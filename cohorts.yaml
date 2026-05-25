@@ -1,0 +1,53 @@
+# TagAlng cohort taxonomy v1 — single source of truth (CTO spec)
+# Import in admin, website, and shared packages. IDs must not drift.
+
+version: 1
+
+cohorts:
+  - id: parents
+    label: Parents
+  - id: sports
+    label: Sports
+  - id: faith
+    label: Faith & community
+  - id: sober
+    label: Sober / recovery
+  - id: runner
+    label: Running & fitness
+  - id: newcomer
+    label: New to the area
+  - id: professional
+    label: Professional network
+  - id: creative
+    label: Creative & makers
+  - id: volunteer
+    label: Volunteer & civic
+
+# Sport sub-types (sub= URL param); parent must be sports
+sport_subtypes:
+  - id: basketball
+    parent: sports
+    label: Basketball
+  - id: soccer
+    parent: sports
+    label: Soccer
+  - id: tennis
+    parent: sports
+    label: Tennis
+  - id: pickleball
+    parent: sports
+    label: Pickleball
+  - id: running
+    parent: sports
+    label: Running group
+  - id: cycling
+    parent: sports
+    label: Cycling
+  - id: swimming
+    parent: sports
+    label: Swimming
+  - id: other
+    parent: sports
+    label: Other sport
+
+# URL contract: ?cohort=parents,sports&sub=basketball&ref=POST_SLUG
