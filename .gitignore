@@ -8,12 +8,24 @@ yarn-debug.log*
 .env
 .env.local
 .env.*.local
+deploy/identity-worker.env
+
+# GCP / keys
+gcp.json
+*-sa.json
+**/gcp*.json
+
+# Python (identity-worker)
+.venv/
+__pycache__/
+*.pyc
 
 # Supabase local dev
 supabase/.branches/
 supabase/.temp/
 supabase/logs/
 **/.supabase/
+.supabase/
 
 # Sanity
 sanity/dist/

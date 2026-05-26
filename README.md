@@ -19,61 +19,51 @@ Note Tommaso's rule: **no paid actions without double approval.** Free tiers acr
 
 ---
 
-## Repo layout (target)
+## Repo layout (current + target)
 
 ```
 TagAlng-backend/
 ├── supabase/
-│   ├── migrations/        # SQL migrations · 20260525000_init.sql, etc.
-│   ├── functions/         # Supabase Edge Functions (Deno)
-│   │   ├── waitlist/      # POST /waitlist · stores phone + cohort + via
-│   │   ├── rsvp/          # commit-unlocks-info state machine
-│   │   ├── mutual-meet/   # both-tapped check → reveal real names
-│   │   └── cohort-resolve/  # URL ?cohort=... param → resolved cohort set
-│   ├── seed.sql           # the 12 Day-Zero events + 14 seed moms
+│   ├── migrations/        # SQL migrations (Phase 1–2 live)
+│   ├── functions/         # Edge Functions (Deno) — target
 │   └── config.toml
-├── twilio/
-│   ├── senders.md         # phone numbers + verification status
-│   ├── templates.ts       # the 6 SMS templates (launch, RSVP-confirm, host-message, etc.)
-│   └── webhooks/          # opt-out + delivery-failure handlers
-├── sanity/
-│   ├── schemas/           # post, cohort, author, scene
-│   ├── sanity.config.ts
-│   └── README.md
+├── services/
+│   └── identity-worker/   # Cloud Run · Vertex intake + embeddings
+├── deploy/                # identity-worker.env.example (secrets gitignored)
 ├── scripts/
-│   ├── seed-cohorts.ts    # populates cohorts.yaml into Supabase
-│   ├── seed-events.ts     # the 12 Day-Zero events (mirrored from the website)
-│   └── seed-moms.ts       # 14 seed moms (Marina, Beatriz, etc.)
-├── docs/
-│   ├── api.md             # endpoint reference for app + web devs
-│   ├── schema.md          # ER diagram of the DB
-│   └── runbook.md         # how to roll a release · how to roll back · who to page
-├── .env.example
-├── .gitignore
-├── package.json
-├── tsconfig.json
-└── README.md (this file)
+│   └── deploy-identity-worker.sh
+├── apps/admin/            # Next.js admin — Phase 1+
+├── cohorts.yaml
+├── twilio/                # target
+├── sanity/                # target
+└── docs/                  # target (api, schema, runbook)
 ```
+
+Consumer app: **[TagAlng-App](https://github.com/Phygtl-Inc/TagAlng-App)** · Website: **TagAlng-Web**
 
 ---
 
 ## Setup (for a new contractor)
 
 ```bash
-git clone https://github.com/Phygtl-Inc/TagAlng-backend.git
-cd TagAlng-backend
-npm install
+git clone https://github.com/Phygtl-Inc/TagAlng-Backend.git
+cd TagAlng-Backend
 cp .env.example .env.local       # ask Tommaso for service keys
 
-# Local Supabase (Postgres on Docker)
-npx supabase start
-npx supabase db reset            # runs migrations + seed.sql
+# Supabase (hosted tagalng-dev or local)
+supabase link
+supabase db push
 
-# Edge functions locally
-npx supabase functions serve waitlist --env-file .env.local
+# Identity worker (local)
+cd services/identity-worker
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+# set SUPABASE_* + GCP_VERTEX_* then:
+uvicorn app.main:app --reload --port 8080
 
-# Sanity Studio locally (for editing Reads)
-cd sanity && npx sanity dev
+# Cloud Run deploy (from repo root)
+cp deploy/identity-worker.env.example deploy/identity-worker.env
+./scripts/deploy-identity-worker.sh
 ```
 
 ---
@@ -191,4 +181,4 @@ The platform **never tells a user who opted out of matching with them**. Impleme
 
 ## Status
 
-🟡 **Scaffold only.** Empty repo. Contractor TBD. Target: waitlist endpoint live + seeded DB by **May 28, 2026.**
+🟢 **Phase 1–2 in repo:** blocks, waitlist, users + home block, `user_identity_claims` + pgvector, **identity-worker** on Cloud Run (Vertex). Fellows matching RPC next.
