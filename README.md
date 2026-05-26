@@ -41,6 +41,8 @@ TagAlng-backend/
 
 Consumer app: **[TagAlng-App](https://github.com/Phygtl-Inc/TagAlng-App)** · Website: **TagAlng-Web**
 
+**Frontend / Postman:** [docs/FRONTEND_API.md](docs/FRONTEND_API.md) — test phone `+15550000000` · OTP `000000`
+
 ---
 
 ## Setup (for a new contractor)

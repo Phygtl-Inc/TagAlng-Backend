@@ -1,0 +1,181 @@
+{
+  "info": {
+    "_postman_id": "tagalng-full-flow",
+    "name": "TagAlng — Full flow (auth → block → identity)",
+    "description": "Run A → D in order. Environment: **TagAlng — tagalng-dev**. Set `anon_key`. See docs/FRONTEND_API.md.\n\nTest phone: +15550000000 · OTP: 000000",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "A — Setup",
+      "item": [
+        {
+          "name": "A1. Supabase health (anon key)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/blocks?select=id&limit=1"
+          }
+        },
+        {
+          "name": "A2. Identity worker health",
+          "request": {
+            "method": "GET",
+            "url": "{{identity_worker_url}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "B — Sign up / Login (phone OTP)",
+      "item": [
+        {
+          "name": "B1. Send OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{test_phone}}\",\n  \"create_user\": true\n}"
+            },
+            "url": "{{supabase_url}}/auth/v1/otp"
+          }
+        },
+        {
+          "name": "B2. Verify OTP (saves access_token)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (j.access_token) pm.environment.set('access_token', j.access_token);",
+                  "if (j.refresh_token) pm.environment.set('refresh_token', j.refresh_token);",
+                  "pm.test('access_token saved', () => pm.expect(j.access_token).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{test_phone}}\",\n  \"token\": \"{{test_otp}}\",\n  \"type\": \"sms\"\n}"
+            },
+            "url": "{{supabase_url}}/auth/v1/verify"
+          }
+        }
+      ]
+    },
+    {
+      "name": "C — Home block",
+      "item": [
+        {
+          "name": "C1. Assign home block (Lake Nona GPS)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_lat\": 28.3685,\n  \"p_lng\": -81.2762\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/assign_home_block"
+          }
+        },
+        {
+          "name": "C2. Get my profile",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_my_profile"
+          }
+        }
+      ]
+    },
+    {
+      "name": "D — Identity (Cloud Run)",
+      "item": [
+        {
+          "name": "D1. Intake — cover only (may clarify)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cover_text\": \"{{cover_text}}\"\n}"
+            },
+            "url": "{{identity_worker_url}}/identity/intake"
+          }
+        },
+        {
+          "name": "D2. Intake — with clarifications (complete)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cover_text\": \"{{cover_text}}\",\n  \"clarifications\": {{clarifications_json}}\n}"
+            },
+            "url": "{{identity_worker_url}}/identity/intake"
+          }
+        },
+        {
+          "name": "D3. Get my identity claims (Supabase)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_my_identity_claims"
+          }
+        },
+        {
+          "name": "D4. Extract one-shot (optional)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cover_text\": \"Sicilian-American mom of two toddlers in Lake Nona. Catholic, Sunday Mass. Runner and pickleball.\"\n}"
+            },
+            "url": "{{identity_worker_url}}/identity/extract"
+          }
+        }
+      ]
+    }
+  ]
+}
