@@ -2,6 +2,8 @@
 
 How to test **tagalng-dev** end-to-end: Supabase Auth → home block → identity intake → read claims.
 
+**v0.1 events / RTJ / nudges / peers:** see [`PWA_V01_BACKEND_HANDOFF.md`](./PWA_V01_BACKEND_HANDOFF.md).
+
 Use the Postman files in this folder together with the **deployed** identity worker and hosted Supabase.
 
 ---

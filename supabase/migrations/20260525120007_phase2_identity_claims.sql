@@ -1,7 +1,6 @@
 -- TagAlng Phase 2: identity claims + pgvector (text-embedding-005 = 768 dims)
 
 create type public.claim_disclosure as enum ('public', 'mutual', 'private');
-
 create table public.user_identity_claims (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users (id) on delete cascade,
@@ -18,27 +17,21 @@ create table public.user_identity_claims (
   constraint user_identity_claims_concept_format
     check (concept ~ '^[a-z][a-z0-9_]{1,63}$')
 );
-
 comment on table public.user_identity_claims is
   'AI-extracted identity threads per user. Never store race, exact age, or sex as claims.';
-
 create unique index user_identity_claims_user_concept_active_idx
   on public.user_identity_claims (user_id, concept)
   where dismissed_at is null;
-
 create index user_identity_claims_user_id_idx
   on public.user_identity_claims (user_id)
   where dismissed_at is null;
-
 create index user_identity_claims_embedding_hnsw_idx
   on public.user_identity_claims
   using hnsw (embedding extensions.vector_cosine_ops)
   where dismissed_at is null and embedding is not null;
-
 create trigger user_identity_claims_updated_at
 before update on public.user_identity_claims
 for each row execute function public.set_updated_at();
-
 -- Read own active claims (for Profile built UI)
 create or replace function public.get_my_identity_claims()
 returns table (
@@ -70,5 +63,4 @@ as $$
     and c.dismissed_at is null
   order by c.confidence desc, c.created_at desc;
 $$;
-
 grant execute on function public.get_my_identity_claims to authenticated;
