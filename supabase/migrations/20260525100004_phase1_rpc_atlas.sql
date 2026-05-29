@@ -12,7 +12,6 @@ as $$
     where not exists (select 1 from public.cohorts co where co.id = c.id)
   );
 $$;
-
 -- Join waitlist (called from Next admin/website server or later Edge Function)
 create or replace function public.join_waitlist(
   p_phone text default null,
@@ -84,7 +83,6 @@ begin
   return v_id;
 end;
 $$;
-
 -- Bump atlas count + notify Realtime listeners
 create or replace function public.bump_block_waitlist_count()
 returns trigger
@@ -117,11 +115,9 @@ begin
   return new;
 end;
 $$;
-
 create trigger waitlist_atlas_notify
 after insert on public.waitlist_signups
 for each row execute function public.bump_block_waitlist_count();
-
 -- Read atlas state (for admin dashboard + public ticker)
 create or replace function public.get_atlas_snapshot(p_cluster_id text default 'lake-nona')
 returns table (
@@ -147,6 +143,5 @@ as $$
   where b.cluster_id = p_cluster_id
   order by coalesce(c.signup_count, 0) desc;
 $$;
-
 grant execute on function public.join_waitlist to anon, authenticated;
 grant execute on function public.get_atlas_snapshot to anon, authenticated;

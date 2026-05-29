@@ -3,19 +3,15 @@
 -- Block centroids for nearest-block resolution (never store user street address)
 alter table public.blocks
   add column if not exists centroid extensions.geography(point, 4326);
-
 comment on column public.blocks.centroid is
   'Approx block center for dev nearest-block lookup. Production: H3 from geocode worker.';
-
 -- Lake Nona placeholder centers (replace with dossier H3 centroids)
 update public.blocks
 set centroid = extensions.st_setsrid(extensions.st_makepoint(-81.2568, 28.3647), 4326)::extensions.geography
 where id = '8a2a1072b59ffff';
-
 update public.blocks
 set centroid = extensions.st_setsrid(extensions.st_makepoint(-81.2621, 28.3689), 4326)::extensions.geography
 where id = '8a2a1072b5affff';
-
 create table public.users (
   id uuid primary key references auth.users (id) on delete cascade,
   phone text,
@@ -24,16 +20,12 @@ create table public.users (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
-
 comment on table public.users is
   'App profile keyed to auth.users. No street address; home_block_id is H3 block.';
-
 create index users_home_block_id_idx on public.users (home_block_id);
-
 create trigger users_updated_at
 before update on public.users
 for each row execute function public.set_updated_at();
-
 -- Create profile row when phone auth completes
 create or replace function public.handle_new_user()
 returns trigger
@@ -50,11 +42,9 @@ begin
   return new;
 end;
 $$;
-
 create trigger on_auth_user_created
 after insert on auth.users
 for each row execute function public.handle_new_user();
-
 -- Nearest block by GPS (lng, lat). Does not persist raw coordinates.
 create or replace function public.resolve_nearest_block_id(
   p_lat double precision,
@@ -77,7 +67,6 @@ as $$
   )
   limit 1;
 $$;
-
 -- Authenticated user sets home block (manual pick or GPS)
 create or replace function public.assign_home_block(
   p_block_id text default null,
@@ -139,7 +128,6 @@ begin
   );
 end;
 $$;
-
 create or replace function public.get_my_profile()
 returns jsonb
 language sql
@@ -161,7 +149,6 @@ as $$
   left join public.blocks b on b.id = u.home_block_id
   where u.id = auth.uid();
 $$;
-
 grant execute on function public.resolve_nearest_block_id to authenticated;
 grant execute on function public.assign_home_block to authenticated;
 grant execute on function public.get_my_profile to authenticated;

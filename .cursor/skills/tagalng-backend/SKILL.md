@@ -4,7 +4,8 @@ description: >-
   Builds TagAlng backend on Supabase Postgres, PostGIS/H3, pgvector, Cloud Run,
   and Vertex AI. Use for TagAlng, Tagalong, Phygtl, Social Agentics, block unlock,
   identity claims, waitlist, atlas ticker, fellows matching, RLS, cohorts.yaml,
-  or any backend/API/migration work in this repo.
+  PWA visitor vs signed-in v0.1 visual TPR, events, request-to-join, nudges,
+  thread_events, or any backend/API/migration work in this repo.
 ---
 
 # TagAlng Backend
@@ -95,8 +96,10 @@ Phase 3 MVP:
 - `blocks` — h3_id, geometry, cluster_id, state  
 - `users` — auth uid, nickname, home_block_id, verified_at  
 - `user_identity_claims` — tone, concept, confidence, disclosure, embedding  
-- `events` — host_id, block_id, scene_id, starts_at (user-created only)  
-- `rsvps`, `threads`, `thread_messages`  
+- `events` — host_id, block_id, starts_at (user-created only)  
+- `event_requests` — RTJ (replaces RSVP in v0.1)  
+- `thread_events` — system activity log (no `thread_messages` in v0.1)  
+- `nudges`, `event_reports`  
 - `waitlist_signups` — cohorts[], candidate_block_id  
 - `audit_log` — sensitive reads / policy violations  
 - `analytics_events` — name, props (hashed where spec requires)  
@@ -105,10 +108,20 @@ Phase 3 MVP:
 
 **Recurring weekly fellows per LIVE block** — instrument `event_checkin`, `connection_made`, `friendship_compound` (derived).
 
+## PWA v0.1 visual TPR (read for surface → API mapping)
+
+**Diagram:** `docs/pwa/tagalng_pwa_visitor_vs_signedin_v8.svg` — visitor (read-only) vs **7 auth triggers** vs signed-in (RTJ, nudge, Threads activity log, host). **Not chat in v0.1.**
+
+**Full agent reference:** [pwa-v01-visual-tpr.md](pwa-v01-visual-tpr.md)
+
+Ground truth with live app: https://app.tagalng.com/ · backend migrations: `Azjit_Backend_Brief_v01.pdf`.
+
 ## Canonical docs (read when unsure)
 
 | Doc | Path |
 |-----|------|
+| PWA visitor vs signed-in (v8) | `docs/pwa/tagalng_pwa_visitor_vs_signedin_v8.svg` + [pwa-v01-visual-tpr.md](pwa-v01-visual-tpr.md) |
+| v0.1 backend brief (SQL/RPC) | `Azjit_Backend_Brief_v01.pdf` |
 | CTO spec (ship list) | `Tagalong-CTO-Spec.pdf` |
 | R&D kickoff | `TagAlng-RD-Kickoff.pdf` |
 | Agentic manifesto (post-MVP) | `tagalong-agentic-spec.pdf` |
