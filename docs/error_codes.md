@@ -20,3 +20,8 @@ Machine-readable errors are raised with `errcode = 'P0001'` and mapped to UI i18
 - `invalid_sport_sub`
 - `no_block_nearby`
 - `block_or_coords_required`
+- `peer_not_found`
+- `location_required`
+- `title_required`
+- `reason_required`
+- `wire_to_aki_pipeline`
