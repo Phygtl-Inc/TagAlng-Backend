@@ -7,13 +7,10 @@ alter table public.users
   add column if not exists founder_role text check (founder_role in ('internal', 'founding_member')),
   add column if not exists locale text not null default 'en'
     check (locale in ('en', 'pt', 'es'));
-
 create index if not exists users_locale_idx on public.users (locale);
-
 alter table public.cohorts
   add column if not exists label_pt text,
   add column if not exists label_es text;
-
 create or replace function public.sync_phone_verified()
 returns trigger
 language plpgsql
@@ -29,12 +26,10 @@ begin
   return new;
 end;
 $$;
-
 drop trigger if exists trg_sync_phone_verified on auth.users;
 create trigger trg_sync_phone_verified
 after update on auth.users
 for each row execute function public.sync_phone_verified();
-
 -- Allow self-edit for identity claim editor RPCs (worker still uses service_role)
 drop policy if exists "identity_claims_update_own" on public.user_identity_claims;
 create policy "identity_claims_update_own"
@@ -42,7 +37,6 @@ create policy "identity_claims_update_own"
   to authenticated
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
-
 -- 0012: events
 create table if not exists public.events (
   id uuid primary key default gen_random_uuid(),
@@ -65,25 +59,20 @@ create table if not exists public.events (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
-
 create index if not exists events_cluster_starts_idx on public.events (cluster_id, starts_at);
 create index if not exists events_host_idx on public.events (host_id);
 create index if not exists events_block_idx on public.events (block_id);
 create index if not exists events_location_gix on public.events using gist (location);
-
 alter table public.events enable row level security;
-
 drop policy if exists "events_select_open_anyone" on public.events;
 create policy "events_select_open_anyone"
   on public.events for select
   using (status = 'open');
-
 drop policy if exists "events_select_host_all_status" on public.events;
 create policy "events_select_host_all_status"
   on public.events for select
   to authenticated
   using (host_id = auth.uid());
-
 -- attendee select policy is created after event_requests exists
 
 drop policy if exists "events_insert_self_phone_verified" on public.events;
@@ -99,25 +88,21 @@ create policy "events_insert_self_phone_verified"
         and u.phone_verified_at is not null
     )
   );
-
 drop policy if exists "events_update_host_only" on public.events;
 create policy "events_update_host_only"
   on public.events for update
   to authenticated
   using (host_id = auth.uid())
   with check (host_id = auth.uid());
-
 drop policy if exists "events_delete_host_only" on public.events;
 create policy "events_delete_host_only"
   on public.events for delete
   to authenticated
   using (host_id = auth.uid());
-
 drop trigger if exists trg_events_updated_at on public.events;
 create trigger trg_events_updated_at
 before update on public.events
 for each row execute function public.set_updated_at();
-
 -- 0015 (created early): thread events table used by event_requests triggers
 create table if not exists public.thread_events (
   id uuid primary key default gen_random_uuid(),
@@ -131,12 +116,9 @@ create table if not exists public.thread_events (
   payload jsonb not null default '{}',
   created_at timestamptz not null default now()
 );
-
 create index if not exists thread_events_event_time_idx
   on public.thread_events (event_id, created_at desc);
-
 alter table public.thread_events enable row level security;
-
 -- 0013: event_requests
 create table if not exists public.event_requests (
   id uuid primary key default gen_random_uuid(),
@@ -149,14 +131,11 @@ create table if not exists public.event_requests (
   decided_at timestamptz,
   unique (event_id, requester_id)
 );
-
 create index if not exists event_requests_event_status_idx
   on public.event_requests (event_id, status);
 create index if not exists event_requests_requester_idx
   on public.event_requests (requester_id);
-
 alter table public.event_requests enable row level security;
-
 drop policy if exists "er_select_self_or_host" on public.event_requests;
 create policy "er_select_self_or_host"
   on public.event_requests for select
@@ -168,7 +147,6 @@ create policy "er_select_self_or_host"
       where e.id = event_id and e.host_id = auth.uid()
     )
   );
-
 drop policy if exists "er_insert_self" on public.event_requests;
 create policy "er_insert_self"
   on public.event_requests for insert
@@ -188,7 +166,6 @@ create policy "er_insert_self"
         and e.status = 'open'
     )
   );
-
 drop policy if exists "er_update_host_or_self_cancel" on public.event_requests;
 create policy "er_update_host_or_self_cancel"
   on public.event_requests for update
@@ -211,7 +188,6 @@ create policy "er_update_host_or_self_cancel"
     )
     or (requester_id = auth.uid() and status = 'cancelled')
   );
-
 drop policy if exists "events_select_approved_attendee" on public.events;
 create policy "events_select_approved_attendee"
   on public.events for select
@@ -225,7 +201,6 @@ create policy "events_select_approved_attendee"
         and r.status in ('approved', 'attended')
     )
   );
-
 drop policy if exists "te_select_member" on public.thread_events;
 create policy "te_select_member"
   on public.thread_events for select
@@ -245,7 +220,6 @@ create policy "te_select_member"
         and r.status in ('approved', 'attended')
     )
   );
-
 create or replace function public.set_event_request_decided_at()
 returns trigger
 language plpgsql
@@ -260,12 +234,10 @@ begin
   return new;
 end;
 $$;
-
 drop trigger if exists trg_event_request_set_decided_at on public.event_requests;
 create trigger trg_event_request_set_decided_at
 before update on public.event_requests
 for each row execute function public.set_event_request_decided_at();
-
 create or replace function public.log_event_request_change()
 returns trigger
 language plpgsql
@@ -299,12 +271,10 @@ begin
   return coalesce(new, old);
 end;
 $$;
-
 drop trigger if exists trg_event_request_change on public.event_requests;
 create trigger trg_event_request_change
 after insert or update on public.event_requests
 for each row execute function public.log_event_request_change();
-
 -- 0014: nudges
 create table if not exists public.nudges (
   id uuid primary key default gen_random_uuid(),
@@ -313,20 +283,16 @@ create table if not exists public.nudges (
   sent_at timestamptz not null default now(),
   check (sender_id <> recipient_id)
 );
-
 create index if not exists nudges_recipient_time_idx
   on public.nudges (recipient_id, sent_at desc);
 create index if not exists nudges_sender_time_idx
   on public.nudges (sender_id, sent_at desc);
-
 alter table public.nudges enable row level security;
-
 drop policy if exists "nudges_select_self" on public.nudges;
 create policy "nudges_select_self"
   on public.nudges for select
   to authenticated
   using (sender_id = auth.uid() or recipient_id = auth.uid());
-
 create or replace function public.enforce_nudge_limits()
 returns trigger
 language plpgsql
@@ -358,12 +324,10 @@ begin
   return new;
 end;
 $$;
-
 drop trigger if exists trg_enforce_nudge_limits on public.nudges;
 create trigger trg_enforce_nudge_limits
 before insert on public.nudges
 for each row execute function public.enforce_nudge_limits();
-
 -- Core RPCs for v0.1 loop
 create or replace function public.update_identity_claim_label(
   p_claim_id uuid,
@@ -383,7 +347,6 @@ as $$
     and user_id = auth.uid()
     and dismissed_at is null;
 $$;
-
 create or replace function public.update_identity_claim_disclosure(
   p_claim_id uuid,
   p_disclosure public.claim_disclosure
@@ -400,7 +363,6 @@ as $$
     and user_id = auth.uid()
     and dismissed_at is null;
 $$;
-
 create or replace function public.dismiss_identity_claim(p_claim_id uuid)
 returns void
 language sql
@@ -414,7 +376,6 @@ as $$
     and user_id = auth.uid()
     and dismissed_at is null;
 $$;
-
 create or replace function public.get_cluster_events(
   p_cluster_id text,
   p_window interval default '14 days',
@@ -456,7 +417,6 @@ as $$
     and e.starts_at between now() and now() + p_window
   order by e.starts_at asc;
 $$;
-
 create or replace function public.request_to_join_event(
   p_event_id uuid,
   p_message text default null
@@ -496,7 +456,6 @@ begin
   return req_id;
 end;
 $$;
-
 create or replace function public.decide_event_request(
   p_request_id uuid,
   p_decision text
@@ -520,7 +479,6 @@ begin
   end if;
 end;
 $$;
-
 create or replace function public.cancel_event_request(p_request_id uuid)
 returns void
 language sql
@@ -532,7 +490,6 @@ as $$
   where id = p_request_id
     and requester_id = auth.uid();
 $$;
-
 create or replace function public.send_nudge(p_recipient_id uuid)
 returns uuid
 language plpgsql
@@ -553,7 +510,6 @@ begin
   return nudge_id;
 end;
 $$;
-
 create or replace function public.get_thread_events(p_event_id uuid)
 returns setof public.thread_events
 language sql
@@ -566,31 +522,22 @@ as $$
   where te.event_id = p_event_id
   order by te.created_at desc;
 $$;
-
 -- Grants
 revoke execute on function public.update_identity_claim_label(uuid, text, text[]) from public, anon;
 grant execute on function public.update_identity_claim_label(uuid, text, text[]) to authenticated;
-
 revoke execute on function public.update_identity_claim_disclosure(uuid, public.claim_disclosure) from public, anon;
 grant execute on function public.update_identity_claim_disclosure(uuid, public.claim_disclosure) to authenticated;
-
 revoke execute on function public.dismiss_identity_claim(uuid) from public, anon;
 grant execute on function public.dismiss_identity_claim(uuid) to authenticated;
-
 revoke execute on function public.get_cluster_events(text, interval, text) from public;
 grant execute on function public.get_cluster_events(text, interval, text) to anon, authenticated;
-
 revoke execute on function public.request_to_join_event(uuid, text) from public, anon;
 grant execute on function public.request_to_join_event(uuid, text) to authenticated;
-
 revoke execute on function public.decide_event_request(uuid, text) from public, anon;
 grant execute on function public.decide_event_request(uuid, text) to authenticated;
-
 revoke execute on function public.cancel_event_request(uuid) from public, anon;
 grant execute on function public.cancel_event_request(uuid) to authenticated;
-
 revoke execute on function public.send_nudge(uuid) from public, anon;
 grant execute on function public.send_nudge(uuid) to authenticated;
-
 revoke execute on function public.get_thread_events(uuid) from public, anon;
 grant execute on function public.get_thread_events(uuid) to authenticated;

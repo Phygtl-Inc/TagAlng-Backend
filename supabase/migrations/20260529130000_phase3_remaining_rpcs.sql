@@ -11,17 +11,13 @@ create table if not exists public.event_reports (
   reviewed_at timestamptz,
   reviewer_id uuid references public.users(id)
 );
-
 create index if not exists event_reports_status_idx on public.event_reports (status, created_at);
-
 alter table public.event_reports enable row level security;
-
 drop policy if exists "er_reports_insert_self" on public.event_reports;
 create policy "er_reports_insert_self"
   on public.event_reports for insert
   to authenticated
   with check (reporter_id = auth.uid());
-
 drop policy if exists "er_reports_select_self_or_admin" on public.event_reports;
 create policy "er_reports_select_self_or_admin"
   on public.event_reports for select
@@ -33,7 +29,6 @@ create policy "er_reports_select_self_or_admin"
       where u.id = auth.uid() and u.founder_role = 'internal'
     )
   );
-
 -- Peer reads (anon blurred)
 create or replace function public.get_cluster_peers(p_cluster_id text)
 returns table (
@@ -110,7 +105,6 @@ begin
   order by 4 desc, cu.nickname asc nulls last;
 end;
 $$;
-
 create or replace function public.get_peer_profile(p_user_id uuid)
 returns jsonb
 language plpgsql
@@ -199,7 +193,6 @@ begin
   return result;
 end;
 $$;
-
 -- Event host RPCs
 create or replace function public.create_event(p_fields jsonb)
 returns uuid
@@ -265,7 +258,6 @@ begin
   return new_id;
 end;
 $$;
-
 create or replace function public.create_event_from_description(p_text text)
 returns uuid
 language plpgsql
@@ -276,7 +268,6 @@ begin
   raise exception 'wire_to_aki_pipeline' using errcode = 'P0001';
 end;
 $$;
-
 create or replace function public.update_event(p_event_id uuid, p_fields jsonb)
 returns void
 language plpgsql
@@ -314,7 +305,6 @@ begin
   where e.id = p_event_id;
 end;
 $$;
-
 create or replace function public.cancel_event(p_event_id uuid)
 returns void
 language sql
@@ -325,7 +315,6 @@ as $$
   set status = 'cancelled'
   where id = p_event_id;
 $$;
-
 -- Nudges list
 create or replace function public.get_my_nudges(p_direction text default 'received')
 returns table (
@@ -356,7 +345,6 @@ as $$
   )
   order by n.sent_at desc;
 $$;
-
 -- Reports (Slack hook deferred)
 create or replace function public.report_event(p_event_id uuid, p_reason text)
 returns uuid
@@ -382,28 +370,20 @@ begin
   return report_id;
 end;
 $$;
-
 -- Grants
 revoke execute on function public.get_cluster_peers(text) from public;
 grant execute on function public.get_cluster_peers(text) to anon, authenticated;
-
 revoke execute on function public.get_peer_profile(uuid) from public;
 grant execute on function public.get_peer_profile(uuid) to anon, authenticated;
-
 revoke execute on function public.create_event(jsonb) from public, anon;
 grant execute on function public.create_event(jsonb) to authenticated;
-
 revoke execute on function public.create_event_from_description(text) from public, anon;
 grant execute on function public.create_event_from_description(text) to authenticated;
-
 revoke execute on function public.update_event(uuid, jsonb) from public, anon;
 grant execute on function public.update_event(uuid, jsonb) to authenticated;
-
 revoke execute on function public.cancel_event(uuid) from public, anon;
 grant execute on function public.cancel_event(uuid) to authenticated;
-
 revoke execute on function public.get_my_nudges(text) from public, anon;
 grant execute on function public.get_my_nudges(text) to authenticated;
-
 revoke execute on function public.report_event(uuid, text) from public, anon;
 grant execute on function public.report_event(uuid, text) to authenticated;
