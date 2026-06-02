@@ -1,0 +1,293 @@
+<svg viewBox="0 0 1120 1240" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" style="background:#FAFAF7">
+  <title id="title">TagAlng architecture — Atlas Quiet</title>
+  <desc id="desc">Three Vercel-hosted surfaces (marketing website, the app, internal admin) share one Supabase Postgres database with PostGIS, pgvector, Realtime, Auth, Storage, and RLS+Audit. Sanity Studio is embedded at /studio and feeds the website via webhook+ISR. Google Cloud provides the AI plane (Gemini Flash and Pro), Cloud Run for backend services, Google Maps Platform for geocoding and the map, FCM for push, BigQuery for analytics, and reCAPTCHA for anti-bot. Each box shows what it serves underneath its title.</desc>
+
+  <defs>
+    <style>
+      .tier { font: 600 11px "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #5A6478; letter-spacing: 0.16em; text-transform: uppercase; }
+      .title { font: 600 15px Inter, ui-sans-serif, system-ui, sans-serif; fill: #1A1D24; }
+      .sub { font: 500 11px "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #5A6478; letter-spacing: 0.04em; }
+      .desc { font: 400 11px Inter, ui-sans-serif, system-ui, sans-serif; fill: #5A6478; }
+      .descMuted { font: 400 11px Inter, ui-sans-serif, system-ui, sans-serif; fill: #8B92A8; }
+      .h1 { font: 600 22px Inter, ui-sans-serif, system-ui, sans-serif; fill: #1A1D24; letter-spacing: -0.01em; }
+      .footnote { font: 400 11px Inter, ui-sans-serif, system-ui, sans-serif; fill: #8B92A8; }
+      .callout { font: 500 12px Inter, ui-sans-serif, system-ui, sans-serif; fill: #2B7FFF; }
+      .platformLabel { font: 600 12px Inter, ui-sans-serif, system-ui, sans-serif; fill: #5A6478; letter-spacing: 0.06em; }
+      .box { fill: #FFFFFF; stroke: #E5E7EB; stroke-width: 1; }
+      .boxAccent { fill: #FFFFFF; stroke: #2B7FFF; stroke-width: 1.5; }
+      .boxFuture { fill: #FFFFFF; stroke: #D1D5DB; stroke-width: 1; stroke-dasharray: 4 3; }
+      .platform { fill: #F4F6FB; stroke: #E5E7EB; stroke-width: 1; }
+      .platformAccent { fill: #EEF4FF; stroke: #BFD4FF; stroke-width: 1; }
+      .descBg { fill: #F4F6FB; }
+      .edge { fill: none; stroke: #8B92A8; stroke-width: 1.25; }
+      .edgeData { fill: none; stroke: #2B7FFF; stroke-width: 1.75; }
+      .edgeDash { fill: none; stroke: #8B92A8; stroke-width: 1.25; stroke-dasharray: 5 3; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8B92A8"/>
+    </marker>
+    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2B7FFF"/>
+    </marker>
+  </defs>
+
+  <!-- ============ Header ============ -->
+  <text x="56" y="48" class="h1">TagAlng — system architecture</text>
+  <text x="56" y="70" class="footnote">Three surfaces. One shared database. AI plane where it earns it. Each block names what it serves.</text>
+
+  <!-- ============ Tier 1 · Surfaces (Vercel) ============ -->
+  <text x="56" y="108" class="tier">Tier 1  ·  Front-end surfaces</text>
+  <text x="1064" y="108" class="platformLabel" text-anchor="end">Hosted on Vercel</text>
+  <rect x="56" y="120" width="1008" height="190" rx="14" ry="14" class="platform"/>
+
+  <!-- Marketing Website -->
+  <rect x="80" y="142" width="304" height="146" rx="10" ry="10" class="box"/>
+  <text x="100" y="172" class="title">Marketing Website</text>
+  <text x="100" y="192" class="sub">Next.js 14 · /reads blog</text>
+  <rect x="100" y="208" width="264" height="64" rx="6" ry="6" class="descBg"/>
+  <text x="112" y="226" class="desc">Public landing + blog.</text>
+  <text x="112" y="242" class="descMuted">Captures waitlist signups, attributes</text>
+  <text x="112" y="258" class="descMuted">inbound cohort via the URL contract</text>
+  <text x="112" y="268" class="descMuted">(?cohort=A,B&amp;ref=POST_SLUG).</text>
+
+  <!-- App -->
+  <rect x="408" y="142" width="304" height="146" rx="10" ry="10" class="box"/>
+  <text x="428" y="172" class="title">The App</text>
+  <text x="428" y="192" class="sub">PWA → React Native + Expo</text>
+  <rect x="428" y="208" width="264" height="64" rx="6" ry="6" class="descBg"/>
+  <text x="440" y="226" class="desc">The mom's surface.</text>
+  <text x="440" y="242" class="descMuted">Cover input → scene activation →</text>
+  <text x="440" y="258" class="descMuted">block map of fellows + events →</text>
+  <text x="440" y="268" class="descMuted">RSVP → auto-thread per event.</text>
+
+  <!-- Admin -->
+  <rect x="736" y="142" width="304" height="146" rx="10" ry="10" class="box"/>
+  <text x="756" y="172" class="title">Internal Admin</text>
+  <text x="756" y="192" class="sub">Next.js · /admin subroute</text>
+  <rect x="756" y="208" width="264" height="64" rx="6" ry="6" class="descBg"/>
+  <text x="768" y="226" class="desc">Phygtl team: full RBAC.</text>
+  <text x="768" y="242" class="descMuted">Investors: read-only analytics views</text>
+  <text x="768" y="258" class="descMuted">(RLS-gated, BigQuery-backed, never</text>
+  <text x="768" y="268" class="descMuted">see raw user data or PII).</text>
+
+  <!-- ============ Tier 2 · Sanity CMS ============ -->
+  <text x="56" y="358" class="tier">Tier 2  ·  Content management</text>
+  <text x="1064" y="358" class="platformLabel" text-anchor="end">Hosted on Vercel · embedded at /studio</text>
+
+  <rect x="56" y="370" width="1008" height="116" rx="14" ry="14" class="platform"/>
+  <rect x="80" y="392" width="960" height="76" rx="10" ry="10" class="box"/>
+  <text x="100" y="422" class="title">Sanity CMS</text>
+  <text x="100" y="440" class="sub">Studio mounted at tagalng.com/studio · webhook → Vercel ISR &lt; 30 s</text>
+  <text x="100" y="460" class="descMuted">Posts · scenes · cohort copy · event templates · first-class i18n (PT-BR ready). Free tier covers us past 50k MAU.</text>
+
+  <!-- Edge: website → Sanity (renders) -->
+  <path d="M232 288 L232 392" class="edge" marker-end="url(#arrow)"/>
+  <text x="240" y="340" class="sub" fill="#8B92A8">renders</text>
+
+  <!-- ============ Tier 3 · Supabase shared data layer ============ -->
+  <text x="56" y="528" class="tier">Tier 3  ·  Shared data layer  ·  the single source of truth</text>
+  <text x="1064" y="528" class="platformLabel" fill="#2B7FFF" text-anchor="end">Supabase Postgres · region-pinned us-east</text>
+
+  <rect x="56" y="540" width="1008" height="270" rx="14" ry="14" class="platformAccent"/>
+
+  <rect x="80" y="562" width="960" height="64" rx="10" ry="10" class="boxAccent"/>
+  <text x="100" y="590" class="title">One Postgres database</text>
+  <text x="100" y="610" class="descMuted">cohorts.yaml mirror · users · identity_claims · events · threads · block_state · audit_log · all surfaces read &amp; write here</text>
+
+  <!-- Six service pills -->
+  <g transform="translate(80,646)">
+    <rect x="0" y="0" width="148" height="146" rx="8" ry="8" class="box"/>
+    <text x="74" y="26" class="title" text-anchor="middle">PostGIS</text>
+    <text x="74" y="44" class="sub" text-anchor="middle">+ H3 hexagons</text>
+    <rect x="12" y="58" width="124" height="76" rx="6" ry="6" class="descBg"/>
+    <text x="74" y="78" class="descMuted" text-anchor="middle">Block geometry,</text>
+    <text x="74" y="93" class="descMuted" text-anchor="middle">5-min-walk cells.</text>
+    <text x="74" y="108" class="descMuted" text-anchor="middle">Vicinity is the unit,</text>
+    <text x="74" y="123" class="descMuted" text-anchor="middle">not lat/lng radius.</text>
+  </g>
+
+  <g transform="translate(240,646)">
+    <rect x="0" y="0" width="148" height="146" rx="8" ry="8" class="box"/>
+    <text x="74" y="26" class="title" text-anchor="middle">pgvector</text>
+    <text x="74" y="44" class="sub" text-anchor="middle">ANN search</text>
+    <rect x="12" y="58" width="124" height="76" rx="6" ry="6" class="descBg"/>
+    <text x="74" y="78" class="descMuted" text-anchor="middle">Identity-claim</text>
+    <text x="74" y="93" class="descMuted" text-anchor="middle">embeddings.</text>
+    <text x="74" y="108" class="descMuted" text-anchor="middle">Powers semantic</text>
+    <text x="74" y="123" class="descMuted" text-anchor="middle">match + scenes.</text>
+  </g>
+
+  <g transform="translate(400,646)">
+    <rect x="0" y="0" width="148" height="146" rx="8" ry="8" class="box"/>
+    <text x="74" y="26" class="title" text-anchor="middle">Auth</text>
+    <text x="74" y="44" class="sub" text-anchor="middle">phone OTP</text>
+    <rect x="12" y="58" width="124" height="76" rx="6" ry="6" class="descBg"/>
+    <text x="74" y="78" class="descMuted" text-anchor="middle">Twilio Verify</text>
+    <text x="74" y="93" class="descMuted" text-anchor="middle">behind Supabase</text>
+    <text x="74" y="108" class="descMuted" text-anchor="middle">Auth. Deferred to</text>
+    <text x="74" y="123" class="descMuted" text-anchor="middle">first engagement.</text>
+  </g>
+
+  <g transform="translate(560,646)">
+    <rect x="0" y="0" width="148" height="146" rx="8" ry="8" class="box"/>
+    <text x="74" y="26" class="title" text-anchor="middle">Realtime</text>
+    <text x="74" y="44" class="sub" text-anchor="middle">WebSocket</text>
+    <rect x="12" y="58" width="124" height="76" rx="6" ry="6" class="descBg"/>
+    <text x="74" y="78" class="descMuted" text-anchor="middle">Event threads,</text>
+    <text x="74" y="93" class="descMuted" text-anchor="middle">live presence,</text>
+    <text x="74" y="108" class="descMuted" text-anchor="middle">atlas waitlist</text>
+    <text x="74" y="123" class="descMuted" text-anchor="middle">ticker.</text>
+  </g>
+
+  <g transform="translate(720,646)">
+    <rect x="0" y="0" width="148" height="146" rx="8" ry="8" class="box"/>
+    <text x="74" y="26" class="title" text-anchor="middle">Storage</text>
+    <text x="74" y="44" class="sub" text-anchor="middle">blob + CDN</text>
+    <rect x="12" y="58" width="124" height="76" rx="6" ry="6" class="descBg"/>
+    <text x="74" y="78" class="descMuted" text-anchor="middle">User uploads</text>
+    <text x="74" y="93" class="descMuted" text-anchor="middle">(only after IRL</text>
+    <text x="74" y="108" class="descMuted" text-anchor="middle">co-checkin reveals</text>
+    <text x="74" y="123" class="descMuted" text-anchor="middle">real identity).</text>
+  </g>
+
+  <g transform="translate(880,646)">
+    <rect x="0" y="0" width="160" height="146" rx="8" ry="8" class="box"/>
+    <text x="80" y="26" class="title" text-anchor="middle">RLS + Audit</text>
+    <text x="80" y="44" class="sub" text-anchor="middle">privacy as code</text>
+    <rect x="12" y="58" width="136" height="76" rx="6" ry="6" class="descBg"/>
+    <text x="80" y="78" class="descMuted" text-anchor="middle">Row-level security</text>
+    <text x="80" y="93" class="descMuted" text-anchor="middle">policies. Anti-disc.</text>
+    <text x="80" y="108" class="descMuted" text-anchor="middle">enforced at query</text>
+    <text x="80" y="123" class="descMuted" text-anchor="middle">layer. PII audited.</text>
+  </g>
+
+  <!-- Edges Tier 1 → Supabase -->
+  <path d="M232 288 Q 232 530 232 540" class="edgeData" marker-end="url(#arrowAccent)" opacity="0.55"/>
+  <path d="M560 288 L560 540" class="edgeData" marker-end="url(#arrowAccent)"/>
+  <path d="M888 288 Q 888 530 888 540" class="edgeData" marker-end="url(#arrowAccent)" opacity="0.55"/>
+
+  <!-- Edge Sanity → Supabase (optional mirror) -->
+  <path d="M520 486 L520 540" class="edgeDash" marker-end="url(#arrow)"/>
+  <text x="528" y="514" class="footnote">optional mirror</text>
+
+  <!-- ============ Tier 4 · Google Cloud (AI plane + services) ============ -->
+  <text x="56" y="858" class="tier">Tier 4  ·  AI plane + supporting services</text>
+  <text x="1064" y="858" class="platformLabel" text-anchor="end">Google Cloud</text>
+
+  <rect x="56" y="870" width="1008" height="330" rx="14" ry="14" class="platform"/>
+
+  <!-- Row 1: AI -->
+  <g transform="translate(80,892)">
+    <rect x="0" y="0" width="232" height="124" rx="10" ry="10" class="box"/>
+    <text x="20" y="28" class="title">Gemini Flash</text>
+    <text x="20" y="46" class="sub">Vertex AI · LLM</text>
+    <rect x="20" y="58" width="192" height="50" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Identity-claim NLP extraction</text>
+    <text x="32" y="92" class="descMuted">from one-sentence cover input;</text>
+    <text x="32" y="105" class="descMuted">thread-moderation triage.</text>
+  </g>
+
+  <g transform="translate(328,892)">
+    <rect x="0" y="0" width="232" height="124" rx="10" ry="10" class="box"/>
+    <text x="20" y="28" class="title">Gemini Pro</text>
+    <text x="20" y="46" class="sub">Vertex AI · LLM</text>
+    <rect x="20" y="58" width="192" height="50" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Host-prompt assist (the "AI host"</text>
+    <text x="32" y="92" class="descMuted">screen); LDE weekly narratives;</text>
+    <text x="32" y="105" class="descMuted">higher-stakes reasoning paths.</text>
+  </g>
+
+  <g transform="translate(576,892)">
+    <rect x="0" y="0" width="232" height="124" rx="10" ry="10" class="box"/>
+    <text x="20" y="28" class="title">Cloud Run</text>
+    <text x="20" y="46" class="sub">stateless containers</text>
+    <rect x="20" y="58" width="192" height="50" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Identity worker · Sanity webhook</text>
+    <text x="32" y="92" class="descMuted">receivers · Latent Demand Engine</text>
+    <text x="32" y="105" class="descMuted">weekly clustering batch.</text>
+  </g>
+
+  <g transform="translate(824,892)">
+    <rect x="0" y="0" width="216" height="124" rx="10" ry="10" class="box"/>
+    <text x="20" y="28" class="title">Maps Platform</text>
+    <text x="20" y="46" class="sub">Google Maps SDK · Geocoding</text>
+    <rect x="20" y="58" width="176" height="50" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Address → H3 block ID at</text>
+    <text x="32" y="92" class="descMuted">geocode time. Maps view inside</text>
+    <text x="32" y="105" class="descMuted">the app (Phase 3+).</text>
+  </g>
+
+  <!-- Row 2: Services + future -->
+  <g transform="translate(80,1036)">
+    <rect x="0" y="0" width="216" height="146" rx="10" ry="10" class="box"/>
+    <text x="20" y="28" class="title">FCM</text>
+    <text x="20" y="46" class="sub">Firebase Cloud Messaging</text>
+    <rect x="20" y="58" width="176" height="74" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Push notifications: thread</text>
+    <text x="32" y="92" class="descMuted">replies, RSVPs, block-unlock</text>
+    <text x="32" y="108" class="descMuted">moments. Phase 3 onwards.</text>
+    <text x="32" y="124" class="descMuted">Crashlytics for free.</text>
+  </g>
+
+  <g transform="translate(312,1036)">
+    <rect x="0" y="0" width="216" height="146" rx="10" ry="10" class="box"/>
+    <text x="20" y="28" class="title">BigQuery</text>
+    <text x="20" y="46" class="sub">analytics warehouse</text>
+    <rect x="20" y="58" width="176" height="74" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Nightly ETL from Supabase.</text>
+    <text x="32" y="92" class="descMuted">Backs the investor-analytics</text>
+    <text x="32" y="108" class="descMuted">materialized views surfaced</text>
+    <text x="32" y="124" class="descMuted">via the admin /admin route.</text>
+  </g>
+
+  <g transform="translate(544,1036)">
+    <rect x="0" y="0" width="216" height="146" rx="10" ry="10" class="box"/>
+    <text x="20" y="28" class="title">reCAPTCHA</text>
+    <text x="20" y="46" class="sub">Enterprise · anti-bot</text>
+    <rect x="20" y="58" width="176" height="74" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Protects the waitlist signup</text>
+    <text x="32" y="92" class="descMuted">and SMS-OTP cost path.</text>
+    <text x="32" y="108" class="descMuted">Required from Phase 1 — before</text>
+    <text x="32" y="124" class="descMuted">we open the form.</text>
+  </g>
+
+  <g transform="translate(776,1036)">
+    <rect x="0" y="0" width="264" height="146" rx="10" ry="10" class="boxFuture"/>
+    <text x="20" y="28" class="title">Phase 5+ · future</text>
+    <text x="20" y="46" class="sub">dashed = not at MVP</text>
+    <rect x="20" y="58" width="224" height="74" rx="6" ry="6" class="descBg"/>
+    <text x="32" y="76" class="descMuted">Vertex Vector Search (graduate</text>
+    <text x="32" y="92" class="descMuted">from pgvector at scale) · Gemini</text>
+    <text x="32" y="108" class="descMuted">Nano + Apple Foundation Models</text>
+    <text x="32" y="124" class="descMuted">on-device · ADK + A2A agents.</text>
+  </g>
+
+  <!-- Edges: Supabase ↔ Cloud Run -->
+  <path d="M560 810 L560 892" class="edge" marker-end="url(#arrow)"/>
+  <text x="568" y="858" class="sub" fill="#8B92A8">RPC</text>
+
+  <!-- Cloud Run → Gemini Flash + Pro -->
+  <path d="M576 952 L312 952" class="edge" marker-end="url(#arrow)"/>
+  <path d="M576 970 L560 970" class="edge"/>
+  <path d="M560 970 L560 970" class="edge"/>
+
+  <!-- App → Maps (Phase 1 geocoding, Phase 3 map view) -->
+  <path d="M712 288 Q 920 600 920 892" class="edge" marker-end="url(#arrow)" opacity="0.45"/>
+
+  <!-- Supabase → BigQuery nightly ETL -->
+  <path d="M420 810 Q 420 920 420 1036" class="edgeDash" marker-end="url(#arrow)"/>
+  <text x="430" y="922" class="sub" fill="#8B92A8">nightly ETL</text>
+
+  <!-- ============ Footer callout + legend ============ -->
+  <rect x="56" y="1206" width="700" height="20" rx="4" ry="4" fill="#EEF4FF" stroke="#BFD4FF"/>
+  <text x="68" y="1220" class="callout">⚑  Activities are USER-created by hosting moms. The AI does not generate them.</text>
+
+  <g transform="translate(780,1220)">
+    <line x1="0" y1="-4" x2="22" y2="-4" class="edgeData"/>
+    <text x="28" y="0" class="footnote">primary data</text>
+    <line x1="116" y1="-4" x2="138" y2="-4" class="edge"/>
+    <text x="144" y="0" class="footnote">service call</text>
+    <line x1="220" y1="-4" x2="242" y2="-4" class="edgeDash"/>
+    <text x="248" y="0" class="footnote">async / future</text>
+  </g>
+</svg>

@@ -65,7 +65,7 @@ MUTUAL_CONCEPT_MARKERS = (
 
 def _vertex_client():
     project = os.environ.get("GCP_VERTEX_PROJECT", "")
-    location = os.environ.get("GCP_VERTEX_LOCATION", "us-east1")
+    location = os.environ.get("GCP_VERTEX_LOCATION", "us-central1")
     if not project:
         raise RuntimeError("GCP_VERTEX_PROJECT not set")
     from google import genai
@@ -142,7 +142,7 @@ def vertex_intake(
     Returns: status, assistant_message, questions, claims
     """
     client = _vertex_client()
-    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.0-flash-001")
+    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
     from google.genai import types
 
     user_payload = _build_user_payload(cover_text, clarifications or [])

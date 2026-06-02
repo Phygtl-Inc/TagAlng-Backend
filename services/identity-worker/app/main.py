@@ -85,7 +85,7 @@ def _vertex_error_detail(prefix: str, exc: Exception) -> str:
     if "404" in msg and "not found" in msg.lower():
         return (
             f"{prefix}:model_or_region — try GCP_VERTEX_LOCATION=us-central1 or "
-            f"VERTEX_EXTRACT_MODEL=gemini-1.5-flash-002. Raw: {msg}"
+            f"VERTEX_EXTRACT_MODEL=gemini-2.5-flash. Raw: {msg}"
         )
     return f"{prefix}:{type(exc).__name__}:{msg}"
 
@@ -149,7 +149,7 @@ def health():
         "ok": True,
         "mode": "vertex",
         "vertex_configured": _vertex_configured(),
-        "extract_model": os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.0-flash-001"),
+        "extract_model": os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
         "embed_model": os.environ.get("VERTEX_EMBED_MODEL", "text-embedding-005"),
     }
 

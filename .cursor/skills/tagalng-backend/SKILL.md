@@ -44,13 +44,15 @@ Airbnb Experiences for your block: **Identity × Vicinity × Activity**, with th
 
 Surfaces (Vercel) are not backend-owned — they read/write the same DB.
 
-## Core loop (Phase 2+)
+## Core loop (Phase 2+ target — not all shipped)
 
 ```
 cover input → Gemini Flash → identity_claims + embeddings
-→ scene activation (rules + centroid, no runtime LLM v1)
-→ fellows + events on block → RSVP → auto-thread → IRL → thread persists
+→ scene activation (rules + centroid, no runtime LLM v1)     [NOT BUILT]
+→ fellows + events on block → RTJ → thread_events → IRL      [PARTIAL: see architecture-alignment.md]
 ```
+
+**v0.1 shipped today:** identity intake, blocks (GPS/ZIP), events, RTJ, nudges, peers map, `thread_events` (no chat). **Do not** treat `Tagalong-Architecture-Diagram.svg` as a checklist of live APIs.
 
 ## Five AI jobs
 
@@ -125,7 +127,8 @@ Ground truth with live app: https://app.tagalng.com/ · backend migrations: `Azj
 | CTO spec (ship list) | `Tagalong-CTO-Spec.pdf` |
 | R&D kickoff | `TagAlng-RD-Kickoff.pdf` |
 | Agentic manifesto (post-MVP) | `tagalong-agentic-spec.pdf` |
-| Architecture | `Tagalong-Architecture-Diagram.svg` |
+| Architecture (target) | `Tagalong-Architecture-Diagram.svg` |
+| Diagram vs shipped (v0.1) | [architecture-alignment.md](architecture-alignment.md) |
 
 ## Execution defaults
 
@@ -138,4 +141,5 @@ Ground truth with live app: https://app.tagalng.com/ · backend migrations: `Azj
 
 - Phase ship lists + investor events: [phases.md](phases.md)  
 - Invariants + negative space: [invariants.md](invariants.md)  
-- Ticket-style breakdown: [tickets.md](tickets.md)
+- Ticket-style breakdown: [tickets.md](tickets.md)  
+- Architecture diagram vs tagalng-dev reality: [architecture-alignment.md](architecture-alignment.md)

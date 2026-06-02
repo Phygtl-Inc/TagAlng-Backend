@@ -65,11 +65,20 @@ for var in "${required[@]}"; do
 done
 
 VERTEX_LOCATION="${GCP_VERTEX_LOCATION:-us-central1}"
-EXTRACT_MODEL="${VERTEX_EXTRACT_MODEL:-gemini-2.0-flash-001}"
+EXTRACT_MODEL="${VERTEX_EXTRACT_MODEL:-gemini-2.5-flash}"
 EMBED_MODEL="${VERTEX_EMBED_MODEL:-text-embedding-005}"
 CORS="${CORS_ALLOW_ORIGINS:-*}"
 
+case "$EXTRACT_MODEL" in
+  gemini-2.0-flash-001|gemini-1.5-flash-002|gemini-1.5-flash-001)
+    echo "WARN: $EXTRACT_MODEL is retired on Vertex — deploying with gemini-2.5-flash"
+    echo "       Update VERTEX_EXTRACT_MODEL in $ENV_FILE"
+    EXTRACT_MODEL="gemini-2.5-flash"
+    ;;
+esac
+
 echo "Project: $PROJECT  Region: $REGION  Service: $SERVICE"
+echo "Vertex: $VERTEX_LOCATION / $EXTRACT_MODEL"
 echo "Vertex SA: $SA"
 
 gcloud config set project "$PROJECT" >/dev/null

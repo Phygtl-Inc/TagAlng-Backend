@@ -41,7 +41,8 @@ TagAlng-backend/
 
 Consumer app: **[TagAlng-App](https://github.com/Phygtl-Inc/TagAlng-App)** · Website: **TagAlng-Web**
 
-**Frontend / Postman:** [docs/FRONTEND_API.md](docs/FRONTEND_API.md) — test phone `+15550000000` · OTP `000000`
+**Frontend / Postman:** [docs/FRONTEND_API.md](docs/FRONTEND_API.md) — auth, identity worker, ZIP block picker  
+**Dev seed data:** [docs/SEED_DEV_DATA.md](docs/SEED_DEV_DATA.md) — test users `+15550100001`–`03` · OTP `000000`
 
 ---
 
@@ -54,7 +55,11 @@ cp .env.example .env.local       # ask Tommaso for service keys
 
 # Supabase (hosted tagalng-dev or local)
 supabase link
+supabase migration fetch --linked   # if remote has migrations not in repo
 supabase db push
+
+# Dev seed (users, events, RTJ) on tagalng-dev — see docs/SEED_DEV_DATA.md
+supabase db query --linked -f supabase/seed.sql
 
 # Identity worker (local)
 cd services/identity-worker
@@ -183,4 +188,4 @@ The platform **never tells a user who opted out of matching with them**. Impleme
 
 ## Status
 
-🟢 **Phase 1–2 in repo:** blocks, waitlist, users + home block, `user_identity_claims` + pgvector, **identity-worker** on Cloud Run (Vertex). Fellows matching RPC next.
+🟢 **Phase 1–2 in repo:** blocks, waitlist, users + home block, `user_identity_claims` + pgvector, **identity-worker** + **lana-worker** (signup chat) on Cloud Run (Vertex). Fellows matching RPC next.
