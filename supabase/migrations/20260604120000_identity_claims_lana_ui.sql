@@ -3,24 +3,19 @@
 alter table public.user_identity_claims
   add column if not exists source_quote text,
   add column if not exists bucket text;
-
 alter table public.user_identity_claims
   drop constraint if exists user_identity_claims_bucket_check;
-
 alter table public.user_identity_claims
   add constraint user_identity_claims_bucket_check check (
     bucket is null
     or bucket in ('heritage', 'stage', 'vicinity', 'faith', 'activity', 'interest', 'general')
   );
-
 comment on column public.user_identity_claims.source_quote is
   'Exact phrase from user story Lana mapped (e.g. Latino mom). UI only — not used for matching.';
 comment on column public.user_identity_claims.bucket is
   'UI theme bucket for card color: heritage, stage, vicinity, faith, activity, interest, general.';
-
 -- Postgres cannot change RETURNS TABLE shape via CREATE OR REPLACE (42P13).
 drop function if exists public.get_my_identity_claims();
-
 create function public.get_my_identity_claims()
 returns table (
   id uuid,
@@ -55,5 +50,4 @@ as $$
     and c.dismissed_at is null
   order by c.confidence desc, c.created_at desc;
 $$;
-
 grant execute on function public.get_my_identity_claims() to authenticated;

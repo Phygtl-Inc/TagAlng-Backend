@@ -1,16 +1,34 @@
-# TagAlng Admin (Next.js)
+# TagAlng Admin — Lana inbox
 
-Phygtl internal admin at `/admin`. Calls the same Supabase project as TagAlng-app.
+WhatsApp-style viewer for **all Lana signup chats**, with **bucket / focus_phrase / highlights** on each assistant message.
 
-**Phase 1 pages to build:**
+## Prerequisites
 
-- Atlas dashboard — `get_atlas_snapshot` RPC
-- Waitlist tooling (service-role server routes only)
+1. `supabase db push` — migration `20260605120000_admin_lana_inbox.sql`
+2. Supabase Auth user (email/password) on `admin_allowlist` — see [`docs/ADMIN_LANA_INBOX.md`](../docs/ADMIN_LANA_INBOX.md)
 
-Scaffold with:
+## Run locally
 
 ```bash
-npx create-next-app@14 . --typescript --app --eslint
+cd apps/admin
+cp .env.example .env.local
+# NEXT_PUBLIC_SUPABASE_URL + NEXT_PUBLIC_SUPABASE_ANON_KEY from Dashboard
+npm install
+npm run dev
 ```
 
-Use `@supabase/ssr` for server-side Supabase client.
+Open http://localhost:3001 → `/login` → `/lana`
+
+## Pages
+
+| Route | Description |
+|-------|-------------|
+| `/login` | Admin email/password |
+| `/lana` | Inbox list + chat thread + claim cards |
+
+## Data
+
+- `admin_list_lana_sessions` — left pane
+- `admin_get_lana_conversation` — messages include `metadata.ui` (rendered by `LanaBubble`)
+
+No service role in the browser.

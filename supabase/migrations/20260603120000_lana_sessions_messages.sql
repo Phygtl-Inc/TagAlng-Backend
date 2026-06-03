@@ -4,13 +4,11 @@ create type public.lana_session_purpose as enum (
   'profile_intake',
   'event_draft'
 );
-
 create type public.lana_session_status as enum (
   'active',
   'completed',
   'abandoned'
 );
-
 create table public.lana_sessions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users (id) on delete cascade,
@@ -22,18 +20,14 @@ create table public.lana_sessions (
   completed_at timestamptz,
   constraint lana_sessions_context_is_object check (jsonb_typeof(context) = 'object')
 );
-
 comment on table public.lana_sessions is
   'Lana agent sessions. Chat turns in lana_messages; profile truth in user_identity_claims after complete.';
-
 create index lana_sessions_user_id_active_idx
   on public.lana_sessions (user_id, created_at desc)
   where status = 'active';
-
 create trigger lana_sessions_updated_at
 before update on public.lana_sessions
 for each row execute function public.set_updated_at();
-
 create table public.lana_messages (
   id uuid primary key default gen_random_uuid(),
   session_id uuid not null references public.lana_sessions (id) on delete cascade,
@@ -43,27 +37,21 @@ create table public.lana_messages (
   created_at timestamptz not null default now(),
   constraint lana_messages_metadata_is_object check (jsonb_typeof(metadata) = 'object')
 );
-
 comment on table public.lana_messages is
   'Lana chat transcript. Not used for matching — claims table is source of truth.';
-
 create index lana_messages_session_id_created_idx
   on public.lana_messages (session_id, created_at asc);
-
 alter table public.lana_sessions enable row level security;
 alter table public.lana_messages enable row level security;
-
 create policy "lana_sessions_select_own"
   on public.lana_sessions for select
   to authenticated
   using (user_id = auth.uid());
-
 create policy "lana_sessions_no_client_write"
   on public.lana_sessions for all
   to authenticated
   using (false)
   with check (false);
-
 create policy "lana_messages_select_own_session"
   on public.lana_messages for select
   to authenticated
@@ -75,13 +63,11 @@ create policy "lana_messages_select_own_session"
         and s.user_id = auth.uid()
     )
   );
-
 create policy "lana_messages_no_client_write"
   on public.lana_messages for all
   to authenticated
   using (false)
   with check (false);
-
 -- Resume active profile intake session (optional frontend helper)
 create or replace function public.get_active_lana_session(
   p_purpose public.lana_session_purpose default 'profile_intake'
@@ -117,12 +103,9 @@ as $$
   order by s.created_at desc
   limit 1;
 $$;
-
 comment on function public.get_active_lana_session(public.lana_session_purpose) is
   'Returns latest active Lana session for the caller, if any.';
-
 grant execute on function public.get_active_lana_session(public.lana_session_purpose) to authenticated;
-
 create or replace function public.get_lana_session_messages(
   p_session_id uuid
 )
@@ -145,5 +128,4 @@ as $$
     and s.user_id = auth.uid()
   order by m.created_at asc;
 $$;
-
 grant execute on function public.get_lana_session_messages(uuid) to authenticated;

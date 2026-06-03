@@ -3,7 +3,6 @@
 -- Backward compatibility: keep old columns `match_score` and `total_threads` as aliases for shared public claim count and shared event count.
 
 drop function if exists public.get_cluster_peers(text);
-
 create or replace function public.get_cluster_peers(p_cluster_id text)
 returns table (
   user_id uuid,
@@ -113,8 +112,6 @@ begin
   order by pd.public_claims_count desc, pd.shared_events desc, pd.nickname asc nulls last;
 end;
 $$;
-
 comment on function public.get_cluster_peers(text) is
   'Returns list of peers in a cluster with separate public/mutual claim counts and is_matched flag. Anon sees blurred placeholders.';
-
 grant execute on function public.get_cluster_peers(text) to authenticated, anon;
