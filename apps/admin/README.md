@@ -19,6 +19,16 @@ npm run dev
 
 Open http://localhost:3001 → `/login` → `/lana`
 
+## Deploy on Vercel
+
+1. Import `Phygtl-Inc/TagAlng-Backend`, branch `main`.
+2. **Root Directory:** `apps/admin` (use **Edit** and pick the folder — do not leave repo root).
+3. **Framework Preset:** choose **Next.js** manually if the dropdown stays empty, then confirm build command is `npm run build`.
+4. Env: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (anon key only).
+5. Deploy. Enable **Deployment Protection** for internal use.
+
+`apps/admin/vercel.json` pins the framework for monorepo imports.
+
 ## Pages
 
 | Route | Description |
