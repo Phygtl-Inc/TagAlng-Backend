@@ -20,6 +20,8 @@ Machine-readable errors are raised with `errcode = 'P0001'` and mapped to UI i18
 - `invalid_sport_sub`
 - `no_block_nearby`
 - `block_or_coords_required`
+- `invalid_zip`
+- `zip_not_found`
 - `peer_not_found`
 - `location_required`
 - `title_required`

@@ -12,23 +12,26 @@ Use the Postman files in this folder together with the **deployed** identity wor
 
 | System | Base URL | Used for |
 |--------|----------|----------|
-| **Supabase** | `https://rjlcyvwogmfmngemhbmn.supabase.co` | Phone OTP login, RPCs (`assign_home_block`, `get_my_identity_claims`) |
-| **Identity worker** | `https://tagalng-identity-worker-975128128744.us-east1.run.app` | `POST /identity/intake`, `POST /identity/extract` (Gemini + embeddings) |
+| **Supabase** | `https://rjlcyvwogmfmngemhbmn.supabase.co` | Phone OTP, RPCs (`get_blocks_near_zip`, `assign_home_block`, `get_my_identity_claims`, events/RTJ) |
+| **Identity worker** | `https://tagalng-identity-worker-975128128744.us-east1.run.app` | `POST /identity/intake`, `POST /identity/extract` (legacy one/two-shot intake) |
+| **Lana worker** | `https://tagalng-lana-worker-975128128744.us-east1.run.app` | **Signup chat:** `POST /lana/sessions`, `.../messages`, `.../complete` — see [`LANA_API.md`](./LANA_API.md) |
 
-The mobile app uses the **same split**: Supabase client for auth + Postgres RPCs; `fetch` to identity worker for cover/intake only.
+The mobile app uses the **same split**: Supabase client for auth + Postgres RPCs; `fetch` to **Lana worker** for signup profile chat (preferred) or identity worker for short cover text.
 
 ---
 
 ## Dev phone OTP (no real SMS yet)
 
-Hosted **tagalng-dev** uses a **test phone** in the Supabase Dashboard (Auth → Phone):
+Hosted **tagalng-dev** uses **test phones** in Supabase Dashboard → Auth → Phone:
 
-| Field | Value |
-|-------|--------|
-| Test phone | `+15550000000` (or `15550000000`) |
-| OTP code | `000000` |
+| Phone | OTP | Use |
+|-------|-----|-----|
+| `+15550000000` | `000000` | Generic Postman flow |
+| `+15550100001` | `000000` | Seed host **Marina** (after `seed.sql`) |
+| `+15550100002` | `000000` | Seed guest **Beatriz** |
+| `+15550100003` | `000000` | Seed peer **Carla** |
 
-Real SMS (Twilio) is not required for this flow. Ask backend for the anon key; do not commit it.
+Real SMS: Supabase Dashboard → Auth → Phone → Twilio credentials. Seed data: [`SEED_DEV_DATA.md`](./SEED_DEV_DATA.md).
 
 ---
 
@@ -41,6 +44,7 @@ Real SMS (Twilio) is not required for this flow. Ask backend for the anon key; d
 3. Set **`anon_key`**: Supabase Dashboard → Project Settings → API → `anon` `public`.
 4. Confirm **`identity_worker_url`** is the Cloud Run URL (already set in the env file).
 5. Run requests **in order** (folder **A → B → C → D**). Tests on **B2** save `access_token` automatically.
+6. **ZIP path:** use **C0** → pick `block_id` → **C1b** instead of **C1** (GPS).
 
 ---
 
@@ -52,11 +56,17 @@ Real SMS (Twilio) is not required for this flow. Ask backend for the anon key; d
 | **A2** | `GET {{identity_worker_url}}/health` | Worker + Vertex up |
 | **B1** | Send OTP | SMS path (test number) |
 | **B2** | Verify OTP | `access_token` saved to env |
-| **C1** | `assign_home_block` (GPS) | User linked to nearest block |
-| **C2** | `get_my_profile` | Confirms `home_block_id` |
-| **D1** | `POST /identity/intake` (cover only) | Often `status: "clarify"` + questions |
-| **D2** | `POST /identity/intake` (+ answers) | `status: "complete"`, claims saved |
-| **D3** | `get_my_identity_claims` | Threads from Supabase |
+| **C0** | `get_blocks_near_zip` | List blocks for ZIP (e.g. `32827`) |
+| **C1** | `assign_home_block` (GPS) | Auto nearest block |
+| **C1b** | `assign_home_block` (ZIP pick) | `p_block_id` + `p_home_zip` |
+| **C2** | `get_my_profile` | Confirms `home_block_id`, `home_zip` |
+| **A3** | `GET {{lana_worker_url}}/health` | Lana worker up |
+| **D1** | `POST /lana/sessions` | Lana opening → saves `lana_session_id` |
+| **D2–D3** | `POST .../messages` | Chat turns → `lana_messages` in DB |
+| **D4** | `POST .../complete` | → `user_identity_claims` |
+| **D5** | `get_my_identity_claims` | Verify claims in Supabase |
+| **D6** | `get_lana_session_messages` | Verify chat in Supabase |
+| *(alt E)* | `POST /identity/intake` | Legacy folder **E** in Postman |
 
 Optional **D4**: one-shot `POST /identity/extract` if cover text is very detailed (may skip clarify).
 
@@ -74,6 +84,8 @@ Optional **D4**: one-shot `POST /identity/extract` if cover text is very detaile
 | `access_token` | Filled by B2 |
 | `cover_text` | Short vague text for D1 (triggers follow-ups) |
 | `clarifications_json` | JSON array for D2 (see below) |
+| `test_zip` | `32827` (Lake Nona) for **C0** |
+| `picked_block_id` | Filled from **C0** response (first row) for **C1b** |
 
 ---
 
@@ -239,7 +251,8 @@ Content-Type: application/json
 
 | RPC | Body (example) |
 |-----|----------------|
-| `assign_home_block` | `{ "p_lat": 28.3685, "p_lng": -81.2762 }` |
+| `get_blocks_near_zip` | `{ "p_zip": "32827", "p_cluster_id": "lake-nona", "p_limit": 10 }` |
+| `assign_home_block` | GPS: `{ "p_lat", "p_lng" }` · ZIP: `{ "p_block_id", "p_home_zip" }` |
 | `get_my_profile` | `{}` |
 | `get_my_identity_claims` | `{}` |
 

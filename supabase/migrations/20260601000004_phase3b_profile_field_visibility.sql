@@ -12,35 +12,28 @@ create table if not exists public.user_profile_field_visibility (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
-
 comment on table public.user_profile_field_visibility is
   'Per-user visibility preferences for profile fields. Schema: { "field_name": "public"|"mutual"|"private" }. Defaults to empty (all fields private).';
-
 -- Enable RLS on visibility table
 alter table public.user_profile_field_visibility enable row level security;
-
 -- Policy: Users read/update their own visibility settings
 create policy "pv_select_own"
   on public.user_profile_field_visibility for select
   to authenticated
   using (user_id = auth.uid());
-
 create policy "pv_update_own"
   on public.user_profile_field_visibility for update
   to authenticated
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
-
 create policy "pv_insert_own"
   on public.user_profile_field_visibility for insert
   to authenticated
   with check (user_id = auth.uid());
-
 -- Trigger to auto-update updated_at
 create trigger pv_updated_at
 before update on public.user_profile_field_visibility
 for each row execute function public.set_updated_at();
-
 -- RPC: Set visibility for a single field
 create or replace function public.set_profile_field_visibility(
   p_field_name text,
@@ -72,12 +65,9 @@ begin
   return updated_visibility;
 end;
 $$;
-
 comment on function public.set_profile_field_visibility(text, text) is
   'Set visibility for a profile field. Visibility: public (all see), mutual (matched only), private (owner only).';
-
 grant execute on function public.set_profile_field_visibility(text, text) to authenticated;
-
 -- RPC: Get user's own visibility settings
 create or replace function public.get_my_profile_field_visibility()
 returns jsonb
@@ -90,12 +80,9 @@ as $$
   from public.user_profile_field_visibility
   where user_id = auth.uid();
 $$;
-
 comment on function public.get_my_profile_field_visibility() is
   'Retrieve the current user''s field visibility settings.';
-
 grant execute on function public.get_my_profile_field_visibility() to authenticated;
-
 -- Helper: Check if a field is visible to a viewer
 -- Returns true if the field visibility allows the viewer to see it
 create or replace function public.is_field_visible_to(
@@ -137,8 +124,6 @@ begin
   return false;
 end;
 $$;
-
 comment on function public.is_field_visible_to(uuid, text, uuid) is
   'Check if a field is visible to a viewer based on privacy settings.';
-
 grant execute on function public.is_field_visible_to(uuid, text, uuid) to authenticated;

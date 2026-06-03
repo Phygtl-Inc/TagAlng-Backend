@@ -2,7 +2,6 @@
 -- Purpose: Return public claims to all, mutual claims only to matched users
 
 drop function if exists public.get_peer_profile(uuid);
-
 create or replace function public.get_peer_profile(p_user_id uuid)
 returns jsonb
 language plpgsql
@@ -124,8 +123,6 @@ begin
   return result;
 end;
 $$;
-
 comment on function public.get_peer_profile(uuid) is
   'Returns peer profile with disclosure-aware claims. Shows public claims to all, mutual claims only to matched users. Hides home_block_id.';
-
 grant execute on function public.get_peer_profile(uuid) to authenticated, anon;

@@ -17,13 +17,10 @@ BEGIN
   END IF;
 END
 $$;
-
 alter table public.users
   add column if not exists home_location_visibility public.location_visibility not null default 'block';
-
 comment on column public.users.home_location_visibility is
   'Controls the precision of location labels shown to other users: block or cluster.';
-
 -- Update get_my_profile to expose the current user setting
 create or replace function public.get_my_profile()
 returns jsonb
@@ -47,9 +44,7 @@ as $$
   left join public.blocks b on b.id = u.home_block_id
   where u.id = auth.uid();
 $$;
-
 grant execute on function public.get_my_profile() to authenticated;
-
 -- Allow users to update their own location precision preference
 create or replace function public.set_home_location_visibility(
   p_visibility public.location_visibility
@@ -77,12 +72,9 @@ begin
   );
 end;
 $$;
-
 comment on function public.set_home_location_visibility(public.location_visibility) is
   'Set the current user''s location disclosure precision. Allowed values: block, cluster.';
-
 grant execute on function public.set_home_location_visibility(public.location_visibility) to authenticated;
-
 -- Helper to return the user's visible location label
 create or replace function public.get_user_location_label(
   p_user_id uuid
@@ -106,9 +98,7 @@ as $$
   left join public.blocks b on b.id = u.home_block_id
   where u.id = p_user_id;
 $$;
-
 grant execute on function public.get_user_location_label(uuid) to authenticated, anon;
-
 -- Update get_peer_profile to return label based on peer's chosen precision and hide raw block info when not block
 create or replace function public.get_peer_profile(p_user_id uuid)
 returns jsonb
@@ -245,8 +235,6 @@ begin
   return result;
 end;
 $$;
-
 comment on function public.get_peer_profile(uuid) is
   'Returns peer profile with disclosure-aware claims. Shows public claims to all, mutual claims only to matched users. Returns location label based on peer''s chosen precision and hides home_block_id.';
-
 grant execute on function public.get_peer_profile(uuid) to authenticated, anon;

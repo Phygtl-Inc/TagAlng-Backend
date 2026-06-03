@@ -13,7 +13,7 @@ For **auth + identity intake** (cover → claims), see also [`docs/FRONTEND_API.
 | Area | Status on dev | Notes |
 |------|----------------|-------|
 | Phone OTP auth | Live | Test number `+15550000000` / OTP `000000` |
-| Home block assignment | Live | `assign_home_block` (GPS or block id) |
+| Home block assignment | Live | `get_blocks_near_zip` (ZIP) → `assign_home_block` (GPS or `p_block_id` + `p_home_zip`) |
 | Identity intake (cover) | Live | Cloud Run worker, not Supabase RPC |
 | Identity claim editor | Live | label, disclosure, dismiss RPCs |
 | Cluster events list | Live | Anon + signed-in; 14-day window |
@@ -257,7 +257,8 @@ All bodies are JSON. Errors use Postgres `P0001` with message = machine code (se
 
 | RPC | Notes |
 |-----|--------|
-| `assign_home_block({ p_lat, p_lng })` or `{ p_block_id }` | Returns `{ user_id, home_block_id, block_display_name, cluster_id, ... }` |
+| `get_blocks_near_zip({ p_zip })` | Nearby blocks for ZIP picker |
+| `assign_home_block({ p_lat, p_lng })` or `{ p_block_id, p_home_zip }` | Saves `home_block_id` + optional `home_zip` |
 | `get_my_profile()` | jsonb profile + block |
 | `get_my_identity_claims()` | claim stack for editor |
 

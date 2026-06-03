@@ -1,8 +1,8 @@
 {
   "info": {
     "_postman_id": "tagalng-full-flow",
-    "name": "TagAlng — Full flow (auth → block → identity)",
-    "description": "Run A → D in order. Environment: **TagAlng — tagalng-dev**. Set `anon_key`. See docs/FRONTEND_API.md.\n\nTest phone: +15550000000 · OTP: 000000",
+    "name": "TagAlng — Full flow (auth → block → Lana signup)",
+    "description": "Run **A → D** in order. Environment: **TagAlng — tagalng-dev**. Set `anon_key`.\n\n**Signup profile:** folder **D** uses **Lana** (`lana_worker_url`) — chat saved to `lana_sessions` / `lana_messages`, profile threads to `user_identity_claims` on complete.\n\nTest phone: `+15550000000` · OTP: `000000` · See `docs/LANA_API.md`.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -25,6 +25,28 @@
           "request": {
             "method": "GET",
             "url": "{{identity_worker_url}}/health"
+          }
+        },
+        {
+          "name": "A3. Lana worker health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Lana ok', () => {",
+                  "  const j = pm.response.json();",
+                  "  pm.expect(j.ok).to.eql(true);",
+                  "  pm.expect(j.vertex_configured).to.eql(true);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{lana_worker_url}}/health"
           }
         }
       ]
@@ -84,6 +106,37 @@
       "name": "C — Home block",
       "item": [
         {
+          "name": "C0. get_blocks_near_zip",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "if (Array.isArray(rows) && rows[0] && rows[0].block_id) {",
+                  "  pm.environment.set('picked_block_id', rows[0].block_id);",
+                  "}",
+                  "pm.test('blocks returned', () => pm.expect(rows.length).to.be.above(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_zip\": \"{{test_zip}}\",\n  \"p_cluster_id\": \"lake-nona\",\n  \"p_limit\": 10\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_blocks_near_zip"
+          }
+        },
+        {
           "name": "C1. Assign home block (Lake Nona GPS)",
           "request": {
             "method": "POST",
@@ -100,7 +153,37 @@
           }
         },
         {
+          "name": "C1b. Assign home block (ZIP pick)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_block_id\": \"{{picked_block_id}}\",\n  \"p_home_zip\": \"{{test_zip}}\"\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/assign_home_block"
+          }
+        },
+        {
           "name": "C2. Get my profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "pm.test('home_block set', () => {",
+                  "  pm.expect(rows[0].home_block_id).to.be.a('string');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
@@ -115,10 +198,223 @@
       ]
     },
     {
-      "name": "D — Identity (Cloud Run)",
+      "name": "D — Lana signup (chat → DB)",
+      "description": "Conversational profile intake. Writes:\n- `lana_sessions` + `lana_messages` (chat history)\n- `user_identity_claims` + embeddings on **D4 complete**",
       "item": [
         {
-          "name": "D1. Intake — cover only (may clarify)",
+          "name": "D1. Start Lana session (opening message)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (j.session_id) pm.environment.set('lana_session_id', j.session_id);",
+                  "pm.test('session created', () => pm.expect(j.session_id).to.be.a('string'));",
+                  "pm.test('Lana greeted', () => pm.expect(j.assistant_message).to.be.a('string').and.not.empty);",
+                  "pm.test('status active', () => pm.expect(j.status).to.eql('active'));",
+                  "pm.test('ui object', () => pm.expect(j.ui).to.be.an('object'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"purpose\": \"profile_intake\"\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions"
+          }
+        },
+        {
+          "name": "D2. Lana — user message 1",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('Lana replied', () => pm.expect(j.assistant_message).to.be.a('string').and.not.empty);",
+                  "pm.test('status continue or ready', () => pm.expect(['continue','ready_to_complete']).to.include(j.status));",
+                  "pm.test('ui highlights', () => pm.expect(j.ui).to.be.an('object'));",
+                  "if (j.ready_to_complete) pm.environment.set('lana_ready', 'true');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"{{lana_message}}\"\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "D3. Lana — user message 2 (answer follow-ups)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('Lana replied', () => pm.expect(j.assistant_message).to.be.a('string').and.not.empty);",
+                  "if (j.ready_to_complete) pm.environment.set('lana_ready', 'true');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"{{lana_message_2}}\"\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "D4. Lana — complete (save claims to DB)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('session completed', () => pm.expect(j.status).to.eql('completed'));",
+                  "pm.test('claims saved', () => pm.expect(j.claims.length).to.be.above(0));",
+                  "pm.test('mapped_summary', () => pm.expect(j.mapped_summary).to.be.a('string').and.not.empty);",
+                  "pm.test('spans', () => pm.expect(j.spans.length).to.be.above(0));",
+                  "pm.test('source_quote on claim', () => pm.expect(j.claims[0].source_quote).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"force\": true\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/complete"
+          }
+        },
+        {
+          "name": "D5. Get my identity claims (Supabase)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "pm.test('claims in DB', () => pm.expect(rows.length).to.be.above(0));",
+                  "pm.test('has concept + label', () => {",
+                  "  pm.expect(rows[0].concept).to.be.a('string');",
+                  "  pm.expect(rows[0].label).to.be.a('string');",
+                  "});",
+                  "pm.test('source_quote in DB', () => pm.expect(rows[0].source_quote).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_my_identity_claims"
+          }
+        },
+        {
+          "name": "D6. DB — get_lana_session_messages (chat history)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "pm.test('messages in DB', () => pm.expect(rows.length).to.be.above(2));",
+                  "const roles = rows.map(r => r.role);",
+                  "pm.test('has user + assistant', () => {",
+                  "  pm.expect(roles).to.include('user');",
+                  "  pm.expect(roles).to.include('assistant');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_session_id\": \"{{lana_session_id}}\"\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_lana_session_messages"
+          }
+        },
+        {
+          "name": "D7. GET session (worker — full transcript)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('session completed', () => pm.expect(j.status).to.eql('completed'));",
+                  "pm.test('messages returned', () => pm.expect(j.messages.length).to.be.above(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "E — Legacy identity intake (optional)",
+      "description": "Old one/two-shot flow via identity-worker. Skip if using Lana (folder D).",
+      "item": [
+        {
+          "name": "E1. Intake — cover only (may clarify)",
           "request": {
             "method": "POST",
             "header": [
@@ -133,7 +429,7 @@
           }
         },
         {
-          "name": "D2. Intake — with clarifications (complete)",
+          "name": "E2. Intake — with clarifications (complete)",
           "request": {
             "method": "POST",
             "header": [
@@ -148,20 +444,7 @@
           }
         },
         {
-          "name": "D3. Get my identity claims (Supabase)",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "apikey", "value": "{{anon_key}}" },
-              { "key": "Authorization", "value": "Bearer {{access_token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{}" },
-            "url": "{{supabase_url}}/rest/v1/rpc/get_my_identity_claims"
-          }
-        },
-        {
-          "name": "D4. Extract one-shot (optional)",
+          "name": "E3. Extract one-shot (optional)",
           "request": {
             "method": "POST",
             "header": [

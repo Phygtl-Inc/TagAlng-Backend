@@ -41,8 +41,6 @@ as $$
     )
   );
 $$;
-
 comment on function public.are_users_matched(uuid, uuid) is
   'Returns true if two users are matched (same event or shared public claims). Used for mutual disclosure visibility.';
-
 grant execute on function public.are_users_matched(uuid, uuid) to authenticated;
