@@ -8,16 +8,12 @@ create table if not exists public.zip_centroids (
   cluster_id text not null default 'lake-nona',
   created_at timestamptz not null default now()
 );
-
 comment on table public.zip_centroids is
   'ZIP5 → approximate centroid for block picker. Not user PII; seed/expand per market.';
-
 alter table public.users
   add column if not exists home_zip text check (home_zip is null or home_zip ~ '^\d{5}$');
-
 comment on column public.users.home_zip is
   'US ZIP5 chosen by user (vicinity). Never store street address.';
-
 insert into public.zip_centroids (zip5, lat, lng, city, cluster_id) values
   ('32827', 28.3647, -81.2568, 'Lake Nona', 'lake-nona'),
   ('32832', 28.4510, -81.2490, 'Orlando SE', 'lake-nona'),
@@ -32,7 +28,6 @@ on conflict (zip5) do update
       lng = excluded.lng,
       city = excluded.city,
       cluster_id = excluded.cluster_id;
-
 create or replace function public.normalize_zip5(p_zip text)
 returns text
 language plpgsql
@@ -49,9 +44,7 @@ begin
   return substr(v_digits, 1, 5);
 end;
 $$;
-
 revoke all on function public.normalize_zip5(text) from public, anon, authenticated;
-
 create or replace function public.get_blocks_near_zip(
   p_zip text,
   p_cluster_id text default 'lake-nona',
@@ -111,9 +104,7 @@ begin
   limit greatest(1, least(coalesce(p_limit, 10), 25));
 end;
 $$;
-
 drop function if exists public.assign_home_block(text, double precision, double precision);
-
 create or replace function public.assign_home_block(
   p_block_id text default null,
   p_lat double precision default null,
@@ -180,7 +171,6 @@ begin
   );
 end;
 $$;
-
 create or replace function public.get_my_profile()
 returns jsonb
 language sql
@@ -204,9 +194,7 @@ as $$
   left join public.blocks b on b.id = u.home_block_id
   where u.id = auth.uid();
 $$;
-
 revoke execute on function public.get_blocks_near_zip(text, text, int) from public, anon;
 grant execute on function public.get_blocks_near_zip(text, text, int) to authenticated;
-
 revoke execute on function public.assign_home_block(text, double precision, double precision, text) from public, anon;
 grant execute on function public.assign_home_block(text, double precision, double precision, text) to authenticated;

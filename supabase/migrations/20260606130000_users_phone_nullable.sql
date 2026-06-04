@@ -3,10 +3,8 @@
 
 alter table public.users
   alter column phone drop not null;
-
 comment on column public.users.phone is
   'From auth phone OTP when present; null for email-only accounts (e.g. ops admin).';
-
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql

@@ -94,6 +94,8 @@ PostgREST URL pattern (for debugging):
 |--------|------|---------------------------------------------|
 | `get_cluster_events` | Anon OK | — |
 | `get_cluster_peers`, `get_peer_profile` | Anon OK (blurred) | — |
+| `match_peers_by_claim_vectors` | Signed-in | Embeddings required; same **home block** |
+| `get_nearby_activities` / `_authed` | Anon / signed-in | See migration `20260607120000` |
 | `assign_home_block`, profile, claims read | Signed-in | — |
 | `create_event` | Signed-in | **Required** |
 | `request_to_join_event` | Signed-in | **Required** |
@@ -121,9 +123,42 @@ PostgREST URL pattern (for debugging):
 1. `signInWithOtp` / `verifyOtp` (test phone above)
 2. `assign_home_block({ p_lat, p_lng })` or `{ p_block_id }`
 3. `POST /identity/intake` on identity worker (see `FRONTEND_API.md`)
-4. `get_my_identity_claims()` for claim stack UI
+4. `get_my_identity_claims()` for claim stack UI — or one shot:
+
+```ts
+const { data } = await supabase.rpc('get_my_profile_dashboard');
+// data.profile.full_name, data.profile.handle (= nickname), data.profile.profile_photo_url
+// data.mapped_summary — "In your own words"
+// data.claims[] — "Things about you" cards (confidence, source_quote, synonyms, bucket, disclosure)
+// data.stats — events_hosted, events_attended, check_ins, peers_met
+```
+
+Set `full_name` / `nickname` via `update` on `users` (RLS: own row). **@handle in UI = `nickname`.**
+
+**Not in dashboard yet:** host level (New → Trusted), structured kids list — UI mock ahead of backend.
+
+**Vector fellows (after claims + embeddings exist):**
+
+```ts
+const { data } = await supabase.rpc('match_peers_by_claim_vectors', {
+  p_limit: 20,
+  p_min_similarity: 0.65,
+});
+// data[].peer_user_id, similarity_score, matching_peer_label, has_exact_concept_match
+```
 
 ### 5.3 Signed-in — host an event
+
+**Option A — Lana event draft (recommended for mock UI)**
+
+1. `POST /lana/sessions` with `{ "purpose": "event_draft" }` on lana-worker
+2. User describes event → `POST .../messages` → use `ui.highlights` + `event_draft` to fill form
+3. Purpose chips: merge Lana’s `event_draft.cohort_tags` with `get_event_purposes()` labels
+4. `POST .../complete` with `{ "publish": true }` → `event_id`, or `{ "publish": false }` then manual `create_event`
+
+See [`docs/LANA_API.md`](./LANA_API.md#event-draft-host-an-event).
+
+**Option B — manual form**
 
 1. `create_event({ p_fields })` → returns `event_id` (uuid)
 2. Optional cover image: upload to Storage (below), then `update_event` with `cover_image_url`
@@ -182,7 +217,7 @@ All bodies are JSON. Errors use Postgres `P0001` with message = machine code (se
 | `starts_at` | No | default now + 7 days |
 | `ends_at` | No | |
 | `venue_name` | No | |
-| `cohort_tags` | No | string array |
+| `cohort_tags` | No | string array — use **event purpose** ids from `get_event_purposes()` (e.g. `coffee_stroller`, `faith_small_group`); legacy waitlist cohort ids still accepted |
 | `max_attendees` | No | 1–200 |
 | `cover_image_url` | No | public URL after storage upload |
 
@@ -193,6 +228,11 @@ All bodies are JSON. Errors use Postgres `P0001` with message = machine code (se
 #### `cancel_event(p_event_id)` → void
 
 - Sets `status = 'cancelled'`.
+
+#### `get_event_purposes()` → rows
+
+- **Grant:** `anon`, `authenticated`
+- **Returns:** `id`, `label`, `emoji`, `display_order`, `affinity_concepts` — host **Purpose** chips (PWA v8); pass selected `id` values in `create_event` → `cohort_tags`
 
 #### `create_event_from_description(p_text)` → uuid
 
@@ -259,8 +299,9 @@ All bodies are JSON. Errors use Postgres `P0001` with message = machine code (se
 |-----|--------|
 | `get_blocks_near_zip({ p_zip })` | Nearby blocks for ZIP picker |
 | `assign_home_block({ p_lat, p_lng })` or `{ p_block_id, p_home_zip }` | Saves `home_block_id` + optional `home_zip` |
-| `get_my_profile()` | jsonb profile + block |
-| `get_my_identity_claims()` | claim stack for editor |
+| `get_my_profile()` | jsonb profile + block + `full_name`, `handle` (= `nickname`), avatar, phone verified |
+| `get_my_profile_dashboard()` | **One call for profile tab:** profile + `mapped_summary` + `spans` + `claims` + `stats` |
+| `get_my_identity_claims()` | claim stack (also inside dashboard) |
 
 ---
 
@@ -321,7 +362,9 @@ Import:
 
 1. [`docs/postman/TagAlng-tagalng-dev.postman_environment.json`](./postman/TagAlng-tagalng-dev.postman_environment.json)
 2. [`docs/postman/TagAlng-v01-core.postman_collection.json`](./postman/TagAlng-v01-core.postman_collection.json) — **v0.1 events / RTJ / nudges**
-3. [`docs/postman/TagAlng-Full-Flow.postman_collection.json`](./postman/TagAlng-Full-Flow.postman_collection.json) — auth + identity worker
+3. [`docs/postman/TagAlng-Full-Flow.postman_collection.json`](./postman/TagAlng-Full-Flow.postman_collection.json) — auth + block + **Lana profile (D)** + **Lana host event (F)**
+
+**Lana host event (Postman):** after **B** + **C**, run folder **F** (`event_draft` → `publish: true` → `event_id`). See [`FRONTEND_API.md`](./FRONTEND_API.md#host-event-via-lana-summary).
 
 **Required:** select environment **TagAlng — tagalng-dev** and paste **`anon_key`** from the dashboard.
 
