@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.auth import require_home_block, service_client, verify_jwt
+from app.auth import require_home_block, verify_jwt
 from app.context import format_user_context, load_user_context
 from app.db import (
     complete_session,
@@ -15,11 +15,13 @@ from app.db import (
     transcript_text,
     update_session_context,
 )
+from app.event_publish import publish_event
 from app.models import (
     CompleteSessionRequest,
     CompleteSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    EventDraft,
     ExtractedClaim,
     HighlightSpan,
     LanaTurnUi,
@@ -27,10 +29,12 @@ from app.models import (
     SendMessageResponse,
     SessionDetailResponse,
 )
+from app.vertex_event import lana_event_opening, lana_event_turn
+from app.vertex_event_extract import vertex_extract_event_from_transcript
 from app.vertex_extract import vertex_embed, vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
-app = FastAPI(title="TagAlng lana-worker", version="0.2.0")
+app = FastAPI(title="TagAlng lana-worker", version="0.3.0")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -83,7 +87,15 @@ def _ui_from_dict(raw: dict[str, Any]) -> LanaTurnUi:
     )
 
 
+def _draft_from_dict(raw: dict[str, Any] | None) -> EventDraft | None:
+    if not raw:
+        return None
+    return EventDraft(**raw)
+
+
 def _persist_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
+    from app.auth import service_client
+
     sb = service_client()
     sb.table("user_identity_claims").delete().eq("user_id", user_id).is_(
         "dismissed_at", "null"
@@ -108,11 +120,17 @@ def _persist_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
         sb.table("user_identity_claims").insert(rows).execute()
 
 
+def _bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing_bearer_token")
+    return authorization.removeprefix("Bearer ").strip()
+
+
 @app.get("/")
 def root():
     return {
         "service": "tagalng-lana-worker",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "endpoints": {
             "health": "GET /health",
             "create_session": "POST /lana/sessions",
@@ -121,6 +139,7 @@ def root():
             "get_session": "GET /lana/sessions/{session_id}",
             "docs": "GET /docs",
         },
+        "purposes": ["profile_intake", "event_draft"],
     }
 
 
@@ -146,15 +165,21 @@ def create_lana_session(
     require_home_block(user_id)
 
     purpose = body.purpose
-    if purpose != "profile_intake":
-        raise HTTPException(status_code=400, detail="only_profile_intake_supported_v01")
-
     try:
         session = create_session(user_id, purpose)
         session_id = str(session["id"])
         ctx_pack = load_user_context(user_id)
         user_block = format_user_context(ctx_pack, purpose)
-        opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
+        purpose_ids = ctx_pack.get("event_purpose_ids") or []
+
+        if purpose == "event_draft":
+            opening, status, session_ctx, ui_raw, draft_raw = lana_event_opening(
+                user_block, purpose_ids
+            )
+        else:
+            opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
+            draft_raw = None
+
         insert_message(
             session_id,
             "assistant",
@@ -164,6 +189,7 @@ def create_lana_session(
         merged_ctx = {**(session.get("context") or {}), **session_ctx}
         update_session_context(session_id, merged_ctx)
         ui = _ui_from_dict(ui_raw)
+        event_draft = _draft_from_dict(draft_raw)
     except HTTPException:
         raise
     except Exception as exc:
@@ -179,6 +205,7 @@ def create_lana_session(
         assistant_message=opening,
         ready_to_complete=(status == "ready_to_complete"),
         ui=ui,
+        event_draft=event_draft,
     )
 
 
@@ -196,22 +223,38 @@ def send_lana_message(
     if session.get("status") != "active":
         raise HTTPException(status_code=400, detail="session_not_active")
 
+    purpose = str(session.get("purpose", "profile_intake"))
     insert_message(session_id, "user", body.message.strip(), {})
     history = list_messages(session_id)
 
     try:
         ctx_pack = load_user_context(user_id)
-        user_block = format_user_context(ctx_pack, str(session.get("purpose", "profile_intake")))
-        reply, status, session_ctx, ui_raw = lana_turn(
-            user_block,
-            str(session.get("purpose", "profile_intake")),
-            history,
-            body.message,
-        )
+        user_block = format_user_context(ctx_pack, purpose)
+        purpose_ids = ctx_pack.get("event_purpose_ids") or []
+        prev_draft = (session.get("context") or {}).get("event_draft")
+
+        if purpose == "event_draft":
+            reply, status, session_ctx, ui_raw, draft_raw = lana_event_turn(
+                user_block,
+                purpose_ids,
+                history,
+                body.message,
+                prev_draft,
+            )
+        else:
+            reply, status, session_ctx, ui_raw = lana_turn(
+                user_block,
+                purpose,
+                history,
+                body.message,
+            )
+            draft_raw = session_ctx.get("event_draft")
+
         insert_message(session_id, "assistant", reply, {"status": status, "ui": ui_raw})
         merged = {**(session.get("context") or {}), **session_ctx}
         update_session_context(session_id, merged)
         ui = _ui_from_dict(ui_raw)
+        event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -226,6 +269,7 @@ def send_lana_message(
         ready_to_complete=(status == "ready_to_complete"),
         message_count=len(all_msgs),
         ui=ui,
+        event_draft=event_draft,
     )
 
 
@@ -237,6 +281,7 @@ def complete_lana_session(
 ):
     _vertex_required()
     user_id = verify_jwt(authorization)
+    user_jwt = _bearer_token(authorization)
     require_home_block(user_id)
 
     session = get_session_for_user(session_id, user_id)
@@ -245,6 +290,7 @@ def complete_lana_session(
     if session.get("status") != "active":
         raise HTTPException(status_code=400, detail="session_not_active")
 
+    purpose = str(session.get("purpose", "profile_intake"))
     messages = list_messages(session_id)
     user_turns = [m for m in messages if m.get("role") == "user"]
     if not user_turns and not body.force:
@@ -258,6 +304,18 @@ def complete_lana_session(
         )
 
     transcript = transcript_text(messages)
+    sess_ctx = session.get("context") or {}
+
+    if purpose == "event_draft":
+        return _complete_event_draft(
+            session_id=session_id,
+            user_id=user_id,
+            user_jwt=user_jwt,
+            transcript=transcript,
+            sess_ctx=sess_ctx,
+            publish=body.publish,
+        )
+
     try:
         claims, closing, mapped_summary, spans = vertex_extract_from_transcript(transcript)
     except Exception as exc:
@@ -268,7 +326,7 @@ def complete_lana_session(
 
     _persist_claims(user_id, claims)
     final_ctx = {
-        **(session.get("context") or {}),
+        **sess_ctx,
         "last_status": "completed",
         "mapped_summary": mapped_summary,
         "spans": [s.model_dump() for s in spans],
@@ -283,6 +341,73 @@ def complete_lana_session(
         threads_found=len(claims),
         mapped_summary=mapped_summary,
         spans=spans,
+        published=False,
+    )
+
+
+def _complete_event_draft(
+    *,
+    session_id: str,
+    user_id: str,
+    user_jwt: str,
+    transcript: str,
+    sess_ctx: dict[str, Any],
+    publish: bool,
+) -> CompleteSessionResponse:
+    ctx_pack = load_user_context(user_id)
+    purpose_ids = ctx_pack.get("event_purpose_ids") or []
+    prev_draft = sess_ctx.get("event_draft")
+
+    try:
+        draft, closing, mapped_summary, spans = vertex_extract_event_from_transcript(
+            transcript,
+            purpose_ids=purpose_ids,
+            previous_draft=prev_draft,
+        )
+    except ValueError as exc:
+        if str(exc) == "event_title_required":
+            raise HTTPException(status_code=400, detail="event_title_required") from exc
+        raise HTTPException(status_code=502, detail="lana_extract_failed") from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=_vertex_error_detail("lana_extract_failed", exc),
+        ) from exc
+
+    event_id: str | None = None
+    published = False
+    if publish:
+        try:
+            event_id = publish_event(user_id, user_jwt, draft)
+            published = True
+        except HTTPException as exc:
+            if exc.detail == "phone_not_verified":
+                closing = (
+                    "Your event draft is ready — verify your phone in settings, "
+                    "then publish from the form or call complete again."
+                )
+            else:
+                raise
+
+    final_ctx = {
+        **sess_ctx,
+        "last_status": "completed",
+        "mapped_summary": mapped_summary,
+        "spans": [s.model_dump() for s in spans],
+        "event_draft": draft.model_dump(),
+        "event_id": event_id,
+    }
+    complete_session(session_id, final_ctx)
+
+    return CompleteSessionResponse(
+        session_id=session_id,
+        status="completed",
+        assistant_message=closing,
+        mapped_summary=mapped_summary,
+        spans=spans,
+        event_id=event_id,
+        event_draft=draft,
+        published=published,
     )
 
 
@@ -302,6 +427,7 @@ def get_lana_session(
         context=sess_ctx,
         mapped_summary=sess_ctx.get("mapped_summary"),
         spans=sess_ctx.get("spans") or [],
+        event_draft=_draft_from_dict(sess_ctx.get("event_draft")),
         messages=[
             {
                 "id": m.get("id"),

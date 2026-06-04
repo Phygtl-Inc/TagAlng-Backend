@@ -1,8 +1,9 @@
-# TagAlng cohort taxonomy v1 — single source of truth (CTO spec)
+# TagAlng cohort taxonomy v2 — single source of truth (CTO spec)
 # Import in admin, website, and shared packages. IDs must not drift.
 
-version: 1
+version: 2
 
+# Waitlist / marketing URL (?cohort=parents,sports&sub=basketball)
 cohorts:
   - id: parents
     label: Parents
@@ -50,4 +51,58 @@ sport_subtypes:
     parent: sports
     label: Other sport
 
+# Host event "Purpose" chips (PWA v8) → events.cohort_tags
+event_purposes:
+  - id: faith_small_group
+    label: Faith small group
+    emoji: "⛪"
+    order: 1
+    affinity_concepts: [faith, faith_community]
+  - id: running_fitness
+    label: Running / fitness
+    emoji: "🏃"
+    order: 2
+    affinity_concepts: [runner, running, sports]
+  - id: outdoor_adventure
+    label: Outdoor + adventure
+    emoji: "🌳"
+    order: 3
+    affinity_concepts: [outdoor, activity]
+  - id: coffee_stroller
+    label: Coffee + stroller
+    emoji: "☕"
+    order: 4
+    affinity_concepts: [parents, parents_toddlers, newcomer]
+  - id: heritage_language
+    label: Heritage / language
+    emoji: "🌍"
+    order: 5
+    affinity_concepts: [heritage]
+  - id: postpartum_support
+    label: Postpartum + support
+    emoji: "🌿"
+    order: 6
+    affinity_concepts: [parents, parents_toddlers, postpartum]
+  - id: book_club_learning
+    label: Book club / learning
+    emoji: "📖"
+    order: 7
+    affinity_concepts: [creative, book_club, learning]
+  - id: beauty_wellness
+    label: Beauty + wellness
+    emoji: "💆"
+    order: 8
+    affinity_concepts: [wellness, activity]
+  - id: lifestyle_social
+    label: Lifestyle + social
+    emoji: "🍷"
+    order: 9
+    affinity_concepts: [social, interest]
+  - id: kids_led_activity
+    label: Kids-led activity
+    emoji: "🧸"
+    order: 10
+    affinity_concepts: [parents, parents_toddlers, parents_elementary]
+
 # URL contract: ?cohort=parents,sports&sub=basketball&ref=POST_SLUG
+# Event host: cohort_tags = event_purpose ids (e.g. coffee_stroller, faith_small_group)

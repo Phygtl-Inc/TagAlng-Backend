@@ -20,6 +20,18 @@ class MappedSpan(BaseModel):
     claim_concept: str | None = None
 
 
+class EventDraft(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    venue_name: str | None = None
+    starts_at: str | None = None
+    ends_at: str | None = None
+    duration_minutes: int | None = None
+    max_attendees: int | None = None
+    cohort_tags: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+
+
 class CreateSessionRequest(BaseModel):
     purpose: Literal["profile_intake", "event_draft"] = "profile_intake"
 
@@ -31,6 +43,7 @@ class CreateSessionResponse(BaseModel):
     assistant_message: str
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
+    event_draft: EventDraft | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -44,10 +57,12 @@ class SendMessageResponse(BaseModel):
     ready_to_complete: bool = False
     message_count: int = 0
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
+    event_draft: EventDraft | None = None
 
 
 class CompleteSessionRequest(BaseModel):
     force: bool = False
+    publish: bool = True
 
 
 class ExtractedClaim(BaseModel):
@@ -69,6 +84,9 @@ class CompleteSessionResponse(BaseModel):
     threads_found: int = 0
     mapped_summary: str | None = None
     spans: list[MappedSpan] = Field(default_factory=list)
+    event_id: str | None = None
+    event_draft: EventDraft | None = None
+    published: bool = False
 
 
 class SessionDetailResponse(BaseModel):
@@ -79,3 +97,4 @@ class SessionDetailResponse(BaseModel):
     messages: list[dict] = Field(default_factory=list)
     mapped_summary: str | None = None
     spans: list[MappedSpan] = Field(default_factory=list)
+    event_draft: EventDraft | None = None

@@ -1,6 +1,11 @@
-# Lana API (signup profile intake)
+# Lana API (profile intake + event draft)
 
-**Lana** is TagAlng’s conversational onboarding agent. She knows **what TagAlng is**, **who the user is on their block**, and **this chat’s history**. Profile truth is saved as **`user_identity_claims`** when the user completes the session — not as fixed attribute columns.
+**Lana** is TagAlng’s conversational agent. She knows **what TagAlng is**, **who the user is on their block**, and **this chat’s history**.
+
+| Purpose | On complete |
+|---------|-------------|
+| `profile_intake` | Saves **`user_identity_claims`** |
+| `event_draft` | Returns **`event_draft`**; optionally **`create_event`** when `publish: true` |
 
 ## When to call (signup order)
 
@@ -169,6 +174,97 @@ Claims are stored in Postgres (`source_quote`, `bucket` columns) with embeddings
 
 ---
 
+## Event draft (host an event)
+
+Same session endpoints; use `"purpose": "event_draft"`. Requires phone-verified user to **publish** (`create_event`).
+
+### Start
+
+```json
+{ "purpose": "event_draft" }
+```
+
+Response includes `event_draft` (may be empty) and `ui.highlights: []`.
+
+### Send message
+
+User types natural language (e.g. brunch for new moms at Lake Nona Commons — 10am…).
+
+**Response fields**
+
+| Field | Use |
+|-------|-----|
+| `ui.highlights` | Color phrases in the textarea |
+| `ui.bucket` | Active bucket: `time`, `venue`, `audience`, `activity`, `constraint`, `capacity`, `purpose` |
+| `ui.focus_phrase` | Phrase Lana is asking about |
+| `event_draft.title` | Prefill Title field |
+| `event_draft.description` | Prefill Description |
+| `event_draft.venue_name` | Venue |
+| `event_draft.starts_at` / `ends_at` | ISO timestamps when inferable |
+| `event_draft.max_attendees` | Capacity |
+| `event_draft.cohort_tags` | Suggested Purpose chip ids → `get_event_purposes()` |
+| `event_draft.missing` | Blockers still unknown |
+| `ready_to_complete` | Show **Publish** when true |
+
+**Event bucket → color (suggested UI)**
+
+| Bucket | Color role |
+|--------|------------|
+| time | orange |
+| venue | blue |
+| audience | purple |
+| activity | green |
+| constraint | orange |
+| capacity | orange |
+| purpose | teal |
+
+Lana asks **at most 1–2 questions per turn**, only when title, time, or venue is missing.
+
+### Complete event
+
+```http
+POST /lana/sessions/{session_id}/complete
+```
+
+```json
+{ "force": false, "publish": true }
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `force` | false | Complete before Lana says ready (needs 2+ user turns) |
+| `publish` | true | Call `create_event` with extracted draft |
+
+**Response (event_draft)**
+
+```json
+{
+  "session_id": "uuid",
+  "status": "completed",
+  "assistant_message": "...",
+  "mapped_summary": "Sunday brunch for new moms at Lake Nona Commons…",
+  "spans": [{ "text": "10am", "bucket": "time" }],
+  "event_draft": {
+    "title": "Sunday brunch for new moms",
+    "description": "...",
+    "venue_name": "Lake Nona Commons",
+    "starts_at": "2026-06-08T14:00:00+00:00",
+    "cohort_tags": ["coffee_stroller", "postpartum_support"],
+    "max_attendees": 12
+  },
+  "event_id": "uuid-if-published",
+  "published": true
+}
+```
+
+Set `"publish": false` to return draft only; host edits Purpose chips / fields, then call Supabase `create_event` from the client.
+
+If `phone_not_verified`, `published` is false — draft is still returned.
+
+Purpose chip ids: `get_event_purposes()` RPC (see PWA handoff).
+
+---
+
 ## 4. Resume session (optional)
 
 **Worker**
@@ -231,7 +327,9 @@ const done = await lanaFetch(`/lana/sessions/${session_id}/complete`, token, { f
 | 400 | `home_block_required` | Run `assign_home_block` first |
 | 400 | `session_not_active` | Start a new session |
 | 400 | `keep_chatting_or_set_force_true` | More chat or `force: true` |
-| 502 | `lana_*_failed` | Vertex model retired — use `GCP_VERTEX_LOCATION=us-central1` and `VERTEX_LANA_MODEL=gemini-2.5-flash` (not `gemini-2.0-flash-001`, discontinued 2026-06-01) |
+| 400 | `event_title_required` | Event complete without a title |
+| 400 | `phone_not_verified` | Publish blocked until OTP verified |
+| 502 | `lana_*_failed` / `create_event_failed` | Vertex or `create_event` RPC error |
 
 ---
 
@@ -239,6 +337,9 @@ const done = await lanaFetch(`/lana/sessions/${session_id}/complete`, token, { f
 
 1. **Product** — `prompts/tagalng_product.md` (deployed with worker)  
 2. **User** — block, cluster, ZIP, existing claims  
-3. **History** — `lana_messages` for this session  
+3. **Block network (agent retrieval)** — `get_lana_block_context_for_user` (service role): neighbor public labels + upcoming open events on the cluster — see [`DATA_MODEL_CLAIMS.md`](./DATA_MODEL_CLAIMS.md)  
+4. **History** — `lana_messages` for this session  
 
 Prompts are versioned in git; change copy via redeploy.
+
+Apply migrations through `20260611120000_event_purpose_cohorts.sql` on tagalng-dev before deploy.

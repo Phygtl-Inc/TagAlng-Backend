@@ -1,5 +1,5 @@
--- Fix: handle_new_user for email-only auth users (no phone on auth.users).
--- If creation still fails, apply 20260606130000_users_phone_nullable.sql (phone was NOT NULL on dev).
+-- Fix: Dashboard email/password user creation fails with "Database error creating new user"
+-- Cause: handle_new_user assumed phone auth; email-only admins have no phone on auth.users.
 
 create or replace function public.handle_new_user()
 returns trigger
