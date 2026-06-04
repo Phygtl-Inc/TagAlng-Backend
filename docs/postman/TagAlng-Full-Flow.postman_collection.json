@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "tagalng-full-flow",
     "name": "TagAlng — Full flow (auth → block → Lana signup)",
-    "description": "Run **A → D** in order. Environment: **TagAlng — tagalng-dev**. Set `anon_key`.\n\n**Signup profile:** folder **D** uses **Lana** (`lana_worker_url`) — chat saved to `lana_sessions` / `lana_messages`, profile threads to `user_identity_claims` on complete.\n\nTest phone: `+15550000000` · OTP: `000000` · See `docs/LANA_API.md`.",
+    "description": "Run **A → C** then **F** (host event) or **D** (profile signup). Environment: **TagAlng — tagalng-dev**. Set `anon_key` from Supabase dashboard.\n\n**Host event (Lana):** folder **F** — `event_draft` → highlights + `event_draft` → publish via `create_event`.\n\n**Signup profile:** folder **D** — chat → `user_identity_claims` on complete.\n\nTest phone: `+15550000000` · OTP: `000000` · See `docs/LANA_API.md`.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -38,6 +38,17 @@
                   "  const j = pm.response.json();",
                   "  pm.expect(j.ok).to.eql(true);",
                   "  pm.expect(j.vertex_configured).to.eql(true);",
+                  "});",
+                  "pm.sendRequest({",
+                  "  url: pm.environment.get('lana_worker_url') + '/',",
+                  "  method: 'GET'",
+                  "}, (err, res) => {",
+                  "  if (!err && res.code === 200) {",
+                  "    const root = res.json();",
+                  "    pm.test('event_draft supported', () => {",
+                  "      pm.expect(root.purposes).to.include('event_draft');",
+                  "    });",
+                  "  }",
                   "});"
                 ],
                 "type": "text/javascript"
@@ -405,6 +416,262 @@
               { "key": "Authorization", "value": "Bearer {{access_token}}" }
             ],
             "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "F — Lana host event (event_draft → create_event)",
+      "description": "Host an activity via Lana natural language. **Prerequisites:** run **B** (OTP) + **C1** (assign home block) first.\n\nWrites:\n- `lana_sessions` + `lana_messages` (purpose `event_draft`)\n- `events` row on **F3 complete** when `publish: true`\n\nPurpose chip ids from **F0** (`get_event_purposes`). See `docs/LANA_API.md#event-draft-host-an-event`.",
+      "item": [
+        {
+          "name": "F0. get_event_purposes (Purpose chips)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "pm.test('purposes returned', () => pm.expect(rows.length).to.be.at.least(10));",
+                  "pm.test('has coffee_stroller', () => {",
+                  "  const ids = rows.map(r => r.id);",
+                  "  pm.expect(ids).to.include('coffee_stroller');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_event_purposes"
+          }
+        },
+        {
+          "name": "F1. Start Lana event_draft session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (j.session_id) pm.environment.set('lana_event_session_id', j.session_id);",
+                  "pm.test('session created', () => pm.expect(j.session_id).to.be.a('string'));",
+                  "pm.test('purpose event_draft', () => pm.expect(j.purpose).to.eql('event_draft'));",
+                  "pm.test('Lana greeted', () => pm.expect(j.assistant_message).to.be.a('string').and.not.empty);",
+                  "pm.test('event_draft object', () => pm.expect(j.event_draft).to.be.an('object'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"purpose\": \"event_draft\"\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions"
+          }
+        },
+        {
+          "name": "F2. Describe event (highlights + draft)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('Lana replied', () => pm.expect(j.assistant_message).to.be.a('string').and.not.empty);",
+                  "pm.test('event_draft returned', () => pm.expect(j.event_draft).to.be.an('object'));",
+                  "pm.test('title extracted', () => pm.expect(j.event_draft.title).to.be.a('string').and.not.empty);",
+                  "pm.test('venue extracted', () => pm.expect(j.event_draft.venue_name).to.be.a('string').and.not.empty);",
+                  "pm.test('ui highlights', () => pm.expect(j.ui.highlights.length).to.be.above(0));",
+                  "pm.test('has time highlight', () => {",
+                  "  const buckets = j.ui.highlights.map(h => h.bucket);",
+                  "  pm.expect(buckets).to.include('time');",
+                  "});",
+                  "if (j.ready_to_complete) pm.environment.set('lana_event_ready', 'true');",
+                  "if (j.event_draft && j.event_draft.cohort_tags && j.event_draft.cohort_tags.length) {",
+                  "  pm.environment.set('event_cohort_tags_json', JSON.stringify(j.event_draft.cohort_tags));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"{{lana_event_message}}\"\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_event_session_id}}/messages"
+          }
+        },
+        {
+          "name": "F2b. Follow-up (only if F2 not ready)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('Lana replied', () => pm.expect(j.assistant_message).to.be.a('string').and.not.empty);",
+                  "if (j.ready_to_complete) pm.environment.set('lana_event_ready', 'true');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"{{lana_event_message_2}}\"\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_event_session_id}}/messages"
+          }
+        },
+        {
+          "name": "F3. Complete + publish (create_event)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('session completed', () => pm.expect(j.status).to.eql('completed'));",
+                  "pm.test('event_draft in response', () => pm.expect(j.event_draft).to.be.an('object'));",
+                  "pm.test('event_draft title', () => pm.expect(j.event_draft.title).to.be.a('string').and.not.empty);",
+                  "pm.test('published', () => pm.expect(j.published).to.eql(true));",
+                  "pm.test('event_id returned', () => pm.expect(j.event_id).to.be.a('string').and.not.empty);",
+                  "if (j.event_id) pm.environment.set('event_id', j.event_id);",
+                  "pm.test('mapped_summary', () => pm.expect(j.mapped_summary).to.be.a('string').and.not.empty);",
+                  "pm.test('cohort_tags suggested', () => pm.expect(j.event_draft.cohort_tags.length).to.be.above(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"force\": false,\n  \"publish\": true\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_event_session_id}}/complete"
+          }
+        },
+        {
+          "name": "F3b. Complete draft only (no publish)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('draft returned', () => pm.expect(j.event_draft).to.be.an('object'));",
+                  "pm.test('not published', () => pm.expect(j.published).to.eql(false));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"force\": true,\n  \"publish\": false\n}"
+            },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_event_session_id}}/complete"
+          }
+        },
+        {
+          "name": "F4. Verify — get_cluster_events",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "pm.test('events listed', () => pm.expect(rows.length).to.be.above(0));",
+                  "const eid = pm.environment.get('event_id');",
+                  "if (eid) {",
+                  "  pm.test('published event visible', () => {",
+                  "    const found = rows.some(r => r.id === eid);",
+                  "    pm.expect(found).to.eql(true);",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_cluster_id\": \"lake-nona\",\n  \"p_window\": \"14 days\",\n  \"p_locale\": \"en\"\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_cluster_events"
+          }
+        },
+        {
+          "name": "F5. GET session (worker — transcript + draft)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('purpose event_draft', () => pm.expect(j.purpose).to.eql('event_draft'));",
+                  "pm.test('messages returned', () => pm.expect(j.messages.length).to.be.above(0));",
+                  "if (j.status === 'completed') {",
+                  "  pm.test('event_draft in context', () => pm.expect(j.event_draft).to.be.an('object'));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_event_session_id}}"
           }
         }
       ]

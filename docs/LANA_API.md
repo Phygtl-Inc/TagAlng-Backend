@@ -18,7 +18,7 @@
 
 Deploy `services/lana-worker` to Cloud Run (separate from identity-worker). Example env var:
 
-`lana_worker_url` = `https://tagalng-lana-worker-975128128744.us-east1.run.app` (tagalng-dev)
+`lana_worker_url` = `https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app` (tagalng-dev)
 
 ## Auth
 

@@ -85,11 +85,18 @@ def parse_event_turn_ui(data: dict[str, Any]) -> dict[str, Any]:
 def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
-    title = str(raw.get("title", "")).strip()[:80] or None
-    description = str(raw.get("description", "")).strip()[:500] or None
-    venue_name = str(raw.get("venue_name", "")).strip()[:120] or None
-    starts_at = str(raw.get("starts_at", "")).strip()[:64] or None
-    ends_at = str(raw.get("ends_at", "")).strip()[:64] or None
+
+    def field(key: str, max_len: int) -> str | None:
+        val = str(raw.get(key, "")).strip()[:max_len]
+        if not val or val.lower() in ("none", "null", "n/a"):
+            return None
+        return val
+
+    title = field("title", 80)
+    description = field("description", 500)
+    venue_name = field("venue_name", 120)
+    starts_at = field("starts_at", 64)
+    ends_at = field("ends_at", 64)
     duration = raw.get("duration_minutes")
     duration_minutes: int | None = None
     if duration is not None:

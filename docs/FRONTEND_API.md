@@ -14,9 +14,9 @@ Use the Postman files in this folder together with the **deployed** identity wor
 |--------|----------|----------|
 | **Supabase** | `https://rjlcyvwogmfmngemhbmn.supabase.co` | Phone OTP, RPCs (`get_blocks_near_zip`, `assign_home_block`, `get_my_identity_claims`, events/RTJ) |
 | **Identity worker** | `https://tagalng-identity-worker-975128128744.us-east1.run.app` | `POST /identity/intake`, `POST /identity/extract` (legacy one/two-shot intake) |
-| **Lana worker** | `https://tagalng-lana-worker-975128128744.us-east1.run.app` | **Signup chat:** `POST /lana/sessions`, `.../messages`, `.../complete` — see [`LANA_API.md`](./LANA_API.md) |
+| **Lana worker** | `https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app` | **Profile:** `purpose: profile_intake` · **Host event:** `purpose: event_draft` → `create_event` on complete — see [`LANA_API.md`](./LANA_API.md) |
 
-The mobile app uses the **same split**: Supabase client for auth + Postgres RPCs; `fetch` to **Lana worker** for signup profile chat (preferred) or identity worker for short cover text.
+The mobile app uses the **same split**: Supabase client for auth + Postgres RPCs; `fetch` to **Lana worker** for profile intake and **host event** chat, or identity worker for legacy cover text.
 
 ---
 
@@ -43,7 +43,9 @@ Real SMS: Supabase Dashboard → Auth → Phone → Twilio credentials. Seed dat
 2. Select environment **TagAlng — tagalng-dev**.
 3. Set **`anon_key`**: Supabase Dashboard → Project Settings → API → `anon` `public`.
 4. Confirm **`identity_worker_url`** is the Cloud Run URL (already set in the env file).
-5. Run requests **in order** (folder **A → B → C → D**). Tests on **B2** save `access_token` automatically.
+5. Run requests **in order**:
+   - **Profile signup:** **A → B → C → D**
+   - **Host event (Lana):** **A → B → C → F** (skip D unless you also want profile claims)
 6. **ZIP path:** use **C0** → pick `block_id` → **C1b** instead of **C1** (GPS).
 
 ---
@@ -66,6 +68,12 @@ Real SMS: Supabase Dashboard → Auth → Phone → Twilio credentials. Seed dat
 | **D4** | `POST .../complete` | → `user_identity_claims` |
 | **D5** | `get_my_identity_claims` | Verify claims in Supabase |
 | **D6** | `get_lana_session_messages` | Verify chat in Supabase |
+| **F0** | `get_event_purposes` | Purpose chip ids for host UI |
+| **F1** | `POST /lana/sessions` `{ "purpose": "event_draft" }` | Saves `lana_event_session_id` |
+| **F2** | `POST .../messages` | `ui.highlights` + `event_draft` (title, venue, cohort_tags) |
+| **F2b** | Follow-up message | Only if **F2** not `ready_to_complete` |
+| **F3** | `POST .../complete` `{ "publish": true }` | → `create_event` → saves `event_id` |
+| **F4** | `get_cluster_events` | Verify published event |
 | *(alt E)* | `POST /identity/intake` | Legacy folder **E** in Postman |
 
 Optional **D4**: one-shot `POST /identity/extract` if cover text is very detailed (may skip clarify).
@@ -86,6 +94,24 @@ Optional **D4**: one-shot `POST /identity/extract` if cover text is very detaile
 | `clarifications_json` | JSON array for D2 (see below) |
 | `test_zip` | `32827` (Lake Nona) for **C0** |
 | `picked_block_id` | Filled from **C0** response (first row) for **C1b** |
+| `lana_worker_url` | Lana Cloud Run URL (set in env file) |
+| `lana_event_session_id` | Filled by **F1** |
+| `lana_event_message` | Brunch host story for **F2** (see env file) |
+| `event_id` | Filled by **F3** when `published: true` |
+
+---
+
+## Host event via Lana (summary)
+
+Same Lana endpoints as profile intake; different `purpose` and response shape. Full spec: [`LANA_API.md` — Event draft](./LANA_API.md#event-draft-host-an-event).
+
+1. **Prerequisites:** OTP (**B**), `assign_home_block` (**C1** or **C1b**).
+2. `POST {{lana_worker_url}}/lana/sessions` → `{ "purpose": "event_draft" }`.
+3. `POST .../sessions/{id}/messages` → user describes event; read `event_draft` + `ui.highlights`.
+4. `POST .../sessions/{id}/complete` → `{ "force": false, "publish": true }` → `event_id`, `event_draft`, `published`.
+5. Purpose chips: `get_event_purposes()` RPC; Lana suggests ids in `event_draft.cohort_tags`.
+
+If complete returns `keep_chatting_or_set_force_true`, send **F2b** or set `"force": true`. If `phone_not_verified`, use `"publish": false` and call `create_event` manually after OTP.
 
 ---
 

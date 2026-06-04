@@ -362,7 +362,9 @@ Import:
 
 1. [`docs/postman/TagAlng-tagalng-dev.postman_environment.json`](./postman/TagAlng-tagalng-dev.postman_environment.json)
 2. [`docs/postman/TagAlng-v01-core.postman_collection.json`](./postman/TagAlng-v01-core.postman_collection.json) — **v0.1 events / RTJ / nudges**
-3. [`docs/postman/TagAlng-Full-Flow.postman_collection.json`](./postman/TagAlng-Full-Flow.postman_collection.json) — auth + identity worker
+3. [`docs/postman/TagAlng-Full-Flow.postman_collection.json`](./postman/TagAlng-Full-Flow.postman_collection.json) — auth + block + **Lana profile (D)** + **Lana host event (F)**
+
+**Lana host event (Postman):** after **B** + **C**, run folder **F** (`event_draft` → `publish: true` → `event_id`). See [`FRONTEND_API.md`](./FRONTEND_API.md#host-event-via-lana-summary).
 
 **Required:** select environment **TagAlng — tagalng-dev** and paste **`anon_key`** from the dashboard.
 
