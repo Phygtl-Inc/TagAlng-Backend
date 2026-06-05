@@ -115,6 +115,7 @@ That is **retrieve → augment prompt → generate**, without a separate doc sea
 
 ## Related docs
 
+- [`LANA.md`](./LANA.md) — **team overview** (identity, embeddings, history, context, approach)  
 - [`LANA_API.md`](./LANA_API.md) — HTTP API  
 - [`FRONTEND_API.md`](./FRONTEND_API.md) — signup order  
 - [`PWA_V01_BACKEND_HANDOFF.md`](./PWA_V01_BACKEND_HANDOFF.md) — events / RTJ  
