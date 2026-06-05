@@ -533,3 +533,862 @@ a {
   color: #c62828;
   background: #ffebee;
 }
+
+/* —— Meet Lana (PWA demo) —— */
+.meet-lana-sidebar-links {
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid #f0f2f5;
+  background: #fffaf5;
+}
+
+.meet-lana-demo-link {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #e85d04;
+  text-decoration: none;
+}
+
+.meet-lana-demo-link:hover {
+  text-decoration: underline;
+}
+
+.meet-lana-page {
+  min-height: 100vh;
+  background: linear-gradient(165deg, #f3e8dc 0%, #ebe0d4 45%, #e8dfd6 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1rem 1rem 2rem;
+}
+
+.meet-lana-topbar {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.meet-lana-back {
+  font-size: 0.85rem;
+  color: #6b5b4f;
+  text-decoration: none;
+}
+
+.meet-lana-topbar-title {
+  font-size: 0.8rem;
+  color: #8a7968;
+  font-weight: 600;
+}
+
+.meet-lana-phone {
+  width: 100%;
+  max-width: 390px;
+  min-height: min(820px, calc(100vh - 4rem));
+  background: linear-gradient(180deg, #faf6f0 0%, #f5ebe0 55%, #efe4d8 100%);
+  border-radius: 28px;
+  box-shadow:
+    0 24px 60px rgba(80, 50, 20, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  padding: 1.25rem 1.1rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.meet-lana-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.meet-lana-serif {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 2rem;
+  font-weight: 400;
+  line-height: 1.15;
+  margin: 0.75rem 0 0.5rem;
+  color: #2c2419;
+}
+
+.meet-lana-serif em {
+  font-style: italic;
+}
+
+.meet-lana-accent {
+  color: #e85d04;
+  font-style: normal;
+}
+
+.meet-lana-lede {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: #5c4f42;
+  max-width: 28ch;
+}
+
+.meet-lana-muted {
+  color: #8a7968;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  margin: 0 0 1rem;
+}
+
+.meet-lana-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #5c4f42;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.meet-lana-pill--purple {
+  color: #5b21b6;
+}
+
+.meet-lana-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.meet-lana-dot--orange {
+  background: #e85d04;
+}
+
+.meet-lana-dot--rec {
+  background: #ef4444;
+  animation: lana-pulse 1.2s ease-in-out infinite;
+}
+
+.meet-lana-dot--purple {
+  background: #8b5cf6;
+}
+
+.meet-lana-chip {
+  margin-left: 0.25rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.meet-lana-chip--blue {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.meet-lana-cta {
+  margin-top: auto;
+  padding: 0.85rem 1.5rem;
+  border: none;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ff8c42 0%, #e85d04 100%);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(232, 93, 4, 0.35);
+}
+
+.meet-lana-cta--wide {
+  width: 100%;
+  max-width: 280px;
+}
+
+.meet-lana-cta:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.meet-lana-link {
+  margin-top: 0.85rem;
+  background: none;
+  border: none;
+  color: #8a7968;
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.meet-lana-bubble {
+  width: 100%;
+  background: #fff;
+  border-radius: 18px;
+  padding: 1rem 1.1rem;
+  text-align: left;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+  margin: 0.75rem 0;
+}
+
+.meet-lana-bubble--card p {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #3d3429;
+}
+
+.meet-lana-bubble--speech {
+  position: relative;
+  margin-bottom: 0.25rem;
+}
+
+.meet-lana-bubble--speech::after {
+  content: '';
+  position: absolute;
+  bottom: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 10px solid transparent;
+  border-top-color: #fff;
+}
+
+.meet-lana-bubble-q {
+  margin: 0;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 1.15rem;
+  line-height: 1.45;
+  color: #2c2419;
+}
+
+.meet-lana-bubble-q em {
+  font-style: italic;
+}
+
+.meet-lana-bubble-sub {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: #9a8b7a;
+}
+
+.meet-lana-hint-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 12px;
+  background: #fff5eb;
+  font-size: 0.85rem;
+  color: #6b5b4f;
+  margin-bottom: 0.85rem;
+}
+
+.meet-lana-hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: #ffe4cc;
+  color: #e85d04;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.meet-lana-choice-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.meet-lana-choice {
+  flex: 1;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid #e8dfd6;
+}
+
+.meet-lana-choice--ghost {
+  background: #fff;
+  color: #5c4f42;
+}
+
+.meet-lana-choice--primary {
+  background: #e85d04;
+  color: #fff;
+  border-color: #e85d04;
+}
+
+.meet-lana-choice--white {
+  background: #fff;
+  color: #5b21b6;
+  border: none;
+}
+
+.meet-lana-choice--on-purple {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.meet-lana-mic-hint {
+  margin-top: 0.5rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  color: #6b5b4f;
+  font-size: 0.78rem;
+}
+
+.meet-lana-mic-ring {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #ff8c42 0%, #e85d04 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 12px rgba(232, 93, 4, 0.15);
+  animation: lana-mic-glow 2s ease-in-out infinite;
+}
+
+.meet-lana-mic-icon {
+  font-size: 1.5rem;
+}
+
+.meet-lana-chat {
+  gap: 0.35rem;
+}
+
+.meet-lana-composer {
+  margin-top: auto;
+  width: 100%;
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  background: #fff;
+  border-radius: 16px;
+  padding: 0.45rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.meet-lana-composer input {
+  flex: 1;
+  border: none;
+  padding: 0.55rem 0.65rem;
+  font-size: 0.88rem;
+  background: transparent;
+  min-width: 0;
+}
+
+.meet-lana-composer input:focus {
+  outline: none;
+}
+
+.meet-lana-mic-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(180deg, #ff8c42 0%, #e85d04 100%);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.meet-lana-send {
+  padding: 0.5rem 0.75rem;
+  border: none;
+  border-radius: 12px;
+  background: #e85d04;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.meet-lana-thats-me {
+  margin: 0.5rem 0;
+  padding: 0.55rem 1.25rem;
+  border: 2px solid #2d6a4f;
+  border-radius: 999px;
+  background: #fff;
+  color: #2d6a4f;
+  font-weight: 700;
+  cursor: pointer;
+  animation: lana-pulse 2s ease-in-out infinite;
+}
+
+.meet-lana-history {
+  width: 100%;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  text-align: left;
+  color: #8a7968;
+}
+
+.meet-lana-history-list {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-top: 0.35rem;
+}
+
+.meet-lana-history-line {
+  padding: 0.25rem 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.meet-lana-joint {
+  width: 100%;
+  background: linear-gradient(145deg, #7c3aed 0%, #5b21b6 100%);
+  color: #fff;
+  border-radius: 18px;
+  padding: 1rem 1.1rem;
+  text-align: left;
+  margin: 0.5rem 0;
+}
+
+.meet-lana-joint--muted {
+  background: linear-gradient(145deg, #6b7280 0%, #4b5563 100%);
+}
+
+.meet-lana-joint-label {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  opacity: 0.85;
+  margin-bottom: 0.5rem;
+}
+
+.meet-lana-joint-text {
+  margin: 0 0 0.85rem;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.meet-lana-joint-text strong {
+  color: #fde68a;
+}
+
+.meet-lana-peer-card {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: #fff;
+  border-radius: 14px;
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+  text-align: left;
+}
+
+.meet-lana-peer-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #ede9fe;
+  color: #5b21b6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+}
+
+.meet-lana-peer-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.meet-lana-peer-meta {
+  font-size: 0.72rem;
+  color: #8a7968;
+}
+
+.meet-lana-peer-score {
+  margin-left: auto;
+  font-weight: 800;
+  color: #e85d04;
+}
+
+.meet-lana-section {
+  width: 100%;
+  text-align: left;
+  margin: 0.75rem 0 0;
+}
+
+.meet-lana-section h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8a7968;
+}
+
+.meet-lana-peer-list,
+.meet-lana-event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.82rem;
+}
+
+.meet-lana-peer-list li,
+.meet-lana-event-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.meet-lana-event-list li {
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.meet-lana-insights {
+  width: 100%;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0.5rem 0;
+  text-align: left;
+}
+
+.meet-lana-insights .mapped-panel,
+.meet-lana-insights .claims-panel {
+  margin-bottom: 0.5rem;
+  padding: 0.65rem;
+}
+
+.meet-lana-setup-form {
+  width: 100%;
+  text-align: left;
+}
+
+.meet-lana-setup-form label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #8a7968;
+  margin-bottom: 0.75rem;
+}
+
+.meet-lana-setup-form input {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #e8dfd6;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.meet-lana-error {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: #fef2f2;
+  color: #b91c1c;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  margin-bottom: 0.5rem;
+}
+
+.meet-lana-dots {
+  display: flex;
+  justify-content: center;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+}
+
+.meet-lana-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d6ccc0;
+}
+
+.meet-lana-dots span.on {
+  width: 18px;
+  border-radius: 999px;
+  background: #9a8b7a;
+}
+
+/* Animated sheep */
+.lana-sheep-wrap {
+  display: flex;
+  justify-content: center;
+  margin: 0.25rem 0;
+  transform-origin: center bottom;
+}
+
+.lana-sheep-svg {
+  overflow: visible;
+}
+
+.lana-sheep-body-group {
+  animation: lana-sheep-bob 3s ease-in-out infinite;
+  transform-origin: 100px 105px;
+}
+
+.lana-sheep-legs {
+  animation: lana-sheep-legs 3s ease-in-out infinite;
+  transform-origin: 100px 170px;
+}
+
+.lana-sheep-wrap--listening .lana-sheep-body-group,
+.lana-sheep-wrap--listening .lana-sheep-legs,
+.lana-sheep-wrap--thinking .lana-sheep-body-group,
+.lana-sheep-wrap--thinking .lana-sheep-legs {
+  animation-duration: 1.6s;
+}
+
+.lana-sheep-wrap--thinking .lana-sheep-body-group {
+  animation-name: lana-sheep-bob, lana-sheep-wiggle;
+  animation-duration: 1.6s, 0.45s;
+  animation-iteration-count: infinite, infinite;
+  animation-timing-function: ease-in-out, ease-in-out;
+}
+
+.meet-lana-dot--pulse-blue {
+  background: #3b82f6;
+  animation: lana-pulse 0.9s ease-in-out infinite;
+}
+
+.meet-lana-bubble--typing {
+  min-height: 4.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.meet-lana-typing-dots {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem 0;
+}
+
+.meet-lana-typing-dots span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e85d04;
+  animation: lana-typing-bounce 1.2s ease-in-out infinite;
+}
+
+.meet-lana-typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.meet-lana-typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.meet-lana-composer--busy {
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.meet-lana-send-spinner {
+  display: inline-block;
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: lana-spin 0.7s linear infinite;
+}
+
+.meet-lana-history-line--pending {
+  color: #8a7968;
+  font-style: italic;
+}
+
+.meet-lana-typing-inline {
+  letter-spacing: 0.15em;
+  animation: lana-pulse 1s ease-in-out infinite;
+}
+
+.meet-lana-chat--thinking .lana-sheep-wrap {
+  filter: drop-shadow(0 0 12px rgba(232, 93, 4, 0.25));
+}
+
+@keyframes lana-typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  30% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
+
+@keyframes lana-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes lana-sheep-wiggle {
+  0%,
+  100% {
+    transform: translateY(-8px) rotate(-1.5deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(1.5deg);
+  }
+}
+
+.lana-sheep-shadow {
+  opacity: 0.15;
+  animation: lana-sheep-shadow 3s ease-in-out infinite;
+}
+
+.lana-sheep-lens-dot {
+  animation: lana-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes lana-sheep-bob {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(-1.5deg);
+  }
+}
+
+@keyframes lana-sheep-legs {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(2px);
+  }
+}
+
+@keyframes lana-sheep-shadow {
+  0%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0.15;
+  }
+  50% {
+    transform: scaleX(0.88);
+    opacity: 0.1;
+  }
+}
+
+@keyframes lana-mic-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 10px rgba(232, 93, 4, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 0 18px rgba(232, 93, 4, 0.06);
+  }
+}
+
+.meet-lana-topbar--minimal {
+  max-width: 420px;
+  margin-bottom: 0.25rem;
+}
+
+.meet-lana-topbar--minimal .meet-lana-topbar-title {
+  display: none;
+}
+
+.meet-lana-link--account {
+  margin-top: 0.65rem;
+  font-size: 0.88rem;
+  color: #6b5b4f;
+}
+
+.meet-lana-footer-nav {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding-top: 0.75rem;
+  width: 100%;
+}
+
+.meet-lana-footer-nav button,
+.meet-lana-footer-nav a {
+  background: none;
+  border: none;
+  font-size: 0.72rem;
+  color: #b8a99a;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.meet-lana-footer-nav button:hover,
+.meet-lana-footer-nav a:hover {
+  color: #8a7968;
+}
+
+.meet-lana-intro-greet {
+  margin: 0 0 0.75rem;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: #3d3429;
+}
+
+.meet-lana-error--inline {
+  margin-top: 0.75rem;
+  width: 100%;
+}
+
+.meet-lana-dev-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(44, 36, 25, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+
+.meet-lana-dev-sheet {
+  width: 100%;
+  max-width: 390px;
+  background: #fff;
+  border-radius: 20px 20px 12px 12px;
+  padding: 1.25rem;
+  text-align: left;
+}
+
+.meet-lana-dev-sheet h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+@keyframes lana-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}

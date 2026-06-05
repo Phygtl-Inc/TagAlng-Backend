@@ -43,6 +43,11 @@ def synthesize_turn(
         f"ROUTING: {json.dumps(routing)}",
         f"TOOL RESULT: {json.dumps(tool_result or {})}",
     ]
+    if purpose == "profile_intake" and utterance.strip().startswith("(session start"):
+        payload_parts.append(
+            'OPENING TURN: First chat line after "Meet Lana". '
+            'Say something like: "So — *who are you*, right now?" — warm, one question, invite their story.'
+        )
     if tool_result and tool_result.get("tool") == "recall":
         memories = tool_result.get("memories") or []
         payload_parts.append("RECALL RESULTS:\n" + format_recall_memories(memories))
@@ -56,7 +61,13 @@ def synthesize_turn(
     payload = "\n\n".join(payload_parts)
 
     model = _synth_model(outcome, tool_result)
-    raw = llm_json(model=model, system=system, user_payload=payload, max_tokens=900, temperature=0.55)
+    raw = llm_json(
+        model=model,
+        system=system,
+        user_payload=payload,
+        max_tokens=2048,
+        temperature=0.55,
+    )
 
     if purpose == "event_draft":
         return _parse_event_synth(raw, prev_draft=prev_draft, tool_result=tool_result)
@@ -83,25 +94,20 @@ def synthesize_opening(
 
 def _profile_synth_schema() -> str:
     return """{
-  "assistant_message": "...",
-  "status": "continue" | "ready_to_complete",
+  "assistant_message": "single-line warm reply",
+  "status": "continue",
   "topics_covered": [],
   "topics_to_explore": [],
-  "core_patch": {
-    "session": {
-      "current_goal": null,
-      "last_topic": null,
-      "last_captured_inquiry_id": null
-    }
-  },
   "ui": { "bucket": null, "focus_phrase": null, "highlights": [] }
-}"""
+}
+
+Rules: status is continue or ready_to_complete. assistant_message ONE line only. Omit core_patch unless session goal changed."""
 
 
 def _event_synth_schema() -> str:
     return """{
-  "assistant_message": "...",
-  "status": "continue" | "ready_to_complete",
+  "assistant_message": "Your warm reply to the host",
+  "status": "continue",
   "event_draft": {
     "title": null, "description": null, "venue_name": null,
     "starts_at": null, "ends_at": null, "duration_minutes": null,
@@ -114,7 +120,9 @@ def _event_synth_schema() -> str:
     }
   },
   "ui": { "bucket": "activity", "focus_phrase": null, "highlights": [] }
-}"""
+}
+
+status must be "continue" or "ready_to_complete" (pick one)."""
 
 
 def _parse_profile_synth(raw: dict[str, Any]) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:

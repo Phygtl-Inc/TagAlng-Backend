@@ -8,6 +8,7 @@ import {
   type Conversation,
   type InboxSession,
 } from '@/lib/supabase';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 
@@ -103,6 +104,11 @@ export default function LanaInboxPage() {
           <button type="button" onClick={signOut}>
             Sign out
           </button>
+        </div>
+        <div className="meet-lana-sidebar-links">
+          <Link href="/lana/meet" className="meet-lana-demo-link">
+            Meet Lana (PWA demo) →
+          </Link>
         </div>
         <div className="session-list">
           {loadingList && <p className="loading">Loading…</p>}

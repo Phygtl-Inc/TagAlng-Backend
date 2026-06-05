@@ -1,9 +1,9 @@
-import json
 import os
 from typing import Any
 
 from app.lana_ui import merge_event_drafts, parse_event_draft
 from app.models import EventDraft, MappedSpan
+from app.orchestrator.json_util import parse_json_object
 
 EVENT_EXTRACT_PROMPT = """You are an event extraction model for TagAlng host flow.
 
@@ -27,7 +27,7 @@ Output ONLY valid JSON (no markdown):
   }},
   "mapped_summary": "One sentence preview of the scheduled event",
   "spans": [
-    {{ "text": "exact phrase from host words", "bucket": "time" | "venue" | "audience" | "activity" | "constraint" | "capacity" | "purpose" }}
+    { "text": "exact phrase from host words", "bucket": "time" }
   ],
   "assistant_message": "Short warm closing — event is ready to publish"
 }}
@@ -72,7 +72,7 @@ def vertex_extract_event_from_transcript(
             response_mime_type="application/json",
         ),
     )
-    data = json.loads((response.text or "{}").strip())
+    data = parse_json_object(response.text or "")
     return parse_event_extract_data(data, purpose_ids=purpose_ids, previous_draft=previous_draft)
 
 
