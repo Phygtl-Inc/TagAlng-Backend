@@ -45,6 +45,7 @@ class CreateSessionResponse(BaseModel):
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
     orchestrator: bool = False
+    timing_ms: dict[str, int] | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -69,6 +70,7 @@ class SendMessageResponse(BaseModel):
     event_draft: EventDraft | None = None
     routing: TurnRouting | None = None
     orchestrator: bool = False
+    timing_ms: dict[str, int] | None = None
 
 
 class CompleteSessionRequest(BaseModel):

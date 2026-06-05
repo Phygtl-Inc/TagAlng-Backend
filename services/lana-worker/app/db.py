@@ -69,6 +69,8 @@ def insert_message(
     role: str,
     content: str,
     metadata: dict[str, Any] | None = None,
+    *,
+    embed: bool = True,
 ) -> str | None:
     sb = service_client()
     res = sb.table("lana_messages").insert(
@@ -82,8 +84,14 @@ def insert_message(
     if not res.data:
         return None
     message_id = str(res.data[0]["id"])
-    _embed_message(message_id, content)
+    if embed:
+        _embed_message(message_id, content)
     return message_id
+
+
+def embed_message_by_id(message_id: str, content: str) -> None:
+    """Background-safe embedding for lana_messages (recall index)."""
+    _embed_message(message_id, content)
 
 
 def update_session_context(

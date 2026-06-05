@@ -3,7 +3,15 @@ import os
 from typing import Any
 
 from app.context import build_system_prompt
-from app.lana_ui import merge_event_drafts, parse_event_draft, parse_event_turn_ui
+from app.lana_ui import (
+    event_draft_blockers,
+    finalize_event_draft,
+    merge_event_drafts,
+    parse_event_draft,
+    parse_event_turn_ui,
+)
+from app.orchestrator.json_util import parse_json_object
+from app.turn_timing import TurnTimer
 
 EVENT_BUCKET_GUIDE = """
 UI buckets for event highlights (pick one per focus):
@@ -32,7 +40,7 @@ If the user gave a rich description (time + place + vibe), set status "ready_to_
 Output ONLY valid JSON (no markdown):
 {{
   "assistant_message": "Your reply (include quoted focus phrase when clarifying)",
-  "status": "continue" | "ready_to_complete",
+  "status": "continue",
   "event_draft": {{
     "title": "short event title or null",
     "description": "full friendly description for the event page or null",
@@ -45,13 +53,15 @@ Output ONLY valid JSON (no markdown):
     "missing": ["starts_at"]
   }},
   "ui": {{
-    "bucket": "time" | "venue" | "audience" | "activity" | "constraint" | "capacity" | "purpose",
+    "bucket": "time",
     "focus_phrase": "short exact quote from USER text you are asking about (null if none)",
     "highlights": [
       {{ "text": "phrase from user story", "bucket": "time" }}
     ]
   }}
 }}
+
+Use status "ready_to_complete" when title, starts_at, and venue_name are all set; otherwise "continue".
 
 Rules:
 - status "continue" — missing title, starts_at, or venue_name; set ui.focus_phrase to the phrase you clarify.
@@ -118,6 +128,88 @@ def _purpose_ids_block(purpose_ids: list[str]) -> str:
     return ", ".join(purpose_ids)
 
 
+def reconcile_orchestrator_event_turn(
+    *,
+    ctx_pack: dict[str, Any],
+    history: list[dict[str, Any]],
+    utterance: str,
+    prev_draft: dict[str, Any] | None,
+    synth_draft: dict[str, Any] | None,
+    ui: dict[str, Any],
+    status: str,
+    tool_result: dict[str, Any] | None,
+    pending_confirmation: bool,
+    timer: TurnTimer | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Fill event_draft from legacy extract when synth/tool left blockers or empty UI."""
+    from app.context import format_user_context
+
+    draft = merge_event_drafts(prev_draft, synth_draft or {})
+    if tool_result and tool_result.get("event_draft"):
+        draft = merge_event_drafts(draft, tool_result["event_draft"])
+
+    needs_extract = bool(event_draft_blockers(draft)) or not (ui.get("highlights"))
+    if needs_extract:
+        purpose_ids = ctx_pack.get("event_purpose_ids") or []
+        user_block = format_user_context(ctx_pack, "event_draft")
+        if timer:
+            with timer.stage("llm_event_extract"):
+                extracted, extracted_ui = extract_event_draft_from_chat(
+                    user_context_block=user_block,
+                    purpose_ids=purpose_ids,
+                    history=history,
+                    user_message=utterance,
+                    previous_draft=draft,
+                )
+        else:
+            extracted, extracted_ui = extract_event_draft_from_chat(
+                user_context_block=user_block,
+                purpose_ids=purpose_ids,
+                history=history,
+                user_message=utterance,
+                previous_draft=draft,
+            )
+        draft = merge_event_drafts(draft, extracted)
+        if extracted_ui.get("highlights"):
+            ui = extracted_ui
+
+    draft = finalize_event_draft(draft)
+    if draft["missing"] or pending_confirmation:
+        status = "continue"
+    elif status != "ready_to_complete":
+        status = "ready_to_complete"
+    return status, ui, draft
+
+
+def extract_event_draft_from_chat(
+    *,
+    user_context_block: str,
+    purpose_ids: list[str],
+    history: list[dict[str, Any]],
+    user_message: str,
+    previous_draft: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Legacy-quality extract: merge conversation into event_draft + ui highlights."""
+    payload = "\n\n".join(
+        [
+            user_context_block,
+            "CURRENT EVENT DRAFT (merge updates into this):\n"
+            + json.dumps(previous_draft or {}, ensure_ascii=False),
+            "CONVERSATION SO FAR:\n" + _format_history(history),
+            f"USER'S NEW MESSAGE:\n{user_message.strip()}",
+            "Extract event_draft and ui.highlights from the user's words. "
+            "Do not invent title, time, or venue not supported by the transcript.",
+        ]
+    )
+    data = _call_event_lana(payload, purpose_ids)
+    valid = set(purpose_ids)
+    merged = merge_event_drafts(
+        previous_draft,
+        parse_event_draft(data.get("event_draft"), valid_purpose_ids=valid),
+    )
+    return finalize_event_draft(merged), parse_event_turn_ui(data)
+
+
 def _parse_event_turn(
     data: Any,
     *,
@@ -149,31 +241,63 @@ def _parse_event_turn(
     return assistant_message, status, ctx, ui, merged
 
 
-def _call_event_lana(payload: str, purpose_ids: list[str]) -> Any:
+def _call_event_lana(
+    payload: str,
+    purpose_ids: list[str],
+    *,
+    attempts_out: list[int] | None = None,
+) -> Any:
     client = _vertex_client()
     model = os.environ.get("VERTEX_LANA_MODEL", os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"))
     from google.genai import types
 
     suffix = EVENT_TURN_SUFFIX.replace("{purpose_ids}", _purpose_ids_block(purpose_ids))
     system = build_system_prompt() + "\n\n" + suffix
-    response = client.models.generate_content(
-        model=model,
-        contents=payload,
-        config=types.GenerateContentConfig(
-            temperature=0.45,
-            response_mime_type="application/json",
-            system_instruction=system,
-        ),
-    )
-    return json.loads((response.text or "{}").strip())
+
+    def _generate(user: str) -> str:
+        response = client.models.generate_content(
+            model=model,
+            contents=user,
+            config=types.GenerateContentConfig(
+                temperature=0.45,
+                response_mime_type="application/json",
+                system_instruction=system,
+            ),
+        )
+        return response.text or ""
+
+    attempts = 1
+    text = _generate(payload)
+    try:
+        data = parse_json_object(text)
+    except (json.JSONDecodeError, ValueError):
+        attempts = 2
+        text = _generate(
+            payload
+            + "\n\nYour previous reply was invalid JSON. "
+            "Return ONE compact JSON object with event_draft and assistant_message."
+        )
+        data = parse_json_object(text)
+    if attempts_out is not None:
+        attempts_out[:] = [attempts]
+    return data
 
 
 def lana_event_opening(
     user_context_block: str,
     purpose_ids: list[str],
+    *,
+    timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
     payload = "\n\n".join([user_context_block, EVENT_OPENING])
-    data = _call_event_lana(payload, purpose_ids)
+    attempts_box: list[int] = []
+    if timer:
+        with timer.stage("llm_event_turn"):
+            data = _call_event_lana(payload, purpose_ids, attempts_out=attempts_box)
+        if attempts_box:
+            timer.set_count("llm_event_attempts", attempts_box[0])
+    else:
+        data = _call_event_lana(payload, purpose_ids)
     return _parse_event_turn(data, previous_draft=None, valid_purpose_ids=set(purpose_ids))
 
 
@@ -183,6 +307,8 @@ def lana_event_turn(
     history: list[dict[str, Any]],
     user_message: str,
     previous_draft: dict[str, Any] | None,
+    *,
+    timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
     payload = "\n\n".join(
         [
@@ -194,7 +320,14 @@ def lana_event_turn(
             "Reply as Lana. Update event_draft and ui.highlights from the user's words.",
         ]
     )
-    data = _call_event_lana(payload, purpose_ids)
+    attempts_box: list[int] = []
+    if timer:
+        with timer.stage("llm_event_turn"):
+            data = _call_event_lana(payload, purpose_ids, attempts_out=attempts_box)
+        if attempts_box:
+            timer.set_count("llm_event_attempts", attempts_box[0])
+    else:
+        data = _call_event_lana(payload, purpose_ids)
     return _parse_event_turn(
         data,
         previous_draft=previous_draft,

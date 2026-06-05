@@ -28,12 +28,13 @@ def recall_memories(
     query: str,
     scope: str,
     k: int = DEFAULT_K,
+    query_embedding: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     scope_norm = str(scope or "self").strip().lower()
     if scope_norm not in RECALL_SCOPES:
         return []
 
-    embedding = embed_query(query)
+    embedding = query_embedding if query_embedding is not None else embed_query(query)
     if not embedding:
         return []
 
@@ -78,6 +79,9 @@ def prefetch_turn_memories(
     """Pre-turn retrieval (Architecture §4): embed utterance, top-k self + neighbors."""
     if not utterance.strip():
         return []
+    embedding = embed_query(utterance)
+    if not embedding:
+        return []
     combined: list[dict[str, Any]] = []
     seen: set[str] = set()
     per_scope = max(1, k // len(PREFETCH_SCOPES))
@@ -90,6 +94,7 @@ def prefetch_turn_memories(
             query=utterance,
             scope=scope,
             k=per_scope,
+            query_embedding=embedding,
         )
         for hit in hits:
             key = f"{hit.get('source_type')}:{hit.get('source_id')}"

@@ -15,6 +15,8 @@ from app.orchestrator.router import route_turn
 from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
 from app.orchestrator.tools import execute_tool
 from app.context import load_user_context
+from app.turn_timing import TurnTimer
+from app.vertex_event import reconcile_orchestrator_event_turn
 
 
 def orchestrator_enabled() -> bool:
@@ -39,7 +41,12 @@ def run_opening(
         purpose=purpose,
         ctx_pack=ctx_pack,
     )
-    reply, status, session_ctx, ui, draft = synthesize_opening(purpose=purpose, core_block=core)
+    purpose_ids = ctx_pack.get("event_purpose_ids") or []
+    reply, status, session_ctx, ui, draft = synthesize_opening(
+        purpose=purpose,
+        core_block=core,
+        purpose_ids=purpose_ids if purpose == "event_draft" else None,
+    )
     core = apply_core_patch(core, session_ctx.pop("core_patch", None))
     session_ctx["core_block"] = strip_ephemeral(core)
     log_turn(
@@ -64,27 +71,33 @@ def run_turn(
     session_ctx: dict[str, Any],
     user_jwt: str | None = None,
     persisted_core: dict[str, Any] | None = None,
+    timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
-    ctx_pack = load_user_context(user_id)
+    timer = timer or TurnTimer()
+    with timer.stage("load_user_context"):
+        ctx_pack = load_user_context(user_id)
     block_id = ctx_pack.get("home_block_id")
+    purpose_ids = ctx_pack.get("event_purpose_ids") or []
     prev_draft = session_ctx.get("event_draft")
     utterance = scrub_pii(user_message.strip())
 
-    prefetched = prefetch_turn_memories(
-        user_id=user_id,
-        block_id=block_id,
-        utterance=utterance,
-    )
-    core = build_core_block(
-        user_id=user_id,
-        session_id=session_id,
-        purpose=purpose,
-        ctx_pack=ctx_pack,
-        session_ctx=session_ctx,
-        history=history,
-        persisted=persisted_core if isinstance(persisted_core, dict) else None,
-        prefetched=prefetched,
-    )
+    with timer.stage("prefetch_memories"):
+        prefetched = prefetch_turn_memories(
+            user_id=user_id,
+            block_id=block_id,
+            utterance=utterance,
+        )
+    with timer.stage("build_core_block"):
+        core = build_core_block(
+            user_id=user_id,
+            session_id=session_id,
+            purpose=purpose,
+            ctx_pack=ctx_pack,
+            session_ctx=session_ctx,
+            history=history,
+            persisted=persisted_core if isinstance(persisted_core, dict) else None,
+            prefetched=prefetched,
+        )
 
     rails = run_input_rails(utterance)
     capture_fired = False
@@ -132,6 +145,7 @@ def run_turn(
         core_block=core,
         history=history,
         guardrail_flags=rails.flags,
+        timer=timer,
     )
     routing = enforce_routing(
         routing,
@@ -141,17 +155,18 @@ def run_turn(
     )
 
     if should_execute_tool(routing):
-        tool_result = execute_tool(
-            tool_name=str(routing["tool_to_call"]),
-            tool_args=routing.get("tool_args"),
-            user_id=user_id,
-            user_jwt=user_jwt,
-            session_id=session_id,
-            block_id=block_id,
-            purpose=purpose,
-            session_ctx=session_ctx,
-            source_module=str(routing.get("intent_class", "companionship")),
-        )
+        with timer.stage("execute_tool"):
+            tool_result = execute_tool(
+                tool_name=str(routing["tool_to_call"]),
+                tool_args=routing.get("tool_args"),
+                user_id=user_id,
+                user_jwt=user_jwt,
+                session_id=session_id,
+                block_id=block_id,
+                purpose=purpose,
+                session_ctx=session_ctx,
+                source_module=str(routing.get("intent_class", "companionship")),
+            )
         if routing["tool_to_call"] == "capture_inquiry":
             capture_fired = True
             if tool_result and tool_result.get("inquiry_id"):
@@ -171,6 +186,8 @@ def run_turn(
         history=history,
         tool_result=tool_result,
         prev_draft=prev_draft,
+        purpose_ids=purpose_ids if purpose == "event_draft" else None,
+        timer=timer,
     )
 
     if not check_refusal_without_capture(reply, capture_fired):
@@ -202,7 +219,27 @@ def run_turn(
             history=history,
             tool_result=tool_result,
             prev_draft=prev_draft,
+            purpose_ids=purpose_ids if purpose == "event_draft" else None,
+            timer=timer,
         )
+
+    if purpose == "event_draft":
+        status, ui, draft = reconcile_orchestrator_event_turn(
+            ctx_pack=ctx_pack,
+            history=history,
+            utterance=utterance,
+            prev_draft=prev_draft,
+            synth_draft=draft,
+            ui=ui,
+            status=status,
+            tool_result=tool_result,
+            pending_confirmation=bool(
+                synth_ctx.get("pending_confirmation") or session_ctx.get("pending_confirmation")
+            ),
+            timer=timer,
+        )
+        synth_ctx["event_draft"] = draft
+        synth_ctx["last_status"] = status
 
     core = apply_core_patch(core, synth_ctx.pop("core_patch", None))
     merged_ctx = {
@@ -210,6 +247,7 @@ def run_turn(
         **synth_ctx,
         "core_block": strip_ephemeral(core),
         "last_routing": routing,
+        "timing_ms": timer.to_dict(),
     }
     if draft:
         merged_ctx["event_draft"] = draft

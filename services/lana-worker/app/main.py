@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import require_home_block, service_client, verify_jwt
@@ -9,12 +9,15 @@ from app.context import format_user_context, load_user_context
 from app.db import (
     complete_session,
     create_session,
+    embed_message_by_id,
     get_session_for_user,
     insert_message,
     list_messages,
     transcript_text,
     update_session_context,
 )
+from app.lana_paths import event_fast_path_enabled, use_orchestrator_for_purpose
+from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.models import (
     CompleteSessionRequest,
@@ -81,8 +84,55 @@ def _embed(label: str, concept: str) -> list[float]:
         ) from exc
 
 
+def _timing_total_ms(timing: dict[str, int]) -> int:
+    return sum(
+        v for k, v in timing.items() if k != "total_ms" and not k.endswith("_attempts")
+    )
+
+
+def _event_routing_stub() -> dict[str, Any]:
+    return {
+        "outcome": "R",
+        "intent_class": "activity",
+        "confidence": 1.0,
+        "tool_to_call": None,
+        "capture_fired": False,
+        "event_fast_path": True,
+    }
+
+
 def _use_orchestrator() -> bool:
     return orchestrator_enabled()
+
+
+def _legacy_lana_turn(
+    *,
+    purpose: str,
+    user_block: str,
+    purpose_ids: list[str],
+    history: list[dict[str, Any]],
+    user_message: str,
+    prev_draft: dict[str, Any] | None,
+    timer: TurnTimer,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    if purpose == "event_draft":
+        reply, status, session_ctx, ui_raw, draft_raw = lana_event_turn(
+            user_block,
+            purpose_ids,
+            history,
+            user_message,
+            prev_draft,
+            timer=timer,
+        )
+        session_ctx["last_routing"] = _event_routing_stub()
+        return reply, status, session_ctx, ui_raw, draft_raw
+    reply, status, session_ctx, ui_raw = lana_turn(
+        user_block,
+        purpose,
+        history,
+        user_message,
+    )
+    return reply, status, session_ctx, ui_raw, session_ctx.get("event_draft")
 
 
 def _routing_from_ctx(ctx: dict[str, Any]) -> TurnRouting | None:
@@ -195,6 +245,7 @@ def health():
         "ok": True,
         "vertex_configured": _vertex_configured(),
         "orchestrator_enabled": _use_orchestrator(),
+        "event_fast_path": event_fast_path_enabled(),
         "llm_provider": provider(),
         "llm_configured": llm_configured(),
         "router_model": router_model() if llm_configured() else None,
@@ -228,7 +279,7 @@ def create_lana_session(
         user_block = format_user_context(ctx_pack, purpose)
         purpose_ids = ctx_pack.get("event_purpose_ids") or []
 
-        use_orch = _use_orchestrator()
+        use_orch = use_orchestrator_for_purpose(purpose)
         if use_orch:
             opening, status, session_ctx, ui_raw, draft_raw = run_opening(
                 user_id=user_id,
@@ -239,6 +290,7 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw, draft_raw = lana_event_opening(
                 user_block, purpose_ids
             )
+            session_ctx["last_routing"] = _event_routing_stub()
         else:
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
@@ -281,27 +333,33 @@ def create_lana_session(
 def send_lana_message(
     session_id: str,
     body: SendMessageRequest,
+    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
     _vertex_required()
+    timer = TurnTimer()
     user_id = verify_jwt(authorization)
     require_home_block(user_id)
 
-    session = get_session_for_user(session_id, user_id)
+    with timer.stage("db_load_session"):
+        session = get_session_for_user(session_id, user_id)
     if session.get("status") != "active":
         raise HTTPException(status_code=400, detail="session_not_active")
 
     purpose = str(session.get("purpose", "profile_intake"))
-    insert_message(session_id, "user", body.message.strip(), {})
-    history = list_messages(session_id)
+    with timer.stage("db_save_user_message"):
+        user_msg_id = insert_message(session_id, "user", body.message.strip(), {}, embed=False)
+    with timer.stage("db_list_messages"):
+        history = list_messages(session_id)
 
+    timing_ms: dict[str, int] | None = None
+    assistant_msg_id: str | None = None
+    merged: dict[str, Any] = {}
     try:
-        ctx_pack = load_user_context(user_id)
-        user_block = format_user_context(ctx_pack, purpose)
-        purpose_ids = ctx_pack.get("event_purpose_ids") or []
+        purpose_ids: list[str] = []
         prev_draft = (session.get("context") or {}).get("event_draft")
 
-        use_orch = _use_orchestrator()
+        use_orch = use_orchestrator_for_purpose(purpose)
         user_jwt = _bearer_token(authorization)
         if use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(
@@ -313,36 +371,40 @@ def send_lana_message(
                 session_ctx=session.get("context") or {},
                 user_jwt=user_jwt,
                 persisted_core=session.get("core_block") if isinstance(session.get("core_block"), dict) else None,
+                timer=timer,
             )
-        elif purpose == "event_draft":
-            reply, status, session_ctx, ui_raw, draft_raw = lana_event_turn(
-                user_block,
-                purpose_ids,
-                history,
-                body.message,
-                prev_draft,
-            )
+            timing_ms = session_ctx.pop("timing_ms", None)
         else:
-            reply, status, session_ctx, ui_raw = lana_turn(
-                user_block,
-                purpose,
-                history,
-                body.message,
+            with timer.stage("load_user_context"):
+                ctx_pack = load_user_context(user_id)
+            user_block = format_user_context(ctx_pack, purpose)
+            purpose_ids = ctx_pack.get("event_purpose_ids") or []
+            reply, status, session_ctx, ui_raw, draft_raw = _legacy_lana_turn(
+                purpose=purpose,
+                user_block=user_block,
+                purpose_ids=purpose_ids,
+                history=history,
+                user_message=body.message,
+                prev_draft=prev_draft,
+                timer=timer,
             )
-            draft_raw = session_ctx.get("event_draft")
+            timing_ms = timer.to_dict()
 
-        insert_message(
-            session_id,
-            "assistant",
-            reply,
-            {"status": status, "ui": ui_raw, "orchestrator": use_orch},
-        )
-        merged = {**(session.get("context") or {}), **session_ctx}
-        update_session_context(
-            session_id,
-            merged,
-            core_block=session_ctx.get("core_block"),
-        )
+        with timer.stage("db_save_assistant_message"):
+            assistant_msg_id = insert_message(
+                session_id,
+                "assistant",
+                reply,
+                {"status": status, "ui": ui_raw, "orchestrator": use_orch},
+                embed=False,
+            )
+        with timer.stage("db_update_session"):
+            merged = {**(session.get("context") or {}), **session_ctx}
+            update_session_context(
+                session_id,
+                merged,
+                core_block=session_ctx.get("core_block"),
+            )
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
     except Exception as exc:
@@ -351,7 +413,22 @@ def send_lana_message(
             detail=_vertex_error_detail("lana_message_failed", exc),
         ) from exc
 
-    all_msgs = list_messages(session_id)
+    if user_msg_id:
+        background_tasks.add_task(embed_message_by_id, user_msg_id, body.message.strip())
+    if assistant_msg_id:
+        background_tasks.add_task(embed_message_by_id, assistant_msg_id, reply)
+
+    with timer.stage("db_list_messages_final"):
+        all_msgs = list_messages(session_id)
+    if timing_ms is not None:
+        merged_timing = dict(timing_ms)
+        for key, ms in timer.ms.items():
+            merged_timing[key] = merged_timing.get(key, 0) + ms
+        timing_ms = merged_timing
+    else:
+        timing_ms = dict(timer.ms)
+    timing_ms["total_ms"] = _timing_total_ms(timing_ms)
+
     return SendMessageResponse(
         session_id=session_id,
         status=status,
@@ -362,6 +439,7 @@ def send_lana_message(
         event_draft=event_draft,
         routing=_routing_from_ctx(merged),
         orchestrator=use_orch,
+        timing_ms=timing_ms,
     )
 
 
