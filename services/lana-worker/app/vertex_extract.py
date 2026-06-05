@@ -1,10 +1,10 @@
-import json
 import os
 import re
 from typing import Any
 
 from app.lana_ui import normalize_bucket, parse_mapped_spans
 from app.models import ExtractedClaim, MappedSpan
+from app.orchestrator.json_util import parse_json_object
 
 EXTRACT_PROMPT = """You are an identity extraction model for TagAlng, a block-based social app.
 
@@ -12,12 +12,12 @@ Read the full conversation transcript between Lana and the user. Extract identit
 
 Output ONLY valid JSON (no markdown):
 {
-  "mapped_summary": "One warm sentence summarizing the user (comma-separated phrases, natural prose)",
+  "mapped_summary": "One warm sentence summarizing the user",
   "spans": [
     {
       "text": "exact phrase from user words",
-      "bucket": "heritage" | "stage" | "vicinity" | "faith" | "activity" | "interest" | "general",
-      "claim_concept": "matching claim slug or empty"
+      "bucket": "heritage",
+      "claim_concept": "latino_heritage"
     }
   ],
   "claims": [
@@ -25,15 +25,18 @@ Output ONLY valid JSON (no markdown):
       "concept": "snake_case_slug",
       "label": "Short UI card title",
       "tone": "optional",
-      "confidence": 0.0-1.0,
-      "disclosure": "public" | "mutual" | "private",
-      "synonyms": ["≈ style tags, max 4"],
-      "source_quote": "exact short quote from user story for From '...' UI",
-      "bucket": "heritage" | "stage" | "vicinity" | "faith" | "activity" | "interest" | "general"
+      "confidence": 0.85,
+      "disclosure": "public",
+      "synonyms": ["tag1"],
+      "source_quote": "exact short quote from user",
+      "bucket": "heritage"
     }
   ],
   "assistant_message": "Short warm closing line"
 }
+
+Allowed bucket values: heritage, stage, vicinity, faith, activity, interest, general.
+Allowed disclosure: public, mutual, private.
 
 Rules:
 - Max 8 claims; only what the user expressed or clearly implied
@@ -148,7 +151,7 @@ def vertex_extract_from_transcript(
             response_mime_type="application/json",
         ),
     )
-    data = json.loads((response.text or "{}").strip())
+    data = parse_json_object(response.text or "")
     return parse_profile_extract_data(data)
 
 

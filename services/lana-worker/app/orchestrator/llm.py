@@ -2,11 +2,18 @@
 
 import json
 import os
-import re
 from typing import Any
+
+from app.orchestrator.json_util import parse_json_object
 
 _gemini_client_instance: Any = None
 _claude_client_instance: Any = None
+
+_JSON_RULES = (
+    "\n\nReturn strictly valid JSON. Double-quoted keys/strings only. "
+    "No trailing commas. No | union syntax. "
+    "Keep assistant_message on ONE line (no raw line breaks)."
+)
 
 
 def provider() -> str:
@@ -40,21 +47,6 @@ def synthesizer_model() -> str:
     return "claude-sonnet-4-6" if provider() == "claude" else "gemini-2.5-pro"
 
 
-def _strip_json_fence(text: str) -> str:
-    raw = (text or "").strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-    return raw.strip()
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    data = json.loads(_strip_json_fence(text) or "{}")
-    if not isinstance(data, dict):
-        raise ValueError("llm_json_not_object")
-    return data
-
-
 def _gemini_client():
     global _gemini_client_instance
     if _gemini_client_instance is not None:
@@ -86,14 +78,7 @@ def _claude_client():
     return _claude_client_instance
 
 
-def _gemini_json(
-    *,
-    model: str,
-    system: str,
-    user_payload: str,
-    max_tokens: int,
-    temperature: float,
-) -> dict[str, Any]:
+def _gemini_generate(*, model: str, system: str, user_payload: str, max_tokens: int, temperature: float) -> str:
     from google.genai import types
 
     client = _gemini_client()
@@ -104,10 +89,54 @@ def _gemini_json(
             temperature=temperature,
             max_output_tokens=max_tokens,
             response_mime_type="application/json",
-            system_instruction=system,
+            system_instruction=system + _JSON_RULES,
         ),
     )
-    return _parse_json_object(response.text or "")
+    return response.text or ""
+
+
+def _gemini_json(
+    *,
+    model: str,
+    system: str,
+    user_payload: str,
+    max_tokens: int,
+    temperature: float,
+) -> dict[str, Any]:
+    text = _gemini_generate(
+        model=model,
+        system=system,
+        user_payload=user_payload,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    try:
+        return parse_json_object(text)
+    except (json.JSONDecodeError, ValueError):
+        retry_text = _gemini_generate(
+            model=model,
+            system=system,
+            user_payload=(
+                user_payload
+                + "\n\nYour previous reply was invalid JSON. "
+                "Return ONE compact JSON object. assistant_message must be a single line string."
+            ),
+            max_tokens=max_tokens,
+            temperature=0.1,
+        )
+        try:
+            return parse_json_object(retry_text)
+        except (json.JSONDecodeError, ValueError):
+            if model != router_model():
+                flash_text = _gemini_generate(
+                    model=router_model(),
+                    system=system,
+                    user_payload=user_payload,
+                    max_tokens=max_tokens,
+                    temperature=0.15,
+                )
+                return parse_json_object(flash_text)
+            raise
 
 
 def _claude_json(
@@ -123,14 +152,14 @@ def _claude_json(
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
-        system=system,
+        system=system + _JSON_RULES,
         messages=[{"role": "user", "content": user_payload}],
     )
     parts: list[str] = []
     for block in response.content:
         if getattr(block, "type", None) == "text":
             parts.append(block.text)
-    return _parse_json_object("".join(parts))
+    return parse_json_object("".join(parts))
 
 
 def llm_json(

@@ -8,9 +8,9 @@ from app.orchestrator.memory import format_core_block, format_recent_turns
 
 ROUTER_SCHEMA = """
 {
-  "outcome": "R" | "A" | "T" | "C",
-  "intent_class": "identity" | "discovery" | "activity" | "marketplace" | "tier" | "companionship" | "off_topic",
-  "confidence": 0.0,
+  "outcome": "R",
+  "intent_class": "identity",
+  "confidence": 0.85,
   "tool_to_call": null,
   "tool_args": null,
   "missing_slots": [],
@@ -18,6 +18,10 @@ ROUTER_SCHEMA = """
   "needs_confirmation": false,
   "thinking": "brief rationale"
 }
+
+Allowed values:
+- outcome: R, A, T, or C (one letter only)
+- intent_class: identity, discovery, activity, marketplace, tier, companionship, off_topic
 """
 
 
@@ -40,7 +44,7 @@ def route_turn(
             "Classify and route. Output ONLY JSON matching:\n" + ROUTER_SCHEMA,
         ]
     )
-    raw = llm_json(model=router_model(), system=system, user_payload=payload, max_tokens=512)
+    raw = llm_json(model=router_model(), system=system, user_payload=payload, max_tokens=1024)
     return _normalize_router(raw, utterance=utterance)
 
 
