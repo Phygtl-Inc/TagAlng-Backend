@@ -19,6 +19,49 @@ def build_system_prompt() -> str:
     return f"{product}\n\n---\n\n{persona}"
 
 
+def build_event_host_system_prompt() -> str:
+    return load_prompt("lana_event_host.md")
+
+
+def format_event_draft_context(ctx: dict[str, Any]) -> str:
+    from app.event_context import format_event_draft_context as _format
+
+    return _format(ctx)
+
+
+def load_event_draft_context(user_id: str) -> dict[str, Any]:
+    """Minimal DB context for event_draft fast path (form-filling only)."""
+    sb = service_client()
+    user_row = (
+        sb.table("users")
+        .select("id, nickname, full_name, home_block_id")
+        .eq("id", user_id)
+        .limit(1)
+        .execute()
+    )
+    user = user_row.data[0] if user_row.data else {}
+    block_id = user.get("home_block_id")
+    block_display_name: str | None = None
+    if block_id:
+        block_row = (
+            sb.table("blocks")
+            .select("display_name")
+            .eq("id", block_id)
+            .limit(1)
+            .execute()
+        )
+        if block_row.data:
+            block_display_name = block_row.data[0].get("display_name")
+
+    return {
+        "nickname": user.get("nickname"),
+        "full_name": user.get("full_name"),
+        "home_block_id": block_id,
+        "block_display_name": block_display_name,
+        "event_purpose_ids": load_event_purpose_ids(),
+    }
+
+
 def load_user_context(user_id: str) -> dict[str, Any]:
     sb = service_client()
     user_row = (

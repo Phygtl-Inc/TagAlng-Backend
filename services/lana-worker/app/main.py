@@ -5,7 +5,13 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import require_home_block, service_client, verify_jwt
-from app.context import format_user_context, load_user_context
+from app.context import (
+    format_event_draft_context,
+    format_user_context,
+    load_event_draft_context,
+    load_user_context,
+)
+from app.event_context import host_display_name
 from app.db import (
     complete_session,
     create_session,
@@ -44,7 +50,7 @@ from app.vertex_event_extract import vertex_extract_event_from_transcript
 from app.vertex_extract import vertex_embed, vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
-app = FastAPI(title="TagAlng lana-worker", version="0.5.1")
+app = FastAPI(title="TagAlng lana-worker", version="0.5.2")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -103,6 +109,33 @@ def _event_routing_stub() -> dict[str, Any]:
 
 def _use_orchestrator() -> bool:
     return orchestrator_enabled()
+
+
+def _load_lana_context_pack(
+    user_id: str,
+    purpose: str,
+    *,
+    timer: TurnTimer | None = None,
+) -> tuple[dict[str, Any], str, list[str]]:
+    """Full context for profile; minimal for event_draft fast path."""
+    if purpose == "event_draft":
+        stage = timer.stage("load_event_context") if timer else None
+        if stage:
+            with stage:
+                ctx_pack = load_event_draft_context(user_id)
+        else:
+            ctx_pack = load_event_draft_context(user_id)
+        user_block = format_event_draft_context(ctx_pack)
+    else:
+        stage = timer.stage("load_user_context") if timer else None
+        if stage:
+            with stage:
+                ctx_pack = load_user_context(user_id)
+        else:
+            ctx_pack = load_user_context(user_id)
+        user_block = format_user_context(ctx_pack, purpose)
+    purpose_ids = ctx_pack.get("event_purpose_ids") or []
+    return ctx_pack, user_block, purpose_ids
 
 
 def _legacy_lana_turn(
@@ -225,7 +258,7 @@ def _bearer_token(authorization: str | None) -> str:
 def root():
     return {
         "service": "tagalng-lana-worker",
-        "version": "0.5.1",
+        "version": "0.5.2",
         "orchestrator": _use_orchestrator(),
         "endpoints": {
             "health": "GET /health",
@@ -275,10 +308,6 @@ def create_lana_session(
     try:
         session = create_session(user_id, purpose)
         session_id = str(session["id"])
-        ctx_pack = load_user_context(user_id)
-        user_block = format_user_context(ctx_pack, purpose)
-        purpose_ids = ctx_pack.get("event_purpose_ids") or []
-
         use_orch = use_orchestrator_for_purpose(purpose)
         if use_orch:
             opening, status, session_ctx, ui_raw, draft_raw = run_opening(
@@ -287,11 +316,15 @@ def create_lana_session(
                 session_id=session_id,
             )
         elif purpose == "event_draft":
+            ctx_pack, user_block, purpose_ids = _load_lana_context_pack(user_id, purpose)
             opening, status, session_ctx, ui_raw, draft_raw = lana_event_opening(
-                user_block, purpose_ids
+                user_block,
+                purpose_ids,
+                host_name=host_display_name(ctx_pack),
             )
             session_ctx["last_routing"] = _event_routing_stub()
         else:
+            _, user_block, _ = _load_lana_context_pack(user_id, purpose)
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
@@ -375,10 +408,9 @@ def send_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
         else:
-            with timer.stage("load_user_context"):
-                ctx_pack = load_user_context(user_id)
-            user_block = format_user_context(ctx_pack, purpose)
-            purpose_ids = ctx_pack.get("event_purpose_ids") or []
+            _, user_block, purpose_ids = _load_lana_context_pack(
+                user_id, purpose, timer=timer
+            )
             reply, status, session_ctx, ui_raw, draft_raw = _legacy_lana_turn(
                 purpose=purpose,
                 user_block=user_block,
@@ -529,7 +561,7 @@ def _complete_event_draft(
     sess_ctx: dict[str, Any],
     publish: bool,
 ) -> CompleteSessionResponse:
-    ctx_pack = load_user_context(user_id)
+    ctx_pack = load_event_draft_context(user_id)
     purpose_ids = ctx_pack.get("event_purpose_ids") or []
     prev_draft = sess_ctx.get("event_draft")
 

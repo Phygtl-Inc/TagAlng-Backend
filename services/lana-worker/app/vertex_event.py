@@ -2,7 +2,8 @@ import json
 import os
 from typing import Any
 
-from app.context import build_system_prompt
+from app.context import build_event_host_system_prompt
+from app.event_context import EVENT_HISTORY_MAX, format_chat_history
 from app.lana_ui import (
     event_draft_blockers,
     finalize_event_draft,
@@ -12,6 +13,10 @@ from app.lana_ui import (
 )
 from app.orchestrator.json_util import parse_json_object
 from app.turn_timing import TurnTimer
+
+EVENT_MAX_OUTPUT_TOKENS = 1024
+
+_vertex_client_instance: Any = None
 
 EVENT_BUCKET_GUIDE = """
 UI buckets for event highlights (pick one per focus):
@@ -102,24 +107,21 @@ Output ONLY valid JSON:
 
 
 def _vertex_client():
+    global _vertex_client_instance
+    if _vertex_client_instance is not None:
+        return _vertex_client_instance
     project = os.environ.get("GCP_VERTEX_PROJECT", "")
     location = os.environ.get("GCP_VERTEX_LOCATION", "us-central1")
     if not project:
         raise RuntimeError("GCP_VERTEX_PROJECT not set")
     from google import genai
 
-    return genai.Client(vertexai=True, project=project, location=location)
+    _vertex_client_instance = genai.Client(vertexai=True, project=project, location=location)
+    return _vertex_client_instance
 
 
-def _format_history(messages: list[dict[str, Any]]) -> str:
-    if not messages:
-        return "(no messages yet)"
-    lines: list[str] = []
-    for m in messages:
-        role = m.get("role", "user")
-        who = "User" if role == "user" else "Lana"
-        lines.append(f"{who}: {m.get('content', '').strip()}")
-    return "\n".join(lines)
+def _format_history(messages: list[dict[str, Any]], *, max_messages: int | None = None) -> str:
+    return format_chat_history(messages, max_messages=max_messages)
 
 
 def _purpose_ids_block(purpose_ids: list[str]) -> str:
@@ -195,7 +197,7 @@ def extract_event_draft_from_chat(
             user_context_block,
             "CURRENT EVENT DRAFT (merge updates into this):\n"
             + json.dumps(previous_draft or {}, ensure_ascii=False),
-            "CONVERSATION SO FAR:\n" + _format_history(history),
+            "CONVERSATION SO FAR:\n" + _format_history(history, max_messages=EVENT_HISTORY_MAX),
             f"USER'S NEW MESSAGE:\n{user_message.strip()}",
             "Extract event_draft and ui.highlights from the user's words. "
             "Do not invent title, time, or venue not supported by the transcript.",
@@ -252,7 +254,7 @@ def _call_event_lana(
     from google.genai import types
 
     suffix = EVENT_TURN_SUFFIX.replace("{purpose_ids}", _purpose_ids_block(purpose_ids))
-    system = build_system_prompt() + "\n\n" + suffix
+    system = build_event_host_system_prompt() + "\n\n---\n\n" + suffix
 
     def _generate(user: str) -> str:
         response = client.models.generate_content(
@@ -260,6 +262,7 @@ def _call_event_lana(
             contents=user,
             config=types.GenerateContentConfig(
                 temperature=0.45,
+                max_output_tokens=EVENT_MAX_OUTPUT_TOKENS,
                 response_mime_type="application/json",
                 system_instruction=system,
             ),
@@ -283,13 +286,28 @@ def _call_event_lana(
     return data
 
 
+def _event_opening_payload(user_context_block: str, host_name: str | None) -> str:
+    if host_name:
+        name_rule = (
+            f'The host\'s name is "{host_name}". '
+            f'assistant_message MUST open with a greeting that uses their name '
+            f'(e.g. "Hi {host_name}! I\'m Lana — tell me about the event you have in mind.").'
+        )
+    else:
+        name_rule = (
+            "No host name on file — use a warm generic greeting (e.g. Hi there!)."
+        )
+    return "\n\n".join([user_context_block, EVENT_OPENING.strip(), name_rule])
+
+
 def lana_event_opening(
     user_context_block: str,
     purpose_ids: list[str],
     *,
+    host_name: str | None = None,
     timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
-    payload = "\n\n".join([user_context_block, EVENT_OPENING])
+    payload = _event_opening_payload(user_context_block, host_name)
     attempts_box: list[int] = []
     if timer:
         with timer.stage("llm_event_turn"):
@@ -315,7 +333,7 @@ def lana_event_turn(
             user_context_block,
             "CURRENT EVENT DRAFT (merge updates into this):\n"
             + json.dumps(previous_draft or {}, ensure_ascii=False),
-            "CONVERSATION SO FAR:\n" + _format_history(history),
+            "CONVERSATION SO FAR:\n" + _format_history(history, max_messages=EVENT_HISTORY_MAX),
             f"USER'S NEW MESSAGE:\n{user_message.strip()}",
             "Reply as Lana. Update event_draft and ui.highlights from the user's words.",
         ]
