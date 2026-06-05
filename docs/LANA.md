@@ -1,6 +1,7 @@
 # TagAlng — Lana (team overview)
 
 **Share this doc** with engineering, product, and frontend.  
+**For team/manager summary (easy wording + examples):** [`LANA_WHAT_WE_BUILT.md`](LANA_WHAT_WE_BUILT.md)  
 **Environment:** tagalng-dev · **Last updated:** June 2026 · **Worker version:** 0.5.0
 
 ---
