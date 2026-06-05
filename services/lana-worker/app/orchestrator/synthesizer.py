@@ -3,12 +3,12 @@ from typing import Any
 
 from app.context import build_system_prompt, load_prompt
 from app.lana_ui import merge_event_drafts, parse_event_draft, parse_event_turn_ui, parse_turn_ui
-from app.orchestrator.claude import claude_json, router_model, synthesizer_model
+from app.orchestrator.llm import llm_json, router_model, synthesizer_model
 from app.orchestrator.memory import format_core_block, format_recent_turns, format_recall_memories
 
 
 def _synth_model(outcome: str, tool_result: dict[str, Any] | None) -> str:
-    """Sonnet for tool/hero turns; Haiku for simple R/A."""
+    """Synth model for tool/hero turns; router model for simple R/A."""
     if outcome == "T" and tool_result:
         return synthesizer_model()
     if tool_result and tool_result.get("tool") == "recall":
@@ -56,7 +56,7 @@ def synthesize_turn(
     payload = "\n\n".join(payload_parts)
 
     model = _synth_model(outcome, tool_result)
-    raw = claude_json(model=model, system=system, user_payload=payload, max_tokens=900, temperature=0.55)
+    raw = llm_json(model=model, system=system, user_payload=payload, max_tokens=900, temperature=0.55)
 
     if purpose == "event_draft":
         return _parse_event_synth(raw, prev_draft=prev_draft, tool_result=tool_result)

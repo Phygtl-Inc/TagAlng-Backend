@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 from app.context import load_prompt
-from app.orchestrator.claude import claude_json, router_model
+from app.orchestrator.llm import llm_json, router_model
 from app.orchestrator.memory import format_core_block, format_recent_turns
 
 
@@ -40,7 +40,7 @@ def route_turn(
             "Classify and route. Output ONLY JSON matching:\n" + ROUTER_SCHEMA,
         ]
     )
-    raw = claude_json(model=router_model(), system=system, user_payload=payload, max_tokens=512)
+    raw = llm_json(model=router_model(), system=system, user_payload=payload, max_tokens=512)
     return _normalize_router(raw, utterance=utterance)
 
 

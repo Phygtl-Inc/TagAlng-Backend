@@ -2,7 +2,7 @@ import os
 from typing import Any
 
 from app.orchestrator.audit import log_turn
-from app.orchestrator.claude import claude_configured
+from app.orchestrator.llm import llm_configured
 from app.orchestrator.enforce import enforce_routing, should_execute_tool
 from app.orchestrator.guardrails import check_refusal_without_capture, run_input_rails, scrub_pii
 from app.orchestrator.memory import (
@@ -22,8 +22,8 @@ def orchestrator_enabled() -> bool:
     if flag in ("0", "false", "off", "legacy"):
         return False
     if flag in ("1", "true", "on"):
-        return claude_configured()
-    return claude_configured()
+        return llm_configured()
+    return llm_configured()
 
 
 def run_opening(
