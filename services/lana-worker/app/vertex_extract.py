@@ -114,6 +114,25 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
     return out[:8]
 
 
+def parse_profile_extract_data(
+    data: Any,
+) -> tuple[list[ExtractedClaim], str, str | None, list[MappedSpan]]:
+    if not isinstance(data, dict):
+        raise ValueError("invalid_extract_json")
+    claims = _parse_claims(data)
+    if not claims:
+        raise ValueError("model_returned_no_valid_claims")
+    closing = str(data.get("assistant_message", "")).strip()[:800]
+    if not closing:
+        closing = "Your profile threads are ready — neighbors on your block can get to know the real you."
+    mapped_summary = str(data.get("mapped_summary", "")).strip()[:800] or None
+    span_dicts = parse_mapped_spans(data.get("spans"))
+    spans = [MappedSpan(**s) for s in span_dicts if s.get("text")]
+    if not mapped_summary and spans:
+        mapped_summary = ", ".join(s.text for s in spans[:6])
+    return claims, closing, mapped_summary, spans
+
+
 def vertex_extract_from_transcript(
     transcript: str,
 ) -> tuple[list[ExtractedClaim], str, str | None, list[MappedSpan]]:
@@ -130,18 +149,7 @@ def vertex_extract_from_transcript(
         ),
     )
     data = json.loads((response.text or "{}").strip())
-    claims = _parse_claims(data)
-    if not claims:
-        raise ValueError("model_returned_no_valid_claims")
-    closing = str(data.get("assistant_message", "")).strip()[:800]
-    if not closing:
-        closing = "Your profile threads are ready — neighbors on your block can get to know the real you."
-    mapped_summary = str(data.get("mapped_summary", "")).strip()[:800] or None
-    span_dicts = parse_mapped_spans(data.get("spans"))
-    spans = [MappedSpan(**s) for s in span_dicts if s.get("text")]
-    if not mapped_summary and spans:
-        mapped_summary = ", ".join(s.text for s in spans[:6])
-    return claims, closing, mapped_summary, spans
+    return parse_profile_extract_data(data)
 
 
 def vertex_embed(text: str, dim: int = 768) -> list[float]:

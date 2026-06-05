@@ -6,6 +6,17 @@ from fastapi import HTTPException
 from app.auth import service_client
 
 
+def _embed_message(message_id: str, content: str) -> None:
+    try:
+        from app.vertex_extract import vertex_embed
+
+        embedding = vertex_embed(content[:2000])
+        sb = service_client()
+        sb.table("lana_messages").update({"embedding": embedding}).eq("id", message_id).execute()
+    except Exception:
+        return
+
+
 def abandon_other_active_sessions(user_id: str, purpose: str) -> None:
     sb = service_client()
     sb.table("lana_sessions").update(
@@ -58,9 +69,9 @@ def insert_message(
     role: str,
     content: str,
     metadata: dict[str, Any] | None = None,
-) -> None:
+) -> str | None:
     sb = service_client()
-    sb.table("lana_messages").insert(
+    res = sb.table("lana_messages").insert(
         {
             "session_id": session_id,
             "role": role,
@@ -68,13 +79,26 @@ def insert_message(
             "metadata": metadata or {},
         }
     ).execute()
+    if not res.data:
+        return None
+    message_id = str(res.data[0]["id"])
+    _embed_message(message_id, content)
+    return message_id
 
 
-def update_session_context(session_id: str, context: dict[str, Any]) -> None:
+def update_session_context(
+    session_id: str,
+    context: dict[str, Any],
+    core_block: dict[str, Any] | None = None,
+) -> None:
     sb = service_client()
-    sb.table("lana_sessions").update(
-        {"context": context, "updated_at": datetime.now(timezone.utc).isoformat()}
-    ).eq("id", session_id).execute()
+    patch: dict[str, Any] = {
+        "context": context,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if core_block is not None:
+        patch["core_block"] = core_block
+    sb.table("lana_sessions").update(patch).eq("id", session_id).execute()
 
 
 def complete_session(session_id: str, context: dict[str, Any]) -> None:

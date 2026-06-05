@@ -1,7 +1,7 @@
 # TagAlng — Lana (team overview)
 
 **Share this doc** with engineering, product, and frontend.  
-**Environment:** tagalng-dev · **Last updated:** June 2026 · **Worker version:** 0.3.0
+**Environment:** tagalng-dev · **Last updated:** June 2026 · **Worker version:** 0.5.0
 
 ---
 
@@ -23,13 +23,54 @@ Lana is **not** a generic chatbot. She is plumbing: extract, match, assist — *
 |-------|------|
 | **Runtime** | Cloud Run `tagalng-lana-worker` (FastAPI, `us-east1`) |
 | **URL (dev)** | `https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app` |
-| **AI chat + extract** | Vertex Gemini Flash (`gemini-2.5-flash`) |
+| **Orchestrator (v0.4)** | Vertex **Claude Haiku 4.5** router + **Sonnet 4.6** synthesizer (R/A/T/C per turn) |
+| **Legacy / extract** | Vertex Gemini Flash (`gemini-2.5-flash`) — complete/extract when orchestrator off |
 | **Embeddings** | Vertex `text-embedding-005` (768 dims) |
 | **Database** | Supabase Postgres — sessions, messages, claims, pgvector |
 | **Auth** | Supabase user JWT on every request; worker uses **service role** for writes |
 | **Code** | `services/lana-worker/` · deploy: `./scripts/deploy-lana-worker.sh` |
 
 **Prerequisites for any Lana call:** user signed in + `assign_home_block` completed.
+
+**Orchestrator:** enabled when `LANA_ORCHESTRATOR=auto` (default) and `GCP_VERTEX_PROJECT` is set. Enable Claude models in Vertex Model Garden. Set `LANA_ORCHESTRATOR=legacy` to force Gemini-only turns.
+
+---
+
+## Agent orchestrator (v0.4 · Option A)
+
+Per-turn pipeline (see `docs/LANA_AGENT_ARCHITECTURE_v1.md`, `docs/LANA_TOOL_ROUTING_v1.md`):
+
+```
+User message
+  → input rails (PII scrub + safety keywords)
+  → Haiku router (intent, confidence, R/A/T/C, tool pick)
+  → tool execution (capture_inquiry, update_event_draft, flag_sensitive, …)
+  → Sonnet or Haiku synthesizer (Lana voice + ui + event_draft)
+  → output check (refusal-without-capture repair)
+  → lana_messages + lana_audit_log + inquiry_signals (if capture)
+```
+
+| Outcome | Meaning |
+|---------|---------|
+| **R** | Conversational reply only |
+| **A** | One clarifying question (missing slots) |
+| **T** | Tool called, then reply with result |
+| **C** | Out-of-scope → `capture_inquiry` + warm bridge |
+
+**Memory (MemGPT two-tier · v0.5.1):**
+
+| Tier | What |
+|------|------|
+| **Core block** | Always in prompt — user, block, tiers, session state/goal, last topic, event draft, pattern hints (session 3+). Persisted on `lana_sessions.core_block`; synth writes `core_patch` each turn. |
+| **Archival** | pgvector on `user_identity_claims`, `inquiry_signals`, `lana_messages`, `neighbor_facts`, `block_context`. **Pre-turn prefetch** (self + neighbors) + explicit **`recall`** tool. |
+
+Migration: `20260614120000_lana_memgpt_memory.sql` · RPC: `lana_recall_memories` (service role).
+
+Last 6 turns also in prompt (working memory).
+
+**On complete (orchestrator on):** Claude Sonnet extract → claims or final event draft; then `create_event` if `publish: true`. Embeddings stay `text-embedding-005` (Gemini).
+
+**Social graph tools (v0.5):** `send_nudge`, `propose_intro`, `propose_cohost`, `update_relationship_tier` (event-driven). Migration `20260613120000_social_graph_lana_tools.sql`.
 
 ---
 

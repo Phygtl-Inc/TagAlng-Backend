@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.auth import require_home_block, verify_jwt
+from app.auth import require_home_block, service_client, verify_jwt
 from app.context import format_user_context, load_user_context
 from app.db import (
     complete_session,
@@ -28,13 +28,20 @@ from app.models import (
     SendMessageRequest,
     SendMessageResponse,
     SessionDetailResponse,
+    TurnRouting,
+)
+from app.orchestrator import orchestrator_enabled, run_opening, run_turn
+from app.orchestrator.claude import claude_configured, router_model, synthesizer_model
+from app.orchestrator.extract import (
+    claude_extract_event_from_transcript,
+    claude_extract_profile_from_transcript,
 )
 from app.vertex_event import lana_event_opening, lana_event_turn
 from app.vertex_event_extract import vertex_extract_event_from_transcript
 from app.vertex_extract import vertex_embed, vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
-app = FastAPI(title="TagAlng lana-worker", version="0.3.0")
+app = FastAPI(title="TagAlng lana-worker", version="0.5.1")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -74,6 +81,23 @@ def _embed(label: str, concept: str) -> list[float]:
         ) from exc
 
 
+def _use_orchestrator() -> bool:
+    return orchestrator_enabled()
+
+
+def _routing_from_ctx(ctx: dict[str, Any]) -> TurnRouting | None:
+    raw = ctx.get("last_routing")
+    if not isinstance(raw, dict):
+        return None
+    return TurnRouting(
+        outcome=raw.get("outcome"),
+        intent_class=raw.get("intent_class"),
+        confidence=raw.get("confidence"),
+        tool_called=raw.get("tool_to_call"),
+        capture_fired=bool(raw.get("capture_fired")),
+    )
+
+
 def _ui_from_dict(raw: dict[str, Any]) -> LanaTurnUi:
     highlights = [
         HighlightSpan(text=h["text"], bucket=h.get("bucket") or "general")
@@ -91,6 +115,27 @@ def _draft_from_dict(raw: dict[str, Any] | None) -> EventDraft | None:
     if not raw:
         return None
     return EventDraft(**raw)
+
+
+def _accepted_cohost_id(user_id: str, candidate_id: str | None) -> str | None:
+    if not candidate_id:
+        return None
+    try:
+        sb = service_client()
+        res = (
+            sb.table("event_cohost_invites")
+            .select("id")
+            .eq("host_id", user_id)
+            .eq("candidate_id", str(candidate_id))
+            .eq("status", "accepted")
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            return str(candidate_id)
+    except Exception:
+        return None
+    return None
 
 
 def _persist_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
@@ -130,7 +175,8 @@ def _bearer_token(authorization: str | None) -> str:
 def root():
     return {
         "service": "tagalng-lana-worker",
-        "version": "0.3.0",
+        "version": "0.5.1",
+        "orchestrator": _use_orchestrator(),
         "endpoints": {
             "health": "GET /health",
             "create_session": "POST /lana/sessions",
@@ -148,9 +194,18 @@ def health():
     return {
         "ok": True,
         "vertex_configured": _vertex_configured(),
+        "orchestrator_enabled": _use_orchestrator(),
+        "claude_configured": claude_configured(),
         "lana_model": os.environ.get(
             "VERTEX_LANA_MODEL",
             os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+        ),
+        "claude_router_model": router_model() if claude_configured() else None,
+        "claude_synth_model": synthesizer_model() if claude_configured() else None,
+        "extract_model": (
+            synthesizer_model()
+            if _use_orchestrator() and claude_configured()
+            else os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
         ),
     }
 
@@ -172,7 +227,14 @@ def create_lana_session(
         user_block = format_user_context(ctx_pack, purpose)
         purpose_ids = ctx_pack.get("event_purpose_ids") or []
 
-        if purpose == "event_draft":
+        use_orch = _use_orchestrator()
+        if use_orch:
+            opening, status, session_ctx, ui_raw, draft_raw = run_opening(
+                user_id=user_id,
+                purpose=purpose,
+                session_id=session_id,
+            )
+        elif purpose == "event_draft":
             opening, status, session_ctx, ui_raw, draft_raw = lana_event_opening(
                 user_block, purpose_ids
             )
@@ -184,10 +246,14 @@ def create_lana_session(
             session_id,
             "assistant",
             opening,
-            {"status": status, "ui": ui_raw},
+            {"status": status, "ui": ui_raw, "orchestrator": use_orch},
         )
         merged_ctx = {**(session.get("context") or {}), **session_ctx}
-        update_session_context(session_id, merged_ctx)
+        update_session_context(
+            session_id,
+            merged_ctx,
+            core_block=session_ctx.get("core_block"),
+        )
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw)
     except HTTPException:
@@ -206,6 +272,7 @@ def create_lana_session(
         ready_to_complete=(status == "ready_to_complete"),
         ui=ui,
         event_draft=event_draft,
+        orchestrator=use_orch,
     )
 
 
@@ -233,7 +300,20 @@ def send_lana_message(
         purpose_ids = ctx_pack.get("event_purpose_ids") or []
         prev_draft = (session.get("context") or {}).get("event_draft")
 
-        if purpose == "event_draft":
+        use_orch = _use_orchestrator()
+        user_jwt = _bearer_token(authorization)
+        if use_orch:
+            reply, status, session_ctx, ui_raw, draft_raw = run_turn(
+                user_id=user_id,
+                session_id=session_id,
+                purpose=purpose,
+                history=history,
+                user_message=body.message,
+                session_ctx=session.get("context") or {},
+                user_jwt=user_jwt,
+                persisted_core=session.get("core_block") if isinstance(session.get("core_block"), dict) else None,
+            )
+        elif purpose == "event_draft":
             reply, status, session_ctx, ui_raw, draft_raw = lana_event_turn(
                 user_block,
                 purpose_ids,
@@ -250,9 +330,18 @@ def send_lana_message(
             )
             draft_raw = session_ctx.get("event_draft")
 
-        insert_message(session_id, "assistant", reply, {"status": status, "ui": ui_raw})
+        insert_message(
+            session_id,
+            "assistant",
+            reply,
+            {"status": status, "ui": ui_raw, "orchestrator": use_orch},
+        )
         merged = {**(session.get("context") or {}), **session_ctx}
-        update_session_context(session_id, merged)
+        update_session_context(
+            session_id,
+            merged,
+            core_block=session_ctx.get("core_block"),
+        )
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
     except Exception as exc:
@@ -270,6 +359,8 @@ def send_lana_message(
         message_count=len(all_msgs),
         ui=ui,
         event_draft=event_draft,
+        routing=_routing_from_ctx(merged),
+        orchestrator=use_orch,
     )
 
 
@@ -317,7 +408,12 @@ def complete_lana_session(
         )
 
     try:
-        claims, closing, mapped_summary, spans = vertex_extract_from_transcript(transcript)
+        if _use_orchestrator():
+            claims, closing, mapped_summary, spans = claude_extract_profile_from_transcript(
+                transcript
+            )
+        else:
+            claims, closing, mapped_summary, spans = vertex_extract_from_transcript(transcript)
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -359,11 +455,18 @@ def _complete_event_draft(
     prev_draft = sess_ctx.get("event_draft")
 
     try:
-        draft, closing, mapped_summary, spans = vertex_extract_event_from_transcript(
-            transcript,
-            purpose_ids=purpose_ids,
-            previous_draft=prev_draft,
-        )
+        if _use_orchestrator():
+            draft, closing, mapped_summary, spans = claude_extract_event_from_transcript(
+                transcript,
+                purpose_ids=purpose_ids,
+                previous_draft=prev_draft,
+            )
+        else:
+            draft, closing, mapped_summary, spans = vertex_extract_event_from_transcript(
+                transcript,
+                purpose_ids=purpose_ids,
+                previous_draft=prev_draft,
+            )
     except ValueError as exc:
         if str(exc) == "event_title_required":
             raise HTTPException(status_code=400, detail="event_title_required") from exc
@@ -378,7 +481,8 @@ def _complete_event_draft(
     published = False
     if publish:
         try:
-            event_id = publish_event(user_id, user_jwt, draft)
+            cohost_id = _accepted_cohost_id(user_id, sess_ctx.get("pending_cohost_id"))
+            event_id = publish_event(user_id, user_jwt, draft, cohost_id=cohost_id)
             published = True
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":

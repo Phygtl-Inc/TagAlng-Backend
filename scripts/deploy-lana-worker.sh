@@ -39,6 +39,10 @@ EXTRACT_MODEL="${VERTEX_EXTRACT_MODEL:-gemini-2.5-flash}"
 LANA_MODEL="${VERTEX_LANA_MODEL:-$EXTRACT_MODEL}"
 EMBED_MODEL="${VERTEX_EMBED_MODEL:-text-embedding-005}"
 CORS="${CORS_ALLOW_ORIGINS:-*}"
+LANA_ORCHESTRATOR="${LANA_ORCHESTRATOR:-auto}"
+CLAUDE_REGION="${VERTEX_CLAUDE_REGION:-us-east1}"
+CLAUDE_ROUTER="${VERTEX_CLAUDE_ROUTER_MODEL:-claude-haiku-4-5@20251001}"
+CLAUDE_SYNTH="${VERTEX_CLAUDE_SYNTH_MODEL:-claude-sonnet-4-6}"
 
 # Retired on Vertex (e.g. gemini-2.0-flash-001 discontinued 2026-06-01). Override stale deploy/*.env.
 case "$EXTRACT_MODEL" in
@@ -51,7 +55,8 @@ case "$EXTRACT_MODEL" in
 esac
 
 echo "Project: $PROJECT  Region: $REGION  Service: $SERVICE"
-echo "Vertex: $VERTEX_LOCATION / $LANA_MODEL"
+echo "Vertex: $VERTEX_LOCATION / extract=$EXTRACT_MODEL legacy_lana=$LANA_MODEL"
+echo "Orchestrator: $LANA_ORCHESTRATOR · Claude $CLAUDE_REGION router=$CLAUDE_ROUTER synth=$CLAUDE_SYNTH"
 echo "Vertex SA: $SA (shared with identity-worker)"
 
 gcloud config set project "$PROJECT" >/dev/null
@@ -65,6 +70,25 @@ gcloud services enable \
   --quiet
 
 echo "Deploying from services/lana-worker ..."
+# Use env-vars-file — Claude model ids contain '@' which breaks --set-env-vars ^@^ delimiter.
+ENV_VARS_FILE="$(mktemp)"
+trap 'rm -f "$ENV_VARS_FILE"' EXIT
+cat >"$ENV_VARS_FILE" <<EOF
+SUPABASE_URL: "${SUPABASE_URL}"
+SUPABASE_ANON_KEY: "${SUPABASE_ANON_KEY}"
+SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY}"
+GCP_VERTEX_PROJECT: "${GCP_VERTEX_PROJECT}"
+GCP_VERTEX_LOCATION: "${VERTEX_LOCATION}"
+VERTEX_EXTRACT_MODEL: "${EXTRACT_MODEL}"
+VERTEX_LANA_MODEL: "${LANA_MODEL}"
+VERTEX_EMBED_MODEL: "${EMBED_MODEL}"
+LANA_ORCHESTRATOR: "${LANA_ORCHESTRATOR}"
+VERTEX_CLAUDE_REGION: "${CLAUDE_REGION}"
+VERTEX_CLAUDE_ROUTER_MODEL: "${CLAUDE_ROUTER}"
+VERTEX_CLAUDE_SYNTH_MODEL: "${CLAUDE_SYNTH}"
+CORS_ALLOW_ORIGINS: "${CORS}"
+EOF
+
 gcloud run deploy "$SERVICE" \
   --source "$ROOT/services/lana-worker" \
   --project "$PROJECT" \
@@ -79,7 +103,7 @@ gcloud run deploy "$SERVICE" \
   --concurrency 20 \
   --min-instances 0 \
   --max-instances 10 \
-  --set-env-vars "^@^SUPABASE_URL=${SUPABASE_URL}@SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}@SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}@GCP_VERTEX_PROJECT=${GCP_VERTEX_PROJECT}@GCP_VERTEX_LOCATION=${VERTEX_LOCATION}@VERTEX_EXTRACT_MODEL=${EXTRACT_MODEL}@VERTEX_LANA_MODEL=${LANA_MODEL}@VERTEX_EMBED_MODEL=${EMBED_MODEL}@CORS_ALLOW_ORIGINS=${CORS}"
+  --env-vars-file "$ENV_VARS_FILE"
 
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT" --format='value(status.url)')"
 echo ""
@@ -87,4 +111,4 @@ echo "Deployed: $URL"
 echo "Health:   $URL/health"
 echo ""
 echo "Postman / app: set lana_worker_url to $URL"
-echo "Apply DB migration first if not done: supabase db push (20260603120000_lana_sessions_messages.sql)"
+echo "Apply DB migrations if not done: supabase db push (lana_sessions + lana_orchestrator)"

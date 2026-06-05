@@ -73,6 +73,17 @@ def vertex_extract_event_from_transcript(
         ),
     )
     data = json.loads((response.text or "{}").strip())
+    return parse_event_extract_data(data, purpose_ids=purpose_ids, previous_draft=previous_draft)
+
+
+def parse_event_extract_data(
+    data: Any,
+    *,
+    purpose_ids: list[str],
+    previous_draft: dict[str, Any] | None = None,
+) -> tuple[EventDraft, str, str | None, list[MappedSpan]]:
+    if not isinstance(data, dict):
+        raise ValueError("invalid_extract_json")
     valid = set(purpose_ids)
     incoming = parse_event_draft(data.get("event_draft"), valid_purpose_ids=valid)
     merged = merge_event_drafts(previous_draft, incoming)
