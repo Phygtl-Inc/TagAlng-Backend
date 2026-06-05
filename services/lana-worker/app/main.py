@@ -31,7 +31,7 @@ from app.models import (
     TurnRouting,
 )
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
-from app.orchestrator.claude import claude_configured, router_model, synthesizer_model
+from app.orchestrator.llm import llm_configured, provider, router_model, synthesizer_model
 from app.orchestrator.extract import (
     claude_extract_event_from_transcript,
     claude_extract_profile_from_transcript,
@@ -195,16 +195,17 @@ def health():
         "ok": True,
         "vertex_configured": _vertex_configured(),
         "orchestrator_enabled": _use_orchestrator(),
-        "claude_configured": claude_configured(),
+        "llm_provider": provider(),
+        "llm_configured": llm_configured(),
+        "router_model": router_model() if llm_configured() else None,
+        "synth_model": synthesizer_model() if llm_configured() else None,
         "lana_model": os.environ.get(
             "VERTEX_LANA_MODEL",
             os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
         ),
-        "claude_router_model": router_model() if claude_configured() else None,
-        "claude_synth_model": synthesizer_model() if claude_configured() else None,
         "extract_model": (
             synthesizer_model()
-            if _use_orchestrator() and claude_configured()
+            if _use_orchestrator() and llm_configured()
             else os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
         ),
     }
