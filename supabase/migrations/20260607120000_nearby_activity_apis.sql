@@ -14,6 +14,10 @@ drop function if exists public.get_event_preview_anon(uuid, double precision, do
 drop function if exists public.get_profile_summary(uuid);
 drop function if exists public.get_profile_summary_authed(uuid);
 drop function if exists public.get_anon_profile_summary(uuid);
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 -- =====================================================================
 -- ANONYMOUS VARIANTS (always blurred)
 -- =====================================================================
@@ -155,6 +159,10 @@ begin
   limit greatest(1, least(coalesce(p_limit, 20), 50));
 end;
 $$;
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 -- 2a. Event preview for anonymous visitors (blurred participants).
 create function public.get_event_preview(
   p_event_id uuid,
@@ -262,6 +270,10 @@ begin
   );
 end;
 $$;
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 -- 3a. Profile summary for anonymous visitors (blurred).
 create function public.get_profile_summary(
   p_user_id uuid
@@ -311,6 +323,10 @@ begin
   );
 end;
 $$;
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 -- =====================================================================
 -- SIGNED-IN VARIANTS (full data + personalized match; require a login token)
 -- =====================================================================
@@ -490,6 +506,10 @@ begin
   limit greatest(1, least(coalesce(p_limit, 20), 50));
 end;
 $$;
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 -- 2b. Event preview for signed-in users.
 create function public.get_event_preview_authed(
   p_event_id uuid,
@@ -637,6 +657,10 @@ begin
   );
 end;
 $$;
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 -- 3b. Profile summary for signed-in users.
 create function public.get_profile_summary_authed(
   p_user_id uuid
@@ -719,12 +743,20 @@ begin
   );
 end;
 $$;
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 -- =====================================================================
 -- GRANTS: anon variants open to everyone; _authed variants signed-in only.
 -- =====================================================================
 grant execute on function public.get_nearby_activities(double precision, double precision, text, interval, text, int) to anon, authenticated;
 grant execute on function public.get_event_preview(uuid, double precision, double precision, text) to anon, authenticated;
 grant execute on function public.get_profile_summary(uuid) to anon, authenticated;
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 revoke all on function public.get_nearby_activities_authed(double precision, double precision, text, interval, text, int) from public, anon;
 grant execute on function public.get_nearby_activities_authed(double precision, double precision, text, interval, text, int) to authenticated;
 revoke all on function public.get_event_preview_authed(uuid, double precision, double precision, text) from public, anon;
