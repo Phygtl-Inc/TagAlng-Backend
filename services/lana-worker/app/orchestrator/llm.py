@@ -5,8 +5,8 @@ import os
 import re
 from typing import Any
 
-_gemini_client: Any = None
-_claude_client: Any = None
+_gemini_client_instance: Any = None
+_claude_client_instance: Any = None
 
 
 def provider() -> str:
@@ -56,23 +56,23 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 
 
 def _gemini_client():
-    global _gemini_client
-    if _gemini_client is not None:
-        return _gemini_client
+    global _gemini_client_instance
+    if _gemini_client_instance is not None:
+        return _gemini_client_instance
     project = os.environ.get("GCP_VERTEX_PROJECT", "")
     location = os.environ.get("GCP_VERTEX_LOCATION", "us-central1")
     if not project:
         raise RuntimeError("GCP_VERTEX_PROJECT not set")
     from google import genai
 
-    _gemini_client = genai.Client(vertexai=True, project=project, location=location)
-    return _gemini_client
+    _gemini_client_instance = genai.Client(vertexai=True, project=project, location=location)
+    return _gemini_client_instance
 
 
 def _claude_client():
-    global _claude_client
-    if _claude_client is not None:
-        return _claude_client
+    global _claude_client_instance
+    if _claude_client_instance is not None:
+        return _claude_client_instance
     project = os.environ.get("GCP_VERTEX_PROJECT", "")
     if not project:
         raise RuntimeError("GCP_VERTEX_PROJECT not set")
@@ -82,8 +82,8 @@ def _claude_client():
         "VERTEX_CLAUDE_REGION",
         os.environ.get("GCP_VERTEX_LOCATION", "us-east1"),
     )
-    _claude_client = AnthropicVertex(project_id=project, region=region)
-    return _claude_client
+    _claude_client_instance = AnthropicVertex(project_id=project, region=region)
+    return _claude_client_instance
 
 
 def _gemini_json(
