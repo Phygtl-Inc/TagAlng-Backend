@@ -1,0 +1,232 @@
+import os
+from typing import Any
+
+from app.orchestrator.audit import log_turn
+from app.orchestrator.claude import claude_configured
+from app.orchestrator.enforce import enforce_routing, should_execute_tool
+from app.orchestrator.guardrails import check_refusal_without_capture, run_input_rails, scrub_pii
+from app.orchestrator.memory import (
+    apply_core_patch,
+    build_core_block,
+    strip_ephemeral,
+)
+from app.orchestrator.recall import prefetch_turn_memories
+from app.orchestrator.router import route_turn
+from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
+from app.orchestrator.tools import execute_tool
+from app.context import load_user_context
+
+
+def orchestrator_enabled() -> bool:
+    flag = os.environ.get("LANA_ORCHESTRATOR", "auto").strip().lower()
+    if flag in ("0", "false", "off", "legacy"):
+        return False
+    if flag in ("1", "true", "on"):
+        return claude_configured()
+    return claude_configured()
+
+
+def run_opening(
+    *,
+    user_id: str,
+    purpose: str,
+    session_id: str,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    ctx_pack = load_user_context(user_id)
+    core = build_core_block(
+        user_id=user_id,
+        session_id=session_id,
+        purpose=purpose,
+        ctx_pack=ctx_pack,
+    )
+    reply, status, session_ctx, ui, draft = synthesize_opening(purpose=purpose, core_block=core)
+    core = apply_core_patch(core, session_ctx.pop("core_patch", None))
+    session_ctx["core_block"] = strip_ephemeral(core)
+    log_turn(
+        session_id=session_id,
+        user_id=user_id,
+        event_type="opening",
+        module="companionship",
+        utterance=None,
+        response=reply,
+        routing={"outcome": "R"},
+    )
+    return reply, status, session_ctx, ui, draft
+
+
+def run_turn(
+    *,
+    user_id: str,
+    session_id: str,
+    purpose: str,
+    history: list[dict[str, Any]],
+    user_message: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str | None = None,
+    persisted_core: dict[str, Any] | None = None,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    ctx_pack = load_user_context(user_id)
+    block_id = ctx_pack.get("home_block_id")
+    prev_draft = session_ctx.get("event_draft")
+    utterance = scrub_pii(user_message.strip())
+
+    prefetched = prefetch_turn_memories(
+        user_id=user_id,
+        block_id=block_id,
+        utterance=utterance,
+    )
+    core = build_core_block(
+        user_id=user_id,
+        session_id=session_id,
+        purpose=purpose,
+        ctx_pack=ctx_pack,
+        session_ctx=session_ctx,
+        history=history,
+        persisted=persisted_core if isinstance(persisted_core, dict) else None,
+        prefetched=prefetched,
+    )
+
+    rails = run_input_rails(utterance)
+    capture_fired = False
+    tool_result: dict[str, Any] | None = None
+
+    if rails.safety_triggered:
+        routing = {
+            "outcome": "T",
+            "intent_class": "companionship",
+            "confidence": 1.0,
+            "tool_to_call": "flag_sensitive",
+            "tool_args": {"category": rails.category, "severity": rails.severity},
+        }
+        tool_result = execute_tool(
+            tool_name="flag_sensitive",
+            tool_args=routing["tool_args"],
+            user_id=user_id,
+            user_jwt=user_jwt,
+            session_id=session_id,
+            block_id=block_id,
+            purpose=purpose,
+            session_ctx=session_ctx,
+            source_module="guardrails",
+        )
+        reply = rails.template_response or "I'm here with you."
+        status = "continue"
+        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+        core = strip_ephemeral(core)
+        out_ctx = {**session_ctx, "last_status": status, "core_block": core}
+        log_turn(
+            session_id=session_id,
+            user_id=user_id,
+            event_type="safety_gate",
+            module="guardrails",
+            utterance=utterance,
+            response=reply,
+            guardrail_result={"safety": True, "category": rails.category},
+            routing=routing,
+        )
+        return reply, status, out_ctx, ui, prev_draft if purpose == "event_draft" else None
+
+    routing = route_turn(
+        purpose=purpose,
+        utterance=utterance,
+        core_block=core,
+        history=history,
+        guardrail_flags=rails.flags,
+    )
+    routing = enforce_routing(
+        routing,
+        purpose=purpose,
+        utterance=utterance,
+        session_ctx=session_ctx,
+    )
+
+    if should_execute_tool(routing):
+        tool_result = execute_tool(
+            tool_name=str(routing["tool_to_call"]),
+            tool_args=routing.get("tool_args"),
+            user_id=user_id,
+            user_jwt=user_jwt,
+            session_id=session_id,
+            block_id=block_id,
+            purpose=purpose,
+            session_ctx=session_ctx,
+            source_module=str(routing.get("intent_class", "companionship")),
+        )
+        if routing["tool_to_call"] == "capture_inquiry":
+            capture_fired = True
+            if tool_result and tool_result.get("inquiry_id"):
+                session_ctx["last_captured_inquiry_id"] = tool_result["inquiry_id"]
+        if tool_result and tool_result.get("needs_user_confirmation"):
+            session_ctx["pending_confirmation"] = tool_result.get("confirmation_prompt")
+        if tool_result and tool_result.get("published"):
+            session_ctx.pop("pending_confirmation", None)
+            session_ctx["event_id"] = tool_result.get("event_id")
+            session_ctx["last_status"] = "ready_to_complete"
+
+    reply, status, synth_ctx, ui, draft = synthesize_turn(
+        purpose=purpose,
+        utterance=utterance,
+        routing=routing,
+        core_block=core,
+        history=history,
+        tool_result=tool_result,
+        prev_draft=prev_draft,
+    )
+
+    if not check_refusal_without_capture(reply, capture_fired):
+        routing_retry = {**routing, "outcome": "C", "tool_to_call": "capture_inquiry"}
+        if not capture_fired:
+            tool_result = execute_tool(
+                tool_name="capture_inquiry",
+                tool_args={
+                    "raw_query": utterance,
+                    "extracted_category": "refusal_repair",
+                    "sentiment": routing.get("sentiment", "neutral"),
+                },
+                user_id=user_id,
+                user_jwt=user_jwt,
+                session_id=session_id,
+                block_id=block_id,
+                purpose=purpose,
+                session_ctx=session_ctx,
+                source_module="guardrails",
+            )
+            capture_fired = True
+            if tool_result and tool_result.get("inquiry_id"):
+                session_ctx["last_captured_inquiry_id"] = tool_result["inquiry_id"]
+        reply, status, synth_ctx, ui, draft = synthesize_turn(
+            purpose=purpose,
+            utterance=utterance,
+            routing=routing_retry,
+            core_block=core,
+            history=history,
+            tool_result=tool_result,
+            prev_draft=prev_draft,
+        )
+
+    core = apply_core_patch(core, synth_ctx.pop("core_patch", None))
+    merged_ctx = {
+        **session_ctx,
+        **synth_ctx,
+        "core_block": strip_ephemeral(core),
+        "last_routing": routing,
+    }
+    if draft:
+        merged_ctx["event_draft"] = draft
+
+    log_turn(
+        session_id=session_id,
+        user_id=user_id,
+        event_type="turn",
+        module=str(routing.get("intent_class")),
+        utterance=utterance,
+        response=reply,
+        guardrail_result=rails.flags,
+        routing={
+            **routing,
+            "capture_fired": capture_fired,
+            "recall_prefetch_count": len(prefetched),
+        },
+    )
+
+    return reply, status, merged_ctx, ui, draft

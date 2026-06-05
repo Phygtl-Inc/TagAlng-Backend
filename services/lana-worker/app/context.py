@@ -52,6 +52,7 @@ def load_user_context(user_id: str) -> dict[str, Any]:
 
     network = _load_block_network(user_id)
     vector_peers = _load_vector_peer_hints(user_id)
+    relationship_tiers = _load_relationship_tiers(user_id, vector_peers, network)
     event_purpose_ids = load_event_purpose_ids()
 
     return {
@@ -64,8 +65,43 @@ def load_user_context(user_id: str) -> dict[str, Any]:
         "existing_claims": claims,
         "block_network": network,
         "vector_peers": vector_peers,
+        "relationship_tiers": relationship_tiers,
         "event_purpose_ids": event_purpose_ids,
     }
+
+
+def _load_relationship_tiers(
+    user_id: str,
+    vector_peers: list[dict[str, Any]],
+    network: dict[str, Any],
+) -> dict[str, str]:
+    """Map neighbor user_id -> relationship tier for Lana routing."""
+    ids: list[str] = []
+    for vp in vector_peers or []:
+        uid = vp.get("peer_user_id") or vp.get("user_id")
+        if uid:
+            ids.append(str(uid))
+    for h in (network.get("neighbor_hints") or [])[:8]:
+        uid = h.get("user_id")
+        if uid:
+            ids.append(str(uid))
+    unique = list(dict.fromkeys(ids))[:12]
+    if not unique:
+        return {}
+    try:
+        sb = service_client()
+        res = sb.rpc(
+            "get_relationship_tiers_for_user",
+            {"p_user_id": user_id, "p_other_user_ids": unique},
+        ).execute()
+        rows = res.data or []
+        return {
+            str(r["other_user_id"]): str(r.get("tier", "stranger"))
+            for r in rows
+            if r.get("other_user_id")
+        }
+    except Exception:
+        return {}
 
 
 def _load_vector_peer_hints(user_id: str) -> list[dict[str, Any]]:
@@ -172,15 +208,21 @@ def format_user_context(ctx: dict[str, Any], purpose: str) -> str:
                 extra = f", {shared} shared thread(s)" if shared else ""
                 lines.append(f"  · {nick}: {label_txt}{extra}")
         vpeers = ctx.get("vector_peers") or []
+        tiers = ctx.get("relationship_tiers") or {}
         if vpeers:
             lines.append("- Vector similarity neighbors (meaning-close public threads on this block):")
             for vp in vpeers[:5]:
                 nick = vp.get("nickname") or "Neighbor"
+                uid = vp.get("peer_user_id") or vp.get("user_id")
+                tier = tiers.get(str(uid), "stranger") if uid else "stranger"
                 sim = vp.get("similarity_score")
                 pct = f"{round(float(sim) * 100)}%" if sim is not None else "—"
                 lbl = vp.get("matching_peer_label") or "—"
                 exact = " (same thread slug)" if vp.get("has_exact_concept_match") else ""
-                lines.append(f"  · {nick}: ~{pct} match via «{lbl}»{exact}")
+                id_hint = f" [user_id={uid}]" if uid else ""
+                lines.append(
+                    f"  · {nick}{id_hint}: ~{pct} match via «{lbl}»{exact} · tier={tier}"
+                )
         lines.append(
             "- Agent rule: you may mention that neighbors or activities exist on the block; "
             "do not invent names or events beyond this list."

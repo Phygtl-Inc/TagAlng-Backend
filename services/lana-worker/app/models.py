@@ -44,10 +44,19 @@ class CreateSessionResponse(BaseModel):
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
+    orchestrator: bool = False
 
 
 class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
+
+
+class TurnRouting(BaseModel):
+    outcome: str | None = None
+    intent_class: str | None = None
+    confidence: float | None = None
+    tool_called: str | None = None
+    capture_fired: bool = False
 
 
 class SendMessageResponse(BaseModel):
@@ -58,6 +67,8 @@ class SendMessageResponse(BaseModel):
     message_count: int = 0
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
+    routing: TurnRouting | None = None
+    orchestrator: bool = False
 
 
 class CompleteSessionRequest(BaseModel):

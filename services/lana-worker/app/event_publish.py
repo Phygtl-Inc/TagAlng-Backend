@@ -67,7 +67,12 @@ def _parse_iso_ts(raw: str | None) -> str | None:
         return None
 
 
-def build_create_event_fields(user_id: str, draft: EventDraft) -> dict[str, Any]:
+def build_create_event_fields(
+    user_id: str,
+    draft: EventDraft,
+    *,
+    cohost_id: str | None = None,
+) -> dict[str, Any]:
     title = (draft.title or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="event_title_required")
@@ -92,14 +97,22 @@ def build_create_event_fields(user_id: str, draft: EventDraft) -> dict[str, Any]
         cap = int(draft.max_attendees)
         if 1 <= cap <= 200:
             fields["max_attendees"] = cap
+    if cohost_id:
+        fields["cohost_id"] = cohost_id
     return fields
 
 
-def publish_event(user_id: str, user_jwt: str, draft: EventDraft) -> str:
+def publish_event(
+    user_id: str,
+    user_jwt: str,
+    draft: EventDraft,
+    *,
+    cohost_id: str | None = None,
+) -> str:
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
 
-    fields = build_create_event_fields(user_id, draft)
+    fields = build_create_event_fields(user_id, draft, cohost_id=cohost_id)
 
     with httpx.Client(timeout=30.0) as client:
         res = client.post(
