@@ -1,0 +1,25 @@
+"""Which Lana code path runs per session purpose."""
+
+import os
+
+
+def event_fast_path_enabled() -> bool:
+    """Single-call event hosting (legacy lana_event_turn). Default on."""
+    flag = os.environ.get("LANA_EVENT_FAST_PATH", "1").strip().lower()
+    return flag not in ("0", "false", "off", "legacy")
+
+
+def _orchestrator_enabled() -> bool:
+    flag = os.environ.get("LANA_ORCHESTRATOR", "auto").strip().lower()
+    if flag in ("0", "false", "off", "legacy"):
+        return False
+    if flag in ("1", "true", "on"):
+        return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
+    return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
+
+
+def use_orchestrator_for_purpose(purpose: str) -> bool:
+    """Profile intake uses full orchestrator; event_draft uses fast path by default."""
+    if purpose == "event_draft" and event_fast_path_enabled():
+        return False
+    return _orchestrator_enabled()

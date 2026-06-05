@@ -9,7 +9,20 @@ EVENT_BUCKETS = frozenset(
     {"time", "venue", "audience", "activity", "constraint", "capacity", "purpose"}
 )
 
+EVENT_DRAFT_REQUIRED = ("title", "starts_at", "venue_name")
+
 ALL_BUCKETS = VALID_BUCKETS | EVENT_BUCKETS
+
+
+def event_draft_blockers(draft: dict[str, Any] | None) -> list[str]:
+    data = draft or {}
+    return [field for field in EVENT_DRAFT_REQUIRED if not str(data.get(field) or "").strip()]
+
+
+def finalize_event_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    out = dict(draft)
+    out["missing"] = event_draft_blockers(out)
+    return out
 
 
 def normalize_bucket(raw: Any) -> str | None:
@@ -28,19 +41,26 @@ def normalize_event_bucket(raw: Any) -> str:
     return "activity"
 
 
+def _clean_ui_phrase(raw: Any, *, max_len: int = 120) -> str | None:
+    text = str(raw or "").strip()[:max_len]
+    if not text or text.lower() in ("none", "null", "n/a"):
+        return None
+    return text
+
+
 def parse_highlights(raw: Any) -> list[dict[str, str]]:
     if not isinstance(raw, list):
         return []
     out: list[dict[str, str]] = []
     for item in raw[:6]:
         if isinstance(item, str):
-            text = item.strip()[:120]
+            text = _clean_ui_phrase(item)
             if text:
                 out.append({"text": text, "bucket": "general"})
             continue
         if not isinstance(item, dict):
             continue
-        text = str(item.get("text", "")).strip()[:120]
+        text = _clean_ui_phrase(item.get("text"))
         if not text:
             continue
         out.append({"text": text, "bucket": normalize_bucket(item.get("bucket")) or "general"})
@@ -53,13 +73,13 @@ def parse_event_highlights(raw: Any) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for item in raw[:8]:
         if isinstance(item, str):
-            text = item.strip()[:120]
+            text = _clean_ui_phrase(item)
             if text:
                 out.append({"text": text, "bucket": "activity"})
             continue
         if not isinstance(item, dict):
             continue
-        text = str(item.get("text", "")).strip()[:120]
+        text = _clean_ui_phrase(item.get("text"))
         if not text:
             continue
         out.append({"text": text, "bucket": normalize_event_bucket(item.get("bucket"))})
@@ -70,14 +90,14 @@ def parse_event_turn_ui(data: dict[str, Any]) -> dict[str, Any]:
     ui_raw = data.get("ui")
     if not isinstance(ui_raw, dict):
         ui_raw = {}
-    focus = str(ui_raw.get("focus_phrase", data.get("focus_phrase", ""))).strip()[:120]
+    focus = _clean_ui_phrase(ui_raw.get("focus_phrase", data.get("focus_phrase")))
     bucket = normalize_event_bucket(ui_raw.get("bucket", data.get("bucket")))
     highlights = parse_event_highlights(ui_raw.get("highlights"))
     if focus and not highlights:
         highlights = [{"text": focus, "bucket": bucket}]
     return {
         "bucket": bucket,
-        "focus_phrase": focus or None,
+        "focus_phrase": focus,
         "highlights": highlights,
     }
 

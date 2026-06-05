@@ -102,7 +102,8 @@ def _gemini_json(
     user_payload: str,
     max_tokens: int,
     temperature: float,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
+    attempts = 1
     text = _gemini_generate(
         model=model,
         system=system,
@@ -111,8 +112,9 @@ def _gemini_json(
         temperature=temperature,
     )
     try:
-        return parse_json_object(text)
+        return parse_json_object(text), attempts
     except (json.JSONDecodeError, ValueError):
+        attempts = 2
         retry_text = _gemini_generate(
             model=model,
             system=system,
@@ -125,9 +127,10 @@ def _gemini_json(
             temperature=0.1,
         )
         try:
-            return parse_json_object(retry_text)
+            return parse_json_object(retry_text), attempts
         except (json.JSONDecodeError, ValueError):
             if model != router_model():
+                attempts = 3
                 flash_text = _gemini_generate(
                     model=router_model(),
                     system=system,
@@ -135,7 +138,7 @@ def _gemini_json(
                     max_tokens=max_tokens,
                     temperature=0.15,
                 )
-                return parse_json_object(flash_text)
+                return parse_json_object(flash_text), attempts
             raise
 
 
@@ -169,19 +172,26 @@ def llm_json(
     user_payload: str,
     max_tokens: int = 1024,
     temperature: float = 0.2,
+    llm_attempts: list[int] | None = None,
 ) -> dict[str, Any]:
     if provider() == "claude":
-        return _claude_json(
+        data = _claude_json(
             model=model,
             system=system,
             user_payload=user_payload,
             max_tokens=max_tokens,
             temperature=temperature,
         )
-    return _gemini_json(
+        if llm_attempts is not None:
+            llm_attempts[:] = [1]
+        return data
+    data, attempts = _gemini_json(
         model=model,
         system=system,
         user_payload=user_payload,
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    if llm_attempts is not None:
+        llm_attempts[:] = [attempts]
+    return data

@@ -4,6 +4,7 @@ from typing import Any
 from app.context import load_prompt
 from app.orchestrator.llm import llm_json, router_model
 from app.orchestrator.memory import format_core_block, format_recent_turns
+from app.turn_timing import TurnTimer
 
 
 ROUTER_SCHEMA = """
@@ -32,6 +33,7 @@ def route_turn(
     core_block: dict[str, Any],
     history: list[dict[str, Any]],
     guardrail_flags: dict[str, Any] | None = None,
+    timer: TurnTimer | None = None,
 ) -> dict[str, Any]:
     system = load_prompt("orchestrator_router.md")
     payload = "\n\n".join(
@@ -44,7 +46,20 @@ def route_turn(
             "Classify and route. Output ONLY JSON matching:\n" + ROUTER_SCHEMA,
         ]
     )
-    raw = llm_json(model=router_model(), system=system, user_payload=payload, max_tokens=1024)
+    if timer:
+        attempts_box: list[int] = []
+        with timer.stage("llm_router"):
+            raw = llm_json(
+                model=router_model(),
+                system=system,
+                user_payload=payload,
+                max_tokens=1024,
+                llm_attempts=attempts_box,
+            )
+        if attempts_box:
+            timer.set_count("llm_router_attempts", attempts_box[0])
+    else:
+        raw = llm_json(model=router_model(), system=system, user_payload=payload, max_tokens=1024)
     return _normalize_router(raw, utterance=utterance)
 
 
