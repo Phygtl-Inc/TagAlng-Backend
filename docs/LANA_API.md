@@ -7,6 +7,8 @@
 | `profile_intake` | Saves **`user_identity_claims`** |
 | `event_draft` | Returns **`event_draft`**; optionally **`create_event`** when `publish: true` |
 
+**Team overview (share this):** [`LANA.md`](./LANA.md)
+
 ## When to call (signup order)
 
 1. Phone OTP → Supabase session  
