@@ -192,7 +192,7 @@ def parse_turn_ui(data: dict[str, Any]) -> dict[str, Any]:
     ui_raw = data.get("ui")
     if not isinstance(ui_raw, dict):
         ui_raw = {}
-    focus = str(ui_raw.get("focus_phrase", data.get("focus_phrase", ""))).strip()[:120]
+    focus = _clean_ui_phrase(ui_raw.get("focus_phrase", data.get("focus_phrase")))
     bucket = normalize_bucket(ui_raw.get("bucket", data.get("bucket")))
     highlights = parse_highlights(ui_raw.get("highlights"))
     if focus and not highlights:

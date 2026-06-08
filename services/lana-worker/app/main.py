@@ -22,7 +22,16 @@ from app.db import (
     transcript_text,
     update_session_context,
 )
-from app.lana_paths import event_fast_path_enabled, use_orchestrator_for_purpose
+from app.lana_paths import (
+    event_fast_path_enabled,
+    profile_fast_path_enabled,
+    use_orchestrator_for_purpose,
+)
+from app.profile_intake import (
+    format_profile_intake_context,
+    lana_profile_opening,
+    lana_profile_turn,
+)
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.models import (
@@ -107,6 +116,17 @@ def _event_routing_stub() -> dict[str, Any]:
     }
 
 
+def _profile_routing_stub() -> dict[str, Any]:
+    return {
+        "outcome": "R",
+        "intent_class": "identity",
+        "confidence": 1.0,
+        "tool_to_call": None,
+        "capture_fired": False,
+        "profile_fast_path": True,
+    }
+
+
 def _use_orchestrator() -> bool:
     return orchestrator_enabled()
 
@@ -117,7 +137,7 @@ def _load_lana_context_pack(
     *,
     timer: TurnTimer | None = None,
 ) -> tuple[dict[str, Any], str, list[str]]:
-    """Full context for profile; minimal for event_draft fast path."""
+    """Full context for legacy profile; minimal for fast paths."""
     if purpose == "event_draft":
         stage = timer.stage("load_event_context") if timer else None
         if stage:
@@ -126,6 +146,14 @@ def _load_lana_context_pack(
         else:
             ctx_pack = load_event_draft_context(user_id)
         user_block = format_event_draft_context(ctx_pack)
+    elif purpose == "profile_intake" and profile_fast_path_enabled():
+        stage = timer.stage("load_profile_context") if timer else None
+        if stage:
+            with stage:
+                ctx_pack = load_event_draft_context(user_id)
+        else:
+            ctx_pack = load_event_draft_context(user_id)
+        user_block = format_profile_intake_context(ctx_pack)
     else:
         stage = timer.stage("load_user_context") if timer else None
         if stage:
@@ -159,6 +187,15 @@ def _legacy_lana_turn(
         )
         session_ctx["last_routing"] = _event_routing_stub()
         return reply, status, session_ctx, ui_raw, draft_raw
+    if purpose == "profile_intake":
+        reply, status, session_ctx, ui_raw = lana_profile_turn(
+            user_block,
+            history,
+            user_message,
+            timer=timer,
+        )
+        session_ctx["last_routing"] = _profile_routing_stub()
+        return reply, status, session_ctx, ui_raw, None
     reply, status, session_ctx, ui_raw = lana_turn(
         user_block,
         purpose,
@@ -279,6 +316,7 @@ def health():
         "vertex_configured": _vertex_configured(),
         "orchestrator_enabled": _use_orchestrator(),
         "event_fast_path": event_fast_path_enabled(),
+        "profile_fast_path": profile_fast_path_enabled(),
         "llm_provider": provider(),
         "llm_configured": llm_configured(),
         "router_model": router_model() if llm_configured() else None,
@@ -323,6 +361,14 @@ def create_lana_session(
                 host_name=host_display_name(ctx_pack),
             )
             session_ctx["last_routing"] = _event_routing_stub()
+        elif purpose == "profile_intake":
+            ctx_pack, user_block, _ = _load_lana_context_pack(user_id, purpose)
+            opening, status, session_ctx, ui_raw = lana_profile_opening(
+                user_block,
+                host_name=host_display_name(ctx_pack),
+            )
+            session_ctx["last_routing"] = _profile_routing_stub()
+            draft_raw = None
         else:
             _, user_block, _ = _load_lana_context_pack(user_id, purpose)
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)

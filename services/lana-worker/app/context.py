@@ -23,6 +23,10 @@ def build_event_host_system_prompt() -> str:
     return load_prompt("lana_event_host.md")
 
 
+def build_profile_system_prompt() -> str:
+    return load_prompt("lana_profile_intake.md")
+
+
 def format_event_draft_context(ctx: dict[str, Any]) -> str:
     from app.event_context import format_event_draft_context as _format
 
