@@ -56,6 +56,7 @@ from app.orchestrator.extract import (
 )
 from app.vertex_event import lana_event_opening, lana_event_turn
 from app.vertex_event_extract import vertex_extract_event_from_transcript
+from app.claim_embed import claim_embedding_text
 from app.vertex_extract import vertex_embed, vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
@@ -89,9 +90,15 @@ def _vertex_error_detail(prefix: str, exc: Exception) -> str:
     return f"{prefix}:{type(exc).__name__}:{msg}"
 
 
-def _embed(label: str, concept: str) -> list[float]:
+def _embed_claim(c: ExtractedClaim) -> list[float]:
     try:
-        return vertex_embed(f"{concept}: {label}")
+        text = claim_embedding_text(
+            concept=c.concept,
+            label=c.label,
+            source_quote=c.source_quote,
+            bucket=c.bucket,
+        )
+        return vertex_embed(text)
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -175,6 +182,9 @@ def _legacy_lana_turn(
     user_message: str,
     prev_draft: dict[str, Any] | None,
     timer: TurnTimer,
+    user_id: str | None = None,
+    ctx_pack: dict[str, Any] | None = None,
+    session_ctx: dict[str, Any] | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     if purpose == "event_draft":
         reply, status, session_ctx, ui_raw, draft_raw = lana_event_turn(
@@ -188,14 +198,19 @@ def _legacy_lana_turn(
         session_ctx["last_routing"] = _event_routing_stub()
         return reply, status, session_ctx, ui_raw, draft_raw
     if purpose == "profile_intake":
-        reply, status, session_ctx, ui_raw = lana_profile_turn(
+        reply, status, turn_ctx, ui_raw = lana_profile_turn(
             user_block,
             history,
             user_message,
+            ctx_pack=ctx_pack,
+            session_ctx=session_ctx,
             timer=timer,
         )
-        session_ctx["last_routing"] = _profile_routing_stub()
-        return reply, status, session_ctx, ui_raw, None
+        patch = turn_ctx.pop("profile_patch", None)
+        if patch and user_id:
+            _persist_profile_patch(user_id, patch)
+        turn_ctx["last_routing"] = _profile_routing_stub()
+        return reply, status, turn_ctx, ui_raw, None
     reply, status, session_ctx, ui_raw = lana_turn(
         user_block,
         purpose,
@@ -258,6 +273,19 @@ def _accepted_cohost_id(user_id: str, candidate_id: str | None) -> str | None:
     return None
 
 
+def _persist_profile_patch(user_id: str, patch: dict[str, str]) -> None:
+    from app.auth import service_client
+
+    row: dict[str, Any] = {}
+    if patch.get("nickname"):
+        row["nickname"] = patch["nickname"][:30]
+    if patch.get("full_name"):
+        row["full_name"] = patch["full_name"][:80]
+    if not row:
+        return
+    service_client().table("users").update(row).eq("id", user_id).execute()
+
+
 def _persist_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
     from app.auth import service_client
 
@@ -278,7 +306,7 @@ def _persist_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
                 "synonyms": c.synonyms,
                 "source_quote": c.source_quote,
                 "bucket": c.bucket,
-                "embedding": _embed(c.label, c.concept),
+                "embedding": _embed_claim(c),
             }
         )
     if rows:
@@ -366,6 +394,7 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_profile_opening(
                 user_block,
                 host_name=host_display_name(ctx_pack),
+                ctx_pack=ctx_pack,
             )
             session_ctx["last_routing"] = _profile_routing_stub()
             draft_raw = None
@@ -454,7 +483,7 @@ def send_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
         else:
-            _, user_block, purpose_ids = _load_lana_context_pack(
+            ctx_pack, user_block, purpose_ids = _load_lana_context_pack(
                 user_id, purpose, timer=timer
             )
             reply, status, session_ctx, ui_raw, draft_raw = _legacy_lana_turn(
@@ -465,6 +494,9 @@ def send_lana_message(
                 user_message=body.message,
                 prev_draft=prev_draft,
                 timer=timer,
+                user_id=user_id,
+                ctx_pack=ctx_pack,
+                session_ctx=session.get("context") or {},
             )
             timing_ms = timer.to_dict()
 
