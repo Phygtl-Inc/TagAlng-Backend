@@ -14,6 +14,21 @@ class LanaTurnUi(BaseModel):
     highlights: list[HighlightSpan] = Field(default_factory=list)
 
 
+class JointMomentCandidate(BaseModel):
+    user_id: str | None = None
+    nickname: str | None = None
+    avatar_url: str | None = None
+
+
+class JointMomentPayload(BaseModel):
+    joint_moment_id: str | None = None
+    status: str | None = None
+    candidate: JointMomentCandidate | None = None
+    lana_copy: str | None = None
+    match_reason: str | None = None
+    is_demo: bool = False
+
+
 class MappedSpan(BaseModel):
     text: str
     bucket: str = "general"
@@ -46,6 +61,12 @@ class CreateSessionResponse(BaseModel):
     event_draft: EventDraft | None = None
     orchestrator: bool = False
     timing_ms: dict[str, int] | None = None
+    is_anonymous: bool = False
+    phone_verified: bool = False
+    home_block_assigned: bool = False
+    onboarding_step: str | None = None
+    requires_phone_verification: bool = False
+    joint_moment: JointMomentPayload | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -71,6 +92,11 @@ class SendMessageResponse(BaseModel):
     routing: TurnRouting | None = None
     orchestrator: bool = False
     timing_ms: dict[str, int] | None = None
+    onboarding_step: str | None = None
+    requires_phone_verification: bool = False
+    joint_moment: JointMomentPayload | None = None
+    phone_verified: bool = False
+    home_block_assigned: bool = False
 
 
 class CompleteSessionRequest(BaseModel):

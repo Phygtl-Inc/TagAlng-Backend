@@ -143,6 +143,24 @@ def needs_kids_followup(
 
 def format_profile_intake_context(ctx: dict[str, Any]) -> str:
     lines = ["HOST CONTEXT (minimal — profile intake only):"]
+    guest_step = str(ctx.get("guest_step") or "")
+    if ctx.get("guest_intake"):
+        if guest_step == "post_verify":
+            lines.append(
+                "- Guest intake (phone verified): collect remaining profile details "
+                "(kids ages, interests). Do not ask for phone. Intro to neighbor is queued."
+            )
+        elif guest_step == "intro_declined":
+            lines.append(
+                "- Guest intake: user skipped neighbor intro — finish heritage, interests, "
+                "and display name. Do not ask for phone."
+            )
+        else:
+            lines.append(
+                "- Guest intake (anonymous): ask life stage and heritage first — "
+                "one question per turn. Do not ask for phone, block, or display name yet "
+                "(joint-moment intro handles name after they accept)."
+            )
     gaps = profile_intake_gaps(ctx)
     name = host_display_name(ctx)
     if name:
@@ -156,7 +174,40 @@ def format_profile_intake_context(ctx: dict[str, Any]) -> str:
         lines.append(f"- Block: {ctx['block_display_name']}")
     elif ctx.get("home_block_id"):
         lines.append("- Block: assigned")
+    elif ctx.get("guest_intake"):
+        lines.append("- Block: not assigned yet (normal for guest — do not ask)")
     return "\n".join(lines)
+
+
+GUEST_PROFILE_OPENING = (
+    "So — who are you, right now? "
+    "Tell me your life stage and what you're hoping to find on the block."
+)
+
+
+def lana_profile_guest_opening() -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    """Instant opening for anonymous Meet-Lana flow (no LLM call)."""
+    ui: dict[str, Any] = {
+        "bucket": "stage",
+        "focus_phrase": None,
+        "highlights": [],
+    }
+    ctx: dict[str, Any] = {
+        "topics_covered": [],
+        "topics_to_explore": ["heritage", "stage"],
+        "last_status": "continue",
+        "last_ui": ui,
+        "guest_intake": True,
+        "guest_step": "early_chat",
+        "last_routing": {
+            "outcome": "R",
+            "intent_class": "identity",
+            "confidence": 1.0,
+            "tool_to_call": None,
+            "guest_fast_opening": True,
+        },
+    }
+    return GUEST_PROFILE_OPENING, "continue", ctx, ui
 
 
 def assistant_message_looks_truncated(msg: str) -> bool:
@@ -224,8 +275,13 @@ def apply_profile_stop_rules(
     profile_gaps: dict[str, bool] | None = None,
     display_name_saved: bool = False,
     profile_patch: dict[str, str] | None = None,
+    guest_step: str | None = None,
 ) -> tuple[str, str]:
     """Code enforcement: short intake, with optional name + mom/kids beats."""
+    if guest_step and guest_step not in ("post_verify", "intro_declined"):
+        if status == "ready_to_complete":
+            status = "continue"
+        return assistant_message, status
     user_turns = count_user_turns(history)
     buckets = collect_profile_buckets(history=history, ui=ui, topics_covered=topics_covered)
     has_heritage = bool(buckets & HERITAGE_SIGNALS) or any(
@@ -291,6 +347,7 @@ def _parse_profile_turn(
     history: list[dict[str, Any]],
     profile_gaps: dict[str, bool] | None = None,
     display_name_saved: bool = False,
+    guest_step: str | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
     if not isinstance(data, dict):
         raise ValueError("invalid_turn_json")
@@ -325,6 +382,7 @@ def _parse_profile_turn(
         profile_gaps=profile_gaps,
         display_name_saved=display_name_saved,
         profile_patch=profile_patch,
+        guest_step=guest_step,
     )
     ctx: dict[str, Any] = {
         "topics_covered": covered,
@@ -452,9 +510,11 @@ def lana_profile_turn(
         data = _call_profile_lana(payload)
     gaps = profile_intake_gaps(ctx_pack or {})
     saved = bool((session_ctx or {}).get("display_name_saved"))
+    guest_step = str((session_ctx or {}).get("guest_step") or "") or None
     return _parse_profile_turn(
         data,
         history=history,
         profile_gaps=gaps,
         display_name_saved=saved,
+        guest_step=guest_step,
     )

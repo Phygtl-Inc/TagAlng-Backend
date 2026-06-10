@@ -4,7 +4,13 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.auth import require_home_block, service_client, verify_jwt
+from app.auth import (
+    AuthSession,
+    require_home_block_for_purpose,
+    service_client,
+    verify_auth,
+    verify_jwt,
+)
 from app.context import (
     format_event_draft_context,
     format_user_context,
@@ -29,11 +35,13 @@ from app.lana_paths import (
 )
 from app.profile_intake import (
     format_profile_intake_context,
+    lana_profile_guest_opening,
     lana_profile_opening,
     lana_profile_turn,
 )
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
+from app.guest_intake import lana_profile_guest_turn
 from app.models import (
     CompleteSessionRequest,
     CompleteSessionResponse,
@@ -42,6 +50,8 @@ from app.models import (
     EventDraft,
     ExtractedClaim,
     HighlightSpan,
+    JointMomentCandidate,
+    JointMomentPayload,
     LanaTurnUi,
     SendMessageRequest,
     SendMessageResponse,
@@ -60,7 +70,7 @@ from app.claim_embed import claim_embedding_text
 from app.vertex_extract import vertex_embed, vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
-app = FastAPI(title="TagAlng lana-worker", version="0.5.2")
+app = FastAPI(title="TagAlng lana-worker", version="0.5.3")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -185,6 +195,9 @@ def _legacy_lana_turn(
     user_id: str | None = None,
     ctx_pack: dict[str, Any] | None = None,
     session_ctx: dict[str, Any] | None = None,
+    session_id: str | None = None,
+    user_jwt: str | None = None,
+    auth: AuthSession | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     if purpose == "event_draft":
         reply, status, session_ctx, ui_raw, draft_raw = lana_event_turn(
@@ -198,14 +211,27 @@ def _legacy_lana_turn(
         session_ctx["last_routing"] = _event_routing_stub()
         return reply, status, session_ctx, ui_raw, draft_raw
     if purpose == "profile_intake":
-        reply, status, turn_ctx, ui_raw = lana_profile_turn(
-            user_block,
-            history,
-            user_message,
-            ctx_pack=ctx_pack,
-            session_ctx=session_ctx,
-            timer=timer,
-        )
+        if auth and auth.is_anonymous and session_id and user_jwt:
+            reply, status, turn_ctx, ui_raw, _jm = lana_profile_guest_turn(
+                user_block=user_block,
+                history=history,
+                user_message=user_message,
+                session_ctx=session_ctx or {},
+                session_id=session_id,
+                user_jwt=user_jwt,
+                phone_verified=auth.phone_verified,
+                ctx_pack=ctx_pack,
+                timer=timer,
+            )
+        else:
+            reply, status, turn_ctx, ui_raw = lana_profile_turn(
+                user_block,
+                history,
+                user_message,
+                ctx_pack=ctx_pack,
+                session_ctx=session_ctx,
+                timer=timer,
+            )
         patch = turn_ctx.pop("profile_patch", None)
         if patch and user_id:
             _persist_profile_patch(user_id, patch)
@@ -250,6 +276,38 @@ def _draft_from_dict(raw: dict[str, Any] | None) -> EventDraft | None:
     if not raw:
         return None
     return EventDraft(**raw)
+
+
+def _joint_moment_from_dict(raw: dict[str, Any] | None) -> JointMomentPayload | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    card = raw.get("candidate") if isinstance(raw.get("candidate"), dict) else {}
+    return JointMomentPayload(
+        joint_moment_id=str(raw.get("joint_moment_id") or "") or None,
+        status=str(raw.get("status") or "") or None,
+        candidate=JointMomentCandidate(
+            user_id=str(card.get("user_id") or "") or None,
+            nickname=str(card.get("nickname") or "") or None,
+            avatar_url=str(card.get("avatar_url") or "") or None,
+        ),
+        lana_copy=str(raw.get("lana_copy") or "") or None,
+        match_reason=str(raw.get("match_reason") or "") or None,
+        is_demo=bool(raw.get("is_demo")),
+    )
+
+
+def _onboarding_fields(
+    ctx: dict[str, Any],
+    auth: AuthSession,
+) -> dict[str, Any]:
+    jm = _joint_moment_from_dict(ctx.get("joint_moment"))
+    return {
+        "onboarding_step": ctx.get("guest_step"),
+        "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
+        "joint_moment": jm,
+        "phone_verified": auth.phone_verified,
+        "home_block_assigned": bool(auth.home_block_id),
+    }
 
 
 def _accepted_cohost_id(user_id: str, candidate_id: str | None) -> str | None:
@@ -323,7 +381,7 @@ def _bearer_token(authorization: str | None) -> str:
 def root():
     return {
         "service": "tagalng-lana-worker",
-        "version": "0.5.2",
+        "version": "0.5.3",
         "orchestrator": _use_orchestrator(),
         "endpoints": {
             "health": "GET /health",
@@ -361,36 +419,53 @@ def health():
     }
 
 
+def _profile_context_pack(
+    auth: AuthSession,
+    purpose: str,
+    session_ctx: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str, list[str]]:
+    ctx_pack, user_block, purpose_ids = _load_lana_context_pack(auth.user_id, purpose)
+    if auth.is_anonymous:
+        ctx_pack = {**ctx_pack, "guest_intake": True}
+        if session_ctx and session_ctx.get("guest_step"):
+            ctx_pack["guest_step"] = session_ctx["guest_step"]
+        user_block = format_profile_intake_context(ctx_pack)
+    return ctx_pack, user_block, purpose_ids
+
+
 @app.post("/lana/sessions", response_model=CreateSessionResponse)
 def create_lana_session(
     body: CreateSessionRequest,
     authorization: str | None = Header(default=None),
 ):
     _vertex_required()
-    user_id = verify_jwt(authorization)
-    require_home_block(user_id)
+    auth = verify_auth(authorization)
+    require_home_block_for_purpose(auth, body.purpose)
 
     purpose = body.purpose
     try:
-        session = create_session(user_id, purpose)
+        session = create_session(auth.user_id, purpose)
         session_id = str(session["id"])
         use_orch = use_orchestrator_for_purpose(purpose)
         if use_orch:
             opening, status, session_ctx, ui_raw, draft_raw = run_opening(
-                user_id=user_id,
+                user_id=auth.user_id,
                 purpose=purpose,
                 session_id=session_id,
             )
         elif purpose == "event_draft":
-            ctx_pack, user_block, purpose_ids = _load_lana_context_pack(user_id, purpose)
+            ctx_pack, user_block, purpose_ids = _load_lana_context_pack(auth.user_id, purpose)
             opening, status, session_ctx, ui_raw, draft_raw = lana_event_opening(
                 user_block,
                 purpose_ids,
                 host_name=host_display_name(ctx_pack),
             )
             session_ctx["last_routing"] = _event_routing_stub()
+        elif purpose == "profile_intake" and auth.is_anonymous:
+            opening, status, session_ctx, ui_raw = lana_profile_guest_opening()
+            draft_raw = None
         elif purpose == "profile_intake":
-            ctx_pack, user_block, _ = _load_lana_context_pack(user_id, purpose)
+            ctx_pack, user_block, _ = _profile_context_pack(auth, purpose, {})
             opening, status, session_ctx, ui_raw = lana_profile_opening(
                 user_block,
                 host_name=host_display_name(ctx_pack),
@@ -399,7 +474,7 @@ def create_lana_session(
             session_ctx["last_routing"] = _profile_routing_stub()
             draft_raw = None
         else:
-            _, user_block, _ = _load_lana_context_pack(user_id, purpose)
+            _, user_block, _ = _load_lana_context_pack(auth.user_id, purpose)
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
@@ -425,6 +500,7 @@ def create_lana_session(
             detail=_vertex_error_detail("lana_session_failed", exc),
         ) from exc
 
+    ob = _onboarding_fields(merged_ctx, auth)
     return CreateSessionResponse(
         session_id=session_id,
         purpose=purpose,
@@ -434,6 +510,8 @@ def create_lana_session(
         ui=ui,
         event_draft=event_draft,
         orchestrator=use_orch,
+        is_anonymous=auth.is_anonymous,
+        **ob,
     )
 
 
@@ -446,15 +524,15 @@ def send_lana_message(
 ):
     _vertex_required()
     timer = TurnTimer()
-    user_id = verify_jwt(authorization)
-    require_home_block(user_id)
+    auth = verify_auth(authorization)
 
     with timer.stage("db_load_session"):
-        session = get_session_for_user(session_id, user_id)
+        session = get_session_for_user(session_id, auth.user_id)
     if session.get("status") != "active":
         raise HTTPException(status_code=400, detail="session_not_active")
 
     purpose = str(session.get("purpose", "profile_intake"))
+    require_home_block_for_purpose(auth, purpose)
     with timer.stage("db_save_user_message"):
         user_msg_id = insert_message(session_id, "user", body.message.strip(), {}, embed=False)
     with timer.stage("db_list_messages"):
@@ -471,7 +549,7 @@ def send_lana_message(
         user_jwt = _bearer_token(authorization)
         if use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(
-                user_id=user_id,
+                user_id=auth.user_id,
                 session_id=session_id,
                 purpose=purpose,
                 history=history,
@@ -483,9 +561,15 @@ def send_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
         else:
-            ctx_pack, user_block, purpose_ids = _load_lana_context_pack(
-                user_id, purpose, timer=timer
-            )
+            if purpose == "profile_intake":
+                ctx_pack, user_block, purpose_ids = _profile_context_pack(
+                    auth, purpose, session.get("context") or {}
+                )
+            else:
+                require_home_block_for_purpose(auth, purpose)
+                ctx_pack, user_block, purpose_ids = _load_lana_context_pack(
+                    auth.user_id, purpose, timer=timer
+                )
             reply, status, session_ctx, ui_raw, draft_raw = _legacy_lana_turn(
                 purpose=purpose,
                 user_block=user_block,
@@ -494,9 +578,12 @@ def send_lana_message(
                 user_message=body.message,
                 prev_draft=prev_draft,
                 timer=timer,
-                user_id=user_id,
+                user_id=auth.user_id,
                 ctx_pack=ctx_pack,
                 session_ctx=session.get("context") or {},
+                session_id=session_id,
+                user_jwt=user_jwt,
+                auth=auth,
             )
             timing_ms = timer.to_dict()
 
@@ -539,6 +626,7 @@ def send_lana_message(
         timing_ms = dict(timer.ms)
     timing_ms["total_ms"] = _timing_total_ms(timing_ms)
 
+    ob = _onboarding_fields(merged, auth)
     return SendMessageResponse(
         session_id=session_id,
         status=status,
@@ -550,6 +638,7 @@ def send_lana_message(
         routing=_routing_from_ctx(merged),
         orchestrator=use_orch,
         timing_ms=timing_ms,
+        **ob,
     )
 
 
@@ -560,17 +649,17 @@ def complete_lana_session(
     authorization: str | None = Header(default=None),
 ):
     _vertex_required()
-    user_id = verify_jwt(authorization)
+    auth = verify_auth(authorization)
     user_jwt = _bearer_token(authorization)
-    require_home_block(user_id)
 
-    session = get_session_for_user(session_id, user_id)
+    session = get_session_for_user(session_id, auth.user_id)
     if session.get("status") == "completed":
         raise HTTPException(status_code=400, detail="session_already_completed")
     if session.get("status") != "active":
         raise HTTPException(status_code=400, detail="session_not_active")
 
     purpose = str(session.get("purpose", "profile_intake"))
+    require_home_block_for_purpose(auth, purpose)
     messages = list_messages(session_id)
     user_turns = [m for m in messages if m.get("role") == "user"]
     if not user_turns and not body.force:
@@ -589,7 +678,7 @@ def complete_lana_session(
     if purpose == "event_draft":
         return _complete_event_draft(
             session_id=session_id,
-            user_id=user_id,
+            user_id=auth.user_id,
             user_jwt=user_jwt,
             transcript=transcript,
             sess_ctx=sess_ctx,
@@ -609,7 +698,7 @@ def complete_lana_session(
             detail=_vertex_error_detail("lana_extract_failed", exc),
         ) from exc
 
-    _persist_claims(user_id, claims)
+    _persist_claims(auth.user_id, claims)
     final_ctx = {
         **sess_ctx,
         "last_status": "completed",
