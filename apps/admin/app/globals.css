@@ -1383,6 +1383,63 @@ a {
   font-size: 1.1rem;
 }
 
+.meet-lana-phone-flow {
+  gap: 0.5rem;
+}
+
+.meet-lana-user-echo {
+  align-self: flex-end;
+  max-width: 85%;
+  margin: 0.25rem 0;
+  padding: 0.65rem 0.9rem;
+  border-radius: 16px 16px 4px 16px;
+  background: linear-gradient(180deg, #ff8c42 0%, #e85d04 100%);
+  color: #fff;
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.meet-lana-phone-card {
+  width: 100%;
+}
+
+.meet-lana-phone-serif {
+  margin: 0 0 0.5rem;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 1.35rem;
+  color: #2c2419;
+}
+
+.meet-lana-phone-body {
+  margin: 0 0 0.75rem;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: #3d3429;
+  text-align: left;
+}
+
+.meet-lana-phone-fine {
+  margin: 0.5rem 0 0;
+  font-size: 0.68rem;
+  color: #9a8b7a;
+  text-align: left;
+}
+
+.meet-lana-composer--phone {
+  flex-wrap: wrap;
+}
+
+.meet-lana-send--wide {
+  flex: 1;
+  min-width: 120px;
+}
+
+.meet-lana-tap-hint {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+}
+
 @keyframes lana-pulse {
   0%,
   100% {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.guest_capabilities import handle_guest_capability
 from app.profile_intake import collect_profile_buckets, lana_profile_turn
 from app.supabase_rpc import call_rpc
 
@@ -17,7 +18,18 @@ GUEST_STEP_DECLINED = "intro_declined"
 
 _HERITAGE_RE = re.compile(
     r"\b(latino|latina|latinx|hispanic|brazil(?:ian)?|mexican|puerto\s*rican|"
-    r"cuban|colombian|heritage|from\s+\w+|roots?\s+in)\b",
+    r"cuban|colombian|pakistan\w*|indian\w*|bangladesh\w*|korean\w*|chinese\w*|"
+    r"vietnamese\w*|filipin\w*|arab\w*|heritage|from\s+\w+|roots?\s+in)\b",
+    re.I,
+)
+_VICINITY_RE = re.compile(
+    r"\b(new here|new to|just moved|moved here|on the block|this block|neighborhood|"
+    r"lake nona)\b",
+    re.I,
+)
+_NAME_ASK_RE = re.compile(
+    r"what (?:name |should neighbors call|do neighbors call)|"
+    r"what should .+ call you|neighbors (?:use|call)",
     re.I,
 )
 _STAGE_RE = re.compile(
@@ -78,13 +90,52 @@ def _user_text(history: list[dict[str, Any]], extra: str = "") -> str:
 def has_joint_moment_signals(history: list[dict[str, Any]], user_message: str) -> bool:
     text = _user_text(history, user_message)
     has_heritage = bool(_HERITAGE_RE.search(text))
-    has_thread = bool(_STAGE_RE.search(text)) or bool(_INTEREST_RE.search(text))
+    has_thread = (
+        bool(_STAGE_RE.search(text))
+        or bool(_INTEREST_RE.search(text))
+        or bool(_VICINITY_RE.search(text))
+    )
     buckets = collect_profile_buckets(history=history, ui={}, topics_covered=[])
     if "heritage" in buckets:
         has_heritage = True
     if buckets & {"stage", "interest", "activity", "vicinity"}:
         has_thread = True
     return has_heritage and has_thread
+
+
+def known_intro_name(
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]],
+    ctx_pack: dict[str, Any] | None = None,
+) -> str | None:
+    stored = str(session_ctx.get("intro_name") or "").strip()
+    if stored:
+        return stored[:30]
+    patch = session_ctx.get("profile_patch")
+    if isinstance(patch, dict):
+        nick = str(patch.get("nickname") or "").strip()
+        if nick:
+            return nick[:30]
+    if ctx_pack:
+        nick = str(ctx_pack.get("nickname") or "").strip()
+        if nick:
+            return nick[:30]
+    for msg in reversed(history):
+        if msg.get("role") != "user":
+            continue
+        name = extract_intro_name(str(msg.get("content") or ""))
+        if name:
+            return name
+    return None
+
+
+def _scrub_early_name_ask(reply: str) -> str:
+    if not _NAME_ASK_RE.search(reply):
+        return reply
+    return (
+        "Got it — tell me a bit more about your background "
+        "and what you're hoping to find on the block."
+    )
 
 
 def _candidate_nickname(jm: dict[str, Any]) -> str:
@@ -168,6 +219,7 @@ def lana_profile_guest_turn(
     session_id: str,
     user_jwt: str,
     phone_verified: bool,
+    home_block_id: str | None = None,
     ctx_pack: dict[str, Any] | None = None,
     timer: Any | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
@@ -182,8 +234,21 @@ def lana_profile_guest_turn(
         nick = _candidate_nickname(joint_moment or {})
         if choice is True:
             accept_joint_moment(user_jwt, str(jm_id))
-            reply = f"Love it! What should {nick} call you when I introduce you?"
-            ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_INTRO_NAME)
+            existing = known_intro_name(session_ctx, history, ctx_pack)
+            if existing:
+                reply = (
+                    f"Perfect, {existing}! Before I introduce you to {nick}, "
+                    "verify your phone — use the button below to enter your number."
+                )
+                ctx = _merge_guest_ctx(
+                    session_ctx,
+                    guest_step=GUEST_STEP_PHONE,
+                    intro_name=existing,
+                    requires_phone=True,
+                )
+            else:
+                reply = f"Love it! What should {nick} call you when I introduce you?"
+                ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_INTRO_NAME)
             return reply, "continue", ctx, _ui_joint_moment(), joint_moment
         if choice is False:
             decline_joint_moment(user_jwt, str(jm_id))
@@ -240,6 +305,27 @@ def lana_profile_guest_turn(
         )
         return reply, "continue", ctx, _ui_joint_moment(), joint_moment
 
+    # --- peer find / host: only after phone verify (post_verify), not during signup ---
+    if step == GUEST_STEP_POST_VERIFY and phone_verified:
+        cap = handle_guest_capability(
+            user_message,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            user_jwt=user_jwt,
+            guest_step=step,
+        )
+    else:
+        cap = None
+    if cap is not None:
+        reply, cap_ctx = cap
+        ctx = _merge_guest_ctx(
+            session_ctx,
+            guest_step=str(cap_ctx.get("guest_step") or step),
+            requires_phone=bool(cap_ctx.get("requires_phone_verification")),
+        )
+        ctx.update({k: v for k, v in cap_ctx.items() if k not in ("guest_step",)})
+        return reply, "continue", ctx, _ui_joint_moment(), joint_moment
+
     # --- early_chat: offer joint moment when signals are strong enough ---
     if step in (GUEST_STEP_EARLY, GUEST_STEP_DECLINED) and not jm_id:
         if has_joint_moment_signals(history, user_message):
@@ -270,6 +356,13 @@ def lana_profile_guest_turn(
         turn_ctx["requires_phone_verification"] = False
     elif step == GUEST_STEP_PHONE:
         turn_ctx["requires_phone_verification"] = True
+
+    if step == GUEST_STEP_EARLY:
+        reply = _scrub_early_name_ask(reply)
+        patch = turn_ctx.get("profile_patch")
+        if isinstance(patch, dict) and patch.get("nickname"):
+            turn_ctx["intro_name"] = patch["nickname"]
+            turn_ctx["display_name_saved"] = True
 
     if step in (GUEST_STEP_EARLY, GUEST_STEP_POST_VERIFY, GUEST_STEP_DECLINED):
         if status == "ready_to_complete" and step != GUEST_STEP_POST_VERIFY:

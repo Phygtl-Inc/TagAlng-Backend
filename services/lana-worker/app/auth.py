@@ -41,7 +41,7 @@ def verify_auth(authorization: str | None) -> AuthSession:
     return AuthSession(
         user_id=str(user_id),
         is_anonymous=bool(user.get("is_anonymous")),
-        phone_verified=bool(profile.get("phone_verified_at")),
+        phone_verified=_resolve_phone_verified(str(user_id), user, profile),
         home_block_id=profile.get("home_block_id"),
     )
 
@@ -80,6 +80,24 @@ def service_client():
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
+def _resolve_phone_verified(user_id: str, user: dict, profile: dict) -> bool:
+    """Auth confirm time is source of truth; public.users may lag the sync trigger."""
+    if profile.get("phone_verified_at"):
+        return True
+    confirmed = user.get("phone_confirmed_at")
+    if confirmed and not user.get("is_anonymous"):
+        if SUPABASE_SERVICE_ROLE_KEY and not profile.get("phone_verified_at"):
+            try:
+                sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                sb.table("users").update({"phone_verified_at": confirmed}).eq(
+                    "id", user_id
+                ).execute()
+            except Exception:
+                pass
+        return True
+    return False
 
 
 def _load_user_profile(user_id: str) -> dict:

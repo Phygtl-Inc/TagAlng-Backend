@@ -20,6 +20,16 @@ class JointMomentCandidate(BaseModel):
     avatar_url: str | None = None
 
 
+class PeerMatchRow(BaseModel):
+    peer_user_id: str | None = None
+    nickname: str | None = None
+    avatar_url: str | None = None
+    similarity_score: float | None = None
+    matching_peer_label: str | None = None
+    matching_peer_concept: str | None = None
+    has_exact_concept_match: bool = False
+
+
 class JointMomentPayload(BaseModel):
     joint_moment_id: str | None = None
     status: str | None = None
@@ -67,6 +77,7 @@ class CreateSessionResponse(BaseModel):
     onboarding_step: str | None = None
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
+    peer_matches: list[PeerMatchRow] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):
@@ -97,6 +108,7 @@ class SendMessageResponse(BaseModel):
     joint_moment: JointMomentPayload | None = None
     phone_verified: bool = False
     home_block_assigned: bool = False
+    peer_matches: list[PeerMatchRow] = Field(default_factory=list)
 
 
 class CompleteSessionRequest(BaseModel):

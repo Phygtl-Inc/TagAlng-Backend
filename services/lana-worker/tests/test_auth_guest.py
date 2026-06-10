@@ -75,6 +75,38 @@ class VerifyAuthTests(unittest.TestCase):
         self.assertFalse(auth.phone_verified)
         self.assertIsNone(auth.home_block_id)
 
+    @patch("app.auth.create_client")
+    @patch("app.auth.httpx.Client")
+    def test_phone_verified_from_auth_confirmed_at(self, mock_client_cls, mock_create_client) -> None:
+        mock_http = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value = mock_http
+        mock_http.get.return_value.status_code = 200
+        mock_http.get.return_value.json.return_value = {
+            "id": "user-uuid",
+            "is_anonymous": False,
+            "phone_confirmed_at": "2026-06-10T12:00:00Z",
+        }
+
+        mock_sb = MagicMock()
+        mock_create_client.return_value = mock_sb
+        mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [
+            {"home_block_id": None, "phone_verified_at": None}
+        ]
+        update_chain = mock_sb.table.return_value.update.return_value.eq.return_value
+
+        with patch.dict(
+            "app.auth.os.environ",
+            {
+                "SUPABASE_URL": "https://example.supabase.co",
+                "SUPABASE_ANON_KEY": "anon-key",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-key",
+            },
+        ):
+            auth = verify_auth("Bearer test-jwt")
+
+        self.assertTrue(auth.phone_verified)
+        update_chain.execute.assert_called_once()
+
 
 class GuestOpeningTests(unittest.TestCase):
     def test_guest_opening_is_instant_and_on_script(self) -> None:

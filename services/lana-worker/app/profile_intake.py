@@ -163,12 +163,23 @@ def format_profile_intake_context(ctx: dict[str, Any]) -> str:
             )
     gaps = profile_intake_gaps(ctx)
     name = host_display_name(ctx)
+    defer_name = ctx.get("guest_intake") and guest_step in (
+        "early_chat",
+        "offered_intro",
+        "awaiting_intro_name",
+        "",
+    )
     if name:
         lines.append(f"- Neighbor name (use in greeting): {name}")
-    elif gaps["needs_display_name"]:
+    elif gaps["needs_display_name"] and not defer_name:
         lines.append(
             "- Display name: MISSING — after heritage/interests, ask indirectly "
             'what neighbors should call them; save in profile_patch.nickname'
+        )
+    elif defer_name:
+        lines.append(
+            "- Display name: defer — joint-moment intro will collect name after they accept; "
+            "do NOT ask what neighbors should call them in this phase"
         )
     if ctx.get("block_display_name"):
         lines.append(f"- Block: {ctx['block_display_name']}")
