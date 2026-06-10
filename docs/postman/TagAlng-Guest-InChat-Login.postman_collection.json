@@ -1,0 +1,311 @@
+{
+  "info": {
+    "_postman_id": "tagalng-guest-inchat-login",
+    "name": "TagAlng — Guest in-chat login (Lana → phone → OTP → sms)",
+    "description": "Test **returning-user login inside Lana chat** after Meet Lana (anonymous).\n\n**Environment:** `TagAlng — tagalng-dev` · set `anon_key`\n\n**Prerequisites:** Anonymous sign-ins ON · lana-worker `00034+` deployed · an **existing** account on `login_phone` (default `+15550000000`, OTP `000000`)\n\n**Run 1 → 9 in order.**\n\n| Step | What |\n|------|------|\n| 1–2 | Anonymous + Lana session |\n| 3–4 | Chat: log in → phone |\n| 5 | `POST /auth/v1/otp` (send SMS — when `requires_login_otp`) |\n| 6 | Chat: type OTP → Lana returns `login_otp_token` |\n| 7 | `POST /auth/v1/verify` **`type: sms`** (login — NOT phone_change) |\n| 8–9 | Profile check + prove guest Lana session is abandoned |\n\nSee `docs/LANA_GUEST_SIGNUP_FRONTEND.md` · In-chat login section.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Phase 1 — Meet Lana (anonymous)",
+      "item": [
+        {
+          "name": "1. Anonymous sign-in",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "function jwtSub(t) {",
+                "  const p = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));",
+                "  return p.sub;",
+                "}",
+                "if (j.access_token) {",
+                "  pm.environment.set('access_token', j.access_token);",
+                "  pm.environment.set('guest_user_id', jwtSub(j.access_token));",
+                "}",
+                "if (j.refresh_token) pm.environment.set('refresh_token', j.refresh_token);",
+                "pm.test('anonymous', () => pm.expect(j.user.is_anonymous).to.eql(true));"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{supabase_url}}/auth/v1/signup"
+          }
+        },
+        {
+          "name": "2. Start Lana session",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "if (j.session_id) pm.environment.set('lana_session_id', j.session_id);",
+                "pm.test('guest session', () => {",
+                "  pm.expect(j.is_anonymous).to.eql(true);",
+                "  pm.expect(j.onboarding_step).to.eql('early_chat');",
+                "});",
+                "pm.test('opening mentions log in', () => {",
+                "  pm.expect(j.assistant_message.toLowerCase()).to.include('log in');",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"purpose\": \"profile_intake\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Phase 2 — In-chat login (Lana chat)",
+      "item": [
+        {
+          "name": "3. Lana — I want to log in",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "pm.test('login intent', () => {",
+                "  pm.expect(j.auth_intent).to.eql('login');",
+                "  pm.expect(j.onboarding_step).to.eql('await_login_phone');",
+                "});",
+                "pm.test('asks for phone', () => {",
+                "  pm.expect(j.assistant_message.toLowerCase()).to.include('phone');",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{guest_message_login}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "4. Lana — provide phone number",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "if (j.login_phone) pm.environment.set('login_phone', j.login_phone);",
+                "pm.test('await OTP in chat', () => {",
+                "  pm.expect(j.auth_intent).to.eql('login');",
+                "  pm.expect(j.onboarding_step).to.eql('await_login_otp');",
+                "  pm.expect(j.requires_login_otp).to.eql(true);",
+                "});",
+                "pm.test('login_phone set', () => {",
+                "  pm.expect(j.login_phone).to.be.a('string').and.not.empty;",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{login_phone}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "5. Send OTP (signInWithOtp — existing account)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('OTP sent', () => pm.response.to.have.status(200));"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{login_phone}}\",\n  \"create_user\": false\n}"
+            },
+            "url": "{{supabase_url}}/auth/v1/otp",
+            "description": "FE calls this when Lana sets `requires_login_otp: true` (after step 4). Uses `login_phone` for an **existing** account."
+          }
+        },
+        {
+          "name": "6. Lana — enter OTP in chat",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "pm.test('OTP token for FE verify', () => {",
+                "  pm.expect(j.login_otp_token).to.eql(pm.environment.get('test_otp'));",
+                "  pm.expect(j.auth_intent).to.eql('login');",
+                "});",
+                "pm.test('signing in message', () => {",
+                "  pm.expect(j.assistant_message.toLowerCase()).to.include('signing');",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{test_otp}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages",
+            "description": "User types OTP in chat. Response includes `login_otp_token` — FE calls verifyOtp(sms) with this value."
+          }
+        },
+        {
+          "name": "7. Verify OTP (type sms — login, saves access_token)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "function jwtSub(t) {",
+                "  const p = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));",
+                "  return p.sub;",
+                "}",
+                "if (j.access_token) {",
+                "  pm.environment.set('logged_in_access_token', j.access_token);",
+                "  pm.environment.set('access_token', j.access_token);",
+                "}",
+                "if (j.refresh_token) pm.environment.set('refresh_token', j.refresh_token);",
+                "const guestId = pm.environment.get('guest_user_id');",
+                "const loggedInId = jwtSub(j.access_token);",
+                "pm.environment.set('logged_in_user_id', loggedInId);",
+                "pm.test('logged in', () => pm.expect(j.access_token).to.be.a('string').and.not.empty);",
+                "pm.test('NOT anonymous', () => pm.expect(j.user.is_anonymous).to.eql(false));",
+                "pm.test('different user_id than guest (abandon guest Lana session)', () => {",
+                "  pm.expect(loggedInId).to.not.eql(guestId);",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{login_phone}}\",\n  \"token\": \"{{test_otp}}\",\n  \"type\": \"sms\"\n}"
+            },
+            "url": "{{supabase_url}}/auth/v1/verify",
+            "description": "CRITICAL: `type` must be **sms** for login. `phone_change` is guest signup only."
+          }
+        }
+      ],
+      "description": "Steps 5–7: Supabase OTP. In the app, call step 5 when `requires_login_otp` is true, then step 6 when user types the code."
+    },
+    {
+      "name": "Phase 4 — After login",
+      "item": [
+        {
+          "name": "8. get_my_profile (logged-in user)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const rows = pm.response.json();",
+                "pm.test('profile returned', () => pm.expect(rows.length).to.be.above(0));",
+                "if (rows[0] && rows[0].id) {",
+                "  pm.test('profile matches logged-in user', () => {",
+                "    pm.expect(rows[0].id).to.eql(pm.environment.get('logged_in_user_id'));",
+                "  });",
+                "}"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{logged_in_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{supabase_url}}/rest/v1/rpc/get_my_profile"
+          }
+        },
+        {
+          "name": "9. Guest Lana session rejected (expect 401/403)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('cannot reuse guest session with logged-in token', () => {",
+                "  pm.expect(pm.response.code).to.be.oneOf([401, 403, 404]);",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{logged_in_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"hello\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages",
+            "description": "Proves FE must abandon anonymous `lana_session_id` after login and start fresh or go to app home."
+          }
+        },
+        {
+          "name": "Optional — match_peers (if block + claims)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{logged_in_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_limit\": 5,\n  \"p_min_similarity\": 0.55\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/match_peers_by_claim_vectors"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-# Lana · Tool Routing Doctrine · v1
+2# Lana · Tool Routing Doctrine · v1
 *The decision logic the LLM follows every single turn · written 2026-06-04*
 
 > **The core question this document answers**: Lana is listening (voice or text). The user just said something. Does the LLM (a) reply with words, (b) ask a clarifying question, (c) call a capability tool (publish_activity · find_exchange_match · propose_intro · etc), or (d) capture an out-of-scope signal? This document is the contract that trains that decision.

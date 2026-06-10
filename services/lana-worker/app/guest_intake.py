@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from app.guest_capabilities import handle_guest_capability
+from app.guest_login import GUEST_STEP_LOGIN_OTP, GUEST_STEP_LOGIN_PHONE, handle_guest_login
 from app.profile_intake import collect_profile_buckets, lana_profile_turn
 from app.supabase_rpc import call_rpc
 
@@ -304,6 +305,16 @@ def lana_profile_guest_turn(
             requires_phone=True,
         )
         return reply, "continue", ctx, _ui_joint_moment(), joint_moment
+
+    # --- in-chat login (returning user): early_chat → phone → OTP ---
+    login = handle_guest_login(
+        user_message,
+        step=step,
+        session_ctx=session_ctx,
+    )
+    if login is not None:
+        reply, login_ctx = login
+        return reply, "continue", login_ctx, _ui_joint_moment(), joint_moment
 
     # --- peer find / host: only after phone verify (post_verify), not during signup ---
     if step == GUEST_STEP_POST_VERIFY and phone_verified:

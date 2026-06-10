@@ -59,6 +59,11 @@ class TestLanaPaths(unittest.TestCase):
         self.assertFalse(use_orchestrator_for_purpose("profile_intake"))
         self.assertFalse(use_orchestrator_for_purpose("event_draft"))
 
+    def test_lana_skips_orchestrator(self) -> None:
+        os.environ["LANA_ORCHESTRATOR"] = "1"
+        os.environ["GCP_VERTEX_PROJECT"] = "test-project"
+        self.assertFalse(use_orchestrator_for_purpose("lana"))
+
 
 if __name__ == "__main__":
     unittest.main()

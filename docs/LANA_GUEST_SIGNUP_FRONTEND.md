@@ -13,7 +13,8 @@ This doc describes the **new Lana-first signup flow** (anonymous → in-chat pro
 | [`LANA_API.md`](./LANA_API.md) | Full Lana API (messages, complete, event draft) |
 | [`GUEST_PWA_HANDOFF.md`](./GUEST_PWA_HANDOFF.md) | Screen → API map + demo PWA (`/lana/meet`) |
 | [`FRONTEND_API.md`](./FRONTEND_API.md) | Returning-user OTP login (folder B) |
-| Postman `TagAlng-Guest-Onboarding-Full.postman_collection.json` | E2E guest flow (steps 1–13) |
+| Postman `TagAlng-Guest-Onboarding-Full.postman_collection.json` | E2E guest signup (steps 1–13) |
+| Postman `TagAlng-Guest-InChat-Login.postman_collection.json` | In-chat login (steps 1–9) |
 | Postman `TagAlng-Full-Flow.postman_collection.json` | Returning user + block + Lana |
 
 **Base URLs (dev)**
@@ -40,17 +41,21 @@ flowchart TD
     H --> I[send_joint_moment_intro]
   end
 
-  subgraph returning [Returning user — already has account]
-    R1[signInWithOtp] --> R2[verifyOtp type sms]
-    R2 --> R3[Existing user_id + session]
-    R3 --> R4[Lana / RPCs / events]
+  subgraph returning [Returning user — in-chat login]
+    L0[Meet Lana + anonymous] --> L1[User says log in]
+    L1 --> L2[Lana asks phone in chat]
+    L2 --> L3[FE signInWithOtp]
+    L3 --> L4[User enters OTP in chat]
+    L4 --> L5[FE verifyOtp type sms]
+    L5 --> L6[New access_token → app home]
   end
 ```
 
 | Path | When | Auth APIs |
 |------|------|-----------|
-| **Guest signup** | First time, “Meet Lana” | `signInAnonymously()` → later `updateUser({ phone })` → `verifyOtp({ type: 'phone_change' })` |
-| **Returning login** | Account already exists | `signInWithOtp({ phone })` → `verifyOtp({ type: 'sms' })` |
+| **Guest signup** | New user chats with Lana | `signInAnonymously()` → later `updateUser({ phone })` → `verifyOtp({ type: 'phone_change' })` |
+| **In-chat login** | User says “log in” at start of Lana chat | Lana collects phone → `signInWithOtp` → `verifyOtp({ type: 'sms' })` |
+| **Standalone login** (optional) | Separate login screen | Same as in-chat: `signInWithOtp` + `verifyOtp({ type: 'sms' })` |
 
 **Critical:** Guest signup must use `phone_change` so the **same `user_id`** is kept as the Lana session. Returning login must use `sms`. Mixing them breaks the session (`session_not_found` on Lana).
 
@@ -154,6 +159,8 @@ Read these fields on **every** message response:
 | `await_phone` | OTP required before intro | Navigate to **phone verification** screen |
 | `post_verify` | Phone done; finish kids/interests | Chat → Complete button |
 | `intro_declined` | User declined intro | Normal profile chat |
+| `await_login_phone` | In-chat login — need phone | Chat composer |
+| `await_login_otp` | In-chat login — need OTP | Chat + call Supabase OTP APIs (see below) |
 
 #### Example conversation
 
@@ -262,29 +269,106 @@ Returns `{ status: 'intro_sent', nudge_id: '...' }`.
 
 ---
 
-## Returning user login (account already exists)
+## In-chat login (returning user)
 
-Do **not** use anonymous signup. Use standard phone OTP login:
+User taps **Meet Lana** (anonymous) but can say **“log in”** / **“I already have an account”** in the first messages. Lana switches from signup to login **inside the same chat** — no separate login screen required (though you may still add one on the landing page).
+
+Lana opening now includes: *“Already have an account? Just say log in.”*
+
+### Conversation example
+
+| Turn | Who | Message |
+|------|-----|---------|
+| 0 | Lana | So — who are you… Already have an account? Just say log in. |
+| 1 | User | I want to log in |
+| 2 | Lana | Sure — what's the phone number on your account? |
+| 3 | User | +15550000000 |
+| 4 | Lana | Got it — I sent a 6-digit code to +15550000000. Enter it here when it arrives. |
+| — | **FE** | `signInWithOtp({ phone })` when `requires_login_otp` becomes true |
+| 5 | User | 000000 |
+| 6 | Lana | Perfect — signing you in now. One moment… |
+| — | **FE** | `verifyOtp({ type: 'sms' })` → navigate to app home |
+
+### Response fields (login)
+
+| Field | When set | FE action |
+|-------|----------|-----------|
+| `auth_intent` | `"login"` during login flow | Treat as login, not signup |
+| `onboarding_step` | `await_login_phone` | Show chat; user types phone |
+| `onboarding_step` | `await_login_otp` | User types OTP in chat |
+| `login_phone` | After phone captured | E.164 for Supabase calls |
+| `requires_login_otp` | `true` on OTP step | Call `signInWithOtp({ phone: login_phone })` once |
+| `login_otp_token` | User sent 6 digits in chat | Call `verifyOtp` immediately (see below) |
+
+### FE implementation (critical)
 
 ```ts
-await supabase.auth.signInWithOtp({ phone: '+15550000000' });
+async function onLanaTurn(turn: LanaGuestTurn) {
+  // 1. Phone captured → send OTP
+  if (turn.requires_login_otp && turn.login_phone && !otpSentForPhone) {
+    await supabase.auth.signInWithOtp({ phone: turn.login_phone });
+    otpSentForPhone = turn.login_phone;
+  }
 
-await supabase.auth.verifyOtp({
-  phone: '+15550000000',
-  token: '000000',
-  type: 'sms',  // login — NOT phone_change
-});
+  // 2. User typed OTP in chat → Lana echoes login_otp_token for you to verify
+  if (turn.auth_intent === 'login' && turn.login_otp_token && turn.login_phone) {
+    const { data, error } = await supabase.auth.verifyOtp({
+      phone: turn.login_phone,
+      token: turn.login_otp_token,
+      type: 'sms',  // LOGIN — never phone_change
+    });
+    if (error) { showError(error.message); return; }
+
+    const accessToken = data.session!.access_token;
+    // 3. Drop anonymous Lana session (wrong user_id) → app home
+    abandonGuestLanaSession();
+    routeAfterLogin(accessToken);
+  }
+}
 ```
 
-Postman: folder **B** in `TagAlng-Full-Flow.postman_collection.json`.
+**Why abandon the guest session?** Anonymous signup created a Lana `session_id` tied to the anonymous `user_id`. After `verifyOtp` with `type: sms`, you get the **existing account’s** `user_id`. Continuing the old `session_id` returns `session_not_found`.
 
-Then:
+After login:
 
-1. `get_my_profile` — check `home_block_id`, `phone_verified_at`
-2. `assign_home_block` if needed
-3. `POST /lana/sessions` with verified token — normal `profile_intake` or `event_draft` (not guest opening)
+```ts
+async function routeAfterLogin(accessToken: string) {
+  const { data } = await supabase.rpc('get_my_profile');
+  const row = data?.[0];
+  if (!row?.home_block_id) {
+    // assign_home_block flow
+  } else {
+    // Main app home (feed, peers, events)
+  }
+}
+```
 
-Returning users skip `onboarding_step` guest states unless they start a fresh guest session while anonymous.
+### Verify response (tokens)
+
+```json
+{
+  "access_token": "eyJ...",
+  "refresh_token": "...",
+  "user": { "id": "uuid", "is_anonymous": false }
+}
+```
+
+Use `supabase.auth.getSession()` on later app opens — the client persists the session.
+
+### Signup vs in-chat login
+
+| | **Signup (guest)** | **In-chat login** |
+|--|-------------------|-------------------|
+| Trigger | User describes themselves | User says “log in” |
+| Phone step | Mid-flow (`await_phone`) | `await_login_phone` |
+| Send OTP | `updateUser({ phone })` | `signInWithOtp({ phone })` |
+| Verify `type` | **`phone_change`** | **`sms`** |
+| After success | Same Lana session continues | **New** session / app home |
+| `auth_intent` | unset / signup | `"login"` |
+
+Postman (standalone login, same Supabase calls): folder **B** in `TagAlng-Full-Flow.postman_collection.json`.
+
+User can say **“never mind”** during login to return to signup (`early_chat`).
 
 ---
 
@@ -386,6 +470,12 @@ type LanaGuestTurn = {
   home_block_assigned?: boolean;
   peer_matches?: PeerMatchRow[];
 
+  // In-chat login
+  auth_intent?: 'login' | null;
+  login_phone?: string | null;
+  requires_login_otp?: boolean;
+  login_otp_token?: string | null;
+
   // Profile UI (same as signed-in intake)
   ui?: {
     bucket?: string;
@@ -425,8 +515,17 @@ NEXT_PUBLIC_LANA_WORKER_URL=https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app
 ## FE routing cheat sheet
 
 ```
+auth_intent === 'login' && onboarding_step === 'await_login_phone'
+  → Chat — user types phone number
+
+auth_intent === 'login' && requires_login_otp
+  → signInWithOtp(login_phone); user types OTP in chat
+
+login_otp_token present
+  → verifyOtp(sms) → abandon guest Lana session → app home
+
 onboarding_step === 'await_phone' OR requires_phone_verification
-  → PhoneVerifyScreen
+  → PhoneVerifyScreen (signup OTP — phone_change)
 
 onboarding_step === 'offered_intro' AND joint_moment
   → Chat + JointMomentCard (Yes/No)
@@ -457,7 +556,8 @@ Returning user (not anonymous)
 - [ ] `send_joint_moment_intro` with stored `joint_moment_id`
 - [ ] “Find people like me” **during** signup does not show peers
 - [ ] “Find people like me” **after** verify returns `peer_matches`
-- [ ] Returning user: `signInWithOtp` + `type: sms` logs into existing account
+- [ ] In-chat: “log in” → phone → OTP → `verifyOtp` sms → tokens + app home
+- [ ] After in-chat login, do **not** reuse anonymous `lana_session_id`
 
 **Postman:** Run `TagAlng-Guest-Onboarding-Full` steps 1–13 in order.  
 **Demo PWA:** `apps/admin` → `/lana/meet` (see [`GUEST_PWA_HANDOFF.md`](./GUEST_PWA_HANDOFF.md)).

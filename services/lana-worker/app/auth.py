@@ -54,7 +54,7 @@ def require_home_block_for_purpose(auth: AuthSession, purpose: str) -> str | Non
     """Return home_block_id when set. profile_intake may run before block assignment."""
     if auth.home_block_id:
         return auth.home_block_id
-    if purpose == "profile_intake":
+    if purpose in ("profile_intake", "lana"):
         return None
     raise HTTPException(status_code=400, detail="home_block_required")
 

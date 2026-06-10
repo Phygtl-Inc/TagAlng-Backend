@@ -28,6 +28,14 @@ class PeerMatchRow(BaseModel):
     matching_peer_label: str | None = None
     matching_peer_concept: str | None = None
     has_exact_concept_match: bool = False
+    preview: bool = False
+
+
+class AuthActionPayload(BaseModel):
+    type: str
+    phone: str | None = None
+    token: str | None = None
+    verify_type: str | None = None
 
 
 class JointMomentPayload(BaseModel):
@@ -58,7 +66,7 @@ class EventDraft(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    purpose: Literal["profile_intake", "event_draft"] = "profile_intake"
+    purpose: Literal["lana", "profile_intake", "event_draft"] = "lana"
 
 
 class CreateSessionResponse(BaseModel):
@@ -78,6 +86,13 @@ class CreateSessionResponse(BaseModel):
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    auth_intent: str | None = None
+    login_phone: str | None = None
+    requires_login_otp: bool = False
+    login_otp_token: str | None = None
+    auth_action: AuthActionPayload | None = None
+    active_intent: str | None = None
+    routing_phase: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -109,6 +124,13 @@ class SendMessageResponse(BaseModel):
     phone_verified: bool = False
     home_block_assigned: bool = False
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    auth_intent: str | None = None
+    login_phone: str | None = None
+    requires_login_otp: bool = False
+    login_otp_token: str | None = None
+    auth_action: AuthActionPayload | None = None
+    active_intent: str | None = None
+    routing_phase: str | None = None
 
 
 class CompleteSessionRequest(BaseModel):
