@@ -1,0 +1,93 @@
+"""Unified Lana dispatcher — purpose ``lana`` with rule-based routing (no FE mode)."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.discovery_route import handle_discovery_turn
+from app.guest_login import wants_login as wants_login_intent
+
+LANA_UNIFIED_OPENING = (
+    "Hey — I'm Lana, your block concierge. "
+    "Ask me to find neighbors like you, plan something, or tell me about yourself. "
+    "Already have an account? Just say log in."
+)
+
+
+def lana_unified_opening() -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    ui: dict[str, Any] = {
+        "bucket": None,
+        "focus_phrase": None,
+        "highlights": [],
+    }
+    ctx: dict[str, Any] = {
+        "unified_mode": True,
+        "active_intent": None,
+        "routing_phase": "listening",
+        "last_routing": {
+            "outcome": "R",
+            "intent_class": "companionship",
+            "confidence": 1.0,
+            "tool_to_call": None,
+        },
+    }
+    return LANA_UNIFIED_OPENING, "continue", ctx, ui
+
+
+def lana_unified_turn(
+    *,
+    history: list[dict[str, Any]],
+    user_message: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    is_anonymous: bool,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Route unified session turn. Returns reply, status, ctx, ui, peer_matches."""
+    discovery = handle_discovery_turn(
+        user_message,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        is_anonymous=is_anonymous,
+    )
+    if discovery is not None:
+        reply, ctx, routing, peers = discovery
+        ctx["last_routing"] = routing
+        ui = {
+            "bucket": "interest" if peers else None,
+            "focus_phrase": None,
+            "highlights": [],
+        }
+        return reply, "continue", ctx, ui, peers
+
+    msg = str(user_message or "").strip().lower()
+    if wants_login_intent(msg):
+        # handle_discovery_turn already tried login; fallback
+        reply = "Sure — what's the phone number on your account?"
+        ctx = {
+            **session_ctx,
+            "unified_mode": True,
+            "auth_intent": "login",
+            "guest_step": "await_login_phone",
+            "routing_phase": "await_login_phone",
+        }
+        return reply, "continue", ctx, {"bucket": None, "focus_phrase": None, "highlights": []}, []
+
+    reply = (
+        "I'm here for your block — find neighbors, log in, or tell me about yourself. "
+        "What would you like to do?"
+    )
+    ctx = {
+        **session_ctx,
+        "unified_mode": True,
+        "last_routing": {
+            "outcome": "R",
+            "intent_class": "companionship",
+            "confidence": 0.8,
+            "tool_to_call": None,
+        },
+    }
+    return reply, "continue", ctx, {"bucket": None, "focus_phrase": None, "highlights": []}, []

@@ -42,7 +42,9 @@ from app.profile_intake import (
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
+from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.models import (
+    AuthActionPayload,
     CompleteSessionRequest,
     CompleteSessionResponse,
     CreateSessionRequest,
@@ -71,7 +73,7 @@ from app.claim_embed import claim_embedding_text
 from app.vertex_extract import vertex_embed, vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
-app = FastAPI(title="TagAlng lana-worker", version="0.5.3")
+app = FastAPI(title="TagAlng lana-worker", version="0.5.4")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -211,6 +213,19 @@ def _legacy_lana_turn(
         )
         session_ctx["last_routing"] = _event_routing_stub()
         return reply, status, session_ctx, ui_raw, draft_raw
+    if purpose == "lana" and auth and user_jwt:
+        reply, status, turn_ctx, ui_raw, peers = lana_unified_turn(
+            history=history,
+            user_message=user_message,
+            session_ctx=session_ctx or {},
+            user_jwt=user_jwt,
+            phone_verified=auth.phone_verified,
+            home_block_id=auth.home_block_id,
+            is_anonymous=auth.is_anonymous,
+        )
+        if peers:
+            turn_ctx["peer_matches"] = peers
+        return reply, status, turn_ctx, ui_raw, None
     if purpose == "profile_intake":
         sess_ctx = session_ctx or {}
         guest_flow = bool(
@@ -306,6 +321,18 @@ def _joint_moment_from_dict(raw: dict[str, Any] | None) -> JointMomentPayload | 
     )
 
 
+def _auth_action_from_ctx(ctx: dict[str, Any]) -> AuthActionPayload | None:
+    raw = ctx.get("auth_action")
+    if not isinstance(raw, dict) or not raw.get("type"):
+        return None
+    return AuthActionPayload(
+        type=str(raw["type"]),
+        phone=str(raw.get("phone") or "") or None,
+        token=str(raw.get("token") or "") or None,
+        verify_type=str(raw.get("verify_type") or "") or None,
+    )
+
+
 def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list):
@@ -323,6 +350,7 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 matching_peer_label=str(row.get("matching_peer_label") or "") or None,
                 matching_peer_concept=str(row.get("matching_peer_concept") or "") or None,
                 has_exact_concept_match=bool(row.get("has_exact_concept_match")),
+                preview=bool(row.get("preview")),
             )
         )
     return out
@@ -338,8 +366,15 @@ def _onboarding_fields(
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
         "joint_moment": jm,
         "phone_verified": auth.phone_verified,
-        "home_block_assigned": bool(auth.home_block_id),
+        "home_block_assigned": bool(auth.home_block_id or ctx.get("preview_block_id")),
         "peer_matches": _peer_matches_from_ctx(ctx),
+        "auth_intent": ctx.get("auth_intent"),
+        "login_phone": ctx.get("login_phone"),
+        "requires_login_otp": bool(ctx.get("requires_login_otp")),
+        "login_otp_token": ctx.get("login_otp_token"),
+        "auth_action": _auth_action_from_ctx(ctx),
+        "active_intent": ctx.get("active_intent"),
+        "routing_phase": ctx.get("routing_phase"),
     }
 
 
@@ -494,6 +529,9 @@ def create_lana_session(
                 host_name=host_display_name(ctx_pack),
             )
             session_ctx["last_routing"] = _event_routing_stub()
+        elif purpose == "lana":
+            opening, status, session_ctx, ui_raw = lana_unified_opening()
+            draft_raw = None
         elif purpose == "profile_intake" and auth.is_anonymous:
             opening, status, session_ctx, ui_raw = lana_profile_guest_opening()
             session_ctx["guest_intake"] = True
@@ -595,7 +633,7 @@ def send_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
         else:
-            if purpose == "profile_intake":
+            if purpose in ("profile_intake", "lana"):
                 ctx_pack, user_block, purpose_ids = _profile_context_pack(
                     auth, purpose, session.get("context") or {}
                 )

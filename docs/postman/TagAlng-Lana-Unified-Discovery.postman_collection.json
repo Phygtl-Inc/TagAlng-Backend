@@ -1,0 +1,198 @@
+{
+  "info": {
+    "_postman_id": "tagalng-lana-unified-discovery",
+    "name": "TagAlng — Lana unified (discovery routing v1)",
+    "description": "Unified Lana chat — **no purpose in request** (defaults `lana`). Routing rules drive discovery: ZIP → identity → preview → verify gate.\n\n**Environment:** `TagAlng — tagalng-dev` · set `anon_key`\n\n**Prerequisites:** migration `20260618120000_lana_unified_purpose.sql` · lana-worker deployed\n\n**Flow diagram:** `docs/LANA_UNIFIED_ROUTING_FLOW.md`\n\nRun 1 → 8 in order.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Anonymous sign-in",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "if (j.access_token) pm.environment.set('access_token', j.access_token);"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "apikey", "value": "{{anon_key}}" },
+          { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{supabase_url}}/auth/v1/signup"
+      }
+    },
+    {
+      "name": "2. Start Lana (unified — empty body)",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "if (j.session_id) pm.environment.set('lana_session_id', j.session_id);",
+            "pm.test('purpose lana', () => pm.expect(j.purpose).to.eql('lana'));",
+            "pm.test('unified opening', () => pm.expect(j.assistant_message.toLowerCase()).to.include('concierge'));"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{lana_worker_url}}/lana/sessions"
+      }
+    },
+    {
+      "name": "3. Find people like me → ask ZIP",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "pm.test('discovery intent', () => pm.expect(j.active_intent).to.eql('discovery.find_peers'));",
+            "pm.test('need zip', () => pm.expect(j.routing_phase).to.eql('need_zip'));"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"message\": \"find people like me on the block\"\n}" },
+        "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+      }
+    },
+    {
+      "name": "4. Provide ZIP",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "pm.test('need identity', () => pm.expect(j.routing_phase).to.eql('need_identity'));"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{test_zip}}\"\n}" },
+        "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+      }
+    },
+    {
+      "name": "5. Identity snippet",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "pm.test('preview phase', () => pm.expect(j.routing_phase).to.eql('preview'));",
+            "pm.test('preview peers', () => pm.expect(j.peer_matches.length).to.be.above(0));",
+            "pm.test('redacted', () => pm.expect(j.peer_matches[0].preview).to.eql(true));"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"message\": \"I'm a Latino mom looking for weekend activities\"\n}" },
+        "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+      }
+    },
+    {
+      "name": "6. Ask for names → verify gate",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "pm.test('gate verify', () => pm.expect(j.routing_phase).to.eql('await_signup_phone'));"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"message\": \"show me their names and introduce me\"\n}" },
+        "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+      }
+    },
+    {
+      "name": "7. Phone for signup verify",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "pm.test('auth_action link phone', () => {",
+            "  pm.expect(j.auth_action.type).to.eql('link_phone_signup');",
+            "  pm.expect(j.auth_action.verify_type).to.eql('phone_change');",
+            "});"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{test_phone}}\"\n}" },
+        "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+      }
+    },
+    {
+      "name": "8. OTP → auth_action verify_signup_otp",
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "const j = pm.response.json();",
+            "pm.test('verify signup otp action', () => {",
+            "  pm.expect(j.auth_action.type).to.eql('verify_signup_otp');",
+            "  pm.expect(j.auth_action.token).to.eql(pm.environment.get('test_otp'));",
+            "});"
+          ],
+          "type": "text/javascript"
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{test_otp}}\"\n}" },
+        "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+      }
+    }
+  ]
+}

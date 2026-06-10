@@ -192,7 +192,8 @@ def format_profile_intake_context(ctx: dict[str, Any]) -> str:
 
 GUEST_PROFILE_OPENING = (
     "So — who are you, right now? "
-    "Tell me your life stage and what you're hoping to find on the block."
+    "Tell me your life stage and what you're hoping to find on the block. "
+    "Already have an account? Just say log in."
 )
 
 

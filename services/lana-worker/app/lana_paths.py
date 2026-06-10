@@ -25,9 +25,11 @@ def _orchestrator_enabled() -> bool:
 
 
 def use_orchestrator_for_purpose(purpose: str) -> bool:
-    """event_draft and profile_intake use fast paths by default."""
+    """event_draft, profile_intake, and lana use fast paths by default."""
     if purpose == "event_draft" and event_fast_path_enabled():
         return False
     if purpose == "profile_intake" and profile_fast_path_enabled():
+        return False
+    if purpose == "lana":
         return False
     return _orchestrator_enabled()
