@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from app.context import build_system_prompt, load_prompt
+from app.profile_intake import apply_profile_stop_rules
 from app.lana_ui import merge_event_drafts, parse_event_draft, parse_event_turn_ui, parse_turn_ui, finalize_event_draft
 from app.orchestrator.llm import llm_json, router_model, synthesizer_model
 from app.orchestrator.memory import format_core_block, format_recent_turns, format_recall_memories
@@ -106,7 +107,7 @@ def synthesize_turn(
             tool_result=tool_result,
             valid_purpose_ids=set(purpose_ids or []),
         )
-    return _parse_profile_synth(raw)
+    return _parse_profile_synth(raw, history=history)
 
 
 def synthesize_opening(
@@ -169,7 +170,11 @@ status: continue until title + starts_at + venue_name are set; then ready_to_com
 Fill event_draft from conversation — never leave all null if user gave details."""
 
 
-def _parse_profile_synth(raw: dict[str, Any]) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
+def _parse_profile_synth(
+    raw: dict[str, Any],
+    *,
+    history: list[dict[str, Any]] | None = None,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
     assistant_message = str(raw.get("assistant_message", "")).strip()[:1200]
     if not assistant_message:
         assistant_message = "Tell me a bit about you — I'd love to hear your story."
@@ -177,10 +182,26 @@ def _parse_profile_synth(raw: dict[str, Any]) -> tuple[str, str, dict[str, Any],
     if status not in ("continue", "ready_to_complete"):
         status = "continue"
     ui = parse_turn_ui(raw)
+    covered = raw.get("topics_covered") or []
+    if not isinstance(covered, list):
+        covered = []
+    covered = [str(x)[:64] for x in covered[:12]]
+    if history is not None:
+        assistant_message, status = apply_profile_stop_rules(
+            status,
+            assistant_message,
+            history=history,
+            ui=ui,
+            topics_covered=covered,
+        )
+    explore = raw.get("topics_to_explore") or []
+    if not isinstance(explore, list):
+        explore = []
+    explore = [str(x)[:64] for x in explore[:12]]
     core_patch = raw.get("core_patch") if isinstance(raw.get("core_patch"), dict) else None
     ctx = {
-        "topics_covered": raw.get("topics_covered") or [],
-        "topics_to_explore": raw.get("topics_to_explore") or [],
+        "topics_covered": covered,
+        "topics_to_explore": explore,
         "last_status": status,
         "last_ui": ui,
     }

@@ -9,6 +9,12 @@ def event_fast_path_enabled() -> bool:
     return flag not in ("0", "false", "off", "legacy")
 
 
+def profile_fast_path_enabled() -> bool:
+    """Single-call profile intake (heritage + short follow-up). Default on."""
+    flag = os.environ.get("LANA_PROFILE_FAST_PATH", "1").strip().lower()
+    return flag not in ("0", "false", "off", "legacy")
+
+
 def _orchestrator_enabled() -> bool:
     flag = os.environ.get("LANA_ORCHESTRATOR", "auto").strip().lower()
     if flag in ("0", "false", "off", "legacy"):
@@ -19,7 +25,9 @@ def _orchestrator_enabled() -> bool:
 
 
 def use_orchestrator_for_purpose(purpose: str) -> bool:
-    """Profile intake uses full orchestrator; event_draft uses fast path by default."""
+    """event_draft and profile_intake use fast paths by default."""
     if purpose == "event_draft" and event_fast_path_enabled():
+        return False
+    if purpose == "profile_intake" and profile_fast_path_enabled():
         return False
     return _orchestrator_enabled()

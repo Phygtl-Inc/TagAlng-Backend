@@ -1,0 +1,405 @@
+{
+  "info": {
+    "_postman_id": "tagalng-guest-onboarding-full",
+    "name": "TagAlng — Guest onboarding (in-chat Maria → OTP → intro)",
+    "description": "Full Lana-first guest flow — **everything in chat** until OTP, then finish profile + intro.\n\n**Environment:** `TagAlng — tagalng-dev` · set `anon_key`\n\n**Prerequisites:** Anonymous sign-ins · Manual linking · migration `20260617120000_joint_moment_onboarding.sql` · lana-worker deployed\n\n**Run 1 → 13 in order.** OTP: step 6 links phone (no separate /otp call). Step 7 verify uses `type: phone_change`. Use a **fresh** `test_phone` each run (e.g. `+15550999012`). Dev OTP: `000000`.\n\nSee `docs/GUEST_ONBOARDING_FLOW.md` for the conversation script.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Phase 1 — Anonymous + Lana (Maria in chat)",
+      "item": [
+        {
+          "name": "1. Anonymous sign-in",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "function jwtSub(t) {",
+                "  const p = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));",
+                "  return p.sub;",
+                "}",
+                "if (j.access_token) {",
+                "  pm.environment.set('access_token', j.access_token);",
+                "  pm.environment.set('guest_user_id', jwtSub(j.access_token));",
+                "}",
+                "if (j.refresh_token) pm.environment.set('refresh_token', j.refresh_token);",
+                "pm.test('anonymous', () => pm.expect(j.user.is_anonymous).to.eql(true));"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{supabase_url}}/auth/v1/signup"
+          }
+        },
+        {
+          "name": "2. Start Lana session",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "if (j.session_id) pm.environment.set('lana_session_id', j.session_id);",
+                "pm.test('guest session', () => {",
+                "  pm.expect(j.is_anonymous).to.eql(true);",
+                "  pm.expect(j.onboarding_step).to.eql('early_chat');",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"purpose\": \"profile_intake\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions"
+          }
+        },
+        {
+          "name": "3. Lana — life stage (triggers Maria offer)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "if (j.joint_moment && j.joint_moment.joint_moment_id) {",
+                "  pm.environment.set('joint_moment_id', j.joint_moment.joint_moment_id);",
+                "}",
+                "if (j.joint_moment && j.joint_moment.candidate && j.joint_moment.candidate.user_id) {",
+                "  pm.environment.set('maria_user_id', j.joint_moment.candidate.user_id);",
+                "}",
+                "pm.test('Maria offered in chat', () => {",
+                "  pm.expect(j.onboarding_step).to.eql('offered_intro');",
+                "  pm.expect(j.assistant_message.toLowerCase()).to.include('maria');",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{guest_message_life_stage}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "4. Lana — yes introduce us",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "pm.test('asks intro name', () => {",
+                "  pm.expect(j.onboarding_step).to.eql('awaiting_intro_name');",
+                "  pm.expect(j.assistant_message.toLowerCase()).to.include('call you');",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{guest_message_yes}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "5. Lana — intro name",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "if (j.joint_moment && j.joint_moment.joint_moment_id) {",
+                "  pm.environment.set('joint_moment_id', j.joint_moment.joint_moment_id);",
+                "}",
+                "pm.test('await phone', () => {",
+                "  pm.expect(j.onboarding_step).to.eql('await_phone');",
+                "  pm.expect(j.requires_phone_verification).to.eql(true);",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{guest_intro_name}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Phase 2 — Phone OTP",
+      "item": [
+        {
+          "name": "6. Link phone (sends OTP to anonymous user)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('phone linked on same user', () => pm.response.to.have.status(200));",
+                "pm.test('still anonymous until verify', () => {",
+                "  const j = pm.response.json();",
+                "  pm.expect(j.is_anonymous).to.eql(true);",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{test_phone}}\"\n}"
+            },
+            "url": "{{supabase_url}}/auth/v1/user",
+            "description": "Links phone to the **anonymous** user (same user_id as Lana session). Supabase sends OTP automatically. Do NOT call /auth/v1/otp — that is sign-in and creates a different user."
+          }
+        },
+        {
+          "name": "7. Verify OTP (phone_change — keeps same user_id)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "function jwtSub(t) {",
+                "  const p = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));",
+                "  return p.sub;",
+                "}",
+                "if (j.access_token) pm.environment.set('access_token', j.access_token);",
+                "if (j.refresh_token) pm.environment.set('refresh_token', j.refresh_token);",
+                "const guestId = pm.environment.get('guest_user_id');",
+                "pm.test('verified', () => pm.expect(j.access_token).to.be.a('string').and.not.empty);",
+                "pm.test('same user_id as Lana session', () => {",
+                "  pm.expect(jwtSub(j.access_token)).to.eql(guestId);",
+                "});",
+                "pm.test('no longer anonymous', () => pm.expect(j.user.is_anonymous).to.eql(false));"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{test_phone}}\",\n  \"token\": \"{{test_otp}}\",\n  \"type\": \"phone_change\"\n}"
+            },
+            "url": "{{supabase_url}}/auth/v1/verify",
+            "description": "CRITICAL: type must be phone_change (not sms). sms = sign-in → new/different user → session_not_found on Lana."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Phase 3 — Resume Lana + complete profile",
+      "item": [
+        {
+          "name": "8. Lana — after OTP (kids question)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "pm.test('post verify', () => {",
+                "  pm.expect(j.onboarding_step).to.eql('post_verify');",
+                "  pm.expect(j.phone_verified).to.eql(true);",
+                "});"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{guest_message_post_otp}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "9. Lana — kids ages",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{guest_message_kids}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "10. Lana — interests",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"{{guest_message_interests}}\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        },
+        {
+          "name": "11. Lana — complete profile",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "pm.test('profile completed', () => pm.expect(j.status).to.eql('completed'));",
+                "pm.test('claims saved', () => pm.expect(j.claims.length).to.be.above(0));"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"force\": true\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/complete"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Phase 4 — Block + send intro to Maria",
+      "item": [
+        {
+          "name": "12. assign_home_block (Maria's block)",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('block assigned', () => pm.response.to.have.status(200));"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_lat\": 28.3647,\n  \"p_lng\": -81.2568\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/assign_home_block"
+          }
+        },
+        {
+          "name": "13. send_joint_moment_intro",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "if (j.nudge_id) pm.environment.set('nudge_id', j.nudge_id);",
+                "pm.test('intro sent', () => pm.expect(j.status).to.eql('intro_sent'));"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"p_joint_moment_id\": \"{{joint_moment_id}}\",\n  \"p_opener_text\": \"Hi Maria — Lana thought we should meet!\"\n}"
+            },
+            "url": "{{supabase_url}}/rest/v1/rpc/send_joint_moment_intro"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Optional — resume mid-flow",
+      "item": [
+        {
+          "name": "GET session state",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}"
+          }
+        },
+        {
+          "name": "Lana — send any message",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const j = pm.response.json();",
+                "if (j.joint_moment && j.joint_moment.joint_moment_id) {",
+                "  pm.environment.set('joint_moment_id', j.joint_moment.joint_moment_id);",
+                "}",
+                "console.log('onboarding_step:', j.onboarding_step);",
+                "console.log('requires_phone_verification:', j.requires_phone_verification);"
+              ],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"ok\"\n}" },
+            "url": "{{lana_worker_url}}/lana/sessions/{{lana_session_id}}/messages"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,11 +1,32 @@
 -- TagAlng dev seed (tagalng-dev / local supabase db reset)
 -- Re-runnable: fixed UUIDs. Never run on production.
 
+delete from public.joint_moment_impressions
+where viewer_user_id in (
+  'a0000001-0001-4000-8000-000000000001'::uuid,
+  'a0000002-0002-4000-8000-000000000002'::uuid,
+  'a0000003-0003-4000-8000-000000000003'::uuid,
+  'a0000004-0004-4000-8000-000000000004'::uuid
+)
+or candidate_user_id in (
+  'a0000001-0001-4000-8000-000000000001'::uuid,
+  'a0000002-0002-4000-8000-000000000002'::uuid,
+  'a0000003-0003-4000-8000-000000000003'::uuid,
+  'a0000004-0004-4000-8000-000000000004'::uuid
+);
+
 delete from public.nudges
 where sender_id in (
   'a0000001-0001-4000-8000-000000000001'::uuid,
   'a0000002-0002-4000-8000-000000000002'::uuid,
-  'a0000003-0003-4000-8000-000000000003'::uuid
+  'a0000003-0003-4000-8000-000000000003'::uuid,
+  'a0000004-0004-4000-8000-000000000004'::uuid
+)
+or recipient_id in (
+  'a0000001-0001-4000-8000-000000000001'::uuid,
+  'a0000002-0002-4000-8000-000000000002'::uuid,
+  'a0000003-0003-4000-8000-000000000003'::uuid,
+  'a0000004-0004-4000-8000-000000000004'::uuid
 );
 
 delete from public.event_requests
@@ -36,7 +57,8 @@ delete from public.user_identity_claims
 where user_id in (
   'a0000001-0001-4000-8000-000000000001'::uuid,
   'a0000002-0002-4000-8000-000000000002'::uuid,
-  'a0000003-0003-4000-8000-000000000003'::uuid
+  'a0000003-0003-4000-8000-000000000003'::uuid,
+  'a0000004-0004-4000-8000-000000000004'::uuid
 );
 
 insert into auth.users (
@@ -46,24 +68,28 @@ insert into auth.users (
 values
   ('00000000-0000-0000-0000-000000000000', 'a0000001-0001-4000-8000-000000000001', 'authenticated', 'authenticated', null, null, null, '{"provider":"phone","providers":["phone"]}'::jsonb, '{"seed_role":"host"}'::jsonb, now(), now(), '+15550100001', now(), false),
   ('00000000-0000-0000-0000-000000000000', 'a0000002-0002-4000-8000-000000000002', 'authenticated', 'authenticated', null, null, null, '{"provider":"phone","providers":["phone"]}'::jsonb, '{"seed_role":"guest"}'::jsonb, now(), now(), '+15550100002', now(), false),
-  ('00000000-0000-0000-0000-000000000000', 'a0000003-0003-4000-8000-000000000003', 'authenticated', 'authenticated', null, null, null, '{"provider":"phone","providers":["phone"]}'::jsonb, '{"seed_role":"peer"}'::jsonb, now(), now(), '+15550100003', now(), false)
+  ('00000000-0000-0000-0000-000000000000', 'a0000003-0003-4000-8000-000000000003', 'authenticated', 'authenticated', null, null, null, '{"provider":"phone","providers":["phone"]}'::jsonb, '{"seed_role":"peer"}'::jsonb, now(), now(), '+15550100003', now(), false),
+  ('00000000-0000-0000-0000-000000000000', 'a0000004-0004-4000-8000-000000000004', 'authenticated', 'authenticated', null, null, null, '{"provider":"phone","providers":["phone"]}'::jsonb, '{"seed_role":"joint_moment_demo"}'::jsonb, now(), now(), '+15550100004', now(), false)
 on conflict (id) do update set phone = excluded.phone, phone_confirmed_at = excluded.phone_confirmed_at, updated_at = now();
 
 insert into auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)
 values
   ('a0000001-0001-4000-8000-000000000001', 'a0000001-0001-4000-8000-000000000001', '+15550100001', jsonb_build_object('sub', 'a0000001-0001-4000-8000-000000000001', 'phone', '+15550100001'), 'phone', now(), now(), now()),
   ('a0000002-0002-4000-8000-000000000002', 'a0000002-0002-4000-8000-000000000002', '+15550100002', jsonb_build_object('sub', 'a0000002-0002-4000-8000-000000000002', 'phone', '+15550100002'), 'phone', now(), now(), now()),
-  ('a0000003-0003-4000-8000-000000000003', 'a0000003-0003-4000-8000-000000000003', '+15550100003', jsonb_build_object('sub', 'a0000003-0003-4000-8000-000000000003', 'phone', '+15550100003'), 'phone', now(), now(), now())
+  ('a0000003-0003-4000-8000-000000000003', 'a0000003-0003-4000-8000-000000000003', '+15550100003', jsonb_build_object('sub', 'a0000003-0003-4000-8000-000000000003', 'phone', '+15550100003'), 'phone', now(), now(), now()),
+  ('a0000004-0004-4000-8000-000000000004', 'a0000004-0004-4000-8000-000000000004', '+15550100004', jsonb_build_object('sub', 'a0000004-0004-4000-8000-000000000004', 'phone', '+15550100004'), 'phone', now(), now(), now())
 on conflict (id) do nothing;
 
 insert into public.users (id, phone, nickname, home_block_id, home_zip, phone_verified_at, locale)
 values
   ('a0000001-0001-4000-8000-000000000001', '+15550100001', 'Marina', '8a2a1072b59ffff', '32827', now(), 'en'),
   ('a0000002-0002-4000-8000-000000000002', '+15550100002', 'Beatriz', '8a2a1072b59ffff', '32827', now(), 'en'),
-  ('a0000003-0003-4000-8000-000000000003', '+15550100003', 'Carla', '8a2a1072b5affff', '32828', now(), 'en')
+  ('a0000003-0003-4000-8000-000000000003', '+15550100003', 'Carla', '8a2a1072b5affff', '32828', now(), 'en'),
+  ('a0000004-0004-4000-8000-000000000004', '+15550100004', 'Maria', '8a2a1072b59ffff', '32827', now(), 'en')
 on conflict (id) do update set
   phone = excluded.phone, nickname = excluded.nickname, home_block_id = excluded.home_block_id,
-  home_zip = excluded.home_zip, phone_verified_at = excluded.phone_verified_at, locale = excluded.locale, updated_at = now();
+  home_zip = excluded.home_zip, phone_verified_at = excluded.phone_verified_at, locale = excluded.locale,
+  consent_to_receive_intros = true, updated_at = now();
 
 insert into public.user_identity_claims (user_id, concept, label, tone, confidence, disclosure, synonyms)
 values
@@ -73,7 +99,10 @@ values
   ('a0000002-0002-4000-8000-000000000002', 'parents_toddlers', 'Mom of toddlers', null, 0.90, 'public', '{}'),
   ('a0000002-0002-4000-8000-000000000002', 'new_to_area', 'New to the area', null, 0.80, 'public', '{}'),
   ('a0000003-0003-4000-8000-000000000003', 'runner', 'Morning runner', null, 0.91, 'public', array['running','jogging']),
-  ('a0000003-0003-4000-8000-000000000003', 'parents_elementary', 'Elementary school parent', null, 0.87, 'public', '{}');
+  ('a0000003-0003-4000-8000-000000000003', 'parents_elementary', 'Elementary school parent', null, 0.87, 'public', '{}'),
+  ('a0000004-0004-4000-8000-000000000004', 'heritage_brazilian', 'Paulista', 'warm', 0.93, 'public', array['brazilian','latina']),
+  ('a0000004-0004-4000-8000-000000000004', 'parents_toddlers', '14-month-old', null, 0.90, 'public', array['mom','toddler']),
+  ('a0000004-0004-4000-8000-000000000004', 'faith_community', 'faith', null, 0.85, 'public', '{}');
 
 insert into public.events (id, host_id, cluster_id, block_id, title, description, starts_at, ends_at, location, venue_name, cohort_tags, max_attendees, status)
 values
