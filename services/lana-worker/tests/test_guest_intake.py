@@ -37,6 +37,14 @@ class TestGuestIntakeHelpers(unittest.TestCase):
         self.assertFalse(has_joint_moment_signals([], "I like coffee"))
         self.assertFalse(has_joint_moment_signals([], "I'm from Brazil"))
 
+    def test_joint_moment_signals_pakistan_dad(self) -> None:
+        self.assertTrue(
+            has_joint_moment_signals(
+                [],
+                "I am a pakistan person who is new to this block and i am a dad",
+            )
+        )
+
 
 class TestGuestIntakeTurn(unittest.TestCase):
     @patch("app.guest_intake.fetch_joint_moment")
@@ -84,6 +92,31 @@ class TestGuestIntakeTurn(unittest.TestCase):
         self.assertEqual(ctx["guest_step"], GUEST_STEP_INTRO_NAME)
         self.assertIn("Maria", reply)
         self.assertIn("call you", reply.lower())
+
+    @patch("app.guest_intake.accept_joint_moment")
+    def test_yes_skips_name_when_already_given(self, mock_accept) -> None:
+        from app.guest_intake import lana_profile_guest_turn
+
+        mock_accept.return_value = {"status": "accepted"}
+        reply, _, ctx, _, _ = lana_profile_guest_turn(
+            user_block="HOST CONTEXT",
+            history=[
+                {"role": "user", "content": "pakistan dad new to block"},
+                {"role": "user", "content": "Asjid"},
+            ],
+            user_message="yes",
+            session_ctx={
+                "guest_step": GUEST_STEP_OFFERED,
+                "joint_moment_id": "jm-1",
+                "joint_moment": {"candidate": {"nickname": "Maria"}},
+            },
+            session_id="sess-1",
+            user_jwt="jwt",
+            phone_verified=False,
+        )
+        self.assertEqual(ctx["guest_step"], GUEST_STEP_PHONE)
+        self.assertEqual(ctx.get("intro_name"), "Asjid")
+        self.assertIn("verify", reply.lower())
 
     def test_name_then_phone_prompt(self) -> None:
         from app.guest_intake import lana_profile_guest_turn

@@ -36,9 +36,78 @@ export type ClusterEvent = {
   status: string;
 };
 
-/** Supabase test phone — no Twilio (Dashboard → Auth → Phone → Test numbers). */
-export const DEMO_TEST_PHONE = '+15550000000';
+/** Supabase test phone — add in Dashboard → Auth → Phone → Test numbers. */
+export const DEMO_TEST_PHONE = '+15550999012';
 export const DEMO_TEST_OTP = '000000';
+
+/** Maria demo block (Lake Nona) — same as Postman assign_home_block. */
+const MARIA_BLOCK_LAT = 28.3647;
+const MARIA_BLOCK_LNG = -81.2568;
+
+/** Meet Lana — anonymous guest (no phone until joint-moment intro). */
+export async function guestAnonymousSignIn() {
+  const supabase = getDemoSupabase();
+  const { data, error } = await supabase.auth.signInAnonymously();
+  if (error) throw error;
+  if (!data.session?.access_token) throw new Error('No session after anonymous sign-in');
+  return data.session;
+}
+
+/**
+ * Link phone to the current anonymous user (same user_id as Lana session).
+ * OTP is sent automatically. Verify with guestVerifyPhoneLink (type phone_change).
+ */
+/** Refresh JWT before phone link — anonymous sessions expire after ~1h idle. */
+export async function refreshDemoSession() {
+  const supabase = getDemoSupabase();
+  const { data: current } = await supabase.auth.getSession();
+  if (!current.session) throw new Error('Session expired — tap Meet Lana to start over');
+  const { data, error } = await supabase.auth.refreshSession();
+  if (error) throw error;
+  if (!data.session?.access_token) {
+    throw new Error('Session expired — tap Meet Lana to start over');
+  }
+  return data.session;
+}
+
+export async function guestLinkPhone(phone: string) {
+  const supabase = getDemoSupabase();
+  await refreshDemoSession();
+  const { error } = await supabase.auth.updateUser({ phone });
+  if (error) throw error;
+}
+
+export async function guestVerifyPhoneLink(phone: string, otp: string) {
+  const supabase = getDemoSupabase();
+  await refreshDemoSession();
+  const { data, error } = await supabase.auth.verifyOtp({
+    phone,
+    token: otp,
+    type: 'phone_change',
+  });
+  if (error) throw error;
+  if (!data.session?.access_token) throw new Error('No session after phone verify');
+  return data.session;
+}
+
+export async function assignMariaDemoBlock() {
+  const supabase = getDemoSupabase();
+  const { error } = await supabase.rpc('assign_home_block', {
+    p_lat: MARIA_BLOCK_LAT,
+    p_lng: MARIA_BLOCK_LNG,
+  });
+  if (error) throw error;
+}
+
+export async function sendJointMomentIntro(jointMomentId: string, opener?: string) {
+  const supabase = getDemoSupabase();
+  const { data, error } = await supabase.rpc('send_joint_moment_intro', {
+    p_joint_moment_id: jointMomentId,
+    p_opener_text: opener ?? 'Hi — Lana thought we should meet!',
+  });
+  if (error) throw error;
+  return data as { status?: string; nudge_id?: string };
+}
 
 /** Same order as Postman B1 → B2: /otp then /verify. Test phone skips Twilio. */
 export async function demoPhoneAuth(

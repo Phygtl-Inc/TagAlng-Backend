@@ -12,7 +12,29 @@ export type TurnRouting = {
   capture_fired?: boolean;
 };
 
-export type LanaSession = {
+export type JointMomentPayload = {
+  joint_moment_id?: string | null;
+  status?: string | null;
+  candidate?: {
+    user_id?: string | null;
+    nickname?: string | null;
+    avatar_url?: string | null;
+  } | null;
+  lana_copy?: string | null;
+  match_reason?: string | null;
+  is_demo?: boolean;
+};
+
+export type GuestOnboardingFields = {
+  onboarding_step?: string | null;
+  requires_phone_verification?: boolean;
+  joint_moment?: JointMomentPayload | null;
+  phone_verified?: boolean;
+  home_block_assigned?: boolean;
+  is_anonymous?: boolean;
+};
+
+export type LanaSession = GuestOnboardingFields & {
   session_id: string;
   purpose: string;
   status: string;
@@ -22,7 +44,7 @@ export type LanaSession = {
   orchestrator?: boolean;
 };
 
-export type LanaTurn = {
+export type LanaTurn = GuestOnboardingFields & {
   session_id: string;
   status: string;
   assistant_message: string;

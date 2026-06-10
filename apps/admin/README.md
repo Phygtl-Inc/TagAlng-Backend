@@ -35,6 +35,7 @@ Open http://localhost:3001 → `/login` → `/lana`
 |-------|-------------|
 | `/login` | Admin email/password |
 | `/lana` | Inbox list + chat thread + claim cards |
+| `/lana/meet` | **PWA guest onboarding demo** — anonymous → Lana chat → joint moment → phone → intro (see [`docs/GUEST_PWA_HANDOFF.md`](../docs/GUEST_PWA_HANDOFF.md)) |
 
 ## Data
 
