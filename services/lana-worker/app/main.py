@@ -53,6 +53,7 @@ from app.models import (
     JointMomentCandidate,
     JointMomentPayload,
     LanaTurnUi,
+    PeerMatchRow,
     SendMessageRequest,
     SendMessageResponse,
     SessionDetailResponse,
@@ -211,7 +212,15 @@ def _legacy_lana_turn(
         session_ctx["last_routing"] = _event_routing_stub()
         return reply, status, session_ctx, ui_raw, draft_raw
     if purpose == "profile_intake":
-        if auth and auth.is_anonymous and session_id and user_jwt:
+        sess_ctx = session_ctx or {}
+        guest_flow = bool(
+            auth
+            and session_id
+            and user_jwt
+            and sess_ctx.get("last_status") != "completed"
+            and (auth.is_anonymous or sess_ctx.get("guest_intake"))
+        )
+        if guest_flow:
             reply, status, turn_ctx, ui_raw, _jm = lana_profile_guest_turn(
                 user_block=user_block,
                 history=history,
@@ -220,6 +229,7 @@ def _legacy_lana_turn(
                 session_id=session_id,
                 user_jwt=user_jwt,
                 phone_verified=auth.phone_verified,
+                home_block_id=auth.home_block_id,
                 ctx_pack=ctx_pack,
                 timer=timer,
             )
@@ -296,6 +306,28 @@ def _joint_moment_from_dict(raw: dict[str, Any] | None) -> JointMomentPayload | 
     )
 
 
+def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
+    raw = ctx.get("peer_matches")
+    if not isinstance(raw, list):
+        return []
+    out: list[PeerMatchRow] = []
+    for row in raw[:8]:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            PeerMatchRow(
+                peer_user_id=str(row.get("peer_user_id") or "") or None,
+                nickname=str(row.get("nickname") or "") or None,
+                avatar_url=str(row.get("avatar_url") or "") or None,
+                similarity_score=row.get("similarity_score"),
+                matching_peer_label=str(row.get("matching_peer_label") or "") or None,
+                matching_peer_concept=str(row.get("matching_peer_concept") or "") or None,
+                has_exact_concept_match=bool(row.get("has_exact_concept_match")),
+            )
+        )
+    return out
+
+
 def _onboarding_fields(
     ctx: dict[str, Any],
     auth: AuthSession,
@@ -307,6 +339,7 @@ def _onboarding_fields(
         "joint_moment": jm,
         "phone_verified": auth.phone_verified,
         "home_block_assigned": bool(auth.home_block_id),
+        "peer_matches": _peer_matches_from_ctx(ctx),
     }
 
 
@@ -425,7 +458,7 @@ def _profile_context_pack(
     session_ctx: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str, list[str]]:
     ctx_pack, user_block, purpose_ids = _load_lana_context_pack(auth.user_id, purpose)
-    if auth.is_anonymous:
+    if auth.is_anonymous or (session_ctx and session_ctx.get("guest_intake")):
         ctx_pack = {**ctx_pack, "guest_intake": True}
         if session_ctx and session_ctx.get("guest_step"):
             ctx_pack["guest_step"] = session_ctx["guest_step"]
@@ -463,6 +496,7 @@ def create_lana_session(
             session_ctx["last_routing"] = _event_routing_stub()
         elif purpose == "profile_intake" and auth.is_anonymous:
             opening, status, session_ctx, ui_raw = lana_profile_guest_opening()
+            session_ctx["guest_intake"] = True
             draft_raw = None
         elif purpose == "profile_intake":
             ctx_pack, user_block, _ = _profile_context_pack(auth, purpose, {})

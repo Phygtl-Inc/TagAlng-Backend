@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.guest_capabilities import handle_guest_capability
 from app.profile_intake import collect_profile_buckets, lana_profile_turn
 from app.supabase_rpc import call_rpc
 
@@ -218,6 +219,7 @@ def lana_profile_guest_turn(
     session_id: str,
     user_jwt: str,
     phone_verified: bool,
+    home_block_id: str | None = None,
     ctx_pack: dict[str, Any] | None = None,
     timer: Any | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
@@ -301,6 +303,27 @@ def lana_profile_guest_turn(
             guest_step=GUEST_STEP_PHONE,
             requires_phone=True,
         )
+        return reply, "continue", ctx, _ui_joint_moment(), joint_moment
+
+    # --- peer find / host: only after phone verify (post_verify), not during signup ---
+    if step == GUEST_STEP_POST_VERIFY and phone_verified:
+        cap = handle_guest_capability(
+            user_message,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            user_jwt=user_jwt,
+            guest_step=step,
+        )
+    else:
+        cap = None
+    if cap is not None:
+        reply, cap_ctx = cap
+        ctx = _merge_guest_ctx(
+            session_ctx,
+            guest_step=str(cap_ctx.get("guest_step") or step),
+            requires_phone=bool(cap_ctx.get("requires_phone_verification")),
+        )
+        ctx.update({k: v for k, v in cap_ctx.items() if k not in ("guest_step",)})
         return reply, "continue", ctx, _ui_joint_moment(), joint_moment
 
     # --- early_chat: offer joint moment when signals are strong enough ---
