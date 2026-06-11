@@ -89,6 +89,8 @@ def enforce_routing(
     purpose: str,
     utterance: str,
     session_ctx: dict[str, Any],
+    history: list[dict[str, Any]] | None = None,
+    home_block_id: str | None = None,
 ) -> dict[str, Any]:
     """Apply confidence + slot rules in code; may override Haiku's outcome."""
     notes: list[str] = []
@@ -110,6 +112,17 @@ def enforce_routing(
     )
     if enforced is not None:
         return enforced
+
+    if purpose == "lana":
+        discovery = _enforce_lana_discovery(
+            base,
+            utterance=utterance,
+            session_ctx=session_ctx,
+            history=history,
+            home_block_id=home_block_id,
+        )
+        if discovery is not None:
+            return discovery
 
     if intent == "off_topic" or base.get("outcome") == "C":
         return _as_capture(base, utterance, notes=["off_topic"])
@@ -138,7 +151,7 @@ def enforce_routing(
 
     missing = validate_tool_slots(tool, tool_args, purpose=purpose, session_ctx=session_ctx)
     if missing:
-        if tool == "publish_activity" and purpose == "event_draft":
+        if tool == "publish_activity" and purpose in ("event_draft", "lana"):
             if has_partial_event_args(tool_args, session_ctx):
                 merged = merged_event_draft(session_ctx, tool_args)
                 return _as_tool(
@@ -174,6 +187,71 @@ def enforce_routing(
     )
 
 
+def _enforce_lana_discovery(
+    base: dict[str, Any],
+    *,
+    utterance: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+    home_block_id: str | None,
+) -> dict[str, Any] | None:
+    """Override router when user is in (or wants) discovery — code owns privacy gates."""
+    from app.discovery_route import (
+        PHASE_NEED_IDENTITY,
+        extract_zip,
+        resolve_block_id,
+        resolve_identity_for_turn,
+        wants_discovery_turn,
+    )
+    from app.guest_capabilities import wants_host_activity, wants_peer_find
+
+    phase = str(session_ctx.get("routing_phase") or "")
+    in_funnel = wants_discovery_turn(utterance, session_ctx, history)
+    if not in_funnel:
+        return None
+    if wants_host_activity(utterance) and not wants_peer_find(utterance):
+        return None
+
+    out = {**base, "intent_class": "discovery"}
+    block_id = resolve_block_id(session_ctx, home_block_id)
+    zip_from = extract_zip(utterance)
+    if not block_id and not zip_from:
+        return _as_ask(
+            out,
+            missing_slots=["zip"],
+            ask_slot="zip",
+            notes=["discovery_need_zip"],
+        )
+
+    identity = resolve_identity_for_turn(
+        utterance,
+        session_ctx,
+        history,
+        phase,
+        block_just_resolved=bool(zip_from and not block_id),
+    )
+    if block_id and not identity and not zip_from:
+        return _as_ask(
+            out,
+            missing_slots=["identity_snippet"],
+            ask_slot="identity_snippet",
+            notes=["discovery_need_identity"],
+        )
+
+    tool_args: dict[str, Any] = {}
+    if zip_from:
+        tool_args["zip"] = zip_from
+    if identity:
+        session_ctx["identity_snippet"] = identity
+    return _as_tool(
+        out,
+        tool="find_peers",
+        tool_args=tool_args,
+        missing_slots=[],
+        notes=["discovery_find_peers"],
+    )
+
+
 def _check_pending_confirmation(
     base: dict[str, Any],
     *,
@@ -182,7 +260,7 @@ def _check_pending_confirmation(
     session_ctx: dict[str, Any],
     sentiment: str,
 ) -> dict[str, Any] | None:
-    if not session_ctx.get("pending_confirmation") or purpose != "event_draft":
+    if not session_ctx.get("pending_confirmation") or purpose not in ("event_draft", "lana"):
         return None
 
     draft = session_ctx.get("event_draft") or {}
@@ -227,6 +305,7 @@ def _apply_purpose_guards(
         "publish_activity",
         "update_event_draft",
         "propose_cohost",
+        "find_peers",
     ):
         return None, {}, True
     if purpose != "event_draft" and tool == "propose_cohost":

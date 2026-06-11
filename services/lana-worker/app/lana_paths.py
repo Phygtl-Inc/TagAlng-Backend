@@ -3,6 +3,10 @@
 import os
 
 
+def _llm_ready() -> bool:
+    return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
+
+
 def event_fast_path_enabled() -> bool:
     """Single-call event hosting (legacy lana_event_turn). Default on."""
     flag = os.environ.get("LANA_EVENT_FAST_PATH", "1").strip().lower()
@@ -20,16 +24,22 @@ def _orchestrator_enabled() -> bool:
     if flag in ("0", "false", "off", "legacy"):
         return False
     if flag in ("1", "true", "on"):
-        return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
-    return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
+        return _llm_ready()
+    return _llm_ready()
+
+
+def unified_rules_first_enabled() -> bool:
+    """Run discovery/auth gates before orchestrator on unified lana turns."""
+    flag = os.environ.get("LANA_UNIFIED_RULES_FIRST", "1").strip().lower()
+    return flag not in ("0", "false", "off")
 
 
 def use_orchestrator_for_purpose(purpose: str) -> bool:
-    """event_draft, profile_intake, and lana use fast paths by default."""
+    """event_draft and profile_intake use fast paths; lana uses orchestrator when LLM ready."""
     if purpose == "event_draft" and event_fast_path_enabled():
         return False
     if purpose == "profile_intake" and profile_fast_path_enabled():
         return False
     if purpose == "lana":
-        return False
+        return _orchestrator_enabled()
     return _orchestrator_enabled()

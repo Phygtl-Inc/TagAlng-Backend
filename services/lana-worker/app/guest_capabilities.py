@@ -9,8 +9,9 @@ from app.supabase_rpc import call_rpc
 
 _PEER_FIND_RE = re.compile(
     r"\b(find|show|match|meet|connect with|introduce me to|people|neighbors|fellows|"
-    r"moms?|dads?|parents?)\b.*\b(like me|similar|same|my vibe|on the block|nearby)\b"
-    r"|\b(find people|find neighbors|who else|others like)\b",
+    r"moms?|dads?|parents?)\b.*\b(like me|similar|same|my vibe|on the block|nearby|near me)\b"
+    r"|\b(find people|find neighbors|who else|others like|similar people)\b"
+    r"|\b(want|wanna|looking)\b.*\b(similar|like-minded)\b.*\b(people|neighbors|peers)\b",
     re.I,
 )
 _HOST_RE = re.compile(

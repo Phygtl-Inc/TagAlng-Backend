@@ -69,6 +69,13 @@ def execute_tool(
             block_id=block_id,
             args=args,
         )
+    if tool_name == "find_peers":
+        return _find_peers(
+            session_ctx=session_ctx,
+            args=args,
+            user_jwt=user_jwt,
+            block_id=block_id,
+        )
     return {"status": "error", "tool": tool_name, "reason": "unknown_tool"}
 
 
@@ -407,3 +414,75 @@ def _confirmation_echo(draft: dict[str, Any]) -> str:
     when = draft.get("starts_at") or "TBD"
     where = draft.get("venue_name") or "your place"
     return f"Got it: {title} · {when} · {where}. *Publish?*"
+
+
+def _find_peers(
+    *,
+    session_ctx: dict[str, Any],
+    args: dict[str, Any],
+    user_jwt: str | None,
+    block_id: str | None,
+) -> dict[str, Any]:
+    from app.discovery_route import (
+        fetch_blocks_for_zip,
+        fetch_preview_peers_on_block,
+        resolve_block_id,
+    )
+    from app.guest_capabilities import fetch_peer_matches, format_peer_matches
+
+    jwt = _require_jwt(user_jwt)
+    if not jwt:
+        return {"status": "error", "tool": "find_peers", "reason": "auth_required"}
+
+    zip5 = str(args.get("zip") or args.get("home_zip") or session_ctx.get("preview_zip") or "").strip()
+    bid = block_id or resolve_block_id(session_ctx, None)
+    if not bid and zip5:
+        blocks = fetch_blocks_for_zip(jwt, zip5[:5])
+        if blocks:
+            bid = str(blocks[0].get("block_id") or blocks[0].get("id") or "")
+            session_ctx["preview_block_id"] = bid
+            session_ctx["preview_zip"] = zip5[:5]
+            label = blocks[0].get("label") or blocks[0].get("name")
+            if label:
+                session_ctx["preview_block_label"] = str(label)
+
+    if not bid:
+        return {
+            "status": "blocked",
+            "tool": "find_peers",
+            "reason": "need_zip",
+            "routing_phase": "need_zip",
+        }
+
+    if not session_ctx.get("identity_snippet"):
+        return {
+            "status": "blocked",
+            "tool": "find_peers",
+            "reason": "need_identity",
+            "routing_phase": "need_identity",
+            "block_id": bid,
+        }
+
+    if not session_ctx.get("phone_verified"):
+        peers = fetch_preview_peers_on_block(bid, limit=int(args.get("limit") or 3))
+        for p in peers:
+            p["preview"] = True
+        return {
+            "status": "ok",
+            "tool": "find_peers",
+            "preview": True,
+            "peer_matches": peers,
+            "block_id": bid,
+            "routing_phase": "preview",
+        }
+
+    peers = fetch_peer_matches(jwt, limit=int(args.get("limit") or 5))
+    return {
+        "status": "ok",
+        "tool": "find_peers",
+        "preview": False,
+        "peer_matches": peers,
+        "summary": format_peer_matches(peers),
+        "block_id": bid,
+        "routing_phase": "preview",
+    }

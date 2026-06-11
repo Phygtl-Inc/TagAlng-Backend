@@ -121,6 +121,36 @@ class EnforceRoutingTests(unittest.TestCase):
         self.assertTrue(is_affirmative("Yes, publish"))
         self.assertFalse(is_affirmative("maybe"))
 
+    def test_lana_discovery_forces_zip_ask(self):
+        out = enforce_routing(
+            self._base(
+                intent_class="discovery",
+                outcome="R",
+                confidence=0.95,
+                tool_to_call=None,
+            ),
+            purpose="lana",
+            utterance="find similar people near me",
+            session_ctx={},
+        )
+        self.assertEqual(out["outcome"], "A")
+        self.assertIn("zip", out["missing_slots"])
+
+    def test_lana_companionship_not_overridden(self):
+        out = enforce_routing(
+            self._base(
+                intent_class="companionship",
+                outcome="R",
+                confidence=0.95,
+                tool_to_call=None,
+            ),
+            purpose="lana",
+            utterance="how are you",
+            session_ctx={"routing_phase": "listening"},
+        )
+        self.assertEqual(out["outcome"], "R")
+        self.assertIsNone(out["tool_to_call"])
+
 
 if __name__ == "__main__":
     unittest.main()
