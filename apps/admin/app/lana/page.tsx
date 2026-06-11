@@ -107,7 +107,7 @@ export default function LanaInboxPage() {
         </div>
         <div className="meet-lana-sidebar-links">
           <Link href="/lana/meet" className="meet-lana-demo-link">
-            Meet Lana (PWA demo) →
+            Meet Lana (unified chat) →
           </Link>
         </div>
         <div className="session-list">

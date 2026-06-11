@@ -1034,6 +1034,13 @@ a {
   color: #8a7968;
 }
 
+.meet-lana-peer-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
 .meet-lana-peer-list,
 .meet-lana-event-list {
   list-style: none;
@@ -1315,6 +1322,61 @@ a {
   display: none;
 }
 
+.meet-lana-topbar--minimal {
+  justify-content: space-between;
+}
+
+.meet-lana-account-btn {
+  margin-left: auto;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid #d4c4b0;
+  background: #fff;
+  color: #6b5b4f;
+  cursor: pointer;
+}
+
+.meet-lana-account-btn--signed-in {
+  border-color: #128c7e;
+  color: #075e54;
+  background: #e8f7f4;
+}
+
+.meet-lana-account-panel {
+  width: 100%;
+  max-width: 390px;
+  margin: 0 auto 0.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid #e0d5c8;
+  font-size: 0.82rem;
+  color: #4a4038;
+}
+
+.meet-lana-account-status {
+  margin: 0 0 0.5rem;
+  font-weight: 700;
+  color: #075e54;
+}
+
+.meet-lana-account-line {
+  margin: 0.25rem 0;
+}
+
+.meet-lana-account-signout {
+  margin-top: 0.65rem;
+  font-size: 0.8rem;
+  color: #b33;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
 .meet-lana-link--account {
   margin-top: 0.65rem;
   font-size: 0.88rem;
@@ -1424,6 +1486,10 @@ a {
   font-size: 0.68rem;
   color: #9a8b7a;
   text-align: left;
+}
+
+.meet-lana-composer--intent {
+  margin-bottom: 0.5rem;
 }
 
 .meet-lana-composer--phone {

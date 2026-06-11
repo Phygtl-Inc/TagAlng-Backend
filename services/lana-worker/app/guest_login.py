@@ -64,6 +64,7 @@ def _login_ctx(
         "auth_intent": "login",
         "requires_phone_verification": False,
         "requires_login_otp": requires_login_otp,
+        "routing_phase": guest_step,
     }
     if login_phone:
         out["login_phone"] = login_phone

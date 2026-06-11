@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
+
+from fastapi import HTTPException
 
 from app.auth import service_client
 from app.discovery_slots import (
@@ -19,10 +22,17 @@ from app.guest_capabilities import (
 )
 from app.guest_login import extract_otp_code, extract_phone_e164, handle_guest_login
 from app.guest_login import wants_login as wants_login_intent
+from app.claims_persist import (
+    extract_display_name_reply,
+    extract_nickname_from_message,
+    persist_profile_patch,
+    user_needs_display_name,
+)
 from app.supabase_rpc import call_rpc
 
 PHASE_NEED_ZIP = "need_zip"
 PHASE_NEED_IDENTITY = "need_identity"
+PHASE_NEED_DISPLAY_NAME = "need_display_name"
 PHASE_PREVIEW = "preview"
 PHASE_GATE_VERIFY = "gate_verify"
 PHASE_AWAIT_SIGNUP_PHONE = "await_signup_phone"
@@ -122,27 +132,27 @@ def wants_discovery_turn(
 ) -> bool:
     """
     Should discovery code handle this turn?
-    Explicit funnel input (ZIP, find-peers phrasing) → code.
-    Otherwise → AI slots decide; orchestrator handles chat/meta even mid-funnel.
+    Code: explicit funnel signals only (ZIP digits, find-peers phrasing).
+    AI: every other message — slots decide discovery vs orchestrator.
     """
     if _explicit_funnel_input(msg):
         return True
 
     phase = str(session_ctx.get("routing_phase") or "")
-    if slots is None and discovery_ai_enabled():
-        slots = ai_parse_discovery_turn(
-            msg,
-            routing_phase=phase or "listening",
-            history=history,
-            has_block=bool(resolve_block_id(session_ctx, None)),
-            has_identity=bool(session_ctx.get("identity_snippet")),
-        )
-
-    if discovery_ai_enabled() and slots:
+    if discovery_ai_enabled():
+        if slots is None:
+            slots = ai_parse_discovery_turn(
+                msg,
+                routing_phase=phase or "listening",
+                history=history,
+                has_block=bool(resolve_block_id(session_ctx, None)),
+                has_identity=bool(session_ctx.get("identity_snippet")),
+            )
         if slots.get("identity_snippet") and phase == PHASE_NEED_IDENTITY:
             return True
         return slots_want_discovery_handling(slots, routing_phase=phase)
 
+    # AI off (dev/tests): minimal legacy fallback
     if phase == PHASE_NEED_IDENTITY:
         s = str(msg or "").strip()
         if (
@@ -152,7 +162,6 @@ def wants_discovery_turn(
             and not _looks_like_meta_chat(s)
         ):
             return True
-
     return wants_peer_find(msg)
 
 
@@ -219,11 +228,17 @@ def resolve_block_id(
 
 
 def fetch_blocks_for_zip(user_jwt: str, zip5: str) -> list[dict[str, Any]]:
-    raw = call_rpc(
-        user_jwt,
-        "get_blocks_near_zip",
-        {"p_zip": zip5, "p_cluster_id": "lake-nona", "p_limit": 5},
-    )
+    try:
+        raw = call_rpc(
+            user_jwt,
+            "get_blocks_near_zip",
+            {"p_zip": zip5, "p_cluster_id": "lake-nona", "p_limit": 5},
+        )
+    except HTTPException as exc:
+        detail = str(exc.detail or "").lower()
+        if "zip_not_found" in detail or "invalid_zip" in detail:
+            return []
+        raise
     if isinstance(raw, list):
         return [r for r in raw if isinstance(r, dict)]
     return []
@@ -293,6 +308,34 @@ def redact_peers_for_preview(peers: list[dict[str, Any]]) -> list[dict[str, Any]
     return out
 
 
+def _format_event_when(raw: Any) -> str | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.strftime("%a %b %d").replace(" 0", " ")
+    except ValueError:
+        return s[:10] if len(s) >= 10 else s
+
+
+def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for ev in events[:5]:
+        if not isinstance(ev, dict):
+            continue
+        out.append(
+            {
+                "title": str(ev.get("title") or "Activity"),
+                "starts_at": str(ev.get("starts_at") or "") or None,
+                "starts_label": _format_event_when(ev.get("starts_at")),
+                "venue_name": str(ev.get("venue_name") or "").strip() or None,
+                "preview": True,
+            }
+        )
+    return out
+
+
 def fetch_preview_events_on_block(block_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
     """Upcoming open events on preview block (service role)."""
     try:
@@ -322,7 +365,7 @@ def format_activities_message(events: list[dict[str, Any]], block_label: str | N
     for ev in events[:5]:
         title = str(ev.get("title") or "Activity")
         venue = str(ev.get("venue_name") or "").strip()
-        when = str(ev.get("starts_at") or "").strip()
+        when = _format_event_when(ev.get("starts_at"))
         line = f"• {title}"
         if venue:
             line += f" at {venue}"
@@ -358,19 +401,26 @@ def _verify_gate_reply(
         lead = f"To join {event_label}, verify your phone first — I'll text you a code."
     else:
         lead = "I can see neighbors nearby — to show names and connect you, verify your phone first."
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=PHASE_AWAIT_SIGNUP_PHONE,
+        preview_block_id=block_id,
+    )
+    ctx["peer_matches"] = []
     return (
         f"{lead} What's your number?",
-        _routing_ctx(
-            ctx_base,
-            phase=PHASE_AWAIT_SIGNUP_PHONE,
-            preview_block_id=block_id,
-        ),
+        ctx,
         _discovery_routing_stub(PHASE_GATE_VERIFY),
         [],
     )
 
 
-def format_preview_message(peers: list[dict[str, Any]], block_label: str | None) -> str:
+def format_preview_message(
+    peers: list[dict[str, Any]],
+    block_label: str | None,
+    *,
+    phone_verified: bool = False,
+) -> str:
     where = block_label or "your block"
     if not peers:
         return (
@@ -381,9 +431,14 @@ def format_preview_message(peers: list[dict[str, Any]], block_label: str | None)
     for i, p in enumerate(peers[:3], 1):
         label = str(p.get("matching_peer_label") or "shared interests")
         lines.append(f"• Neighbor {i} — {label}")
-    lines.append(
-        "Verify your phone to see names and connect — or tell me more about you for sharper matches."
-    )
+    if phone_verified:
+        lines.append(
+            "Tell me more about you for sharper matches — or ask me to introduce you to someone."
+        )
+    else:
+        lines.append(
+            "Verify your phone to see names and connect — or tell me more about you for sharper matches."
+        )
     return "\n".join(lines)
 
 
@@ -398,6 +453,56 @@ def _discovery_routing_stub(phase: str, tool: str | None = None) -> dict[str, An
     }
 
 
+def _apply_display_name_gate(
+    msg: str,
+    *,
+    user_id: str | None,
+    ctx_base: dict[str, Any],
+    block_id: str,
+    phase: str,
+    snippet: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """After identity: collect display name before peer preview."""
+    if not snippet or not user_needs_display_name(user_id, ctx_base):
+        return None
+
+    if phase == PHASE_NEED_DISPLAY_NAME:
+        nick = extract_display_name_reply(msg)
+        if nick and user_id:
+            persist_profile_patch(user_id, {"nickname": nick})
+            ctx_base["display_name_saved"] = True
+            return None
+        return (
+            "I didn't catch that — what should neighbors call you? First name is fine.",
+            _routing_ctx(
+                ctx_base,
+                phase=PHASE_NEED_DISPLAY_NAME,
+                active_intent=INTENT_FIND_PEERS,
+                preview_block_id=block_id,
+            ),
+            _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
+            [],
+        )
+
+    nick = extract_nickname_from_message(msg)
+    if nick and user_id:
+        persist_profile_patch(user_id, {"nickname": nick})
+        ctx_base["display_name_saved"] = True
+        return None
+
+    return (
+        "Love that — what should neighbors call you? First name is fine.",
+        _routing_ctx(
+            ctx_base,
+            phase=PHASE_NEED_DISPLAY_NAME,
+            active_intent=INTENT_FIND_PEERS,
+            preview_block_id=block_id,
+        ),
+        _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
+        [],
+    )
+
+
 def handle_discovery_turn(
     user_message: str,
     *,
@@ -407,6 +512,7 @@ def handle_discovery_turn(
     home_block_id: str | None,
     is_anonymous: bool,
     history: list[dict[str, Any]] | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """
     Returns (reply, ctx, routing, peer_matches) or None if not handling this turn.
@@ -547,7 +653,7 @@ def handle_discovery_turn(
         )
 
     block_just_resolved = bool(zip_from_msg and not had_block)
-    goal = str(slots.get("goal") or "peers")
+    goal = str(slots.get("goal") or "none")
 
     # Slot: identity snippet (Flash — not chat history heuristics)
     snippet = resolve_identity_for_turn(
@@ -561,21 +667,37 @@ def handle_discovery_turn(
     if snippet:
         ctx_base["identity_snippet"] = snippet
 
-    if not snippet:
+    effective_snippet = str(ctx_base.get("identity_snippet") or "").strip() or None
+
+    if not effective_snippet:
+        # AI already routed here — only collect identity when funnel goal says so
+        if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
+            return None
         return (
-                "Tell me one thing about you — life stage, heritage, or what you're looking for — "
-                "so I can match you better.",
-                _routing_ctx(
-                    session_ctx,
-                    phase=PHASE_NEED_IDENTITY,
-                    active_intent=INTENT_FIND_PEERS,
-                    preview_block_id=block_id,
-                    preview_zip=ctx_base.get("preview_zip"),
-                    preview_block_label=ctx_base.get("preview_block_label"),
-                ),
-                _discovery_routing_stub(PHASE_NEED_IDENTITY),
-                [],
-            )
+            "Tell me one thing about you — life stage, heritage, or what you're looking for — "
+            "so I can match you better.",
+            _routing_ctx(
+                session_ctx,
+                phase=PHASE_NEED_IDENTITY,
+                active_intent=INTENT_FIND_PEERS,
+                preview_block_id=block_id,
+                preview_zip=ctx_base.get("preview_zip"),
+                preview_block_label=ctx_base.get("preview_block_label"),
+            ),
+            _discovery_routing_stub(PHASE_NEED_IDENTITY),
+            [],
+        )
+
+    name_gate = _apply_display_name_gate(
+        msg,
+        user_id=user_id,
+        ctx_base=ctx_base,
+        block_id=block_id,
+        phase=phase,
+        snippet=effective_snippet,
+    )
+    if name_gate is not None:
+        return name_gate
 
     block_label = str(
         ctx_base.get("preview_block_label")
@@ -588,6 +710,8 @@ def handle_discovery_turn(
         reply = format_activities_message(events, block_label)
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "browse_block_activities")
+        ctx["activity_previews"] = activity_previews_from_events(events)
+        ctx["peer_matches"] = []
         return reply, ctx, ctx["last_routing"], []
 
     if wants_rsvp_intent(msg) or goal == "rsvp":
@@ -622,6 +746,7 @@ def handle_discovery_turn(
             if peers:
                 reply = format_peer_matches(peers)
                 ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
+                ctx.pop("activity_previews", None)
                 ctx["last_routing"] = _discovery_routing_stub(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
@@ -629,8 +754,9 @@ def handle_discovery_turn(
 
         if wants_peers or phase != PHASE_PREVIEW:
             peers = fetch_preview_peers_on_block(block_id, limit=3)
-            reply = format_preview_message(peers, block_label)
+            reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
             ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
+            ctx.pop("activity_previews", None)
             ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "preview_peers_on_block")
             return reply, ctx, ctx["last_routing"], peers
 

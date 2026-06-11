@@ -25,6 +25,48 @@ export type JointMomentPayload = {
   is_demo?: boolean;
 };
 
+export type AuthActionPayload = {
+  type:
+    | 'link_phone_signup'
+    | 'verify_signup_otp'
+    | 'send_login_otp'
+    | 'verify_login_otp';
+  phone?: string | null;
+  token?: string | null;
+  verify_type?: string | null;
+};
+
+export type PeerMatchRow = {
+  peer_user_id?: string | null;
+  nickname?: string | null;
+  avatar_url?: string | null;
+  similarity_score?: number | null;
+  matching_peer_label?: string | null;
+  matching_peer_concept?: string | null;
+  has_exact_concept_match?: boolean;
+  preview?: boolean;
+};
+
+export type ActivityPreviewRow = {
+  title: string;
+  starts_at?: string | null;
+  starts_label?: string | null;
+  venue_name?: string | null;
+  preview?: boolean;
+};
+
+/** What input chrome to show — mirrors lana-worker `ui_intent`. */
+export type LanaUiIntent =
+  | 'chat'
+  | 'collect_zip'
+  | 'collect_identity'
+  | 'collect_display_name'
+  | 'collect_phone'
+  | 'collect_otp'
+  | 'show_peer_preview'
+  | 'show_activity_preview'
+  | 'confirm_profile';
+
 export type GuestOnboardingFields = {
   onboarding_step?: string | null;
   requires_phone_verification?: boolean;
@@ -32,6 +74,16 @@ export type GuestOnboardingFields = {
   phone_verified?: boolean;
   home_block_assigned?: boolean;
   is_anonymous?: boolean;
+  active_intent?: string | null;
+  routing_phase?: string | null;
+  ui_intent?: LanaUiIntent | null;
+  peer_matches?: PeerMatchRow[];
+  activity_previews?: ActivityPreviewRow[];
+  auth_action?: AuthActionPayload | null;
+  auth_intent?: string | null;
+  login_phone?: string | null;
+  requires_login_otp?: boolean;
+  login_otp_token?: string | null;
 };
 
 export type LanaSession = GuestOnboardingFields & {
@@ -97,6 +149,15 @@ async function lanaFetch<T>(
   return body as T;
 }
 
+/** Unified Lana chat (default) — empty body, purpose `lana`. */
+export function startUnifiedSession(token: string) {
+  return lanaFetch<LanaSession>('/lana/sessions', token, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+/** Legacy guest onboarding — profile_intake. */
 export function startProfileSession(token: string) {
   return lanaFetch<LanaSession>('/lana/sessions', token, {
     method: 'POST',
