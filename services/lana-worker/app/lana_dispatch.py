@@ -52,6 +52,7 @@ def lana_unified_turn(
         phone_verified=phone_verified,
         home_block_id=home_block_id,
         is_anonymous=is_anonymous,
+        history=history,
     )
     if discovery is not None:
         reply, ctx, routing, peers = discovery

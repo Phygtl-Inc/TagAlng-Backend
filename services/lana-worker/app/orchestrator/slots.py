@@ -21,6 +21,7 @@ KNOWN_TOOLS = frozenset(
         "propose_cohost",
         "update_relationship_tier",
         "recall",
+        "find_peers",
     }
 )
 
@@ -114,17 +115,22 @@ def validate_tool_slots(
         return missing
 
     if tool_name == "update_event_draft":
-        if purpose != "event_draft":
+        if purpose not in ("event_draft", "lana"):
             return ["wrong_session_purpose"]
         if not has_partial_event_args(args, session_ctx):
             return ["event_detail"]
         return []
 
     if tool_name == "publish_activity":
-        if purpose != "event_draft":
+        if purpose not in ("event_draft", "lana"):
             return ["wrong_session_purpose"]
         draft = merged_event_draft(session_ctx, args)
         return event_missing_slots(draft)
+
+    if tool_name == "find_peers":
+        if purpose != "lana":
+            return ["wrong_session_purpose"]
+        return []
 
     if tool_name == "send_nudge":
         if is_placeholder(args.get("to_user_id") or args.get("recipient_id")):

@@ -43,6 +43,7 @@ from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
+from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.models import (
     AuthActionPayload,
     CompleteSessionRequest,
@@ -618,8 +619,26 @@ def send_lana_message(
         prev_draft = (session.get("context") or {}).get("event_draft")
 
         use_orch = use_orchestrator_for_purpose(purpose)
+        orch_used = False
         user_jwt = _bearer_token(authorization)
-        if use_orch:
+        if purpose == "lana":
+            reply, status, session_ctx, ui_raw, draft_raw = run_lana_unified_pipeline(
+                user_id=auth.user_id,
+                session_id=session_id,
+                history=history,
+                user_message=body.message,
+                session_ctx=session.get("context") or {},
+                user_jwt=user_jwt,
+                phone_verified=auth.phone_verified,
+                home_block_id=auth.home_block_id,
+                is_anonymous=auth.is_anonymous,
+                persisted_core=session.get("core_block") if isinstance(session.get("core_block"), dict) else None,
+                timer=timer,
+                use_orchestrator=use_orch,
+            )
+            timing_ms = session_ctx.pop("timing_ms", None)
+            orch_used = bool(session_ctx.pop("_orchestrator_turn", False))
+        elif use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(
                 user_id=auth.user_id,
                 session_id=session_id,
@@ -632,6 +651,7 @@ def send_lana_message(
                 timer=timer,
             )
             timing_ms = session_ctx.pop("timing_ms", None)
+            orch_used = True
         else:
             if purpose in ("profile_intake", "lana"):
                 ctx_pack, user_block, purpose_ids = _profile_context_pack(
@@ -658,13 +678,14 @@ def send_lana_message(
                 auth=auth,
             )
             timing_ms = timer.to_dict()
+            orch_used = False
 
         with timer.stage("db_save_assistant_message"):
             assistant_msg_id = insert_message(
                 session_id,
                 "assistant",
                 reply,
-                {"status": status, "ui": ui_raw, "orchestrator": use_orch},
+                {"status": status, "ui": ui_raw, "orchestrator": orch_used},
                 embed=False,
             )
         with timer.stage("db_update_session"):
@@ -708,7 +729,7 @@ def send_lana_message(
         ui=ui,
         event_draft=event_draft,
         routing=_routing_from_ctx(merged),
-        orchestrator=use_orch,
+        orchestrator=orch_used,
         timing_ms=timing_ms,
         **ob,
     )

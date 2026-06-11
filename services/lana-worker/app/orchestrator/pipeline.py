@@ -16,6 +16,8 @@ from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
 from app.orchestrator.tools import execute_tool
 from app.context import load_user_context
 from app.turn_timing import TurnTimer
+from app.guest_capabilities import wants_host_activity
+from app.orchestrator.slots import has_partial_event_args
 from app.vertex_event import reconcile_orchestrator_event_turn
 
 
@@ -152,6 +154,8 @@ def run_turn(
         purpose=purpose,
         utterance=utterance,
         session_ctx=session_ctx,
+        history=history,
+        home_block_id=block_id,
     )
 
     if should_execute_tool(routing):
@@ -177,6 +181,12 @@ def run_turn(
             session_ctx.pop("pending_confirmation", None)
             session_ctx["event_id"] = tool_result.get("event_id")
             session_ctx["last_status"] = "ready_to_complete"
+        if tool_result and tool_result.get("peer_matches"):
+            session_ctx["peer_matches"] = tool_result["peer_matches"]
+        if tool_result and tool_result.get("routing_phase"):
+            session_ctx["routing_phase"] = tool_result["routing_phase"]
+        if tool_result and tool_result.get("block_id"):
+            session_ctx["preview_block_id"] = tool_result["block_id"]
 
     reply, status, synth_ctx, ui, draft = synthesize_turn(
         purpose=purpose,
@@ -187,6 +197,7 @@ def run_turn(
         tool_result=tool_result,
         prev_draft=prev_draft,
         purpose_ids=purpose_ids if purpose == "event_draft" else None,
+        session_ctx=session_ctx,
         timer=timer,
     )
 
@@ -220,10 +231,18 @@ def run_turn(
             tool_result=tool_result,
             prev_draft=prev_draft,
             purpose_ids=purpose_ids if purpose == "event_draft" else None,
+            session_ctx=session_ctx,
             timer=timer,
         )
 
-    if purpose == "event_draft":
+    if _should_reconcile_event_turn(
+        purpose=purpose,
+        utterance=utterance,
+        session_ctx=session_ctx,
+        routing=routing,
+        tool_result=tool_result,
+        prev_draft=prev_draft,
+    ):
         status, ui, draft = reconcile_orchestrator_event_turn(
             ctx_pack=ctx_pack,
             history=history,
@@ -252,6 +271,9 @@ def run_turn(
     if draft:
         merged_ctx["event_draft"] = draft
 
+    if purpose == "lana":
+        _stamp_lana_unified_fields(merged_ctx, routing=routing, tool_result=tool_result)
+
     log_turn(
         session_id=session_id,
         user_id=user_id,
@@ -268,3 +290,55 @@ def run_turn(
     )
 
     return reply, status, merged_ctx, ui, draft
+
+
+def _should_reconcile_event_turn(
+    *,
+    purpose: str,
+    utterance: str,
+    session_ctx: dict[str, Any],
+    routing: dict[str, Any],
+    tool_result: dict[str, Any] | None,
+    prev_draft: dict[str, Any] | None,
+) -> bool:
+    if purpose == "event_draft":
+        return True
+    if purpose != "lana":
+        return False
+    if wants_host_activity(utterance):
+        return True
+    if session_ctx.get("pending_confirmation"):
+        return True
+    if tool_result and tool_result.get("tool") in ("publish_activity", "update_event_draft"):
+        return True
+    if has_partial_event_args(None, session_ctx):
+        return True
+    if isinstance(prev_draft, dict) and has_partial_event_args(prev_draft, session_ctx):
+        return True
+    if routing.get("intent_class") == "activity" and routing.get("tool_to_call") in (
+        "publish_activity",
+        "update_event_draft",
+        "propose_cohost",
+    ):
+        return True
+    return False
+
+
+def _stamp_lana_unified_fields(
+    ctx: dict[str, Any],
+    *,
+    routing: dict[str, Any],
+    tool_result: dict[str, Any] | None,
+) -> None:
+    notes = list(routing.get("enforce_notes") or [])
+    if routing.get("intent_class") == "discovery" or "discovery_find_peers" in notes:
+        ctx["active_intent"] = "discovery.find_peers"
+        ctx.setdefault("unified_mode", True)
+    if "discovery_need_zip" in notes or (tool_result and tool_result.get("reason") == "need_zip"):
+        ctx["routing_phase"] = "need_zip"
+    elif "discovery_need_identity" in notes or (
+        tool_result and tool_result.get("reason") == "need_identity"
+    ):
+        ctx["routing_phase"] = "need_identity"
+    elif tool_result and tool_result.get("tool") == "find_peers" and tool_result.get("status") == "ok":
+        ctx["routing_phase"] = "preview"

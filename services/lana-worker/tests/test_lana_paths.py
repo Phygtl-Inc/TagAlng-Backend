@@ -59,10 +59,16 @@ class TestLanaPaths(unittest.TestCase):
         self.assertFalse(use_orchestrator_for_purpose("profile_intake"))
         self.assertFalse(use_orchestrator_for_purpose("event_draft"))
 
-    def test_lana_skips_orchestrator(self) -> None:
+    def test_lana_uses_orchestrator_when_vertex_on(self) -> None:
         os.environ["LANA_ORCHESTRATOR"] = "1"
         os.environ["GCP_VERTEX_PROJECT"] = "test-project"
-        self.assertFalse(use_orchestrator_for_purpose("lana"))
+        self.assertTrue(use_orchestrator_for_purpose("lana"))
+
+    def test_unified_rules_first_default_on(self) -> None:
+        from app.lana_paths import unified_rules_first_enabled
+
+        os.environ.pop("LANA_UNIFIED_RULES_FIRST", None)
+        self.assertTrue(unified_rules_first_enabled())
 
 
 if __name__ == "__main__":

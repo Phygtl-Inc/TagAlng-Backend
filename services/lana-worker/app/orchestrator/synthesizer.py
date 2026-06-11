@@ -33,6 +33,7 @@ def synthesize_turn(
     tool_result: dict[str, Any] | None,
     prev_draft: dict[str, Any] | None = None,
     purpose_ids: list[str] | None = None,
+    session_ctx: dict[str, Any] | None = None,
     timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     outcome = routing.get("outcome", "R")
@@ -40,6 +41,8 @@ def synthesize_turn(
 
     if purpose == "event_draft":
         schema = _event_synth_schema()
+    elif purpose == "lana":
+        schema = _lana_synth_schema()
     else:
         schema = _profile_synth_schema()
 
@@ -54,6 +57,22 @@ def synthesize_turn(
         payload_parts.append(
             'OPENING TURN: First chat line after "Meet Lana". '
             'Say something like: "So — *who are you*, right now?" — warm, one question, invite their story.'
+        )
+    if purpose == "lana":
+        phase = str((session_ctx or {}).get("routing_phase") or "listening")
+        notes = routing.get("enforce_notes") or []
+        payload_parts.append(
+            f"LANA UNIFIED · routing_phase={phase} · enforce_notes={notes}\n"
+            "You are Lana, block concierge — warm, one line.\n"
+            "- Answer what the user actually asked first (are you real, frustration, small talk).\n"
+            "- If routing_phase is need_zip/need_identity but they did not give ZIP/identity, "
+            "respond to their question; gently offer ZIP or one identity line only if natural.\n"
+            "- Greetings: answer naturally; mention find neighbors / log in when helpful.\n"
+            "- NEVER claim you found peers unless tool_result.peer_matches is non-empty.\n"
+            "- Do NOT run a long profile interview; discovery = ZIP then one identity line.\n"
+            "- discovery_need_zip: ask for 5-digit US ZIP (e.g. 32827).\n"
+            "- discovery_need_identity: ask one short line (heritage, life stage, or what they want).\n"
+            "- If peer_matches with preview=true: describe labels only, no names.\n"
         )
     if purpose == "event_draft":
         ids = purpose_ids or []
@@ -107,6 +126,8 @@ def synthesize_turn(
             tool_result=tool_result,
             valid_purpose_ids=set(purpose_ids or []),
         )
+    if purpose == "lana":
+        return _parse_lana_synth(raw, routing=routing, tool_result=tool_result)
     return _parse_profile_synth(raw, history=history)
 
 
@@ -130,6 +151,49 @@ def synthesize_opening(
         purpose_ids=purpose_ids,
         timer=timer,
     )
+
+
+def _lana_synth_schema() -> str:
+    return """{
+  "assistant_message": "single-line warm reply",
+  "status": "continue",
+  "ui": { "bucket": null, "focus_phrase": null, "highlights": [] }
+}
+
+Rules: assistant_message ONE line only. status is continue."""
+
+
+def _parse_lana_synth(
+    raw: dict[str, Any],
+    *,
+    routing: dict[str, Any],
+    tool_result: dict[str, Any] | None,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
+    assistant_message = str(raw.get("assistant_message", "")).strip()[:1200]
+    notes = list(routing.get("enforce_notes") or [])
+    if not assistant_message:
+        if "discovery_need_zip" in notes or (tool_result and tool_result.get("reason") == "need_zip"):
+            assistant_message = "What ZIP code is your block? (e.g. 32827)"
+        elif "discovery_need_identity" in notes or (
+            tool_result and tool_result.get("reason") == "need_identity"
+        ):
+            assistant_message = (
+                "Tell me one thing about you — life stage, heritage, or what you're looking for."
+            )
+        elif tool_result and tool_result.get("summary"):
+            assistant_message = str(tool_result["summary"])[:1200]
+        else:
+            assistant_message = (
+                "Hey — I'm here for your block. Ask me to find neighbors like you or say log in."
+            )
+    status = "continue"
+    ui = parse_turn_ui(raw)
+    ctx: dict[str, Any] = {"last_status": status, "unified_mode": True}
+    if tool_result and tool_result.get("peer_matches"):
+        ctx["peer_matches"] = tool_result["peer_matches"]
+    if tool_result and tool_result.get("identity_snippet"):
+        ctx["identity_snippet"] = tool_result["identity_snippet"]
+    return assistant_message, status, ctx, ui, None
 
 
 def _profile_synth_schema() -> str:
