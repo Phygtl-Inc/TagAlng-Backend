@@ -7,24 +7,32 @@ import { MappedSummary } from '@/components/MappedSummary';
 import {
   completeSession,
   sendMessage,
-  startProfileSession,
+  startUnifiedSession,
   type CompleteResult,
   type JointMomentPayload,
   type LanaTurn,
+  type LanaUiIntent,
+  type ActivityPreviewRow,
+  type PeerMatchRow,
 } from '@/lib/lana-client';
 import {
   DEMO_TEST_OTP,
   DEMO_TEST_PHONE,
   assignMariaDemoBlock,
+  authActionFromTurn,
   demoPhoneAuth,
+  demoSignOut,
   ensureDemoBlock,
-  guestAnonymousSignIn,
+  fetchAuthProfile,
+  guestAnonymousSignUp,
   guestLinkPhone,
   guestVerifyPhoneLink,
   getDemoSupabase,
+  handleLanaAuthAction,
   loadClusterEvents,
   sendJointMomentIntro,
   type ClusterEvent,
+  type DemoAuthProfile,
 } from '@/lib/demo-user';
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
@@ -36,6 +44,25 @@ type ChatLine = {
   role: 'user' | 'assistant';
   content: string;
 };
+
+function fallbackUiIntent(
+  phase: string,
+  readyToComplete?: boolean,
+): LanaUiIntent {
+  if (readyToComplete) return 'confirm_profile';
+  const map: Record<string, LanaUiIntent> = {
+    need_zip: 'collect_zip',
+    need_identity: 'collect_identity',
+    need_display_name: 'collect_display_name',
+    await_signup_phone: 'collect_phone',
+    await_signup_otp: 'collect_otp',
+    await_login_phone: 'collect_phone',
+    await_login_otp: 'collect_otp',
+    gate_verify: 'collect_phone',
+    preview: 'show_peer_preview',
+  };
+  return map[phase] ?? 'chat';
+}
 
 function toE164(raw: string) {
   const digits = raw.replace(/\D/g, '');
@@ -67,7 +94,31 @@ export default function MeetLanaPage() {
   const [otpDraft, setOtpDraft] = useState(DEMO_TEST_OTP);
   const [otpSent, setOtpSent] = useState(false);
   const [introSent, setIntroSent] = useState(false);
+  const [routingPhase, setRoutingPhase] = useState<string | null>('listening');
+  const [uiIntent, setUiIntent] = useState<LanaUiIntent>('chat');
+  const [loginPhoneHint, setLoginPhoneHint] = useState<string | null>(null);
+  const [peerMatches, setPeerMatches] = useState<PeerMatchRow[]>([]);
+  const [activityPreviews, setActivityPreviews] = useState<ActivityPreviewRow[]>([]);
+  const [lastOrchestrator, setLastOrchestrator] = useState<boolean | null>(null);
+  const [signedInUser, setSignedInUser] = useState<DemoAuthProfile | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  const refreshAccount = useCallback(async () => {
+    try {
+      const profile = await fetchAuthProfile();
+      setSignedInUser(profile);
+      if (profile && !profile.isAnonymous) {
+        setPhoneVerified(true);
+      }
+    } catch {
+      setSignedInUser(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAccount();
+  }, [refreshAccount]);
 
   const scrollChat = useCallback(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -80,16 +131,33 @@ export default function MeetLanaPage() {
   function applyTurn(turn: LanaTurn, opts?: { forceVerified?: boolean }) {
     setReadyToComplete(turn.ready_to_complete);
     if (turn.joint_moment) setJointMoment(turn.joint_moment);
+    if (turn.routing_phase) setRoutingPhase(turn.routing_phase);
+    if (turn.ui_intent) {
+      setUiIntent(turn.ui_intent);
+    } else if (turn.routing_phase) {
+      setUiIntent(fallbackUiIntent(turn.routing_phase, turn.ready_to_complete));
+    }
+    if (turn.login_phone) setLoginPhoneHint(turn.login_phone);
+    setPeerMatches(turn.peer_matches ?? []);
+    setActivityPreviews(turn.activity_previews ?? []);
+    if (typeof turn.orchestrator === 'boolean') setLastOrchestrator(turn.orchestrator);
+
     const verified = Boolean(opts?.forceVerified || turn.phone_verified);
     if (verified) setPhoneVerified(true);
 
-    // Phone done — stay in chat even if session context still says await_phone
-    if (verified || turn.onboarding_step === 'post_verify') {
-      setOnboardingStep(turn.onboarding_step === 'post_verify' ? 'post_verify' : 'post_verify');
+    // Unified lana: stay in chat; phone/OTP typed in thread (auth_action handled in pushTurn)
+    if (turn.routing_phase != null || turn.active_intent != null || !turn.onboarding_step) {
       setScreen('chat');
+      if (turn.onboarding_step) setOnboardingStep(turn.onboarding_step);
       return;
     }
 
+    // Legacy profile_intake fallback
+    if (verified || turn.onboarding_step === 'post_verify') {
+      setOnboardingStep('post_verify');
+      setScreen('chat');
+      return;
+    }
     if (turn.onboarding_step) setOnboardingStep(turn.onboarding_step);
     if (turn.onboarding_step === 'await_phone' || turn.requires_phone_verification) {
       setOtpSent(false);
@@ -99,15 +167,83 @@ export default function MeetLanaPage() {
     }
   }
 
+  async function completeSignedInSession(access: string, mode: 'login' | 'signup') {
+    const profile = await fetchAuthProfile();
+    setSignedInUser(profile);
+    setPhoneVerified(true);
+    setOnboardingStep('post_verify');
+    setRoutingPhase('listening');
+    setUiIntent('chat');
+    setToken(access);
+
+    const label = profile?.nickname || profile?.phone || 'your account';
+    const blockHint = profile?.homeBlockId
+      ? 'Your block is on file — ask me to find neighbors or activities.'
+      : 'Tell me your ZIP when you want discovery, or keep chatting.';
+
+    if (mode === 'login') {
+      // Postman Guest-InChat-Login: new user_id → abandon guest Lana session, start fresh
+      const lana = await startUnifiedSession(access);
+      setSessionId(lana.session_id);
+      setLines((prev) => [
+        ...prev,
+        {
+          id: `a-signed-in-${Date.now()}`,
+          role: 'assistant',
+          content: `You're signed in as **${label}**. ${blockHint}`,
+        },
+      ]);
+      return lana;
+    }
+
+    // Postman E2E step 14+: same lana_session_id, new access_token after phone_change
+    setLines((prev) => [
+      ...prev,
+      {
+        id: `a-verified-${Date.now()}`,
+        role: 'assistant',
+        content: `Phone verified — you're set up as **${label}**. ${blockHint}`,
+      },
+    ]);
+    return null;
+  }
+
   async function pushTurn(access: string, sid: string, text: string) {
     const userLine: ChatLine = { id: `u-${Date.now()}`, role: 'user', content: text };
     setLines((prev) => [...prev, userLine]);
-    const turn = await sendMessage(access, sid, text);
+    let token = access;
+    let turn = await sendMessage(token, sid, text);
+
     setLines((prev) => [
       ...prev,
       { id: `a-${Date.now()}`, role: 'assistant', content: turn.assistant_message },
     ]);
     applyTurn(turn);
+
+    const authAction = authActionFromTurn(turn);
+    if (authAction) {
+      try {
+        token = await handleLanaAuthAction(authAction);
+        setToken(token);
+        if (authAction.type === 'verify_signup_otp') {
+          await completeSignedInSession(token, 'signup');
+          // Postman E2E step 14 — same session_id, new bearer after phone_change
+          turn = await sendMessage(token, sid, 'ok');
+          setLines((prev) => [
+            ...prev,
+            { id: `a-verify-${Date.now()}`, role: 'assistant', content: turn.assistant_message },
+          ]);
+          applyTurn(turn, { forceVerified: true });
+        } else if (authAction.type === 'verify_login_otp') {
+          await completeSignedInSession(token, 'login');
+          return turn;
+        }
+      } catch (authErr) {
+        const msg = authErr instanceof Error ? authErr.message : 'Auth failed';
+        throw new Error(msg);
+      }
+    }
+
     return turn;
   }
 
@@ -115,39 +251,25 @@ export default function MeetLanaPage() {
     setBusy(true);
     setError(null);
     try {
-      const session = await guestAnonymousSignIn();
+      const session = await guestAnonymousSignUp();
       setToken(session.access_token);
-      const lana = await startProfileSession(session.access_token);
+      const lana = await startUnifiedSession(session.access_token);
       setSessionId(lana.session_id);
       setLines([{ id: 'open', role: 'assistant', content: lana.assistant_message }]);
+      setRoutingPhase(lana.routing_phase ?? 'listening');
+      setUiIntent(
+        lana.ui_intent ??
+          fallbackUiIntent(lana.routing_phase ?? 'listening', lana.ready_to_complete),
+      );
       setOnboardingStep(lana.onboarding_step || 'early_chat');
       setJointMoment(lana.joint_moment ?? null);
       setReadyToComplete(lana.ready_to_complete);
+      setPeerMatches(lana.peer_matches ?? []);
+      setActivityPreviews(lana.activity_previews ?? []);
+      setLastOrchestrator(lana.orchestrator ?? false);
       setScreen('chat');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start — check env keys');
-      setDevOpen(true);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onAlreadyHaveAccount() {
-    setBusy(true);
-    setError(null);
-    try {
-      await demoPhoneAuth(setupPhone, setupOtp);
-      const supabase = getDemoSupabase();
-      const { data } = await supabase.auth.getSession();
-      if (!data.session?.access_token) throw new Error('No session');
-      setToken(data.session.access_token);
-      setPhoneVerified(true);
-      const lana = await startProfileSession(data.session.access_token);
-      setSessionId(lana.session_id);
-      setLines([{ id: 'open', role: 'assistant', content: lana.assistant_message }]);
-      setScreen('chat');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sign-in failed');
       setDevOpen(true);
     } finally {
       setBusy(false);
@@ -290,12 +412,53 @@ export default function MeetLanaPage() {
   const latestUser = [...lines].reverse().find((l) => l.role === 'user');
   const mariaNick = jointMoment?.candidate?.nickname || 'Maria';
   const showJointCard = screen === 'chat' && onboardingStep === 'offered_intro' && jointMoment;
-  const composerPlaceholder =
-    onboardingStep === 'awaiting_intro_name'
-      ? `What should ${mariaNick} call you?`
-      : onboardingStep === 'post_verify'
-        ? 'Tell Lana about your kids, interests…'
-        : 'Tell Lana about yourself…';
+  const showAuthField = uiIntent === 'collect_phone' || uiIntent === 'collect_otp';
+  const showZipField = uiIntent === 'collect_zip';
+
+  const composerPlaceholder = (() => {
+    if (uiIntent === 'collect_zip') return 'Your 5-digit ZIP (e.g. 32827)…';
+    if (uiIntent === 'collect_identity') return 'Tell Lana one thing about you…';
+    if (uiIntent === 'collect_display_name') return 'Your first name…';
+    if (uiIntent === 'collect_phone') return 'Phone on your account (e.g. +923…)…';
+    if (uiIntent === 'collect_otp') {
+      return loginPhoneHint
+        ? `Code sent to ${loginPhoneHint} (dev: ${DEMO_TEST_OTP})…`
+        : `6-digit code (dev: ${DEMO_TEST_OTP})…`;
+    }
+    if (onboardingStep === 'awaiting_intro_name') return `What should ${mariaNick} call you?`;
+    if (onboardingStep === 'post_verify' || phoneVerified) {
+      return 'Chat with Lana — find neighbors, activities…';
+    }
+    return 'Say hi, ask anything, or try “find people like me”…';
+  })();
+
+  async function onStructuredSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!token || !sessionId || busy) return;
+    const text =
+      uiIntent === 'collect_otp'
+        ? otpDraft.trim()
+        : uiIntent === 'collect_phone'
+          ? toE164(phoneDraft)
+          : uiIntent === 'collect_zip'
+            ? draft.trim()
+            : draft.trim();
+    if (!text) return;
+    if (uiIntent === 'collect_phone') setPhoneDraft(text);
+    setBusy(true);
+    setThinking(true);
+    setError(null);
+    try {
+      await pushTurn(token, sessionId, text);
+      if (uiIntent === 'collect_phone') setOtpDraft(DEMO_TEST_OTP);
+      if (uiIntent === 'collect_otp') setOtpDraft('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong');
+    } finally {
+      setBusy(false);
+      setThinking(false);
+    }
+  }
 
   return (
     <div className="meet-lana-page">
@@ -303,7 +466,64 @@ export default function MeetLanaPage() {
         <Link href="/lana" className="meet-lana-back">
           ← Inbox
         </Link>
+        {screen === 'chat' && (
+          <button
+            type="button"
+            className={`meet-lana-account-btn${signedInUser && !signedInUser.isAnonymous ? ' meet-lana-account-btn--signed-in' : ''}`}
+            onClick={() => setAccountOpen((o) => !o)}
+            aria-expanded={accountOpen}
+          >
+            {signedInUser && !signedInUser.isAnonymous
+              ? signedInUser.nickname || signedInUser.phone || 'Signed in'
+              : 'Guest'}
+          </button>
+        )}
       </header>
+
+      {accountOpen && screen === 'chat' && (
+        <div className="meet-lana-account-panel" role="region" aria-label="Account">
+          {signedInUser && !signedInUser.isAnonymous ? (
+            <>
+              <p className="meet-lana-account-status">Signed in</p>
+              <p className="meet-lana-account-line">
+                <strong>Phone:</strong> {signedInUser.phone || '—'}
+              </p>
+              <p className="meet-lana-account-line">
+                <strong>Name:</strong>{' '}
+                {signedInUser.nickname || '(not set — tell Lana what to call you)'}
+              </p>
+              <p className="meet-lana-account-line">
+                <strong>Block:</strong>{' '}
+                {signedInUser.homeBlockId ? 'assigned' : 'not set — say your ZIP in chat'}
+              </p>
+              <button
+                type="button"
+                className="meet-lana-account-signout"
+                onClick={async () => {
+                  await demoSignOut();
+                  setSignedInUser(null);
+                  setPhoneVerified(false);
+                  setToken(null);
+                  setSessionId(null);
+                  setLines([]);
+                  setScreen('welcome');
+                  setAccountOpen(false);
+                }}
+              >
+                Sign out
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="meet-lana-account-status">Browsing as guest</p>
+              <p className="meet-lana-account-line">
+                Say <strong>log in</strong> in chat to use an existing phone account, or verify
+                during discovery to sign up.
+              </p>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="meet-lana-phone">
         {error && screen !== 'welcome' && <p className="meet-lana-error">{error}</p>}
@@ -318,8 +538,8 @@ export default function MeetLanaPage() {
               Hi. I&apos;m <span className="meet-lana-accent">Lana</span>.
             </h1>
             <p className="meet-lana-lede">
-              The concierge for moms on your block. I help you{' '}
-              <strong>meet, exchange, and host</strong> — no feeds, no forms.
+              Your block concierge — chat first, find neighbors when you&apos;re ready.
+              Dev phone <strong>{DEMO_TEST_PHONE}</strong> · OTP <strong>{DEMO_TEST_OTP}</strong>.
             </p>
             <LanaSheep mood="idle" size="lg" />
             <button
@@ -330,14 +550,10 @@ export default function MeetLanaPage() {
             >
               {busy ? 'One sec…' : 'Meet Lana →'}
             </button>
-            <button
-              type="button"
-              className="meet-lana-link meet-lana-link--account"
-              onClick={onAlreadyHaveAccount}
-              disabled={busy}
-            >
-              I already have an account
-            </button>
+            <p className="meet-lana-muted meet-lana-login-hint">
+              Already have an account? Tap <strong>Meet Lana</strong>, then say{' '}
+              <strong>&ldquo;log in&rdquo;</strong> in chat.
+            </p>
             <nav className="meet-lana-footer-nav" aria-label="Demo links">
               <button type="button" onClick={() => setDevOpen(true)}>
                 dev sign-in
@@ -433,6 +649,44 @@ export default function MeetLanaPage() {
               </div>
             )}
 
+            {activityPreviews.length > 0 && !showJointCard && (
+              <div className="meet-lana-peer-preview-list">
+                {activityPreviews.slice(0, 5).map((ev, i) => (
+                  <div key={`act-${i}`} className="meet-lana-peer-card meet-lana-activity-card">
+                    <div className="meet-lana-peer-avatar meet-lana-activity-icon">📅</div>
+                    <div>
+                      <div className="meet-lana-peer-name">{ev.title}</div>
+                      <div className="meet-lana-peer-meta">
+                        {[ev.starts_label, ev.venue_name].filter(Boolean).join(' · ')}
+                        {ev.preview ? ' · preview' : ''}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {peerMatches.length > 0 && activityPreviews.length === 0 && !showJointCard && (
+              <div className="meet-lana-peer-preview-list">
+                {peerMatches.slice(0, 3).map((p, i) => (
+                  <div key={`peer-${i}`} className="meet-lana-peer-card">
+                    <div className="meet-lana-peer-avatar">
+                      {p.preview ? '?' : (p.nickname?.[0] ?? 'N')}
+                    </div>
+                    <div>
+                      <div className="meet-lana-peer-name">
+                        {p.preview ? `Neighbor ${i + 1}` : p.nickname || 'Neighbor'}
+                      </div>
+                      <div className="meet-lana-peer-meta">
+                        {p.matching_peer_label || 'shared interests'}
+                        {p.preview ? ' · preview' : ''}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {readyToComplete && !thinking && !showJointCard && (
               <button
                 type="button"
@@ -444,16 +698,54 @@ export default function MeetLanaPage() {
               </button>
             )}
 
-            {!showJointCard && (
+            {!showJointCard && showAuthField && (
+              <form
+                className="meet-lana-composer meet-lana-composer--phone meet-lana-composer--intent"
+                onSubmit={onStructuredSubmit}
+              >
+                <input
+                  value={uiIntent === 'collect_otp' ? otpDraft : phoneDraft}
+                  onChange={(e) =>
+                    uiIntent === 'collect_otp'
+                      ? setOtpDraft(e.target.value)
+                      : setPhoneDraft(e.target.value)
+                  }
+                  placeholder={
+                    uiIntent === 'collect_otp'
+                      ? `6-digit code (dev: ${DEMO_TEST_OTP})`
+                      : 'Phone with country code'
+                  }
+                  inputMode={uiIntent === 'collect_otp' ? 'numeric' : 'tel'}
+                  autoComplete={uiIntent === 'collect_otp' ? 'one-time-code' : 'tel'}
+                  maxLength={uiIntent === 'collect_otp' ? 6 : 20}
+                  disabled={busy}
+                  aria-label={uiIntent === 'collect_otp' ? 'Verification code' : 'Phone number'}
+                />
+                <button
+                  type="submit"
+                  className="meet-lana-send meet-lana-send--wide"
+                  disabled={
+                    busy ||
+                    (uiIntent === 'collect_otp' ? !otpDraft.trim() : !phoneDraft.trim())
+                  }
+                >
+                  {busy ? '…' : uiIntent === 'collect_otp' ? 'Verify →' : 'Continue →'}
+                </button>
+              </form>
+            )}
+
+            {!showJointCard && !showAuthField && (
               <form
                 className={`meet-lana-composer ${thinking ? 'meet-lana-composer--busy' : ''}`}
-                onSubmit={onSend}
+                onSubmit={showZipField ? onStructuredSubmit : onSend}
               >
                 <input
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   placeholder={thinking ? 'Waiting for Lana…' : composerPlaceholder}
                   disabled={busy}
+                  inputMode={showZipField ? 'numeric' : undefined}
+                  maxLength={showZipField ? 5 : undefined}
                   aria-label="Message to Lana"
                 />
                 <button
@@ -482,7 +774,11 @@ export default function MeetLanaPage() {
             )}
 
             <details className="meet-lana-history">
-              <summary>Full chat ({lines.length}) · step: {onboardingStep}</summary>
+              <summary>
+                Full chat ({lines.length}) · intent: {uiIntent} · phase:{' '}
+                {routingPhase || onboardingStep}
+                {lastOrchestrator != null ? ` · AI: ${lastOrchestrator ? 'on' : 'rules'}` : ''}
+              </summary>
               <div className="meet-lana-history-list">
                 {lines.map((line) => (
                   <div
@@ -605,8 +901,11 @@ export default function MeetLanaPage() {
                 setSessionId(null);
                 setJointMoment(null);
                 setOnboardingStep('early_chat');
+                setRoutingPhase('listening');
+                setPeerMatches([]);
                 setIntroSent(false);
                 setOtpSent(false);
+                setPhoneVerified(false);
                 setScreen('welcome');
               }}
             >

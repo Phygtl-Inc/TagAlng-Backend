@@ -49,6 +49,41 @@ Rules:
 Transcript:
 """
 
+INCREMENTAL_EXTRACT_PROMPT = """You extract identity claims from ONE user message in a TagAlng block chat.
+
+Output ONLY valid JSON (no markdown):
+{
+  "nickname": "first name neighbors should use, or null",
+  "claims": [
+    {
+      "concept": "snake_case_slug",
+      "label": "Short UI card title",
+      "tone": "optional",
+      "confidence": 0.85,
+      "disclosure": "public",
+      "synonyms": ["tag1"],
+      "source_quote": "exact short quote from this message",
+      "bucket": "heritage"
+    }
+  ]
+}
+
+Allowed bucket values: heritage, stage, vicinity, faith, activity, interest, general.
+Allowed disclosure: public, mutual, private.
+
+Rules:
+- Max 4 claims from this message only
+- If no identity content (greetings, "ok", ZIP, phone), return {"nickname": null, "claims": []}
+- Split distinct threads (e.g. "italian mom" → italian_heritage + mom life stage)
+- Every claim MUST have source_quote from this message and bucket
+- concept must match ^[a-z][a-z0-9_]{1,63}$
+- NEVER extract race, exact age, sex/gender demographics, street address
+- Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
+- nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
+
+User message:
+"""
+
 MUTUAL_CONCEPT_MARKERS = (
     "faith",
     "catholic",
@@ -134,6 +169,35 @@ def parse_profile_extract_data(
     if not mapped_summary and spans:
         mapped_summary = ", ".join(s.text for s in spans[:6])
     return claims, closing, mapped_summary, spans
+
+
+def parse_incremental_claims_data(
+    data: Any,
+) -> tuple[str | None, list[ExtractedClaim]]:
+    if not isinstance(data, dict):
+        return None, []
+    nickname_raw = data.get("nickname")
+    nickname = str(nickname_raw).strip()[:30] if nickname_raw else None
+    if nickname and len(nickname) < 2:
+        nickname = None
+    claims = _parse_claims(data)
+    return nickname, claims[:4]
+
+
+def vertex_extract_claims_from_utterance(message: str) -> Any:
+    client = _vertex_client()
+    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
+    from google.genai import types
+
+    response = client.models.generate_content(
+        model=model,
+        contents=INCREMENTAL_EXTRACT_PROMPT + message.strip(),
+        config=types.GenerateContentConfig(
+            temperature=0.2,
+            response_mime_type="application/json",
+        ),
+    )
+    return parse_json_object(response.text or "")
 
 
 def vertex_extract_from_transcript(

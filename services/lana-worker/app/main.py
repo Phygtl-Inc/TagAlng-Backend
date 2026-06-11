@@ -45,6 +45,7 @@ from app.guest_intake import lana_profile_guest_turn
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.models import (
+    ActivityPreviewRow,
     AuthActionPayload,
     CompleteSessionRequest,
     CompleteSessionResponse,
@@ -70,8 +71,14 @@ from app.orchestrator.extract import (
 )
 from app.vertex_event import lana_event_opening, lana_event_turn
 from app.vertex_event_extract import vertex_extract_event_from_transcript
-from app.claim_embed import claim_embedding_text
-from app.vertex_extract import vertex_embed, vertex_extract_from_transcript
+from app.claims_persist import (
+    extract_and_upsert_claims_from_message,
+    persist_nickname_if_stated,
+    replace_all_claims,
+    should_extract_claims_from_message,
+)
+from app.ui_intent import derive_ui_intent
+from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
 app = FastAPI(title="TagAlng lana-worker", version="0.5.4")
@@ -102,22 +109,6 @@ def _vertex_required() -> None:
 def _vertex_error_detail(prefix: str, exc: Exception) -> str:
     msg = str(exc).replace("\n", " ")[:500]
     return f"{prefix}:{type(exc).__name__}:{msg}"
-
-
-def _embed_claim(c: ExtractedClaim) -> list[float]:
-    try:
-        text = claim_embedding_text(
-            concept=c.concept,
-            label=c.label,
-            source_quote=c.source_quote,
-            bucket=c.bucket,
-        )
-        return vertex_embed(text)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"embedding_failed:{type(exc).__name__}",
-        ) from exc
 
 
 def _timing_total_ms(timing: dict[str, int]) -> int:
@@ -357,18 +348,46 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
     return out
 
 
+def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]:
+    raw = ctx.get("activity_previews")
+    if not isinstance(raw, list):
+        return []
+    out: list[ActivityPreviewRow] = []
+    for row in raw[:8]:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        out.append(
+            ActivityPreviewRow(
+                title=title,
+                starts_at=str(row.get("starts_at") or "") or None,
+                starts_label=str(row.get("starts_label") or "") or None,
+                venue_name=str(row.get("venue_name") or "") or None,
+                preview=bool(row.get("preview", True)),
+            )
+        )
+    return out
+
+
 def _onboarding_fields(
     ctx: dict[str, Any],
     auth: AuthSession,
+    *,
+    ready_to_complete: bool = False,
 ) -> dict[str, Any]:
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
+    peers = _peer_matches_from_ctx(ctx)
+    activities = _activity_previews_from_ctx(ctx)
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
         "joint_moment": jm,
         "phone_verified": auth.phone_verified,
         "home_block_assigned": bool(auth.home_block_id or ctx.get("preview_block_id")),
-        "peer_matches": _peer_matches_from_ctx(ctx),
+        "peer_matches": peers,
+        "activity_previews": activities,
         "auth_intent": ctx.get("auth_intent"),
         "login_phone": ctx.get("login_phone"),
         "requires_login_otp": bool(ctx.get("requires_login_otp")),
@@ -376,6 +395,12 @@ def _onboarding_fields(
         "auth_action": _auth_action_from_ctx(ctx),
         "active_intent": ctx.get("active_intent"),
         "routing_phase": ctx.get("routing_phase"),
+        "ui_intent": derive_ui_intent(
+            ctx,
+            ready_to_complete=ready_to_complete,
+            peer_count=len(peers),
+            activity_count=len(activities),
+        ),
     }
 
 
@@ -401,43 +426,13 @@ def _accepted_cohost_id(user_id: str, candidate_id: str | None) -> str | None:
 
 
 def _persist_profile_patch(user_id: str, patch: dict[str, str]) -> None:
-    from app.auth import service_client
+    from app.claims_persist import persist_profile_patch
 
-    row: dict[str, Any] = {}
-    if patch.get("nickname"):
-        row["nickname"] = patch["nickname"][:30]
-    if patch.get("full_name"):
-        row["full_name"] = patch["full_name"][:80]
-    if not row:
-        return
-    service_client().table("users").update(row).eq("id", user_id).execute()
+    persist_profile_patch(user_id, patch)
 
 
 def _persist_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
-    from app.auth import service_client
-
-    sb = service_client()
-    sb.table("user_identity_claims").delete().eq("user_id", user_id).is_(
-        "dismissed_at", "null"
-    ).execute()
-    rows: list[dict[str, Any]] = []
-    for c in claims:
-        rows.append(
-            {
-                "user_id": user_id,
-                "concept": c.concept,
-                "label": c.label,
-                "tone": c.tone,
-                "confidence": c.confidence,
-                "disclosure": c.disclosure,
-                "synonyms": c.synonyms,
-                "source_quote": c.source_quote,
-                "bucket": c.bucket,
-                "embedding": _embed_claim(c),
-            }
-        )
-    if rows:
-        sb.table("user_identity_claims").insert(rows).execute()
+    replace_all_claims(user_id, claims)
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -516,7 +511,11 @@ def create_lana_session(
         session = create_session(auth.user_id, purpose)
         session_id = str(session["id"])
         use_orch = use_orchestrator_for_purpose(purpose)
-        if use_orch:
+        if purpose == "lana":
+            opening, status, session_ctx, ui_raw = lana_unified_opening()
+            draft_raw = None
+            use_orch = False
+        elif use_orch:
             opening, status, session_ctx, ui_raw, draft_raw = run_opening(
                 user_id=auth.user_id,
                 purpose=purpose,
@@ -530,9 +529,6 @@ def create_lana_session(
                 host_name=host_display_name(ctx_pack),
             )
             session_ctx["last_routing"] = _event_routing_stub()
-        elif purpose == "lana":
-            opening, status, session_ctx, ui_raw = lana_unified_opening()
-            draft_raw = None
         elif purpose == "profile_intake" and auth.is_anonymous:
             opening, status, session_ctx, ui_raw = lana_profile_guest_opening()
             session_ctx["guest_intake"] = True
@@ -573,13 +569,14 @@ def create_lana_session(
             detail=_vertex_error_detail("lana_session_failed", exc),
         ) from exc
 
-    ob = _onboarding_fields(merged_ctx, auth)
+    ready = status == "ready_to_complete"
+    ob = _onboarding_fields(merged_ctx, auth, ready_to_complete=ready)
     return CreateSessionResponse(
         session_id=session_id,
         purpose=purpose,
         status="active",
         assistant_message=opening,
-        ready_to_complete=(status == "ready_to_complete"),
+        ready_to_complete=ready,
         ui=ui,
         event_draft=event_draft,
         orchestrator=use_orch,
@@ -611,12 +608,17 @@ def send_lana_message(
     with timer.stage("db_list_messages"):
         history = list_messages(session_id)
 
+    session_ctx_in = dict(session.get("context") or {})
+    if purpose in ("lana", "profile_intake"):
+        if persist_nickname_if_stated(auth.user_id, body.message.strip()):
+            session_ctx_in["display_name_saved"] = True
+
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
     merged: dict[str, Any] = {}
     try:
         purpose_ids: list[str] = []
-        prev_draft = (session.get("context") or {}).get("event_draft")
+        prev_draft = session_ctx_in.get("event_draft")
 
         use_orch = use_orchestrator_for_purpose(purpose)
         orch_used = False
@@ -627,7 +629,7 @@ def send_lana_message(
                 session_id=session_id,
                 history=history,
                 user_message=body.message,
-                session_ctx=session.get("context") or {},
+                session_ctx=session_ctx_in,
                 user_jwt=user_jwt,
                 phone_verified=auth.phone_verified,
                 home_block_id=auth.home_block_id,
@@ -645,7 +647,7 @@ def send_lana_message(
                 purpose=purpose,
                 history=history,
                 user_message=body.message,
-                session_ctx=session.get("context") or {},
+                session_ctx=session_ctx_in,
                 user_jwt=user_jwt,
                 persisted_core=session.get("core_block") if isinstance(session.get("core_block"), dict) else None,
                 timer=timer,
@@ -655,7 +657,7 @@ def send_lana_message(
         else:
             if purpose in ("profile_intake", "lana"):
                 ctx_pack, user_block, purpose_ids = _profile_context_pack(
-                    auth, purpose, session.get("context") or {}
+                    auth, purpose, session_ctx_in
                 )
             else:
                 require_home_block_for_purpose(auth, purpose)
@@ -672,7 +674,7 @@ def send_lana_message(
                 timer=timer,
                 user_id=auth.user_id,
                 ctx_pack=ctx_pack,
-                session_ctx=session.get("context") or {},
+                session_ctx=session_ctx_in,
                 session_id=session_id,
                 user_jwt=user_jwt,
                 auth=auth,
@@ -707,6 +709,14 @@ def send_lana_message(
         background_tasks.add_task(embed_message_by_id, user_msg_id, body.message.strip())
     if assistant_msg_id:
         background_tasks.add_task(embed_message_by_id, assistant_msg_id, reply)
+    if purpose in ("lana", "profile_intake") and should_extract_claims_from_message(
+        body.message
+    ):
+        background_tasks.add_task(
+            extract_and_upsert_claims_from_message,
+            auth.user_id,
+            body.message.strip(),
+        )
 
     with timer.stage("db_list_messages_final"):
         all_msgs = list_messages(session_id)
@@ -719,12 +729,13 @@ def send_lana_message(
         timing_ms = dict(timer.ms)
     timing_ms["total_ms"] = _timing_total_ms(timing_ms)
 
-    ob = _onboarding_fields(merged, auth)
+    ready = status == "ready_to_complete"
+    ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
     return SendMessageResponse(
         session_id=session_id,
         status=status,
         assistant_message=reply,
-        ready_to_complete=(status == "ready_to_complete"),
+        ready_to_complete=ready,
         message_count=len(all_msgs),
         ui=ui,
         event_draft=event_draft,

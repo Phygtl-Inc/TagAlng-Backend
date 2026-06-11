@@ -2,8 +2,9 @@
 
 **Audience:** mobile / PWA frontend team  
 **Backend:** `tagalng-dev` · Lana worker on Cloud Run  
-**Status:** v1 shipped and E2E-tested (June 2026)  
-**Postman:** `docs/postman/TagAlng-Lana-Unified-Discovery.postman_collection.json`
+**Status:** v1.1 — unified chat + `ui_intent` + in-chat auth (June 2026)  
+**Postman:** `docs/postman/TagAlng-Lana-Unified-Full-E2E.postman_collection.json`  
+**Reference FE:** `apps/admin/app/lana/meet/page.tsx` + `apps/admin/lib/demo-user.ts`
 
 This doc describes **exactly what backend shipped** for the new **unified Lana chat** model and how frontend should integrate it — especially the **discovery flow** (find similar neighbors) and **`auth_action`** OTP handoff.
 
@@ -35,15 +36,15 @@ This doc describes **exactly what backend shipped** for the new **unified Lana c
 ### New model (what to build against)
 
 - Frontend opens **one chat** — send **empty body** on session create.
-- Backend defaults `purpose` to **`"lana"`** and **routes per message** (ZIP → identity → preview → verify gate → full matches).
+- Backend defaults `purpose` to **`"lana"`** and **routes per message** (ZIP → identity → display name → preview → verify gate → full matches).
 - Frontend **does not** send `profile_intake` / `event_draft` for the main Meet Lana experience.
-- When user needs auth, Lana returns **`auth_action`** — frontend must call **Supabase Auth** (Lana never verifies OTP itself).
+- When user needs auth, Lana returns **`ui_intent`** (what input to show) and **`auth_action`** (what Supabase call to make). Frontend must call **Supabase Auth** — Lana never verifies OTP itself.
 
 ```mermaid
 flowchart LR
   FE[Frontend chat UI] -->|POST message| Lana[Lana worker]
-  Lana -->|auth_action| FE
-  FE -->|verifyOtp / updateUser| Supabase[Supabase Auth]
+  Lana -->|ui_intent + auth_action| FE
+  FE -->|PUT user / otp / verify| Supabase[Supabase Auth]
   Supabase -->|new access_token| FE
   FE -->|next message + new token| Lana
 ```
@@ -56,18 +57,23 @@ flowchart LR
 |------|----------------|
 | **DB migration** | `20260618120000_lana_unified_purpose.sql` — adds `'lana'` to `lana_session_purpose` enum |
 | **Session default** | `POST /lana/sessions` with `{}` → `purpose: "lana"` |
-| **Unified dispatcher** | `lana_dispatch.py` — opening message, per-turn routing entry |
-| **Discovery routing** | `discovery_route.py` — find peers: ZIP → identity → preview → verify gate → full |
-| **In-chat login** | Still works inside unified session (`guest_login.py`) — user says "log in" |
-| **Auth handoff** | `auth_action` on responses — FE calls Supabase |
-| **Deploy** | Lana worker revision `tagalng-lana-worker-00035-s98` (no redeploy needed for enum fix) |
-| **Tests** | `tests/test_discovery_route.py` + Postman collection steps 1–8 |
+| **Unified pipeline** | `lana_unified_pipeline.py` — discovery gates (code) + orchestrator (AI) per turn |
+| **Discovery routing** | `discovery_route.py` — ZIP → identity → **display name** → preview → verify gate → full |
+| **`ui_intent`** | `ui_intent.py` — stable FE signal for phone/OTP/ZIP/name fields (see table below) |
+| **In-chat login** | `guest_login.py` — user says "log in" → `await_login_phone` / `await_login_otp` |
+| **In-chat signup** | Discovery verify gate → `await_signup_phone` / `await_signup_otp` |
+| **Auth handoff** | `auth_action` on responses — FE calls Supabase (see reference impl) |
+| **Incremental claims** | Each identity message → background extract → `user_identity_claims` upsert |
+| **Nickname** | `"my name is …"` → `users.nickname` sync; discovery asks name if missing |
+| **`activity_previews`** | Activity browse returns cards separate from `peer_matches` |
+| **Tests** | `tests/test_discovery_route.py`, `tests/test_ui_intent.py`, `tests/test_claims_persist.py` |
 
 **Not in this slice**
 
 - Mid-session switch to `event_draft` host flow inside unified chat (legacy `event_draft` purpose still works separately).
-- Full orchestrator on every turn (`lana` uses fast path, `orchestrator: false`).
 - Backend-side OTP validation — **by design**, auth stays in Supabase.
+
+**Orchestrator:** may be on per env (`LANA_ORCHESTRATOR`); discovery privacy gates (ZIP, phone, OTP) stay **code-first** regardless.
 
 ---
 
@@ -117,8 +123,10 @@ Content-Type: application/json
   "home_block_assigned": false,
   "active_intent": null,
   "routing_phase": "listening",
+  "ui_intent": "chat",
   "auth_action": null,
   "peer_matches": [],
+  "activity_previews": [],
   "orchestrator": false
 }
 ```
@@ -141,24 +149,62 @@ Content-Type: application/json
 |-------|------|--------|
 | `assistant_message` | string | Render Lana bubble |
 | `active_intent` | string \| null | e.g. `discovery.find_peers` |
-| `routing_phase` | string \| null | Drive sub-flow UI (see table below) |
+| `routing_phase` | string \| null | Debug / analytics phase (see table below) |
+| `ui_intent` | string \| null | **Drive input UI** — phone field, OTP field, ZIP, etc. (see table) |
 | `phone_verified` | boolean | **Source of truth** for verified state |
 | `home_block_assigned` | boolean | User has `home_block_id` on profile |
 | `peer_matches` | array | Preview or full neighbor cards |
-| `auth_action` | object \| null | **When set, call Supabase immediately** |
+| `activity_previews` | array | Activity browse cards (when user asks for events) |
+| `auth_action` | object \| null | **When set, call Supabase immediately** (same turn as user message) |
+| `login_phone` | string \| null | Phone captured during in-chat login (hint for OTP UI) |
+| `requires_login_otp` | boolean | Login OTP step active |
 | `routing.tool_called` | string | Debug / analytics |
-| `orchestrator` | boolean | Always `false` for unified v1 |
+| `orchestrator` | boolean | Whether AI orchestrator ran this turn |
 
-### `routing_phase` values (discovery)
+### `ui_intent` — **primary FE driver** (use this for input chrome)
 
-| Phase | Meaning | FE action |
-|-------|---------|-----------|
-| `listening` | Opening / no active intent | Show chat only |
-| `need_zip` | Discovery started, need location | User types ZIP in chat (or location picker → send ZIP as message) |
-| `need_identity` | Block resolved, need snippet | User describes themselves in chat |
-| `preview` | Redacted peers shown | Show preview cards (`preview: true`, no names) |
-| `await_signup_phone` | User asked for names/more, not verified | User sends phone in chat |
-| `await_signup_otp` | Phone captured, waiting OTP in chat | User sends OTP in chat → then **FE must call Supabase** |
+Read **`ui_intent` every turn** (session create + each message). Switch UI based on it; use `routing_phase` only for debug/analytics.
+
+| `ui_intent` | Show in UI |
+|-------------|------------|
+| `chat` | Default message composer |
+| `collect_zip` | ZIP input (`inputMode=numeric`, max 5 digits) |
+| `collect_identity` | Free-text “about you” |
+| `collect_display_name` | First-name field — saved to `users.nickname` |
+| `collect_phone` | Phone field (`type=tel`) + **Continue** → send as Lana message |
+| `collect_otp` | OTP field (6 digits) + **Verify** → send as Lana message, then run `auth_action` |
+| `show_peer_preview` | Redacted neighbor cards (`peer_matches`, `preview: true`) |
+| `show_activity_preview` | Activity cards (`activity_previews`) |
+| `confirm_profile` | “That’s me ✓” / `POST …/complete` when `ready_to_complete` |
+
+**Pairing with `auth_action`:** user can type phone/OTP in chat *or* use dedicated fields — both work. On the turn where Lana parses phone/OTP, check `auth_action` and call Supabase **before** treating auth as done.
+
+```ts
+// After every Lana message:
+applyTurn(turn); // read ui_intent, peer_matches, routing_phase, etc.
+const action = authActionFromTurn(turn);
+if (action) {
+  const newToken = await handleLanaAuthAction(action);
+  // signup: same session_id, new token
+  // login: new user_id → start new Lana session (see below)
+}
+```
+
+TypeScript types: `apps/admin/lib/lana-client.ts` → `LanaUiIntent`, `AuthActionPayload`.
+
+### `routing_phase` values (debug / analytics)
+
+| Phase | Typical `ui_intent` | Meaning |
+|-------|---------------------|---------|
+| `listening` | `chat` | Opening / no active discovery |
+| `need_zip` | `collect_zip` | Need 5-digit US ZIP |
+| `need_identity` | `collect_identity` | Need heritage / life stage / what they want |
+| `need_display_name` | `collect_display_name` | Need `users.nickname` before preview |
+| `preview` | `show_peer_preview` or `show_activity_preview` | Cards shown |
+| `gate_verify` / `await_signup_phone` | `collect_phone` | Signup verify gate — need phone |
+| `await_signup_otp` | `collect_otp` | Signup — need OTP (`phone_change`) |
+| `await_login_phone` | `collect_phone` | In-chat login — need phone |
+| `await_login_otp` | `collect_otp` | In-chat login — need OTP (`sms`) |
 
 ---
 
@@ -166,19 +212,23 @@ Content-Type: application/json
 
 Example happy path (messages user sends in chat):
 
-| Step | User message | `routing_phase` after | Notes |
-|------|--------------|----------------------|-------|
-| 1 | *(session open)* | `listening` | Concierge greeting |
-| 2 | `find people like me on the block` | `need_zip` | `active_intent: discovery.find_peers` |
-| 3 | `32827` | `need_identity` | Backend calls `get_blocks_near_zip`, stores `preview_block_id` |
-| 4 | `I'm a Latino mom looking for weekend activities` | `preview` | 3 redacted `peer_matches` |
-| 5 | `show me their names and introduce me` | `await_signup_phone` | Verify gate |
-| 6 | `+15550999012` | `await_signup_otp` | `auth_action: link_phone_signup` |
-| 7 | `000000` | `preview` | `auth_action: verify_signup_otp` — **not verified yet** |
-| 8 | *(FE calls Supabase verify)* | — | See auth section below |
-| 9 | `ok` *(with new token)* | `preview` or full | `phone_verified: true` → full matches |
+| Step | User message | `ui_intent` after | `routing_phase` | Notes |
+|------|--------------|-------------------|-----------------|-------|
+| 1 | *(session open)* | `chat` | `listening` | Concierge greeting |
+| 2 | `find people like me on the block` | `collect_zip` | `need_zip` | `active_intent: discovery.find_peers` |
+| 3 | `32827` | `collect_identity` | `need_identity` | `get_blocks_near_zip` → `preview_block_id` |
+| 4 | `I'm a Latino mom…` | `collect_display_name` | `need_display_name` | If `users.nickname` empty |
+| 5 | `Marina` | `show_peer_preview` | `preview` | 3 redacted `peer_matches` |
+| 6 | `show me their names` | `collect_phone` | `await_signup_phone` | Verify gate (anonymous) |
+| 7 | `+15550999012` | `collect_otp` | `await_signup_otp` | `auth_action: link_phone_signup` → FE **PUT /user** |
+| 8 | `000000` | `collect_otp` | `await_signup_otp` | `auth_action: verify_signup_otp` → FE **POST /verify** `phone_change` |
+| 9 | `ok` *(new bearer)* | `show_peer_preview` or full | `preview` | `phone_verified: true` → full matches |
 
 **Triggers for verify gate** (user wants more detail): words like *names, introduce, connect, show me, full, details, meet them*.
+
+**Logged-in users** (`phone_verified: true` from in-chat login): preview copy does not ask to verify again; full matches when `home_block_id` is set.
+
+**Identity claims:** heritage/life-stage lines are upserted to `user_identity_claims` in the background during chat (not only on session complete).
 
 ---
 
@@ -233,63 +283,188 @@ Only returned when `phone_verified: true` and user has block context.
 
 ### Action types
 
-| `auth_action.type` | When | Supabase JS | REST |
-|--------------------|------|-------------|------|
-| `link_phone_signup` | User gave phone during signup/discovery | `supabase.auth.updateUser({ phone })` | `PUT /auth/v1/user` with bearer = **anonymous session token** |
-| `verify_signup_otp` | User gave OTP in chat (signup path) | `supabase.auth.verifyOtp({ phone, token, type: 'phone_change' })` | `POST /auth/v1/verify` |
-| `send_login_otp` | User said "log in", gave phone | `supabase.auth.signInWithOtp({ phone })` | `POST /auth/v1/otp` |
-| `verify_login_otp` | User gave OTP (login path) | `supabase.auth.verifyOtp({ phone, token, type: 'sms' })` | `POST /auth/v1/verify` |
+| `auth_action.type` | When | REST (canonical — matches our PWA) |
+|--------------------|------|-------------------------------------|
+| `link_phone_signup` | User gave phone during signup/discovery | `PUT /auth/v1/user` — bearer = **guest `access_token`** |
+| `verify_signup_otp` | User gave OTP (signup path) | `POST /auth/v1/verify` — `type: "phone_change"`, bearer = **anon key** |
+| `send_login_otp` | User said "log in", gave phone | `POST /auth/v1/otp` — bearer = **anon key**, `create_user: false` |
+| `verify_login_otp` | User gave OTP (login path) | `POST /auth/v1/verify` — `type: "sms"`, bearer = **anon key** |
 
 ### OTP types — do not mix
 
 | Flow | Verify `type` | Why |
 |------|---------------|-----|
 | **Signup / discovery** (anonymous user linking phone) | `phone_change` | Keeps **same `user_id`** as Lana session |
-| **Returning login** | `sms` | Signs into existing phone account |
+| **Returning login** | `sms` | Signs into **existing** phone account (new `user_id`) |
 
 Using `sms` during signup creates a **different user** → Lana returns `session_not_found`.
 
-### Recommended FE handler
+---
+
+## How our app does signup & login (copy this)
+
+**Reference code:** `apps/admin/lib/demo-user.ts` (`handleLanaAuthAction`, `authActionFromTurn`) + `apps/admin/app/lana/meet/page.tsx` (`pushTurn`).
+
+**Env:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_LANA_WORKER_URL`.
+
+### A. App entry — anonymous guest
+
+Every “Meet Lana” tap starts fresh anonymous auth (Postman E2E step 1):
+
+```http
+POST /auth/v1/signup
+apikey: <anon_key>
+Authorization: Bearer <anon_key>
+Content-Type: application/json
+
+{}
+```
+
+→ `access_token` (`user.is_anonymous === true`). Store in your auth client.
+
+Then:
+
+```http
+POST /lana/sessions
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{}
+```
+
+→ `session_id` — keep for the whole signup chat.
+
+### B. Signup (discovery) — same `user_id`, same `session_id`
+
+User chats phone + OTP in Lana (or uses `ui_intent` phone/OTP fields). After **each** `POST …/messages`:
 
 ```ts
-async function handleAuthAction(
-  action: AuthActionPayload,
-  supabase: SupabaseClient,
-  lanaAccessToken: string,
-): Promise<string> {
-  switch (action.type) {
-    case 'link_phone_signup': {
-      await supabase.auth.updateUser({ phone: action.phone! });
-      // Supabase sends OTP SMS automatically
-      return lanaAccessToken; // same token until verify
-    }
-    case 'verify_signup_otp': {
-      const { data, error } = await supabase.auth.verifyOtp({
-        phone: action.phone!,
-        token: action.token!,
-        type: 'phone_change',
-      });
-      if (error) throw error;
-      return data.session!.access_token; // NEW token — use for next Lana message
-    }
-    case 'send_login_otp': {
-      await supabase.auth.signInWithOtp({ phone: action.phone! });
-      return lanaAccessToken;
-    }
-    case 'verify_login_otp': {
-      const { data, error } = await supabase.auth.verifyOtp({
-        phone: action.phone!,
-        token: action.token!,
-        type: 'sms',
-      });
-      if (error) throw error;
-      return data.session!.access_token;
-    }
-    default:
-      return lanaAccessToken;
+async function pushTurn(accessToken: string, sessionId: string, text: string) {
+  const turn = await sendMessage(accessToken, sessionId, text);
+  renderBubble(turn.assistant_message);
+  setUiFromTurn(turn); // ui_intent, peer_matches, etc.
+
+  const action = authActionFromTurn(turn);
+  if (!action) return turn;
+
+  const newToken = await handleLanaAuthAction(action);
+  if (action.type === 'verify_signup_otp') {
+    // SAME session_id, NEW bearer after phone_change
+    const resume = await sendMessage(newToken, sessionId, 'ok');
+    return resume;
   }
+  return turn;
 }
 ```
+
+| Step | User / Lana | `ui_intent` | Supabase call (when `auth_action` set) |
+|------|-------------|-------------|----------------------------------------|
+| 1 | User: phone in chat | `collect_otp` | `link_phone_signup` → **PUT /auth/v1/user** |
+| 2 | User: OTP in chat | `collect_otp` | `verify_signup_otp` → **POST /verify** `phone_change` |
+| 3 | FE: `sendMessage(…, 'ok')` | `show_peer_preview` | None — `phone_verified: true` on response |
+
+**PUT /auth/v1/user** (link phone — signup):
+
+```http
+PUT /auth/v1/user
+apikey: <anon_key>
+Authorization: Bearer <anonymous access_token>
+Content-Type: application/json
+
+{ "phone": "+15550999012" }
+```
+
+Refresh anonymous JWT before link if idle >1h (`POST /auth/v1/token?grant_type=refresh_token` or client `refreshSession()`).
+
+**POST /auth/v1/verify** (signup OTP):
+
+```http
+POST /auth/v1/verify
+apikey: <anon_key>
+Authorization: Bearer <anon_key>
+Content-Type: application/json
+
+{
+  "phone": "+15550999012",
+  "token": "000000",
+  "type": "phone_change"
+}
+```
+
+→ new `access_token` — **same `user_id`**. Use for all further Lana calls on **same `session_id`**.
+
+> **Important:** Do **not** use `signInWithOtp` for login while the anonymous Lana session is in storage — it overwrites the guest session. Use raw `POST /auth/v1/otp` for login (see below).
+
+### C. Login (returning user) — new `user_id`, new Lana session
+
+User says “log in” in chat. Phases: `await_login_phone` → `await_login_otp` (`ui_intent`: `collect_phone` → `collect_otp`).
+
+| Step | User / Lana | `auth_action` | Supabase |
+|------|-------------|---------------|----------|
+| 1 | User: phone | `send_login_otp` | **POST /auth/v1/otp** |
+| 2 | User: OTP | `verify_login_otp` | **POST /verify** `type: "sms"` |
+| 3 | FE | — | **New** `POST /lana/sessions` with login token |
+
+**POST /auth/v1/otp** (send login code — does not replace guest session in our impl):
+
+```http
+POST /auth/v1/otp
+apikey: <anon_key>
+Authorization: Bearer <anon_key>
+Content-Type: application/json
+
+{ "phone": "+15550000000", "create_user": false }
+```
+
+**POST /auth/v1/verify** (login OTP):
+
+```http
+POST /auth/v1/verify
+apikey: <anon_key>
+Authorization: Bearer <anon_key>
+Content-Type: application/json
+
+{
+  "phone": "+15550000000",
+  "token": "000000",
+  "type": "sms"
+}
+```
+
+→ `setSession` with returned tokens → **new `user_id`**. Abandon guest `session_id`; call `POST /lana/sessions` again.
+
+```ts
+if (action.type === 'verify_login_otp') {
+  const loginToken = await verifyLoginOtp(phone, otp); // sms
+  const lana = await startUnifiedSession(loginToken);  // NEW session_id
+  setSessionId(lana.session_id);
+}
+```
+
+### D. `authActionFromTurn` — fallback when `auth_action` omitted
+
+Login OTP can also be inferred from turn fields (see `demo-user.ts`):
+
+```ts
+function authActionFromTurn(turn): AuthActionPayload | null {
+  if (turn.auth_action?.type) return turn.auth_action;
+  if (turn.login_otp_token && turn.login_phone) {
+    return { type: 'verify_login_otp', phone: turn.login_phone, token: turn.login_otp_token, verify_type: 'sms' };
+  }
+  if (turn.requires_login_otp && turn.login_phone) {
+    return { type: 'send_login_otp', phone: turn.login_phone, verify_type: 'sms' };
+  }
+  return null;
+}
+```
+
+### E. Profile / claims (during chat)
+
+| What | Where |
+|------|--------|
+| Display name | `users.nickname` — sync on `"my name is …"` or discovery name gate |
+| Identity threads | `user_identity_claims` — background upsert per identity message |
+| Full extract + embeddings | `POST /lana/sessions/{id}/complete` (optional; `ready_to_complete` / “That’s me ✓”) |
 
 ### How to know verification actually succeeded
 
@@ -377,16 +552,18 @@ Expect `phone_verified: true` and full `peer_matches`.
 
 ## Frontend implementation checklist
 
-- [ ] `signInAnonymously()` on Meet Lana entry
+- [ ] `POST /auth/v1/signup` `{}` on Meet Lana entry (anonymous)
 - [ ] `POST /lana/sessions` with `{}` — no `purpose` field
-- [ ] Single chat UI — user always types in one thread
-- [ ] Read `routing_phase` + `active_intent` each turn (optional UI hints; Lana copy is primary)
-- [ ] Render `peer_matches` — respect `preview: true` (hide names/avatars)
-- [ ] On `auth_action` non-null → call Supabase **before** showing success
-- [ ] After verify → refresh `access_token` → send next Lana message with new bearer
-- [ ] Gate "connect / introduce" CTAs on `phone_verified === true`
-- [ ] Do **not** use `purpose: profile_intake` for new unified flow
-- [ ] In-chat login: handle `send_login_otp` / `verify_login_otp` with `type: sms`
+- [ ] Single chat UI — user types in one thread (optional dedicated fields per `ui_intent`)
+- [ ] Read **`ui_intent`** every turn — switch phone / OTP / ZIP / name inputs
+- [ ] Read `auth_action` (or `authActionFromTurn`) on same turn as phone/OTP message
+- [ ] **Signup:** `PUT /user` → `POST /verify` `phone_change` → **same** `session_id` + `ok` message
+- [ ] **Login:** `POST /otp` → `POST /verify` `sms` → **new** `POST /lana/sessions`
+- [ ] Do **not** use `signInWithOtp` for login during an active anonymous Lana session
+- [ ] Render `peer_matches` / `activity_previews` — respect `preview: true` (hide names/avatars)
+- [ ] Gate connect CTAs on `phone_verified === true`
+- [ ] Fresh test phone per signup run (Supabase Dashboard → Phone → test numbers)
+- [ ] Copy handler from `apps/admin/lib/demo-user.ts` or Postman `TagAlng-Lana-Unified-Full-E2E`
 
 ---
 
@@ -420,9 +597,11 @@ Set `anon_key` in environment. Use a **fresh test phone** per run for signup (`t
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `invalid input value for enum lana_session_purpose: "lana"` | DB migration not applied | Backend applies `20260618120000` — should be fixed on dev |
-| `phone_verified: false` after OTP message | FE skipped Supabase verify | Call `verifyOtp` / `POST /auth/v1/verify` |
+| `phone_verified: false` after OTP message | FE skipped Supabase verify | `POST /auth/v1/verify` then send Lana message with new token |
+| `Token has expired or is invalid` on verify | Stale anon JWT or reused phone | `refreshSession()` before PUT /user; fresh test phone per run |
 | `session_not_found` after OTP | Used `type: sms` on signup | Use `phone_change` for anonymous signup |
-| 522 on Supabase | Network / regional timeout | Retry; check project not paused |
+| Login OTP never arrives | Used `signInWithOtp` and clobbered guest session | Use raw `POST /auth/v1/otp` with anon bearer |
+| Nickname not in DB | Only said name in chat, worker not deployed | Deploy lana-worker; or say `my name is …` (sync save) |
 | Preview peers but no names | Expected before verify | User must verify; then send another message |
 | Real phone (non-test) | SMS OTP required | Use code from SMS, not `000000` |
 
@@ -431,4 +610,16 @@ Set `anon_key` in environment. Use a **fresh test phone** per run for signup (`t
 ## Questions for backend
 
 - Event hosting inside unified `lana` session — not yet routed; use `event_draft` purpose temporarily if needed.
-- `POST /lana/sessions/{id}/complete` after discovery-only flow — optional; full onboarding still uses complete for claims/embeddings.
+- `POST /lana/sessions/{id}/complete` — optional for discovery; incremental claims already save during chat; complete re-extracts full transcript.
+
+## Reference files (repo)
+
+| File | Purpose |
+|------|---------|
+| `apps/admin/lib/demo-user.ts` | Supabase REST auth — signup/login handlers |
+| `apps/admin/lib/lana-client.ts` | Lana worker client + `LanaUiIntent` types |
+| `apps/admin/app/lana/meet/page.tsx` | Full chat UI + `ui_intent` phone/OTP fields + `pushTurn` |
+| `services/lana-worker/app/ui_intent.py` | Backend `ui_intent` derivation |
+| `services/lana-worker/app/discovery_route.py` | Discovery + auth phases |
+| `docs/postman/TagAlng-Lana-Unified-Full-E2E.postman_collection.json` | End-to-end REST sequence |
+| `docs/postman/TagAlng-Guest-InChat-Login.postman_collection.json` | In-chat login only |

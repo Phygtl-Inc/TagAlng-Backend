@@ -61,6 +61,8 @@ def synthesize_turn(
     if purpose == "lana":
         phase = str((session_ctx or {}).get("routing_phase") or "listening")
         notes = routing.get("enforce_notes") or []
+        user_nick = str((core_block or {}).get("user", {}).get("nickname") or "").strip()
+        name_saved = bool((session_ctx or {}).get("display_name_saved"))
         payload_parts.append(
             f"LANA UNIFIED · routing_phase={phase} · enforce_notes={notes}\n"
             "You are Lana, block concierge — warm, one line.\n"
@@ -72,8 +74,14 @@ def synthesize_turn(
             "- Do NOT run a long profile interview; discovery = ZIP then one identity line.\n"
             "- discovery_need_zip: ask for 5-digit US ZIP (e.g. 32827).\n"
             "- discovery_need_identity: ask one short line (heritage, life stage, or what they want).\n"
+            "- discovery_need_display_name: ask what neighbors should call them (first name).\n"
             "- If peer_matches with preview=true: describe labels only, no names.\n"
         )
+        if not user_nick and not name_saved:
+            payload_parts.append(
+                "- Display name MISSING on file — if they have not said their name yet, "
+                "ask what neighbors should call them (one short question)."
+            )
     if purpose == "event_draft":
         ids = purpose_ids or []
         payload_parts.append(

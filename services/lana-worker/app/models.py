@@ -31,6 +31,14 @@ class PeerMatchRow(BaseModel):
     preview: bool = False
 
 
+class ActivityPreviewRow(BaseModel):
+    title: str
+    starts_at: str | None = None
+    starts_label: str | None = None
+    venue_name: str | None = None
+    preview: bool = True
+
+
 class AuthActionPayload(BaseModel):
     type: str
     phone: str | None = None
@@ -86,6 +94,7 @@ class CreateSessionResponse(BaseModel):
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
     requires_login_otp: bool = False
@@ -93,6 +102,7 @@ class CreateSessionResponse(BaseModel):
     auth_action: AuthActionPayload | None = None
     active_intent: str | None = None
     routing_phase: str | None = None
+    ui_intent: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -124,6 +134,7 @@ class SendMessageResponse(BaseModel):
     phone_verified: bool = False
     home_block_assigned: bool = False
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
     requires_login_otp: bool = False
@@ -131,6 +142,7 @@ class SendMessageResponse(BaseModel):
     auth_action: AuthActionPayload | None = None
     active_intent: str | None = None
     routing_phase: str | None = None
+    ui_intent: str | None = None
 
 
 class CompleteSessionRequest(BaseModel):

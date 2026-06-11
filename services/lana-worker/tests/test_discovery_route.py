@@ -1,11 +1,15 @@
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from app.discovery_route import (
+    PHASE_NEED_DISPLAY_NAME,
     PHASE_NEED_IDENTITY,
     PHASE_NEED_ZIP,
     PHASE_PREVIEW,
     extract_zip,
+    fetch_blocks_for_zip,
     format_preview_message,
     handle_discovery_turn,
     invalid_zip_hint,
@@ -65,6 +69,26 @@ class TestDiscoveryRouting(unittest.TestCase):
         reply, _, _, _ = result
         self.assertIn("5-digit", reply)
 
+    @patch("app.discovery_route.call_rpc")
+    def test_unknown_zip_returns_friendly_reply(self, mock_rpc) -> None:
+        mock_rpc.side_effect = HTTPException(
+            status_code=502,
+            detail='rpc_failed:{"message":"zip_not_found"}',
+        )
+        self.assertEqual(fetch_blocks_for_zip("jwt", "32872"), [])
+        result = handle_discovery_turn(
+            "32872",
+            session_ctx={"routing_phase": PHASE_NEED_ZIP, "active_intent": "discovery.find_peers"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIn("couldn't find blocks", reply.lower())
+        self.assertEqual(ctx["routing_phase"], PHASE_NEED_ZIP)
+
     @patch("app.discovery_route.fetch_blocks_for_zip")
     def test_zip_then_identity(self, mock_blocks) -> None:
         mock_blocks.return_value = [{"block_id": "block-1", "label": "Whisper Park"}]
@@ -80,6 +104,29 @@ class TestDiscoveryRouting(unittest.TestCase):
         reply, ctx, _, _ = result
         self.assertEqual(ctx["routing_phase"], PHASE_NEED_IDENTITY)
         self.assertIn("one thing", reply.lower())
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    @patch("app.discovery_route.fetch_blocks_for_zip")
+    def test_identity_then_asks_display_name(self, mock_blocks, _mock_needs_name) -> None:
+        mock_blocks.return_value = [{"block_id": "block-1", "label": "Whisper Park"}]
+        result = handle_discovery_turn(
+            "I'm a Latino mom looking for friends",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_IDENTITY,
+                "preview_block_id": "block-1",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id=None,
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertEqual(ctx["routing_phase"], PHASE_NEED_DISPLAY_NAME)
+        self.assertIn("call you", reply.lower())
+        self.assertEqual(peers, [])
 
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.fetch_blocks_for_zip")
@@ -238,6 +285,41 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(ctx["routing_phase"], PHASE_PREVIEW)
         self.assertIn("Park walk", reply)
         self.assertEqual(peers, [])
+        self.assertEqual(ctx.get("peer_matches"), [])
+        previews = ctx.get("activity_previews") or []
+        self.assertEqual(len(previews), 1)
+        self.assertEqual(previews[0].get("title"), "Park walk")
+
+
+    def test_profile_question_passes_to_orchestrator(self) -> None:
+        result = handle_discovery_turn(
+            "ok so what are my identity claims?",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-amanda",
+            is_anonymous=False,
+            history=[{"role": "assistant", "content": "You're signed in as Amanda."}],
+        )
+        self.assertIsNone(result)
+
+    def test_need_identity_still_collects_when_in_funnel(self) -> None:
+        result = handle_discovery_turn(
+            "hello",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_IDENTITY,
+                "preview_block_id": "block-1",
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertEqual(ctx["routing_phase"], PHASE_NEED_IDENTITY)
+        self.assertIn("Tell me one thing", reply)
 
 
 class TestUnifiedOpening(unittest.TestCase):

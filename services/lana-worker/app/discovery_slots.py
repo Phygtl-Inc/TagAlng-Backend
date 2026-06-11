@@ -11,21 +11,19 @@ from app.orchestrator.llm import llm_configured, llm_json
 _ZIP_IN_TEXT = re.compile(r"\b(\d{5})\b")
 
 _SYSTEM = (
-    "You extract discovery funnel slots for TagAlng Lana. "
+    "You are the ONLY router for TagAlng Lana discovery vs chat on each user message. "
     "Output only valid JSON. "
-    "Decide whether THIS message should be handled by the discovery funnel (ZIP, identity, matches) "
-    "vs normal AI chat (companionship). "
-    "identity_snippet is ONLY explicit self-description (heritage, life stage, what they want) — "
-    "never greetings, small talk, or questions to Lana (e.g. 'how are you', 'are you real', 'are you dumb'). "
+    "Discovery funnel = ZIP, giving self-description for matching, preview matches, verify phone, RSVP. "
+    "Everything else = goal chat or none, in_discovery=false — companionship AI answers (profile questions, "
+    "what are my claims, what's my name, random questions, frustration, meta, off-topic). "
+    "identity_snippet is ONLY new self-description the user offers for matching — never questions, "
+    "never reading existing profile/claims. "
     "If the user only sent a ZIP code, identity_snippet must be null. "
-    "When routing_phase is need_zip or need_identity and the user asks about Lana, pushes back, "
-    "or changes topic (e.g. 'are you real', 'what??', 'no I asked something else'), "
-    "set in_discovery=false and goal=chat. "
-    "goal: peers = find/show neighbors; activities = browse events on block; "
-    "both = peers and activities; verify = how to verify phone or unlock full matches; "
-    "rsvp = join/attend a specific event; chat = small talk, confusion, frustration, meta questions; "
-    "continue = answering the current funnel step (ZIP or identity); "
-    "none = not discovery (general companionship)."
+    "Mid-funnel pushback or topic change → in_discovery=false, goal=chat. "
+    "goal: peers = find/show neighbors; activities = browse events; both; verify; rsvp; "
+    "chat = companionship / profile read / any non-funnel question; "
+    "continue = user is answering the current funnel step (supplying ZIP or identity snippet); "
+    "none = not discovery."
 )
 
 

@@ -46,13 +46,19 @@ def run_lana_unified_pipeline(
             home_block_id=home_block_id,
             is_anonymous=is_anonymous,
             history=history,
+            user_id=user_id,
         )
         if discovery is not None:
             reply, ctx, routing, peers = discovery
             ctx["last_routing"] = routing
             ctx["_orchestrator_turn"] = False
-            if peers:
+            if ctx.get("activity_previews"):
+                ctx["peer_matches"] = []
+            elif peers:
                 ctx["peer_matches"] = peers
+                ctx.pop("activity_previews", None)
+            elif "peer_matches" not in ctx:
+                ctx["peer_matches"] = []
             ui = {
                 "bucket": "interest" if peers else None,
                 "focus_phrase": None,
