@@ -10,9 +10,47 @@ from app.turn_timing import TurnTimer
 from app.vertex_event import EVENT_BUCKET_GUIDE
 
 
+def _format_shown_peer_preview(session_ctx: dict[str, Any] | None) -> str | None:
+    """What discovery already returned — so Lana can answer pushback honestly."""
+    if not session_ctx:
+        return None
+    peers = session_ctx.get("peer_matches")
+    if not isinstance(peers, list) or not peers:
+        return None
+    rows: list[dict[str, Any]] = []
+    for p in peers[:5]:
+        if not isinstance(p, dict):
+            continue
+        rows.append(
+            {
+                "label": p.get("matching_peer_label"),
+                "preview": bool(p.get("preview", True)),
+                "nickname": p.get("nickname") if not p.get("preview") else None,
+            }
+        )
+    if not rows:
+        return None
+    snippet = str(session_ctx.get("identity_snippet") or "").strip()
+    block = str(session_ctx.get("preview_block_label") or session_ctx.get("preview_zip") or "")
+    parts = [
+        "NEIGHBOR PREVIEW ALREADY SHOWN TO USER (backend result — do not invent others):",
+        json.dumps(rows, ensure_ascii=False),
+    ]
+    if snippet:
+        parts.append(f"User matching ask stored: {snippet[:200]}")
+    if block:
+        parts.append(f"Block/ZIP context: {block}")
+    parts.append(
+        "If preview labels do not match what the user asked for, say so honestly — "
+        "these are anonymized sample neighbors on the block, not a filtered search yet. "
+        "Do NOT repeat the same bullet list unless user asks to see it again."
+    )
+    return "\n".join(parts)
+
+
 def _synth_model(outcome: str, tool_result: dict[str, Any] | None, *, purpose: str = "") -> str:
     """Synth model for tool/hero turns; router model for simple R/A."""
-    if purpose == "event_draft":
+    if purpose in ("event_draft", "lana"):
         return router_model()
     if outcome == "T" and tool_result:
         return synthesizer_model()
@@ -72,11 +110,19 @@ def synthesize_turn(
             "- Greetings: answer naturally; mention find neighbors / log in when helpful.\n"
             "- NEVER claim you found peers unless tool_result.peer_matches is non-empty.\n"
             "- Do NOT run a long profile interview; discovery = ZIP then one identity line.\n"
+            "- NEVER ask 'tap That\\'s me' or ready_to_complete — that is legacy profile intake, not Lana unified.\n"
+            "- NEVER re-ask life stage, kids, work, or hobbies if RECENT TURNS already cover them.\n"
+            "- After phone verify, discovery code shows matches — do not interview; congratulate briefly only.\n"
             "- discovery_need_zip: ask for 5-digit US ZIP (e.g. 32827).\n"
             "- discovery_need_identity: ask one short line (heritage, life stage, or what they want).\n"
             "- discovery_need_display_name: ask what neighbors should call them (first name).\n"
             "- If peer_matches with preview=true: describe labels only, no names.\n"
+            "- When NEIGHBOR PREVIEW ALREADY SHOWN is present, use those exact labels to answer "
+            "pushback (e.g. user asked for dads but labels say Mom of toddlers — acknowledge the gap).\n"
         )
+        preview_ctx = _format_shown_peer_preview(session_ctx)
+        if preview_ctx:
+            payload_parts.append(preview_ctx)
         if not user_nick and not name_saved:
             payload_parts.append(
                 "- Display name MISSING on file — if they have not said their name yet, "

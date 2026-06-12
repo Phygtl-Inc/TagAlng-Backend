@@ -47,11 +47,13 @@ def run_lana_unified_pipeline(
             is_anonymous=is_anonymous,
             history=history,
             user_id=user_id,
+            timer=timer,
         )
         if discovery is not None:
             reply, ctx, routing, peers = discovery
             ctx["last_routing"] = routing
             ctx["_orchestrator_turn"] = False
+            ctx["timing_ms"] = timer.to_dict()
             if ctx.get("activity_previews"):
                 ctx["peer_matches"] = []
             elif peers:

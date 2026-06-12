@@ -14,6 +14,9 @@ class TestGuestCapabilityIntents(unittest.TestCase):
     def test_wants_peer_find(self) -> None:
         self.assertTrue(wants_peer_find("find people like me on the block"))
         self.assertTrue(wants_peer_find("who else is nearby like me"))
+        self.assertTrue(wants_peer_find("i wanna meet my neighbours"))
+        self.assertTrue(wants_peer_find("nothing just find me people"))
+        self.assertTrue(wants_peer_find("fuck off and just show me users in my block"))
         self.assertFalse(wants_peer_find("I'm a Latino mom"))
 
     def test_wants_host_activity(self) -> None:

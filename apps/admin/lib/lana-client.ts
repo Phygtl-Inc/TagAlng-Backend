@@ -30,7 +30,8 @@ export type AuthActionPayload = {
     | 'link_phone_signup'
     | 'verify_signup_otp'
     | 'send_login_otp'
-    | 'verify_login_otp';
+    | 'verify_login_otp'
+    | 'logout';
   phone?: string | null;
   token?: string | null;
   verify_type?: string | null;
@@ -149,11 +150,11 @@ async function lanaFetch<T>(
   return body as T;
 }
 
-/** Unified Lana chat (default) — empty body, purpose `lana`. */
-export function startUnifiedSession(token: string) {
+/** Unified Lana chat (default) — empty body, purpose `lana`. Resumes active session unless `forceNew`. */
+export function startUnifiedSession(token: string, options?: { forceNew?: boolean }) {
   return lanaFetch<LanaSession>('/lana/sessions', token, {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify(options?.forceNew ? { force_new: true } : {}),
   });
 }
 

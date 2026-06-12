@@ -2,7 +2,7 @@
 
 **Audience:** mobile / PWA frontend team  
 **Backend:** `tagalng-dev` · Lana worker on Cloud Run  
-**Status:** v1.1 — unified chat + `ui_intent` + in-chat auth (June 2026)  
+**Status:** v1.2 — unified chat + `ui_intent` + in-chat auth + logout + session resume (June 2026)  
 **Postman:** `docs/postman/TagAlng-Lana-Unified-Full-E2E.postman_collection.json`  
 **Reference FE:** `apps/admin/app/lana/meet/page.tsx` + `apps/admin/lib/demo-user.ts`
 
@@ -61,6 +61,8 @@ flowchart LR
 | **Discovery routing** | `discovery_route.py` — ZIP → identity → **display name** → preview → verify gate → full |
 | **`ui_intent`** | `ui_intent.py` — stable FE signal for phone/OTP/ZIP/name fields (see table below) |
 | **In-chat login** | `guest_login.py` — user says "log in" → `await_login_phone` / `await_login_otp` |
+| **In-chat logout** | User says "log out" / "sign out" → `auth_action: logout` (signed-in users only) |
+| **Session resume** | `POST /lana/sessions` resumes active session per user; `{ "force_new": true }` for fresh thread |
 | **In-chat signup** | Discovery verify gate → `await_signup_phone` / `await_signup_otp` |
 | **Auth handoff** | `auth_action` on responses — FE calls Supabase (see reference impl) |
 | **Incremental claims** | Each identity message → background extract → `user_identity_claims` upsert |
@@ -110,6 +112,8 @@ Content-Type: application/json
 
 **Do not send `purpose`** — backend defaults to `"lana"`.
 
+**Session resume:** If this user already has an **active** `lana` session, the API returns that same `session_id` and the last assistant message (no new opening bubble). Pass `{ "force_new": true }` only when you intentionally want a blank thread (e.g. debug or “start over” after logout).
+
 **Response (highlights)**
 
 ```json
@@ -156,6 +160,7 @@ Content-Type: application/json
 | `peer_matches` | array | Preview or full neighbor cards |
 | `activity_previews` | array | Activity browse cards (when user asks for events) |
 | `auth_action` | object \| null | **When set, call Supabase immediately** (same turn as user message) |
+| `auth_intent` | string \| null | `login` \| `logout` during auth sub-flows (analytics / debug) |
 | `login_phone` | string \| null | Phone captured during in-chat login (hint for OTP UI) |
 | `requires_login_otp` | boolean | Login OTP step active |
 | `routing.tool_called` | string | Debug / analytics |
@@ -187,6 +192,7 @@ if (action) {
   const newToken = await handleLanaAuthAction(action);
   // signup: same session_id, new token
   // login: new user_id → start new Lana session (see below)
+  // logout: signOut → new anonymous JWT → new Lana session (see below)
 }
 ```
 
@@ -289,6 +295,7 @@ Only returned when `phone_verified: true` and user has block context.
 | `verify_signup_otp` | User gave OTP (signup path) | `POST /auth/v1/verify` — `type: "phone_change"`, bearer = **anon key** |
 | `send_login_otp` | User said "log in", gave phone | `POST /auth/v1/otp` — bearer = **anon key**, `create_user: false` |
 | `verify_login_otp` | User gave OTP (login path) | `POST /auth/v1/verify` — `type: "sms"`, bearer = **anon key** |
+| `logout` | Signed-in user said "log out" / "sign out" | `POST /auth/v1/logout` or client `signOut()` — then fresh anonymous session |
 
 ### OTP types — do not mix
 
@@ -441,7 +448,48 @@ if (action.type === 'verify_login_otp') {
 }
 ```
 
-### D. `authActionFromTurn` — fallback when `auth_action` omitted
+### D. Logout (signed-in user) — new anonymous session
+
+User says “log out” / “sign out” / “I want to logout” in chat. Lana replies with a farewell and sets:
+
+```json
+{
+  "auth_action": { "type": "logout" },
+  "auth_intent": "logout",
+  "ui_intent": "chat",
+  "routing_phase": "listening"
+}
+```
+
+**When `auth_action.type === 'logout'`** (same turn as the user message):
+
+1. Call Supabase **`signOut()`** (or `POST /auth/v1/logout` with current bearer).
+2. Start a **new anonymous** session (`POST /auth/v1/signup` `{}` or `signInAnonymously()`).
+3. Call **`POST /lana/sessions`** with the new anon token — use `{ "force_new": true }` so you do not resume the signed-in user's old thread.
+4. Reset local chat state (clear `peer_matches`, `phone_verified`, signed-in profile UI).
+
+```ts
+if (action.type === 'logout') {
+  await supabase.auth.signOut();
+  const { data } = await supabase.auth.signInAnonymously();
+  const anonToken = data.session!.access_token;
+  const lana = await lanaFetch('/lana/sessions', anonToken, {
+    method: 'POST',
+    body: JSON.stringify({ force_new: true }),
+  });
+  setSessionId(lana.session_id);
+  setAccessToken(anonToken);
+  // Lana's farewell is already in turn.assistant_message; optional append lana.assistant_message as fresh opening
+}
+```
+
+**Not signed in** (anonymous guest, no verified phone): Lana says there is nothing to log out of — **no** `auth_action`.
+
+**Already signed in + says “log in”:** Lana does **not** re-ask for phone; she says you're already signed in (no `auth_action`).
+
+**Stuck in login phone step:** “no thanks” / “build my profile” / any non-phone message exits login back to `ui_intent: chat` (no `auth_action`).
+
+### E. `authActionFromTurn` — fallback when `auth_action` omitted
 
 Login OTP can also be inferred from turn fields (see `demo-user.ts`):
 
@@ -458,7 +506,7 @@ function authActionFromTurn(turn): AuthActionPayload | null {
 }
 ```
 
-### E. Profile / claims (during chat)
+### F. Profile / claims (during chat)
 
 | What | Where |
 |------|--------|
@@ -559,6 +607,8 @@ Expect `phone_verified: true` and full `peer_matches`.
 - [ ] Read `auth_action` (or `authActionFromTurn`) on same turn as phone/OTP message
 - [ ] **Signup:** `PUT /user` → `POST /verify` `phone_change` → **same** `session_id` + `ok` message
 - [ ] **Login:** `POST /otp` → `POST /verify` `sms` → **new** `POST /lana/sessions`
+- [ ] **Logout:** `auth_action.type === 'logout'` → `signOut()` → anonymous signup → `POST /lana/sessions` with `force_new: true`
+- [ ] **Resume:** default `POST /lana/sessions` reuses active session per user (one thread per user)
 - [ ] Do **not** use `signInWithOtp` for login during an active anonymous Lana session
 - [ ] Render `peer_matches` / `activity_previews` — respect `preview: true` (hide names/avatars)
 - [ ] Gate connect CTAs on `phone_verified === true`

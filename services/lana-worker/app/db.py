@@ -24,7 +24,31 @@ def abandon_other_active_sessions(user_id: str, purpose: str) -> None:
     ).eq("user_id", user_id).eq("purpose", purpose).eq("status", "active").execute()
 
 
-def create_session(user_id: str, purpose: str) -> dict[str, Any]:
+def get_active_session(user_id: str, purpose: str) -> dict[str, Any] | None:
+    sb = service_client()
+    res = (
+        sb.table("lana_sessions")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("purpose", purpose)
+        .eq("status", "active")
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    row = (res.data or [None])[0]
+    return row if isinstance(row, dict) else None
+
+
+def create_session(user_id: str, purpose: str, *, force_new: bool = False) -> tuple[dict[str, Any], bool]:
+    """
+    Create or resume the user's active Lana session.
+    Returns (session_row, resumed).
+    """
+    if not force_new:
+        existing = get_active_session(user_id, purpose)
+        if existing:
+            return existing, True
     abandon_other_active_sessions(user_id, purpose)
     sb = service_client()
     res = (
@@ -34,7 +58,7 @@ def create_session(user_id: str, purpose: str) -> dict[str, Any]:
     )
     if not res.data:
         raise HTTPException(status_code=500, detail="session_create_failed")
-    return res.data[0]
+    return res.data[0], False
 
 
 def get_session_for_user(session_id: str, user_id: str) -> dict[str, Any]:

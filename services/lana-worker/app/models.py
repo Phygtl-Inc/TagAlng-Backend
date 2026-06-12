@@ -75,6 +75,7 @@ class EventDraft(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     purpose: Literal["lana", "profile_intake", "event_draft"] = "lana"
+    force_new: bool = False
 
 
 class CreateSessionResponse(BaseModel):

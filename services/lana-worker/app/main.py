@@ -508,8 +508,53 @@ def create_lana_session(
 
     purpose = body.purpose
     try:
-        session = create_session(auth.user_id, purpose)
+        session, resumed = create_session(
+            auth.user_id, purpose, force_new=body.force_new
+        )
         session_id = str(session["id"])
+        if resumed:
+            messages = list_messages(session_id)
+            opening = ""
+            status = "active"
+            merged_ctx = dict(session.get("context") or {})
+            ui_raw: dict[str, Any] | None = None
+            draft_raw = None
+            use_orch = use_orchestrator_for_purpose(purpose)
+            for m in reversed(messages):
+                if m.get("role") != "assistant":
+                    continue
+                opening = str(m.get("content") or "")
+                meta = m.get("metadata") or {}
+                status = str(meta.get("status") or status)
+                ui_raw = meta.get("ui") or ui_raw
+                use_orch = bool(meta.get("orchestrator", use_orch))
+                break
+            if not opening:
+                if purpose == "lana":
+                    opening, status, session_ctx, ui_raw = lana_unified_opening()
+                    merged_ctx = {**merged_ctx, **session_ctx}
+                    use_orch = False
+                else:
+                    raise HTTPException(
+                        status_code=500, detail="resumed_session_empty"
+                    )
+            ready = status == "ready_to_complete"
+            ob = _onboarding_fields(merged_ctx, auth, ready_to_complete=ready)
+            ui = _ui_from_dict(ui_raw)
+            event_draft = _draft_from_dict(draft_raw)
+            return CreateSessionResponse(
+                session_id=session_id,
+                purpose=purpose,
+                status="active",
+                assistant_message=opening,
+                ready_to_complete=ready,
+                ui=ui,
+                event_draft=event_draft,
+                orchestrator=use_orch,
+                is_anonymous=auth.is_anonymous,
+                **ob,
+            )
+
         use_orch = use_orchestrator_for_purpose(purpose)
         if purpose == "lana":
             opening, status, session_ctx, ui_raw = lana_unified_opening()
