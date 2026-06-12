@@ -12,16 +12,25 @@ from app.auth import service_client
 from app.discovery_slots import (
     ai_parse_discovery_turn,
     discovery_ai_enabled,
+    discovery_slots_for_turn,
     slots_want_discovery_handling,
+    slots_want_preview_refetch,
 )
+from app.turn_timing import TurnTimer
 from app.guest_capabilities import (
     fetch_peer_matches,
     format_peer_matches,
     wants_host_activity,
     wants_peer_find,
 )
-from app.guest_login import extract_otp_code, extract_phone_e164, handle_guest_login
-from app.guest_login import wants_login as wants_login_intent
+from app.guest_login import (
+    _exit_login_ctx,
+    extract_otp_code,
+    extract_phone_e164,
+    handle_guest_login,
+    wants_login as wants_login_intent,
+    wants_logout as wants_logout_intent,
+)
 from app.claims_persist import (
     extract_display_name_reply,
     extract_nickname_from_message,
@@ -39,6 +48,10 @@ PHASE_AWAIT_SIGNUP_PHONE = "await_signup_phone"
 PHASE_AWAIT_SIGNUP_OTP = "await_signup_otp"
 
 INTENT_FIND_PEERS = "discovery.find_peers"
+
+_FUNNEL_PHASES = frozenset(
+    {PHASE_NEED_ZIP, PHASE_NEED_IDENTITY, PHASE_NEED_DISPLAY_NAME}
+)
 
 _MORE_DETAIL_RE = re.compile(
     r"\b(more|names?|introduce|connect|who are they|show me|full|details?|"
@@ -62,6 +75,12 @@ _ZIP_RE = re.compile(r"\b(\d{5})\b")
 _META_CHAT_RE = re.compile(
     r"\b(are you (?:real|ai|a bot|human|dumb|stupid)|who are you|what are you)\b|^\s*what\?+\s*$",
     re.I,
+)
+_NOT_IDENTITY_REPLIES = frozenset(
+    {"hello", "hi", "hey", "ok", "okay", "yes", "no", "thanks", "thank you", "yep", "nope"}
+)
+_AFFIRMATIVE_REPLIES = frozenset(
+    {"ok", "okay", "yes", "yeah", "yep", "sure", "done", "ready", "go", "great", "perfect"}
 )
 
 
@@ -111,11 +130,72 @@ def invalid_zip_hint(text: str) -> str | None:
     return None
 
 
+def _is_affirmative(msg: str) -> bool:
+    lower = str(msg or "").strip().lower().rstrip(".!")
+    return lower in _AFFIRMATIVE_REPLIES or any(lower.startswith(f"{a} ") for a in _AFFIRMATIVE_REPLIES)
+
+
+def _is_peer_find_command(msg: str) -> bool:
+    """Short 'find me people' lines are intent, not identity."""
+    s = str(msg or "").strip()
+    return bool(s) and wants_peer_find(s) and len(s) < 60
+
+
+def _user_messages_from_history(history: list[dict[str, Any]] | None) -> list[str]:
+    out: list[str] = []
+    for turn in history or []:
+        if str(turn.get("role") or "") != "user":
+            continue
+        content = str(turn.get("content") or "").strip()
+        if content:
+            out.append(content)
+    return out
+
+
+def _fallback_identity_snippet(
+    msg: str,
+    history: list[dict[str, Any]] | None,
+    *,
+    phase: str,
+    block_just_resolved: bool,
+) -> str | None:
+    """
+    Funnel fallback when Flash misses identity — reuse what the user already said.
+    Not intent regex; only runs during need_identity or right after ZIP.
+    """
+    text = str(msg or "").strip()
+    if phase == PHASE_NEED_IDENTITY and text:
+        if text.lower() in _NOT_IDENTITY_REPLIES:
+            return None
+        if (
+            not extract_zip(text)
+            and not wants_login_intent(text)
+            and not _looks_like_meta_chat(text)
+            and not _is_peer_find_command(text)
+        ):
+            return text[:400]
+
+    if not block_just_resolved and phase != PHASE_NEED_IDENTITY:
+        return None
+
+    parts: list[str] = []
+    for content in _user_messages_from_history(history):
+        if extract_zip(content) and len(content.strip()) <= 8:
+            continue
+        if _is_peer_find_command(content):
+            continue
+        if _looks_like_meta_chat(content) or wants_login_intent(content):
+            continue
+        if len(content.strip()) >= 12:
+            parts.append(content.strip()[:200])
+    if parts:
+        return "; ".join(parts[-3:])[:400]
+    return None
+
+
 def _explicit_funnel_input(msg: str) -> bool:
-    """Code-owned signals: user gave ZIP digits or explicit discovery phrasing."""
+    """Code-owned structural signals only — intent is AI slots, not phrase regex."""
     if extract_zip(msg) or invalid_zip_hint(msg):
-        return True
-    if wants_peer_find(msg):
         return True
     if wants_verify_help(msg) or wants_more_peer_detail(msg):
         return True
@@ -139,14 +219,30 @@ def wants_discovery_turn(
         return True
 
     phase = str(session_ctx.get("routing_phase") or "")
+    if phase in _FUNNEL_PHASES:
+        if wants_login_intent(msg):
+            return True
+        if _looks_like_meta_chat(msg):
+            return False
+        return True
+
+    if session_ctx.get("pending_post_verify"):
+        if wants_login_intent(msg):
+            return True
+        if _looks_like_meta_chat(msg):
+            return False
+        return True
+
     if discovery_ai_enabled():
         if slots is None:
-            slots = ai_parse_discovery_turn(
+            slots = discovery_slots_for_turn(
+                session_ctx,
                 msg,
                 routing_phase=phase or "listening",
                 history=history,
                 has_block=bool(resolve_block_id(session_ctx, None)),
                 has_identity=bool(session_ctx.get("identity_snippet")),
+                phone_verified=bool(session_ctx.get("phone_verified")),
             )
         if slots.get("identity_snippet") and phase == PHASE_NEED_IDENTITY:
             return True
@@ -162,7 +258,88 @@ def wants_discovery_turn(
             and not _looks_like_meta_chat(s)
         ):
             return True
-    return wants_peer_find(msg)
+    return wants_peer_find(msg) or wants_activities_browse(msg)
+
+
+def _identity_refinement(
+    slots: dict[str, Any] | None,
+    session_ctx: dict[str, Any],
+) -> str | None:
+    """New identity line in preview phase (user refined who they want)."""
+    if not slots:
+        return None
+    raw = slots.get("identity_snippet")
+    if not raw:
+        return None
+    new_sn = str(raw).strip()[:400]
+    if not new_sn:
+        return None
+    stored = str(session_ctx.get("identity_snippet") or "").strip()
+    if stored and new_sn.lower() == stored.lower():
+        return None
+    return new_sn
+
+
+def _user_nickname(user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("users")
+            .select("nickname, full_name")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+        if not isinstance(row, dict):
+            return None
+        nick = str(row.get("nickname") or row.get("full_name") or "").strip()
+        return nick or None
+    except Exception:
+        return None
+
+
+def _try_assign_home_block(
+    user_jwt: str,
+    *,
+    session_ctx: dict[str, Any],
+    home_block_id: str | None,
+) -> str | None:
+    """Persist preview block on user after phone verify (required for vector match)."""
+    if home_block_id:
+        return home_block_id
+    bid = resolve_block_id(session_ctx, None)
+    if not bid:
+        return None
+    payload: dict[str, Any] = {"p_block_id": bid}
+    zip5 = session_ctx.get("preview_zip")
+    if zip5:
+        payload["p_home_zip"] = str(zip5)
+    try:
+        call_rpc(user_jwt, "assign_home_block", payload)
+    except HTTPException:
+        pass
+    return bid
+
+
+def _should_skip_preview_refetch(
+    *,
+    phase: str,
+    msg: str,
+    goal: str,
+    slots: dict[str, Any] | None,
+    session_ctx: dict[str, Any],
+) -> bool:
+    """After first preview, let orchestrator handle pushback unless explicit refresh."""
+    if phase != PHASE_PREVIEW:
+        return False
+    if wants_more_peer_detail(msg) or goal in ("verify", "rsvp"):
+        return False
+    if slots_want_preview_refetch(slots or {}, session_ctx):
+        return False
+    return True
 
 
 def resolve_identity_for_turn(
@@ -174,24 +351,56 @@ def resolve_identity_for_turn(
     block_just_resolved: bool,
     slots: dict[str, Any] | None = None,
 ) -> str | None:
-    stored = session_ctx.get("identity_snippet")
-    if stored:
-        return str(stored)
+    stored = str(session_ctx.get("identity_snippet") or "").strip() or None
     if discovery_ai_enabled():
-        parsed = slots or ai_parse_discovery_turn(
+        parsed = slots or discovery_slots_for_turn(
+            session_ctx,
             msg,
             routing_phase=PHASE_NEED_IDENTITY if block_just_resolved else phase,
-            history=None if block_just_resolved else history,
+            history=history,
             has_block=True,
-            has_identity=False,
+            has_identity=bool(stored),
+            phone_verified=bool(session_ctx.get("phone_verified")),
         )
         sn = parsed.get("identity_snippet")
         if sn:
-            return str(sn).strip()[:400]
+            sn_s = str(sn).strip()[:400]
+            if sn_s:
+                if phase == PHASE_PREVIEW and stored and sn_s.lower() != stored.lower():
+                    return sn_s
+                if not stored:
+                    return sn_s
+        if stored:
+            return stored
+        fallback = _fallback_identity_snippet(
+            msg,
+            history,
+            phase=PHASE_NEED_IDENTITY if block_just_resolved else phase,
+            block_just_resolved=block_just_resolved,
+        )
+        if fallback:
+            return fallback
         return None
+    if stored:
+        return stored
+    fallback = _fallback_identity_snippet(
+        msg,
+        history,
+        phase=phase,
+        block_just_resolved=block_just_resolved,
+    )
+    if fallback:
+        return fallback
     if phase == PHASE_NEED_IDENTITY:
         s = str(msg or "").strip()
-        if s and not extract_zip(s) and not wants_login_intent(s):
+        if (
+            s
+            and s.lower() not in _NOT_IDENTITY_REPLIES
+            and not extract_zip(s)
+            and not wants_login_intent(s)
+            and not _looks_like_meta_chat(s)
+            and not _is_peer_find_command(s)
+        ):
             return s[:400]
     return None
 
@@ -513,6 +722,7 @@ def handle_discovery_turn(
     is_anonymous: bool,
     history: list[dict[str, Any]] | None = None,
     user_id: str | None = None,
+    timer: TurnTimer | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """
     Returns (reply, ctx, routing, peer_matches) or None if not handling this turn.
@@ -560,6 +770,7 @@ def handle_discovery_turn(
                 [],
             )
         ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=phone)
+        ctx["pending_post_verify"] = True
         ctx["auth_action"] = _auth_action(
             type="verify_signup_otp",
             phone=phone,
@@ -567,9 +778,38 @@ def handle_discovery_turn(
             verify_type="phone_change",
         )
         return (
-            "Perfect — verifying you now. Send me another message once you're verified and I'll show full matches.",
+            "Perfect — verifying you now. Once you're verified, tell me your first name "
+            "and I'll show neighbors you can connect with.",
             ctx,
             _discovery_routing_stub(PHASE_PREVIEW, "verify_signup_otp"),
+            [],
+        )
+
+    if wants_logout_intent(msg):
+        if phone_verified or not is_anonymous:
+            nick = _user_nickname(user_id)
+            farewell = f"Take care{', ' + nick if nick else ''} — signing you out now."
+            ctx = _exit_login_ctx(session_ctx)
+            ctx["auth_intent"] = "logout"
+            ctx["auth_action"] = _auth_action(type="logout")
+            ctx["unified_mode"] = True
+            return (
+                farewell,
+                ctx,
+                {"outcome": "A", "intent_class": "auth", "confidence": 1.0},
+                [],
+            )
+        if session_ctx.get("auth_intent") == "login":
+            return (
+                "No problem — what would you like to do? Find neighbors, plan something, or tell me about yourself.",
+                _exit_login_ctx(session_ctx),
+                {"outcome": "A", "intent_class": "auth", "confidence": 1.0},
+                [],
+            )
+        return (
+            "You're not signed in — nothing to log out of. Ask me to find neighbors or tell me about yourself.",
+            _routing_ctx(session_ctx, phase="listening"),
+            {"outcome": "A", "intent_class": "auth", "confidence": 1.0},
             [],
         )
 
@@ -582,6 +822,17 @@ def handle_discovery_turn(
         else "early_chat"
     )
     if wants_login_intent(msg) or session_ctx.get("auth_intent") == "login":
+        if phone_verified and not is_anonymous:
+            nick = _user_nickname(user_id)
+            label = f" as {nick}" if nick else ""
+            ctx = _exit_login_ctx(session_ctx)
+            return (
+                f"You're already signed in{label}! Ask me to find neighbors, plan something, "
+                "or tell me what you're looking for.",
+                ctx,
+                {"outcome": "A", "intent_class": "auth", "confidence": 1.0},
+                [],
+            )
         login = handle_guest_login(msg, step=str(login_step), session_ctx=session_ctx)
         if login:
             reply, ctx = login
@@ -604,12 +855,15 @@ def handle_discovery_turn(
     had_block = bool(resolve_block_id(session_ctx, home_block_id))
     slots: dict[str, Any] = {}
     if discovery_ai_enabled():
-        slots = ai_parse_discovery_turn(
+        slots = discovery_slots_for_turn(
+            session_ctx,
             msg,
             routing_phase=phase or "listening",
             history=history,
             has_block=had_block,
             has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
         )
 
     if not wants_discovery_turn(msg, session_ctx, history, slots=slots):
@@ -670,9 +924,10 @@ def handle_discovery_turn(
     effective_snippet = str(ctx_base.get("identity_snippet") or "").strip() or None
 
     if not effective_snippet:
-        # AI already routed here — only collect identity when funnel goal says so
-        if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
-            return None
+        in_funnel = phase in _FUNNEL_PHASES or block_just_resolved
+        if not in_funnel:
+            if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
+                return None
         return (
             "Tell me one thing about you — life stage, heritage, or what you're looking for — "
             "so I can match you better.",
@@ -688,17 +943,7 @@ def handle_discovery_turn(
             [],
         )
 
-    name_gate = _apply_display_name_gate(
-        msg,
-        user_id=user_id,
-        ctx_base=ctx_base,
-        block_id=block_id,
-        phase=phase,
-        snippet=effective_snippet,
-    )
-    if name_gate is not None:
-        return name_gate
-
+    # Display name deferred until phone verify — show anonymous preview first.
     block_label = str(
         ctx_base.get("preview_block_label")
         or session_ctx.get("preview_block_label")
@@ -736,9 +981,106 @@ def handle_discovery_turn(
             block_id=block_id,
         )
 
-    wants_peers = goal in ("peers", "both") or wants_peer_find(msg)
+    # Post-verify funnel: name first, then matches (JWT may lag one turn after OTP).
+    if ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME:
+        if user_needs_display_name(user_id, ctx_base):
+            nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+            if nick and user_id:
+                persist_profile_patch(user_id, {"nickname": nick})
+                ctx_base["display_name_saved"] = True
+            else:
+                return (
+                    "What should neighbors call you? First name is fine.",
+                    _routing_ctx(
+                        ctx_base,
+                        phase=PHASE_NEED_DISPLAY_NAME,
+                        active_intent=INTENT_FIND_PEERS,
+                        preview_block_id=block_id,
+                        pending_post_verify=True,
+                    ),
+                    _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
+                    [],
+                )
+        if not phone_verified:
+            nick = str(
+                (ctx_base.get("display_name_saved") and extract_display_name_reply(msg))
+                or extract_nickname_from_message(msg)
+                or ""
+            ).strip()
+            lead = f"Got it{', ' + nick if nick else ''}! "
+            return (
+                f"{lead}Finishing verification — send one more message and I'll show your matches.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_PREVIEW,
+                    active_intent=INTENT_FIND_PEERS,
+                    preview_block_id=block_id,
+                    pending_post_verify=True,
+                ),
+                _discovery_routing_stub(PHASE_PREVIEW),
+                [],
+            )
+        _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+        try:
+            peers = fetch_peer_matches(user_jwt, limit=5)
+        except Exception:
+            peers = []
+        if not peers:
+            peers = fetch_preview_peers_on_block(block_id, limit=3)
+            reply = format_preview_message(peers, block_label, phone_verified=True)
+        else:
+            reply = format_peer_matches(peers)
+        ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
+        ctx.pop("pending_post_verify", None)
+        ctx.pop("activity_previews", None)
+        ctx["last_routing"] = _discovery_routing_stub(
+            PHASE_PREVIEW, "match_peers_by_claim_vectors"
+        )
+        return reply, ctx, ctx["last_routing"], peers
+
+    # Preview re-search: AI must supply new identity_snippet + goal=peers (not questions).
+    if phase == PHASE_PREVIEW and slots_want_preview_refetch(slots, session_ctx):
+        refined = _identity_refinement(slots, session_ctx)
+        if refined:
+            ctx_base["identity_snippet"] = refined
+        if phone_verified:
+            _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+            try:
+                peers = fetch_peer_matches(user_jwt, limit=5)
+            except Exception:
+                peers = []
+            if peers:
+                reply = format_peer_matches(peers)
+                ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
+                ctx.pop("activity_previews", None)
+                ctx["last_routing"] = _discovery_routing_stub(
+                    PHASE_PREVIEW, "match_peers_by_claim_vectors"
+                )
+                return reply, ctx, ctx["last_routing"], peers
+        peers = fetch_preview_peers_on_block(block_id, limit=3)
+        reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
+        ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
+        ctx.pop("activity_previews", None)
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "preview_peers_on_block")
+        return reply, ctx, ctx["last_routing"], peers
+
+    wants_peers = goal in ("peers", "both")
+    if not discovery_ai_enabled():
+        wants_peers = wants_peers or wants_peer_find(msg)
+    if _should_skip_preview_refetch(
+        phase=phase,
+        msg=msg,
+        goal=goal,
+        slots=slots,
+        session_ctx=session_ctx,
+    ):
+        return None
+
     if phase != PHASE_PREVIEW or wants_peers or wants_more_peer_detail(msg):
-        if phone_verified and home_block_id:
+        effective_home = home_block_id or _try_assign_home_block(
+            user_jwt, session_ctx=ctx_base, home_block_id=home_block_id
+        )
+        if phone_verified and effective_home:
             try:
                 peers = fetch_peer_matches(user_jwt, limit=5)
             except Exception:

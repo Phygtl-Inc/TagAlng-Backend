@@ -237,6 +237,22 @@ export default function MeetLanaPage() {
         } else if (authAction.type === 'verify_login_otp') {
           await completeSignedInSession(token, 'login');
           return turn;
+        } else if (authAction.type === 'logout') {
+          setSignedInUser(null);
+          setPhoneVerified(false);
+          setOnboardingStep('early_chat');
+          setRoutingPhase('listening');
+          setUiIntent('chat');
+          setPeerMatches([]);
+          setActivityPreviews([]);
+          const lana = await startUnifiedSession(token, { forceNew: true });
+          setSessionId(lana.session_id);
+          setLines((prev) => [
+            ...prev,
+            { id: `a-open-${Date.now()}`, role: 'assistant', content: lana.assistant_message },
+          ]);
+          applyTurn(lana);
+          return turn;
         }
       } catch (authErr) {
         const msg = authErr instanceof Error ? authErr.message : 'Auth failed';

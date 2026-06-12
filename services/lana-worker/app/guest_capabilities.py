@@ -8,10 +8,14 @@ from typing import Any
 from app.supabase_rpc import call_rpc
 
 _PEER_FIND_RE = re.compile(
-    r"\b(find|show|match|meet|connect with|introduce me to|people|neighbors|fellows|"
-    r"moms?|dads?|parents?)\b.*\b(like me|similar|same|my vibe|on the block|nearby|near me)\b"
-    r"|\b(find people|find neighbors|who else|others like|similar people)\b"
-    r"|\b(want|wanna|looking)\b.*\b(similar|like-minded)\b.*\b(people|neighbors|peers)\b",
+    r"\b(find|show|match|meet|connect with|introduce me to|people|neighbors?|neighbours?|fellows|"
+    r"moms?|dads?|parents?|users)\b.*\b(like me|similar|same|my vibe|on the block|nearby|near me|in my block)\b"
+    r"|\b(find people|find neighbors|find neighbours|who else|others like|similar people)\b"
+    r"|\b(want|wanna|looking|trying)\b.*\b(similar|like-minded|new users|new people|neighbors|neighbours|people|peers)\b"
+    r"|\b(find|meet|connect with?|show)\b.*\b(new users|new people|neighbors|neighbours|people|users)\b"
+    r"|\bnew here\b.*\b(find|meet|people|neighbors|neighbours|users)\b"
+    r"|\b(find|show)\b.*\b(me )?(people|users|neighbors|neighbours)\b"
+    r"|\b(i wanna|i want to)\b.*\bmeet\b.*\b(neighbors|neighbours|people)\b",
     re.I,
 )
 _HOST_RE = re.compile(

@@ -105,10 +105,16 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(ctx["routing_phase"], PHASE_NEED_IDENTITY)
         self.assertIn("one thing", reply.lower())
 
+    @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.user_needs_display_name", return_value=True)
     @patch("app.discovery_route.fetch_blocks_for_zip")
-    def test_identity_then_asks_display_name(self, mock_blocks, _mock_needs_name) -> None:
+    def test_identity_goes_to_preview_without_display_name_gate(
+        self, mock_blocks, _mock_needs_name, mock_preview
+    ) -> None:
         mock_blocks.return_value = [{"block_id": "block-1", "label": "Whisper Park"}]
+        mock_preview.return_value = [
+            {"matching_peer_label": "Weekend activities", "preview": True},
+        ]
         result = handle_discovery_turn(
             "I'm a Latino mom looking for friends",
             session_ctx={
@@ -124,9 +130,59 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         reply, ctx, _, peers = result
-        self.assertEqual(ctx["routing_phase"], PHASE_NEED_DISPLAY_NAME)
-        self.assertIn("call you", reply.lower())
-        self.assertEqual(peers, [])
+        self.assertEqual(ctx["routing_phase"], PHASE_PREVIEW)
+        self.assertIn("neighbor", reply.lower())
+        self.assertEqual(len(peers), 1)
+
+    @patch("app.discovery_route.fetch_preview_peers_on_block")
+    @patch("app.discovery_route.fetch_blocks_for_zip")
+    def test_zip_reuses_identity_from_history(self, mock_blocks, mock_preview) -> None:
+        mock_blocks.return_value = [{"block_id": "block-1", "label": "Whisper Park"}]
+        mock_preview.return_value = [
+            {"matching_peer_label": "British heritage", "preview": True},
+        ]
+        history = [
+            {"role": "user", "content": "I am a British dad who recently moved to this block"},
+            {"role": "assistant", "content": "What ZIP code is your block?"},
+        ]
+        result = handle_discovery_turn(
+            "32827",
+            session_ctx={"active_intent": "discovery.find_peers", "routing_phase": PHASE_NEED_ZIP},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            history=history,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertEqual(ctx["routing_phase"], PHASE_PREVIEW)
+        self.assertIn("British", ctx.get("identity_snippet") or "")
+        self.assertEqual(len(peers), 1)
+
+    @patch("app.discovery_route.fetch_preview_peers_on_block")
+    def test_need_identity_short_answer_goes_preview(self, mock_preview) -> None:
+        mock_preview.return_value = [
+            {"matching_peer_label": "Dad on block", "preview": True},
+        ]
+        result = handle_discovery_turn(
+            "british",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_IDENTITY,
+                "preview_block_id": "block-1",
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertEqual(ctx["routing_phase"], PHASE_PREVIEW)
+        self.assertEqual(ctx.get("identity_snippet"), "british")
+        self.assertIn("neighbor", reply.lower())
+        self.assertEqual(len(peers), 1)
 
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.fetch_blocks_for_zip")
@@ -179,6 +235,37 @@ class TestDiscoveryRouting(unittest.TestCase):
                 "routing_phase": PHASE_PREVIEW,
                 "preview_block_id": "block-1",
                 "identity_snippet": "brazilian",
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertEqual(ctx["routing_phase"], "await_signup_phone")
+        self.assertIn("number", reply.lower())
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    def test_ai_verify_goal_gates_phone_without_regex(self, mock_slots, _mock_ai, _mock_ai2) -> None:
+        """Signup intent is AI-routed (goal=verify), not hardcoded phrase matching."""
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "verify",
+            "zip": None,
+            "identity_snippet": None,
+            "confidence": 0.92,
+        }
+        result = handle_discovery_turn(
+            "ok sign me up",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "identity_snippet": "dads who like soccer",
+                "display_name_saved": True,
             },
             user_jwt="jwt",
             phone_verified=False,
@@ -290,6 +377,35 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(len(previews), 1)
         self.assertEqual(previews[0].get("title"), "Park walk")
 
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    def test_preview_pushback_passes_to_orchestrator(self, mock_slots, _mock_ai, _mock_ai2) -> None:
+        mock_slots.return_value = {
+            "in_discovery": False,
+            "goal": "chat",
+            "zip": None,
+            "identity_snippet": None,
+            "confidence": 0.9,
+        }
+        result = handle_discovery_turn(
+            "dont you have some dads? you showed all moms",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "identity_snippet": "dads who like playing soccer",
+                "peer_matches": [
+                    {"matching_peer_label": "Mom of toddlers", "preview": True},
+                ],
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNone(result)
+
 
     def test_profile_question_passes_to_orchestrator(self) -> None:
         result = handle_discovery_turn(
@@ -302,6 +418,124 @@ class TestDiscoveryRouting(unittest.TestCase):
             history=[{"role": "assistant", "content": "You're signed in as Amanda."}],
         )
         self.assertIsNone(result)
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_pending_post_verify_asks_name_without_jwt_verified(self, _mock_needs_name) -> None:
+        result = handle_discovery_turn(
+            "still waiting",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "identity_snippet": "italian mom",
+                "pending_post_verify": True,
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertEqual(ctx["routing_phase"], PHASE_NEED_DISPLAY_NAME)
+        self.assertIn("call you", reply.lower())
+
+    @patch("app.discovery_route.persist_profile_patch")
+    @patch("app.discovery_route._try_assign_home_block", return_value="block-1")
+    @patch("app.discovery_route.fetch_peer_matches")
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_post_verify_asks_name_then_matches(
+        self, _mock_needs_name, mock_match, _mock_assign, _mock_persist
+    ) -> None:
+        mock_match.return_value = [
+            {
+                "nickname": "Marina",
+                "matching_peer_label": "Weekend BBQ",
+                "similarity_score": 0.8,
+            }
+        ]
+        result = handle_discovery_turn(
+            "Tom",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_DISPLAY_NAME,
+                "preview_block_id": "block-1",
+                "identity_snippet": "dad, italian",
+                "pending_post_verify": True,
+                "phone_verified": True,
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id=None,
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertIn("Marina", reply)
+        self.assertFalse(ctx.get("pending_post_verify"))
+        self.assertEqual(len(peers), 1)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    def test_preview_question_passes_to_orchestrator(self, mock_slots, _mock_ai, _mock_ai2) -> None:
+        mock_slots.return_value = {
+            "in_discovery": False,
+            "goal": "chat",
+            "zip": None,
+            "identity_snippet": None,
+            "confidence": 0.9,
+        }
+        result = handle_discovery_turn(
+            "do you have brazilian moms?",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "identity_snippet": "italian mom, 2 kids",
+                "peer_matches": [{"matching_peer_label": "Mom of toddlers", "preview": True}],
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNone(result)
+
+    @patch("app.discovery_route.fetch_preview_peers_on_block")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    def test_preview_ai_refetch_on_new_identity(self, mock_slots, _mock_ai, _mock_ai2, mock_preview) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "peers",
+            "zip": None,
+            "identity_snippet": "dad who likes soccer",
+            "confidence": 0.9,
+        }
+        mock_preview.return_value = [
+            {"matching_peer_label": "Dad on block", "preview": True},
+        ]
+        result = handle_discovery_turn(
+            "I am a dad looking for other dads on the block",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "identity_snippet": "italian mom",
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        _, ctx, _, peers = result
+        self.assertIn("dad", (ctx.get("identity_snippet") or "").lower())
+        self.assertEqual(len(peers), 1)
 
     def test_need_identity_still_collects_when_in_funnel(self) -> None:
         result = handle_discovery_turn(
@@ -320,6 +554,42 @@ class TestDiscoveryRouting(unittest.TestCase):
         reply, ctx, _, _ = result
         self.assertEqual(ctx["routing_phase"], PHASE_NEED_IDENTITY)
         self.assertIn("Tell me one thing", reply)
+
+
+    @patch("app.discovery_route._user_nickname", return_value="Amanda")
+    def test_signed_in_user_logout_returns_auth_action(self, _nick) -> None:
+        result = handle_discovery_turn(
+            "I want to logout",
+            session_ctx={},
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            user_id="user-amanda",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIn("signing you out", reply.lower())
+        self.assertEqual(ctx.get("auth_action", {}).get("type"), "logout")
+        self.assertEqual(ctx.get("auth_intent"), "logout")
+
+    @patch("app.discovery_route._user_nickname", return_value="Amanda")
+    def test_signed_in_user_login_intent_not_re_asked(self, _nick) -> None:
+        result = handle_discovery_turn(
+            "I want to login",
+            session_ctx={"auth_intent": "login", "guest_step": "await_login_phone"},
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            user_id="user-amanda",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIn("already signed in", reply.lower())
+        self.assertIn("amanda", reply.lower())
+        self.assertIsNone(ctx.get("auth_intent"))
+        self.assertEqual(ctx.get("routing_phase"), "listening")
 
 
 class TestUnifiedOpening(unittest.TestCase):

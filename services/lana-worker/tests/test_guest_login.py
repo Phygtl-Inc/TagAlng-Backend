@@ -6,6 +6,7 @@ from app.guest_login import (
     extract_phone_e164,
     handle_guest_login,
     wants_login,
+    wants_logout,
 )
 from app.guest_intake import lana_profile_guest_turn
 
@@ -15,6 +16,11 @@ class TestGuestLoginHelpers(unittest.TestCase):
         self.assertTrue(wants_login("I want to log in"))
         self.assertTrue(wants_login("I already have an account"))
         self.assertFalse(wants_login("I'm a Latino mom"))
+
+    def test_wants_logout(self) -> None:
+        self.assertTrue(wants_logout("I want to logout"))
+        self.assertTrue(wants_logout("sign out please"))
+        self.assertFalse(wants_logout("find neighbors"))
 
     def test_extract_phone(self) -> None:
         self.assertEqual(extract_phone_e164("+15550000000"), "+15550000000")
@@ -44,6 +50,15 @@ class TestGuestLoginTurn(unittest.TestCase):
         self.assertEqual(ctx["guest_step"], GUEST_STEP_LOGIN_OTP)
         self.assertEqual(ctx["login_phone"], "+15550000000")
         self.assertTrue(ctx["requires_login_otp"])
+
+    def test_cancel_login_exits_phone_step(self) -> None:
+        base = {"guest_step": GUEST_STEP_LOGIN_PHONE, "auth_intent": "login"}
+        for msg in ("no no thanks", "I want to build my profile", "find neighbors"):
+            reply, ctx = handle_guest_login(msg, step=GUEST_STEP_LOGIN_PHONE, session_ctx=base)
+            self.assertIn("what would you like", reply.lower())
+            self.assertIsNone(ctx.get("auth_intent"))
+            self.assertIsNone(ctx.get("guest_step"))
+            self.assertEqual(ctx.get("routing_phase"), "listening")
 
     def test_otp_returns_token_for_fe(self) -> None:
         reply, ctx = handle_guest_login(

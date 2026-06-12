@@ -13,7 +13,15 @@ _LOGIN_INTENT_RE = re.compile(
     r"i\s+have\s+an\s+account|returning\s+user)\b",
     re.I,
 )
-_CANCEL_RE = re.compile(r"\b(never\s*mind|cancel|sign\s*up|new\s+account|meet\s+lana)\b", re.I)
+_LOGOUT_INTENT_RE = re.compile(
+    r"\b(log\s*out|logout|sign\s*out|signout|log\s*off)\b",
+    re.I,
+)
+_CANCEL_RE = re.compile(
+    r"\b(never\s*mind|cancel|sign\s*up|new\s+account|meet\s+lana|no\s+thanks?|nope|skip|stop|"
+    r"not\s+now|build\s+(?:my\s+)?profile|profile)\b",
+    re.I,
+)
 _OTP_RE = re.compile(r"\b(\d{6})\b")
 _PHONE_DIGITS_RE = re.compile(r"\+?[\d\s().-]{10,18}")
 
@@ -22,8 +30,26 @@ def wants_login(text: str) -> bool:
     return bool(_LOGIN_INTENT_RE.search(str(text or "").strip()))
 
 
+def wants_logout(text: str) -> bool:
+    return bool(_LOGOUT_INTENT_RE.search(str(text or "").strip()))
+
+
 def wants_cancel_login(text: str) -> bool:
     return bool(_CANCEL_RE.search(str(text or "").strip()))
+
+
+def _exit_login_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Leave login sub-flow; return to unified listening."""
+    out = {
+        **session_ctx,
+        "auth_intent": None,
+        "guest_step": None,
+        "routing_phase": "listening",
+        "requires_login_otp": False,
+        "login_otp_token": None,
+    }
+    out.pop("login_phone", None)
+    return out
 
 
 def extract_otp_code(text: str) -> str | None:
@@ -87,15 +113,20 @@ def handle_guest_login(
     if step == GUEST_STEP_LOGIN_PHONE:
         if wants_cancel_login(msg):
             return (
-                "No problem — tell me your life stage and what you're hoping to find on the block.",
-                {**session_ctx, "guest_intake": True, "guest_step": "early_chat", "auth_intent": None},
+                "No problem — what would you like to do? Find neighbors, plan something, or tell me about yourself.",
+                _exit_login_ctx(session_ctx),
             )
         phone = extract_phone_e164(msg)
         if not phone:
+            if wants_login(msg):
+                return (
+                    "I didn't catch a valid phone number — include country code if you can "
+                    "(e.g. +15550000000).",
+                    _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
+                )
             return (
-                "I didn't catch a valid phone number — include country code if you can "
-                "(e.g. +15550000000).",
-                _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
+                "No problem — what would you like to do? Find neighbors, plan something, or tell me about yourself.",
+                _exit_login_ctx(session_ctx),
             )
         return (
             f"Got it — I sent a 6-digit code to {phone}. Enter it here when it arrives.",
@@ -110,8 +141,8 @@ def handle_guest_login(
     if step == GUEST_STEP_LOGIN_OTP:
         if wants_cancel_login(msg):
             return (
-                "Okay — we can start fresh. Who are you, and what are you hoping to find here?",
-                {**session_ctx, "guest_intake": True, "guest_step": "early_chat", "auth_intent": None},
+                "Okay — what would you like to do next?",
+                _exit_login_ctx(session_ctx),
             )
         otp = extract_otp_code(msg)
         if not otp:

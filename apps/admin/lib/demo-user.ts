@@ -289,7 +289,8 @@ export type LanaAuthAction = {
     | 'link_phone_signup'
     | 'verify_signup_otp'
     | 'send_login_otp'
-    | 'verify_login_otp';
+    | 'verify_login_otp'
+    | 'logout';
   phone?: string | null;
   token?: string | null;
   verify_type?: string | null;
@@ -360,6 +361,12 @@ export async function handleLanaAuthAction(action: LanaAuthAction): Promise<stri
     const token = action.token;
     if (!phone || !token) throw new Error('auth_action missing phone or OTP');
     return verifyLoginOtp(phone, token);
+  }
+
+  if (action.type === 'logout') {
+    await demoSignOut();
+    const session = await guestAnonymousSignUp();
+    return session.access_token;
   }
 
   throw new Error(`Unknown auth_action type: ${action.type}`);
