@@ -8,6 +8,7 @@ import {
   completeSession,
   sendMessage,
   startUnifiedSession,
+  uploadProfilePhoto,
   type CompleteResult,
   type JointMomentPayload,
   type LanaTurn,
@@ -35,7 +36,7 @@ import {
   type DemoAuthProfile,
 } from '@/lib/demo-user';
 import Link from 'next/link';
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 
 type Screen = 'welcome' | 'chat' | 'phone' | 'discover';
 
@@ -59,6 +60,8 @@ function fallbackUiIntent(
     await_login_phone: 'collect_phone',
     await_login_otp: 'collect_otp',
     gate_verify: 'collect_phone',
+    await_profile_photo: 'upload_profile_photo',
+    await_logout: 'sign_out',
     preview: 'show_peer_preview',
   };
   return map[phase] ?? 'chat';
@@ -429,7 +432,27 @@ export default function MeetLanaPage() {
   const mariaNick = jointMoment?.candidate?.nickname || 'Maria';
   const showJointCard = screen === 'chat' && onboardingStep === 'offered_intro' && jointMoment;
   const showAuthField = uiIntent === 'collect_phone' || uiIntent === 'collect_otp';
+  const showPhotoField = uiIntent === 'upload_profile_photo';
   const showZipField = uiIntent === 'collect_zip';
+  const photoInputRef = useRef<HTMLInputElement>(null);
+
+  async function onPhotoSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || !token || !sessionId || busy) return;
+    setBusy(true);
+    setThinking(true);
+    setError(null);
+    try {
+      await uploadProfilePhoto(token, file);
+      await pushTurn(token, sessionId, 'done');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Photo upload failed');
+    } finally {
+      setBusy(false);
+      setThinking(false);
+      e.target.value = '';
+    }
+  }
 
   const composerPlaceholder = (() => {
     if (uiIntent === 'collect_zip') return 'Your 5-digit ZIP (e.g. 32827)…';
@@ -750,7 +773,30 @@ export default function MeetLanaPage() {
               </form>
             )}
 
-            {!showJointCard && !showAuthField && (
+            {!showJointCard && showPhotoField && (
+              <div className="meet-lana-composer meet-lana-composer--intent">
+                <input
+                  ref={photoInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  capture="user"
+                  style={{ display: 'none' }}
+                  onChange={onPhotoSelected}
+                  disabled={busy}
+                  aria-label="Profile photo"
+                />
+                <button
+                  type="button"
+                  className="meet-lana-send meet-lana-send--wide"
+                  disabled={busy}
+                  onClick={() => photoInputRef.current?.click()}
+                >
+                  {busy ? '…' : 'Add photo →'}
+                </button>
+              </div>
+            )}
+
+            {!showJointCard && !showAuthField && !showPhotoField && (
               <form
                 className={`meet-lana-composer ${thinking ? 'meet-lana-composer--busy' : ''}`}
                 onSubmit={showZipField ? onStructuredSubmit : onSend}

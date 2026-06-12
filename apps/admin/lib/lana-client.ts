@@ -66,7 +66,9 @@ export type LanaUiIntent =
   | 'collect_otp'
   | 'show_peer_preview'
   | 'show_activity_preview'
-  | 'confirm_profile';
+  | 'confirm_profile'
+  | 'upload_profile_photo'
+  | 'sign_out';
 
 export type GuestOnboardingFields = {
   onboarding_step?: string | null;
@@ -164,6 +166,31 @@ export function startProfileSession(token: string) {
     method: 'POST',
     body: JSON.stringify({ purpose: 'profile_intake' }),
   });
+}
+
+export type ProfilePhotoUploadResult = {
+  profile_photo_url: string;
+};
+
+export async function uploadProfilePhoto(token: string, file: File) {
+  const res = await fetch(`${BASE}/lana/profile-photo`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: (() => {
+      const form = new FormData();
+      form.append('file', file);
+      return form;
+    })(),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail =
+      typeof body.detail === 'string'
+        ? body.detail
+        : body.message || res.statusText;
+    throw new Error(detail || `Profile photo upload ${res.status}`);
+  }
+  return body as ProfilePhotoUploadResult;
 }
 
 export function sendMessage(token: string, sessionId: string, message: string) {

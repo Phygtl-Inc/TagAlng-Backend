@@ -7,6 +7,7 @@ from typing import Any
 
 GUEST_STEP_LOGIN_PHONE = "await_login_phone"
 GUEST_STEP_LOGIN_OTP = "await_login_otp"
+GUEST_STEP_LOGOUT = "await_logout"
 
 _LOGIN_INTENT_RE = re.compile(
     r"\b(log\s*in|login|sign\s*in|signin|existing\s+account|already\s+have\s+(?:an?\s+)?account|"
@@ -47,6 +48,21 @@ def _exit_login_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
         "routing_phase": "listening",
         "requires_login_otp": False,
         "login_otp_token": None,
+    }
+    out.pop("login_phone", None)
+    return out
+
+
+def _logout_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Signed-in logout — FE reads ui_intent sign_out + auth_action logout on this turn."""
+    out = {
+        **session_ctx,
+        "auth_intent": "logout",
+        "guest_step": GUEST_STEP_LOGOUT,
+        "routing_phase": GUEST_STEP_LOGOUT,
+        "requires_login_otp": False,
+        "login_otp_token": None,
+        "requires_phone_verification": False,
     }
     out.pop("login_phone", None)
     return out

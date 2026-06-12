@@ -25,6 +25,7 @@ from app.guest_capabilities import (
 )
 from app.guest_login import (
     _exit_login_ctx,
+    _logout_ctx,
     extract_otp_code,
     extract_phone_e164,
     handle_guest_login,
@@ -37,6 +38,7 @@ from app.claims_persist import (
     persist_profile_patch,
     user_needs_display_name,
 )
+from app.profile_photo import handle_profile_photo_turn, user_profile_photo_url
 from app.supabase_rpc import call_rpc
 
 PHASE_NEED_ZIP = "need_zip"
@@ -46,8 +48,11 @@ PHASE_PREVIEW = "preview"
 PHASE_GATE_VERIFY = "gate_verify"
 PHASE_AWAIT_SIGNUP_PHONE = "await_signup_phone"
 PHASE_AWAIT_SIGNUP_OTP = "await_signup_otp"
+PHASE_AWAIT_PROFILE_PHOTO = "await_profile_photo"
 
 INTENT_FIND_PEERS = "discovery.find_peers"
+INTENT_FIND_ACTIVITIES = "discovery.find_activities"
+_DISCOVERY_GOALS = frozenset({"peers", "activities", "both"})
 
 _FUNNEL_PHASES = frozenset(
     {PHASE_NEED_ZIP, PHASE_NEED_IDENTITY, PHASE_NEED_DISPLAY_NAME}
@@ -68,7 +73,7 @@ _RSVP_RE = re.compile(
     re.I,
 )
 _ACTIVITIES_RE = re.compile(
-    r"\b(activit(?:y|ies)|events?|what'?s (?:happening|going on)|things to do)\b",
+    r"\b(activit\w*|events?|what'?s (?:happening|going on)|things to do)\b",
     re.I,
 )
 _ZIP_RE = re.compile(r"\b(\d{5})\b")
@@ -98,6 +103,82 @@ def wants_rsvp_intent(text: str) -> bool:
 
 def wants_activities_browse(text: str) -> bool:
     return bool(_ACTIVITIES_RE.search(str(text or "").strip()))
+
+
+def _active_intent_for_goal(goal: str) -> str | None:
+    if goal == "activities":
+        return INTENT_FIND_ACTIVITIES
+    if goal in ("peers", "both"):
+        return INTENT_FIND_PEERS
+    return None
+
+
+def _update_discovery_goal_from_slots(
+    session_ctx: dict[str, Any],
+    slots: dict[str, Any],
+) -> None:
+    """Persist browse goal when Flash names peers/activities/both this turn."""
+    slot_goal = str(slots.get("goal") or "none").lower()
+    conf = float(slots.get("confidence", 0.0))
+    if slot_goal in _DISCOVERY_GOALS and conf >= 0.45:
+        session_ctx["discovery_goal"] = slot_goal
+
+
+def _effective_discovery_goal(
+    msg: str,
+    session_ctx: dict[str, Any],
+    slots: dict[str, Any],
+) -> str:
+    """
+    Browse goal for this turn: Flash when explicit; else persisted across ZIP/continue steps.
+    Updates session.discovery_goal when user pivots (e.g. peers → activities).
+    """
+    if wants_activities_browse(msg):
+        session_ctx["discovery_goal"] = "activities"
+    _update_discovery_goal_from_slots(session_ctx, slots)
+    stored = str(session_ctx.get("discovery_goal") or "none")
+    slot_goal = str(slots.get("goal") or "none").lower()
+    conf = float(slots.get("confidence", 0.0))
+
+    if slot_goal in _DISCOVERY_GOALS and conf >= 0.45:
+        return slot_goal
+    if slot_goal == "continue" and stored in _DISCOVERY_GOALS:
+        return stored
+    if extract_zip(msg) and stored in _DISCOVERY_GOALS:
+        return stored
+    return stored if stored in _DISCOVERY_GOALS else slot_goal
+
+
+def _zip_prompt(discovery_goal: str) -> str:
+    if discovery_goal == "activities":
+        return (
+            "What ZIP code is your block? That helps me find activities near you."
+        )
+    if discovery_goal == "both":
+        return (
+            "What ZIP code is your block? That helps me find neighbors and activities near you."
+        )
+    return "What ZIP code is your block? That helps me find neighbors near you."
+
+
+def _show_activities_preview(
+    *,
+    ctx_base: dict[str, Any],
+    block_id: str,
+    block_label: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    events = fetch_preview_events_on_block(block_id)
+    reply = format_activities_message(events, block_label)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=PHASE_PREVIEW,
+        preview_block_id=block_id,
+        active_intent=INTENT_FIND_ACTIVITIES,
+    )
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "browse_block_activities")
+    ctx["activity_previews"] = activity_previews_from_events(events)
+    ctx["peer_matches"] = []
+    return reply, ctx, ctx["last_routing"], []
 
 
 def _looks_like_meta_chat(msg: str) -> bool:
@@ -158,10 +239,12 @@ def _fallback_identity_snippet(
     *,
     phase: str,
     block_just_resolved: bool,
+    has_block: bool = False,
+    slots: dict[str, Any] | None = None,
 ) -> str | None:
     """
     Funnel fallback when Flash misses identity — reuse what the user already said.
-    Not intent regex; only runs during need_identity or right after ZIP.
+    Runs during need_identity, right after ZIP, or when user demands peers with block set.
     """
     text = str(msg or "").strip()
     if phase == PHASE_NEED_IDENTITY and text:
@@ -175,26 +258,44 @@ def _fallback_identity_snippet(
         ):
             return text[:400]
 
-    if not block_just_resolved and phase != PHASE_NEED_IDENTITY:
+    goal = str((slots or {}).get("goal") or "none")
+    late_peer_find = (
+        goal in ("peers", "both")
+        and float((slots or {}).get("confidence", 0.0)) >= 0.45
+        and has_block
+        and phase in ("listening", PHASE_PREVIEW)
+    )
+    if not block_just_resolved and phase != PHASE_NEED_IDENTITY and not late_peer_find:
         return None
 
-    parts: list[str] = []
+    long_parts: list[str] = []
+    short_parts: list[str] = []
     for content in _user_messages_from_history(history):
         if extract_zip(content) and len(content.strip()) <= 8:
             continue
         if _is_peer_find_command(content):
             continue
+        if wants_activities_browse(content):
+            continue
         if _looks_like_meta_chat(content) or wants_login_intent(content):
             continue
-        if len(content.strip()) >= 12:
-            parts.append(content.strip()[:200])
-    if parts:
-        return "; ".join(parts[-3:])[:400]
+        stripped = content.strip()
+        if len(stripped) >= 12:
+            long_parts.append(stripped[:200])
+        elif len(stripped) >= 2:
+            short_parts.append(stripped[:80])
+    if long_parts:
+        merged = long_parts[-3:]
+        if short_parts and (block_just_resolved or late_peer_find):
+            merged = merged + short_parts[-5:]
+        return "; ".join(merged)[:400]
+    if short_parts and (block_just_resolved or late_peer_find):
+        return "; ".join(short_parts[-6:])[:400]
     return None
 
 
 def _explicit_funnel_input(msg: str) -> bool:
-    """Code-owned structural signals only — intent is AI slots, not phrase regex."""
+    """Code-owned structural signals only — peer-find intent is Flash slots, not regex."""
     if extract_zip(msg) or invalid_zip_hint(msg):
         return True
     if wants_verify_help(msg) or wants_more_peer_detail(msg):
@@ -377,6 +478,8 @@ def resolve_identity_for_turn(
             history,
             phase=PHASE_NEED_IDENTITY if block_just_resolved else phase,
             block_just_resolved=block_just_resolved,
+            has_block=True,
+            slots=slots,
         )
         if fallback:
             return fallback
@@ -388,6 +491,8 @@ def resolve_identity_for_turn(
         history,
         phase=phase,
         block_just_resolved=block_just_resolved,
+        has_block=bool(resolve_block_id(session_ctx, None)),
+        slots=slots,
     )
     if fallback:
         return fallback
@@ -785,12 +890,40 @@ def handle_discovery_turn(
             [],
         )
 
+    had_block = bool(resolve_block_id(session_ctx, home_block_id))
+    has_profile_photo = bool(user_profile_photo_url(user_id))
+    slots: dict[str, Any] = {}
+    if discovery_ai_enabled():
+        slots = discovery_slots_for_turn(
+            session_ctx,
+            msg,
+            routing_phase=phase or "listening",
+            history=history,
+            has_block=had_block,
+            has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            has_profile_photo=has_profile_photo,
+            timer=timer,
+        )
+
+    photo_turn = handle_profile_photo_turn(
+        msg,
+        session_ctx=session_ctx,
+        slots=slots,
+        user_id=user_id,
+        phone_verified=phone_verified,
+        is_anonymous=is_anonymous,
+    )
+    if photo_turn:
+        reply, ctx = photo_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, {"outcome": "A", "intent_class": "profile_photo", "confidence": 1.0}, []
+
     if wants_logout_intent(msg):
         if phone_verified or not is_anonymous:
             nick = _user_nickname(user_id)
             farewell = f"Take care{', ' + nick if nick else ''} — signing you out now."
-            ctx = _exit_login_ctx(session_ctx)
-            ctx["auth_intent"] = "logout"
+            ctx = _logout_ctx(session_ctx)
             ctx["auth_action"] = _auth_action(type="logout")
             ctx["unified_mode"] = True
             return (
@@ -852,20 +985,6 @@ def handle_discovery_turn(
             ctx["unified_mode"] = True
             return reply, ctx, {"outcome": "A", "intent_class": "auth", "confidence": 1.0}, []
 
-    had_block = bool(resolve_block_id(session_ctx, home_block_id))
-    slots: dict[str, Any] = {}
-    if discovery_ai_enabled():
-        slots = discovery_slots_for_turn(
-            session_ctx,
-            msg,
-            routing_phase=phase or "listening",
-            history=history,
-            has_block=had_block,
-            has_identity=bool(session_ctx.get("identity_snippet")),
-            phone_verified=phone_verified,
-            timer=timer,
-        )
-
     if not wants_discovery_turn(msg, session_ctx, history, slots=slots):
         return None
 
@@ -876,7 +995,15 @@ def handle_discovery_turn(
     ):
         return None
 
-    ctx_base = _routing_ctx(session_ctx, phase=phase or PHASE_NEED_ZIP, active_intent=INTENT_FIND_PEERS)
+    effective_goal = _effective_discovery_goal(msg, session_ctx, slots)
+    active = _active_intent_for_goal(effective_goal) or INTENT_FIND_PEERS
+    ctx_base = _routing_ctx(
+        session_ctx,
+        phase=phase or PHASE_NEED_ZIP,
+        active_intent=active,
+    )
+    if effective_goal in _DISCOVERY_GOALS:
+        ctx_base["discovery_goal"] = effective_goal
 
     # Slot: ZIP / block
     block_id = resolve_block_id(session_ctx, home_block_id)
@@ -893,21 +1020,31 @@ def handle_discovery_turn(
         if zip_from_msg:
             return (
                 f"I couldn't find blocks for ZIP {zip_from_msg}. Try another ZIP (e.g. 32827 for Lake Nona).",
-                _routing_ctx(session_ctx, phase=PHASE_NEED_ZIP, active_intent=INTENT_FIND_PEERS),
+                _routing_ctx(
+                    session_ctx,
+                    phase=PHASE_NEED_ZIP,
+                    active_intent=active,
+                    discovery_goal=ctx_base.get("discovery_goal"),
+                ),
                 _discovery_routing_stub(PHASE_NEED_ZIP),
                 [],
             )
         zip_hint = invalid_zip_hint(msg)
+        zip_goal = str(ctx_base.get("discovery_goal") or effective_goal or "peers")
         return (
-            zip_hint
-            or "What ZIP code is your block? That helps me find neighbors near you.",
-            _routing_ctx(session_ctx, phase=PHASE_NEED_ZIP, active_intent=INTENT_FIND_PEERS),
+            zip_hint or _zip_prompt(zip_goal),
+            _routing_ctx(
+                session_ctx,
+                phase=PHASE_NEED_ZIP,
+                active_intent=active,
+                discovery_goal=ctx_base.get("discovery_goal"),
+            ),
             _discovery_routing_stub(PHASE_NEED_ZIP),
             [],
         )
 
     block_just_resolved = bool(zip_from_msg and not had_block)
-    goal = str(slots.get("goal") or "none")
+    goal = effective_goal
 
     # Slot: identity snippet (Flash — not chat history heuristics)
     snippet = resolve_identity_for_turn(
@@ -923,6 +1060,19 @@ def handle_discovery_turn(
 
     effective_snippet = str(ctx_base.get("identity_snippet") or "").strip() or None
 
+    block_label = str(
+        ctx_base.get("preview_block_label")
+        or session_ctx.get("preview_block_label")
+        or "your block"
+    )
+
+    if goal == "activities" or wants_activities_browse(msg):
+        return _show_activities_preview(
+            ctx_base=ctx_base,
+            block_id=block_id,
+            block_label=block_label,
+        )
+
     if not effective_snippet:
         in_funnel = phase in _FUNNEL_PHASES or block_just_resolved
         if not in_funnel:
@@ -934,30 +1084,15 @@ def handle_discovery_turn(
             _routing_ctx(
                 session_ctx,
                 phase=PHASE_NEED_IDENTITY,
-                active_intent=INTENT_FIND_PEERS,
+                active_intent=active,
                 preview_block_id=block_id,
                 preview_zip=ctx_base.get("preview_zip"),
                 preview_block_label=ctx_base.get("preview_block_label"),
+                discovery_goal=ctx_base.get("discovery_goal"),
             ),
             _discovery_routing_stub(PHASE_NEED_IDENTITY),
             [],
         )
-
-    # Display name deferred until phone verify — show anonymous preview first.
-    block_label = str(
-        ctx_base.get("preview_block_label")
-        or session_ctx.get("preview_block_label")
-        or "your block"
-    )
-
-    if goal in ("activities", "both") or wants_activities_browse(msg):
-        events = fetch_preview_events_on_block(block_id)
-        reply = format_activities_message(events, block_label)
-        ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
-        ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "browse_block_activities")
-        ctx["activity_previews"] = activity_previews_from_events(events)
-        ctx["peer_matches"] = []
-        return reply, ctx, ctx["last_routing"], []
 
     if wants_rsvp_intent(msg) or goal == "rsvp":
         events = fetch_preview_events_on_block(block_id)
