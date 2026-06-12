@@ -7,6 +7,8 @@ from app.ui_intent import (
     UI_INTENT_COLLECT_ZIP,
     UI_INTENT_CONFIRM_PROFILE,
     UI_INTENT_SHOW_PEER_PREVIEW,
+    UI_INTENT_SIGN_OUT,
+    UI_INTENT_UPLOAD_PROFILE_PHOTO,
     derive_ui_intent,
 )
 
@@ -40,6 +42,18 @@ class TestDeriveUiIntent(unittest.TestCase):
         self.assertEqual(
             derive_ui_intent({"routing_phase": "need_zip"}, ready_to_complete=True),
             UI_INTENT_CONFIRM_PROFILE,
+        )
+
+    def test_logout_phase(self) -> None:
+        self.assertEqual(
+            derive_ui_intent({"routing_phase": "await_logout", "auth_intent": "logout"}),
+            UI_INTENT_SIGN_OUT,
+        )
+
+    def test_profile_photo_phase(self) -> None:
+        self.assertEqual(
+            derive_ui_intent({"routing_phase": "await_profile_photo"}),
+            UI_INTENT_UPLOAD_PROFILE_PHOTO,
         )
 
     def test_listening(self) -> None:

@@ -16,21 +16,28 @@ _SYSTEM = (
     "Output only valid JSON. "
     "Discovery funnel = ZIP, giving self-description for matching, preview matches, verify phone, RSVP. "
     "When routing_phase=listening and user wants to meet/find/show/connect with neighbors or people "
-    "(any phrasing, including British 'neighbours') → goal=peers, in_discovery=true. "
-    "When user is frustrated and demands to see people/users/neighbors on their block → goal=peers, in_discovery=true. "
+    "(any phrasing: 'meet new people', 'make me meet people', 'find me people', 'stop asking questions') "
+    "→ goal=peers, in_discovery=true — even if prior turns were casual chat. "
+    "When user is frustrated and demands to see people/users/neighbors → goal=peers, in_discovery=true, NOT chat. "
+    "If RECENT TURNS already contain self-description (heritage, family, life stage, short answers like 'toddlers') "
+    "and the latest message asks to find/meet people → goal=peers and set identity_snippet synthesized from RECENT TURNS. "
     "Non-funnel chat = goal chat or none, in_discovery=false — companionship AI answers (profile questions, "
     "what are my claims, what's my name, random questions, meta, off-topic). "
     "identity_snippet = self-description for matching from the latest message OR synthesized from RECENT TURNS "
-    "when routing_phase=need_identity or when the latest message is ZIP-only but user already described themselves earlier. "
+    "when routing_phase=need_identity, when the latest message is ZIP-only, or when goal=peers and RECENT TURNS "
+    "already describe the user (include short answers like 'toddlers', 'parents' when synthesizing). "
     "Never set identity_snippet from questions or meta. "
     "When routing_phase=need_identity: user answering the identity step (even one word like 'British') → "
     "goal=continue, in_discovery=true; set identity_snippet from their answer enriched with RECENT TURNS if helpful. "
     "If the user only sent a ZIP code with no prior self-description in RECENT TURNS, identity_snippet must be null. "
+    "When the latest message is only a ZIP code, keep the same goal as the prior browse request "
+    "(activities stays activities, peers stays peers) — use goal=continue, in_discovery=true. "
     "Mid-funnel pushback or topic change in preview → in_discovery=false, goal=chat. "
     "When routing_phase=preview: questions about the neighbors shown (e.g. 'do you have Brazilian moms?', "
     "'are these Brazilian?', 'why moms not dads?') → in_discovery=false, goal=chat — NOT peers. "
     "Never set identity_snippet from questions — only from new self-description. "
-    "Pushback or frustration about match quality → goal=chat. "
+    "Pushback or frustration about match quality in preview (cards already shown) → goal=chat. "
+    "Pushback while still in listening with no preview yet but user demands find/show people → goal=peers. "
     "Only goal=peers + in_discovery=true in preview when user gives NEW self-description for matching "
     "(different identity_snippet than session) and explicitly wants a fresh search — not for questions. "
     "When routing_phase=preview and phone_verified=false: user wants to sign up, create an account, "
@@ -40,9 +47,14 @@ _SYSTEM = (
     "Do NOT classify signup/verify intent as goal=chat. "
     "If phone_verified=true, signup/verify requests → goal=chat (already verified). "
     "goal: peers = find/show neighbors; activities = browse events; both; verify = phone signup gate; rsvp; "
+    "profile_photo = user wants to add/change/upload a profile picture, agrees to Lana's photo suggestion "
+    "(yes/sure), says they finished uploading, or cancels photo upload; "
     "chat = companionship / profile read / any non-funnel question; "
     "continue = user is answering the current funnel step (supplying ZIP or identity snippet); "
-    "none = not discovery."
+    "none = not discovery. "
+    "When goal=profile_photo set profile_photo_action: start (wants upload), accept (yes after Lana suggested), "
+    "done (finished uploading), skip (cancel/not now), none. "
+    "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action."
 )
 
 
@@ -73,6 +85,7 @@ def _empty_slots() -> dict[str, Any]:
         "goal": "none",
         "zip": None,
         "identity_snippet": None,
+        "profile_photo_action": "none",
         "confidence": 0.0,
     }
 
@@ -85,9 +98,10 @@ def ai_parse_discovery_turn(
     has_block: bool,
     has_identity: bool,
     phone_verified: bool = False,
+    has_profile_photo: bool = False,
     timer: TurnTimer | None = None,
 ) -> dict[str, Any]:
-    """One Flash call: discovery yes/no, goal (peers/activities), zip, identity snippet."""
+    """One Flash call: discovery yes/no, goal (peers/activities/profile_photo), zip, identity snippet."""
     if not discovery_ai_enabled():
         return _empty_slots()
     text = str(utterance or "").strip()
@@ -107,6 +121,7 @@ def ai_parse_discovery_turn(
                         has_block=has_block,
                         has_identity=has_identity,
                         phone_verified=phone_verified,
+                        has_profile_photo=has_profile_photo,
                     ),
                     max_tokens=128,
                     temperature=0.0,
@@ -125,6 +140,7 @@ def ai_parse_discovery_turn(
                     has_block=has_block,
                     has_identity=has_identity,
                     phone_verified=phone_verified,
+                    has_profile_photo=has_profile_photo,
                 ),
                 max_tokens=128,
                 temperature=0.0,
@@ -136,11 +152,15 @@ def ai_parse_discovery_turn(
             "both",
             "verify",
             "rsvp",
+            "profile_photo",
             "chat",
             "continue",
             "none",
         ):
             goal = "none"
+        photo_action = str(raw.get("profile_photo_action") or "none").lower()
+        if photo_action not in ("start", "accept", "skip", "done", "none"):
+            photo_action = "none"
         zip_val = raw.get("zip")
         zip_s = str(zip_val).strip() if zip_val else None
         if zip_s:
@@ -153,6 +173,7 @@ def ai_parse_discovery_turn(
             "goal": goal,
             "zip": zip_s,
             "identity_snippet": ident_s,
+            "profile_photo_action": photo_action,
             "confidence": float(raw.get("confidence", 0.0)),
         }
     except Exception:
@@ -167,21 +188,24 @@ def _discovery_slot_payload(
     has_block: bool,
     has_identity: bool,
     phone_verified: bool,
+    has_profile_photo: bool = False,
 ) -> str:
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"
         f"has_identity_in_session: {has_identity}\n"
-        f"phone_verified: {phone_verified}\n\n"
+        f"phone_verified: {phone_verified}\n"
+        f"has_profile_photo: {has_profile_photo}\n\n"
         "RECENT TURNS:\n"
         f"{_format_history(history)}\n\n"
         f"LATEST USER MESSAGE:\n{text}\n\n"
         "Return JSON:\n"
         "{\n"
         '  "in_discovery": true|false,\n'
-        '  "goal": "peers"|"activities"|"both"|"verify"|"rsvp"|"chat"|"continue"|"none",\n'
+        '  "goal": "peers"|"activities"|"both"|"verify"|"rsvp"|"profile_photo"|"chat"|"continue"|"none",\n'
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
+        '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "confidence": 0.0-1.0\n'
         "}"
     )
@@ -196,6 +220,7 @@ def discovery_slots_for_turn(
     has_block: bool,
     has_identity: bool,
     phone_verified: bool = False,
+    has_profile_photo: bool = False,
     timer: TurnTimer | None = None,
 ) -> dict[str, Any]:
     """Parse discovery slots once per user message; reuse within the same turn."""
@@ -211,6 +236,7 @@ def discovery_slots_for_turn(
         has_block=has_block,
         has_identity=has_identity,
         phone_verified=phone_verified,
+        has_profile_photo=has_profile_photo,
         timer=timer,
     )
     if text:
@@ -239,6 +265,20 @@ def slots_want_preview_refetch(
     return not stored or new_sn.lower() != stored.lower()
 
 
+def slots_want_profile_photo(
+    slots: dict[str, Any],
+    *,
+    routing_phase: str = "",
+) -> bool:
+    """AI decision: should profile-photo code handle this turn?"""
+    phase = routing_phase or ""
+    if phase == "await_profile_photo":
+        return True
+    if str(slots.get("goal") or "none") != "profile_photo":
+        return False
+    return float(slots.get("confidence", 0.0)) >= 0.5
+
+
 def slots_want_discovery_handling(
     slots: dict[str, Any],
     *,
@@ -246,10 +286,13 @@ def slots_want_discovery_handling(
 ) -> bool:
     """AI decision: should discovery code handle this turn (not orchestrator)?"""
     goal = str(slots.get("goal") or "none")
-    if goal in ("chat", "none"):
+    if goal in ("chat", "none", "profile_photo"):
         return False
     conf = float(slots.get("confidence", 0.0))
     if goal in ("peers", "activities", "both", "verify", "rsvp"):
+        phase = routing_phase or "listening"
+        if goal in ("peers", "both") and phase in ("listening", ""):
+            return conf >= 0.45
         if slots.get("in_discovery"):
             return conf >= 0.5
         return conf >= 0.65

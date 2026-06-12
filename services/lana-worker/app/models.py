@@ -73,6 +73,10 @@ class EventDraft(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+class ProfilePhotoUploadResponse(BaseModel):
+    profile_photo_url: str
+
+
 class CreateSessionRequest(BaseModel):
     purpose: Literal["lana", "profile_intake", "event_draft"] = "lana"
     force_new: bool = False

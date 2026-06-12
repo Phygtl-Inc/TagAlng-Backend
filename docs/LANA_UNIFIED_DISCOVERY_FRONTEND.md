@@ -2,7 +2,7 @@
 
 **Audience:** mobile / PWA frontend team  
 **Backend:** `tagalng-dev` · Lana worker on Cloud Run  
-**Status:** v1.2 — unified chat + `ui_intent` + in-chat auth + logout + session resume (June 2026)  
+**Status:** v1.3 — unified chat + `ui_intent` + in-chat auth + logout + profile photo upload (June 2026)  
 **Postman:** `docs/postman/TagAlng-Lana-Unified-Full-E2E.postman_collection.json`  
 **Reference FE:** `apps/admin/app/lana/meet/page.tsx` + `apps/admin/lib/demo-user.ts`
 
@@ -62,6 +62,7 @@ flowchart LR
 | **`ui_intent`** | `ui_intent.py` — stable FE signal for phone/OTP/ZIP/name fields (see table below) |
 | **In-chat login** | `guest_login.py` — user says "log in" → `await_login_phone` / `await_login_otp` |
 | **In-chat logout** | User says "log out" / "sign out" → `auth_action: logout` (signed-in users only) |
+| **Profile photo** | User says "upload my picture" → `ui_intent: upload_profile_photo` + `POST /lana/profile-photo` |
 | **Session resume** | `POST /lana/sessions` resumes active session per user; `{ "force_new": true }` for fresh thread |
 | **In-chat signup** | Discovery verify gate → `await_signup_phone` / `await_signup_otp` |
 | **Auth handoff** | `auth_action` on responses — FE calls Supabase (see reference impl) |
@@ -181,6 +182,8 @@ Read **`ui_intent` every turn** (session create + each message). Switch UI based
 | `show_peer_preview` | Redacted neighbor cards (`peer_matches`, `preview: true`) |
 | `show_activity_preview` | Activity cards (`activity_previews`) |
 | `confirm_profile` | “That’s me ✓” / `POST …/complete` when `ready_to_complete` |
+| `upload_profile_photo` | **Add photo** button → file picker / camera → `POST /lana/profile-photo` (not a URL field) |
+| `sign_out` | **Sign out** — call Supabase `signOut()` via `auth_action: logout` (same turn) |
 
 **Pairing with `auth_action`:** user can type phone/OTP in chat *or* use dedicated fields — both work. On the turn where Lana parses phone/OTP, check `auth_action` and call Supabase **before** treating auth as done.
 
@@ -211,6 +214,8 @@ TypeScript types: `apps/admin/lib/lana-client.ts` → `LanaUiIntent`, `AuthActio
 | `await_signup_otp` | `collect_otp` | Signup — need OTP (`phone_change`) |
 | `await_login_phone` | `collect_phone` | In-chat login — need phone |
 | `await_login_otp` | `collect_otp` | In-chat login — need OTP (`sms`) |
+| `await_profile_photo` | `upload_profile_photo` | Waiting for file upload via `POST /lana/profile-photo` |
+| `await_logout` | `sign_out` | User asked to log out — FE runs `auth_action: logout` |
 
 ---
 
@@ -456,12 +461,14 @@ User says “log out” / “sign out” / “I want to logout” in chat. Lana 
 {
   "auth_action": { "type": "logout" },
   "auth_intent": "logout",
-  "ui_intent": "chat",
-  "routing_phase": "listening"
+  "ui_intent": "sign_out",
+  "routing_phase": "await_logout"
 }
 ```
 
-**When `auth_action.type === 'logout'`** (same turn as the user message):
+All three align on the logout turn (same pattern as login’s `collect_phone` + `await_login_phone` + `send_login_otp`).
+
+**When `ui_intent === 'sign_out'` or `auth_action.type === 'logout'`** (same turn as the user message):
 
 1. Call Supabase **`signOut()`** (or `POST /auth/v1/logout` with current bearer).
 2. Start a **new anonymous** session (`POST /auth/v1/signup` `{}` or `signInAnonymously()`).
@@ -469,7 +476,7 @@ User says “log out” / “sign out” / “I want to logout” in chat. Lana 
 4. Reset local chat state (clear `peer_matches`, `phone_verified`, signed-in profile UI).
 
 ```ts
-if (action.type === 'logout') {
+if (turn.ui_intent === 'sign_out' || action?.type === 'logout') {
   await supabase.auth.signOut();
   const { data } = await supabase.auth.signInAnonymously();
   const anonToken = data.session!.access_token;
@@ -506,7 +513,65 @@ function authActionFromTurn(turn): AuthActionPayload | null {
 }
 ```
 
-### F. Profile / claims (during chat)
+### F. Profile photo upload
+
+**Not a URL in chat.** User picks a file (gallery or camera). Flash slots set `goal: profile_photo` (same AI router as discovery) → Lana sets `ui_intent: upload_profile_photo` when:
+
+- User wants to add/change their picture (any phrasing)
+- User says “yes” after Lana suggested a photo (`profile_photo_action: accept`)
+- Session is already in `routing_phase: await_profile_photo`
+- User says they’re done (`profile_photo_action: done`) or cancels (`skip`)
+
+**Chat turn (user asks):**
+
+```json
+{
+  "assistant_message": "Great — tap Add photo below to choose from your gallery or take one.",
+  "ui_intent": "upload_profile_photo",
+  "routing_phase": "await_profile_photo",
+  "profile_photo_intent": "upload"
+}
+```
+
+**Upload endpoint (separate from chat message):**
+
+```http
+POST /lana/profile-photo
+Authorization: Bearer <access_token>
+Content-Type: multipart/form-data
+
+file=<image/jpeg|png|webp, max 2MB>
+```
+
+**Response:**
+
+```json
+{ "profile_photo_url": "https://<project>.supabase.co/storage/v1/object/public/avatars/<user_id>/avatar.jpg" }
+```
+
+Backend uploads to Supabase Storage bucket **`avatars`** at path `{user_id}/avatar.{ext}` (upsert) and sets **`users.profile_photo_url`**.
+
+**After upload succeeds**, send a short Lana message so she can confirm (reference impl sends `"done"`):
+
+```ts
+if (turn.ui_intent === 'upload_profile_photo') {
+  showAddPhotoButton();
+}
+
+async function onPhotoPicked(file: File) {
+  const { profile_photo_url } = await uploadProfilePhoto(accessToken, file);
+  updateLocalAvatar(profile_photo_url);
+  await sendMessage(accessToken, sessionId, 'done');
+}
+```
+
+**Guest without verified phone:** Lana asks them to verify first — no `upload_profile_photo` intent.
+
+**Cancel:** “no thanks” / “skip” exits back to `ui_intent: chat`.
+
+Reference: `apps/admin/lib/lana-client.ts` → `uploadProfilePhoto`, `apps/admin/app/lana/meet/page.tsx` → Add photo button.
+
+### G. Profile / claims (during chat)
 
 | What | Where |
 |------|--------|
@@ -607,8 +672,9 @@ Expect `phone_verified: true` and full `peer_matches`.
 - [ ] Read `auth_action` (or `authActionFromTurn`) on same turn as phone/OTP message
 - [ ] **Signup:** `PUT /user` → `POST /verify` `phone_change` → **same** `session_id` + `ok` message
 - [ ] **Login:** `POST /otp` → `POST /verify` `sms` → **new** `POST /lana/sessions`
-- [ ] **Logout:** `auth_action.type === 'logout'` → `signOut()` → anonymous signup → `POST /lana/sessions` with `force_new: true`
+- [ ] **Logout:** `ui_intent === 'sign_out'` (or `auth_action.type === 'logout'`) → `signOut()` → anonymous signup → `POST /lana/sessions` with `force_new: true`
 - [ ] **Resume:** default `POST /lana/sessions` reuses active session per user (one thread per user)
+- [ ] **`upload_profile_photo`:** show file/camera picker → `POST /lana/profile-photo` → optional `done` message
 - [ ] Do **not** use `signInWithOtp` for login during an active anonymous Lana session
 - [ ] Render `peer_matches` / `activity_previews` — respect `preview: true` (hide names/avatars)
 - [ ] Gate connect CTAs on `phone_verified === true`
@@ -671,5 +737,6 @@ Set `anon_key` in environment. Use a **fresh test phone** per run for signup (`t
 | `apps/admin/app/lana/meet/page.tsx` | Full chat UI + `ui_intent` phone/OTP fields + `pushTurn` |
 | `services/lana-worker/app/ui_intent.py` | Backend `ui_intent` derivation |
 | `services/lana-worker/app/discovery_route.py` | Discovery + auth phases |
+| `services/lana-worker/app/profile_photo.py` | Profile photo intent + storage upload |
 | `docs/postman/TagAlng-Lana-Unified-Full-E2E.postman_collection.json` | End-to-end REST sequence |
 | `docs/postman/TagAlng-Guest-InChat-Login.postman_collection.json` | In-chat login only |

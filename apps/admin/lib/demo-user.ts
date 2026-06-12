@@ -303,11 +303,16 @@ export type LanaAuthAction = {
 /** Map API turn fields → auth_action (in-chat login/signup handoff). */
 export function authActionFromTurn(turn: {
   auth_action?: LanaAuthAction | null;
+  auth_intent?: string | null;
+  ui_intent?: string | null;
   login_phone?: string | null;
   requires_login_otp?: boolean;
   login_otp_token?: string | null;
 }): LanaAuthAction | null {
   if (turn.auth_action?.type) return turn.auth_action;
+  if (turn.ui_intent === 'sign_out' || turn.auth_intent === 'logout') {
+    return { type: 'logout' };
+  }
   if (turn.login_otp_token && turn.login_phone) {
     return {
       type: 'verify_login_otp',

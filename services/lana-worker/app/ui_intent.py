@@ -14,6 +14,8 @@ UI_INTENT_COLLECT_OTP = "collect_otp"
 UI_INTENT_SHOW_PEER_PREVIEW = "show_peer_preview"
 UI_INTENT_SHOW_ACTIVITY_PREVIEW = "show_activity_preview"
 UI_INTENT_CONFIRM_PROFILE = "confirm_profile"
+UI_INTENT_UPLOAD_PROFILE_PHOTO = "upload_profile_photo"
+UI_INTENT_SIGN_OUT = "sign_out"
 
 _PHASE_TO_INTENT: dict[str, str] = {
     "need_zip": UI_INTENT_COLLECT_ZIP,
@@ -24,6 +26,8 @@ _PHASE_TO_INTENT: dict[str, str] = {
     "await_login_phone": UI_INTENT_COLLECT_PHONE,
     "await_login_otp": UI_INTENT_COLLECT_OTP,
     "gate_verify": UI_INTENT_COLLECT_PHONE,
+    "await_profile_photo": UI_INTENT_UPLOAD_PROFILE_PHOTO,
+    "await_logout": UI_INTENT_SIGN_OUT,
 }
 
 _GUEST_STEP_TO_INTENT: dict[str, str] = {
@@ -67,5 +71,8 @@ def derive_ui_intent(
 
     if ctx.get("requires_phone_verification"):
         return UI_INTENT_COLLECT_PHONE
+
+    if ctx.get("auth_intent") == "logout" or phase == "await_logout":
+        return UI_INTENT_SIGN_OUT
 
     return UI_INTENT_CHAT

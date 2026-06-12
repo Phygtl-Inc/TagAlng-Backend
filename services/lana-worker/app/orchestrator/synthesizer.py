@@ -110,6 +110,8 @@ def synthesize_turn(
             "- Greetings: answer naturally; mention find neighbors / log in when helpful.\n"
             "- NEVER claim you found peers unless tool_result.peer_matches is non-empty.\n"
             "- Do NOT run a long profile interview; discovery = ZIP then one identity line.\n"
+            "- If user wants to meet/find people or says stop asking questions, do NOT keep interviewing — "
+            "one short line max; discovery code will ask ZIP or show matches.\n"
             "- NEVER ask 'tap That\\'s me' or ready_to_complete — that is legacy profile intake, not Lana unified.\n"
             "- NEVER re-ask life stage, kids, work, or hobbies if RECENT TURNS already cover them.\n"
             "- After phone verify, discovery code shows matches — do not interview; congratulate briefly only.\n"
@@ -119,6 +121,9 @@ def synthesize_turn(
             "- If peer_matches with preview=true: describe labels only, no names.\n"
             "- When NEIGHBOR PREVIEW ALREADY SHOWN is present, use those exact labels to answer "
             "pushback (e.g. user asked for dads but labels say Mom of toddlers — acknowledge the gap).\n"
+            "- If USER has no profile photo yet, you may suggest adding one once (warm, optional). "
+            "If they agree, tell them to tap Add photo below — do not ask for a URL.\n"
+            "- If routing_phase is await_profile_photo, direct them to the Add photo button.\n"
         )
         preview_ctx = _format_shown_peer_preview(session_ctx)
         if preview_ctx:

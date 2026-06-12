@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import (
@@ -52,6 +52,7 @@ from app.models import (
     CreateSessionRequest,
     CreateSessionResponse,
     EventDraft,
+    ProfilePhotoUploadResponse,
     ExtractedClaim,
     HighlightSpan,
     JointMomentCandidate,
@@ -77,6 +78,7 @@ from app.claims_persist import (
     replace_all_claims,
     should_extract_claims_from_message,
 )
+from app.profile_photo import upload_profile_photo_bytes
 from app.ui_intent import derive_ui_intent
 from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
@@ -789,6 +791,21 @@ def send_lana_message(
         timing_ms=timing_ms,
         **ob,
     )
+
+
+@app.post("/lana/profile-photo", response_model=ProfilePhotoUploadResponse)
+async def upload_lana_profile_photo(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+):
+    """Upload avatar to Supabase `avatars` bucket and set users.profile_photo_url."""
+    auth = verify_auth(authorization)
+    if auth.is_anonymous and not auth.phone_verified:
+        raise HTTPException(status_code=403, detail="phone_not_verified")
+    raw = await file.read()
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    url = upload_profile_photo_bytes(auth.user_id, raw, content_type)
+    return ProfilePhotoUploadResponse(profile_photo_url=url)
 
 
 @app.post("/lana/sessions/{session_id}/complete", response_model=CompleteSessionResponse)
