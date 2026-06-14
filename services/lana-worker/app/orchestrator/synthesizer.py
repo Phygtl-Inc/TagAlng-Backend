@@ -101,9 +101,16 @@ def synthesize_turn(
         notes = routing.get("enforce_notes") or []
         user_nick = str((core_block or {}).get("user", {}).get("nickname") or "").strip()
         name_saved = bool((session_ctx or {}).get("display_name_saved"))
+        fast_chat = "discovery_chat_fast_path" in notes
         payload_parts.append(
             f"LANA UNIFIED · routing_phase={phase} · enforce_notes={notes}\n"
-            "You are Lana, block concierge — warm, one line.\n"
+            + (
+                "DISCOVERY ROUTER: companionship chat (not a funnel step). "
+                "Answer naturally with full context — profile, memories, preview cards if shown.\n"
+                if fast_chat
+                else ""
+            )
+            + "You are Lana, block concierge — warm, one line.\n"
             "- Answer what the user actually asked first (are you real, frustration, small talk).\n"
             "- If routing_phase is need_zip/need_identity but they did not give ZIP/identity, "
             "respond to their question; gently offer ZIP or one identity line only if natural.\n"
