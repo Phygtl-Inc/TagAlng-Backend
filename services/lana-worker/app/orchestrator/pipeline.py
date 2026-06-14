@@ -10,6 +10,11 @@ from app.orchestrator.memory import (
     build_core_block,
     strip_ephemeral,
 )
+from app.orchestrator.lana_chat_fast_path import (
+    lana_chat_routing_from_discovery,
+    should_skip_lana_router,
+    discovery_slots_for_message,
+)
 from app.orchestrator.recall import prefetch_turn_memories
 from app.orchestrator.router import route_turn
 from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
@@ -141,14 +146,24 @@ def run_turn(
         )
         return reply, status, out_ctx, ui, prev_draft if purpose == "event_draft" else None
 
-    routing = route_turn(
+    skip_router = should_skip_lana_router(
         purpose=purpose,
         utterance=utterance,
-        core_block=core,
-        history=history,
-        guardrail_flags=rails.flags,
-        timer=timer,
+        session_ctx=session_ctx,
     )
+    if skip_router:
+        slots = discovery_slots_for_message(session_ctx, utterance) or {}
+        routing = lana_chat_routing_from_discovery(slots)
+        timer.set_count("llm_router_skipped", 1)
+    else:
+        routing = route_turn(
+            purpose=purpose,
+            utterance=utterance,
+            core_block=core,
+            history=history,
+            guardrail_flags=rails.flags,
+            timer=timer,
+        )
     routing = enforce_routing(
         routing,
         purpose=purpose,
@@ -157,6 +172,10 @@ def run_turn(
         history=history,
         home_block_id=block_id,
     )
+    if skip_router:
+        prior = list(routing.get("enforce_notes") or [])
+        if "discovery_chat_fast_path" not in prior:
+            routing = {**routing, "enforce_notes": prior + ["discovery_chat_fast_path"]}
 
     if should_execute_tool(routing):
         with timer.stage("execute_tool"):

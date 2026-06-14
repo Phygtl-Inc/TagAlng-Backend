@@ -113,7 +113,7 @@ def enforce_routing(
     if enforced is not None:
         return enforced
 
-    if purpose == "lana":
+    if purpose == "lana" and "discovery_chat_fast_path" not in (base.get("enforce_notes") or []):
         discovery = _enforce_lana_discovery(
             base,
             utterance=utterance,
