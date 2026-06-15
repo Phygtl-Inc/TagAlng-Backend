@@ -54,6 +54,8 @@ def execute_tool(
         return _send_nudge(user_jwt=user_jwt, args=args)
     if tool_name == "propose_intro":
         return _propose_intro(user_jwt=user_jwt, args=args)
+    if tool_name == "list_my_intros":
+        return _list_my_intros(user_jwt=user_jwt, args=args)
     if tool_name == "propose_cohost":
         return _propose_cohost(
             user_jwt=user_jwt,
@@ -115,6 +117,8 @@ def _send_nudge(*, user_jwt: str | None, args: dict[str, Any]) -> dict[str, Any]
 
 
 def _propose_intro(*, user_jwt: str | None, args: dict[str, Any]) -> dict[str, Any]:
+    from app.intro_proposal import propose_neighbor_intro
+
     jwt = _require_jwt(user_jwt)
     if not jwt:
         return {"status": "error", "tool": "propose_intro", "reason": "auth_required"}
@@ -128,27 +132,48 @@ def _propose_intro(*, user_jwt: str | None, args: dict[str, Any]) -> dict[str, A
     if not isinstance(dimensions, list):
         dimensions = []
     try:
-        intro_id = call_rpc(
+        intro = propose_neighbor_intro(
             jwt,
-            "propose_intro",
-            {
-                "p_candidate_id": str(candidate),
-                "p_match_reason": reason[:280],
-                "p_shared_dimensions": [str(d)[:64] for d in dimensions[:8]],
-                "p_match_score": args.get("match_score"),
-                "p_joint_moment_id": args.get("joint_moment_id"),
-            },
+            candidate_user_id=str(candidate),
+            match_reason=reason,
+            shared_dimensions=[str(d)[:64] for d in dimensions[:8]],
+            match_score=args.get("match_score"),
+            joint_moment_id=args.get("joint_moment_id"),
         )
         return {
             "status": "ok",
             "tool": "propose_intro",
-            "intro_id": intro_id,
-            "candidate_user_id": str(candidate),
+            **intro,
         }
     except HTTPException as exc:
         return {"status": "error", "tool": "propose_intro", "reason": exc.detail}
     except Exception as exc:
         return {"status": "error", "tool": "propose_intro", "reason": str(exc)}
+
+
+def _list_my_intros(*, user_jwt: str | None, args: dict[str, Any]) -> dict[str, Any]:
+    from app.intro_list import fetch_my_intros, normalize_intro_row
+
+    jwt = _require_jwt(user_jwt)
+    if not jwt:
+        return {"status": "error", "tool": "list_my_intros", "reason": "auth_required"}
+    direction = str(args.get("direction") or "all").lower()
+    if direction not in ("sent", "received", "all"):
+        direction = "all"
+    try:
+        rows = fetch_my_intros(jwt, direction=direction)
+        intros = [normalize_intro_row(row) for row in rows]
+        return {
+            "status": "ok",
+            "tool": "list_my_intros",
+            "direction": direction,
+            "count": len(intros),
+            "intros": intros,
+        }
+    except HTTPException as exc:
+        return {"status": "error", "tool": "list_my_intros", "reason": exc.detail}
+    except Exception as exc:
+        return {"status": "error", "tool": "list_my_intros", "reason": str(exc)}
 
 
 def _propose_cohost(

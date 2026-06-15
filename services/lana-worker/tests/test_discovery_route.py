@@ -770,6 +770,32 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(derive_ui_intent(ctx), UI_INTENT_SIGN_OUT)
 
     @patch("app.discovery_route._user_nickname", return_value="Amanda")
+    def test_cancel_logout_clears_await_logout(self, _nick) -> None:
+        from app.ui_intent import UI_INTENT_CHAT, derive_ui_intent
+
+        result = handle_discovery_turn(
+            "stay logged in",
+            session_ctx={
+                "auth_intent": "logout",
+                "routing_phase": "await_logout",
+                "guest_step": "await_logout",
+                "active_intent": "discovery.find_peers",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            user_id="user-amanda",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIn("stay logged in", reply.lower())
+        self.assertIsNone(ctx.get("auth_intent"))
+        self.assertEqual(ctx.get("routing_phase"), "listening")
+        self.assertNotIn("auth_action", ctx)
+        self.assertEqual(derive_ui_intent(ctx), UI_INTENT_CHAT)
+
+    @patch("app.discovery_route._user_nickname", return_value="Amanda")
     def test_signed_in_user_login_intent_not_re_asked(self, _nick) -> None:
         result = handle_discovery_turn(
             "I want to login",

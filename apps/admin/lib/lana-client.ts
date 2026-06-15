@@ -25,6 +25,30 @@ export type JointMomentPayload = {
   is_demo?: boolean;
 };
 
+export type IntroProposalPayload = {
+  intro_id?: string | null;
+  nudge_id?: string | null;
+  candidate_user_id?: string | null;
+  candidate_nickname?: string | null;
+  matching_peer_label?: string | null;
+  match_reason?: string | null;
+  shared_dimensions?: string[];
+  status?: string | null;
+};
+
+export type PendingIntroRow = {
+  intro_id?: string | null;
+  other_user_id?: string | null;
+  nickname?: string | null;
+  avatar_url?: string | null;
+  created_at?: string | null;
+  expires_at?: string | null;
+  status?: string | null;
+  match_reason?: string | null;
+  shared_dimensions?: string[];
+  direction?: 'sent' | 'received' | null;
+};
+
 export type AuthActionPayload = {
   type:
     | 'link_phone_signup'
@@ -68,12 +92,17 @@ export type LanaUiIntent =
   | 'show_activity_preview'
   | 'confirm_profile'
   | 'upload_profile_photo'
-  | 'sign_out';
+  | 'sign_out'
+  | 'offer_neighbor_intro'
+  | 'propose_neighbor_intro'
+  | 'show_pending_intros';
 
 export type GuestOnboardingFields = {
   onboarding_step?: string | null;
   requires_phone_verification?: boolean;
   joint_moment?: JointMomentPayload | null;
+  intro_proposal?: IntroProposalPayload | null;
+  pending_intros?: PendingIntroRow[];
   phone_verified?: boolean;
   home_block_assigned?: boolean;
   is_anonymous?: boolean;

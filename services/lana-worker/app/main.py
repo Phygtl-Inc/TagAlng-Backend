@@ -57,6 +57,8 @@ from app.models import (
     HighlightSpan,
     JointMomentCandidate,
     JointMomentPayload,
+    IntroProposalPayload,
+    PendingIntroRow,
     LanaTurnUi,
     PeerMatchRow,
     SendMessageRequest,
@@ -315,6 +317,52 @@ def _joint_moment_from_dict(raw: dict[str, Any] | None) -> JointMomentPayload | 
     )
 
 
+def _intro_proposal_from_dict(raw: dict[str, Any] | None) -> IntroProposalPayload | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    dims = raw.get("shared_dimensions")
+    if not isinstance(dims, list):
+        dims = []
+    return IntroProposalPayload(
+        intro_id=str(raw.get("intro_id") or "") or None,
+        nudge_id=str(raw.get("nudge_id") or "") or None,
+        candidate_user_id=str(raw.get("candidate_user_id") or "") or None,
+        candidate_nickname=str(raw.get("candidate_nickname") or "") or None,
+        matching_peer_label=str(raw.get("matching_peer_label") or "") or None,
+        match_reason=str(raw.get("match_reason") or "") or None,
+        shared_dimensions=[str(d) for d in dims[:8]],
+        status=str(raw.get("status") or "") or None,
+    )
+
+
+def _pending_intros_from_ctx(ctx: dict[str, Any]) -> list[PendingIntroRow]:
+    raw = ctx.get("pending_intros")
+    if not isinstance(raw, list):
+        return []
+    out: list[PendingIntroRow] = []
+    for row in raw[:12]:
+        if not isinstance(row, dict):
+            continue
+        dims = row.get("shared_dimensions")
+        if not isinstance(dims, list):
+            dims = []
+        out.append(
+            PendingIntroRow(
+                intro_id=str(row.get("intro_id") or "") or None,
+                other_user_id=str(row.get("other_user_id") or "") or None,
+                nickname=str(row.get("nickname") or "") or None,
+                avatar_url=str(row.get("avatar_url") or "") or None,
+                created_at=str(row.get("created_at") or "") or None,
+                expires_at=str(row.get("expires_at") or "") or None,
+                status=str(row.get("status") or "") or None,
+                match_reason=str(row.get("match_reason") or "") or None,
+                shared_dimensions=[str(d) for d in dims[:8]],
+                direction=str(row.get("direction") or "") or None,
+            )
+        )
+    return out
+
+
 def _auth_action_from_ctx(ctx: dict[str, Any]) -> AuthActionPayload | None:
     raw = ctx.get("auth_action")
     if not isinstance(raw, dict) or not raw.get("type"):
@@ -380,12 +428,16 @@ def _onboarding_fields(
     ready_to_complete: bool = False,
 ) -> dict[str, Any]:
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
+    intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
+    pending_intros = _pending_intros_from_ctx(ctx)
     peers = _peer_matches_from_ctx(ctx)
     activities = _activity_previews_from_ctx(ctx)
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
         "joint_moment": jm,
+        "intro_proposal": intro,
+        "pending_intros": pending_intros,
         "phone_verified": auth.phone_verified,
         "home_block_assigned": bool(auth.home_block_id or ctx.get("preview_block_id")),
         "peer_matches": peers,

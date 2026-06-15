@@ -23,12 +23,31 @@ from app.guest_capabilities import (
     wants_host_activity,
     wants_peer_find,
 )
+from app.intro_proposal import (
+    INTENT_PROPOSE_INTRO,
+    accepts_intro_offer,
+    build_match_reason,
+    format_intro_offer_reply,
+    stamp_intro_offer_ctx,
+    stamp_intro_proposal_ctx,
+    try_propose_intro_from_preview,
+    wants_neighbor_intro,
+)
+from app.intro_list import (
+    INTENT_LIST_INTROS,
+    fetch_my_intros,
+    format_intros_list_reply,
+    infer_intro_direction,
+    stamp_pending_intros_ctx,
+)
 from app.guest_login import (
     _exit_login_ctx,
+    _exit_logout_ctx,
     _logout_ctx,
     extract_otp_code,
     extract_phone_e164,
     handle_guest_login,
+    wants_cancel_logout,
     wants_login as wants_login_intent,
     wants_logout as wants_logout_intent,
 )
@@ -49,6 +68,7 @@ PHASE_GATE_VERIFY = "gate_verify"
 PHASE_AWAIT_SIGNUP_PHONE = "await_signup_phone"
 PHASE_AWAIT_SIGNUP_OTP = "await_signup_otp"
 PHASE_AWAIT_PROFILE_PHOTO = "await_profile_photo"
+PHASE_AWAIT_LOGOUT = "await_logout"
 
 INTENT_FIND_PEERS = "discovery.find_peers"
 INTENT_FIND_ACTIVITIES = "discovery.find_activities"
@@ -87,6 +107,165 @@ _NOT_IDENTITY_REPLIES = frozenset(
 _AFFIRMATIVE_REPLIES = frozenset(
     {"ok", "okay", "yes", "yeah", "yep", "sure", "done", "ready", "go", "great", "perfect"}
 )
+
+
+def _preview_peers_with_ids(
+    *,
+    user_jwt: str,
+    session_ctx: dict[str, Any],
+    block_id: str,
+    phone_verified: bool,
+) -> list[dict[str, Any]]:
+    stored = session_ctx.get("peer_matches")
+    if isinstance(stored, list) and stored:
+        if any(p.get("peer_user_id") for p in stored if isinstance(p, dict)):
+            return [p for p in stored if isinstance(p, dict)]
+    if phone_verified:
+        try:
+            peers = fetch_peer_matches(user_jwt, limit=5)
+            if peers:
+                return peers
+        except Exception:
+            pass
+    return fetch_preview_peers_on_block(block_id, limit=3)
+
+
+def _try_neighbor_intro_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    ctx_base: dict[str, Any],
+    user_jwt: str,
+    block_id: str,
+    phone_verified: bool,
+    goal: str,
+    slots: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    if not phone_verified:
+        return None
+    pending = session_ctx.get("pending_intro_offer")
+    wants_intro = goal == "propose_intro" or wants_neighbor_intro(msg)
+    if not wants_intro and pending and accepts_intro_offer(msg):
+        wants_intro = True
+    if not wants_intro and slots and str(slots.get("goal") or "") == "propose_intro":
+        wants_intro = float(slots.get("confidence", 0.0)) >= 0.5
+    if not wants_intro:
+        return None
+
+    peers = _preview_peers_with_ids(
+        user_jwt=user_jwt,
+        session_ctx=session_ctx,
+        block_id=block_id,
+        phone_verified=phone_verified,
+    )
+    identity = str(ctx_base.get("identity_snippet") or session_ctx.get("identity_snippet") or "").strip()
+    result = try_propose_intro_from_preview(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        peers=peers,
+        identity_snippet=identity or None,
+        force=True,
+    )
+    if result is None:
+        if wants_intro and not any(p.get("peer_user_id") for p in peers):
+            return (
+                "I need your verified matches with names before I can introduce you — "
+                "tell me who on the list you'd like to meet.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_PREVIEW,
+                    preview_block_id=block_id,
+                    active_intent=INTENT_PROPOSE_INTRO,
+                ),
+                _discovery_routing_stub(PHASE_PREVIEW, "intro_need_verified_peers"),
+                peers,
+            )
+        return None
+
+    reply, intro = result
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=PHASE_PREVIEW,
+        preview_block_id=block_id,
+        active_intent=INTENT_PROPOSE_INTRO,
+    )
+    if intro.get("intro_id"):
+        peer = next(
+            (p for p in peers if str(p.get("peer_user_id") or "") == str(intro.get("candidate_user_id") or "")),
+            {"peer_user_id": intro.get("candidate_user_id"), "matching_peer_label": intro.get("match_reason")},
+        )
+        stamp_intro_proposal_ctx(ctx, intro=intro, peer=peer)
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "lana_propose_neighbor_intro")
+    else:
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, str(intro.get("status") or "intro_skipped"))
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], peers
+
+
+def _maybe_attach_intro_offer(
+    *,
+    reply: str,
+    peers: list[dict[str, Any]],
+    ctx: dict[str, Any],
+    identity_snippet: str | None,
+) -> str:
+    if ctx.get("intro_offer_shown") or ctx.get("intro_proposal") or ctx.get("pending_intro_offer"):
+        return reply
+    peer = next((p for p in peers if p.get("peer_user_id")), None)
+    if not peer:
+        return reply
+    reason = build_match_reason(identity_snippet=identity_snippet, peer=peer)
+    stamp_intro_offer_ctx(ctx, peer=peer, match_reason=reason)
+    ctx["intro_offer_shown"] = True
+    return f"{reply}\n\n{format_intro_offer_reply(peer, reason)}"
+
+
+def _try_list_intros_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    goal = str(slots.get("goal") or "none")
+    if goal != "list_intros" or float(slots.get("confidence", 0.0)) < 0.5:
+        return None
+
+    ctx_base = dict(session_ctx)
+    if not phone_verified:
+        return (
+            "Verify your phone first — then I can show your pending intros.",
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
+            _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
+            [],
+        )
+
+    direction = infer_intro_direction(msg, slots)
+    try:
+        intros = fetch_my_intros(user_jwt, direction=direction)
+    except HTTPException as exc:
+        if exc.detail == "phone_not_verified":
+            return (
+                "Verify your phone first — then I can show your pending intros.",
+                _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
+                _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
+                [],
+            )
+        raise
+
+    reply = format_intros_list_reply(intros)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=phase or PHASE_PREVIEW,
+        active_intent=INTENT_LIST_INTROS,
+    )
+    stamp_pending_intros_ctx(ctx, intros)
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_intros")
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], []
 
 
 def wants_more_peer_detail(text: str) -> bool:
@@ -919,6 +1098,45 @@ def handle_discovery_turn(
         ctx["unified_mode"] = True
         return reply, ctx, {"outcome": "A", "intent_class": "profile_photo", "confidence": 1.0}, []
 
+    if discovery_ai_enabled() and slots:
+        list_turn = _try_list_intros_turn(
+            msg=msg,
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            phase=phase,
+        )
+        if list_turn is not None:
+            reply, ctx, routing, peers = list_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+    if phase == PHASE_AWAIT_LOGOUT or session_ctx.get("auth_intent") == "logout":
+        if wants_cancel_logout(msg):
+            nick = _user_nickname(user_id)
+            ctx = _exit_logout_ctx(session_ctx)
+            ctx["unified_mode"] = True
+            lead = f"Understood{', ' + nick if nick else ''}"
+            return (
+                f"{lead} — you'll stay logged in.",
+                ctx,
+                {"outcome": "A", "intent_class": "auth", "confidence": 1.0},
+                [],
+            )
+        if wants_logout_intent(msg):
+            nick = _user_nickname(user_id)
+            farewell = f"Take care{', ' + nick if nick else ''} — signing you out now."
+            ctx = _logout_ctx(session_ctx)
+            ctx["auth_action"] = _auth_action(type="logout")
+            ctx["unified_mode"] = True
+            return (
+                farewell,
+                ctx,
+                {"outcome": "A", "intent_class": "auth", "confidence": 1.0},
+                [],
+            )
+
     if wants_logout_intent(msg):
         if phone_verified or not is_anonymous:
             nick = _user_nickname(user_id)
@@ -1106,6 +1324,20 @@ def handle_discovery_turn(
             event_label=f'"{event_title}"' if event_title else "that activity",
         )
 
+    if phase == PHASE_PREVIEW:
+        intro_turn = _try_neighbor_intro_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            ctx_base=ctx_base,
+            user_jwt=user_jwt,
+            block_id=block_id,
+            phone_verified=phone_verified,
+            goal=effective_goal,
+            slots=slots,
+        )
+        if intro_turn is not None:
+            return intro_turn
+
     if (
         not phone_verified
         and (wants_verify_help(msg) or goal == "verify" or wants_more_peer_detail(msg))
@@ -1168,6 +1400,13 @@ def handle_discovery_turn(
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
         ctx.pop("pending_post_verify", None)
         ctx.pop("activity_previews", None)
+        identity = str(ctx_base.get("identity_snippet") or session_ctx.get("identity_snippet") or "").strip()
+        reply = _maybe_attach_intro_offer(
+            reply=reply,
+            peers=peers,
+            ctx=ctx,
+            identity_snippet=identity or None,
+        )
         ctx["last_routing"] = _discovery_routing_stub(
             PHASE_PREVIEW, "match_peers_by_claim_vectors"
         )
@@ -1188,6 +1427,15 @@ def handle_discovery_turn(
                 reply = format_peer_matches(peers)
                 ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
                 ctx.pop("activity_previews", None)
+                identity = str(
+                    ctx_base.get("identity_snippet") or session_ctx.get("identity_snippet") or ""
+                ).strip()
+                reply = _maybe_attach_intro_offer(
+                    reply=reply,
+                    peers=peers,
+                    ctx=ctx,
+                    identity_snippet=identity or None,
+                )
                 ctx["last_routing"] = _discovery_routing_stub(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
@@ -1224,6 +1472,15 @@ def handle_discovery_turn(
                 reply = format_peer_matches(peers)
                 ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
                 ctx.pop("activity_previews", None)
+                identity = str(
+                    ctx_base.get("identity_snippet") or session_ctx.get("identity_snippet") or ""
+                ).strip()
+                reply = _maybe_attach_intro_offer(
+                    reply=reply,
+                    peers=peers,
+                    ctx=ctx,
+                    identity_snippet=identity or None,
+                )
                 ctx["last_routing"] = _discovery_routing_stub(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )

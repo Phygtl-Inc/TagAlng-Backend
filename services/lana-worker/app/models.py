@@ -55,6 +55,30 @@ class JointMomentPayload(BaseModel):
     is_demo: bool = False
 
 
+class IntroProposalPayload(BaseModel):
+    intro_id: str | None = None
+    nudge_id: str | None = None
+    candidate_user_id: str | None = None
+    candidate_nickname: str | None = None
+    matching_peer_label: str | None = None
+    match_reason: str | None = None
+    shared_dimensions: list[str] = Field(default_factory=list)
+    status: str | None = None
+
+
+class PendingIntroRow(BaseModel):
+    intro_id: str | None = None
+    other_user_id: str | None = None
+    nickname: str | None = None
+    avatar_url: str | None = None
+    created_at: str | None = None
+    expires_at: str | None = None
+    status: str | None = None
+    match_reason: str | None = None
+    shared_dimensions: list[str] = Field(default_factory=list)
+    direction: str | None = None
+
+
 class MappedSpan(BaseModel):
     text: str
     bucket: str = "general"
@@ -98,6 +122,8 @@ class CreateSessionResponse(BaseModel):
     onboarding_step: str | None = None
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
+    intro_proposal: IntroProposalPayload | None = None
+    pending_intros: list[PendingIntroRow] = Field(default_factory=list)
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     auth_intent: str | None = None
@@ -136,6 +162,8 @@ class SendMessageResponse(BaseModel):
     onboarding_step: str | None = None
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
+    intro_proposal: IntroProposalPayload | None = None
+    pending_intros: list[PendingIntroRow] = Field(default_factory=list)
     phone_verified: bool = False
     home_block_assigned: bool = False
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)

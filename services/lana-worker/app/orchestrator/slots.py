@@ -18,6 +18,7 @@ KNOWN_TOOLS = frozenset(
         "publish_activity",
         "send_nudge",
         "propose_intro",
+        "list_my_intros",
         "propose_cohost",
         "update_relationship_tier",
         "recall",
@@ -145,6 +146,12 @@ def validate_tool_slots(
         if len(reason) < 10:
             missing.append("match_reason")
         return missing
+
+    if tool_name == "list_my_intros":
+        direction = str(args.get("direction") or "all").lower()
+        if direction and direction not in ("sent", "received", "all"):
+            return ["direction"]
+        return []
 
     if tool_name == "propose_cohost":
         missing = []
