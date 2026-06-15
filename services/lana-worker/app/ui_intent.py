@@ -16,6 +16,9 @@ UI_INTENT_SHOW_ACTIVITY_PREVIEW = "show_activity_preview"
 UI_INTENT_CONFIRM_PROFILE = "confirm_profile"
 UI_INTENT_UPLOAD_PROFILE_PHOTO = "upload_profile_photo"
 UI_INTENT_SIGN_OUT = "sign_out"
+UI_INTENT_OFFER_NEIGHBOR_INTRO = "offer_neighbor_intro"
+UI_INTENT_PROPOSE_NEIGHBOR_INTRO = "propose_neighbor_intro"
+UI_INTENT_SHOW_PENDING_INTROS = "show_pending_intros"
 
 _PHASE_TO_INTENT: dict[str, str] = {
     "need_zip": UI_INTENT_COLLECT_ZIP,
@@ -48,6 +51,15 @@ def derive_ui_intent(
 
     Use with `routing_phase` (debug) and `auth_action` (Supabase handoff).
     """
+    if ctx.get("intro_proposal"):
+        return UI_INTENT_PROPOSE_NEIGHBOR_INTRO
+
+    if ctx.get("pending_intro_offer"):
+        return UI_INTENT_OFFER_NEIGHBOR_INTRO
+
+    if ctx.get("pending_intros") is not None:
+        return UI_INTENT_SHOW_PENDING_INTROS
+
     if ready_to_complete:
         return UI_INTENT_CONFIRM_PROFILE
 

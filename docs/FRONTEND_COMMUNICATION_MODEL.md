@@ -95,6 +95,13 @@ supabase.rpc('get_my_nudges', { p_direction: 'received' }) // or 'sent'
 ```
 **Returns:** array of `{ id, other_user_id, nickname, avatar_url, sent_at, status, context_message, shared_count }`.
 
+### 🔵 `get_my_intros` — pending intro inbox
+```ts
+supabase.rpc('get_my_intros', { p_direction: 'all' }) // or 'sent' | 'received'
+```
+**Returns:** array of `{ id, other_user_id, nickname, avatar_url, created_at, expires_at, status, match_reason, shared_dimensions, direction }` where `status = 'proposed'` and not expired.
+**Lana:** ask "show my pending intros" → `ui_intent: show_pending_intros`, `pending_intros[]`, `active_intent: social.list_intros`.
+
 ### 🟢 `propose_intro` — Lana-style "let me introduce you" (follow-up after a nudge)
 ```ts
 supabase.rpc('propose_intro', { p_candidate_id, p_match_reason, p_shared_dimensions })

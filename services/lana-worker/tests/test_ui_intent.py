@@ -9,6 +9,9 @@ from app.ui_intent import (
     UI_INTENT_SHOW_PEER_PREVIEW,
     UI_INTENT_SIGN_OUT,
     UI_INTENT_UPLOAD_PROFILE_PHOTO,
+    UI_INTENT_OFFER_NEIGHBOR_INTRO,
+    UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
+    UI_INTENT_SHOW_PENDING_INTROS,
     derive_ui_intent,
 )
 
@@ -58,6 +61,33 @@ class TestDeriveUiIntent(unittest.TestCase):
 
     def test_listening(self) -> None:
         self.assertEqual(derive_ui_intent({}), UI_INTENT_CHAT)
+
+    def test_offer_neighbor_intro(self) -> None:
+        self.assertEqual(
+            derive_ui_intent({"pending_intro_offer": {"candidate_user_id": "u1"}}),
+            UI_INTENT_OFFER_NEIGHBOR_INTRO,
+        )
+
+    def test_propose_neighbor_intro(self) -> None:
+        self.assertEqual(
+            derive_ui_intent({"intro_proposal": {"intro_id": "i1"}}),
+            UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
+        )
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "intro_proposal": {"intro_id": "i1"},
+                    "pending_intro_offer": {"candidate_user_id": "u1"},
+                }
+            ),
+            UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
+        )
+
+    def test_show_pending_intros(self) -> None:
+        self.assertEqual(
+            derive_ui_intent({"pending_intros": []}),
+            UI_INTENT_SHOW_PENDING_INTROS,
+        )
 
 
 if __name__ == "__main__":

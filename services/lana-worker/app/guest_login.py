@@ -27,6 +27,13 @@ _OTP_RE = re.compile(r"\b(\d{6})\b")
 _PHONE_DIGITS_RE = re.compile(r"\+?[\d\s().-]{10,18}")
 
 
+_LOGOUT_CANCEL_RE = re.compile(
+    r"\b(stay\s+logged\s+in|stay\s+signed\s+in|keep\s+me\s+signed\s+in|remain\s+logged\s+in|"
+    r"don'?t\s+(?:log|sign)\s*out|changed\s+my\s+mind|not\s+logging\s+out)\b",
+    re.I,
+)
+
+
 def wants_login(text: str) -> bool:
     return bool(_LOGIN_INTENT_RE.search(str(text or "").strip()))
 
@@ -37,6 +44,14 @@ def wants_logout(text: str) -> bool:
 
 def wants_cancel_login(text: str) -> bool:
     return bool(_CANCEL_RE.search(str(text or "").strip()))
+
+
+def wants_cancel_logout(text: str) -> bool:
+    s = str(text or "").strip()
+    lower = s.lower().rstrip(".!")
+    if lower in ("no", "nope", "nah"):
+        return True
+    return bool(_LOGOUT_CANCEL_RE.search(s)) or wants_cancel_login(s)
 
 
 def _exit_login_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
@@ -50,6 +65,21 @@ def _exit_login_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
         "login_otp_token": None,
     }
     out.pop("login_phone", None)
+    return out
+
+
+def _exit_logout_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
+    """User cancelled logout — return to normal chat (clear sign_out chrome)."""
+    out = {
+        **session_ctx,
+        "auth_intent": None,
+        "guest_step": None,
+        "routing_phase": "listening",
+        "requires_login_otp": False,
+        "login_otp_token": None,
+    }
+    out.pop("login_phone", None)
+    out.pop("auth_action", None)
     return out
 
 

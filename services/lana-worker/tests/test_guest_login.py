@@ -22,6 +22,14 @@ class TestGuestLoginHelpers(unittest.TestCase):
         self.assertTrue(wants_logout("sign out please"))
         self.assertFalse(wants_logout("find neighbors"))
 
+    def test_wants_cancel_logout(self) -> None:
+        from app.guest_login import wants_cancel_logout
+
+        self.assertTrue(wants_cancel_logout("stay logged in"))
+        self.assertTrue(wants_cancel_logout("no"))
+        self.assertTrue(wants_cancel_logout("never mind"))
+        self.assertFalse(wants_cancel_logout("find neighbors"))
+
     def test_extract_phone(self) -> None:
         self.assertEqual(extract_phone_e164("+15550000000"), "+15550000000")
         self.assertEqual(extract_phone_e164("5550000000"), "+15550000000")

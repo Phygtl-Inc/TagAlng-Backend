@@ -206,6 +206,37 @@ def run_turn(
             session_ctx["routing_phase"] = tool_result["routing_phase"]
         if tool_result and tool_result.get("block_id"):
             session_ctx["preview_block_id"] = tool_result["block_id"]
+        if (
+            routing.get("tool_to_call") == "propose_intro"
+            and tool_result
+            and tool_result.get("status") == "ok"
+            and tool_result.get("intro_id")
+        ):
+            from app.intro_proposal import stamp_intro_proposal_ctx
+
+            candidate_id = str(tool_result.get("candidate_user_id") or "")
+            peer = next(
+                (
+                    p
+                    for p in (session_ctx.get("peer_matches") or [])
+                    if isinstance(p, dict)
+                    and str(p.get("peer_user_id") or "") == candidate_id
+                ),
+                {"peer_user_id": candidate_id},
+            )
+            stamp_intro_proposal_ctx(session_ctx, intro=tool_result, peer=peer)
+        if (
+            routing.get("tool_to_call") == "list_my_intros"
+            and tool_result
+            and tool_result.get("status") == "ok"
+        ):
+            from app.intro_list import stamp_pending_intros_ctx
+
+            raw_rows = tool_result.get("intros") or []
+            stamp_pending_intros_ctx(
+                session_ctx,
+                [r for r in raw_rows if isinstance(r, dict)],
+            )
 
     reply, status, synth_ctx, ui, draft = synthesize_turn(
         purpose=purpose,

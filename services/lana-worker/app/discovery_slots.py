@@ -33,7 +33,11 @@ _SYSTEM = (
     "When the latest message is only a ZIP code, keep the same goal as the prior browse request "
     "(activities stays activities, peers stays peers) — use goal=continue, in_discovery=true. "
     "Mid-funnel pushback or topic change in preview → in_discovery=false, goal=chat. "
-    "When routing_phase=preview: questions about the neighbors shown (e.g. 'do you have Brazilian moms?', "
+    "When routing_phase=preview and phone_verified=true: user wants Lana to introduce them to a "
+    "shown neighbor (introduce me, connect us, put us together, meet them, yes introduce) "
+    "→ goal=propose_intro, in_discovery=true. "
+    "When routing_phase=preview and Lana just offered an intro (pending) and user says yes/sure/ok "
+    "→ goal=propose_intro, in_discovery=true. "
     "'are these Brazilian?', 'why moms not dads?') → in_discovery=false, goal=chat — NOT peers. "
     "Never set identity_snippet from questions — only from new self-description. "
     "Pushback or frustration about match quality in preview (cards already shown) → goal=chat. "
@@ -47,6 +51,9 @@ _SYSTEM = (
     "Do NOT classify signup/verify intent as goal=chat. "
     "If phone_verified=true, signup/verify requests → goal=chat (already verified). "
     "goal: peers = find/show neighbors; activities = browse events; both; verify = phone signup gate; rsvp; "
+    "propose_intro = user wants Lana to formally introduce them to a shown neighbor (preview, verified); "
+    "list_intros = user wants to see pending intros they sent or received "
+    "(show my intros, pending intros, intro status, who did I introduce, intros waiting on me); "
     "profile_photo = user wants to add/change/upload a profile picture, agrees to Lana's photo suggestion "
     "(yes/sure), says they finished uploading, or cancels photo upload; "
     "chat = companionship / profile read / any non-funnel question; "
@@ -152,6 +159,8 @@ def ai_parse_discovery_turn(
             "both",
             "verify",
             "rsvp",
+            "propose_intro",
+            "list_intros",
             "profile_photo",
             "chat",
             "continue",
@@ -202,7 +211,8 @@ def _discovery_slot_payload(
         "Return JSON:\n"
         "{\n"
         '  "in_discovery": true|false,\n'
-        '  "goal": "peers"|"activities"|"both"|"verify"|"rsvp"|"profile_photo"|"chat"|"continue"|"none",\n'
+        '  "goal": "peers"|"activities"|"both"|"verify"|"rsvp"|"propose_intro"|"list_intros"|"profile_photo"|"chat"|"continue"|"none",\n'
+        '  "intro_direction": "sent"|"received"|"all"|null,\n'
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
@@ -289,8 +299,12 @@ def slots_want_discovery_handling(
     if goal in ("chat", "none", "profile_photo"):
         return False
     conf = float(slots.get("confidence", 0.0))
-    if goal in ("peers", "activities", "both", "verify", "rsvp"):
+    if goal in ("peers", "activities", "both", "verify", "rsvp", "propose_intro", "list_intros"):
         phase = routing_phase or "listening"
+        if goal == "propose_intro":
+            return conf >= 0.5
+        if goal == "list_intros":
+            return conf >= 0.5
         if goal in ("peers", "both") and phase in ("listening", ""):
             return conf >= 0.45
         if slots.get("in_discovery"):
