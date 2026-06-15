@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
-# Deploy lana-worker to Cloud Run (same GCP project as identity-worker).
+# Deploy lana-worker to Cloud Run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-$ROOT/deploy/identity-worker.env}"
-if [[ ! -f "$ENV_FILE" && -f "$ROOT/deploy/lana-worker.env" ]]; then
-  ENV_FILE="$ROOT/deploy/lana-worker.env"
+ENV_FILE="${ENV_FILE:-$ROOT/deploy/lana-worker.env}"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  if [[ -f "$ROOT/deploy/lana-worker.env.example" ]]; then
+    cp "$ROOT/deploy/lana-worker.env.example" "$ENV_FILE"
+    echo "Created $ENV_FILE from example."
+    echo "Edit it: OPENAI_API_KEY, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY"
+    echo "Then re-run: ./scripts/deploy-lana-worker.sh"
+    exit 1
+  fi
+  echo "Missing $ENV_FILE — copy deploy/lana-worker.env.example to that path."
+  exit 1
 fi
 
 PROJECT="${GCP_PROJECT:-silver-bridge-381702}"
@@ -14,19 +23,12 @@ SERVICE="${CLOUD_RUN_SERVICE:-tagalng-lana-worker}"
 SA="${GCP_RUN_SERVICE_ACCOUNT:-tagalng-identity-worker@${PROJECT}.iam.gserviceaccount.com}"
 AR_REPO="${ARTIFACT_REGISTRY_REPO:-cloud-run-source-deploy}"
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-else
-  echo "Missing env file. Use identity-worker secrets:"
-  echo "  cp deploy/identity-worker.env.example deploy/identity-worker.env"
-  echo "  # or: cp deploy/lana-worker.env.example deploy/lana-worker.env"
-  exit 1
-fi
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
 
-required=(SUPABASE_URL SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY GCP_VERTEX_PROJECT)
+required=(SUPABASE_URL SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY)
 for var in "${required[@]}"; do
   if [[ -z "${!var:-}" ]]; then
     echo "Set $var in $ENV_FILE"
@@ -34,17 +36,30 @@ for var in "${required[@]}"; do
   fi
 done
 
+LANA_LLM_PROVIDER="${LANA_LLM_PROVIDER:-gemini}"
+if [[ "$LANA_LLM_PROVIDER" == "openai" || -n "${OPENAI_API_KEY:-}" ]]; then
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "Set OPENAI_API_KEY in $ENV_FILE (LANA_LLM_PROVIDER=openai)"
+    exit 1
+  fi
+  LANA_LLM_PROVIDER=openai
+elif [[ -z "${GCP_VERTEX_PROJECT:-}" ]]; then
+  echo "Set GCP_VERTEX_PROJECT or OPENAI_API_KEY in $ENV_FILE"
+  exit 1
+fi
+
 VERTEX_LOCATION="${GCP_VERTEX_LOCATION:-us-central1}"
 EXTRACT_MODEL="${VERTEX_EXTRACT_MODEL:-gemini-2.5-flash}"
 LANA_MODEL="${VERTEX_LANA_MODEL:-$EXTRACT_MODEL}"
 EMBED_MODEL="${VERTEX_EMBED_MODEL:-text-embedding-005}"
 CORS="${CORS_ALLOW_ORIGINS:-*}"
 LANA_ORCHESTRATOR="${LANA_ORCHESTRATOR:-auto}"
-LANA_LLM_PROVIDER="${LANA_LLM_PROVIDER:-gemini}"
+OPENAI_ROUTER="${OPENAI_ROUTER_MODEL:-gpt-4o-mini}"
+OPENAI_SYNTH="${OPENAI_SYNTH_MODEL:-gpt-4o}"
 LANA_ROUTER="${VERTEX_LANA_ROUTER_MODEL:-gemini-2.5-flash}"
 LANA_SYNTH="${VERTEX_LANA_SYNTH_MODEL:-gemini-2.5-pro}"
 
-# Retired on Vertex (e.g. gemini-2.0-flash-001 discontinued 2026-06-01). Override stale deploy/*.env.
+# Retired on Vertex
 case "$EXTRACT_MODEL" in
   gemini-2.0-flash-001|gemini-1.5-flash-002|gemini-1.5-flash-001)
     echo "WARN: $EXTRACT_MODEL is retired on Vertex — deploying with gemini-2.5-flash"
@@ -55,8 +70,12 @@ case "$EXTRACT_MODEL" in
 esac
 
 echo "Project: $PROJECT  Region: $REGION  Service: $SERVICE"
-echo "Vertex: $VERTEX_LOCATION / extract=$EXTRACT_MODEL legacy_lana=$LANA_MODEL"
-echo "Orchestrator: $LANA_ORCHESTRATOR · LLM $LANA_LLM_PROVIDER router=$LANA_ROUTER synth=$LANA_SYNTH"
+if [[ "$LANA_LLM_PROVIDER" == "openai" ]]; then
+  echo "LLM: openai router=$OPENAI_ROUTER synth=$OPENAI_SYNTH"
+else
+  echo "Vertex: $VERTEX_LOCATION / extract=$EXTRACT_MODEL legacy_lana=$LANA_MODEL"
+  echo "Orchestrator: $LANA_ORCHESTRATOR · LLM $LANA_LLM_PROVIDER router=$LANA_ROUTER synth=$LANA_SYNTH"
+fi
 echo "Vertex SA: $SA (shared with identity-worker)"
 
 gcloud config set project "$PROJECT" >/dev/null
@@ -77,7 +96,7 @@ cat >"$ENV_VARS_FILE" <<EOF
 SUPABASE_URL: "${SUPABASE_URL}"
 SUPABASE_ANON_KEY: "${SUPABASE_ANON_KEY}"
 SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY}"
-GCP_VERTEX_PROJECT: "${GCP_VERTEX_PROJECT}"
+GCP_VERTEX_PROJECT: "${GCP_VERTEX_PROJECT:-}"
 GCP_VERTEX_LOCATION: "${VERTEX_LOCATION}"
 VERTEX_EXTRACT_MODEL: "${EXTRACT_MODEL}"
 VERTEX_LANA_MODEL: "${LANA_MODEL}"
@@ -86,6 +105,9 @@ LANA_ORCHESTRATOR: "${LANA_ORCHESTRATOR}"
 LANA_LLM_PROVIDER: "${LANA_LLM_PROVIDER}"
 VERTEX_LANA_ROUTER_MODEL: "${LANA_ROUTER}"
 VERTEX_LANA_SYNTH_MODEL: "${LANA_SYNTH}"
+OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+OPENAI_ROUTER_MODEL: "${OPENAI_ROUTER}"
+OPENAI_SYNTH_MODEL: "${OPENAI_SYNTH}"
 CORS_ALLOW_ORIGINS: "${CORS}"
 EOF
 

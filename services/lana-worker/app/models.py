@@ -79,6 +79,29 @@ class PendingIntroRow(BaseModel):
     direction: str | None = None
 
 
+class BlockLogEntryRow(BaseModel):
+    entry_id: str | None = None
+    match_type: str | None = None
+    peer_user_id: str | None = None
+    peer_preview_label: str | None = None
+    match_strength: float | None = None
+    match_reasons: list[str] = Field(default_factory=list)
+    created_at: str | None = None
+    expires_at: str | None = None
+    notification_sent_to_peer: bool = False
+    block_id: str | None = None
+    block_name: str | None = None
+
+
+class SignalSavedPayload(BaseModel):
+    signal_id: str | None = None
+    intent: str | None = None
+    category: str | None = None
+    detail_text: str | None = None
+    block_id: str | None = None
+    matches_created: int | None = None
+
+
 class MappedSpan(BaseModel):
     text: str
     bucket: str = "general"
@@ -124,6 +147,8 @@ class CreateSessionResponse(BaseModel):
     joint_moment: JointMomentPayload | None = None
     intro_proposal: IntroProposalPayload | None = None
     pending_intros: list[PendingIntroRow] = Field(default_factory=list)
+    block_log_entries: list[BlockLogEntryRow] = Field(default_factory=list)
+    signal_saved: SignalSavedPayload | None = None
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     auth_intent: str | None = None
@@ -164,6 +189,8 @@ class SendMessageResponse(BaseModel):
     joint_moment: JointMomentPayload | None = None
     intro_proposal: IntroProposalPayload | None = None
     pending_intros: list[PendingIntroRow] = Field(default_factory=list)
+    block_log_entries: list[BlockLogEntryRow] = Field(default_factory=list)
+    signal_saved: SignalSavedPayload | None = None
     phone_verified: bool = False
     home_block_assigned: bool = False
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
@@ -176,6 +203,16 @@ class SendMessageResponse(BaseModel):
     active_intent: str | None = None
     routing_phase: str | None = None
     ui_intent: str | None = None
+
+
+class BlockLogActionRequest(BaseModel):
+    action: Literal["nudged", "dismissed", "saved", "ignored"]
+
+
+class BlockLogListResponse(BaseModel):
+    block_id: str | None = None
+    block_name: str | None = None
+    entries: list[BlockLogEntryRow] = Field(default_factory=list)
 
 
 class CompleteSessionRequest(BaseModel):

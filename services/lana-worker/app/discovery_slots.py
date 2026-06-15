@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from app.orchestrator.llm import llm_configured, llm_json
+from app.orchestrator.llm import llm_configured, llm_json, router_model
 from app.turn_timing import TurnTimer
 
 _ZIP_IN_TEXT = re.compile(r"\b(\d{5})\b")
@@ -54,6 +54,10 @@ _SYSTEM = (
     "propose_intro = user wants Lana to formally introduce them to a shown neighbor (preview, verified); "
     "list_intros = user wants to see pending intros they sent or received "
     "(show my intros, pending intros, intro status, who did I introduce, intros waiting on me); "
+    "save_signal = user is seeking OR offering something on their block — swap/borrow items, meetups/playgroups, "
+    "or local tips/recommendations (any phrasing: looking for rain boots, I have a stroller to give, "
+    "host a coffee morning, know a good pediatrician, anyone want to swap); "
+    "show_block_log = user wants their block match log / what's matching on my block / block radar; "
     "profile_photo = user wants to add/change/upload a profile picture, agrees to Lana's photo suggestion "
     "(yes/sure), says they finished uploading, or cancels photo upload; "
     "chat = companionship / profile read / any non-funnel question; "
@@ -61,7 +65,11 @@ _SYSTEM = (
     "none = not discovery. "
     "When goal=profile_photo set profile_photo_action: start (wants upload), accept (yes after Lana suggested), "
     "done (finished uploading), skip (cancel/not now), none. "
-    "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action."
+    "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action. "
+    "When goal=save_signal set signal_intent: swap_seek|swap_offer|meet_seek|host_meet|tip_seek|tip_share, "
+    "signal_detail = what they want/offer (short phrase from message), signal_category = optional bucket "
+    "(e.g. pediatrician, rain boots, playgroup). "
+    "When goal=show_block_log set intro_direction null."
 )
 
 
@@ -71,6 +79,9 @@ def discovery_ai_enabled() -> bool:
 
 
 def _extract_model() -> str:
+    """Discovery slots use the orchestrator router model (gpt-4o-mini or Flash)."""
+    if llm_configured():
+        return router_model()
     return os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
 
 
@@ -93,6 +104,9 @@ def _empty_slots() -> dict[str, Any]:
         "zip": None,
         "identity_snippet": None,
         "profile_photo_action": "none",
+        "signal_intent": None,
+        "signal_detail": None,
+        "signal_category": None,
         "confidence": 0.0,
     }
 
@@ -161,12 +175,29 @@ def ai_parse_discovery_turn(
             "rsvp",
             "propose_intro",
             "list_intros",
+            "save_signal",
+            "show_block_log",
             "profile_photo",
             "chat",
             "continue",
             "none",
         ):
             goal = "none"
+        signal_intent = raw.get("signal_intent")
+        signal_intent_s = str(signal_intent).strip().lower() if signal_intent else None
+        if signal_intent_s not in (
+            "swap_seek",
+            "swap_offer",
+            "meet_seek",
+            "host_meet",
+            "tip_seek",
+            "tip_share",
+        ):
+            signal_intent_s = None
+        signal_detail = raw.get("signal_detail")
+        signal_detail_s = str(signal_detail).strip()[:500] if signal_detail else None
+        signal_category = raw.get("signal_category")
+        signal_category_s = str(signal_category).strip()[:120] if signal_category else None
         photo_action = str(raw.get("profile_photo_action") or "none").lower()
         if photo_action not in ("start", "accept", "skip", "done", "none"):
             photo_action = "none"
@@ -183,6 +214,9 @@ def ai_parse_discovery_turn(
             "zip": zip_s,
             "identity_snippet": ident_s,
             "profile_photo_action": photo_action,
+            "signal_intent": signal_intent_s,
+            "signal_detail": signal_detail_s,
+            "signal_category": signal_category_s,
             "confidence": float(raw.get("confidence", 0.0)),
         }
     except Exception:
@@ -211,8 +245,12 @@ def _discovery_slot_payload(
         "Return JSON:\n"
         "{\n"
         '  "in_discovery": true|false,\n'
-        '  "goal": "peers"|"activities"|"both"|"verify"|"rsvp"|"propose_intro"|"list_intros"|"profile_photo"|"chat"|"continue"|"none",\n'
+        '  "goal": "peers"|"activities"|"both"|"verify"|"rsvp"|"propose_intro"|"list_intros"|'
+        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"none",\n'
         '  "intro_direction": "sent"|"received"|"all"|null,\n'
+        '  "signal_intent": "swap_seek"|"swap_offer"|"meet_seek"|"host_meet"|"tip_seek"|"tip_share"|null,\n'
+        '  "signal_detail": "string or null",\n'
+        '  "signal_category": "string or null",\n'
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
@@ -299,11 +337,25 @@ def slots_want_discovery_handling(
     if goal in ("chat", "none", "profile_photo"):
         return False
     conf = float(slots.get("confidence", 0.0))
-    if goal in ("peers", "activities", "both", "verify", "rsvp", "propose_intro", "list_intros"):
+    if goal in (
+        "peers",
+        "activities",
+        "both",
+        "verify",
+        "rsvp",
+        "propose_intro",
+        "list_intros",
+        "save_signal",
+        "show_block_log",
+    ):
         phase = routing_phase or "listening"
         if goal == "propose_intro":
             return conf >= 0.5
         if goal == "list_intros":
+            return conf >= 0.5
+        if goal == "save_signal":
+            return conf >= 0.55
+        if goal == "show_block_log":
             return conf >= 0.5
         if goal in ("peers", "both") and phase in ("listening", ""):
             return conf >= 0.45

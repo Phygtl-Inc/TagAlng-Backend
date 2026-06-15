@@ -28,6 +28,7 @@ from app.db import (
     transcript_text,
     update_session_context,
 )
+from app.local_signals import block_log_take_action, fetch_my_block_log, normalize_block_log_row
 from app.lana_paths import (
     event_fast_path_enabled,
     profile_fast_path_enabled,
@@ -47,6 +48,9 @@ from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.models import (
     ActivityPreviewRow,
     AuthActionPayload,
+    BlockLogActionRequest,
+    BlockLogEntryRow,
+    BlockLogListResponse,
     CompleteSessionRequest,
     CompleteSessionResponse,
     CreateSessionRequest,
@@ -59,6 +63,7 @@ from app.models import (
     JointMomentPayload,
     IntroProposalPayload,
     PendingIntroRow,
+    SignalSavedPayload,
     LanaTurnUi,
     PeerMatchRow,
     SendMessageRequest,
@@ -67,7 +72,7 @@ from app.models import (
     TurnRouting,
 )
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
-from app.orchestrator.llm import llm_configured, provider, router_model, synthesizer_model
+from app.orchestrator.llm import llm_configured, openai_configured, provider, router_model, synthesizer_model, vertex_configured
 from app.orchestrator.extract import (
     claude_extract_event_from_transcript,
     claude_extract_profile_from_transcript,
@@ -99,7 +104,7 @@ app.add_middleware(
 
 
 def _vertex_configured() -> bool:
-    return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
+    return vertex_configured()
 
 
 def _vertex_required() -> None:
@@ -421,6 +426,49 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
     return out
 
 
+def _block_log_from_ctx(ctx: dict[str, Any]) -> list[BlockLogEntryRow]:
+    raw = ctx.get("block_log_entries")
+    if not isinstance(raw, list):
+        return []
+    out: list[BlockLogEntryRow] = []
+    for row in raw[:12]:
+        if not isinstance(row, dict):
+            continue
+        reasons = row.get("match_reasons")
+        if not isinstance(reasons, list):
+            reasons = []
+        out.append(
+            BlockLogEntryRow(
+                entry_id=str(row.get("entry_id") or "") or None,
+                match_type=str(row.get("match_type") or "") or None,
+                peer_user_id=str(row.get("peer_user_id") or "") or None,
+                peer_preview_label=str(row.get("peer_preview_label") or "") or None,
+                match_strength=row.get("match_strength"),
+                match_reasons=[str(r) for r in reasons[:6]],
+                created_at=str(row.get("created_at") or "") or None,
+                expires_at=str(row.get("expires_at") or "") or None,
+                notification_sent_to_peer=bool(row.get("notification_sent_to_peer")),
+                block_id=str(row.get("block_id") or "") or None,
+                block_name=str(row.get("block_name") or "") or None,
+            )
+        )
+    return out
+
+
+def _signal_saved_from_ctx(ctx: dict[str, Any]) -> SignalSavedPayload | None:
+    raw = ctx.get("signal_saved")
+    if not raw or not isinstance(raw, dict):
+        return None
+    return SignalSavedPayload(
+        signal_id=str(raw.get("signal_id") or "") or None,
+        intent=str(raw.get("intent") or "") or None,
+        category=str(raw.get("category") or "") or None,
+        detail_text=str(raw.get("detail_text") or "") or None,
+        block_id=str(raw.get("block_id") or "") or None,
+        matches_created=raw.get("matches_created"),
+    )
+
+
 def _onboarding_fields(
     ctx: dict[str, Any],
     auth: AuthSession,
@@ -430,6 +478,8 @@ def _onboarding_fields(
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
     intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
     pending_intros = _pending_intros_from_ctx(ctx)
+    block_log_entries = _block_log_from_ctx(ctx)
+    signal_saved = _signal_saved_from_ctx(ctx)
     peers = _peer_matches_from_ctx(ctx)
     activities = _activity_previews_from_ctx(ctx)
     return {
@@ -438,6 +488,8 @@ def _onboarding_fields(
         "joint_moment": jm,
         "intro_proposal": intro,
         "pending_intros": pending_intros,
+        "block_log_entries": block_log_entries,
+        "signal_saved": signal_saved,
         "phone_verified": auth.phone_verified,
         "home_block_assigned": bool(auth.home_block_id or ctx.get("preview_block_id")),
         "peer_matches": peers,
@@ -517,6 +569,7 @@ def root():
 def health():
     return {
         "ok": True,
+        "openai_configured": openai_configured(),
         "vertex_configured": _vertex_configured(),
         "orchestrator_enabled": _use_orchestrator(),
         "event_fast_path": event_fast_path_enabled(),
@@ -1040,3 +1093,34 @@ def get_lana_session(
             for m in messages
         ],
     )
+
+
+@app.get("/lana/users/{user_id}/block-log", response_model=BlockLogListResponse)
+def get_user_block_log(
+    user_id: str,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    if str(auth.user_id) != str(user_id):
+        raise HTTPException(status_code=403, detail="forbidden")
+    user_jwt = _bearer_token(authorization)
+    rows = fetch_my_block_log(user_jwt)
+    entries = [
+        BlockLogEntryRow(**normalize_block_log_row(row))
+        for row in rows
+    ]
+    block_id = entries[0].block_id if entries else auth.home_block_id
+    block_name = entries[0].block_name if entries else None
+    return BlockLogListResponse(block_id=block_id, block_name=block_name, entries=entries)
+
+
+@app.post("/lana/block-log/{entry_id}/action")
+def post_block_log_action(
+    entry_id: str,
+    body: BlockLogActionRequest,
+    authorization: str | None = Header(default=None),
+):
+    verify_auth(authorization)
+    user_jwt = _bearer_token(authorization)
+    result = block_log_take_action(user_jwt, entry_id, body.action)
+    return result
