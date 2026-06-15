@@ -16,6 +16,8 @@ class TestLanaPaths(unittest.TestCase):
             "LANA_PROFILE_FAST_PATH",
             "LANA_ORCHESTRATOR",
             "GCP_VERTEX_PROJECT",
+            "OPENAI_API_KEY",
+            "LANA_LLM_PROVIDER",
         ):
             self._saved[key] = os.environ.get(key)
 
@@ -61,7 +63,16 @@ class TestLanaPaths(unittest.TestCase):
 
     def test_lana_uses_orchestrator_when_vertex_on(self) -> None:
         os.environ["LANA_ORCHESTRATOR"] = "1"
+        os.environ.pop("OPENAI_API_KEY", None)
         os.environ["GCP_VERTEX_PROJECT"] = "test-project"
+        os.environ["LANA_LLM_PROVIDER"] = "gemini"
+        self.assertTrue(use_orchestrator_for_purpose("lana"))
+
+    def test_lana_uses_orchestrator_when_openai_on(self) -> None:
+        os.environ["LANA_ORCHESTRATOR"] = "1"
+        os.environ.pop("GCP_VERTEX_PROJECT", None)
+        os.environ["LANA_LLM_PROVIDER"] = "openai"
+        os.environ["OPENAI_API_KEY"] = "sk-test"
         self.assertTrue(use_orchestrator_for_purpose("lana"))
 
     def test_unified_rules_first_default_on(self) -> None:

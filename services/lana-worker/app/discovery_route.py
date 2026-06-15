@@ -40,6 +40,17 @@ from app.intro_list import (
     infer_intro_direction,
     stamp_pending_intros_ctx,
 )
+from app.local_signals import (
+    INTENT_SAVE_SIGNAL,
+    INTENT_SHOW_BLOCK_LOG,
+    fetch_my_block_log,
+    format_block_log_reply,
+    format_signal_saved_reply,
+    normalize_signal_intent,
+    save_local_signal,
+    stamp_block_log_ctx,
+    stamp_signal_saved_ctx,
+)
 from app.guest_login import (
     _exit_login_ctx,
     _exit_logout_ctx,
@@ -264,6 +275,124 @@ def _try_list_intros_turn(
     )
     stamp_pending_intros_ctx(ctx, intros)
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_intros")
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_save_signal_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    goal = str(slots.get("goal") or "none")
+    if goal != "save_signal" or float(slots.get("confidence", 0.0)) < 0.55:
+        return None
+
+    ctx_base = dict(session_ctx)
+    intent = normalize_signal_intent(slots.get("signal_intent"))
+    detail = str(slots.get("signal_detail") or msg or "").strip()[:500]
+    category = str(slots.get("signal_category") or "").strip() or None
+
+    if not intent:
+        return None
+    if not detail:
+        return (
+            "Tell me a bit more — what are you looking for or offering on your block?",
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SAVE_SIGNAL),
+            _discovery_routing_stub(phase or "listening", "save_signal_need_detail"),
+            [],
+        )
+
+    if not phone_verified:
+        return (
+            "Verify your phone first — then I can post that to your block.",
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SAVE_SIGNAL),
+            _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
+            [],
+        )
+
+    block_id = resolve_block_id(session_ctx, home_block_id)
+    if not block_id:
+        return (
+            "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+            _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=INTENT_SAVE_SIGNAL),
+            _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
+            [],
+        )
+
+    try:
+        result = save_local_signal(
+            user_jwt,
+            intent=intent,
+            detail_text=detail,
+            category=category,
+            block_id=block_id,
+            zip_code=str(session_ctx.get("zip") or "") or None,
+        )
+    except HTTPException as exc:
+        detail_err = str(exc.detail or "").lower()
+        if "block_required" in detail_err:
+            return (
+                "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+                _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=INTENT_SAVE_SIGNAL),
+                _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
+                [],
+            )
+        raise
+
+    reply = format_signal_saved_reply(result, detail=detail)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=phase or PHASE_PREVIEW,
+        active_intent=INTENT_SAVE_SIGNAL,
+    )
+    stamp_signal_saved_ctx(ctx, result)
+    if int(result.get("matches_created") or 0) > 0:
+        try:
+            entries = fetch_my_block_log(user_jwt)
+            stamp_block_log_ctx(ctx, entries)
+        except HTTPException:
+            pass
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_show_block_log_turn(
+    *,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    goal = str(slots.get("goal") or "none")
+    if goal != "show_block_log" or float(slots.get("confidence", 0.0)) < 0.5:
+        return None
+
+    ctx_base = dict(session_ctx)
+    if not phone_verified:
+        return (
+            "Verify your phone first — then I can show your block log.",
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
+            _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
+            [],
+        )
+
+    entries = fetch_my_block_log(user_jwt)
+    reply = format_block_log_reply(entries)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=phase or PHASE_PREVIEW,
+        active_intent=INTENT_SHOW_BLOCK_LOG,
+    )
+    stamp_block_log_ctx(ctx, entries)
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_block_log")
     ctx.pop("activity_previews", None)
     return reply, ctx, ctx["last_routing"], []
 
@@ -1109,6 +1238,32 @@ def handle_discovery_turn(
         )
         if list_turn is not None:
             reply, ctx, routing, peers = list_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        signal_turn = _try_save_signal_turn(
+            msg=msg,
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+        )
+        if signal_turn is not None:
+            reply, ctx, routing, peers = signal_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        block_log_turn = _try_show_block_log_turn(
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            phase=phase,
+        )
+        if block_log_turn is not None:
+            reply, ctx, routing, peers = block_log_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 

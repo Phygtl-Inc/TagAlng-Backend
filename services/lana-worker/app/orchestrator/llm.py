@@ -1,13 +1,19 @@
-"""Orchestrator LLM calls — Vertex Gemini (default) or Claude via env."""
+"""Orchestrator LLM — OpenAI (ATPR), Vertex Gemini, or Claude via env."""
+
+from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 from app.orchestrator.json_util import parse_json_object
 
+_log = logging.getLogger(__name__)
+
 _gemini_client_instance: Any = None
 _claude_client_instance: Any = None
+_openai_client_instance: Any = None
 
 _JSON_RULES = (
     "\n\nReturn strictly valid JSON. Double-quoted keys/strings only. "
@@ -17,17 +23,39 @@ _JSON_RULES = (
 
 
 def provider() -> str:
-    p = os.environ.get("LANA_LLM_PROVIDER", "gemini").strip().lower()
-    if p in ("claude", "anthropic"):
+    explicit = os.environ.get("LANA_LLM_PROVIDER", "").strip().lower()
+    if explicit in ("openai", "gpt"):
+        return "openai"
+    if explicit in ("claude", "anthropic"):
         return "claude"
+    if explicit in ("gemini", "vertex", "google"):
+        return "gemini"
+    if os.environ.get("OPENAI_API_KEY", "").strip():
+        return "openai"
     return "gemini"
 
 
-def llm_configured() -> bool:
+def openai_configured() -> bool:
+    return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+
+def vertex_configured() -> bool:
     return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
 
 
+def llm_configured() -> bool:
+    if provider() == "openai":
+        return openai_configured()
+    return vertex_configured()
+
+
 def router_model() -> str:
+    if provider() == "openai":
+        return (
+            os.environ.get("OPENAI_ROUTER_MODEL", "").strip()
+            or os.environ.get("OPENAI_LANA_ROUTER_MODEL", "").strip()
+            or "gpt-4o-mini"
+        )
     explicit = os.environ.get("VERTEX_LANA_ROUTER_MODEL", "").strip()
     if explicit:
         return explicit
@@ -38,6 +66,12 @@ def router_model() -> str:
 
 
 def synthesizer_model() -> str:
+    if provider() == "openai":
+        return (
+            os.environ.get("OPENAI_SYNTH_MODEL", "").strip()
+            or os.environ.get("OPENAI_LANA_SYNTH_MODEL", "").strip()
+            or "gpt-4o"
+        )
     explicit = os.environ.get("VERTEX_LANA_SYNTH_MODEL", "").strip()
     if explicit:
         return explicit
@@ -45,6 +79,27 @@ def synthesizer_model() -> str:
     if legacy:
         return legacy
     return "claude-sonnet-4-6" if provider() == "claude" else "gemini-2.5-pro"
+
+
+def _openai_timeout_sec() -> float:
+    raw = os.environ.get("OPENAI_TIMEOUT_SEC", "60").strip()
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
+def _openai_client():
+    global _openai_client_instance
+    if _openai_client_instance is not None:
+        return _openai_client_instance
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    from openai import OpenAI
+
+    _openai_client_instance = OpenAI(api_key=api_key, timeout=_openai_timeout_sec())
+    return _openai_client_instance
 
 
 def _gemini_client():
@@ -76,6 +131,76 @@ def _claude_client():
     )
     _claude_client_instance = AnthropicVertex(project_id=project, region=region)
     return _claude_client_instance
+
+
+def _openai_generate(
+    *,
+    model: str,
+    system: str,
+    user_payload: str,
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    client = _openai_client()
+    response = client.chat.completions.create(
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system + _JSON_RULES},
+            {"role": "user", "content": user_payload},
+        ],
+    )
+    choice = response.choices[0].message.content if response.choices else None
+    return choice or ""
+
+
+def _openai_json(
+    *,
+    model: str,
+    system: str,
+    user_payload: str,
+    max_tokens: int,
+    temperature: float,
+) -> tuple[dict[str, Any], int]:
+    attempts = 1
+    text = _openai_generate(
+        model=model,
+        system=system,
+        user_payload=user_payload,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    try:
+        return parse_json_object(text), attempts
+    except (json.JSONDecodeError, ValueError):
+        attempts = 2
+        retry_text = _openai_generate(
+            model=model,
+            system=system,
+            user_payload=(
+                user_payload
+                + "\n\nYour previous reply was invalid JSON. "
+                "Return ONE compact JSON object. assistant_message must be a single line string."
+            ),
+            max_tokens=max_tokens,
+            temperature=0.1,
+        )
+        try:
+            return parse_json_object(retry_text), attempts
+        except (json.JSONDecodeError, ValueError):
+            if model != router_model():
+                attempts = 3
+                mini_text = _openai_generate(
+                    model=router_model(),
+                    system=system,
+                    user_payload=user_payload,
+                    max_tokens=max_tokens,
+                    temperature=0.15,
+                )
+                return parse_json_object(mini_text), attempts
+            raise
 
 
 def _gemini_generate(*, model: str, system: str, user_payload: str, max_tokens: int, temperature: float) -> str:
@@ -174,7 +299,19 @@ def llm_json(
     temperature: float = 0.2,
     llm_attempts: list[int] | None = None,
 ) -> dict[str, Any]:
-    if provider() == "claude":
+    p = provider()
+    if p == "openai":
+        data, attempts = _openai_json(
+            model=model,
+            system=system,
+            user_payload=user_payload,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        if llm_attempts is not None:
+            llm_attempts[:] = [attempts]
+        return data
+    if p == "claude":
         data = _claude_json(
             model=model,
             system=system,

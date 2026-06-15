@@ -95,7 +95,32 @@ export type LanaUiIntent =
   | 'sign_out'
   | 'offer_neighbor_intro'
   | 'propose_neighbor_intro'
-  | 'show_pending_intros';
+  | 'show_pending_intros'
+  | 'show_block_log'
+  | 'signal_saved';
+
+export type BlockLogEntryRow = {
+  entry_id?: string | null;
+  match_type?: string | null;
+  peer_user_id?: string | null;
+  peer_preview_label?: string | null;
+  match_strength?: number | null;
+  match_reasons?: string[];
+  created_at?: string | null;
+  expires_at?: string | null;
+  notification_sent_to_peer?: boolean;
+  block_id?: string | null;
+  block_name?: string | null;
+};
+
+export type SignalSavedPayload = {
+  signal_id?: string | null;
+  intent?: string | null;
+  category?: string | null;
+  detail_text?: string | null;
+  block_id?: string | null;
+  matches_created?: number | null;
+};
 
 export type GuestOnboardingFields = {
   onboarding_step?: string | null;
@@ -103,6 +128,8 @@ export type GuestOnboardingFields = {
   joint_moment?: JointMomentPayload | null;
   intro_proposal?: IntroProposalPayload | null;
   pending_intros?: PendingIntroRow[];
+  block_log_entries?: BlockLogEntryRow[];
+  signal_saved?: SignalSavedPayload | null;
   phone_verified?: boolean;
   home_block_assigned?: boolean;
   is_anonymous?: boolean;

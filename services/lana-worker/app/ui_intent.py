@@ -19,6 +19,8 @@ UI_INTENT_SIGN_OUT = "sign_out"
 UI_INTENT_OFFER_NEIGHBOR_INTRO = "offer_neighbor_intro"
 UI_INTENT_PROPOSE_NEIGHBOR_INTRO = "propose_neighbor_intro"
 UI_INTENT_SHOW_PENDING_INTROS = "show_pending_intros"
+UI_INTENT_SHOW_BLOCK_LOG = "show_block_log"
+UI_INTENT_SIGNAL_SAVED = "signal_saved"
 
 _PHASE_TO_INTENT: dict[str, str] = {
     "need_zip": UI_INTENT_COLLECT_ZIP,
@@ -59,6 +61,12 @@ def derive_ui_intent(
 
     if ctx.get("pending_intros") is not None:
         return UI_INTENT_SHOW_PENDING_INTROS
+
+    if ctx.get("block_log_entries") is not None:
+        return UI_INTENT_SHOW_BLOCK_LOG
+
+    if ctx.get("signal_saved"):
+        return UI_INTENT_SIGNAL_SAVED
 
     if ready_to_complete:
         return UI_INTENT_CONFIRM_PROFILE

@@ -4,7 +4,9 @@ import os
 
 
 def _llm_ready() -> bool:
-    return bool(os.environ.get("GCP_VERTEX_PROJECT", "").strip())
+    from app.orchestrator.llm import llm_configured
+
+    return llm_configured()
 
 
 def event_fast_path_enabled() -> bool:
