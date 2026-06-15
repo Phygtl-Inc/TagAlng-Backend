@@ -18,6 +18,7 @@ gcp.json
 
 # Python (identity-worker)
 .venv/
+.venv312/
 __pycache__/
 *.pyc
 

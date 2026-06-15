@@ -5,9 +5,16 @@ import httpx
 from fastapi import HTTPException
 from supabase import create_client
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+def _supabase_url() -> str:
+    return os.environ.get("SUPABASE_URL", "")
+
+
+def _supabase_anon_key() -> str:
+    return os.environ.get("SUPABASE_ANON_KEY", "")
+
+
+def _supabase_service_role_key() -> str:
+    return os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 
 @dataclass(frozen=True)
@@ -25,13 +32,15 @@ def verify_auth(authorization: str | None) -> AuthSession:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing_bearer_token")
     token = authorization.removeprefix("Bearer ").strip()
-    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+    supabase_url = _supabase_url()
+    supabase_anon_key = _supabase_anon_key()
+    if not supabase_url or not supabase_anon_key:
         raise HTTPException(status_code=500, detail="server_misconfigured")
 
     with httpx.Client(timeout=15.0) as client:
         res = client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {token}"},
+            f"{supabase_url}/auth/v1/user",
+            headers={"apikey": supabase_anon_key, "Authorization": f"Bearer {token}"},
         )
     if res.status_code != 200:
         raise HTTPException(status_code=401, detail="invalid_session")
@@ -63,7 +72,7 @@ def require_home_block_for_purpose(auth: AuthSession, purpose: str) -> str | Non
 
 
 def require_home_block(user_id: str) -> str:
-    if not SUPABASE_SERVICE_ROLE_KEY:
+    if not _supabase_service_role_key():
         raise HTTPException(status_code=500, detail="server_misconfigured")
     profile = _load_user_profile(user_id)
     block_id = profile.get("home_block_id")
@@ -80,9 +89,11 @@ def require_verified_neighbor_comms(auth: AuthSession) -> None:
 
 
 def service_client():
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    supabase_url = _supabase_url()
+    supabase_service_role_key = _supabase_service_role_key()
+    if not supabase_url or not supabase_service_role_key:
         raise HTTPException(status_code=500, detail="server_misconfigured")
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return create_client(supabase_url, supabase_service_role_key)
 
 
 def email_has_registered_account(email: str) -> bool:
@@ -95,10 +106,12 @@ def email_has_registered_account(email: str) -> bool:
     normalized = str(email or "").strip().lower()
     if not normalized:
         return False
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    supabase_url = _supabase_url()
+    supabase_service_role_key = _supabase_service_role_key()
+    if not supabase_url or not supabase_service_role_key:
         return False
     try:
-        sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        sb = create_client(supabase_url, supabase_service_role_key)
         res = (
             sb.table("users")
             .select("id, email_verified_at")
@@ -116,10 +129,10 @@ def email_has_registered_account(email: str) -> bool:
             return False
         with httpx.Client(timeout=10.0) as client:
             auth_res = client.get(
-                f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+                f"{supabase_url}/auth/v1/admin/users/{user_id}",
                 headers={
-                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    "apikey": supabase_service_role_key,
+                    "Authorization": f"Bearer {supabase_service_role_key}",
                 },
             )
         if auth_res.status_code != 200:
@@ -134,10 +147,12 @@ def registered_user_id_for_email(email: str) -> str | None:
     """User id of the verified non-anonymous account for `email`, else None. Used to
     stash a guest's in-progress event against the account they're logging into."""
     normalized = str(email or "").strip().lower()
-    if not normalized or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    supabase_url = _supabase_url()
+    supabase_service_role_key = _supabase_service_role_key()
+    if not normalized or not supabase_url or not supabase_service_role_key:
         return None
     try:
-        sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        sb = create_client(supabase_url, supabase_service_role_key)
         res = (
             sb.table("users")
             .select("id, email_verified_at")
@@ -169,9 +184,11 @@ def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
         confirmed = user.get("phone_confirmed_at")
         column = "phone_verified_at"
     if confirmed and not user.get("is_anonymous"):
-        if SUPABASE_SERVICE_ROLE_KEY:
+        supabase_url = _supabase_url()
+        supabase_service_role_key = _supabase_service_role_key()
+        if supabase_service_role_key and not profile.get(column):
             try:
-                sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                sb = create_client(supabase_url, supabase_service_role_key)
                 sb.table("users").update({column: confirmed}).eq(
                     "id", user_id
                 ).execute()
@@ -182,9 +199,11 @@ def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
 
 
 def _load_user_profile(user_id: str) -> dict:
-    if not SUPABASE_SERVICE_ROLE_KEY:
+    supabase_url = _supabase_url()
+    supabase_service_role_key = _supabase_service_role_key()
+    if not supabase_service_role_key:
         raise HTTPException(status_code=500, detail="server_misconfigured")
-    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    sb = create_client(supabase_url, supabase_service_role_key)
     profile = (
         sb.table("users")
         .select("home_block_id, phone_verified_at, email_verified_at")

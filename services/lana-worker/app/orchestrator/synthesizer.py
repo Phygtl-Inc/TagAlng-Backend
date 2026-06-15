@@ -128,6 +128,10 @@ def synthesize_turn(
             "- discovery_need_identity: ask one short line (heritage, life stage, or what they want).\n"
             "- discovery_need_display_name: ask what neighbors should call them (first name).\n"
             "- If peer_matches with preview=true: describe labels only, no names.\n"
+            "- If tool_result.tool is recommend_value: this is Lana's private ranking engine, "
+            "not a public recommendation list. Mention at most one useful next step, such as a soft intro, "
+            "nearby activity, swap follow-up, or remembering the need. Do not say 'recommended users list'.\n"
+            "- If recommend_value is empty: offer to remember the need for the block via capture language.\n"
             "- When NEIGHBOR PREVIEW ALREADY SHOWN is present, use those exact labels to answer "
             "pushback (e.g. user asked for dads but labels say Mom of toddlers — acknowledge the gap).\n"
             "- If USER has no profile photo yet, you may suggest adding one once (warm, optional). "
@@ -263,6 +267,8 @@ def _parse_lana_synth(
     ctx: dict[str, Any] = {"last_status": status, "unified_mode": True}
     if tool_result and tool_result.get("peer_matches"):
         ctx["peer_matches"] = tool_result["peer_matches"]
+    if tool_result and tool_result.get("recommendations"):
+        ctx["recommendations"] = tool_result["recommendations"]
     if tool_result and tool_result.get("identity_snippet"):
         ctx["identity_snippet"] = tool_result["identity_snippet"]
     return assistant_message, status, ctx, ui, None

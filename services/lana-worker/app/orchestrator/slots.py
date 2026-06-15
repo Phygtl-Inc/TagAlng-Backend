@@ -23,6 +23,7 @@ KNOWN_TOOLS = frozenset(
         "update_relationship_tier",
         "recall",
         "find_peers",
+        "recommend_value",
     }
 )
 
@@ -149,6 +150,11 @@ def validate_tool_slots(
         return event_missing_slots(draft)
 
     if tool_name == "find_peers":
+        if purpose != "lana":
+            return ["wrong_session_purpose"]
+        return []
+
+    if tool_name == "recommend_value":
         if purpose != "lana":
             return ["wrong_session_purpose"]
         return []

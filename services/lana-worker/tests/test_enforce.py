@@ -116,6 +116,26 @@ class EnforceRoutingTests(unittest.TestCase):
         )
         self.assertEqual(missing, ["event_detail"])
 
+    def test_recommend_value_is_lana_only(self):
+        self.assertEqual(
+            validate_tool_slots(
+                "recommend_value",
+                {},
+                purpose="lana",
+                session_ctx={},
+            ),
+            [],
+        )
+        self.assertEqual(
+            validate_tool_slots(
+                "recommend_value",
+                {},
+                purpose="profile_intake",
+                session_ctx={},
+            ),
+            ["wrong_session_purpose"],
+        )
+
     def test_affirmative_detection(self):
         self.assertTrue(is_affirmative("yes"))
         self.assertTrue(is_affirmative("Yes, publish"))

@@ -311,7 +311,10 @@ def _apply_purpose_guards(
         "update_event_draft",
         "propose_cohost",
         "find_peers",
+        "recommend_value",
     ):
+        return None, {}, True
+    if purpose != "lana" and tool == "recommend_value":
         return None, {}, True
     if purpose != "event_draft" and tool == "propose_cohost":
         return None, {}, True
