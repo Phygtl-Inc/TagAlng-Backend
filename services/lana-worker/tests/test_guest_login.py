@@ -14,6 +14,8 @@ from app.guest_intake import lana_profile_guest_turn
 class TestGuestLoginHelpers(unittest.TestCase):
     def test_wants_login(self) -> None:
         self.assertTrue(wants_login("I want to log in"))
+        self.assertTrue(wants_login("log me in"))
+        self.assertTrue(wants_login("sign me in"))
         self.assertTrue(wants_login("I already have an account"))
         self.assertFalse(wants_login("I'm a Latino mom"))
 
@@ -93,6 +95,15 @@ class TestGuestLoginTurn(unittest.TestCase):
         )
         self.assertEqual(ctx["guest_step"], GUEST_STEP_LOGIN_PHONE)
         self.assertIn("phone", reply.lower())
+
+    def test_log_me_in_phrase(self) -> None:
+        reply, ctx = handle_guest_login(
+            "log me in",
+            step="early_chat",
+            session_ctx={"guest_step": "early_chat"},
+        )
+        self.assertIn("phone", reply.lower())
+        self.assertEqual(ctx["guest_step"], GUEST_STEP_LOGIN_PHONE)
 
 
 if __name__ == "__main__":

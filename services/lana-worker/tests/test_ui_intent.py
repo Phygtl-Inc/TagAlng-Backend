@@ -41,6 +41,34 @@ class TestDeriveUiIntent(unittest.TestCase):
             UI_INTENT_SHOW_PEER_PREVIEW,
         )
 
+    def test_verify_signup_otp_on_preview_uses_collect_otp(self) -> None:
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "routing_phase": "preview",
+                    "requires_phone_verification": True,
+                    "auth_action": {
+                        "type": "verify_signup_otp",
+                        "phone": "+15550999012",
+                        "token": "000000",
+                    },
+                },
+                peer_count=3,
+                phone_verified=False,
+            ),
+            UI_INTENT_COLLECT_OTP,
+        )
+
+    def test_preview_verify_uses_collect_phone(self) -> None:
+        self.assertEqual(
+            derive_ui_intent(
+                {"routing_phase": "preview", "requires_phone_verification": True},
+                peer_count=3,
+                phone_verified=False,
+            ),
+            UI_INTENT_COLLECT_PHONE,
+        )
+
     def test_ready_to_complete(self) -> None:
         self.assertEqual(
             derive_ui_intent({"routing_phase": "need_zip"}, ready_to_complete=True),

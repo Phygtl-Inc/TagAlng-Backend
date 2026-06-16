@@ -202,6 +202,8 @@ def run_turn(
             session_ctx["last_status"] = "ready_to_complete"
         if tool_result and tool_result.get("peer_matches"):
             session_ctx["peer_matches"] = tool_result["peer_matches"]
+        if tool_result and tool_result.get("requires_phone_verification"):
+            session_ctx["requires_phone_verification"] = True
         if tool_result and tool_result.get("routing_phase"):
             session_ctx["routing_phase"] = tool_result["routing_phase"]
         if tool_result and tool_result.get("block_id"):
@@ -392,3 +394,21 @@ def _stamp_lana_unified_fields(
         ctx["routing_phase"] = "need_identity"
     elif tool_result and tool_result.get("tool") == "find_peers" and tool_result.get("status") == "ok":
         ctx["routing_phase"] = "preview"
+        if tool_result.get("requires_phone_verification"):
+            ctx["requires_phone_verification"] = True
+
+    outcome = str(routing.get("outcome") or "")
+    intent = str(routing.get("intent_class") or "")
+    tool = routing.get("tool_to_call")
+    peers_this_turn = bool(
+        tool_result
+        and tool_result.get("peer_matches")
+        and tool == "find_peers"
+    )
+    if outcome == "R" or intent in ("companionship", "meta", "identity"):
+        if not ctx.get("pending_intro_offer") and not ctx.get("intro_proposal"):
+            ctx["peer_matches"] = []
+        ctx.pop("requires_phone_verification", None)
+    elif not peers_this_turn and outcome != "T":
+        if not ctx.get("pending_intro_offer") and not ctx.get("intro_proposal"):
+            ctx["peer_matches"] = []

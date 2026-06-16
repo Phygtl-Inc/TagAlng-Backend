@@ -14,7 +14,10 @@ from app.discovery_slots import (
     discovery_ai_enabled,
     discovery_slots_for_turn,
     slots_want_discovery_handling,
+    slots_want_login,
+    slots_want_logout,
     slots_want_preview_refetch,
+    slots_want_signup_gate,
 )
 from app.turn_timing import TurnTimer
 from app.guest_capabilities import (
@@ -101,6 +104,13 @@ _VERIFY_HELP_RE = re.compile(
 )
 _RSVP_RE = re.compile(
     r"\b(rsvp|sign up for|join|take part in|attend|going to|i want to go|count me in)\b",
+    re.I,
+)
+
+# "sign me up" / account creation intent (not RSVP/event intent).
+_SIGNUP_INTENT_RE = re.compile(
+    # Note: exclude "sign up for ..." (events) so RSVP gating keeps working.
+    r"\b(sign\s*(?:me\s*)?up(?!\s*for\b)|signup(?!\s*for\b)|create\s+(?:an?\s+)?account|complete\s+(?:registration|signup)|finish\s+signing\s+up)\b",
     re.I,
 )
 _ACTIVITIES_RE = re.compile(
@@ -195,6 +205,14 @@ def _try_neighbor_intro_turn(
         return None
 
     reply, intro = result
+    selected_peer = next(
+        (
+            p
+            for p in peers
+            if str(p.get("peer_user_id") or "") == str(intro.get("candidate_user_id") or "")
+        ),
+        None,
+    )
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_PREVIEW,
@@ -202,16 +220,20 @@ def _try_neighbor_intro_turn(
         active_intent=INTENT_PROPOSE_INTRO,
     )
     if intro.get("intro_id"):
-        peer = next(
-            (p for p in peers if str(p.get("peer_user_id") or "") == str(intro.get("candidate_user_id") or "")),
-            {"peer_user_id": intro.get("candidate_user_id"), "matching_peer_label": intro.get("match_reason")},
-        )
+        peer = selected_peer or {
+            "peer_user_id": intro.get("candidate_user_id"),
+            "matching_peer_label": intro.get("match_reason"),
+        }
         stamp_intro_proposal_ctx(ctx, intro=intro, peer=peer)
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "lana_propose_neighbor_intro")
     else:
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, str(intro.get("status") or "intro_skipped"))
     ctx.pop("activity_previews", None)
-    return reply, ctx, ctx["last_routing"], peers
+    if selected_peer:
+        ctx["peer_matches"] = [selected_peer]
+        return reply, ctx, ctx["last_routing"], [selected_peer]
+    ctx["peer_matches"] = []
+    return reply, ctx, ctx["last_routing"], []
 
 
 def _maybe_attach_intro_offer(
@@ -398,7 +420,13 @@ def _try_show_block_log_turn(
 
 
 def wants_more_peer_detail(text: str) -> bool:
-    return bool(_MORE_DETAIL_RE.search(str(text or "").strip()))
+    s = str(text or "").strip()
+    if not s:
+        return False
+    # "what's my name" is profile chat, not a request to reveal neighbor names.
+    if re.search(r"\b(?:what(?:'s| is)\s+my\s+name|my\s+name)\b", s, re.I):
+        return False
+    return bool(_MORE_DETAIL_RE.search(s))
 
 
 def wants_verify_help(text: str) -> bool:
@@ -407,6 +435,53 @@ def wants_verify_help(text: str) -> bool:
 
 def wants_rsvp_intent(text: str) -> bool:
     return bool(_RSVP_RE.search(str(text or "").strip()))
+
+
+def wants_signup_intent(text: str) -> bool:
+    """Regex fallback when discovery AI slots are off."""
+    return bool(_SIGNUP_INTENT_RE.search(str(text or "").strip()))
+
+
+def _login_flow_active(session_ctx: dict[str, Any]) -> bool:
+    if session_ctx.get("auth_intent") == "login":
+        return True
+    phase = str(session_ctx.get("routing_phase") or "")
+    if phase in ("await_login_phone", "await_login_otp"):
+        return True
+    step = session_ctx.get("guest_step")
+    return step in ("await_login_phone", "await_login_otp")
+
+
+def _turn_wants_login(
+    msg: str,
+    slots: dict[str, Any] | None,
+    session_ctx: dict[str, Any],
+) -> bool:
+    if _login_flow_active(session_ctx):
+        return True
+    if discovery_ai_enabled():
+        return slots_want_login(slots)
+    return wants_login_intent(msg)
+
+
+def _turn_wants_signup_gate(
+    msg: str,
+    slots: dict[str, Any] | None,
+    session_ctx: dict[str, Any],
+) -> bool:
+    if discovery_ai_enabled():
+        return slots_want_signup_gate(slots)
+    return wants_signup_intent(msg)
+
+
+def _turn_wants_logout(
+    msg: str,
+    slots: dict[str, Any] | None,
+    session_ctx: dict[str, Any],
+) -> bool:
+    if discovery_ai_enabled():
+        return slots_want_logout(slots)
+    return wants_logout_intent(msg)
 
 
 def wants_activities_browse(text: str) -> bool:
@@ -561,6 +636,7 @@ def _fallback_identity_snippet(
         if (
             not extract_zip(text)
             and not wants_login_intent(text)
+            and not wants_signup_intent(text)
             and not _looks_like_meta_chat(text)
             and not _is_peer_find_command(text)
         ):
@@ -585,7 +661,7 @@ def _fallback_identity_snippet(
             continue
         if wants_activities_browse(content):
             continue
-        if _looks_like_meta_chat(content) or wants_login_intent(content):
+        if _looks_like_meta_chat(content) or wants_login_intent(content) or wants_signup_intent(content):
             continue
         stripped = content.strip()
         if len(stripped) >= 12:
@@ -602,9 +678,18 @@ def _fallback_identity_snippet(
     return None
 
 
-def _explicit_funnel_input(msg: str) -> bool:
+def _explicit_funnel_input(
+    msg: str,
+    *,
+    slots: dict[str, Any] | None = None,
+    session_ctx: dict[str, Any] | None = None,
+) -> bool:
     """Code-owned structural signals only — peer-find intent is Flash slots, not regex."""
     if extract_zip(msg) or invalid_zip_hint(msg):
+        return True
+    if session_ctx and session_ctx.get("pending_signup_gate"):
+        return True
+    if _turn_wants_signup_gate(msg, slots, session_ctx or {}):
         return True
     if wants_verify_help(msg) or wants_more_peer_detail(msg):
         return True
@@ -624,20 +709,23 @@ def wants_discovery_turn(
     Code: explicit funnel signals only (ZIP digits, find-peers phrasing).
     AI: every other message — slots decide discovery vs orchestrator.
     """
-    if _explicit_funnel_input(msg):
+    if _turn_wants_login(msg, slots, session_ctx):
+        return False
+
+    if _explicit_funnel_input(msg, slots=slots, session_ctx=session_ctx):
         return True
 
     phase = str(session_ctx.get("routing_phase") or "")
     if phase in _FUNNEL_PHASES:
-        if wants_login_intent(msg):
-            return True
+        if _turn_wants_login(msg, slots, session_ctx):
+            return False
         if _looks_like_meta_chat(msg):
             return False
         return True
 
     if session_ctx.get("pending_post_verify"):
-        if wants_login_intent(msg):
-            return True
+        if _turn_wants_login(msg, slots, session_ctx):
+            return False
         if _looks_like_meta_chat(msg):
             return False
         return True
@@ -1028,6 +1116,7 @@ def _verify_gate_reply(
         phase=PHASE_AWAIT_SIGNUP_PHONE,
         preview_block_id=block_id,
     )
+    ctx["requires_phone_verification"] = True
     ctx["peer_matches"] = []
     return (
         f"{lead} What's your number?",
@@ -1125,6 +1214,37 @@ def _apply_display_name_gate(
     )
 
 
+def _handle_signup_phone_message(
+    msg: str,
+    session_ctx: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Parse phone → await_signup_otp + link_phone_signup auth_action."""
+    phone = extract_phone_e164(msg)
+    if not phone:
+        return (
+            "What's your phone number? I'll text you a code to verify.",
+            _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_PHONE),
+            _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE),
+            [],
+        )
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=PHASE_AWAIT_SIGNUP_OTP,
+        signup_phone=phone,
+    )
+    ctx["auth_action"] = _auth_action(
+        type="link_phone_signup",
+        phone=phone,
+        verify_type="phone_change",
+    )
+    return (
+        f"Got it — I sent a 6-digit code to {phone}. Enter it here when it arrives.",
+        ctx,
+        _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
+        [],
+    )
+
+
 def handle_discovery_turn(
     user_message: str,
     *,
@@ -1145,32 +1265,38 @@ def handle_discovery_turn(
     phase = str(session_ctx.get("routing_phase") or "")
     active = session_ctx.get("active_intent")
 
+    had_block = bool(resolve_block_id(session_ctx, home_block_id))
+    has_profile_photo = bool(user_profile_photo_url(user_id))
+    slots: dict[str, Any] = {}
+    if discovery_ai_enabled():
+        slots = discovery_slots_for_turn(
+            session_ctx,
+            msg,
+            routing_phase=phase or "listening",
+            history=history,
+            has_block=had_block,
+            has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            has_profile_photo=has_profile_photo,
+            timer=timer,
+        )
+
+    # If the user asked to sign up while phone is unverified, latch it
+    # so the next step that needs ZIP can still switch into the phone-gate UI.
+    if not phone_verified and _turn_wants_signup_gate(msg, slots, session_ctx):
+        session_ctx["pending_signup_gate"] = True
+
     # Continue signup verify sub-flow
     if phase == PHASE_AWAIT_SIGNUP_PHONE:
-        phone = extract_phone_e164(msg)
-        if not phone:
-            return (
-                "What's your phone number? I'll text you a code to verify.",
-                _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_PHONE),
-                _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE),
-                [],
-            )
-        ctx = _routing_ctx(
-            session_ctx,
-            phase=PHASE_AWAIT_SIGNUP_OTP,
-            signup_phone=phone,
-        )
-        ctx["auth_action"] = _auth_action(
-            type="link_phone_signup",
-            phone=phone,
-            verify_type="phone_change",
-        )
-        return (
-            f"Got it — I sent a 6-digit code to {phone}. Enter it here when it arrives.",
-            ctx,
-            _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
-            [],
-        )
+        return _handle_signup_phone_message(msg, session_ctx)
+
+    # Sessions stuck on preview with requires_phone_verification (orchestrator lag).
+    if (
+        not phone_verified
+        and session_ctx.get("requires_phone_verification")
+        and extract_phone_e164(msg)
+    ):
+        return _handle_signup_phone_message(msg, session_ctx)
 
     if phase == PHASE_AWAIT_SIGNUP_OTP:
         otp = extract_otp_code(msg)
@@ -1196,22 +1322,6 @@ def handle_discovery_turn(
             ctx,
             _discovery_routing_stub(PHASE_PREVIEW, "verify_signup_otp"),
             [],
-        )
-
-    had_block = bool(resolve_block_id(session_ctx, home_block_id))
-    has_profile_photo = bool(user_profile_photo_url(user_id))
-    slots: dict[str, Any] = {}
-    if discovery_ai_enabled():
-        slots = discovery_slots_for_turn(
-            session_ctx,
-            msg,
-            routing_phase=phase or "listening",
-            history=history,
-            has_block=had_block,
-            has_identity=bool(session_ctx.get("identity_snippet")),
-            phone_verified=phone_verified,
-            has_profile_photo=has_profile_photo,
-            timer=timer,
         )
 
     photo_turn = handle_profile_photo_turn(
@@ -1292,7 +1402,7 @@ def handle_discovery_turn(
                 [],
             )
 
-    if wants_logout_intent(msg):
+    if _turn_wants_logout(msg, slots, session_ctx):
         if phone_verified or not is_anonymous:
             nick = _user_nickname(user_id)
             farewell = f"Take care{', ' + nick if nick else ''} — signing you out now."
@@ -1327,7 +1437,7 @@ def handle_discovery_turn(
         if phase == "await_login_otp"
         else "early_chat"
     )
-    if wants_login_intent(msg) or session_ctx.get("auth_intent") == "login":
+    if _turn_wants_login(msg, slots, session_ctx):
         if phone_verified and not is_anonymous:
             nick = _user_nickname(user_id)
             label = f" as {nick}" if nick else ""
@@ -1418,6 +1528,16 @@ def handle_discovery_turn(
 
     block_just_resolved = bool(zip_from_msg and not had_block)
     goal = effective_goal
+
+    # Safety: honor explicit signup intent once the ZIP resolves into a block.
+    if not phone_verified and session_ctx.get("pending_signup_gate"):
+        session_ctx.pop("pending_signup_gate", None)
+        ctx_base.pop("pending_signup_gate", None)
+        return _verify_gate_reply(
+            session_ctx=session_ctx,
+            ctx_base=ctx_base,
+            block_id=block_id,
+        )
 
     # Slot: identity snippet (Flash — not chat history heuristics)
     snippet = resolve_identity_for_turn(

@@ -86,7 +86,7 @@ from app.claims_persist import (
     should_extract_claims_from_message,
 )
 from app.profile_photo import upload_profile_photo_bytes
-from app.ui_intent import derive_ui_intent
+from app.ui_intent import PEER_SURFACE_UI_INTENTS, derive_ui_intent
 from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
@@ -469,6 +469,43 @@ def _signal_saved_from_ctx(ctx: dict[str, Any]) -> SignalSavedPayload | None:
     )
 
 
+def _signup_routing_phase_for_fe(ctx: dict[str, Any], auth: AuthSession) -> str | None:
+    """
+    Map session ctx → routing_phase for the PWA verify gate.
+
+    Do not downgrade an in-flight OTP turn back to await_signup_phone just
+    because the JWT is not verified yet — that caused the FE to re-show the
+    phone field after the user posted their OTP to Lana.
+    """
+    phase = str(ctx.get("routing_phase") or "").strip()
+    raw_action = ctx.get("auth_action")
+    action_type = (
+        str(raw_action.get("type") or "").strip()
+        if isinstance(raw_action, dict)
+        else ""
+    )
+
+    if auth.phone_verified:
+        return phase or None
+    if phase in ("need_zip", "need_identity", "need_display_name"):
+        return phase
+    if phase in ("await_signup_phone", "await_signup_otp", "gate_verify"):
+        return phase
+    if action_type == "link_phone_signup":
+        return "await_signup_otp"
+    if action_type == "verify_signup_otp":
+        return "await_signup_otp"
+    if ctx.get("pending_post_verify"):
+        return phase or "preview"
+    if (
+        ctx.get("requires_phone_verification")
+        and not auth.phone_verified
+        and phase in ("", "listening", "preview")
+    ):
+        return "await_signup_phone"
+    return phase or None
+
+
 def _onboarding_fields(
     ctx: dict[str, Any],
     auth: AuthSession,
@@ -480,8 +517,17 @@ def _onboarding_fields(
     pending_intros = _pending_intros_from_ctx(ctx)
     block_log_entries = _block_log_from_ctx(ctx)
     signal_saved = _signal_saved_from_ctx(ctx)
-    peers = _peer_matches_from_ctx(ctx)
+    peers_raw = _peer_matches_from_ctx(ctx)
     activities = _activity_previews_from_ctx(ctx)
+    ui_intent = derive_ui_intent(
+        ctx,
+        ready_to_complete=ready_to_complete,
+        peer_count=len(peers_raw),
+        activity_count=len(activities),
+        phone_verified=auth.phone_verified,
+    )
+    routing_phase = _signup_routing_phase_for_fe(ctx, auth)
+    peers = peers_raw if ui_intent in PEER_SURFACE_UI_INTENTS else []
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
@@ -500,13 +546,8 @@ def _onboarding_fields(
         "login_otp_token": ctx.get("login_otp_token"),
         "auth_action": _auth_action_from_ctx(ctx),
         "active_intent": ctx.get("active_intent"),
-        "routing_phase": ctx.get("routing_phase"),
-        "ui_intent": derive_ui_intent(
-            ctx,
-            ready_to_complete=ready_to_complete,
-            peer_count=len(peers),
-            activity_count=len(activities),
-        ),
+        "routing_phase": routing_phase,
+        "ui_intent": ui_intent,
     }
 
 

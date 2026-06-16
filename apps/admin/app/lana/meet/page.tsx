@@ -350,16 +350,28 @@ export default function MeetLanaPage() {
 
   async function onSendPhoneCode(e?: FormEvent) {
     e?.preventDefault();
+    const phone = toE164(phoneDraft);
+    if (!phone) return;
+    setPhoneDraft(phone);
     setBusy(true);
+    setThinking(true);
     setError(null);
     try {
-      const phone = toE164(phoneDraft);
+      // Unified flow: phone goes to Lana first → auth_action link_phone_signup → PUT /user
+      if (token && sessionId) {
+        await pushTurn(token, sessionId, phone);
+        setOtpSent(true);
+        setOtpDraft(DEMO_TEST_OTP);
+        return;
+      }
+      // Legacy profile_intake screen (no Lana session) — direct Supabase only
       await guestLinkPhone(phone);
       setOtpSent(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send code');
     } finally {
       setBusy(false);
+      setThinking(false);
     }
   }
 
