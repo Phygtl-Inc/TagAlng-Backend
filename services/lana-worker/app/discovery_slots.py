@@ -58,7 +58,11 @@ _SYSTEM = (
     "peers = find/show neighbors; activities = browse events; both; verify = phone signup gate; rsvp; "
     "propose_intro = user wants Lana to formally introduce them to a shown neighbor (preview, verified); "
     "list_intros = user wants to see pending intros they sent or received "
-    "(show my intros, pending intros, intro status, who did I introduce, intros waiting on me); "
+    "(show my intros, pending intros, intro status, who did I introduce, intros waiting on me, "
+    "'what did you send', 'show me what you sent to them', 'what intro message did you send'); "
+    "When user asks what Lana sent in an intro, or asks intro status after an intro attempt, "
+    "choose goal=list_intros (not peers), set in_discovery=true, and prefer intro_direction=sent. "
+    "Do NOT choose goal=peers for intro-message/status questions even if user says 'show me'. "
     "save_signal = user is seeking OR offering something on their block — swap/borrow items, meetups/playgroups, "
     "or local tips/recommendations (any phrasing: looking for rain boots, I have a stroller to give, "
     "host a coffee morning, know a good pediatrician, anyone want to swap); "
@@ -106,6 +110,7 @@ def _empty_slots() -> dict[str, Any]:
     return {
         "in_discovery": False,
         "goal": "none",
+        "intro_direction": None,
         "zip": None,
         "identity_snippet": None,
         "profile_photo_action": "none",
@@ -205,6 +210,10 @@ def ai_parse_discovery_turn(
         signal_detail_s = str(signal_detail).strip()[:500] if signal_detail else None
         signal_category = raw.get("signal_category")
         signal_category_s = str(signal_category).strip()[:120] if signal_category else None
+        intro_direction = raw.get("intro_direction")
+        intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
+        if intro_direction_s not in ("sent", "received", "all"):
+            intro_direction_s = None
         photo_action = str(raw.get("profile_photo_action") or "none").lower()
         if photo_action not in ("start", "accept", "skip", "done", "none"):
             photo_action = "none"
@@ -218,6 +227,7 @@ def ai_parse_discovery_turn(
         return {
             "in_discovery": bool(raw.get("in_discovery")),
             "goal": goal,
+            "intro_direction": intro_direction_s,
             "zip": zip_s,
             "identity_snippet": ident_s,
             "profile_photo_action": photo_action,

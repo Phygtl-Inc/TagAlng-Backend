@@ -80,6 +80,10 @@ def _exit_logout_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
     }
     out.pop("login_phone", None)
     out.pop("auth_action", None)
+    # Stale discovery/intro surface from before logout must not re-show peer cards.
+    out.pop("intro_proposal", None)
+    out.pop("pending_intro_offer", None)
+    out.pop("peer_matches", None)
     return out
 
 

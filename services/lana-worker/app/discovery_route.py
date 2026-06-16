@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.auth import service_client
+from app.auth import phone_has_registered_account, service_client
 from app.discovery_slots import (
     ai_parse_discovery_turn,
     discovery_ai_enabled,
@@ -55,8 +55,10 @@ from app.local_signals import (
     stamp_signal_saved_ctx,
 )
 from app.guest_login import (
+    GUEST_STEP_LOGIN_OTP,
     _exit_login_ctx,
     _exit_logout_ctx,
+    _login_ctx,
     _logout_ctx,
     extract_otp_code,
     extract_phone_e164,
@@ -136,18 +138,25 @@ def _preview_peers_with_ids(
     session_ctx: dict[str, Any],
     block_id: str,
     phone_verified: bool,
+    home_block_id: str | None = None,
 ) -> list[dict[str, Any]]:
     stored = session_ctx.get("peer_matches")
     if isinstance(stored, list) and stored:
         if any(p.get("peer_user_id") for p in stored if isinstance(p, dict)):
             return [p for p in stored if isinstance(p, dict)]
     if phone_verified:
+        _try_assign_home_block(
+            user_jwt,
+            session_ctx=session_ctx,
+            home_block_id=home_block_id,
+        )
         try:
             peers = fetch_peer_matches(user_jwt, limit=5)
             if peers:
                 return peers
         except Exception:
             pass
+        return fetch_preview_peers_on_block(block_id, limit=5, include_peer_ids=True)
     return fetch_preview_peers_on_block(block_id, limit=3)
 
 
@@ -178,6 +187,7 @@ def _try_neighbor_intro_turn(
         session_ctx=session_ctx,
         block_id=block_id,
         phone_verified=phone_verified,
+        home_block_id=ctx_base.get("home_block_id"),
     )
     identity = str(ctx_base.get("identity_snippet") or session_ctx.get("identity_snippet") or "").strip()
     result = try_propose_intro_from_preview(
@@ -190,9 +200,23 @@ def _try_neighbor_intro_turn(
     )
     if result is None:
         if wants_intro and not any(p.get("peer_user_id") for p in peers):
+            snippet = str(session_ctx.get("identity_snippet") or "").strip()
+            if not snippet:
+                return (
+                    "Tell me one thing about you — life stage, heritage, or what you're looking for — "
+                    "then I can introduce you to someone on your block.",
+                    _routing_ctx(
+                        ctx_base,
+                        phase=PHASE_NEED_IDENTITY,
+                        preview_block_id=block_id,
+                        active_intent=INTENT_PROPOSE_INTRO,
+                    ),
+                    _discovery_routing_stub(PHASE_NEED_IDENTITY, "intro_need_identity"),
+                    peers,
+                )
             return (
-                "I need your verified matches with names before I can introduce you — "
-                "tell me who on the list you'd like to meet.",
+                "I'm still loading named matches for your block — say your first name, "
+                "or tell me which neighbor (e.g. first one or Neighbor 1).",
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_PREVIEW,
@@ -954,13 +978,18 @@ def fetch_blocks_for_zip(user_jwt: str, zip5: str) -> list[dict[str, Any]]:
     return []
 
 
-def fetch_preview_peers_on_block(block_id: str, *, limit: int = 3) -> list[dict[str, Any]]:
-    """Anonymous-safe preview: labels only, no peer_user_id or nickname."""
+def fetch_preview_peers_on_block(
+    block_id: str,
+    *,
+    limit: int = 3,
+    include_peer_ids: bool = False,
+) -> list[dict[str, Any]]:
+    """Anonymous-safe preview by default; verified users may get peer_user_id for intros."""
     try:
         sb = service_client()
         users = (
             sb.table("users")
-            .select("id")
+            .select("id, nickname")
             .eq("home_block_id", block_id)
             .limit(15)
             .execute()
@@ -984,16 +1013,17 @@ def fetch_preview_peers_on_block(block_id: str, *, limit: int = 3) -> list[dict[
             label = "shared interests on your block"
             if claims.data:
                 label = str(claims.data[0].get("label") or label)
+            nick = str(u.get("nickname") or "").strip() or None
             out.append(
                 {
-                    "peer_user_id": None,
-                    "nickname": None,
+                    "peer_user_id": str(uid) if include_peer_ids else None,
+                    "nickname": nick if include_peer_ids else None,
                     "avatar_url": None,
                     "similarity_score": None,
                     "matching_peer_label": label,
                     "matching_peer_concept": None,
                     "has_exact_concept_match": False,
-                    "preview": True,
+                    "preview": not include_peer_ids,
                 }
             )
             if len(out) >= limit:
@@ -1099,6 +1129,13 @@ def _match_event_title(events: list[dict[str, Any]], msg: str) -> str | None:
             return title
     return None
 
+
+def _signup_verify_in_flight(session_ctx: dict[str, Any], phase: str) -> bool:
+    """User is mid signup phone/OTP or waiting for JWT to catch up after OTP."""
+    return (
+        phase in (PHASE_AWAIT_SIGNUP_PHONE, PHASE_AWAIT_SIGNUP_OTP)
+        or bool(session_ctx.get("pending_post_verify"))
+    )
 
 def _verify_gate_reply(
     *,
@@ -1217,14 +1254,37 @@ def _apply_display_name_gate(
 def _handle_signup_phone_message(
     msg: str,
     session_ctx: dict[str, Any],
+    *,
+    is_anonymous: bool = True,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """Parse phone → await_signup_otp + link_phone_signup auth_action."""
+    """Parse phone → await_signup_otp + link_phone_signup, or login OTP if phone exists."""
     phone = extract_phone_e164(msg)
     if not phone:
         return (
             "What's your phone number? I'll text you a code to verify.",
             _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_PHONE),
             _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE),
+            [],
+        )
+    if is_anonymous and phone_has_registered_account(phone):
+        ctx = _login_ctx(
+            session_ctx,
+            guest_step=GUEST_STEP_LOGIN_OTP,
+            login_phone=phone,
+            requires_login_otp=True,
+        )
+        ctx.pop("signup_phone", None)
+        ctx.pop("pending_signup_gate", None)
+        ctx["unified_mode"] = True
+        ctx["auth_action"] = _auth_action(
+            type="send_login_otp",
+            phone=phone,
+            verify_type="sms",
+        )
+        return (
+            f"I found your account — I sent a login code to {phone}. Enter it when it arrives.",
+            ctx,
+            _discovery_routing_stub(GUEST_STEP_LOGIN_OTP),
             [],
         )
     ctx = _routing_ctx(
@@ -1288,7 +1348,7 @@ def handle_discovery_turn(
 
     # Continue signup verify sub-flow
     if phase == PHASE_AWAIT_SIGNUP_PHONE:
-        return _handle_signup_phone_message(msg, session_ctx)
+        return _handle_signup_phone_message(msg, session_ctx, is_anonymous=is_anonymous)
 
     # Sessions stuck on preview with requires_phone_verification (orchestrator lag).
     if (
@@ -1296,7 +1356,7 @@ def handle_discovery_turn(
         and session_ctx.get("requires_phone_verification")
         and extract_phone_e164(msg)
     ):
-        return _handle_signup_phone_message(msg, session_ctx)
+        return _handle_signup_phone_message(msg, session_ctx, is_anonymous=is_anonymous)
 
     if phase == PHASE_AWAIT_SIGNUP_OTP:
         otp = extract_otp_code(msg)
@@ -1310,6 +1370,8 @@ def handle_discovery_turn(
             )
         ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=phone)
         ctx["pending_post_verify"] = True
+        ctx["requires_phone_verification"] = False
+        ctx.pop("pending_signup_gate", None)
         ctx["auth_action"] = _auth_action(
             type="verify_signup_otp",
             phone=phone,
@@ -1426,6 +1488,26 @@ def handle_discovery_turn(
             "You're not signed in — nothing to log out of. Ask me to find neighbors or tell me about yourself.",
             _routing_ctx(session_ctx, phase="listening"),
             {"outcome": "A", "intent_class": "auth", "confidence": 1.0},
+            [],
+        )
+
+    if _signup_verify_in_flight(session_ctx, phase) and _turn_wants_login(msg, slots, session_ctx):
+        phone = str(session_ctx.get("signup_phone") or "your phone")
+        if phase == PHASE_AWAIT_SIGNUP_OTP:
+            return (
+                f"You're signing up — enter the 6-digit code I sent to {phone}.",
+                _routing_ctx(
+                    session_ctx,
+                    phase=PHASE_AWAIT_SIGNUP_OTP,
+                    signup_phone=session_ctx.get("signup_phone"),
+                ),
+                _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
+                [],
+            )
+        return (
+            "You're in the middle of signing up — what's the phone number for your account?",
+            _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_PHONE),
+            _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE),
             [],
         )
 
@@ -1613,24 +1695,32 @@ def handle_discovery_turn(
         if intro_turn is not None:
             return intro_turn
 
-    if (
-        not phone_verified
-        and (wants_verify_help(msg) or goal == "verify" or wants_more_peer_detail(msg))
-    ):
-        return _verify_gate_reply(
-            session_ctx=session_ctx,
-            ctx_base=ctx_base,
-            block_id=block_id,
-        )
-
-    # Post-verify funnel: name first, then matches (JWT may lag one turn after OTP).
+    # Post-verify funnel before verify gate — JWT may lag one turn after OTP.
     if ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME:
+        snippet = str(
+            session_ctx.get("identity_snippet") or ctx_base.get("identity_snippet") or ""
+        ).strip()
+        nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+        if extract_otp_code(msg) and not nick:
+            return (
+                "I already have that code — use the Verify button in the code box, "
+                "then tell me your first name.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_NEED_DISPLAY_NAME,
+                    active_intent=INTENT_FIND_PEERS,
+                    preview_block_id=block_id,
+                    pending_post_verify=True,
+                    signup_phone=session_ctx.get("signup_phone"),
+                ),
+                _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
+                [],
+            )
         if user_needs_display_name(user_id, ctx_base):
-            nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
             if nick and user_id:
                 persist_profile_patch(user_id, {"nickname": nick})
                 ctx_base["display_name_saved"] = True
-            else:
+            elif _is_affirmative(msg) or not nick:
                 return (
                     "What should neighbors call you? First name is fine.",
                     _routing_ctx(
@@ -1643,6 +1733,20 @@ def handle_discovery_turn(
                     _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
                     [],
                 )
+        if not snippet and (_is_affirmative(msg) or (phase == PHASE_NEED_DISPLAY_NAME and not nick)):
+            return (
+                "Tell me one thing about you — life stage, heritage, or what you're looking for — "
+                "so I can match you better.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_NEED_IDENTITY,
+                    active_intent=INTENT_FIND_PEERS,
+                    preview_block_id=block_id,
+                    pending_post_verify=True,
+                ),
+                _discovery_routing_stub(PHASE_NEED_IDENTITY),
+                [],
+            )
         if not phone_verified:
             nick = str(
                 (ctx_base.get("display_name_saved") and extract_display_name_reply(msg))
@@ -1668,8 +1772,12 @@ def handle_discovery_turn(
         except Exception:
             peers = []
         if not peers:
-            peers = fetch_preview_peers_on_block(block_id, limit=3)
-            reply = format_preview_message(peers, block_label, phone_verified=True)
+            peers = fetch_preview_peers_on_block(
+                block_id,
+                limit=3,
+                include_peer_ids=phone_verified,
+            )
+            reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
         else:
             reply = format_peer_matches(peers)
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
@@ -1686,6 +1794,17 @@ def handle_discovery_turn(
             PHASE_PREVIEW, "match_peers_by_claim_vectors"
         )
         return reply, ctx, ctx["last_routing"], peers
+
+    if (
+        not phone_verified
+        and not _signup_verify_in_flight(session_ctx, phase)
+        and (wants_verify_help(msg) or goal == "verify" or wants_more_peer_detail(msg))
+    ):
+        return _verify_gate_reply(
+            session_ctx=session_ctx,
+            ctx_base=ctx_base,
+            block_id=block_id,
+        )
 
     # Preview re-search: AI must supply new identity_snippet + goal=peers (not questions).
     if phase == PHASE_PREVIEW and slots_want_preview_refetch(slots, session_ctx):

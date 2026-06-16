@@ -533,6 +533,28 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(ctx["auth_action"]["type"], "link_phone_signup")
         self.assertEqual(ctx["auth_action"]["phone"], "+15550999012")
 
+    @patch("app.discovery_route.phone_has_registered_account", return_value=True)
+    def test_existing_phone_on_verify_gate_routes_to_login(self, _mock_phone) -> None:
+        result = handle_discovery_turn(
+            "+15552232233",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_PREVIEW,
+                "requires_phone_verification": True,
+                "preview_block_id": "block-1",
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertEqual(ctx["routing_phase"], "await_login_otp")
+        self.assertEqual(ctx["auth_action"]["type"], "send_login_otp")
+        self.assertEqual(ctx["auth_action"]["phone"], "+15552232233")
+        self.assertIn("found your account", reply.lower())
+
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
     def test_activities_zip_turn_shows_events_not_neighbors(
@@ -794,6 +816,51 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    @patch("app.discovery_route.fetch_my_intros")
+    def test_preview_sent_intro_question_shows_sent_intros(
+        self, mock_fetch_intros, mock_slots, _mock_ai, _mock_ai2
+    ) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "list_intros",
+            "zip": None,
+            "identity_snippet": None,
+            "intro_direction": "sent",
+            "confidence": 0.9,
+        }
+        mock_fetch_intros.return_value = [
+            {
+                "id": "intro-1",
+                "nickname": "Natasha",
+                "direction": "sent",
+                "match_reason": "You both fit mom.",
+                "expires_at": None,
+            }
+        ]
+        result = handle_discovery_turn(
+            "show me what did you send to them",
+            session_ctx={
+                "active_intent": "social.propose_intro",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "identity_snippet": "pakistani mom",
+                "peer_matches": [{"matching_peer_label": "Mom of toddlers", "preview": True}],
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertIn("Natasha", reply)
+        self.assertIn("you sent", reply.lower())
+        self.assertEqual(ctx.get("active_intent"), "social.list_intros")
+        self.assertEqual(peers, [])
+
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
@@ -878,6 +945,8 @@ class TestDiscoveryRouting(unittest.TestCase):
                 "routing_phase": "await_logout",
                 "guest_step": "await_logout",
                 "active_intent": "discovery.find_peers",
+                "intro_proposal": {"intro_id": "intro-1"},
+                "peer_matches": [{"matching_peer_label": "Mom", "preview": True}],
             },
             user_jwt="jwt",
             phone_verified=True,
@@ -891,6 +960,8 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertIsNone(ctx.get("auth_intent"))
         self.assertEqual(ctx.get("routing_phase"), "listening")
         self.assertNotIn("auth_action", ctx)
+        self.assertNotIn("intro_proposal", ctx)
+        self.assertNotIn("peer_matches", ctx)
         self.assertEqual(derive_ui_intent(ctx), UI_INTENT_CHAT)
 
     @patch("app.discovery_route._user_nickname", return_value="Amanda")
