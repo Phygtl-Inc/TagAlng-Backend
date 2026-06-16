@@ -113,8 +113,45 @@ class TestDeriveUiIntent(unittest.TestCase):
 
     def test_show_pending_intros(self) -> None:
         self.assertEqual(
-            derive_ui_intent({"pending_intros": []}),
+            derive_ui_intent(
+                {
+                    "active_intent": "social.list_intros",
+                    "pending_intros": [],
+                }
+            ),
             UI_INTENT_SHOW_PENDING_INTROS,
+        )
+
+    def test_stale_block_log_without_active_intent_is_chat(self) -> None:
+        from app.ui_intent import UI_INTENT_SHOW_BLOCK_LOG
+
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "active_intent": "looking.meet",
+                    "block_log_entries": [{"entry_id": "e1"}],
+                    "signal_saved": {"detail_text": "walking buddy"},
+                }
+            ),
+            UI_INTENT_SIGNAL_SAVED,
+        )
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "active_intent": "help.what_can_you_do",
+                    "block_log_entries": [{"entry_id": "e1"}],
+                }
+            ),
+            UI_INTENT_CHAT,
+        )
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "active_intent": "discovery.block_log",
+                    "block_log_entries": [{"entry_id": "e1"}],
+                }
+            ),
+            UI_INTENT_SHOW_BLOCK_LOG,
         )
 
 

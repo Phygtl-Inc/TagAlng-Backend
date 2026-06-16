@@ -93,12 +93,64 @@ def stamp_pending_intros_ctx(ctx: dict[str, Any], intros: list[dict[str, Any]]) 
 
 
 def infer_intro_direction(msg: str, slots: dict[str, Any] | None = None) -> str:
-    slot_dir = str((slots or {}).get("intro_direction") or "").lower()
-    if slot_dir in ("sent", "received", "all"):
-        return slot_dir
     lower = str(msg or "").lower()
+    if any(
+        phrase in lower
+        for phrase in (
+            "show my intros",
+            "show intros",
+            "my intros",
+            "pending intros",
+            "list intros",
+            "intro inbox",
+            "any intros",
+        )
+    ):
+        return "all"
     if any(w in lower for w in ("i sent", "outgoing", "waiting on them", "they respond")):
+        return "sent"
+    if any(
+        phrase in lower
+        for phrase in (
+            "what did you send",
+            "what intro did you send",
+            "who did i introduce",
+            "intros i sent",
+        )
+    ):
         return "sent"
     if any(w in lower for w in ("received", "waiting on me", "someone introduced", "for me to accept")):
         return "received"
+    slot_dir = str((slots or {}).get("intro_direction") or "").lower()
+    if slot_dir in ("sent", "received", "all"):
+        return slot_dir
     return "all"
+
+
+def format_duplicate_intro_reply(
+    *,
+    peer: dict[str, Any],
+    user_jwt: str,
+) -> str:
+    nick = str(peer.get("nickname") or peer.get("matching_peer_label") or "them").strip()
+    peer_id = str(peer.get("peer_user_id") or "")
+    try:
+        intros = fetch_my_intros(user_jwt, direction="all")
+    except HTTPException:
+        intros = []
+    for row in intros:
+        if peer_id and str(row.get("other_user_id") or "") != peer_id:
+            continue
+        direction = str(row.get("direction") or "")
+        reason = str(row.get("match_reason") or "").strip()
+        if direction == "received":
+            reply = f"{nick} already introduced you — it's waiting on you to respond."
+        else:
+            reply = f"You already sent an intro to {nick} — give them a little time to respond."
+        if reason:
+            reply += f" I matched you on: {reason}."
+        return reply
+    return (
+        f"There's already a recent intro between you and {nick}. "
+        "Say 'show my intros' to see what's pending."
+    )

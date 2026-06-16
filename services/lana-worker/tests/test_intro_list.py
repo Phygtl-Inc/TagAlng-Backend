@@ -4,6 +4,7 @@ from unittest.mock import patch
 from app.intro_list import (
     INTENT_LIST_INTROS,
     fetch_my_intros,
+    format_duplicate_intro_reply,
     format_intros_list_reply,
     infer_intro_direction,
     normalize_intro_row,
@@ -53,6 +54,43 @@ class TestIntroList(unittest.TestCase):
         self.assertEqual(infer_intro_direction("show intros I sent"), "sent")
         self.assertEqual(infer_intro_direction("intros waiting on me"), "received")
         self.assertEqual(infer_intro_direction("show my pending intros"), "all")
+        self.assertEqual(infer_intro_direction("show my intros"), "all")
+        self.assertEqual(
+            infer_intro_direction("show my intros", {"intro_direction": "sent"}),
+            "all",
+        )
+        self.assertEqual(infer_intro_direction("what did you send to natasha"), "sent")
+
+    @patch("app.intro_list.fetch_my_intros")
+    def test_format_duplicate_intro_reply_received(self, mock_fetch) -> None:
+        mock_fetch.return_value = [
+            {
+                "other_user_id": "peer-1",
+                "direction": "received",
+                "match_reason": "Pakistani Heritage",
+            }
+        ]
+        reply = format_duplicate_intro_reply(
+            peer={"peer_user_id": "peer-1", "nickname": "Kashaf"},
+            user_jwt="jwt",
+        )
+        self.assertIn("Kashaf already introduced you", reply)
+        self.assertIn("Pakistani Heritage", reply)
+
+    @patch("app.intro_list.fetch_my_intros")
+    def test_format_duplicate_intro_reply_sent(self, mock_fetch) -> None:
+        mock_fetch.return_value = [
+            {
+                "other_user_id": "peer-1",
+                "direction": "sent",
+                "match_reason": "Mom",
+            }
+        ]
+        reply = format_duplicate_intro_reply(
+            peer={"peer_user_id": "peer-1", "nickname": "Natasha"},
+            user_jwt="jwt",
+        )
+        self.assertIn("You already sent an intro to Natasha", reply)
 
     def test_stamp_pending_intros_ctx(self) -> None:
         ctx: dict = {}

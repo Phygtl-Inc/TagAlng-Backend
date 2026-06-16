@@ -78,6 +78,8 @@ Rules:
 - Every claim MUST have source_quote from this message and bucket
 - concept must match ^[a-z][a-z0-9_]{1,63}$
 - NEVER extract race, exact age, sex/gender demographics, street address
+- NEVER extract negative or exclusion claims ("not Brazilian", "no Italian", "without X")
+- ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 - nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
 

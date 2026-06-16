@@ -13,6 +13,21 @@ EVENT_DRAFT_REQUIRED = ("title", "starts_at", "venue_name")
 
 ALL_BUCKETS = VALID_BUCKETS | EVENT_BUCKETS
 
+_UI_METADATA_LINE_RE = re.compile(
+    r"^(?:heritage|stage|vicinity|faith|activity|interest|general)\s*·\s*.+$",
+    re.I,
+)
+
+
+def sanitize_assistant_message(text: str) -> str:
+    """Drop orchestrator UI metadata lines leaked into assistant_message."""
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    lines = [ln for ln in raw.splitlines() if not _UI_METADATA_LINE_RE.match(ln.strip())]
+    cleaned = "\n".join(lines).strip()
+    return cleaned or raw
+
 
 def event_draft_blockers(draft: dict[str, Any] | None) -> list[str]:
     data = draft or {}

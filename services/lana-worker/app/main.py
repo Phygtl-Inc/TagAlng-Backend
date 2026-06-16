@@ -27,6 +27,7 @@ from app.db import (
     list_messages,
     transcript_text,
     update_session_context,
+    merge_session_context,
 )
 from app.local_signals import block_log_take_action, fetch_my_block_log, normalize_block_log_row
 from app.lana_paths import (
@@ -61,6 +62,8 @@ from app.models import (
     HighlightSpan,
     JointMomentCandidate,
     JointMomentPayload,
+    IdentityClaimRow,
+    IdentityProfilePayload,
     IntroProposalPayload,
     PendingIntroRow,
     SignalSavedPayload,
@@ -86,7 +89,13 @@ from app.claims_persist import (
     should_extract_claims_from_message,
 )
 from app.profile_photo import upload_profile_photo_bytes
-from app.ui_intent import PEER_SURFACE_UI_INTENTS, derive_ui_intent
+from app.ui_intent import (
+    PEER_SURFACE_UI_INTENTS,
+    UI_INTENT_SHOW_BLOCK_LOG,
+    UI_INTENT_SHOW_IDENTITY_PROFILE,
+    UI_INTENT_SIGNAL_SAVED,
+    derive_ui_intent,
+)
 from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
@@ -226,6 +235,8 @@ def _legacy_lana_turn(
         )
         if peers:
             turn_ctx["peer_matches"] = peers
+        else:
+            turn_ctx["peer_matches"] = []
         return reply, status, turn_ctx, ui_raw, None
     if purpose == "profile_intake":
         sess_ctx = session_ctx or {}
@@ -469,6 +480,36 @@ def _signal_saved_from_ctx(ctx: dict[str, Any]) -> SignalSavedPayload | None:
     )
 
 
+def _identity_profile_from_ctx(ctx: dict[str, Any]) -> IdentityProfilePayload | None:
+    raw = ctx.get("identity_profile")
+    if not raw or not isinstance(raw, dict):
+        return None
+    profile = raw.get("profile") if isinstance(raw.get("profile"), dict) else {}
+    claims_raw = raw.get("claims") if isinstance(raw.get("claims"), list) else []
+    claims: list[IdentityClaimRow] = []
+    for row in claims_raw[:24]:
+        if not isinstance(row, dict):
+            continue
+        claims.append(
+            IdentityClaimRow(
+                id=str(row.get("id") or "") or None,
+                concept=str(row.get("concept") or "") or None,
+                label=str(row.get("label") or "") or None,
+                tone=str(row.get("tone") or "") or None,
+                confidence=row.get("confidence"),
+                disclosure=str(row.get("disclosure") or "") or None,
+                bucket=str(row.get("bucket") or "") or None,
+                source_quote=str(row.get("source_quote") or "") or None,
+            )
+        )
+    return IdentityProfilePayload(
+        mapped_summary=str(raw.get("mapped_summary") or "") or None,
+        nickname=str(profile.get("nickname") or "") or None,
+        block_display_name=str(profile.get("block_display_name") or "") or None,
+        claims=claims,
+    )
+
+
 def _signup_routing_phase_for_fe(ctx: dict[str, Any], auth: AuthSession) -> str | None:
     """
     Map session ctx → routing_phase for the PWA verify gate.
@@ -514,18 +555,27 @@ def _onboarding_fields(
 ) -> dict[str, Any]:
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
     intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
-    pending_intros = _pending_intros_from_ctx(ctx)
-    block_log_entries = _block_log_from_ctx(ctx)
-    signal_saved = _signal_saved_from_ctx(ctx)
-    peers_raw = _peer_matches_from_ctx(ctx)
-    activities = _activity_previews_from_ctx(ctx)
     ui_intent = derive_ui_intent(
         ctx,
         ready_to_complete=ready_to_complete,
-        peer_count=len(peers_raw),
-        activity_count=len(activities),
+        peer_count=len(_peer_matches_from_ctx(ctx)),
+        activity_count=len(_activity_previews_from_ctx(ctx)),
         phone_verified=auth.phone_verified,
     )
+    pending_intros = _pending_intros_from_ctx(ctx)
+    block_log_entries = (
+        _block_log_from_ctx(ctx) if ui_intent == UI_INTENT_SHOW_BLOCK_LOG else []
+    )
+    signal_saved = (
+        _signal_saved_from_ctx(ctx) if ui_intent == UI_INTENT_SIGNAL_SAVED else None
+    )
+    identity_profile = (
+        _identity_profile_from_ctx(ctx)
+        if ui_intent == UI_INTENT_SHOW_IDENTITY_PROFILE
+        else None
+    )
+    peers_raw = _peer_matches_from_ctx(ctx)
+    activities = _activity_previews_from_ctx(ctx)
     routing_phase = _signup_routing_phase_for_fe(ctx, auth)
     peers = peers_raw if ui_intent in PEER_SURFACE_UI_INTENTS else []
     return {
@@ -536,6 +586,7 @@ def _onboarding_fields(
         "pending_intros": pending_intros,
         "block_log_entries": block_log_entries,
         "signal_saved": signal_saved,
+        "identity_profile": identity_profile,
         "phone_verified": auth.phone_verified,
         "home_block_assigned": bool(auth.home_block_id or ctx.get("preview_block_id")),
         "peer_matches": peers,
@@ -746,7 +797,7 @@ def create_lana_session(
             opening,
             {"status": status, "ui": ui_raw, "orchestrator": use_orch},
         )
-        merged_ctx = {**(session.get("context") or {}), **session_ctx}
+        merged_ctx = merge_session_context(session.get("context"), session_ctx)
         update_session_context(
             session_id,
             merged_ctx,
@@ -884,7 +935,7 @@ def send_lana_message(
                 embed=False,
             )
         with timer.stage("db_update_session"):
-            merged = {**(session.get("context") or {}), **session_ctx}
+            merged = merge_session_context(session.get("context"), session_ctx)
             update_session_context(
                 session_id,
                 merged,

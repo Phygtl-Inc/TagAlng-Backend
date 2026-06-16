@@ -3,7 +3,7 @@ from typing import Any
 
 from app.context import build_system_prompt, load_prompt
 from app.profile_intake import apply_profile_stop_rules
-from app.lana_ui import merge_event_drafts, parse_event_draft, parse_event_turn_ui, parse_turn_ui, finalize_event_draft
+from app.lana_ui import merge_event_drafts, parse_event_draft, parse_event_turn_ui, parse_turn_ui, finalize_event_draft, sanitize_assistant_message
 from app.orchestrator.llm import llm_json, router_model, synthesizer_model
 from app.orchestrator.memory import format_core_block, format_recent_turns, format_recall_memories
 from app.turn_timing import TurnTimer
@@ -237,6 +237,11 @@ def _parse_lana_synth(
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
     assistant_message = str(raw.get("assistant_message", "")).strip()[:1200]
     notes = list(routing.get("enforce_notes") or [])
+    ui = parse_turn_ui(raw)
+    if tool_result and tool_result.get("peer_matches") and tool_result.get("summary"):
+        assistant_message = str(tool_result["summary"])[:1200]
+    elif assistant_message:
+        assistant_message = sanitize_assistant_message(assistant_message)
     if not assistant_message:
         if "discovery_need_zip" in notes or (tool_result and tool_result.get("reason") == "need_zip"):
             assistant_message = "What ZIP code is your block? (e.g. 32827)"
@@ -253,7 +258,6 @@ def _parse_lana_synth(
                 "Hey — I'm here for your block. Ask me to find neighbors like you or say log in."
             )
     status = "continue"
-    ui = parse_turn_ui(raw)
     ctx: dict[str, Any] = {"last_status": status, "unified_mode": True}
     if tool_result and tool_result.get("peer_matches"):
         ctx["peer_matches"] = tool_result["peer_matches"]

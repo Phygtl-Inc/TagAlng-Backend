@@ -861,6 +861,96 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(ctx.get("active_intent"), "social.list_intros")
         self.assertEqual(peers, [])
 
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    @patch("app.discovery_route.fetch_my_intros")
+    def test_show_my_intros_lists_received_when_sent_filter_empty(
+        self, mock_fetch_intros, mock_slots, _mock_ai, _mock_ai2
+    ) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "list_intros",
+            "zip": None,
+            "identity_snippet": None,
+            "intro_direction": "sent",
+            "confidence": 0.9,
+        }
+        mock_fetch_intros.return_value = [
+            {
+                "id": "intro-1",
+                "nickname": "Kashaf",
+                "direction": "received",
+                "match_reason": "Pakistani Heritage",
+                "expires_at": "2099-01-01T00:00:00Z",
+            }
+        ]
+        result = handle_discovery_turn(
+            "show my intros",
+            session_ctx={
+                "active_intent": "social.propose_intro",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "recent_intro_duplicate": {
+                    "candidate_user_id": "peer-1",
+                    "candidate_nickname": "Kashaf",
+                    "match_reason": "Pakistani Heritage",
+                },
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertIn("Kashaf", reply)
+        self.assertIn("waiting on you", reply.lower())
+        self.assertNotIn("i already sent", reply.lower())
+        self.assertEqual(ctx.get("active_intent"), "social.list_intros")
+        self.assertEqual(peers, [])
+        self.assertEqual(mock_fetch_intros.call_count, 1)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    @patch("app.discovery_route.fetch_my_intros")
+    def test_list_intros_empty_shows_inbox_message_not_session_duplicate(
+        self, mock_fetch_intros, mock_slots, _mock_ai, _mock_ai2
+    ) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "list_intros",
+            "zip": None,
+            "identity_snippet": None,
+            "intro_direction": "sent",
+            "confidence": 0.9,
+        }
+        mock_fetch_intros.return_value = []
+        result = handle_discovery_turn(
+            "what did you send to natasha",
+            session_ctx={
+                "active_intent": "social.propose_intro",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "recent_intro_duplicate": {
+                    "candidate_user_id": "peer-1",
+                    "candidate_nickname": "Natasha",
+                    "match_reason": "Mom",
+                },
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertIn("don't have any pending intros", reply.lower())
+        self.assertNotIn("recent intro to Natasha".lower(), reply.lower())
+        self.assertEqual(ctx.get("active_intent"), "social.list_intros")
+        self.assertEqual(peers, [])
+
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
@@ -1019,6 +1109,43 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(peers[0]["peer_user_id"], "peer-1")
         self.assertEqual(len(ctx.get("peer_matches") or []), 1)
         self.assertEqual(ctx["peer_matches"][0]["peer_user_id"], "peer-1")
+
+
+class TestPeerDrilldownRouting(unittest.TestCase):
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    def test_second_neighbor_details_not_list_intros(
+        self, mock_slots, _mock_ai, _mock_ai2
+    ) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "list_intros",
+            "confidence": 0.9,
+        }
+        peers = [
+            {"matching_peer_label": "Mom of toddlers", "preview": True},
+            {"matching_peer_label": "Pakistani mom", "preview": True, "peer_user_id": "peer-2"},
+        ]
+        with patch("app.discovery_route._preview_peers_with_ids", return_value=peers):
+            result = handle_discovery_turn(
+                "show me second neighbour mom details",
+                session_ctx={
+                    "routing_phase": PHASE_PREVIEW,
+                    "preview_block_id": "block-1",
+                    "peer_matches": peers,
+                },
+                user_jwt="jwt",
+                phone_verified=True,
+                home_block_id="block-1",
+                is_anonymous=False,
+            )
+        self.assertIsNotNone(result)
+        reply, ctx, _, returned = result
+        self.assertIn("pakistani mom", reply.lower())
+        self.assertEqual(ctx.get("active_intent"), "discovery.find_peers")
+        self.assertNotEqual(ctx.get("active_intent"), "social.list_intros")
+        self.assertEqual(len(returned), 1)
 
 
 class TestUnifiedOpening(unittest.TestCase):

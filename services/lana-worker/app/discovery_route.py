@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.auth import phone_has_registered_account, service_client
+from app.claim_search import parse_claim_filters, peer_matches_identity_snippet
 from app.discovery_slots import (
     ai_parse_discovery_turn,
     discovery_ai_enabled,
@@ -20,6 +21,7 @@ from app.discovery_slots import (
     slots_want_signup_gate,
 )
 from app.turn_timing import TurnTimer
+from app.turn_surfaces import clear_turn_surfaces
 from app.guest_capabilities import (
     fetch_peer_matches,
     format_peer_matches,
@@ -35,6 +37,7 @@ from app.intro_proposal import (
     stamp_intro_proposal_ctx,
     try_propose_intro_from_preview,
     wants_neighbor_intro,
+    pick_peer_for_intro,
 )
 from app.intro_list import (
     INTENT_LIST_INTROS,
@@ -71,10 +74,48 @@ from app.claims_persist import (
     extract_display_name_reply,
     extract_nickname_from_message,
     persist_profile_patch,
+    scrub_negative_heritage_claims,
     user_needs_display_name,
 )
 from app.profile_photo import handle_profile_photo_turn, user_profile_photo_url
 from app.supabase_rpc import call_rpc
+from app.layer1_handlers import (
+    HELP_WHAT_CAN_YOU_DO,
+    HELP_WHO_ARE_YOU,
+    fetch_block_summary,
+    fetch_identity_dashboard,
+    fetch_peers_by_attr_filter,
+    summarize_partial_claim_matches,
+    format_attr_peers_reply,
+    format_block_summary_reply,
+    format_identity_profile_reply,
+    format_peer_detail_reply,
+    handle_add_or_edit_claim,
+    handle_change_name,
+    handle_notification_prefs,
+    peers_to_match_rows,
+    stamp_identity_profile_ctx,
+)
+from app.layer1_intents import (
+    LOOKING_SHARING_INTENTS,
+    intent_confidence_met,
+    is_block_activity_browse,
+    is_profile_acknowledgment,
+    normalize_attr_filter_text,
+    phrase_linear_intent,
+    slots_linear_intent,
+)
+from app.layer1_tier import handle_respond_nudge
+from app.signal_capture import (
+    PHASE_SIGNAL_CONFIRM,
+    PHASE_SIGNAL_EXTRACT,
+    PHASE_SIGNAL_LISTENING,
+    advance_signal_draft,
+    clear_signal_draft,
+    draft_from_slots,
+    is_signal_lane_intent,
+    should_abandon_signal_draft,
+)
 
 PHASE_NEED_ZIP = "need_zip"
 PHASE_NEED_IDENTITY = "need_identity"
@@ -97,6 +138,13 @@ _FUNNEL_PHASES = frozenset(
 _MORE_DETAIL_RE = re.compile(
     r"\b(more|names?|introduce|connect|who are they|show me|full|details?|"
     r"see them|meet them|talk to)\b",
+    re.I,
+)
+_PEER_DRILLDOWN_RE = re.compile(
+    r"\b(?:show me|tell me about|details? (?:on|about|for)|more about)\b.*"
+    r"\b(?:first|second|third|\d+(?:st|nd|rd)?|neighbor|neighbour)\b"
+    r"|\b(?:first|second|third|\d+(?:st|nd|rd)?)\b.*"
+    r"\b(?:neighbor|neighbour|mom|dad|peer|match)\b.*\b(?:detail|details|more|who)\b",
     re.I,
 )
 _VERIFY_HELP_RE = re.compile(
@@ -130,6 +178,23 @@ _NOT_IDENTITY_REPLIES = frozenset(
 _AFFIRMATIVE_REPLIES = frozenset(
     {"ok", "okay", "yes", "yeah", "yep", "sure", "done", "ready", "go", "great", "perfect"}
 )
+
+
+def _clear_peer_surface(ctx: dict[str, Any]) -> None:
+    """Drop stale peer cards when this turn is not a peer-match response."""
+    ctx["peer_matches"] = []
+
+
+def _wants_block_log(msg: str, slots: dict[str, Any]) -> bool:
+    if is_block_activity_browse(msg):
+        return False
+    if phrase_linear_intent(msg) == "discovery.block_log":
+        return True
+    linear = slots_linear_intent(slots)
+    if linear == "discovery.block_log":
+        return intent_confidence_met(slots, linear)
+    goal = str(slots.get("goal") or "none")
+    return goal == "show_block_log" and float(slots.get("confidence", 0.0)) >= 0.5
 
 
 def _preview_peers_with_ids(
@@ -249,8 +314,19 @@ def _try_neighbor_intro_turn(
             "matching_peer_label": intro.get("match_reason"),
         }
         stamp_intro_proposal_ctx(ctx, intro=intro, peer=peer)
+        ctx.pop("recent_intro_duplicate", None)
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "lana_propose_neighbor_intro")
     else:
+        if str(intro.get("status") or "") == "duplicate":
+            ctx["recent_intro_duplicate"] = {
+                "candidate_user_id": intro.get("candidate_user_id"),
+                "candidate_nickname": (
+                    (selected_peer or {}).get("nickname")
+                    or (selected_peer or {}).get("matching_peer_label")
+                    or "that neighbor"
+                ),
+                "match_reason": str((selected_peer or {}).get("matching_peer_label") or "").strip(),
+            }
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, str(intro.get("status") or "intro_skipped"))
     ctx.pop("activity_previews", None)
     if selected_peer:
@@ -266,16 +342,549 @@ def _maybe_attach_intro_offer(
     peers: list[dict[str, Any]],
     ctx: dict[str, Any],
     identity_snippet: str | None,
+    msg: str | None = None,
 ) -> str:
     if ctx.get("intro_offer_shown") or ctx.get("intro_proposal") or ctx.get("pending_intro_offer"):
         return reply
+    if msg and (is_profile_acknowledgment(msg) or (_is_affirmative(msg) and not wants_peer_find(msg))):
+        return reply
     peer = next((p for p in peers if p.get("peer_user_id")), None)
     if not peer:
+        return reply
+    if not peer_matches_identity_snippet(peer, identity_snippet):
         return reply
     reason = build_match_reason(identity_snippet=identity_snippet, peer=peer)
     stamp_intro_offer_ctx(ctx, peer=peer, match_reason=reason)
     ctx["intro_offer_shown"] = True
     return f"{reply}\n\n{format_intro_offer_reply(peer, reason)}"
+
+
+def _try_awaiting_name_change_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Finish settings.change_name when user replies with just their name."""
+    awaiting = bool(session_ctx.get("awaiting_name_change"))
+    rename_flow = (
+        str(session_ctx.get("active_intent") or "") == "settings.change_name"
+        and str(session_ctx.get("routing_phase") or "") == PHASE_NEED_DISPLAY_NAME
+    )
+    if not awaiting and not rename_flow:
+        return None
+    reply, nick = handle_change_name(user_id, msg)
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=(phase or "listening") if nick else PHASE_NEED_DISPLAY_NAME,
+        active_intent="settings.change_name",
+    )
+    if nick:
+        ctx["display_name_saved"] = True
+        ctx["nickname"] = nick
+        ctx.pop("awaiting_name_change", None)
+    else:
+        ctx["awaiting_name_change"] = True
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_name")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_layer1_intent_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+    user_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Layer 1 explicit intents — identity, block summary, settings, help."""
+    linear = slots_linear_intent(slots)
+    if not linear or not intent_confidence_met(slots, linear):
+        return None
+
+    ctx_base = dict(session_ctx)
+
+    if linear == "identity.show_my_profile":
+        if not phone_verified:
+            return (
+                "Verify your phone first — then I can show your full profile and claims.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent="identity.show_my_profile",
+                ),
+                _discovery_routing_stub(phase or "listening", "show_profile_need_verify"),
+                [],
+            )
+        if user_id:
+            scrub_negative_heritage_claims(user_id)
+        dashboard = fetch_identity_dashboard(user_jwt)
+        reply = format_identity_profile_reply(dashboard)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or PHASE_PREVIEW,
+            active_intent="identity.show_my_profile",
+        )
+        stamp_identity_profile_ctx(ctx, dashboard)
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_profile_dashboard")
+        return reply, ctx, ctx["last_routing"], []
+
+    if linear in ("identity.add_claim", "identity.edit_claim"):
+        reply, saved = handle_add_or_edit_claim(user_id, msg, linear_intent=linear)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent=linear,
+        )
+        if saved > 0 and phone_verified:
+            try:
+                dashboard = fetch_identity_dashboard(user_jwt)
+                stamp_identity_profile_ctx(ctx, dashboard)
+            except HTTPException:
+                pass
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "extract_identity_claims")
+        return reply, ctx, ctx["last_routing"], []
+
+    if linear == "discovery.block_log":
+        if not phone_verified:
+            return (
+                "Verify your phone first — then I can show your block log.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent=INTENT_SHOW_BLOCK_LOG,
+                ),
+                _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
+                [],
+            )
+        try:
+            entries = fetch_my_block_log(user_jwt)
+        except HTTPException as exc:
+            detail = str(exc.detail or "").lower()
+            if (
+                "pgrst202" in detail
+                or "get_my_block_log" in detail
+                or "read-only transaction" in detail
+                or "25006" in detail
+            ):
+                return (
+                    "Your block log isn't available yet — we're still rolling it out on this environment.",
+                    _routing_ctx(
+                        ctx_base,
+                        phase=phase or "listening",
+                        active_intent=INTENT_SHOW_BLOCK_LOG,
+                    ),
+                    _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
+                    [],
+                )
+            raise
+        reply = format_block_log_reply(entries)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or PHASE_PREVIEW,
+            active_intent=INTENT_SHOW_BLOCK_LOG,
+        )
+        stamp_block_log_ctx(ctx, entries)
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_block_log")
+        ctx.pop("activity_previews", None)
+        _clear_peer_surface(ctx)
+        return reply, ctx, ctx["last_routing"], []
+
+    if linear == "discovery.find_in_block":
+        block_id = _resolve_block_id_for_turn(
+            session_ctx=session_ctx,
+            home_block_id=home_block_id,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+        )
+        if not block_id and not phone_verified:
+            return (
+                "What ZIP are you in? Once I know your block I can summarize what's happening nearby.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_NEED_ZIP,
+                    active_intent="discovery.find_in_block",
+                ),
+                _discovery_routing_stub(PHASE_NEED_ZIP, "block_summary_need_zip"),
+                [],
+            )
+        summary = fetch_block_summary(user_jwt, block_id=block_id)
+        reply = format_block_summary_reply(
+            block_name=str(summary.get("block_name") or "your block"),
+            neighbor_count=int(summary.get("neighbor_count") or 0),
+            match_count=int(summary.get("match_count") or 0),
+            block_state=summary.get("block_state"),
+            active_signal_count=int(summary.get("active_signal_count") or 0),
+            browse_mode=is_block_activity_browse(msg),
+        )
+        sig_n = int(summary.get("active_signal_count") or 0)
+        if sig_n > 0 and not is_block_activity_browse(msg):
+            reply += f" {sig_n} neighbor ask{'s' if sig_n != 1 else ''} or offer{'s' if sig_n != 1 else ''} active on your block."
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or PHASE_PREVIEW,
+            active_intent="discovery.find_in_block",
+        )
+        ctx["block_summary"] = summary
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_block_summary")
+        _clear_peer_surface(ctx)
+        ctx.pop("activity_previews", None)
+        return reply, ctx, ctx["last_routing"], []
+
+    if linear == "identity.complete_profile":
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent="identity.complete_profile",
+        )
+        if is_profile_acknowledgment(msg):
+            ctx["last_routing"] = _discovery_routing_stub(phase or PHASE_PREVIEW, "profile_ack")
+            return (
+                "Perfect — I've got you. Want neighbors like you, to post a swap, or your block log?",
+                ctx,
+                ctx["last_routing"],
+                [],
+            )
+        ctx["ready_to_complete"] = True
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "complete_profile")
+        return (
+            "That's you — tap Complete when you're ready and I'll lock in your profile.",
+            ctx,
+            ctx["last_routing"],
+            [],
+        )
+
+    if linear == "discovery.find_by_attrs":
+        if not phone_verified:
+            return (
+                "Verify your phone first — then I can search neighbors by those traits.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent="discovery.find_by_attrs",
+                ),
+                _discovery_routing_stub(phase or "listening", "find_by_attrs_need_verify"),
+                [],
+            )
+        filter_text = normalize_attr_filter_text(msg, slots)
+        if len(filter_text) < 2:
+            return (
+                "Who should I look for — heritage, life stage, language, interests?",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_NEED_IDENTITY,
+                    active_intent="discovery.find_by_attrs",
+                ),
+                _discovery_routing_stub(PHASE_NEED_IDENTITY, "find_by_attrs_need_filter"),
+                [],
+            )
+        try:
+            peers = fetch_peers_by_attr_filter(user_jwt, filter_text, limit=5, slots=slots)
+        except HTTPException:
+            peers = []
+        partial_summary = None
+        if not peers:
+            partial_summary = summarize_partial_claim_matches(
+                user_jwt,
+                parse_claim_filters(filter_text, slots),
+            )
+        reply = format_attr_peers_reply(
+            peers,
+            filter_text=filter_text,
+            partial_summary=partial_summary,
+        )
+        peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=PHASE_PREVIEW,
+            active_intent="discovery.find_by_attrs",
+            identity_snippet=filter_text,
+        )
+        ctx["peer_matches"] = peer_rows
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
+        ctx.pop("activity_previews", None)
+        return reply, ctx, ctx["last_routing"], peer_rows
+
+    if linear == "settings.change_zip":
+        return (
+            "Sure — what's your new ZIP code?",
+            _routing_ctx(
+                ctx_base,
+                phase=PHASE_NEED_ZIP,
+                active_intent="settings.change_zip",
+            ),
+            _discovery_routing_stub(PHASE_NEED_ZIP, "settings_change_zip"),
+            [],
+        )
+
+    if linear == "settings.change_name":
+        reply, nick = handle_change_name(user_id, msg)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=(phase or "listening") if nick else PHASE_NEED_DISPLAY_NAME,
+            active_intent="settings.change_name",
+        )
+        if nick:
+            ctx["display_name_saved"] = True
+            ctx["nickname"] = nick
+            ctx.pop("awaiting_name_change", None)
+        else:
+            ctx["awaiting_name_change"] = True
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_name")
+        return reply, ctx, ctx["last_routing"], []
+
+    if linear == "settings.notification_prefs":
+        reply, pref = handle_notification_prefs(user_jwt, msg)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent="settings.notification_prefs",
+        )
+        ctx["notification_prefs"] = {"sms": pref}
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_notification_prefs")
+        return reply, ctx, ctx["last_routing"], []
+
+    if linear == "help.what_can_you_do":
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent="help.what_can_you_do",
+        )
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_capabilities")
+        return HELP_WHAT_CAN_YOU_DO, ctx, ctx["last_routing"], []
+
+    if linear == "help.who_are_you":
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent="help.who_are_you",
+        )
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
+        return HELP_WHO_ARE_YOU, ctx, ctx["last_routing"], []
+
+    if linear == "tier.respond_nudge":
+        reply, pending, _action = handle_respond_nudge(
+            msg, user_jwt=user_jwt, session_ctx=session_ctx
+        )
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or PHASE_PREVIEW,
+            active_intent="tier.respond_nudge",
+        )
+        if pending:
+            ctx["pending_intro_respond"] = pending
+        else:
+            ctx.pop("pending_intro_respond", None)
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "respond_nudge")
+        return reply, ctx, ctx["last_routing"], []
+
+    return None
+
+
+def _try_signal_lane_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """LOOKING/SHARING 4-phase cascade → save_local_signal."""
+    ctx_base = dict(session_ctx)
+    draft = ctx_base.get("signal_draft")
+    if isinstance(draft, dict) and should_abandon_signal_draft(msg, draft, slots):
+        clear_signal_draft(ctx_base)
+        draft = None
+    linear = slots_linear_intent(slots) if slots else None
+    active_linear = None
+    if isinstance(draft, dict):
+        active_linear = str(draft.get("linear_intent") or "")
+    elif linear and is_signal_lane_intent(slots):
+        active_linear = str(linear)
+
+    if active_linear or isinstance(draft, dict):
+        if not phone_verified:
+            return (
+                "Verify your phone first — then I can post that to your block.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent=active_linear or INTENT_SAVE_SIGNAL,
+                ),
+                _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
+                [],
+            )
+        if not resolve_block_id(session_ctx, home_block_id):
+            block_id = _resolve_block_id_for_turn(
+                session_ctx=session_ctx,
+                home_block_id=home_block_id,
+                user_jwt=user_jwt,
+                phone_verified=phone_verified,
+            )
+            if block_id:
+                ctx_base["preview_block_id"] = block_id
+        if not resolve_block_id(ctx_base, home_block_id):
+            return (
+                "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_NEED_ZIP,
+                    active_intent=active_linear or INTENT_SAVE_SIGNAL,
+                ),
+                _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
+                [],
+            )
+
+    if isinstance(draft, dict):
+        updated, prompt, ready = advance_signal_draft(draft, msg=msg)
+        ctx_base["signal_draft"] = updated
+        route_phase = str(updated.get("phase") or PHASE_SIGNAL_EXTRACT)
+        active = str(updated.get("linear_intent") or INTENT_SAVE_SIGNAL)
+        if prompt and not ready:
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=route_phase,
+                active_intent=active,
+            )
+            ctx["last_routing"] = _discovery_routing_stub(route_phase, "signal_confirm_missing")
+            return prompt, ctx, ctx["last_routing"], []
+        if ready:
+            save_slots = {
+                "goal": "save_signal",
+                "confidence": 0.95,
+                "signal_intent": updated.get("intent"),
+                "signal_detail": updated.get("detail"),
+                "signal_category": updated.get("category"),
+                "linear_intent": updated.get("linear_intent"),
+            }
+            ctx_base.pop("signal_draft", None)
+            clear_signal_draft(ctx_base)
+            return _try_save_signal_turn(
+                msg=msg,
+                slots=save_slots,
+                session_ctx=ctx_base,
+                user_jwt=user_jwt,
+                phone_verified=phone_verified,
+                home_block_id=home_block_id,
+                phase=phase,
+            )
+
+    if not slots or not is_signal_lane_intent(slots):
+        return None
+    if not intent_confidence_met(slots, str(linear or "")):
+        return None
+
+    new_draft = draft_from_slots(slots, msg=msg)
+    updated, prompt, ready = advance_signal_draft(new_draft, msg=msg)
+    ctx_base["signal_draft"] = updated
+    active = str(updated.get("linear_intent") or linear or INTENT_SAVE_SIGNAL)
+    if prompt and not ready:
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=str(updated.get("phase") or PHASE_SIGNAL_CONFIRM),
+            active_intent=active,
+        )
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_SIGNAL_CONFIRM, "signal_extract")
+        return prompt, ctx, ctx["last_routing"], []
+    if ready:
+        ctx_base.pop("signal_draft", None)
+        clear_signal_draft(ctx_base)
+        save_slots = {
+            **slots,
+            "goal": "save_signal",
+            "confidence": max(float(slots.get("confidence", 0.9)), 0.9),
+            "signal_intent": updated.get("intent"),
+            "signal_detail": updated.get("detail"),
+            "signal_category": updated.get("category"),
+            "linear_intent": updated.get("linear_intent"),
+        }
+        return _try_save_signal_turn(
+            msg=msg,
+            slots=save_slots,
+            session_ctx=ctx_base,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+        )
+    return None
+
+
+def _try_peer_detail_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    if not looks_like_peer_drilldown(msg):
+        return None
+    if _wants_block_log(msg, slots):
+        return None
+    ctx_base = dict(session_ctx)
+    block_id = _resolve_block_id_for_turn(
+        session_ctx=session_ctx,
+        home_block_id=home_block_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+    )
+    if not block_id:
+        return None
+    peers = _preview_peers_with_ids(
+        user_jwt=user_jwt,
+        session_ctx=session_ctx,
+        block_id=block_id,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+    )
+    if not peers:
+        return (
+            "I don't have neighbor matches loaded yet — say find people like me first.",
+            _routing_ctx(
+                ctx_base,
+                phase=phase or PHASE_PREVIEW,
+                active_intent=INTENT_FIND_PEERS,
+                preview_block_id=block_id,
+            ),
+            _discovery_routing_stub(phase or "listening", "peer_detail_empty"),
+            [],
+        )
+    selected = pick_peer_for_intro(peers, msg=msg)
+    if not selected:
+        return None
+    peer_index = None
+    for i, peer in enumerate(peers):
+        if not isinstance(peer, dict):
+            continue
+        if peer is selected:
+            peer_index = i
+            break
+        if str(peer.get("peer_user_id") or "") and str(peer.get("peer_user_id") or "") == str(
+            selected.get("peer_user_id") or ""
+        ):
+            peer_index = i
+            break
+    reply = format_peer_detail_reply(selected, index=peer_index)
+    peer_rows = peers_to_match_rows([selected], phone_verified=phone_verified)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=PHASE_PREVIEW,
+        preview_block_id=block_id,
+        active_intent=INTENT_FIND_PEERS,
+    )
+    ctx["peer_matches"] = peer_rows
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "peer_detail")
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], peer_rows
 
 
 def _try_list_intros_turn(
@@ -287,6 +896,10 @@ def _try_list_intros_turn(
     phone_verified: bool,
     phase: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    if _wants_block_log(msg, slots):
+        return None
+    if looks_like_peer_drilldown(msg):
+        return None
     goal = str(slots.get("goal") or "none")
     if goal != "list_intros" or float(slots.get("confidence", 0.0)) < 0.5:
         return None
@@ -303,6 +916,8 @@ def _try_list_intros_turn(
     direction = infer_intro_direction(msg, slots)
     try:
         intros = fetch_my_intros(user_jwt, direction=direction)
+        if not intros and direction in ("sent", "received"):
+            intros = fetch_my_intros(user_jwt, direction="all")
     except HTTPException as exc:
         if exc.detail == "phone_not_verified":
             return (
@@ -322,6 +937,7 @@ def _try_list_intros_turn(
     stamp_pending_intros_ctx(ctx, intros)
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_intros")
     ctx.pop("activity_previews", None)
+    _clear_peer_surface(ctx)
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -335,12 +951,20 @@ def _try_save_signal_turn(
     home_block_id: str | None,
     phase: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    linear = slots_linear_intent(slots)
     goal = str(slots.get("goal") or "none")
-    if goal != "save_signal" or float(slots.get("confidence", 0.0)) < 0.55:
+    is_signal = goal == "save_signal" or (linear in LOOKING_SHARING_INTENTS)
+    if not is_signal:
+        return None
+    if linear and not intent_confidence_met(slots, linear):
+        if goal != "save_signal" or float(slots.get("confidence", 0.0)) < 0.55:
+            return None
+    elif goal == "save_signal" and float(slots.get("confidence", 0.0)) < 0.55:
         return None
 
     ctx_base = dict(session_ctx)
     intent = normalize_signal_intent(slots.get("signal_intent"))
+    active_intent = linear or INTENT_SAVE_SIGNAL
     detail = str(slots.get("signal_detail") or msg or "").strip()[:500]
     category = str(slots.get("signal_category") or "").strip() or None
 
@@ -349,7 +973,7 @@ def _try_save_signal_turn(
     if not detail:
         return (
             "Tell me a bit more — what are you looking for or offering on your block?",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SAVE_SIGNAL),
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
             _discovery_routing_stub(phase or "listening", "save_signal_need_detail"),
             [],
         )
@@ -357,7 +981,7 @@ def _try_save_signal_turn(
     if not phone_verified:
         return (
             "Verify your phone first — then I can post that to your block.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SAVE_SIGNAL),
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
             _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
             [],
         )
@@ -366,7 +990,7 @@ def _try_save_signal_turn(
     if not block_id:
         return (
             "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
-            _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=INTENT_SAVE_SIGNAL),
+            _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
             _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
             [],
         )
@@ -385,7 +1009,7 @@ def _try_save_signal_turn(
         if "block_required" in detail_err:
             return (
                 "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
-                _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=INTENT_SAVE_SIGNAL),
+                _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
                 _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
                 [],
             )
@@ -395,9 +1019,9 @@ def _try_save_signal_turn(
     ctx = _routing_ctx(
         ctx_base,
         phase=phase or PHASE_PREVIEW,
-        active_intent=INTENT_SAVE_SIGNAL,
+        active_intent=active_intent,
     )
-    stamp_signal_saved_ctx(ctx, result)
+    stamp_signal_saved_ctx(ctx, result, active_intent=active_intent)
     if int(result.get("matches_created") or 0) > 0:
         try:
             entries = fetch_my_block_log(user_jwt)
@@ -406,19 +1030,20 @@ def _try_save_signal_turn(
             pass
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
     ctx.pop("activity_previews", None)
+    clear_signal_draft(ctx)
     return reply, ctx, ctx["last_routing"], []
 
 
 def _try_show_block_log_turn(
     *,
+    msg: str,
     slots: dict[str, Any],
     session_ctx: dict[str, Any],
     user_jwt: str,
     phone_verified: bool,
     phase: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    goal = str(slots.get("goal") or "none")
-    if goal != "show_block_log" or float(slots.get("confidence", 0.0)) < 0.5:
+    if not _wants_block_log(msg, slots):
         return None
 
     ctx_base = dict(session_ctx)
@@ -430,7 +1055,23 @@ def _try_show_block_log_turn(
             [],
         )
 
-    entries = fetch_my_block_log(user_jwt)
+    try:
+        entries = fetch_my_block_log(user_jwt)
+    except HTTPException as exc:
+        detail = str(exc.detail or "").lower()
+        if (
+            "pgrst202" in detail
+            or "get_my_block_log" in detail
+            or "read-only transaction" in detail
+            or "25006" in detail
+        ):
+            return (
+                "Your block log isn't available yet — we're still rolling it out on this environment.",
+                _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
+                _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
+                [],
+            )
+        raise
     reply = format_block_log_reply(entries)
     ctx = _routing_ctx(
         ctx_base,
@@ -440,6 +1081,7 @@ def _try_show_block_log_turn(
     stamp_block_log_ctx(ctx, entries)
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_block_log")
     ctx.pop("activity_previews", None)
+    _clear_peer_surface(ctx)
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -451,6 +1093,20 @@ def wants_more_peer_detail(text: str) -> bool:
     if re.search(r"\b(?:what(?:'s| is)\s+my\s+name|my\s+name)\b", s, re.I):
         return False
     return bool(_MORE_DETAIL_RE.search(s))
+
+
+def looks_like_peer_drilldown(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    if re.search(r"\b(?:show my intros|my intros|pending intros|intro inbox)\b", s, re.I):
+        return False
+    if _PEER_DRILLDOWN_RE.search(s):
+        return True
+    return bool(
+        wants_more_peer_detail(s)
+        and re.search(r"\b(?:neighbor|neighbour|mom|dad|peer|match)\b", s, re.I)
+    )
 
 
 def wants_verify_help(text: str) -> bool:
@@ -509,10 +1165,17 @@ def _turn_wants_logout(
 
 
 def wants_activities_browse(text: str) -> bool:
-    return bool(_ACTIVITIES_RE.search(str(text or "").strip()))
+    s = str(text or "").strip()
+    if re.search(r"\b(?:on|in) (?:my )?block\b", s, re.I):
+        return False
+    return bool(_ACTIVITIES_RE.search(s))
 
 
-def _active_intent_for_goal(goal: str) -> str | None:
+def _active_intent_for_goal(goal: str, slots: dict[str, Any] | None = None) -> str | None:
+    if slots:
+        linear = slots_linear_intent(slots)
+        if linear:
+            return linear
     if goal == "activities":
         return INTENT_FIND_ACTIVITIES
     if goal in ("peers", "both"):
@@ -573,9 +1236,12 @@ def _show_activities_preview(
     ctx_base: dict[str, Any],
     block_id: str,
     block_label: str,
+    msg: str = "",
+    phone_verified: bool = False,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    events = fetch_preview_events_on_block(block_id)
-    reply = format_activities_message(events, block_label)
+    weekend_only = bool(re.search(r"\bweekend\b", str(msg or ""), re.I))
+    events = fetch_preview_events_on_block(block_id, weekend_only=weekend_only)
+    reply = format_activities_message(events, block_label, phone_verified=phone_verified)
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_PREVIEW,
@@ -584,7 +1250,7 @@ def _show_activities_preview(
     )
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "browse_block_activities")
     ctx["activity_previews"] = activity_previews_from_events(events)
-    ctx["peer_matches"] = []
+    _clear_peer_surface(ctx)
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -736,6 +1402,9 @@ def wants_discovery_turn(
     if _turn_wants_login(msg, slots, session_ctx):
         return False
 
+    if session_ctx.get("signal_draft"):
+        return True
+
     if _explicit_funnel_input(msg, slots=slots, session_ctx=session_ctx):
         return True
 
@@ -856,6 +1525,8 @@ def _should_skip_preview_refetch(
     """After first preview, let orchestrator handle pushback unless explicit refresh."""
     if phase != PHASE_PREVIEW:
         return False
+    if is_profile_acknowledgment(msg):
+        return True
     if wants_more_peer_detail(msg) or goal in ("verify", "rsvp"):
         return False
     if slots_want_preview_refetch(slots or {}, session_ctx):
@@ -943,6 +1614,7 @@ def _routing_ctx(
         "active_intent": active_intent,
         "routing_phase": phase,
     }
+    clear_turn_surfaces(out)
     out.update(extra)
     return out
 
@@ -957,8 +1629,26 @@ def resolve_block_id(
 ) -> str | None:
     if home_block_id:
         return home_block_id
-    bid = session_ctx.get("preview_block_id")
+    bid = session_ctx.get("preview_block_id") or session_ctx.get("home_block_id")
     return str(bid) if bid else None
+
+
+def _resolve_block_id_for_turn(
+    *,
+    session_ctx: dict[str, Any],
+    home_block_id: str | None,
+    user_jwt: str,
+    phone_verified: bool,
+) -> str | None:
+    block_id = resolve_block_id(session_ctx, home_block_id)
+    if block_id or not phone_verified:
+        return block_id
+    try:
+        summary = fetch_block_summary(user_jwt)
+    except Exception:
+        return block_id
+    bid = summary.get("block_id")
+    return str(bid) if bid else block_id
 
 
 def fetch_blocks_for_zip(user_jwt: str, zip5: str) -> list[dict[str, Any]]:
@@ -1076,30 +1766,54 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
     return out
 
 
-def fetch_preview_events_on_block(block_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
+def fetch_preview_events_on_block(
+    block_id: str,
+    *,
+    limit: int = 5,
+    weekend_only: bool = False,
+) -> list[dict[str, Any]]:
     """Upcoming open events on preview block (service role)."""
     try:
         sb = service_client()
+        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
         res = (
             sb.table("events")
             .select("title, starts_at, venue_name, cohort_tags")
             .eq("block_id", block_id)
             .eq("status", "open")
+            .gte("starts_at", now_iso)
             .order("starts_at")
-            .limit(limit)
+            .limit(limit * 3)
             .execute()
         )
-        return [r for r in (res.data or []) if isinstance(r, dict)]
+        rows = [r for r in (res.data or []) if isinstance(r, dict)]
+        if weekend_only:
+            filtered: list[dict[str, Any]] = []
+            for row in rows:
+                when = str(row.get("starts_at") or "")
+                try:
+                    dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
+                    if dt.weekday() in (5, 6):
+                        filtered.append(row)
+                except ValueError:
+                    continue
+            rows = filtered
+        return rows[:limit]
     except Exception:
         return []
 
 
-def format_activities_message(events: list[dict[str, Any]], block_label: str | None) -> str:
+def format_activities_message(
+    events: list[dict[str, Any]],
+    block_label: str | None,
+    *,
+    phone_verified: bool = False,
+) -> str:
     where = block_label or "your block"
     if not events:
         return (
             f"I don't see open activities on {where} in the next couple weeks yet. "
-            "You can verify your phone to host something, or tell me what you're looking for."
+            "You can host something, or tell me what you're looking for."
         )
     lines = [f"Here's what's coming up near {where}:"]
     for ev in events[:5]:
@@ -1112,7 +1826,10 @@ def format_activities_message(events: list[dict[str, Any]], block_label: str | N
         if when:
             line += f" ({when})"
         lines.append(line)
-    lines.append("Verify your phone to RSVP — or ask me to find neighbors like you.")
+    if phone_verified:
+        lines.append("Want to RSVP to one of these, or should I find neighbors like you?")
+    else:
+        lines.append("Verify your phone to RSVP — or ask me to find neighbors like you.")
     return "\n".join(lines)
 
 
@@ -1399,21 +2116,19 @@ def handle_discovery_turn(
         ctx["unified_mode"] = True
         return reply, ctx, {"outcome": "A", "intent_class": "profile_photo", "confidence": 1.0}, []
 
-    if discovery_ai_enabled() and slots:
-        list_turn = _try_list_intros_turn(
-            msg=msg,
-            slots=slots,
-            session_ctx=session_ctx,
-            user_jwt=user_jwt,
-            phone_verified=phone_verified,
-            phase=phase,
-        )
-        if list_turn is not None:
-            reply, ctx, routing, peers = list_turn
-            ctx["unified_mode"] = True
-            return reply, ctx, routing, peers
+    name_change_turn = _try_awaiting_name_change_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_id=user_id,
+        phase=phase,
+    )
+    if name_change_turn is not None:
+        reply, ctx, routing, peers = name_change_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
 
-        signal_turn = _try_save_signal_turn(
+    if discovery_ai_enabled() and slots:
+        signal_turn = _try_signal_lane_turn(
             msg=msg,
             slots=slots,
             session_ctx=session_ctx,
@@ -1427,7 +2142,51 @@ def handle_discovery_turn(
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 
+        layer1_turn = _try_layer1_intent_turn(
+            msg=msg,
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+            user_id=user_id,
+        )
+        if layer1_turn is not None:
+            reply, ctx, routing, peers = layer1_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        peer_detail_turn = _try_peer_detail_turn(
+            msg=msg,
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+        )
+        if peer_detail_turn is not None:
+            reply, ctx, routing, peers = peer_detail_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        list_turn = _try_list_intros_turn(
+            msg=msg,
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            phase=phase,
+        )
+        if list_turn is not None:
+            reply, ctx, routing, peers = list_turn
+            ctx["unified_mode"] = True
+            _clear_peer_surface(ctx)
+            return reply, ctx, routing, peers
+
         block_log_turn = _try_show_block_log_turn(
+            msg=msg,
             slots=slots,
             session_ctx=session_ctx,
             user_jwt=user_jwt,
@@ -1438,6 +2197,24 @@ def handle_discovery_turn(
             reply, ctx, routing, peers = block_log_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
+
+        if phone_verified and wants_neighbor_intro(msg):
+            intro_block = resolve_block_id(session_ctx, home_block_id)
+            if intro_block:
+                intro_turn = _try_neighbor_intro_turn(
+                    msg=msg,
+                    session_ctx=session_ctx,
+                    ctx_base=dict(session_ctx),
+                    user_jwt=user_jwt,
+                    block_id=intro_block,
+                    phone_verified=phone_verified,
+                    goal=str(slots.get("goal") or "none"),
+                    slots=slots,
+                )
+                if intro_turn is not None:
+                    reply, ctx, routing, peers = intro_turn
+                    ctx["unified_mode"] = True
+                    return reply, ctx, routing, peers
 
     if phase == PHASE_AWAIT_LOGOUT or session_ctx.get("auth_intent") == "logout":
         if wants_cancel_logout(msg):
@@ -1646,6 +2423,8 @@ def handle_discovery_turn(
             ctx_base=ctx_base,
             block_id=block_id,
             block_label=block_label,
+            msg=msg,
+            phone_verified=phone_verified,
         )
 
     if not effective_snippet:
@@ -1697,6 +2476,15 @@ def handle_discovery_turn(
 
     # Post-verify funnel before verify gate — JWT may lag one turn after OTP.
     if ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME:
+        if session_ctx.get("awaiting_name_change") or active == "settings.change_name":
+            name_turn = _try_awaiting_name_change_turn(
+                msg=msg,
+                session_ctx=session_ctx,
+                user_id=user_id,
+                phase=phase,
+            )
+            if name_turn is not None:
+                return name_turn
         snippet = str(
             session_ctx.get("identity_snippet") or ctx_base.get("identity_snippet") or ""
         ).strip()
@@ -1789,6 +2577,7 @@ def handle_discovery_turn(
             peers=peers,
             ctx=ctx,
             identity_snippet=identity or None,
+            msg=msg,
         )
         ctx["last_routing"] = _discovery_routing_stub(
             PHASE_PREVIEW, "match_peers_by_claim_vectors"
@@ -1829,6 +2618,7 @@ def handle_discovery_turn(
                     peers=peers,
                     ctx=ctx,
                     identity_snippet=identity or None,
+                    msg=msg,
                 )
                 ctx["last_routing"] = _discovery_routing_stub(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
@@ -1874,6 +2664,7 @@ def handle_discovery_turn(
                     peers=peers,
                     ctx=ctx,
                     identity_snippet=identity or None,
+                    msg=msg,
                 )
                 ctx["last_routing"] = _discovery_routing_stub(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"

@@ -102,6 +102,24 @@ class SignalSavedPayload(BaseModel):
     matches_created: int | None = None
 
 
+class IdentityClaimRow(BaseModel):
+    id: str | None = None
+    concept: str | None = None
+    label: str | None = None
+    tone: str | None = None
+    confidence: float | None = None
+    disclosure: str | None = None
+    bucket: str | None = None
+    source_quote: str | None = None
+
+
+class IdentityProfilePayload(BaseModel):
+    mapped_summary: str | None = None
+    nickname: str | None = None
+    block_display_name: str | None = None
+    claims: list[IdentityClaimRow] = Field(default_factory=list)
+
+
 class MappedSpan(BaseModel):
     text: str
     bucket: str = "general"
@@ -149,6 +167,7 @@ class CreateSessionResponse(BaseModel):
     pending_intros: list[PendingIntroRow] = Field(default_factory=list)
     block_log_entries: list[BlockLogEntryRow] = Field(default_factory=list)
     signal_saved: SignalSavedPayload | None = None
+    identity_profile: IdentityProfilePayload | None = None
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     auth_intent: str | None = None
@@ -191,6 +210,7 @@ class SendMessageResponse(BaseModel):
     pending_intros: list[PendingIntroRow] = Field(default_factory=list)
     block_log_entries: list[BlockLogEntryRow] = Field(default_factory=list)
     signal_saved: SignalSavedPayload | None = None
+    identity_profile: IdentityProfilePayload | None = None
     phone_verified: bool = False
     home_block_assigned: bool = False
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)

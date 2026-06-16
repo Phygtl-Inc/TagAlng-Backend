@@ -1,4 +1,4 @@
-"""Flash extraction for discovery funnel slots and goals (replaces regex identity/heuristics)."""
+"""Flash extraction for Layer 1 linear intents + discovery funnel slots."""
 
 from __future__ import annotations
 
@@ -6,6 +6,13 @@ import os
 import re
 from typing import Any
 
+from app.layer1_intents import (
+    LINEAR_INTENTS,
+    enrich_slots,
+    normalize_attr_filter_text,
+    phrase_linear_intent,
+    slots_want_layer1_handling,
+)
 from app.orchestrator.llm import llm_configured, llm_json, router_model
 from app.turn_timing import TurnTimer
 
@@ -60,13 +67,15 @@ _SYSTEM = (
     "list_intros = user wants to see pending intros they sent or received "
     "(show my intros, pending intros, intro status, who did I introduce, intros waiting on me, "
     "'what did you send', 'show me what you sent to them', 'what intro message did you send'); "
-    "When user asks what Lana sent in an intro, or asks intro status after an intro attempt, "
-    "choose goal=list_intros (not peers), set in_discovery=true, and prefer intro_direction=sent. "
+    "When user asks what Lana sent in an intro ('what did you send to them'), "
+    "choose goal=list_intros (not peers), set in_discovery=true, intro_direction=sent. "
+    "For 'show my intros' / pending inbox / any intros → goal=list_intros, intro_direction=all. "
     "Do NOT choose goal=peers for intro-message/status questions even if user says 'show me'. "
     "save_signal = user is seeking OR offering something on their block — swap/borrow items, meetups/playgroups, "
     "or local tips/recommendations (any phrasing: looking for rain boots, I have a stroller to give, "
     "host a coffee morning, know a good pediatrician, anyone want to swap); "
-    "show_block_log = user wants their block match log / what's matching on my block / block radar; "
+    "show_block_log = user wants **their own** pending match log (show my block log, who matched with me, my matches); "
+    "NOT what neighbors are posting — for 'what are people looking for on my block' use goal=peers or find_in_block, NOT show_block_log. "
     "profile_photo = user wants to add/change/upload a profile picture, agrees to Lana's photo suggestion "
     "(yes/sure), says they finished uploading, or cancels photo upload; "
     "chat = companionship / profile read / any non-funnel question; "
@@ -76,9 +85,33 @@ _SYSTEM = (
     "done (finished uploading), skip (cancel/not now), none. "
     "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action. "
     "When goal=save_signal set signal_intent: swap_seek|swap_offer|meet_seek|host_meet|tip_seek|tip_share, "
-    "signal_detail = what they want/offer (short phrase from message), signal_category = optional bucket "
-    "(e.g. pediatrician, rain boots, playgroup). "
-    "When goal=show_block_log set intro_direction null."
+    "signal_detail = what they want/offer (short phrase from message), signal_category = optional bucket. "
+    "Classify save_signal by MEANING (infinite phrasing is normal): "
+    "meet_seek = wants a NEIGHBOR to do something WITH them (bicycle buddy, walking buddy, playdate, "
+    "coffee walk, stroller walk) — even if 'bike' or 'bicycle' appears; NOT swap_seek. "
+    "swap_seek/swap_offer = physical ITEMS to borrow/swap/buy from neighbors (laptop, rain boots, "
+    "kids bicycle, stroller, furniture) — NOT meet_seek, NOT tip_seek. "
+    "Kids clothing/gear (boots, onesies) may need size; bikes/electronics/furniture do not use 3T. "
+    "tip_seek/tip_share = local SERVICE or place RECOMMENDATION (teacher, tutor, pediatrician, restaurant, "
+    "plumber) — set signal_category education|health|food|home|activities; NOT swap_seek. "
+    "Set linear_intent: looking.meet for meet_seek, looking.swap for swap_seek, looking.tip for tip_seek, "
+    "sharing.swap for swap_offer, sharing.host for host_meet, sharing.tip for tip_share. "
+    "When goal=show_block_log set intro_direction null. "
+    "LAYER 1 CATALOG — set linear_intent to the best match (confidence ≥ 0.85 when sure): "
+    "discovery.find_peers|discovery.find_by_attrs|discovery.find_in_block|discovery.find_activities|discovery.block_log; "
+    "identity.add_claim|identity.edit_claim|identity.complete_profile|identity.show_my_profile; "
+    "looking.swap|looking.meet|looking.tip|sharing.swap|sharing.host|sharing.tip; "
+    "tier.send_nudge|tier.respond_nudge|social.list_intros|social.propose_intro; "
+    "auth.signup_phone|auth.login_phone|auth.logout|auth.upload_photo; "
+    "settings.change_name|settings.change_zip|settings.notification_prefs; "
+    "help.what_can_you_do|help.who_are_you. "
+    "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
+    "Use identity.add_claim when user describes themselves (heritage, stage, interests). "
+    "Use identity.edit_claim for corrections ('I'm not X, I'm Y', 'edit my identity'). "
+    "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
+    "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes. "
+    "Use help.what_can_you_do for help/what can you do; help.who_are_you for who are you. "
+    "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.)."
 )
 
 
@@ -109,6 +142,7 @@ def _format_history(history: list[dict[str, Any]] | None, *, limit: int = 8) -> 
 def _empty_slots() -> dict[str, Any]:
     return {
         "in_discovery": False,
+        "linear_intent": None,
         "goal": "none",
         "intro_direction": None,
         "zip": None,
@@ -210,6 +244,12 @@ def ai_parse_discovery_turn(
         signal_detail_s = str(signal_detail).strip()[:500] if signal_detail else None
         signal_category = raw.get("signal_category")
         signal_category_s = str(signal_category).strip()[:120] if signal_category else None
+        signal_stage = raw.get("signal_stage")
+        signal_stage_s = str(signal_stage).strip()[:80] if signal_stage else None
+        signal_when = raw.get("signal_when")
+        signal_when_s = str(signal_when).strip()[:120] if signal_when else None
+        attr_filter = raw.get("attr_filter")
+        attr_filter_s = str(attr_filter).strip()[:200] if attr_filter else None
         intro_direction = raw.get("intro_direction")
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
@@ -224,8 +264,11 @@ def ai_parse_discovery_turn(
             zip_s = m.group(1) if m else None
         ident = raw.get("identity_snippet")
         ident_s = str(ident).strip()[:400] if ident else None
-        return {
+        linear_raw = str(raw.get("linear_intent") or "").strip().lower()
+        linear_intent = linear_raw if linear_raw in LINEAR_INTENTS else None
+        return enrich_slots({
             "in_discovery": bool(raw.get("in_discovery")),
+            "linear_intent": linear_intent,
             "goal": goal,
             "intro_direction": intro_direction_s,
             "zip": zip_s,
@@ -234,8 +277,11 @@ def ai_parse_discovery_turn(
             "signal_intent": signal_intent_s,
             "signal_detail": signal_detail_s,
             "signal_category": signal_category_s,
+            "signal_stage": signal_stage_s,
+            "signal_when": signal_when_s,
+            "attr_filter": attr_filter_s,
             "confidence": float(raw.get("confidence", 0.0)),
-        }
+        }, msg=text)
     except Exception:
         return _empty_slots()
 
@@ -261,6 +307,7 @@ def _discovery_slot_payload(
         f"LATEST USER MESSAGE:\n{text}\n\n"
         "Return JSON:\n"
         "{\n"
+        '  "linear_intent": "<Layer 1 intent id or null>",\n'
         '  "in_discovery": true|false,\n'
         '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
         '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"none",\n'
@@ -268,6 +315,9 @@ def _discovery_slot_payload(
         '  "signal_intent": "swap_seek"|"swap_offer"|"meet_seek"|"host_meet"|"tip_seek"|"tip_share"|null,\n'
         '  "signal_detail": "string or null",\n'
         '  "signal_category": "string or null",\n'
+        '  "signal_stage": "string or null",\n'
+        '  "signal_when": "string or null",\n'
+        '  "attr_filter": "string or null",\n'
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
@@ -380,43 +430,12 @@ def slots_want_discovery_handling(
     routing_phase: str = "",
 ) -> bool:
     """AI decision: should discovery code handle this turn (not orchestrator)?"""
-    goal = str(slots.get("goal") or "none")
+    enriched = enrich_slots(slots)
+    if slots_want_layer1_handling(enriched, routing_phase=routing_phase):
+        return True
+    goal = str(enriched.get("goal") or "none")
     if goal in ("chat", "none", "profile_photo", "login", "logout"):
         return False
-    conf = float(slots.get("confidence", 0.0))
-    if goal in (
-        "peers",
-        "activities",
-        "both",
-        "verify",
-        "rsvp",
-        "propose_intro",
-        "list_intros",
-        "save_signal",
-        "show_block_log",
-    ):
-        phase = routing_phase or "listening"
-        if goal == "propose_intro":
-            return conf >= 0.5
-        if goal == "list_intros":
-            return conf >= 0.5
-        if goal == "save_signal":
-            return conf >= 0.55
-        if goal == "show_block_log":
-            return conf >= 0.5
-        if goal in ("peers", "both") and phase in ("listening", ""):
-            return conf >= 0.45
-        if slots.get("in_discovery"):
-            return conf >= 0.5
-        return conf >= 0.65
-    if goal == "continue":
-        phase = routing_phase or "listening"
-        if phase == "preview":
-            # Follow-ups in preview (pushback, clarify) → orchestrator with peer context
-            return False
-        if phase in ("need_zip", "need_identity", "need_display_name"):
-            return True
-        return slots.get("in_discovery") and conf >= 0.6
     return False
 
 
