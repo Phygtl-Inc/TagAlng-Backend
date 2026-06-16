@@ -141,8 +141,8 @@ From `LANA_UNIFIED_DISCOVERY_FRONTEND.md` plus v0.2 additions. Wire each value t
 | `collect_zip` | Numeric input · max 5 digits · "32827" placeholder |
 | `collect_identity` | Multi-line text composer · "Tell me about you..." |
 | `collect_display_name` | Single-line text · "Your name or a nickname..." |
-| `collect_phone` | Tel input · 16px JBM font · "(407) 555-0198" placeholder |
-| `collect_otp` | 6-box dashed OTP input (per C-SIGNUP-2/3) |
+| `collect_phone` | Tel input · 16px JBM font · "(407) 555-0198" placeholder · **Send code → POST phone to Lana** (not direct Supabase) |
+| `collect_otp` | 6-box dashed OTP input (per C-SIGNUP-2/3) · **Verify → POST OTP to Lana** → run `auth_action` |
 | `show_peer_preview` | Redacted peer cards · NO names/avatars |
 | `show_activity_preview` | Activity cards (events, meets) |
 | `confirm_profile` | MAPPED YOU layout · "That's me ✓" CTA |

@@ -35,7 +35,16 @@ class TestIntroProposalHelpers(unittest.TestCase):
         )
         self.assertIn("morning runs", reason.lower())
 
-    def test_pick_peer_for_intro_pending(self) -> None:
+    def test_pick_peer_for_intro_neighbor_index(self) -> None:
+        peers = [
+            {"peer_user_id": "u1", "matching_peer_label": "Pakistani Heritage"},
+            {"peer_user_id": "u2", "matching_peer_label": "New Mom"},
+        ]
+        picked = pick_peer_for_intro(peers, msg="neighbor 1")
+        self.assertEqual(picked["peer_user_id"], "u1")
+        picked2 = pick_peer_for_intro(peers, msg="first one")
+        self.assertEqual(picked2["peer_user_id"], "u1")
+
         peers = [
             {"peer_user_id": "u1", "matching_peer_label": "Runner"},
             {"peer_user_id": "u2", "matching_peer_label": "Parent"},

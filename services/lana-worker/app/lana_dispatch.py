@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.discovery_route import handle_discovery_turn
+from app.discovery_slots import discovery_ai_enabled
 from app.guest_login import wants_login as wants_login_intent
 
 LANA_UNIFIED_OPENING = (
@@ -65,7 +66,7 @@ def lana_unified_turn(
         return reply, "continue", ctx, ui, peers
 
     msg = str(user_message or "").strip().lower()
-    if wants_login_intent(msg):
+    if not discovery_ai_enabled() and wants_login_intent(msg):
         # handle_discovery_turn already tried login; fallback
         reply = "Sure — what's the phone number on your account?"
         ctx = {

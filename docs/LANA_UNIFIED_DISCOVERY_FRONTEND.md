@@ -187,6 +187,21 @@ Read **`ui_intent` every turn** (session create + each message). Switch UI based
 
 **Pairing with `auth_action`:** user can type phone/OTP in chat *or* use dedicated fields — both work. On the turn where Lana parses phone/OTP, check `auth_action` and call Supabase **before** treating auth as done.
 
+> **Do not** call `PUT /auth/v1/user` when the user taps **Send code** if Lana has not returned `auth_action` yet.  
+> On the verify gate turn (`collect_phone`, `auth_action: null`), **Send code** must **POST the phone to Lana** first (same as typing it in chat). Lana replies with `ui_intent: collect_otp` and `auth_action.type: link_phone_signup` — **then** run Supabase PUT.
+
+```ts
+// Correct "Send code" handler (collect_phone card)
+async function onSendCode(phone: string) {
+  const turn = await sendMessage(token, sessionId, normalizeE164(phone));
+  applyTurn(turn);
+  const action = authActionFromTurn(turn);
+  if (action?.type === 'link_phone_signup') {
+    await handleLanaAuthAction(action); // PUT /auth/v1/user + refresh session
+  }
+}
+```
+
 ```ts
 // After every Lana message:
 applyTurn(turn); // read ui_intent, peer_matches, routing_phase, etc.

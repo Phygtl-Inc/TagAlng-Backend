@@ -44,16 +44,25 @@ _SYSTEM = (
     "Pushback while still in listening with no preview yet but user demands find/show people → goal=peers. "
     "Only goal=peers + in_discovery=true in preview when user gives NEW self-description for matching "
     "(different identity_snippet than session) and explicitly wants a fresh search — not for questions. "
-    "When routing_phase=preview and phone_verified=false: user wants to sign up, create an account, "
-    "join, get verified, see names, connect, or complete registration "
-    "(e.g. 'sign me up', 'did you sign me up', 'I want to join', 'how do I verify') "
-    "→ goal=verify, in_discovery=true — discovery code will collect phone, NOT profile chat. "
-    "Do NOT classify signup/verify intent as goal=chat. "
-    "If phone_verified=true, signup/verify requests → goal=chat (already verified). "
-    "goal: peers = find/show neighbors; activities = browse events; both; verify = phone signup gate; rsvp; "
+    "AUTH vs discovery — classify carefully; infinite phrasing is normal: "
+    "When user wants to LOG IN to an EXISTING account (log me in, sign in, I already have an account, "
+    "returning user, let me back in, use my old account) → goal=login, in_discovery=false — "
+    "NOT peers, NOT verify, NOT chat. "
+    "When phone_verified=false and user wants to CREATE an account / SIGN UP / REGISTER / join TagAlng "
+    "(sign me up, create account, get verified, see names, complete registration — any phrasing) "
+    "→ goal=verify, in_discovery=true at ANY routing_phase — discovery collects phone, NOT profile chat. "
+    "Do NOT classify signup/verify as goal=peers or goal=chat. "
+    "When user wants to LOG OUT / sign out → goal=logout, in_discovery=false. "
+    "If phone_verified=true, new signup/verify requests → goal=chat (already verified). "
+    "goal: login = returning user access existing account; logout = sign out; "
+    "peers = find/show neighbors; activities = browse events; both; verify = phone signup gate; rsvp; "
     "propose_intro = user wants Lana to formally introduce them to a shown neighbor (preview, verified); "
     "list_intros = user wants to see pending intros they sent or received "
-    "(show my intros, pending intros, intro status, who did I introduce, intros waiting on me); "
+    "(show my intros, pending intros, intro status, who did I introduce, intros waiting on me, "
+    "'what did you send', 'show me what you sent to them', 'what intro message did you send'); "
+    "When user asks what Lana sent in an intro, or asks intro status after an intro attempt, "
+    "choose goal=list_intros (not peers), set in_discovery=true, and prefer intro_direction=sent. "
+    "Do NOT choose goal=peers for intro-message/status questions even if user says 'show me'. "
     "save_signal = user is seeking OR offering something on their block — swap/borrow items, meetups/playgroups, "
     "or local tips/recommendations (any phrasing: looking for rain boots, I have a stroller to give, "
     "host a coffee morning, know a good pediatrician, anyone want to swap); "
@@ -101,6 +110,7 @@ def _empty_slots() -> dict[str, Any]:
     return {
         "in_discovery": False,
         "goal": "none",
+        "intro_direction": None,
         "zip": None,
         "identity_snippet": None,
         "profile_photo_action": "none",
@@ -172,6 +182,8 @@ def ai_parse_discovery_turn(
             "activities",
             "both",
             "verify",
+            "login",
+            "logout",
             "rsvp",
             "propose_intro",
             "list_intros",
@@ -198,6 +210,10 @@ def ai_parse_discovery_turn(
         signal_detail_s = str(signal_detail).strip()[:500] if signal_detail else None
         signal_category = raw.get("signal_category")
         signal_category_s = str(signal_category).strip()[:120] if signal_category else None
+        intro_direction = raw.get("intro_direction")
+        intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
+        if intro_direction_s not in ("sent", "received", "all"):
+            intro_direction_s = None
         photo_action = str(raw.get("profile_photo_action") or "none").lower()
         if photo_action not in ("start", "accept", "skip", "done", "none"):
             photo_action = "none"
@@ -211,6 +227,7 @@ def ai_parse_discovery_turn(
         return {
             "in_discovery": bool(raw.get("in_discovery")),
             "goal": goal,
+            "intro_direction": intro_direction_s,
             "zip": zip_s,
             "identity_snippet": ident_s,
             "profile_photo_action": photo_action,
@@ -245,7 +262,7 @@ def _discovery_slot_payload(
         "Return JSON:\n"
         "{\n"
         '  "in_discovery": true|false,\n'
-        '  "goal": "peers"|"activities"|"both"|"verify"|"rsvp"|"propose_intro"|"list_intros"|'
+        '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
         '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"none",\n'
         '  "intro_direction": "sent"|"received"|"all"|null,\n'
         '  "signal_intent": "swap_seek"|"swap_offer"|"meet_seek"|"host_meet"|"tip_seek"|"tip_share"|null,\n'
@@ -327,6 +344,36 @@ def slots_want_profile_photo(
     return float(slots.get("confidence", 0.0)) >= 0.5
 
 
+_AUTH_SLOT_CONF = 0.5
+
+
+def slots_want_login(slots: dict[str, Any] | None) -> bool:
+    if not slots:
+        return False
+    return (
+        str(slots.get("goal") or "none") == "login"
+        and float(slots.get("confidence", 0.0)) >= _AUTH_SLOT_CONF
+    )
+
+
+def slots_want_logout(slots: dict[str, Any] | None) -> bool:
+    if not slots:
+        return False
+    return (
+        str(slots.get("goal") or "none") == "logout"
+        and float(slots.get("confidence", 0.0)) >= _AUTH_SLOT_CONF
+    )
+
+
+def slots_want_signup_gate(slots: dict[str, Any] | None) -> bool:
+    if not slots:
+        return False
+    return (
+        str(slots.get("goal") or "none") == "verify"
+        and float(slots.get("confidence", 0.0)) >= _AUTH_SLOT_CONF
+    )
+
+
 def slots_want_discovery_handling(
     slots: dict[str, Any],
     *,
@@ -334,7 +381,7 @@ def slots_want_discovery_handling(
 ) -> bool:
     """AI decision: should discovery code handle this turn (not orchestrator)?"""
     goal = str(slots.get("goal") or "none")
-    if goal in ("chat", "none", "profile_photo"):
+    if goal in ("chat", "none", "profile_photo", "login", "logout"):
         return False
     conf = float(slots.get("confidence", 0.0))
     if goal in (

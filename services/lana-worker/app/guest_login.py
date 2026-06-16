@@ -10,8 +10,8 @@ GUEST_STEP_LOGIN_OTP = "await_login_otp"
 GUEST_STEP_LOGOUT = "await_logout"
 
 _LOGIN_INTENT_RE = re.compile(
-    r"\b(log\s*in|login|sign\s*in|signin|existing\s+account|already\s+have\s+(?:an?\s+)?account|"
-    r"i\s+have\s+an\s+account|returning\s+user)\b",
+    r"\b(log\s*(?:me\s+)?in|login|sign\s*(?:me\s+)?in|signin|existing\s+account|"
+    r"already\s+have\s+(?:an?\s+)?account|i\s+have\s+an\s+account|returning\s+user)\b",
     re.I,
 )
 _LOGOUT_INTENT_RE = re.compile(
@@ -80,6 +80,10 @@ def _exit_logout_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
     }
     out.pop("login_phone", None)
     out.pop("auth_action", None)
+    # Stale discovery/intro surface from before logout must not re-show peer cards.
+    out.pop("intro_proposal", None)
+    out.pop("pending_intro_offer", None)
+    out.pop("peer_matches", None)
     return out
 
 
@@ -164,15 +168,10 @@ def handle_guest_login(
             )
         phone = extract_phone_e164(msg)
         if not phone:
-            if wants_login(msg):
-                return (
-                    "I didn't catch a valid phone number — include country code if you can "
-                    "(e.g. +15550000000).",
-                    _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
-                )
             return (
-                "No problem — what would you like to do? Find neighbors, plan something, or tell me about yourself.",
-                _exit_login_ctx(session_ctx),
+                "I didn't catch a valid phone number — include country code if you can "
+                "(e.g. +15550000000).",
+                _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
             )
         return (
             f"Got it — I sent a 6-digit code to {phone}. Enter it here when it arrives.",
@@ -213,7 +212,7 @@ def handle_guest_login(
             ),
         )
 
-    if step in ("early_chat", "intro_declined") and wants_login(msg):
+    if step in ("early_chat", "intro_declined"):
         return (
             "Sure — what's the phone number on your account?",
             _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),

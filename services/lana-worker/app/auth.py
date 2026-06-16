@@ -82,6 +82,51 @@ def service_client():
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
+def phone_has_registered_account(phone: str) -> bool:
+    """
+    True when phone belongs to a verified non-anonymous account.
+
+    Used during anonymous signup gate to route existing numbers to login OTP
+    instead of link_phone_signup (which 422s on duplicate phone).
+    """
+    normalized = str(phone or "").strip()
+    if not normalized:
+        return False
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return False
+    try:
+        sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        res = (
+            sb.table("users")
+            .select("id, phone_verified_at")
+            .eq("phone", normalized)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            return False
+        row = res.data[0]
+        if not row.get("phone_verified_at"):
+            return False
+        user_id = str(row.get("id") or "")
+        if not user_id:
+            return False
+        with httpx.Client(timeout=10.0) as client:
+            auth_res = client.get(
+                f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                },
+            )
+        if auth_res.status_code != 200:
+            return True
+        user = auth_res.json()
+        return bool(user.get("phone")) and not user.get("is_anonymous")
+    except Exception:
+        return False
+
+
 def _resolve_phone_verified(user_id: str, user: dict, profile: dict) -> bool:
     """Auth confirm time is source of truth; public.users may lag the sync trigger."""
     if profile.get("phone_verified_at"):

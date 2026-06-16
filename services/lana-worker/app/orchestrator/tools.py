@@ -492,13 +492,20 @@ def _find_peers(
         peers = fetch_preview_peers_on_block(bid, limit=int(args.get("limit") or 3))
         for p in peers:
             p["preview"] = True
+        phase = str(session_ctx.get("routing_phase") or "")
+        needs_verify_gate = bool(
+            session_ctx.get("peer_matches")
+            or phase == "preview"
+            or session_ctx.get("requires_phone_verification")
+        )
         return {
             "status": "ok",
             "tool": "find_peers",
             "preview": True,
             "peer_matches": peers,
             "block_id": bid,
-            "routing_phase": "preview",
+            "routing_phase": "await_signup_phone" if needs_verify_gate else "preview",
+            "requires_phone_verification": needs_verify_gate,
         }
 
     peers = fetch_peer_matches(jwt, limit=int(args.get("limit") or 5))

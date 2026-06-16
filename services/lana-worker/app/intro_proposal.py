@@ -57,6 +57,20 @@ def build_match_reason(
     return f"Lana matched you with {label} on your block."
 
 
+def _peer_index_from_message(msg: str) -> int | None:
+    lower = str(msg or "").lower()
+    if re.search(r"\b(?:first|1st|#1)\b", lower):
+        return 0
+    if re.search(r"\b(?:second|2nd|#2)\b", lower):
+        return 1
+    if re.search(r"\b(?:third|3rd|#3)\b", lower):
+        return 2
+    m = re.search(r"\b(?:neighbor|neighbour|person|match|#)\s*(\d+)\b", lower)
+    if m:
+        return int(m.group(1)) - 1
+    return None
+
+
 def pick_peer_for_intro(
     peers: list[dict[str, Any]],
     *,
@@ -75,6 +89,10 @@ def pick_peer_for_intro(
     if not identified:
         return None
 
+    idx = _peer_index_from_message(msg)
+    if idx is not None and 0 <= idx < len(identified):
+        return identified[idx]
+
     lower = str(msg or "").lower()
     for p in identified:
         label = str(p.get("matching_peer_label") or "").lower()
@@ -83,6 +101,8 @@ def pick_peer_for_intro(
             return p
         if nick and nick in lower:
             return p
+    if idx is not None and identified:
+        return identified[0]
     return identified[0]
 
 

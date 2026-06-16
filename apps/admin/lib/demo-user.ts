@@ -50,8 +50,10 @@ type SupabaseAuthResponse = {
   token_type?: string;
   user?: { id?: string; is_anonymous?: boolean };
   error?: string;
+  error_code?: string;
   error_description?: string;
   msg?: string;
+  code?: number;
 };
 
 /** E.164 for Supabase Auth (test numbers in Dashboard are digits-only, e.g. 9233079925193=000000). */
@@ -70,15 +72,37 @@ function authBaseUrl() {
 }
 
 function authErrorDetail(data: SupabaseAuthResponse, res: Response): string {
-  return data.error_description || data.msg || data.error || res.statusText;
+  const code = data.error_code || data.error;
+  const body = data.error_description || data.msg || data.error || res.statusText;
+  return code && code !== body ? `${code}: ${body}` : body;
 }
 
-function authPhoneErrorHint(err: unknown): string {
+function authPhoneErrorHint(err: unknown, data?: SupabaseAuthResponse): string {
   const msg = err instanceof Error ? err.message : String(err);
+  const code = data?.error_code || data?.error || '';
+
+  if (code === 'otp_disabled' || msg.includes('Signups not allowed for otp')) {
+    return (
+      `${msg} — Supabase Dashboard → Auth → Providers → Phone: enable Phone signups. ` +
+      `For dev, add test numbers (15550999012=000000) so Twilio is not required.`
+    );
+  }
+  if (code === 'phone_exists' || msg.includes('already registered')) {
+    return `${msg} — That number is on another account. Use a fresh test number or log in instead.`;
+  }
+  if (code === 'validation_failed' || msg.includes('Invalid phone')) {
+    return `${msg} — Use E.164 (e.g. +15550999012) or a US 10-digit number.`;
+  }
   if (msg.includes('Twilio') || msg.includes('572002')) {
     return (
       `${msg} — Add test number in Dashboard → Auth → Phone (digits only, no +): ` +
       `15550999012=000000 or 15550000000=000000. Then start a fresh Meet Lana session.`
+    );
+  }
+  if (msg.includes('422') || msg.includes('Unprocessable')) {
+    return (
+      `${msg} — Dev: use +15550999012 (OTP 000000) from Supabase test numbers. ` +
+      `Do not call PUT /auth/v1/user until Lana returns auth_action link_phone_signup.`
     );
   }
   return msg;
@@ -101,7 +125,7 @@ export async function linkPhoneSignup(accessToken: string, phone: string): Promi
   });
   const data = (await res.json().catch(() => ({}))) as SupabaseAuthResponse;
   if (!res.ok) {
-    throw new Error(authPhoneErrorHint(new Error(authErrorDetail(data, res))));
+    throw new Error(authPhoneErrorHint(new Error(authErrorDetail(data, res)), data));
   }
 }
 
