@@ -6,6 +6,7 @@ from app.layer1_handlers import format_identity_profile_reply
 from app.layer1_intents import (
     attr_filter_tokens,
     enrich_slots,
+    is_block_activity_browse,
     phrase_linear_intent,
     slots_linear_intent,
 )
@@ -35,6 +36,35 @@ class TestLayer1IntentCatalog(unittest.TestCase):
         self.assertEqual(
             phrase_linear_intent("who matched with me"),
             "discovery.block_log",
+        )
+
+    def test_phrase_block_browse_not_block_log(self) -> None:
+        self.assertEqual(
+            phrase_linear_intent("what are people looking for swap in my block"),
+            "discovery.find_in_block",
+        )
+        self.assertNotEqual(
+            phrase_linear_intent("what are people looking for swap in my block"),
+            "discovery.block_log",
+        )
+
+    def test_phrase_block_browse_swaps(self) -> None:
+        self.assertEqual(
+            phrase_linear_intent("what are swaps on my block"),
+            "discovery.find_in_block",
+        )
+        self.assertTrue(
+            is_block_activity_browse("show those 11 asks on my block"),
+        )
+
+    def test_phrase_tip_share_not_seek(self) -> None:
+        self.assertEqual(
+            phrase_linear_intent("Dr Smith is a great pediatrician"),
+            "sharing.tip",
+        )
+        self.assertEqual(
+            phrase_linear_intent("do you know a good pediatrician"),
+            "looking.tip",
         )
 
     def test_signal_intents_left_to_ai_not_phrase_regex(self) -> None:
@@ -171,6 +201,31 @@ class TestSignalCapture(unittest.TestCase):
         self.assertFalse(need)
         self.assertEqual(field, "")
         self.assertEqual(draft.get("category"), "education")
+
+    def test_stroller_swap_skips_clothing_size_prompt(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.swap",
+                "confidence": 0.9,
+                "signal_detail": "looking for a stroller",
+            },
+            msg="looking for a stroller",
+        )
+        need, field, _ = needs_confirm(draft)
+        self.assertFalse(need)
+        self.assertEqual(field, "")
+
+    def test_pediatrician_tip_normalizes_detail(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.tip",
+                "confidence": 0.9,
+            },
+            msg="what do you have any tip for me ? like do you know a good pediatrician",
+        )
+        self.assertEqual(draft.get("category"), "health")
+        self.assertIn("pediatrician", str(draft.get("detail") or "").lower())
+        self.assertNotIn("what do you have", str(draft.get("detail") or "").lower())
 
 
 class TestLayer1DiscoveryRouting(unittest.TestCase):

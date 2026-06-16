@@ -1111,6 +1111,43 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertEqual(ctx["peer_matches"][0]["peer_user_id"], "peer-1")
 
 
+class TestPeerDrilldownRouting(unittest.TestCase):
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    def test_second_neighbor_details_not_list_intros(
+        self, mock_slots, _mock_ai, _mock_ai2
+    ) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "list_intros",
+            "confidence": 0.9,
+        }
+        peers = [
+            {"matching_peer_label": "Mom of toddlers", "preview": True},
+            {"matching_peer_label": "Pakistani mom", "preview": True, "peer_user_id": "peer-2"},
+        ]
+        with patch("app.discovery_route._preview_peers_with_ids", return_value=peers):
+            result = handle_discovery_turn(
+                "show me second neighbour mom details",
+                session_ctx={
+                    "routing_phase": PHASE_PREVIEW,
+                    "preview_block_id": "block-1",
+                    "peer_matches": peers,
+                },
+                user_jwt="jwt",
+                phone_verified=True,
+                home_block_id="block-1",
+                is_anonymous=False,
+            )
+        self.assertIsNotNone(result)
+        reply, ctx, _, returned = result
+        self.assertIn("pakistani mom", reply.lower())
+        self.assertEqual(ctx.get("active_intent"), "discovery.find_peers")
+        self.assertNotEqual(ctx.get("active_intent"), "social.list_intros")
+        self.assertEqual(len(returned), 1)
+
+
 class TestUnifiedOpening(unittest.TestCase):
     def test_opening(self) -> None:
         opening, status, ctx, _ = lana_unified_opening()

@@ -37,6 +37,7 @@ from app.intro_proposal import (
     stamp_intro_proposal_ctx,
     try_propose_intro_from_preview,
     wants_neighbor_intro,
+    pick_peer_for_intro,
 )
 from app.intro_list import (
     INTENT_LIST_INTROS,
@@ -88,6 +89,7 @@ from app.layer1_handlers import (
     format_attr_peers_reply,
     format_block_summary_reply,
     format_identity_profile_reply,
+    format_peer_detail_reply,
     handle_add_or_edit_claim,
     handle_change_name,
     handle_notification_prefs,
@@ -97,6 +99,7 @@ from app.layer1_handlers import (
 from app.layer1_intents import (
     LOOKING_SHARING_INTENTS,
     intent_confidence_met,
+    is_block_activity_browse,
     is_profile_acknowledgment,
     normalize_attr_filter_text,
     phrase_linear_intent,
@@ -135,6 +138,13 @@ _FUNNEL_PHASES = frozenset(
 _MORE_DETAIL_RE = re.compile(
     r"\b(more|names?|introduce|connect|who are they|show me|full|details?|"
     r"see them|meet them|talk to)\b",
+    re.I,
+)
+_PEER_DRILLDOWN_RE = re.compile(
+    r"\b(?:show me|tell me about|details? (?:on|about|for)|more about)\b.*"
+    r"\b(?:first|second|third|\d+(?:st|nd|rd)?|neighbor|neighbour)\b"
+    r"|\b(?:first|second|third|\d+(?:st|nd|rd)?)\b.*"
+    r"\b(?:neighbor|neighbour|mom|dad|peer|match)\b.*\b(?:detail|details|more|who)\b",
     re.I,
 )
 _VERIFY_HELP_RE = re.compile(
@@ -176,6 +186,8 @@ def _clear_peer_surface(ctx: dict[str, Any]) -> None:
 
 
 def _wants_block_log(msg: str, slots: dict[str, Any]) -> bool:
+    if is_block_activity_browse(msg):
+        return False
     if phrase_linear_intent(msg) == "discovery.block_log":
         return True
     linear = slots_linear_intent(slots)
@@ -483,7 +495,12 @@ def _try_layer1_intent_turn(
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "discovery.find_in_block":
-        block_id = resolve_block_id(session_ctx, home_block_id)
+        block_id = _resolve_block_id_for_turn(
+            session_ctx=session_ctx,
+            home_block_id=home_block_id,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+        )
         if not block_id and not phone_verified:
             return (
                 "What ZIP are you in? Once I know your block I can summarize what's happening nearby.",
@@ -501,9 +518,11 @@ def _try_layer1_intent_turn(
             neighbor_count=int(summary.get("neighbor_count") or 0),
             match_count=int(summary.get("match_count") or 0),
             block_state=summary.get("block_state"),
+            active_signal_count=int(summary.get("active_signal_count") or 0),
+            browse_mode=is_block_activity_browse(msg),
         )
         sig_n = int(summary.get("active_signal_count") or 0)
-        if sig_n > 0:
+        if sig_n > 0 and not is_block_activity_browse(msg):
             reply += f" {sig_n} neighbor ask{'s' if sig_n != 1 else ''} or offer{'s' if sig_n != 1 else ''} active on your block."
         ctx = _routing_ctx(
             ctx_base,
@@ -702,6 +721,15 @@ def _try_signal_lane_turn(
                 [],
             )
         if not resolve_block_id(session_ctx, home_block_id):
+            block_id = _resolve_block_id_for_turn(
+                session_ctx=session_ctx,
+                home_block_id=home_block_id,
+                user_jwt=user_jwt,
+                phone_verified=phone_verified,
+            )
+            if block_id:
+                ctx_base["preview_block_id"] = block_id
+        if not resolve_block_id(ctx_base, home_block_id):
             return (
                 "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
                 _routing_ctx(
@@ -788,6 +816,77 @@ def _try_signal_lane_turn(
     return None
 
 
+def _try_peer_detail_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    if not looks_like_peer_drilldown(msg):
+        return None
+    if _wants_block_log(msg, slots):
+        return None
+    ctx_base = dict(session_ctx)
+    block_id = _resolve_block_id_for_turn(
+        session_ctx=session_ctx,
+        home_block_id=home_block_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+    )
+    if not block_id:
+        return None
+    peers = _preview_peers_with_ids(
+        user_jwt=user_jwt,
+        session_ctx=session_ctx,
+        block_id=block_id,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+    )
+    if not peers:
+        return (
+            "I don't have neighbor matches loaded yet — say find people like me first.",
+            _routing_ctx(
+                ctx_base,
+                phase=phase or PHASE_PREVIEW,
+                active_intent=INTENT_FIND_PEERS,
+                preview_block_id=block_id,
+            ),
+            _discovery_routing_stub(phase or "listening", "peer_detail_empty"),
+            [],
+        )
+    selected = pick_peer_for_intro(peers, msg=msg)
+    if not selected:
+        return None
+    peer_index = None
+    for i, peer in enumerate(peers):
+        if not isinstance(peer, dict):
+            continue
+        if peer is selected:
+            peer_index = i
+            break
+        if str(peer.get("peer_user_id") or "") and str(peer.get("peer_user_id") or "") == str(
+            selected.get("peer_user_id") or ""
+        ):
+            peer_index = i
+            break
+    reply = format_peer_detail_reply(selected, index=peer_index)
+    peer_rows = peers_to_match_rows([selected], phone_verified=phone_verified)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=PHASE_PREVIEW,
+        preview_block_id=block_id,
+        active_intent=INTENT_FIND_PEERS,
+    )
+    ctx["peer_matches"] = peer_rows
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "peer_detail")
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], peer_rows
+
+
 def _try_list_intros_turn(
     *,
     msg: str,
@@ -798,6 +897,8 @@ def _try_list_intros_turn(
     phase: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     if _wants_block_log(msg, slots):
+        return None
+    if looks_like_peer_drilldown(msg):
         return None
     goal = str(slots.get("goal") or "none")
     if goal != "list_intros" or float(slots.get("confidence", 0.0)) < 0.5:
@@ -992,6 +1093,20 @@ def wants_more_peer_detail(text: str) -> bool:
     if re.search(r"\b(?:what(?:'s| is)\s+my\s+name|my\s+name)\b", s, re.I):
         return False
     return bool(_MORE_DETAIL_RE.search(s))
+
+
+def looks_like_peer_drilldown(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    if re.search(r"\b(?:show my intros|my intros|pending intros|intro inbox)\b", s, re.I):
+        return False
+    if _PEER_DRILLDOWN_RE.search(s):
+        return True
+    return bool(
+        wants_more_peer_detail(s)
+        and re.search(r"\b(?:neighbor|neighbour|mom|dad|peer|match)\b", s, re.I)
+    )
 
 
 def wants_verify_help(text: str) -> bool:
@@ -1514,8 +1629,26 @@ def resolve_block_id(
 ) -> str | None:
     if home_block_id:
         return home_block_id
-    bid = session_ctx.get("preview_block_id")
+    bid = session_ctx.get("preview_block_id") or session_ctx.get("home_block_id")
     return str(bid) if bid else None
+
+
+def _resolve_block_id_for_turn(
+    *,
+    session_ctx: dict[str, Any],
+    home_block_id: str | None,
+    user_jwt: str,
+    phone_verified: bool,
+) -> str | None:
+    block_id = resolve_block_id(session_ctx, home_block_id)
+    if block_id or not phone_verified:
+        return block_id
+    try:
+        summary = fetch_block_summary(user_jwt)
+    except Exception:
+        return block_id
+    bid = summary.get("block_id")
+    return str(bid) if bid else block_id
 
 
 def fetch_blocks_for_zip(user_jwt: str, zip5: str) -> list[dict[str, Any]]:
@@ -2021,6 +2154,20 @@ def handle_discovery_turn(
         )
         if layer1_turn is not None:
             reply, ctx, routing, peers = layer1_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        peer_detail_turn = _try_peer_detail_turn(
+            msg=msg,
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+        )
+        if peer_detail_turn is not None:
+            reply, ctx, routing, peers = peer_detail_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 

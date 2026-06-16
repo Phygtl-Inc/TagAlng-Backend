@@ -112,10 +112,33 @@ _FIND_PEERS_RE = re.compile(
     r"who(?:'s| is) around(?: me)?|show me nearby|like me on (?:the )?block)\b",
     re.I,
 )
+_BLOCK_BROWSE_PHRASE = (
+    r"what (?:are|is) people (?:looking for|offering|swapping)|"
+    r"who(?:'s| is) (?:looking for|offering|swapping)|"
+    r"what(?:'s| is) (?:everyone|neighbors?) (?:looking for|offering|swapping)|"
+    r"any(?:one|body) (?:looking for|offering|swapping)|"
+    r"what(?:'s| are) swaps?|what are people swapping|"
+    r"show (?:those|the|my)?\s*\d*\s*(?:neighbor )?(?:asks?|offers?|swaps?)|"
+    r"show me what(?:'s| is) on (?:the )?block|"
+    r"what(?:'s| is) on (?:the )?block(?: marketplace)?"
+)
 _FIND_IN_BLOCK_RE = re.compile(
-    r"\b(?:what(?:'s| is) happening (?:on|in) (?:my )?block|"
-    r"who(?:'s| is) new (?:on )?(?:my )?block|block status|"
-    r"what(?:'s| is) (?:going on|new) (?:on|in) (?:my )?block)\b",
+    rf"\b(?:what(?:'s| is) happening (?:on|in) (?:my )?block|"
+    rf"who(?:'s| is) new (?:on )?(?:my )?block|block status|"
+    rf"what(?:'s| is) (?:going on|new) (?:on|in) (?:my )?block|"
+    rf"{_BLOCK_BROWSE_PHRASE})\b",
+    re.I,
+)
+_TIP_SEEK_RE = re.compile(
+    r"\b(?:know a good|know any good|do you know a good|recommend(?:ation)?(?: for)? a?|"
+    r"looking for a?|need a?|find a?|any tips? for)\b",
+    re.I,
+)
+_TIP_SHARE_RE = re.compile(
+    r"\b(?:i recommend|my recommendation|"
+    r"(?:dr\.?|doctor)\s+[\w.]+\s+is\s+(?:\w+\s+)*(?:great|good|awesome|the best)|"
+    r"(?:great|good|awesome)\s+(?:pediatrician|dentist|doctor|tutor|teacher|plumber|restaurant)|"
+    r"i have a tip|here'?s a tip|tip for you|try\s+(?:dr\.?|doctor))\b",
     re.I,
 )
 _BLOCK_LOG_RE = re.compile(
@@ -153,6 +176,11 @@ def is_profile_acknowledgment(msg: str) -> bool:
     return bool(_PROFILE_ACK_RE.match(str(msg or "").strip()))
 
 
+def is_block_activity_browse(msg: str) -> bool:
+    """Neighbor marketplace browse — NOT the user's personal block log."""
+    return bool(re.search(rf"\b(?:{_BLOCK_BROWSE_PHRASE})\b", str(msg or ""), re.I))
+
+
 def phrase_linear_intent(msg: str) -> str | None:
     """Narrow policy overrides only — NOT open-ended routing.
 
@@ -177,6 +205,10 @@ def phrase_linear_intent(msg: str) -> str | None:
         return "discovery.find_peers"
     if _FIND_BY_ATTRS_RE.search(text):
         return "discovery.find_by_attrs"
+    if _TIP_SEEK_RE.search(text) and not _TIP_SHARE_RE.search(text):
+        return "looking.tip"
+    if _TIP_SHARE_RE.search(text):
+        return "sharing.tip"
     return None
 
 

@@ -18,7 +18,12 @@ from app.claim_search import (
     filters_to_rpc_payload,
     parse_claim_filters,
 )
-from app.layer1_intents import LINEAR_INTENTS, attr_filter_tokens, slots_linear_intent
+from app.layer1_intents import (
+    LINEAR_INTENTS,
+    attr_filter_tokens,
+    is_block_activity_browse,
+    slots_linear_intent,
+)
 from app.local_signals import fetch_my_block_log
 from app.supabase_rpc import call_rpc
 
@@ -70,12 +75,17 @@ def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
         lines.append(summary)
     elif claims:
         by_bucket: dict[str, list[str]] = {}
+        seen_labels: set[str] = set()
         for c in claims:
             if not isinstance(c, dict):
                 continue
             label = str(c.get("label") or c.get("concept") or "").strip()
             if not label:
                 continue
+            key = label.lower()
+            if key in seen_labels:
+                continue
+            seen_labels.add(key)
             bucket = str(c.get("bucket") or "general").strip()
             by_bucket.setdefault(bucket, []).append(label)
         claim_bits: list[str] = []
@@ -114,7 +124,23 @@ def format_block_summary_reply(
     neighbor_count: int,
     match_count: int,
     block_state: str | None = None,
+    active_signal_count: int = 0,
+    browse_mode: bool = False,
 ) -> str:
+    if browse_mode:
+        sig_bit = (
+            f"{active_signal_count} neighbor ask{'s' if active_signal_count != 1 else ''} "
+            f"or offer{'s' if active_signal_count != 1 else ''} active on your block right now "
+            "(swaps, meetups, tips)."
+            if active_signal_count > 0
+            else "No public neighbor asks or offers on your block right now."
+        )
+        return (
+            f"On {block_name}: {sig_bit} "
+            "I can't list every neighbor's post yet — that's coming. "
+            "Say **show my block log** for matches tied to *your* posts, "
+            "or tell me what you're looking for or offering."
+        )
     state_bit = ""
     if block_state and block_state not in ("live", "unknown"):
         state_bit = f" Block status: {block_state.replace('_', ' ')}."
@@ -303,6 +329,29 @@ def peers_to_match_rows(
             }
         )
     return out
+
+
+def format_peer_detail_reply(
+    peer: dict[str, Any],
+    *,
+    index: int | None = None,
+) -> str:
+    label = str(peer.get("matching_peer_label") or "shared interests on your block").strip()
+    nick = str(peer.get("nickname") or "").strip()
+    preview = bool(peer.get("preview", True))
+    idx_label = f"Neighbor {(index or 0) + 1}" if index is not None else "This neighbor"
+    who = nick if nick and not preview else idx_label
+    pct = ""
+    score = peer.get("similarity_score")
+    if score is not None:
+        try:
+            pct = f" (~{int(float(score) * 100)}% match)"
+        except (TypeError, ValueError):
+            pct = ""
+    return (
+        f"{who} — {label}{pct}. "
+        "Want me to introduce you? Say the neighbor number or ask for an intro."
+    )
 
 
 def format_attr_peers_reply(

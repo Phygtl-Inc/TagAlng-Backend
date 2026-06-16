@@ -17,15 +17,16 @@ _WHEN_HINT = re.compile(
     r"today|tomorrow|am|pm|\d{1,2}\s*(?:am|pm))\b",
     re.I,
 )
-_KIDS_GEAR_RE = re.compile(
-    r"\b(?:boots?|stroller|car\s*seat|crib|onesie|diaper|highchair|"
-    r"rain\s*boots?|\d+t\b|\d+\s*year|infant|toddler|baby|newborn)\b",
+_KIDS_SIZED_CLOTHING_RE = re.compile(
+    r"\b(?:boots?|rain\s*boots?|onesie|diaper|jacket|coat|shirt|pants|dress|"
+    r"\d+t\b|size\s*\d+)\b",
     re.I,
 )
 _GENERAL_SWAP_ITEM_RE = re.compile(
     r"\b(?:laptop|computer|phone|tablet|furniture|chair|desk|sofa|"
     r"microwave|printer|monitor|ipad|macbook|hp|dell|lenovo|condition|"
-    r"bicycl\w*|bike|scooter|wagon|tricycle)\b",
+    r"bicycl\w*|bike|scooter|wagon|tricycle|stroller|car\s*seat|crib|"
+    r"highchair|pack\s*n\s*play)\b",
     re.I,
 )
 _SIZE_IN_DETAIL_RE = re.compile(
@@ -50,10 +51,32 @@ def _has_when_hint(text: str) -> bool:
     return bool(_WHEN_HINT.search(str(text or "")))
 
 
+def _normalize_tip_detail(text: str) -> str:
+    raw = str(text or "").strip()
+    m = re.search(
+        r"\b(?:know a good|know any good|recommend a|recommendation for a?|"
+        r"looking for a?|need a?|find a?)\s+(.+?)[\?.!]*$",
+        raw,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip()[:500]
+    m = re.search(
+        r"\b(pediatrician|dentist|doctor|tutor|teacher|plumber|restaurant|pizza)\b",
+        raw,
+        re.I,
+    )
+    if m:
+        return f"good {m.group(1).lower()}"
+    return raw[:500]
+
+
 def draft_from_slots(slots: dict[str, Any], *, msg: str) -> dict[str, Any]:
     linear = slots_linear_intent(slots) or "looking.swap"
     intent = SIGNAL_INTENT_BY_LINEAR.get(linear, "swap_seek")
     detail = str(slots.get("signal_detail") or msg or "").strip()[:500]
+    if intent == "tip_seek":
+        detail = _normalize_tip_detail(detail)
     category = str(slots.get("signal_category") or "").strip() or None
     if intent in ("tip_seek", "tip_share") and not category:
         category = _infer_tip_category(detail)
@@ -72,7 +95,7 @@ def draft_from_slots(slots: dict[str, Any], *, msg: str) -> dict[str, Any]:
 def _swap_needs_kids_stage(detail: str) -> bool:
     if _GENERAL_SWAP_ITEM_RE.search(detail):
         return False
-    return bool(_KIDS_GEAR_RE.search(detail))
+    return bool(_KIDS_SIZED_CLOTHING_RE.search(detail))
 
 
 def _looks_like_size_answer(text: str) -> bool:
