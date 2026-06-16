@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from app.claim_search import peer_matches_identity_snippet
 from app.supabase_rpc import call_rpc
 
 INTENT_PROPOSE_INTRO = "social.propose_intro"
@@ -50,6 +51,8 @@ def build_match_reason(
 ) -> str:
     label = str(peer.get("matching_peer_label") or "a neighbor on your block").strip()
     snippet = str(identity_snippet or "").strip()
+    if snippet and not peer_matches_identity_snippet(peer, snippet):
+        return f"Lana matched you with {label} on your block."
     if snippet and label:
         return f"You both fit {label.lower()} — you mentioned {snippet[:120]}."
     if snippet:

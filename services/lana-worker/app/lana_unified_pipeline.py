@@ -66,7 +66,8 @@ def run_lana_unified_pipeline(
                 "focus_phrase": None,
                 "highlights": [],
             }
-            return reply, "continue", ctx, ui, ctx.get("event_draft")
+            status = "ready_to_complete" if ctx.get("ready_to_complete") else "continue"
+            return reply, status, ctx, ui, ctx.get("event_draft")
 
     if use_orchestrator:
         reply, status, turn_ctx, ui, draft = run_turn(

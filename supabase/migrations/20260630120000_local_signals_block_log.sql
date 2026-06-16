@@ -87,7 +87,7 @@ create table if not exists public.block_log_entries (
 
 create index if not exists idx_block_log_user_active
   on public.block_log_entries (for_user_id, created_at desc)
-  where action_taken is null and expires_at > now();
+  where action_taken is null;
 
 create index if not exists idx_block_log_block_recent
   on public.block_log_entries (block_id, created_at desc);

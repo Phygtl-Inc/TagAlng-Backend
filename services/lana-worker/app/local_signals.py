@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from fastapi import HTTPException
+
 from app.supabase_rpc import call_rpc
 
 INTENT_SAVE_SIGNAL = "signal.capture"
@@ -55,7 +57,22 @@ def save_local_signal(
         payload["p_zip"] = zip_code
     if stage:
         payload["p_stage"] = stage
-    raw = call_rpc(user_jwt, "save_local_signal", payload)
+    try:
+        raw = call_rpc(user_jwt, "save_local_signal", payload)
+    except HTTPException as exc:
+        detail = str(exc.detail or "").lower()
+        # Backward-compat for older DB signatures that still use p_detail.
+        if (
+            exc.status_code == 502
+            and "pgrst202" in detail
+            and "p_detail_text" in detail
+        ):
+            legacy_payload = dict(payload)
+            legacy_payload.pop("p_detail_text", None)
+            legacy_payload["p_detail"] = detail_text
+            raw = call_rpc(user_jwt, "save_local_signal", legacy_payload)
+        else:
+            raise
     return raw if isinstance(raw, dict) else {}
 
 
@@ -137,7 +154,12 @@ def format_block_log_reply(entries: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def stamp_signal_saved_ctx(ctx: dict[str, Any], result: dict[str, Any]) -> None:
+def stamp_signal_saved_ctx(
+    ctx: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    active_intent: str | None = None,
+) -> None:
     ctx["signal_saved"] = {
         "signal_id": result.get("signal_id"),
         "intent": result.get("intent"),
@@ -146,7 +168,7 @@ def stamp_signal_saved_ctx(ctx: dict[str, Any], result: dict[str, Any]) -> None:
         "block_id": result.get("block_id"),
         "matches_created": result.get("matches_created"),
     }
-    ctx["active_intent"] = INTENT_SAVE_SIGNAL
+    ctx["active_intent"] = active_intent or INTENT_SAVE_SIGNAL
 
 
 def stamp_block_log_ctx(ctx: dict[str, Any], entries: list[dict[str, Any]]) -> None:

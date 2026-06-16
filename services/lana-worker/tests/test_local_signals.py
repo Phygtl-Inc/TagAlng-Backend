@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from app.discovery_route import (
     PHASE_NEED_ZIP,
     PHASE_PREVIEW,
@@ -10,6 +12,7 @@ from app.local_signals import (
     format_block_log_reply,
     format_signal_saved_reply,
     normalize_signal_intent,
+    save_local_signal,
 )
 
 
@@ -28,6 +31,28 @@ class TestLocalSignalsHelpers(unittest.TestCase):
 
     def test_format_block_log_empty(self) -> None:
         self.assertIn("quiet", format_block_log_reply([]))
+
+    @patch("app.local_signals.call_rpc")
+    def test_save_local_signal_falls_back_to_legacy_detail_param(self, mock_call_rpc) -> None:
+        mock_call_rpc.side_effect = [
+            HTTPException(
+                status_code=502,
+                detail='rpc_failed:{"code":"PGRST202","details":"... p_detail_text ... no matches were"}',
+            ),
+            {"signal_id": "sig-1", "intent": "swap_seek", "detail_text": "rain boots", "matches_created": 0},
+        ]
+        result = save_local_signal(
+            "jwt",
+            intent="swap_seek",
+            detail_text="rain boots",
+            block_id="block-1",
+        )
+        self.assertEqual(result.get("signal_id"), "sig-1")
+        self.assertEqual(mock_call_rpc.call_count, 2)
+        first_payload = mock_call_rpc.call_args_list[0].args[2]
+        second_payload = mock_call_rpc.call_args_list[1].args[2]
+        self.assertIn("p_detail_text", first_payload)
+        self.assertIn("p_detail", second_payload)
 
 
 class TestDiscoverySignalRouting(unittest.TestCase):
@@ -64,7 +89,7 @@ class TestDiscoverySignalRouting(unittest.TestCase):
         self.assertIsNotNone(reply)
         assert reply is not None
         self.assertIn("rain boots", reply)
-        self.assertEqual(ctx.get("active_intent"), "signal.capture")
+        self.assertEqual(ctx.get("active_intent"), "looking.swap")
         self.assertIn("signal_saved", ctx)
         mock_save.assert_called_once()
 
