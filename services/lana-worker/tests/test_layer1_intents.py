@@ -37,6 +37,26 @@ class TestLayer1IntentCatalog(unittest.TestCase):
             "discovery.block_log",
         )
 
+    def test_signal_intents_left_to_ai_not_phrase_regex(self) -> None:
+        """Open-ended looking/sharing phrasing is classified by Flash, not phrase overrides."""
+        for msg in (
+            "I'm looking for rain boots",
+            "i am looking for a laptop",
+            "also looking for a bicycle buddy",
+            "do you know good teacher for my kid?",
+            "I wanna swap my kid bicycle",
+        ):
+            self.assertIsNone(phrase_linear_intent(msg), msg)
+
+    def test_phrase_edit_claim_remove(self) -> None:
+        self.assertEqual(
+            phrase_linear_intent("remove italian heritage. I am pakistani"),
+            "identity.edit_claim",
+        )
+
+    def test_phrase_profile_ack(self) -> None:
+        self.assertEqual(phrase_linear_intent("ok thats me"), "identity.complete_profile")
+
     def test_attr_filter_tokens_multi(self) -> None:
         tokens = attr_filter_tokens("find pakistani mom")
         self.assertIn("pakistani", tokens)
@@ -97,6 +117,60 @@ class TestSignalCapture(unittest.TestCase):
         need, _, prompt = needs_confirm(draft)
         self.assertTrue(need)
         self.assertIn("when", prompt.lower())
+
+    def test_laptop_swap_skips_kids_stage_prompt(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.swap",
+                "confidence": 0.9,
+                "signal_detail": "hp laptop with good condition",
+            },
+            msg="hp laptop with good condition",
+        )
+        need, field, _ = needs_confirm(draft)
+        self.assertFalse(need)
+        self.assertEqual(field, "")
+
+    def test_kids_bicycle_skips_clothing_size_prompt(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.swap",
+                "confidence": 0.9,
+                "signal_detail": "buy a bicycle for my kid",
+            },
+            msg="i wanna buy a bycycle for my kid",
+        )
+        need, field, _ = needs_confirm(draft)
+        self.assertFalse(need)
+        self.assertEqual(field, "")
+
+    def test_rain_boots_swap_asks_kids_stage(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.swap",
+                "confidence": 0.9,
+                "signal_detail": "rain boots",
+            },
+            msg="rain boots",
+        )
+        need, field, prompt = needs_confirm(draft)
+        self.assertTrue(need)
+        self.assertEqual(field, "stage")
+        self.assertIn("3t", prompt.lower())
+
+    def test_teacher_tip_infers_education_category(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.tip",
+                "confidence": 0.9,
+                "signal_detail": "do you know good teacher for my kid?",
+            },
+            msg="do you know good teacher for my kid?",
+        )
+        need, field, _ = needs_confirm(draft)
+        self.assertFalse(need)
+        self.assertEqual(field, "")
+        self.assertEqual(draft.get("category"), "education")
 
 
 class TestLayer1DiscoveryRouting(unittest.TestCase):

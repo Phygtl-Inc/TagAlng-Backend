@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.claim_search import peer_matches_identity_snippet
+from app.intro_list import format_duplicate_intro_reply
 from app.supabase_rpc import call_rpc
 
 INTENT_PROPOSE_INTRO = "social.propose_intro"
@@ -228,9 +229,8 @@ def try_propose_intro_from_preview(
     except HTTPException as exc:
         detail = str(exc.detail or "")
         if detail == "duplicate_intro_recent":
-            nick = str(peer.get("nickname") or peer.get("matching_peer_label") or "them")
             return (
-                f"You already have a recent intro out to {nick} — give them a little time to respond.",
+                format_duplicate_intro_reply(peer=peer, user_jwt=user_jwt),
                 {"status": "duplicate", "candidate_user_id": peer.get("peer_user_id")},
             )
         if detail == "phone_not_verified":

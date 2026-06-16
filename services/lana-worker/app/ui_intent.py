@@ -24,6 +24,11 @@ UI_INTENT_SIGNAL_SAVED = "signal_saved"
 UI_INTENT_SHOW_IDENTITY_PROFILE = "show_identity_profile"
 UI_INTENT_COLLECT_SIGNAL_DETAIL = "collect_signal_detail"
 
+_INTENT_BLOCK_LOG = "discovery.block_log"
+_INTENT_LIST_INTROS = "social.list_intros"
+_INTENT_SHOW_PROFILE = "identity.show_my_profile"
+_SIGNAL_ACTIVE_PREFIXES = ("looking.", "sharing.")
+
 # FE may render peer cards only on these intents (not on chat / verify turns).
 PEER_SURFACE_UI_INTENTS = frozenset({
     UI_INTENT_SHOW_PEER_PREVIEW,
@@ -72,20 +77,24 @@ def derive_ui_intent(
     if ctx.get("pending_intro_offer"):
         return UI_INTENT_OFFER_NEIGHBOR_INTRO
 
-    if ctx.get("pending_intros") is not None:
+    active = str(ctx.get("active_intent") or "").strip()
+
+    if active == _INTENT_LIST_INTROS and ctx.get("pending_intros") is not None:
         return UI_INTENT_SHOW_PENDING_INTROS
 
-    if ctx.get("block_log_entries") is not None:
+    if active == _INTENT_BLOCK_LOG:
         return UI_INTENT_SHOW_BLOCK_LOG
+
+    if active == _INTENT_SHOW_PROFILE and ctx.get("identity_profile") is not None:
+        return UI_INTENT_SHOW_IDENTITY_PROFILE
+
+    if ctx.get("signal_saved") and (
+        active.startswith(_SIGNAL_ACTIVE_PREFIXES) or active == "signal.capture"
+    ):
+        return UI_INTENT_SIGNAL_SAVED
 
     if ctx.get("signal_draft"):
         return UI_INTENT_COLLECT_SIGNAL_DETAIL
-
-    if ctx.get("identity_profile") is not None:
-        return UI_INTENT_SHOW_IDENTITY_PROFILE
-
-    if ctx.get("signal_saved"):
-        return UI_INTENT_SIGNAL_SAVED
 
     if ready_to_complete:
         return UI_INTENT_CONFIRM_PROFILE

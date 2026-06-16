@@ -123,6 +123,19 @@ _BLOCK_LOG_RE = re.compile(
     r"block radar|my matches on (?:the )?block)\b",
     re.I,
 )
+_CHANGE_NAME_RE = re.compile(
+    r"\b(?:change my name|update my name|rename me|call me)\b",
+    re.I,
+)
+_EDIT_CLAIM_RE = re.compile(
+    r"\b(?:remove|delete|drop|clear|get rid of)\b",
+    re.I,
+)
+_PROFILE_ACK_RE = re.compile(
+    r"^\s*(?:ok\s+)?(?:that'?s me|that is me|sounds? good|looks? good|correct|"
+    r"good to go|yes that'?s (?:me|right))[\s!.?]*$",
+    re.I,
+)
 _FIND_BY_ATTRS_RE = re.compile(
     r"\bfind\b(?:(?!people like me|neighbors like me).)*\b(?:"
     r"mom|dad|parent|brazilian|pakistani|portuguese|toddler|toddlers|heritage|speak|"
@@ -136,11 +149,26 @@ _ATTR_FILTER_STOP = frozenset({
 })
 
 
+def is_profile_acknowledgment(msg: str) -> bool:
+    return bool(_PROFILE_ACK_RE.match(str(msg or "").strip()))
+
+
 def phrase_linear_intent(msg: str) -> str | None:
-    """Deterministic intent from user phrasing (overrides flaky classifier)."""
+    """Narrow policy overrides only — NOT open-ended routing.
+
+    Flash classifies looking.swap / meet / tip and all item phrasing.
+    Regex here is only for cases where a wrong AI label causes bad side effects
+    (claim pollution, stale peer cards, discovery vs identity confusion).
+    """
     text = str(msg or "").strip()
     if not text:
         return None
+    if _PROFILE_ACK_RE.match(text):
+        return "identity.complete_profile"
+    if _EDIT_CLAIM_RE.search(text):
+        return "identity.edit_claim"
+    if _CHANGE_NAME_RE.search(text):
+        return "settings.change_name"
     if _BLOCK_LOG_RE.search(text):
         return "discovery.block_log"
     if _FIND_IN_BLOCK_RE.search(text):
@@ -227,6 +255,12 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
         elif phrase == "discovery.block_log":
             out["goal"] = "show_block_log"
             out["in_discovery"] = True
+        elif phrase in ("identity.edit_claim", "identity.complete_profile"):
+            out["goal"] = "chat"
+            out["in_discovery"] = False
+        elif phrase == "settings.change_name":
+            out["goal"] = "chat"
+            out["in_discovery"] = False
     linear = slots_linear_intent(out)
     if linear:
         out["linear_intent"] = linear

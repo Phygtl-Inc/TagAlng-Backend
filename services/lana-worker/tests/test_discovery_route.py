@@ -865,7 +865,57 @@ class TestDiscoveryRouting(unittest.TestCase):
     @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_slots.ai_parse_discovery_turn")
     @patch("app.discovery_route.fetch_my_intros")
-    def test_list_intros_uses_recent_duplicate_intro_when_rpc_empty(
+    def test_show_my_intros_lists_received_when_sent_filter_empty(
+        self, mock_fetch_intros, mock_slots, _mock_ai, _mock_ai2
+    ) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "list_intros",
+            "zip": None,
+            "identity_snippet": None,
+            "intro_direction": "sent",
+            "confidence": 0.9,
+        }
+        mock_fetch_intros.return_value = [
+            {
+                "id": "intro-1",
+                "nickname": "Kashaf",
+                "direction": "received",
+                "match_reason": "Pakistani Heritage",
+                "expires_at": "2099-01-01T00:00:00Z",
+            }
+        ]
+        result = handle_discovery_turn(
+            "show my intros",
+            session_ctx={
+                "active_intent": "social.propose_intro",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "recent_intro_duplicate": {
+                    "candidate_user_id": "peer-1",
+                    "candidate_nickname": "Kashaf",
+                    "match_reason": "Pakistani Heritage",
+                },
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertIn("Kashaf", reply)
+        self.assertIn("waiting on you", reply.lower())
+        self.assertNotIn("i already sent", reply.lower())
+        self.assertEqual(ctx.get("active_intent"), "social.list_intros")
+        self.assertEqual(peers, [])
+        self.assertEqual(mock_fetch_intros.call_count, 1)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    @patch("app.discovery_route.fetch_my_intros")
+    def test_list_intros_empty_shows_inbox_message_not_session_duplicate(
         self, mock_fetch_intros, mock_slots, _mock_ai, _mock_ai2
     ) -> None:
         mock_slots.return_value = {
@@ -896,7 +946,8 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         reply, ctx, _, peers = result
-        self.assertIn("recent intro to Natasha".lower(), reply.lower())
+        self.assertIn("don't have any pending intros", reply.lower())
+        self.assertNotIn("recent intro to Natasha".lower(), reply.lower())
         self.assertEqual(ctx.get("active_intent"), "social.list_intros")
         self.assertEqual(peers, [])
 

@@ -13,7 +13,7 @@ create table if not exists public.reason_codes (
 
 insert into public.reason_codes (code, category, privacy_tier, template) values
   ('swap_offer_matches_seek', 'swap', 1, '{peer_detail} matches what you''re looking for'),
-  ('swap_seek_matches_offer', 'swap', 1, 'Your offer may help someone seeking {peer_detail}'),
+  ('swap_seek_matches_offer', 'swap', 1, 'A neighbor is looking for: {peer_detail}'),
   ('same_block_neighbor', 'vicinity', 1, 'Same block neighbor'),
   ('meet_host_match', 'meet', 1, 'A neighbor wants to meet — you offered to host'),
   ('meet_seek_match', 'meet', 1, 'Someone nearby is looking for a meetup like yours'),
@@ -131,21 +131,39 @@ language plpgsql
 immutable
 as $$
 declare
-  v_strength real := 0.72;
+  v_strength real := 0.0;
   v_word text;
+  v_overlap int := 0;
+  v_stop text[] := array[
+    'looking', 'for', 'have', 'want', 'wanna', 'swap', 'borrow', 'offer',
+    'someone', 'good', 'know', 'block', 'neighbor', 'kids', 'kid', 'child',
+    'the', 'and', 'with', 'from', 'that', 'this', 'your', 'my', 'our', 'are',
+    'you', 'what', 'when', 'size', 'stage', 'also', 'need', 'like', 'just',
+    'give', 'away', 'free', 'home', 'help', 'near', 'nearby'
+  ];
 begin
-  if p_my_category is not null and p_peer_category is not null
-     and lower(trim(p_my_category)) = lower(trim(p_peer_category)) then
-    v_strength := v_strength + 0.08;
-  end if;
-
   if p_my_detail is not null and p_peer_detail is not null then
-    foreach v_word in array regexp_split_to_array(lower(p_my_detail), '\s+') loop
-      if length(v_word) > 3 and position(v_word in lower(p_peer_detail)) > 0 then
-        v_strength := v_strength + 0.1;
-        exit;
+    foreach v_word in array regexp_split_to_array(lower(p_my_detail), '[^a-z0-9]+') loop
+      if length(v_word) < 4 then
+        continue;
+      end if;
+      if v_word = any (v_stop) then
+        continue;
+      end if;
+      if position(v_word in lower(p_peer_detail)) > 0 then
+        v_overlap := v_overlap + 1;
       end if;
     end loop;
+  end if;
+
+  if v_overlap > 0 then
+    v_strength := 0.68 + least(v_overlap * 0.08, 0.27);
+  end if;
+
+  if p_my_category is not null
+     and p_peer_category is not null
+     and lower(trim(p_my_category)) = lower(trim(p_peer_category)) then
+    v_strength := greatest(v_strength, 0.72);
   end if;
 
   return least(v_strength, 0.95);
@@ -236,12 +254,14 @@ begin
         '{peer_detail}', v_peer_detail
       );
       v_reason_peer := replace(
-        coalesce((select template from public.reason_codes where code = case
-          when v_peer.intent = 'swap_offer' then 'swap_seek_matches_offer'
-          when v_peer.intent = 'host_meet' then 'meet_host_match'
-          else 'tip_share_match'
-        end), 'Neighbor match'),
-        '{peer_detail}', coalesce(v_sig.detail_text, 'a neighbor'),
+        replace(
+          coalesce((select template from public.reason_codes where code = case
+            when v_peer.intent = 'swap_offer' then 'swap_seek_matches_offer'
+            when v_peer.intent = 'host_meet' then 'meet_host_match'
+            else 'tip_share_match'
+          end), 'Neighbor match'),
+          '{peer_detail}', coalesce(v_sig.detail_text, 'a neighbor')
+        ),
         '{category}', v_category
       );
     else
@@ -256,21 +276,25 @@ begin
         else 'tip_match'
       end;
       v_reason_me := replace(
-        coalesce((select template from public.reason_codes where code = case
-          when v_sig.intent = 'swap_offer' then 'swap_seek_matches_offer'
-          when v_sig.intent = 'host_meet' then 'meet_host_match'
-          else 'tip_share_match'
-        end), 'Neighbor match'),
-        '{peer_detail}', v_peer_detail,
+        replace(
+          coalesce((select template from public.reason_codes where code = case
+            when v_sig.intent = 'swap_offer' then 'swap_seek_matches_offer'
+            when v_sig.intent = 'host_meet' then 'meet_host_match'
+            else 'tip_share_match'
+          end), 'Neighbor match'),
+          '{peer_detail}', v_peer_detail
+        ),
         '{category}', v_category
       );
       v_reason_peer := replace(
-        coalesce((select template from public.reason_codes where code = case
-          when v_peer.intent = 'swap_seek' then 'swap_offer_matches_seek'
-          when v_peer.intent = 'meet_seek' then 'meet_seek_match'
-          else 'tip_seek_match'
-        end), 'Neighbor match'),
-        '{peer_detail}', coalesce(v_sig.detail_text, 'a neighbor'),
+        replace(
+          coalesce((select template from public.reason_codes where code = case
+            when v_peer.intent = 'swap_seek' then 'swap_offer_matches_seek'
+            when v_peer.intent = 'meet_seek' then 'meet_seek_match'
+            else 'tip_seek_match'
+          end), 'Neighbor match'),
+          '{peer_detail}', coalesce(v_sig.detail_text, 'a neighbor')
+        ),
         '{category}', v_category
       );
     end if;

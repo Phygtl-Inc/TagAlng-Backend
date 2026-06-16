@@ -5,6 +5,26 @@ from fastapi import HTTPException
 
 from app.auth import service_client
 
+from app.turn_surfaces import TURN_SCOPED_SURFACES
+
+# Keys set to None in a turn ctx are removed from persisted session (shallow merge otherwise keeps stale values).
+_CTX_NULL_DELETES = frozenset({"signal_draft", *TURN_SCOPED_SURFACES})
+
+
+def merge_session_context(
+    old: dict[str, Any] | None,
+    new: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = {**(old or {}), **(new or {})}
+    new_ctx = new or {}
+    for key in _CTX_NULL_DELETES:
+        if key in new_ctx and new_ctx.get(key) is None:
+            merged.pop(key, None)
+    for key in TURN_SCOPED_SURFACES:
+        if key not in new_ctx:
+            merged.pop(key, None)
+    return merged
+
 
 def _embed_message(message_id: str, content: str) -> None:
     try:

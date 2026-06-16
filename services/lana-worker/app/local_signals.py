@@ -8,6 +8,8 @@ from fastapi import HTTPException
 
 from app.supabase_rpc import call_rpc
 
+from app.signal_capture import clear_signal_draft
+
 INTENT_SAVE_SIGNAL = "signal.capture"
 INTENT_SHOW_BLOCK_LOG = "discovery.block_log"
 
@@ -21,8 +23,8 @@ _VALID_SIGNAL_INTENTS = frozenset({
 })
 
 _INTENT_LABELS: dict[str, str] = {
-    "swap_seek": "looking to swap or borrow",
-    "swap_offer": "offering to swap or give away",
+    "swap_seek": "looking for",
+    "swap_offer": "offering",
     "meet_seek": "looking to meet neighbors",
     "host_meet": "hosting a meetup",
     "tip_seek": "looking for a recommendation",
@@ -76,7 +78,21 @@ def save_local_signal(
     return raw if isinstance(raw, dict) else {}
 
 
-def fetch_my_block_log(user_jwt: str) -> list[dict[str, Any]]:
+def refresh_my_signal_matches(user_jwt: str) -> int:
+    """Re-run matcher for caller's listening signals (writes block_log_entries)."""
+    try:
+        raw = call_rpc(user_jwt, "refresh_my_signal_matches", {})
+    except HTTPException:
+        return 0
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def fetch_my_block_log(user_jwt: str, *, refresh: bool = True) -> list[dict[str, Any]]:
+    if refresh:
+        refresh_my_signal_matches(user_jwt)
     raw = call_rpc(user_jwt, "get_my_block_log", {})
     if not raw:
         return []
@@ -169,6 +185,7 @@ def stamp_signal_saved_ctx(
         "matches_created": result.get("matches_created"),
     }
     ctx["active_intent"] = active_intent or INTENT_SAVE_SIGNAL
+    clear_signal_draft(ctx)
 
 
 def stamp_block_log_ctx(ctx: dict[str, Any], entries: list[dict[str, Any]]) -> None:

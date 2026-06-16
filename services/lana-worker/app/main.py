@@ -27,6 +27,7 @@ from app.db import (
     list_messages,
     transcript_text,
     update_session_context,
+    merge_session_context,
 )
 from app.local_signals import block_log_take_action, fetch_my_block_log, normalize_block_log_row
 from app.lana_paths import (
@@ -88,7 +89,13 @@ from app.claims_persist import (
     should_extract_claims_from_message,
 )
 from app.profile_photo import upload_profile_photo_bytes
-from app.ui_intent import PEER_SURFACE_UI_INTENTS, derive_ui_intent
+from app.ui_intent import (
+    PEER_SURFACE_UI_INTENTS,
+    UI_INTENT_SHOW_BLOCK_LOG,
+    UI_INTENT_SHOW_IDENTITY_PROFILE,
+    UI_INTENT_SIGNAL_SAVED,
+    derive_ui_intent,
+)
 from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
@@ -548,19 +555,27 @@ def _onboarding_fields(
 ) -> dict[str, Any]:
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
     intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
-    pending_intros = _pending_intros_from_ctx(ctx)
-    block_log_entries = _block_log_from_ctx(ctx)
-    signal_saved = _signal_saved_from_ctx(ctx)
-    identity_profile = _identity_profile_from_ctx(ctx)
-    peers_raw = _peer_matches_from_ctx(ctx)
-    activities = _activity_previews_from_ctx(ctx)
     ui_intent = derive_ui_intent(
         ctx,
         ready_to_complete=ready_to_complete,
-        peer_count=len(peers_raw),
-        activity_count=len(activities),
+        peer_count=len(_peer_matches_from_ctx(ctx)),
+        activity_count=len(_activity_previews_from_ctx(ctx)),
         phone_verified=auth.phone_verified,
     )
+    pending_intros = _pending_intros_from_ctx(ctx)
+    block_log_entries = (
+        _block_log_from_ctx(ctx) if ui_intent == UI_INTENT_SHOW_BLOCK_LOG else []
+    )
+    signal_saved = (
+        _signal_saved_from_ctx(ctx) if ui_intent == UI_INTENT_SIGNAL_SAVED else None
+    )
+    identity_profile = (
+        _identity_profile_from_ctx(ctx)
+        if ui_intent == UI_INTENT_SHOW_IDENTITY_PROFILE
+        else None
+    )
+    peers_raw = _peer_matches_from_ctx(ctx)
+    activities = _activity_previews_from_ctx(ctx)
     routing_phase = _signup_routing_phase_for_fe(ctx, auth)
     peers = peers_raw if ui_intent in PEER_SURFACE_UI_INTENTS else []
     return {
@@ -782,7 +797,7 @@ def create_lana_session(
             opening,
             {"status": status, "ui": ui_raw, "orchestrator": use_orch},
         )
-        merged_ctx = {**(session.get("context") or {}), **session_ctx}
+        merged_ctx = merge_session_context(session.get("context"), session_ctx)
         update_session_context(
             session_id,
             merged_ctx,
@@ -920,7 +935,7 @@ def send_lana_message(
                 embed=False,
             )
         with timer.stage("db_update_session"):
-            merged = {**(session.get("context") or {}), **session_ctx}
+            merged = merge_session_context(session.get("context"), session_ctx)
             update_session_context(
                 session_id,
                 merged,

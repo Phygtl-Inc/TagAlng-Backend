@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from app.auth import service_client
 from app.claims_persist import (
+    dismiss_claims_from_edit_message,
     extract_and_upsert_claims_from_message,
     extract_display_name_reply,
     persist_profile_patch,
@@ -359,12 +360,22 @@ def handle_add_or_edit_claim(
             "Verify your phone first — then I can save identity threads to your profile.",
             0,
         )
+    dismissed = 0
+    if linear_intent == "identity.edit_claim" or re.search(
+        r"\b(?:remove|delete|drop|clear)\b", message, re.I
+    ):
+        dismissed = dismiss_claims_from_edit_message(user_id, message)
     saved = extract_and_upsert_claims_from_message(user_id, message)
-    if saved > 0:
-        verb = "updated" if linear_intent == "identity.edit_claim" else "added"
+    total = dismissed + saved
+    if total > 0:
+        parts: list[str] = []
+        if dismissed:
+            parts.append(f"removed {dismissed}")
+        if saved:
+            parts.append(f"updated {saved}")
         return (
-            f"Got it — I {verb} {saved} identity thread{'s' if saved != 1 else ''} to your profile.",
-            saved,
+            f"Got it — I {' and '.join(parts)} identity thread{'s' if total != 1 else ''} on your profile.",
+            total,
         )
     return (
         "Tell me more — heritage, life stage, interests, language, faith, or what you like to do.",
