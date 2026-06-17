@@ -9,7 +9,9 @@ from app.discovery_route import (
     handle_discovery_turn,
 )
 from app.local_signals import (
+    block_log_match_summary,
     fetch_my_block_log,
+    filter_block_log_for_signal,
     format_block_log_reply,
     format_signal_saved_reply,
     normalize_signal_intent,
@@ -33,6 +35,40 @@ class TestLocalSignalsHelpers(unittest.TestCase):
 
     def test_format_block_log_empty(self) -> None:
         self.assertIn("quiet", format_block_log_reply([]))
+
+    def test_block_log_match_summary_meet_host(self) -> None:
+        summary = block_log_match_summary({
+            "peer_signal_intent": "meet_seek",
+            "peer_signal_detail": "weekend stroller walk",
+            "my_signal_intent": "host_meet",
+            "my_signal_detail": "Saturday coffee at Foxtail",
+        })
+        self.assertIn("weekend stroller walk", summary)
+        self.assertIn("Saturday coffee at Foxtail", summary)
+
+    def test_format_block_log_with_signal_details(self) -> None:
+        reply = format_block_log_reply([
+            {
+                "peer_preview_label": "A neighbor on your block",
+                "match_strength": 0.84,
+                "peer_signal_intent": "meet_seek",
+                "peer_signal_detail": "playgroup for toddlers",
+                "my_signal_intent": "host_meet",
+                "my_signal_detail": "backyard meetup Sunday",
+            }
+        ])
+        self.assertIn("playgroup for toddlers", reply)
+        self.assertIn("backyard meetup Sunday", reply)
+        self.assertIn("84%", reply)
+
+    def test_filter_block_log_for_swap_offer(self) -> None:
+        rows = [
+            {"match_type": "inbound_for_my_offer", "peer_preview_label": "Sam"},
+            {"match_type": "meet_invite_potential", "peer_preview_label": "Alex"},
+        ]
+        filtered = filter_block_log_for_signal(rows, signal_intent="swap_offer")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].get("peer_preview_label"), "Sam")
 
     @patch("app.local_signals.call_rpc")
     def test_fetch_my_block_log_refreshes_before_read(self, mock_rpc) -> None:

@@ -57,6 +57,33 @@ def fetch_identity_dashboard(user_jwt: str) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _sort_claims_for_display(claims: list[dict[str, Any]], *, limit: int = 18) -> list[dict[str, Any]]:
+    bucket_rank = {bucket: idx for idx, bucket in enumerate(_BUCKET_ORDER)}
+    seen: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+
+    def rank(claim: dict[str, Any]) -> tuple[int, float]:
+        bucket = str(claim.get("bucket") or "general").strip()
+        try:
+            confidence = float(claim.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        return (bucket_rank.get(bucket, len(_BUCKET_ORDER)), -confidence)
+
+    for claim in sorted(claims, key=rank):
+        if not isinstance(claim, dict):
+            continue
+        label = str(claim.get("label") or claim.get("concept") or "").strip()
+        key = label.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(claim)
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
 def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
     profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
     claims = dashboard.get("claims") if isinstance(dashboard.get("claims"), list) else []
@@ -109,10 +136,11 @@ def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
 def stamp_identity_profile_ctx(ctx: dict[str, Any], dashboard: dict[str, Any]) -> None:
     claims = dashboard.get("claims") if isinstance(dashboard.get("claims"), list) else []
     profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
+    sorted_claims = _sort_claims_for_display([c for c in claims if isinstance(c, dict)])
     ctx["identity_profile"] = {
         "profile": profile,
         "mapped_summary": dashboard.get("mapped_summary"),
-        "claims": [c for c in claims if isinstance(c, dict)],
+        "claims": sorted_claims,
         "stats": dashboard.get("stats") if isinstance(dashboard.get("stats"), dict) else {},
     }
     ctx["active_intent"] = "identity.show_my_profile"

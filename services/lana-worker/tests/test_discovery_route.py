@@ -1148,6 +1148,64 @@ class TestPeerDrilldownRouting(unittest.TestCase):
         self.assertEqual(len(returned), 1)
 
 
+class TestPeerTraitAndRefine(unittest.TestCase):
+    def test_trait_question_confirms_brazilian_from_label(self) -> None:
+        from app.discovery_route import _try_peer_trait_question_turn
+
+        peers = [
+            {
+                "peer_user_id": "p1",
+                "matching_peer_label": "Brazilian · Mom",
+                "preview": True,
+            },
+            {
+                "peer_user_id": "p2",
+                "matching_peer_label": "Mom",
+                "preview": True,
+            },
+        ]
+        result = _try_peer_trait_question_turn(
+            msg="is she brazilian?",
+            session_ctx={"peer_matches": peers, "routing_phase": PHASE_PREVIEW},
+            phone_verified=False,
+            home_block_id="block-1",
+            phase=PHASE_PREVIEW,
+        )
+        self.assertIsNotNone(result)
+        reply, _, _, _ = result
+        self.assertIn("Yes", reply)
+        self.assertIn("Brazilian", reply)
+
+    @patch("app.discovery_route.fetch_peers_by_attr_filter")
+    @patch("app.discovery_route._resolve_block_id_for_turn", return_value="block-1")
+    def test_attr_refine_reruns_search(self, _mock_block, mock_fetch) -> None:
+        from app.discovery_route import _try_attr_refine_turn
+
+        mock_fetch.return_value = [
+            {
+                "peer_user_id": "p1",
+                "matching_peer_label": "Brazilian · Mom",
+            }
+        ]
+        result = _try_attr_refine_turn(
+            msg="no i want brazilian moms",
+            slots={},
+            session_ctx={
+                "peer_matches": [{"matching_peer_label": "Mom", "preview": True}],
+                "routing_phase": PHASE_PREVIEW,
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            phase=PHASE_PREVIEW,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertIn("brazilian", reply.lower())
+        self.assertEqual(ctx.get("active_intent"), "discovery.find_by_attrs")
+        self.assertEqual(len(peers), 1)
+
+
 class TestUnifiedOpening(unittest.TestCase):
     def test_opening(self) -> None:
         opening, status, ctx, _ = lana_unified_opening()

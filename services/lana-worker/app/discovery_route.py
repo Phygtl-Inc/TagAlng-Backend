@@ -9,7 +9,12 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.auth import phone_has_registered_account, service_client
-from app.claim_search import parse_claim_filters, peer_matches_identity_snippet
+from app.claim_search import (
+    heritage_terms_in_text,
+    parse_claim_filters,
+    peer_heritage_key,
+    peer_matches_identity_snippet,
+)
 from app.discovery_slots import (
     ai_parse_discovery_turn,
     discovery_ai_enabled,
@@ -50,6 +55,7 @@ from app.local_signals import (
     INTENT_SAVE_SIGNAL,
     INTENT_SHOW_BLOCK_LOG,
     fetch_my_block_log,
+    filter_block_log_for_signal,
     format_block_log_reply,
     format_signal_saved_reply,
     normalize_signal_intent,
@@ -145,6 +151,15 @@ _PEER_DRILLDOWN_RE = re.compile(
     r"\b(?:first|second|third|\d+(?:st|nd|rd)?|neighbor|neighbour)\b"
     r"|\b(?:first|second|third|\d+(?:st|nd|rd)?)\b.*"
     r"\b(?:neighbor|neighbour|mom|dad|peer|match)\b.*\b(?:detail|details|more|who)\b",
+    re.I,
+)
+_PEER_TRAIT_QUESTION_RE = re.compile(
+    r"\b(?:is\s+(?:she|he|they|that|this|it)|are\s+(?:they|those|these)|"
+    r"does\s+(?:she|he|they))\b",
+    re.I,
+)
+_ATTR_REFINE_RE = re.compile(
+    r"\b(?:no|nope|not that)[,.\s!]*(?:(?:i\s+)?want|show\s+me|find|looking\s+for)\s+(.+)",
     re.I,
 )
 _VERIFY_HELP_RE = re.compile(
@@ -816,6 +831,140 @@ def _try_signal_lane_turn(
     return None
 
 
+def _session_preview_peers(session_ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    peers = session_ctx.get("peer_matches")
+    if isinstance(peers, list):
+        return [p for p in peers if isinstance(p, dict)]
+    return []
+
+
+def _try_peer_trait_question_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Answer is-she-Brazilian / are-they-moms from preview labels already shown."""
+    msg_s = str(msg or "").strip()
+    peers = _session_preview_peers(session_ctx)
+    if not peers:
+        return None
+
+    asked_heritage = heritage_terms_in_text(msg_s)
+    asked_mom = bool(re.search(r"\b(?:mom|mother|mama|mums?)\b", msg_s, re.I))
+    if not _PEER_TRAIT_QUESTION_RE.search(msg_s) and not asked_heritage and not asked_mom:
+        return None
+
+    selected = pick_peer_for_intro(peers, msg=msg_s) or peers[0]
+    label = str(selected.get("matching_peer_label") or "shared interests").strip()
+    peer_index = next(
+        (i for i, p in enumerate(peers) if p is selected or p.get("peer_user_id") == selected.get("peer_user_id")),
+        0,
+    )
+    who = f"Neighbor {peer_index + 1}"
+
+    if asked_heritage:
+        peer_h = peer_heritage_key(selected)
+        want = next(iter(asked_heritage), None)
+        if peer_h and want and peer_h == want:
+            reply = (
+                f"Yes — {who}'s preview shows {want.title()} heritage ({label}). "
+                "Verify your phone if you'd like an intro by name."
+            )
+        elif peer_h and want:
+            reply = (
+                f"{who}'s preview lists {peer_h.title()}, not {want.title()} ({label}). "
+                "Say another neighbor number or ask me to search again."
+            )
+        else:
+            reply = (
+                f"I don't see that heritage on {who}'s preview ({label}). "
+                "Want me to search your block for Brazilian moms?"
+            )
+    elif asked_mom:
+        if re.search(r"\b(?:mom|mother|mama|mums?)\b", label, re.I):
+            reply = f"Yes — {who} is labeled as a Mom ({label})."
+        else:
+            reply = f"I don't see Mom on {who}'s preview ({label})."
+    else:
+        return None
+
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=PHASE_PREVIEW,
+        active_intent=INTENT_FIND_PEERS,
+        preview_block_id=session_ctx.get("preview_block_id"),
+    )
+    ctx["peer_matches"] = peers_to_match_rows(peers, phone_verified=phone_verified)
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "peer_trait_question")
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], ctx["peer_matches"]
+
+
+def _try_attr_refine_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Re-run attribute search after pushback (e.g. 'no i want brazilian moms')."""
+    msg_s = str(msg or "").strip()
+    m = _ATTR_REFINE_RE.search(msg_s)
+    if m:
+        filter_text = normalize_attr_filter_text(m.group(1), slots)
+    elif re.search(r"\bi want\b", msg_s, re.I):
+        filter_text = normalize_attr_filter_text(msg_s, slots)
+    else:
+        return None
+    if len(filter_text) < 3:
+        return None
+    if not _session_preview_peers(session_ctx) and phase != PHASE_PREVIEW:
+        return None
+    if not phone_verified:
+        return None
+    block_id = _resolve_block_id_for_turn(
+        session_ctx=session_ctx,
+        home_block_id=home_block_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+    )
+    if not block_id:
+        return None
+    try:
+        peers = fetch_peers_by_attr_filter(user_jwt, filter_text, limit=5, slots=slots)
+    except HTTPException:
+        peers = []
+    partial_summary = None
+    if not peers:
+        partial_summary = summarize_partial_claim_matches(
+            user_jwt,
+            parse_claim_filters(filter_text, slots),
+        )
+    reply = format_attr_peers_reply(
+        peers,
+        filter_text=filter_text,
+        partial_summary=partial_summary,
+    )
+    peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=PHASE_PREVIEW,
+        active_intent="discovery.find_by_attrs",
+        identity_snippet=filter_text,
+        preview_block_id=block_id,
+    )
+    ctx["peer_matches"] = peer_rows
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], peer_rows
+
+
 def _try_peer_detail_turn(
     *,
     msg: str,
@@ -1015,19 +1164,35 @@ def _try_save_signal_turn(
             )
         raise
 
-    reply = format_signal_saved_reply(result, detail=detail)
     ctx = _routing_ctx(
         ctx_base,
         phase=phase or PHASE_PREVIEW,
         active_intent=active_intent,
     )
-    stamp_signal_saved_ctx(ctx, result, active_intent=active_intent)
-    if int(result.get("matches_created") or 0) > 0:
+
+    matches_shown = int(result.get("matches_created") or 0)
+    filtered_entries: list[dict[str, Any]] = []
+    if matches_shown > 0:
         try:
-            entries = fetch_my_block_log(user_jwt)
-            stamp_block_log_ctx(ctx, entries)
+            all_entries = fetch_my_block_log(user_jwt)
+            filtered_entries = filter_block_log_for_signal(
+                all_entries,
+                signal_intent=str(result.get("intent") or intent or ""),
+            )
+            matches_shown = len(filtered_entries)
+            if filtered_entries:
+                stamp_block_log_ctx(ctx, filtered_entries)
         except HTTPException:
-            pass
+            matches_shown = 0
+
+    reply = format_signal_saved_reply(
+        result,
+        detail=detail,
+        matches_shown=matches_shown,
+    )
+    stamp_signal_saved_ctx(ctx, result, active_intent=active_intent)
+    if ctx.get("signal_saved") and isinstance(ctx["signal_saved"], dict):
+        ctx["signal_saved"]["matches_created"] = matches_shown
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
     ctx.pop("activity_previews", None)
     clear_signal_draft(ctx)
@@ -2154,6 +2319,32 @@ def handle_discovery_turn(
         )
         if layer1_turn is not None:
             reply, ctx, routing, peers = layer1_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        attr_refine_turn = _try_attr_refine_turn(
+            msg=msg,
+            slots=slots,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+        )
+        if attr_refine_turn is not None:
+            reply, ctx, routing, peers = attr_refine_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        trait_turn = _try_peer_trait_question_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+        )
+        if trait_turn is not None:
+            reply, ctx, routing, peers = trait_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 
