@@ -147,8 +147,19 @@ def _signal_detail_phrase(intent: str, detail: str, *, role: str) -> str | None:
     return None
 
 
-def block_log_match_summary(row: dict[str, Any]) -> str:
-    parts: list[str] = []
+def _first_match_reason(row: dict[str, Any]) -> str:
+    reasons = row.get("match_reasons")
+    if isinstance(reasons, list):
+        for raw in reasons:
+            bit = str(raw or "").strip()
+            if bit and bit.lower() != "same block neighbor":
+                return bit
+    return ""
+
+
+def block_log_match_summary(row: dict[str, Any], *, user_facing: bool = True) -> str:
+    """Summarize a block-log row for chat — lead with what the neighbor has/does."""
+    match_type = str(row.get("match_type") or "").strip()
     peer_bit = _signal_detail_phrase(
         str(row.get("peer_signal_intent") or ""),
         str(row.get("peer_signal_detail") or ""),
@@ -159,19 +170,42 @@ def block_log_match_summary(row: dict[str, Any]) -> str:
         str(row.get("my_signal_detail") or ""),
         role="my",
     )
+    reason = _first_match_reason(row)
+
+    if user_facing:
+        if match_type == "inbound_for_my_seek":
+            if peer_bit:
+                return peer_bit
+            if reason:
+                return reason
+            return "A neighbor may have something that fits your ask."
+        if match_type == "inbound_for_my_offer":
+            if peer_bit:
+                return peer_bit
+            if reason:
+                return reason
+            return "A neighbor is looking for something you offered."
+        if match_type in ("meet_attendee_potential", "meet_invite_potential"):
+            if peer_bit and my_bit:
+                return f"{peer_bit} · {my_bit}"
+            if peer_bit:
+                return peer_bit
+            if reason:
+                return reason
+        if match_type == "tip_match":
+            if peer_bit:
+                return peer_bit
+            if reason:
+                return reason
+
+    parts: list[str] = []
     if peer_bit:
         parts.append(peer_bit)
-    if my_bit:
+    if my_bit and (not user_facing or not peer_bit):
         parts.append(my_bit)
     if parts:
         return " · ".join(parts)
-    reasons = row.get("match_reasons")
-    if isinstance(reasons, list):
-        for raw in reasons:
-            bit = str(raw or "").strip()
-            if bit and bit.lower() != "same block neighbor":
-                return bit
-    return ""
+    return reason or my_bit or peer_bit or ""
 
 
 def filter_block_log_for_signal(
@@ -197,7 +231,7 @@ def normalize_block_log_row(row: dict[str, Any]) -> dict[str, Any]:
     summary = block_log_match_summary(row)
     normalized_reasons = [summary] if summary else [str(r) for r in reasons[:6] if str(r).strip()]
     return {
-        "entry_id": row.get("id"),
+        "entry_id": row.get("entry_id") or row.get("id"),
         "match_type": row.get("match_type"),
         "peer_user_id": row.get("peer_user_id"),
         "peer_preview_label": row.get("peer_preview_label"),
@@ -221,6 +255,7 @@ def format_signal_saved_reply(
     *,
     detail: str,
     matches_shown: int | None = None,
+    entries: list[dict[str, Any]] | None = None,
 ) -> str:
     intent = str(result.get("intent") or "")
     label = _INTENT_LABELS.get(intent, "on your block")
@@ -230,8 +265,24 @@ def format_signal_saved_reply(
         else int(result.get("matches_created") or 0)
     )
     bit = f"Got it — I've noted you're {label}: {detail.strip()}."
+    if matches > 0 and entries:
+        bit += f" I found {matches} neighbor match{'es' if matches != 1 else ''} on your block:"
+        lines = [bit]
+        for row in entries[:4]:
+            nick = str(row.get("peer_preview_label") or "A neighbor").strip()
+            summary = block_log_match_summary(row)
+            if summary:
+                lines.append(f"• {nick} — {summary}")
+            else:
+                lines.append(f"• {nick}")
+        if len(entries) > 4:
+            lines.append(f"…and {len(entries) - 4} more in your block log.")
+        lines.append(
+            "Say show my block log for the full list, or introduce me to #1 to nudge a neighbor."
+        )
+        return "\n".join(lines)
     if matches > 0:
-        bit += f" I found {matches} new match{'es' if matches != 1 else ''} on your block — check your block log."
+        bit += f" I found {matches} match{'es' if matches != 1 else ''} on your block — check your block log."
     else:
         bit += " I'll let you know when a neighbor matches."
     return bit
@@ -263,6 +314,7 @@ def format_block_log_reply(entries: list[dict[str, Any]]) -> str:
         lines.append(bit)
     if len(entries) > 6:
         lines.append(f"…and {len(entries) - 6} more.")
+    lines.append("Say introduce me to #1 to nudge a neighbor about a swap or meetup.")
     return "\n".join(lines)
 
 

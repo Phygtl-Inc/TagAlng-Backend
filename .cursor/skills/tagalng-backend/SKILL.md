@@ -137,6 +137,27 @@ Ground truth with live app: https://app.tagalng.com/ · backend migrations: `Azj
 - Minimize scope: one migration + one policy + one test path per PR  
 - Do not commit secrets; use env for Supabase, GCP, Twilio, Maps, reCAPTCHA  
 
+## Lana Layer 1 routing (non-negotiable)
+
+**Use AI (Vertex Flash via `discovery_slots.ai_parse_discovery_turn`) for open-ended user intent.**  
+Classify by meaning: find neighbors, heritage filters, swap/meet/tip, block browse — infinite phrasing.
+
+| Do | Don't |
+|----|-------|
+| Strengthen `_SYSTEM` prompt in `discovery_slots.py` when routing misfires | Add regex word lists (`italian`, `brazilian`, …) to route intents |
+| Let `enrich_slots` trust AI `linear_intent` + `attr_filter` when confidence met | Override AI with `phrase_linear_intent` for discovery/swap/tip |
+| Keep `phrase_linear_intent` for **policy-only** cases: profile ack, remove-claim, change name, block log vs marketplace | Use `find a?` / `need a?` tip patterns that steal "find italian moms" |
+
+**Regex is allowed only for:** ZIP extraction, block-log vs marketplace browse disambiguation (`is_block_activity_browse`), structural acks (`ok that's me`), claim-edit safety (`remove`/`delete`).
+
+When user says "find italian dads" → AI sets `discovery.find_by_attrs` + `attr_filter: "italian dads"`, **not** `looking.tip`.
+
+**Neighbor questions (preview phase):** "show Kashaf's claims" → `discovery.show_peer_profile` + `get_peer_profile` RPC. "How is 100% match?" → `discovery.explain_peer_match` — never re-list `format_peer_matches`. Do not use bare `show me` regex for peer routing.
+
+**Signals (swap/meet/tip):** AI classifies `goal=save_signal` + `signal_intent` in `discovery_slots` — not phrase regex. Lock `signal_draft` during category/stage confirm (don't let AI re-classify "food" as `tip_share`). After save, always surface existing block-log matches for that intent family, not only `matches_created` on this row.
+
+Files: `services/lana-worker/app/discovery_slots.py` (router), `layer1_intents.py` (catalog + enrich), `discovery_route.py` (handlers).
+
 ## Detail
 
 - Phase ship lists + investor events: [phases.md](phases.md)  

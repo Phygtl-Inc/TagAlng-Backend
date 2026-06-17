@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from app.auth import service_client
@@ -25,12 +26,20 @@ _DISCOVERY_QUERY_RE = re.compile(
     r"(?:\s+(?:people|neighbors|neighbours|someone|moms?|dads?|parents?))?",
     re.I,
 )
+_INTRO_ACTION_RE = re.compile(
+    r"\b(?:int(?:ro)?duce|introduction|connect me|put (?:us|me) together|meet (?:them|her|him)|"
+    r"reach out|say hi|send (?:a )?nudge|talk to)\b",
+    re.I,
+)
 _NEGATIVE_CLAIM_RE = re.compile(
     r"\b(?:no|not|without|non[-\s]?)\s+(?:\w+\s+){0,3}"
     r"(?:heritage|background|from|speaker|brazilian|italian|pakistani|latino|latina)",
     re.I,
 )
 _HERITAGE_ROOT_TERMS: dict[str, tuple[str, ...]] = {
+    "american": ("american", "america", "usa", "u.s."),
+    "british": ("british", "britain", "uk", "english"),
+    "canadian": ("canadian", "canada"),
     "pakistani": ("pakistani", "pakistan"),
     "brazilian": ("brazilian", "brazil", "latina", "latino", "paulista"),
     "italian": ("italian", "italy"),
@@ -42,6 +51,11 @@ _HERITAGE_ROOT_TERMS: dict[str, tuple[str, ...]] = {
     "colombian": ("colombian", "colombia"),
 }
 
+_HERITAGE_CORRECTION_RE = re.compile(
+    r"\b(?:not|no|remove|delete|drop|clear|get rid of|i(?:'m| am) not)\b",
+    re.I,
+)
+
 _NAME_INTRO_PATTERNS = (
     re.compile(
         r"\b(?:my name is|call me|they call me|name'?s)\s+([A-Za-z][A-Za-z'-]{1,28})\b",
@@ -52,6 +66,10 @@ _NAME_INTRO_PATTERNS = (
     ),
     re.compile(
         r"\b(?:change my name to|update my name to|rename me to)\s+([A-Za-z][A-Za-z'-]{1,28})\b",
+        re.I,
+    ),
+    re.compile(
+        r"\badd my name(?:\s+as)?\s+([A-Za-z][A-Za-z'-]{1,28})\b",
         re.I,
     ),
 )
@@ -123,7 +141,11 @@ def extract_display_name_reply(message: str) -> str | None:
         return nick
     text = message.strip()
     bare = re.fullmatch(r"[A-Za-z][A-Za-z'-]{1,28}", text)
-    if bare and bare.group(0).lower() not in _NOT_NAMES:
+    if (
+        bare
+        and bare.group(0).lower() not in _NOT_NAMES
+        and bare.group(0).lower() not in _SKIP_OK
+    ):
         return _normalize_nickname(bare.group(0))
     return None
 
@@ -162,12 +184,116 @@ def persist_nickname_if_stated(user_id: str, message: str) -> str | None:
     return nick
 
 
+@dataclass
+class ClaimExtractResult:
+    saved: int = 0
+    heritage_conflict: dict[str, Any] | None = None
+
+
 def _heritage_root(concept: str, label: str) -> str | None:
     blob = f"{concept} {label}".lower()
     for root, terms in _HERITAGE_ROOT_TERMS.items():
         if any(t in blob for t in terms):
             return root
     return None
+
+
+def heritage_claim_key(concept: str, label: str) -> str:
+    root = _heritage_root(concept, label)
+    if root:
+        return root
+    return str(concept or label).strip().lower()
+
+
+def is_explicit_heritage_correction(message: str) -> bool:
+    """User is correcting or removing heritage — apply without confirmation."""
+    return bool(_HERITAGE_CORRECTION_RE.search(str(message or "")))
+
+
+def message_might_assert_heritage(message: str) -> bool:
+    low = str(message or "").lower()
+    if not re.search(r"\b(?:i(?:'m| am)|my heritage|we(?:'re| are))\b", low):
+        return False
+    for terms in _HERITAGE_ROOT_TERMS.values():
+        if any(re.search(rf"\b{re.escape(t)}\b", low) for t in terms):
+            return True
+    return False
+
+
+def fetch_active_heritage_claims(user_id: str) -> list[tuple[str, str]]:
+    """Return (concept, label) for active heritage rows."""
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("concept, label")
+            .eq("user_id", user_id)
+            .eq("bucket", "heritage")
+            .is_("dismissed_at", "null")
+            .execute()
+        )
+    except Exception:
+        logger.exception("fetch_active_heritage_claims_failed")
+        return []
+    out: list[tuple[str, str]] = []
+    for row in res.data or []:
+        if not isinstance(row, dict):
+            continue
+        concept = str(row.get("concept") or "").strip()
+        label = str(row.get("label") or "").strip()
+        if not concept and not label:
+            continue
+        if is_negative_claim(
+            ExtractedClaim(concept=concept, label=label, confidence=1.0)
+        ):
+            continue
+        out.append((concept, label))
+    return out
+
+
+def detect_heritage_conflict(
+    user_id: str,
+    new_claims: list[ExtractedClaim],
+) -> tuple[str, ExtractedClaim] | None:
+    """When user asserts a new heritage that contradicts stored heritage."""
+    existing = fetch_active_heritage_claims(user_id)
+    if not existing:
+        return None
+    positives = [
+        c for c in new_claims if c.bucket == "heritage" and not is_negative_claim(c)
+    ]
+    if not positives:
+        return None
+    if len(positives) > 1:
+        return None
+    new = positives[0]
+    new_key = heritage_claim_key(new.concept, new.label)
+    for ex_concept, ex_label in existing:
+        if heritage_claim_key(ex_concept, ex_label) == new_key:
+            return None
+        return (ex_label, new)
+    return None
+
+
+def heritage_conflict_prompt(from_label: str, new_claim: ExtractedClaim) -> str:
+    return (
+        f"I thought your heritage was {from_label}. "
+        f"Should I change it to {new_claim.label}? "
+        f"Say yes to update, or no to keep {from_label}."
+    )
+
+
+def pending_heritage_from_claim(from_label: str, claim: ExtractedClaim) -> dict[str, Any]:
+    return {
+        "from_label": from_label,
+        "label": claim.label,
+        "claim": claim.model_dump(),
+    }
+
+
+def claim_from_pending(pending: dict[str, Any]) -> ExtractedClaim:
+    raw = pending.get("claim") or {}
+    return ExtractedClaim(**raw)
 
 
 def is_negative_claim(claim: ExtractedClaim) -> bool:
@@ -185,7 +311,10 @@ def is_negative_claim(claim: ExtractedClaim) -> bool:
 
 
 def is_discovery_query_message(message: str) -> bool:
-    return bool(_DISCOVERY_QUERY_RE.search(message.strip()))
+    text = message.strip()
+    if _INTRO_ACTION_RE.search(text):
+        return True
+    return bool(_DISCOVERY_QUERY_RE.search(text))
 
 
 def filter_extracted_claims(
@@ -220,15 +349,11 @@ def _dismiss_claims_by_ids(sb: Any, claim_ids: list[str]) -> None:
 
 
 def reconcile_heritage_claims(user_id: str, batch: list[ExtractedClaim]) -> None:
-    """One message's heritage assertions replace prior heritage (dual in one line kept)."""
-    new_roots = {
-        r
-        for c in batch
-        if c.bucket == "heritage" and not is_negative_claim(c)
-        for r in [_heritage_root(c.concept, c.label)]
-        if r
-    }
-    if not new_roots:
+    """One heritage slot per user — new batch replaces prior rows (dual in one line kept)."""
+    positive = [
+        c for c in batch if c.bucket == "heritage" and not is_negative_claim(c)
+    ]
+    if not positive:
         return
     sb = service_client()
     res = (
@@ -240,7 +365,7 @@ def reconcile_heritage_claims(user_id: str, batch: list[ExtractedClaim]) -> None
         .execute()
     )
     to_dismiss: list[str] = []
-    batch_concepts = {c.concept for c in batch if c.bucket == "heritage"}
+    batch_concepts = {c.concept for c in positive}
     for row in res.data or []:
         if not isinstance(row, dict):
             continue
@@ -252,9 +377,9 @@ def reconcile_heritage_claims(user_id: str, batch: list[ExtractedClaim]) -> None
         ):
             to_dismiss.append(cid)
             continue
-        root = _heritage_root(concept, label)
-        if root and root not in new_roots and concept not in batch_concepts:
-            to_dismiss.append(cid)
+        if concept in batch_concepts:
+            continue
+        to_dismiss.append(cid)
     _dismiss_claims_by_ids(sb, to_dismiss)
 
 
@@ -402,22 +527,60 @@ def replace_all_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
         sb.table("user_identity_claims").insert(rows).execute()
 
 
-def extract_and_upsert_claims_from_message(user_id: str, message: str) -> int:
-    """Background job: Flash extract from one user line → upsert claims + nickname."""
+def try_upsert_claims_from_message(
+    user_id: str,
+    message: str,
+    *,
+    force_heritage_replace: bool = False,
+    skip_heritage: bool = False,
+) -> ClaimExtractResult:
+    """Flash extract from one user line → upsert claims; confirm heritage conflicts."""
     persist_nickname_if_stated(user_id, message)
     if not should_extract_claims_from_message(message):
-        return 0
+        return ClaimExtractResult()
     try:
         data = vertex_extract_claims_from_utterance(message)
         nickname, claims = parse_incremental_claims_data(data)
     except Exception:
         logger.exception("incremental_claim_extract_failed")
-        return 0
+        return ClaimExtractResult()
     if nickname:
         persist_profile_patch(user_id, {"nickname": _normalize_nickname(nickname)})
     if not claims:
-        return 0
+        return ClaimExtractResult()
     claims = filter_extracted_claims(message, claims)
     if not claims:
-        return 0
-    return upsert_claims(user_id, claims)
+        return ClaimExtractResult()
+
+    heritage = [c for c in claims if c.bucket == "heritage"]
+    other = [c for c in claims if c.bucket != "heritage"]
+
+    if skip_heritage:
+        claims = other
+        heritage = []
+    elif heritage and not force_heritage_replace and not is_explicit_heritage_correction(message):
+        conflict = detect_heritage_conflict(user_id, heritage)
+        if conflict:
+            from_label, new_claim = conflict
+            saved = upsert_claims(user_id, other) if other else 0
+            return ClaimExtractResult(
+                saved=saved,
+                heritage_conflict=pending_heritage_from_claim(from_label, new_claim),
+            )
+
+    saved = upsert_claims(user_id, claims)
+    return ClaimExtractResult(saved=saved)
+
+
+def extract_and_upsert_claims_from_message(
+    user_id: str,
+    message: str,
+    *,
+    skip_heritage: bool = False,
+) -> int:
+    """Background job: Flash extract from one user line → upsert claims + nickname."""
+    return try_upsert_claims_from_message(
+        user_id,
+        message,
+        skip_heritage=skip_heritage,
+    ).saved

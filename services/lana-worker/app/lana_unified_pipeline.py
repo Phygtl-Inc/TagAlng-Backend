@@ -6,6 +6,7 @@ from typing import Any
 
 from app.discovery_route import handle_discovery_turn
 from app.lana_dispatch import lana_unified_turn
+from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import unified_rules_first_enabled
 from app.orchestrator.pipeline import run_turn
 from app.turn_timing import TurnTimer
@@ -51,6 +52,7 @@ def run_lana_unified_pipeline(
         )
         if discovery is not None:
             reply, ctx, routing, peers = discovery
+            reply = sanitize_assistant_message(reply)
             ctx["last_routing"] = routing
             ctx["_orchestrator_turn"] = False
             ctx["timing_ms"] = timer.to_dict()
@@ -62,7 +64,7 @@ def run_lana_unified_pipeline(
             elif "peer_matches" not in ctx:
                 ctx["peer_matches"] = []
             ui = {
-                "bucket": "interest" if peers else None,
+                "bucket": None,
                 "focus_phrase": None,
                 "highlights": [],
             }

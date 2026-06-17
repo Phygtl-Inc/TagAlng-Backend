@@ -90,9 +90,13 @@ from app.claims_persist import (
 )
 from app.profile_photo import upload_profile_photo_bytes
 from app.ui_intent import (
+    PEER_DISCOVERY_ACTIVE_INTENTS,
     PEER_SURFACE_UI_INTENTS,
+    UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
+    UI_INTENT_SHOW_ACTIVITY_PREVIEW,
     UI_INTENT_SHOW_BLOCK_LOG,
     UI_INTENT_SHOW_IDENTITY_PROFILE,
+    UI_INTENT_SHOW_PENDING_INTROS,
     UI_INTENT_SIGNAL_SAVED,
     derive_ui_intent,
 )
@@ -450,12 +454,17 @@ def _block_log_from_ctx(ctx: dict[str, Any]) -> list[BlockLogEntryRow]:
             reasons = []
         out.append(
             BlockLogEntryRow(
-                entry_id=str(row.get("entry_id") or "") or None,
+                entry_id=str(row.get("entry_id") or row.get("id") or "") or None,
                 match_type=str(row.get("match_type") or "") or None,
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
                 peer_preview_label=str(row.get("peer_preview_label") or "") or None,
                 match_strength=row.get("match_strength"),
                 match_reasons=[str(r) for r in reasons[:6]],
+                match_summary=str(row.get("match_summary") or "") or None,
+                peer_signal_detail=str(row.get("peer_signal_detail") or "") or None,
+                peer_signal_intent=str(row.get("peer_signal_intent") or "") or None,
+                my_signal_detail=str(row.get("my_signal_detail") or "") or None,
+                my_signal_intent=str(row.get("my_signal_intent") or "") or None,
                 created_at=str(row.get("created_at") or "") or None,
                 expires_at=str(row.get("expires_at") or "") or None,
                 notification_sent_to_peer=bool(row.get("notification_sent_to_peer")),
@@ -562,7 +571,15 @@ def _onboarding_fields(
         activity_count=len(_activity_previews_from_ctx(ctx)),
         phone_verified=auth.phone_verified,
     )
-    pending_intros = _pending_intros_from_ctx(ctx)
+    pending_intros = (
+        _pending_intros_from_ctx(ctx)
+        if ui_intent
+        in (
+            UI_INTENT_SHOW_PENDING_INTROS,
+            UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
+        )
+        else []
+    )
     block_log_entries = (
         _block_log_from_ctx(ctx) if ui_intent == UI_INTENT_SHOW_BLOCK_LOG else []
     )
@@ -577,7 +594,13 @@ def _onboarding_fields(
     peers_raw = _peer_matches_from_ctx(ctx)
     activities = _activity_previews_from_ctx(ctx)
     routing_phase = _signup_routing_phase_for_fe(ctx, auth)
-    peers = peers_raw if ui_intent in PEER_SURFACE_UI_INTENTS else []
+    active = str(ctx.get("active_intent") or "").strip()
+    show_peers = ui_intent in PEER_SURFACE_UI_INTENTS or (
+        bool(peers_raw) and active in PEER_DISCOVERY_ACTIVE_INTENTS
+    )
+    peers = peers_raw if show_peers else []
+    if ui_intent != UI_INTENT_SHOW_ACTIVITY_PREVIEW:
+        activities = []
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
@@ -955,11 +978,12 @@ def send_lana_message(
         background_tasks.add_task(embed_message_by_id, assistant_msg_id, reply)
     if purpose in ("lana", "profile_intake") and should_extract_claims_from_message(
         body.message
-    ):
+    ) and not merged.get("skip_claims_background_extract"):
         background_tasks.add_task(
             extract_and_upsert_claims_from_message,
             auth.user_id,
             body.message.strip(),
+            bool(merged.get("skip_heritage_background_extract")),
         )
 
     with timer.stage("db_list_messages_final"):

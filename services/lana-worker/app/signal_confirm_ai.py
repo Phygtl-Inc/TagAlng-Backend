@@ -20,6 +20,8 @@ _SYSTEM = (
     "Normalize size: adults/for adults/grown-up -> adult; 3T stays 3T. "
     "If user corrects from seeking to offering (give away my X, swap my X), set linear_intent sharing.swap. "
     "If user corrects to seeking (looking for X), set linear_intent looking.swap. "
+    "When pending_field is category and draft intent is tip_seek, keep tip_seek — do not set sharing.tip. "
+    "Category answers (food, health, home) are field=category only, not intent flips. "
     "Rain coat, boots, jacket = swap not tip. "
     "If the reply clearly answers the pending question, set understood true."
 )

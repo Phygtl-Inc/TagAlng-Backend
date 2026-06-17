@@ -10,7 +10,6 @@ from app.layer1_intents import (
     phrase_linear_intent,
     slots_linear_intent,
 )
-from app.layer1_intents import phrase_linear_intent
 from app.signal_capture import (
     PHASE_SIGNAL_CONFIRM,
     advance_signal_draft,
@@ -22,63 +21,97 @@ from app.ui_intent import UI_INTENT_SHOW_IDENTITY_PROFILE, derive_ui_intent
 
 
 class TestLayer1IntentCatalog(unittest.TestCase):
-    def test_phrase_find_peers_overrides_block(self) -> None:
-        self.assertEqual(
-            phrase_linear_intent("find people like me on the block"),
-            "discovery.find_peers",
-        )
+    def test_open_ended_intents_left_to_ai_not_phrase_regex(self) -> None:
+        """Find neighbors, swap, tip — classified by Flash, not phrase regex."""
+        for msg in (
+            "find people like me on the block",
+            "what's happening on my block",
+            "find italian moms",
+            "i need you to find italian moms in my block",
+            "find italian dads",
+            "what are people looking for swap in my block",
+            "what are swaps on my block",
+            "Dr Smith is a great pediatrician",
+            "do you know a good pediatrician",
+            "I'm looking for rain boots",
+            "i am looking for a laptop",
+            "also looking for a bicycle buddy",
+            "do you know good teacher for my kid?",
+            "I wanna swap my kid bicycle",
+            "I am looking to swap my rain coat",
+            "i am looking for a rain coat to wear",
+            "i want to giveup my kids bicycle",
+        ):
+            self.assertIsNone(phrase_linear_intent(msg), msg)
 
-    def test_phrase_find_in_block(self) -> None:
-        self.assertEqual(
-            phrase_linear_intent("what's happening on my block"),
-            "discovery.find_in_block",
-        )
+    def test_enrich_slots_ai_find_by_attrs_not_overridden_by_regex(self) -> None:
+        slots = enrich_slots({
+            "linear_intent": "discovery.find_by_attrs",
+            "attr_filter": "italian moms",
+            "confidence": 0.88,
+            "goal": "peers",
+            "in_discovery": True,
+        }, msg="find italian moms")
+        self.assertEqual(slots_linear_intent(slots), "discovery.find_by_attrs")
+        self.assertEqual(slots.get("attr_filter"), "italian moms")
+        self.assertNotEqual(slots_linear_intent(slots), "looking.tip")
+
+    def test_enrich_slots_ai_swap_offer_from_slots(self) -> None:
+        slots = enrich_slots({
+            "linear_intent": "sharing.swap",
+            "confidence": 0.9,
+            "signal_detail": "kids bicycle",
+            "goal": "save_signal",
+        }, msg="i want to giveup my kids bicycle")
+        self.assertEqual(slots_linear_intent(slots), "sharing.swap")
+        self.assertEqual(slots.get("signal_intent"), "swap_offer")
+
+    def test_enrich_slots_show_peer_profile_from_ai(self) -> None:
+        slots = enrich_slots({
+            "linear_intent": "discovery.show_peer_profile",
+            "peer_name": "Kashaf",
+            "confidence": 0.9,
+            "goal": "chat",
+            "in_discovery": False,
+        }, msg="show me identity claims of kashaf")
+        self.assertEqual(slots_linear_intent(slots), "discovery.show_peer_profile")
+        self.assertEqual(slots.get("peer_name"), "Kashaf")
 
     def test_phrase_block_log(self) -> None:
         self.assertEqual(
             phrase_linear_intent("who matched with me"),
             "discovery.block_log",
         )
-
-    def test_phrase_block_browse_not_block_log(self) -> None:
         self.assertEqual(
-            phrase_linear_intent("what are people looking for swap in my block"),
-            "discovery.find_in_block",
-        )
-        self.assertNotEqual(
-            phrase_linear_intent("what are people looking for swap in my block"),
+            phrase_linear_intent("show my block logs"),
             "discovery.block_log",
         )
 
-    def test_phrase_block_browse_swaps(self) -> None:
+    def test_phrase_my_name_is_change_name(self) -> None:
         self.assertEqual(
-            phrase_linear_intent("what are swaps on my block"),
-            "discovery.find_in_block",
+            phrase_linear_intent("my name is Zane"),
+            "settings.change_name",
+        )
+        self.assertEqual(
+            phrase_linear_intent("add my name as Ada"),
+            "settings.change_name",
+        )
+
+    def test_phrase_block_browse_not_block_log(self) -> None:
+        self.assertIsNone(
+            phrase_linear_intent("what are people looking for swap in my block"),
+        )
+        self.assertTrue(
+            is_block_activity_browse("what are people looking for swap in my block"),
+        )
+
+    def test_phrase_block_browse_swaps(self) -> None:
+        self.assertTrue(
+            is_block_activity_browse("what are swaps on my block"),
         )
         self.assertTrue(
             is_block_activity_browse("show those 11 asks on my block"),
         )
-
-    def test_phrase_tip_share_not_seek(self) -> None:
-        self.assertEqual(
-            phrase_linear_intent("Dr Smith is a great pediatrician"),
-            "sharing.tip",
-        )
-        self.assertEqual(
-            phrase_linear_intent("do you know a good pediatrician"),
-            "looking.tip",
-        )
-
-    def test_signal_intents_left_to_ai_not_phrase_regex(self) -> None:
-        """Open-ended looking/sharing phrasing is classified by Flash, not phrase overrides."""
-        for msg in (
-            "I'm looking for rain boots",
-            "i am looking for a laptop",
-            "also looking for a bicycle buddy",
-            "do you know good teacher for my kid?",
-            "I wanna swap my kid bicycle",
-        ):
-            self.assertIsNone(phrase_linear_intent(msg), msg)
 
     def test_phrase_edit_claim_remove(self) -> None:
         self.assertEqual(
@@ -220,24 +253,6 @@ class TestSignalCapture(unittest.TestCase):
         self.assertEqual(normalize_size_answer("for adults"), "adult")
         self.assertEqual(normalize_size_answer("adults"), "adult")
 
-    def test_swap_my_coat_is_offer_intent(self) -> None:
-        self.assertEqual(
-            phrase_linear_intent("I am looking to swap my rain coat"),
-            "sharing.swap",
-        )
-
-    def test_looking_for_raincoat_is_seek_not_tip(self) -> None:
-        self.assertEqual(
-            phrase_linear_intent("i am looking for a rain coat to wear"),
-            "looking.swap",
-        )
-
-    def test_giveup_bicycle_is_offer_intent(self) -> None:
-        self.assertEqual(
-            phrase_linear_intent("i want to giveup my kids bicycle"),
-            "sharing.swap",
-        )
-
     def test_swap_offer_detail_strips_giveup_verb(self) -> None:
         draft = draft_from_slots(
             {
@@ -303,6 +318,21 @@ class TestSignalCapture(unittest.TestCase):
         self.assertEqual(draft.get("category"), "health")
         self.assertIn("pediatrician", str(draft.get("detail") or "").lower())
         self.assertNotIn("what do you have", str(draft.get("detail") or "").lower())
+
+    def test_tip_category_confirm_stays_tip_seek(self) -> None:
+        draft = {
+            "linear_intent": "looking.tip",
+            "intent": "tip_seek",
+            "detail": "good place near me",
+            "phase": PHASE_SIGNAL_CONFIRM,
+            "confirm_field": "category",
+            "confirm_attempts": {},
+        }
+        updated, prompt, ready = advance_signal_draft(draft, msg="food")
+        self.assertTrue(ready)
+        self.assertIsNone(prompt)
+        self.assertEqual(updated.get("intent"), "tip_seek")
+        self.assertEqual(updated.get("category"), "food")
 
 
 class TestLayer1DiscoveryRouting(unittest.TestCase):

@@ -11,7 +11,7 @@ from app.intro_list import fetch_my_intros
 from app.supabase_rpc import call_rpc
 
 _ACCEPT_RE = re.compile(
-    r"\b(yes|yeah|yep|sure|ok|okay|accept|introduce|let'?s do it|sounds good)\b",
+    r"\b(yes|yeah|yep|sure|ok|okay|accept|let'?s do it|sounds good)\b",
     re.I,
 )
 _DECLINE_RE = re.compile(
@@ -19,10 +19,44 @@ _DECLINE_RE = re.compile(
     re.I,
 )
 _BLOCK_RE = re.compile(r"\b(block|report|don'?t contact)\b", re.I)
+_INTRO_PROPOSE_RE = re.compile(
+    r"\b(?:int(?:ro)?duce\s+me|connect\s+me|put\s+me)\b",
+    re.I,
+)
+_RESPOND_INTRO_US_RE = re.compile(
+    r"^\s*(?:yes|yeah|yep|sure|ok|okay|accept)\s+introduce\s+us\s*\.?\s*$",
+    re.I,
+)
+_STANDALONE_ACCEPT = frozenset(
+    {"yes", "yeah", "yep", "sure", "ok", "okay", "accept", "sounds good", "let's do it", "lets do it"}
+)
+
+
+def wants_respond_intro(msg: str) -> bool:
+    """Accept/decline a pending received intro — not a new introduce-me request."""
+    text = str(msg or "").strip()
+    if not text:
+        return False
+    if _INTRO_PROPOSE_RE.search(text):
+        return False
+    if _RESPOND_INTRO_US_RE.match(text):
+        return True
+    action = parse_nudge_response(text)
+    if action in ("decline", "block"):
+        return True
+    if action == "accept":
+        norm = text.lower().rstrip(".!")
+        if norm in _STANDALONE_ACCEPT:
+            return True
+        if re.search(r"\bintroduce\s+us\b", text, re.I):
+            return True
+    return False
 
 
 def parse_nudge_response(msg: str) -> str:
     text = str(msg or "").strip()
+    if _INTRO_PROPOSE_RE.search(text):
+        return "unknown"
     if _BLOCK_RE.search(text):
         return "block"
     if _DECLINE_RE.search(text):

@@ -6,6 +6,7 @@ from app.intro_proposal import (
     accepts_intro_offer,
     build_match_reason,
     pick_peer_for_intro,
+    requested_peer_name,
     stamp_intro_offer_ctx,
     stamp_intro_proposal_ctx,
     try_propose_intro_from_preview,
@@ -21,7 +22,10 @@ from app.ui_intent import (
 class TestIntroProposalHelpers(unittest.TestCase):
     def test_wants_neighbor_intro(self) -> None:
         self.assertTrue(wants_neighbor_intro("Can you introduce us?"))
+        self.assertTrue(wants_neighbor_intro("introduce me to Kashaf"))
         self.assertFalse(wants_neighbor_intro("yes"))
+        self.assertFalse(wants_neighbor_intro("yes introduce us"))
+        self.assertFalse(wants_neighbor_intro("not now"))
 
     def test_accepts_intro_offer(self) -> None:
         self.assertTrue(accepts_intro_offer("yes"))
@@ -34,6 +38,20 @@ class TestIntroProposalHelpers(unittest.TestCase):
             peer={"matching_peer_label": "Morning runners"},
         )
         self.assertIn("morning runs", reason.lower())
+
+    def test_requested_peer_name(self) -> None:
+        self.assertEqual(requested_peer_name("introduce me to Kashaf"), "kashaf")
+        self.assertIsNone(requested_peer_name("introduce me to neighbor 1"))
+
+    def test_pick_peer_by_name_not_first_default(self) -> None:
+        peers = [
+            {"peer_user_id": "u1", "nickname": "Natasha", "matching_peer_label": "Mom"},
+            {"peer_user_id": "u2", "nickname": "Kashaf", "matching_peer_label": "Parent"},
+        ]
+        picked = pick_peer_for_intro(peers, msg="introduce me to kashaf")
+        self.assertEqual(picked["peer_user_id"], "u2")
+        missing = pick_peer_for_intro(peers, msg="introduce me to sofia")
+        self.assertIsNone(missing)
 
     def test_pick_peer_for_intro_neighbor_index(self) -> None:
         peers = [
@@ -54,6 +72,21 @@ class TestIntroProposalHelpers(unittest.TestCase):
             msg="yes",
             pending={"candidate_user_id": "u2"},
         )
+        self.assertEqual(picked["peer_user_id"], "u2")
+
+    def test_pending_does_not_override_explicit_other_name(self) -> None:
+        peers = [
+            {"peer_user_id": "u1", "nickname": "Natasha", "matching_peer_label": "Mom"},
+            {"peer_user_id": "u2", "nickname": "Kashaf", "matching_peer_label": "Brazilian"},
+        ]
+        pending = {
+            "candidate_user_id": "u1",
+            "candidate_nickname": "Natasha",
+            "matching_peer_label": "Mom",
+        }
+        picked = pick_peer_for_intro(peers, msg="introduce me to kashaf", pending=pending)
+        self.assertIsNotNone(picked)
+        assert picked is not None
         self.assertEqual(picked["peer_user_id"], "u2")
 
     def test_stamp_intro_offer_ctx(self) -> None:

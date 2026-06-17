@@ -36,6 +36,15 @@ PEER_SURFACE_UI_INTENTS = frozenset({
     UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
 })
 
+# Peer-match turns — FE should render cards when peer_matches is populated.
+PEER_DISCOVERY_ACTIVE_INTENTS = frozenset({
+    "discovery.find_peers",
+    "discovery.find_by_attrs",
+    "discovery.find_in_block",
+    "discovery.show_peer_profile",
+    "discovery.explain_peer_match",
+})
+
 _PHASE_TO_INTENT: dict[str, str] = {
     "need_zip": UI_INTENT_COLLECT_ZIP,
     "need_identity": UI_INTENT_COLLECT_IDENTITY,
@@ -123,10 +132,14 @@ def derive_ui_intent(
         return UI_INTENT_COLLECT_PHONE
 
     if phase == "preview":
-        if activity_count > 0:
+        if peer_count > 0 and active in PEER_DISCOVERY_ACTIVE_INTENTS:
+            return UI_INTENT_SHOW_PEER_PREVIEW
+        if activity_count > 0 and active == "discovery.find_activities":
             return UI_INTENT_SHOW_ACTIVITY_PREVIEW
         if peer_count > 0:
             return UI_INTENT_SHOW_PEER_PREVIEW
+        if activity_count > 0:
+            return UI_INTENT_SHOW_ACTIVITY_PREVIEW
         return UI_INTENT_CHAT
 
     if ctx.get("requires_phone_verification"):

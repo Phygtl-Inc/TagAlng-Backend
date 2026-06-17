@@ -36,28 +36,40 @@ from app.guest_capabilities import (
 from app.intro_proposal import (
     INTENT_PROPOSE_INTRO,
     accepts_intro_offer,
+    block_log_peer_from_entry,
     build_match_reason,
     format_intro_offer_reply,
+    format_intro_proposed_reply,
+    pick_block_log_entry_for_intro,
+    propose_neighbor_intro,
     stamp_intro_offer_ctx,
     stamp_intro_proposal_ctx,
     try_propose_intro_from_preview,
     wants_neighbor_intro,
     pick_peer_for_intro,
+    peer_index_from_message,
+    requested_peer_name,
 )
 from app.intro_list import (
     INTENT_LIST_INTROS,
+    attach_pending_intros_after_propose,
     fetch_my_intros,
+    format_duplicate_intro_reply,
     format_intros_list_reply,
     infer_intro_direction,
     stamp_pending_intros_ctx,
+    wants_list_intros_phrase,
 )
 from app.local_signals import (
     INTENT_SAVE_SIGNAL,
     INTENT_SHOW_BLOCK_LOG,
+    block_log_match_summary,
+    block_log_take_action,
     fetch_my_block_log,
     filter_block_log_for_signal,
     format_block_log_reply,
     format_signal_saved_reply,
+    normalize_block_log_row,
     normalize_signal_intent,
     save_local_signal,
     stamp_block_log_ctx,
@@ -77,10 +89,16 @@ from app.guest_login import (
     wants_logout as wants_logout_intent,
 )
 from app.claims_persist import (
+    claim_from_pending,
     extract_display_name_reply,
     extract_nickname_from_message,
+    heritage_conflict_prompt,
+    is_explicit_heritage_correction,
+    message_might_assert_heritage,
     persist_profile_patch,
     scrub_negative_heritage_claims,
+    try_upsert_claims_from_message,
+    upsert_claims,
     user_needs_display_name,
 )
 from app.profile_photo import handle_profile_photo_turn, user_profile_photo_url
@@ -91,19 +109,24 @@ from app.layer1_handlers import (
     fetch_block_summary,
     fetch_identity_dashboard,
     fetch_peers_by_attr_filter,
-    summarize_partial_claim_matches,
+    fetch_peer_profile,
     format_attr_peers_reply,
     format_block_summary_reply,
     format_identity_profile_reply,
+    format_match_list_explanation,
     format_peer_detail_reply,
+    format_peer_match_explanation,
+    format_peer_profile_reply,
     handle_add_or_edit_claim,
     handle_change_name,
     handle_notification_prefs,
     peers_to_match_rows,
+    summarize_partial_claim_matches,
     stamp_identity_profile_ctx,
 )
 from app.layer1_intents import (
     LOOKING_SHARING_INTENTS,
+    enrich_slots,
     intent_confidence_met,
     is_block_activity_browse,
     is_profile_acknowledgment,
@@ -111,7 +134,7 @@ from app.layer1_intents import (
     phrase_linear_intent,
     slots_linear_intent,
 )
-from app.layer1_tier import handle_respond_nudge
+from app.layer1_tier import handle_respond_nudge, wants_respond_intro
 from app.signal_capture import (
     PHASE_SIGNAL_CONFIRM,
     PHASE_SIGNAL_EXTRACT,
@@ -142,7 +165,9 @@ _FUNNEL_PHASES = frozenset(
 )
 
 _MORE_DETAIL_RE = re.compile(
-    r"\b(more|names?|introduce|connect|who are they|show me|full|details?|"
+    r"\b(?:(?:show|see)\s+(?:me\s+)?(?:their\s+)?names?|"
+    r"introduce|connect(?:\s+me)?|who are they|"
+    r"details?\s+(?:on|about|for)\s+(?:neighbor|them|#?\d)|"
     r"see them|meet them|talk to)\b",
     re.I,
 )
@@ -250,8 +275,11 @@ def _try_neighbor_intro_turn(
     phone_verified: bool,
     goal: str,
     slots: dict[str, Any] | None,
+    history: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     if not phone_verified:
+        return None
+    if _intro_should_use_block_log(msg, session_ctx, history):
         return None
     pending = session_ctx.get("pending_intro_offer")
     wants_intro = goal == "propose_intro" or wants_neighbor_intro(msg)
@@ -270,13 +298,21 @@ def _try_neighbor_intro_turn(
         home_block_id=ctx_base.get("home_block_id"),
     )
     identity = str(ctx_base.get("identity_snippet") or session_ctx.get("identity_snippet") or "").strip()
+    requested = requested_peer_name(msg)
+    if requested and isinstance(pending, dict):
+        pend_nick = str(pending.get("candidate_nickname") or "").lower()
+        if pend_nick and requested not in pend_nick and pend_nick not in requested:
+            ctx_base = dict(ctx_base)
+            ctx_base.pop("pending_intro_offer", None)
+            pending = None
+            session_ctx = ctx_base
     result = try_propose_intro_from_preview(
         msg=msg,
         session_ctx=session_ctx,
         user_jwt=user_jwt,
         peers=peers,
         identity_snippet=identity or None,
-        force=True,
+        force=False,
     )
     if result is None:
         if wants_intro and not any(p.get("peer_user_id") for p in peers):
@@ -306,6 +342,27 @@ def _try_neighbor_intro_turn(
                 _discovery_routing_stub(PHASE_PREVIEW, "intro_need_verified_peers"),
                 peers,
             )
+        requested = requested_peer_name(msg)
+        if wants_intro and requested and any(p.get("peer_user_id") for p in peers):
+            known = [
+                str(p.get("nickname") or p.get("matching_peer_label") or "").strip()
+                for p in peers
+                if isinstance(p, dict)
+            ]
+            known = [n for n in known if n]
+            hint = f" I see: {', '.join(known[:5])}." if known else ""
+            return (
+                f"I don't see {requested.title()} in your neighbor matches.{hint} "
+                "Try a first name from the list, or say neighbor 1.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_PREVIEW,
+                    preview_block_id=block_id,
+                    active_intent=INTENT_PROPOSE_INTRO,
+                ),
+                _discovery_routing_stub(PHASE_PREVIEW, "intro_name_not_found"),
+                peers,
+            )
         return None
 
     reply, intro = result
@@ -330,6 +387,9 @@ def _try_neighbor_intro_turn(
         }
         stamp_intro_proposal_ctx(ctx, intro=intro, peer=peer)
         ctx.pop("recent_intro_duplicate", None)
+        attach_pending_intros_after_propose(
+            ctx, user_jwt=user_jwt, intro=intro, peer=peer
+        )
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "lana_propose_neighbor_intro")
     else:
         if str(intro.get("status") or "") == "duplicate":
@@ -344,7 +404,7 @@ def _try_neighbor_intro_turn(
             }
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, str(intro.get("status") or "intro_skipped"))
     ctx.pop("activity_previews", None)
-    if selected_peer:
+    if selected_peer and str(intro.get("status") or "") != "duplicate":
         ctx["peer_matches"] = [selected_peer]
         return reply, ctx, ctx["last_routing"], [selected_peer]
     ctx["peer_matches"] = []
@@ -359,9 +419,14 @@ def _maybe_attach_intro_offer(
     identity_snippet: str | None,
     msg: str | None = None,
 ) -> str:
+    if str(ctx.get("active_intent") or "") in (INTENT_SHOW_BLOCK_LOG, "discovery.block_log"):
+        return reply
     if ctx.get("intro_offer_shown") or ctx.get("intro_proposal") or ctx.get("pending_intro_offer"):
         return reply
     if msg and (is_profile_acknowledgment(msg) or (_is_affirmative(msg) and not wants_peer_find(msg))):
+        return reply
+    active = str(ctx.get("active_intent") or "")
+    if active == "discovery.find_by_attrs" and msg and not _ATTR_REFINE_RE.search(str(msg)):
         return reply
     peer = next((p for p in peers if p.get("peer_user_id")), None)
     if not peer:
@@ -372,6 +437,167 @@ def _maybe_attach_intro_offer(
     stamp_intro_offer_ctx(ctx, peer=peer, match_reason=reason)
     ctx["intro_offer_shown"] = True
     return f"{reply}\n\n{format_intro_offer_reply(peer, reason)}"
+
+
+def _confirms_heritage_change(msg: str, pending: dict[str, Any]) -> bool:
+    low = str(msg or "").strip().lower()
+    if not low:
+        return False
+    label = str(pending.get("label") or "").strip().lower()
+    if label and label in low:
+        return True
+    return low in {"yes", "yeah", "yep", "sure", "please", "do it", "change it", "update it"}
+
+
+def _try_change_name_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    if phrase_linear_intent(msg) != "settings.change_name":
+        return None
+    reply, nick = handle_change_name(user_id, msg)
+    ctx = _routing_ctx(
+        dict(session_ctx),
+        phase=phase or "listening",
+        active_intent="settings.change_name",
+    )
+    if nick:
+        ctx["display_name_saved"] = True
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "change_display_name")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _message_bypasses_heritage_pending(
+    msg: str,
+    slots: dict[str, Any] | None = None,
+) -> bool:
+    """Social/settings turns must not be trapped in heritage yes/no."""
+    if wants_neighbor_intro(msg) or wants_list_intros_phrase(msg):
+        return True
+    if phrase_linear_intent(msg) == "settings.change_name":
+        return True
+    linear = slots_linear_intent(slots) if slots else None
+    if linear in (
+        "social.propose_intro",
+        "social.list_intros",
+        "settings.change_name",
+        "tier.send_nudge",
+        "tier.respond_nudge",
+    ):
+        return True
+    goal = str((slots or {}).get("goal") or "")
+    if goal in ("propose_intro", "list_intros"):
+        return True
+    return False
+
+
+def _try_pending_heritage_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+    slots: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    pending = session_ctx.get("pending_heritage_change")
+    if not pending or not user_id:
+        return None
+    if _message_bypasses_heritage_pending(msg, slots):
+        return None
+
+    ctx_base = dict(session_ctx)
+    from_label = str(pending.get("from_label") or "your prior heritage")
+    to_label = str(pending.get("label") or "that")
+
+    if _confirms_heritage_change(msg, pending) or _is_affirmative(msg):
+        claim = claim_from_pending(pending)
+        upsert_claims(user_id, [claim])
+        ctx_base.pop("pending_heritage_change", None)
+        ctx_base.pop("skip_heritage_background_extract", None)
+        reply = f"Got it — I'll show your heritage as {to_label} from here."
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent="identity.add_claim",
+        )
+        if phone_verified:
+            try:
+                dashboard = fetch_identity_dashboard(user_jwt)
+                stamp_identity_profile_ctx(ctx, dashboard)
+            except HTTPException:
+                pass
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "heritage_confirmed")
+        return reply, ctx, ctx["last_routing"], []
+
+    if _is_negative(msg) or re.search(r"\bkeep\b", msg, re.I):
+        ctx_base.pop("pending_heritage_change", None)
+        ctx_base.pop("skip_heritage_background_extract", None)
+        reply = f"No problem — I'll keep {from_label} on your profile."
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent="identity.add_claim",
+        )
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "heritage_kept")
+        return reply, ctx, ctx["last_routing"], []
+
+    pending_claim = claim_from_pending(pending)
+    reply = heritage_conflict_prompt(from_label, pending_claim)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=phase or "listening",
+        active_intent="identity.add_claim",
+    )
+    ctx["pending_heritage_change"] = pending
+    ctx["skip_heritage_background_extract"] = True
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "heritage_confirm_pending")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_heritage_conflict_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+    slots: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    if session_ctx.get("pending_heritage_change") or not user_id:
+        return None
+    if _message_bypasses_heritage_pending(msg, slots):
+        return None
+    if is_explicit_heritage_correction(msg):
+        return None
+    if not message_might_assert_heritage(msg):
+        return None
+
+    result = try_upsert_claims_from_message(user_id, msg)
+    if result.heritage_conflict:
+        ctx_base = dict(session_ctx)
+        pending = result.heritage_conflict
+        pending_claim = claim_from_pending(pending)
+        from_label = str(pending.get("from_label") or "your prior heritage")
+        reply = heritage_conflict_prompt(from_label, pending_claim)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or "listening",
+            active_intent="identity.add_claim",
+        )
+        ctx["pending_heritage_change"] = pending
+        ctx["skip_heritage_background_extract"] = True
+        ctx["skip_claims_background_extract"] = True
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "heritage_confirm_ask")
+        return reply, ctx, ctx["last_routing"], []
+    if result.saved > 0:
+        session_ctx["skip_claims_background_extract"] = True
+    return None
 
 
 def _try_awaiting_name_change_turn(
@@ -402,6 +628,33 @@ def _try_awaiting_name_change_turn(
     else:
         ctx["awaiting_name_change"] = True
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_name")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_respond_nudge_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Accept/decline/block a pending received intro before propose-intro routing."""
+    if not phone_verified or not wants_respond_intro(msg):
+        return None
+    reply, pending, _action = handle_respond_nudge(
+        msg, user_jwt=user_jwt, session_ctx=session_ctx
+    )
+    ctx = _routing_ctx(
+        dict(session_ctx),
+        phase=phase or PHASE_PREVIEW,
+        active_intent="tier.respond_nudge",
+    )
+    if pending:
+        ctx["pending_intro_respond"] = pending
+    else:
+        ctx.pop("pending_intro_respond", None)
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "respond_nudge")
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -448,13 +701,114 @@ def _try_layer1_intent_turn(
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "get_my_profile_dashboard")
         return reply, ctx, ctx["last_routing"], []
 
+    if linear in ("discovery.show_peer_profile", "discovery.explain_peer_match"):
+        if not phone_verified:
+            return (
+                "Verify your phone first — then I can show neighbor profiles and explain matches.",
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent=linear,
+                ),
+                _discovery_routing_stub(phase or "listening", "peer_profile_need_verify"),
+                [],
+            )
+        block_id = _resolve_block_id_for_turn(
+            session_ctx=session_ctx,
+            home_block_id=home_block_id,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+        )
+        peers = _preview_peers_with_ids(
+            user_jwt=user_jwt,
+            session_ctx=session_ctx,
+            block_id=block_id or "",
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+        )
+        peer_hint = str(slots.get("peer_name") or "").strip() or msg
+        selected = pick_peer_for_intro(peers, msg=peer_hint) if peers else None
+        identity = str(
+            session_ctx.get("identity_snippet") or ctx_base.get("identity_snippet") or ""
+        ).strip() or None
+        if linear == "discovery.explain_peer_match":
+            if selected:
+                reply = format_peer_match_explanation(selected, identity_snippet=identity)
+            else:
+                reply = format_match_list_explanation(peers, identity_snippet=identity)
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=phase or PHASE_PREVIEW,
+                active_intent="discovery.explain_peer_match",
+                preview_block_id=block_id,
+            )
+            if peers:
+                ctx["peer_matches"] = peers_to_match_rows(peers, phone_verified=phone_verified)
+            ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "explain_peer_match")
+            return reply, ctx, ctx["last_routing"], ctx.get("peer_matches") or []
+
+        if not selected:
+            return (
+                "Which neighbor — say their name or a number from the list?",
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or PHASE_PREVIEW,
+                    active_intent="discovery.show_peer_profile",
+                    preview_block_id=block_id,
+                ),
+                _discovery_routing_stub(PHASE_PREVIEW, "peer_profile_need_name"),
+                peers_to_match_rows(peers, phone_verified=phone_verified) if peers else [],
+            )
+        peer_id = str(selected.get("peer_user_id") or "").strip()
+        if not peer_id:
+            return (
+                format_peer_detail_reply(
+                    selected,
+                    index=next(
+                        (i for i, p in enumerate(peers) if p is selected),
+                        None,
+                    ),
+                ),
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or PHASE_PREVIEW,
+                    active_intent="discovery.show_peer_profile",
+                    preview_block_id=block_id,
+                ),
+                _discovery_routing_stub(PHASE_PREVIEW, "peer_profile_preview_only"),
+                peers_to_match_rows([selected], phone_verified=phone_verified),
+            )
+        try:
+            profile = fetch_peer_profile(user_jwt, peer_id)
+        except HTTPException:
+            profile = {}
+        match_label = str(selected.get("matching_peer_label") or "").strip() or None
+        reply = format_peer_profile_reply(profile, match_label=match_label)
+        ctx = _routing_ctx(
+            ctx_base,
+            phase=phase or PHASE_PREVIEW,
+            active_intent="discovery.show_peer_profile",
+            preview_block_id=block_id,
+        )
+        ctx["peer_matches"] = peers_to_match_rows([selected], phone_verified=phone_verified)
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "get_peer_profile")
+        return reply, ctx, ctx["last_routing"], ctx["peer_matches"]
+
     if linear in ("identity.add_claim", "identity.edit_claim"):
-        reply, saved = handle_add_or_edit_claim(user_id, msg, linear_intent=linear)
+        if wants_neighbor_intro(msg) or wants_list_intros_phrase(msg):
+            return None
+        reply, saved, pending = handle_add_or_edit_claim(
+            user_id, msg, linear_intent=linear
+        )
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or "listening",
             active_intent=linear,
         )
+        if pending:
+            ctx["pending_heritage_change"] = pending
+            ctx["skip_heritage_background_extract"] = True
+            ctx["skip_claims_background_extract"] = True
         if saved > 0 and phone_verified:
             try:
                 dashboard = fetch_identity_dashboard(user_jwt)
@@ -712,8 +1066,18 @@ def _try_signal_lane_turn(
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """LOOKING/SHARING 4-phase cascade → save_local_signal."""
     ctx_base = dict(session_ctx)
+    if slots and (
+        str(slots.get("goal") or "") == "save_signal" or is_signal_lane_intent(slots)
+    ):
+        session_ctx.pop("discovery_goal", None)
+        ctx_base.pop("discovery_goal", None)
     draft = ctx_base.get("signal_draft")
-    if isinstance(draft, dict) and should_abandon_signal_draft(msg, draft, slots):
+    confirming = (
+        isinstance(draft, dict)
+        and str(draft.get("phase") or "") == PHASE_SIGNAL_CONFIRM
+        and draft.get("confirm_field")
+    )
+    if isinstance(draft, dict) and not confirming and should_abandon_signal_draft(msg, draft, slots):
         clear_signal_draft(ctx_base)
         draft = None
     linear = slots_linear_intent(slots) if slots else None
@@ -790,9 +1154,18 @@ def _try_signal_lane_turn(
                 phase=phase,
             )
 
-    if not slots or not is_signal_lane_intent(slots):
+    if not slots:
         return None
-    if not intent_confidence_met(slots, str(linear or "")):
+    goal = str(slots.get("goal") or "none")
+    if not is_signal_lane_intent(slots) and goal != "save_signal":
+        return None
+    if linear and not intent_confidence_met(slots, linear):
+        if goal != "save_signal" or float(slots.get("confidence", 0.0)) < 0.5:
+            return None
+    elif goal == "save_signal":
+        if float(slots.get("confidence", 0.0)) < 0.5:
+            return None
+    else:
         return None
 
     new_draft = draft_from_slots(slots, msg=msg)
@@ -915,11 +1288,12 @@ def _try_attr_refine_turn(
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Re-run attribute search after pushback (e.g. 'no i want brazilian moms')."""
     msg_s = str(msg or "").strip()
+    linear = slots_linear_intent(slots or {})
     m = _ATTR_REFINE_RE.search(msg_s)
     if m:
         filter_text = normalize_attr_filter_text(m.group(1), slots)
-    elif re.search(r"\bi want\b", msg_s, re.I):
-        filter_text = normalize_attr_filter_text(msg_s, slots)
+    elif linear == "discovery.find_by_attrs" and intent_confidence_met(slots, linear):
+        filter_text = normalize_attr_filter_text(msg, slots)
     else:
         return None
     if len(filter_text) < 3:
@@ -1050,7 +1424,11 @@ def _try_list_intros_turn(
     if looks_like_peer_drilldown(msg):
         return None
     goal = str(slots.get("goal") or "none")
-    if goal != "list_intros" or float(slots.get("confidence", 0.0)) < 0.5:
+    phrase_wants_list = wants_list_intros_phrase(msg)
+    slot_wants_list = goal == "list_intros" and float(slots.get("confidence", 0.0)) >= 0.5
+    if wants_neighbor_intro(msg) and phrase_wants_list and not slot_wants_list:
+        return None
+    if not phrase_wants_list and not slot_wants_list:
         return None
 
     ctx_base = dict(session_ctx)
@@ -1172,23 +1550,24 @@ def _try_save_signal_turn(
 
     matches_shown = int(result.get("matches_created") or 0)
     filtered_entries: list[dict[str, Any]] = []
-    if matches_shown > 0:
-        try:
-            all_entries = fetch_my_block_log(user_jwt)
-            filtered_entries = filter_block_log_for_signal(
-                all_entries,
-                signal_intent=str(result.get("intent") or intent or ""),
-            )
+    try:
+        all_entries = fetch_my_block_log(user_jwt)
+        filtered_entries = filter_block_log_for_signal(
+            all_entries,
+            signal_intent=str(result.get("intent") or intent or ""),
+        )
+        if filtered_entries:
             matches_shown = len(filtered_entries)
-            if filtered_entries:
-                stamp_block_log_ctx(ctx, filtered_entries)
-        except HTTPException:
+            stamp_block_log_ctx(ctx, filtered_entries)
+    except HTTPException:
+        if matches_shown <= 0:
             matches_shown = 0
 
     reply = format_signal_saved_reply(
         result,
         detail=detail,
         matches_shown=matches_shown,
+        entries=filtered_entries or None,
     )
     stamp_signal_saved_ctx(ctx, result, active_intent=active_intent)
     if ctx.get("signal_saved") and isinstance(ctx["signal_saved"], dict):
@@ -1197,6 +1576,322 @@ def _try_save_signal_turn(
     ctx.pop("activity_previews", None)
     clear_signal_draft(ctx)
     return reply, ctx, ctx["last_routing"], []
+
+
+_SWAP_FOLLOWUP_RE = re.compile(
+    r"\b(?:wanna|want to|ok\s+)?(?:swap|swapping|trade|exchange)\b|"
+    r"\b(?:bicycle|bike|boots|toy|rain\s+coat|stroller)\b",
+    re.I,
+)
+_TIP_SEEK_RE = re.compile(
+    r"\b(?:restaurant|place to eat|good place to eat|where to eat|"
+    r"know a good (?:place|spot|restaurant)|recommend(?:ation)?)\b",
+    re.I,
+)
+_BLOCK_LOG_CONTEXT_INTENTS = frozenset({
+    INTENT_SAVE_SIGNAL,
+    "looking.swap",
+    "sharing.swap",
+    "looking.tip",
+    "sharing.tip",
+    INTENT_SHOW_BLOCK_LOG,
+    "discovery.block_log",
+})
+
+
+def _history_recent_block_log(history: list[dict[str, Any]] | None) -> bool:
+    for turn in reversed((history or [])[-4:]):
+        if str(turn.get("role") or "") != "assistant":
+            continue
+        text = str(turn.get("content") or "").lower()
+        if any(
+            phrase in text
+            for phrase in (
+                "block log",
+                "neighbor match",
+                "active match",
+                "i've noted you're looking",
+                "introduce me to #",
+                "swap or meetup",
+            )
+        ):
+            return True
+    return False
+
+
+def _block_log_context_active(
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+) -> bool:
+    if str(session_ctx.get("active_intent") or "") in _BLOCK_LOG_CONTEXT_INTENTS:
+        return True
+    if session_ctx.get("block_log_entries"):
+        return True
+    return _history_recent_block_log(history)
+
+
+def _intro_should_use_block_log(
+    msg: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+) -> bool:
+    if not _block_log_context_active(session_ctx, history):
+        return False
+    if not wants_neighbor_intro(msg):
+        return False
+    if peer_index_from_message(msg) is not None:
+        return True
+    if re.search(
+        r"\b(?:swap|regarding|about\s+the|block\s*log|neighbor\s+match|bicycle|bike)\b",
+        str(msg or ""),
+        re.I,
+    ):
+        return True
+    return bool(session_ctx.get("block_log_entries"))
+
+
+def _wants_swap_followup(msg: str) -> bool:
+    return bool(_SWAP_FOLLOWUP_RE.search(str(msg or "")))
+
+
+def _try_swap_block_log_followup_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+    history: list[dict[str, Any]] | None,
+    slots: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """After a swap seek/offer, keep user on block log — not identity peer cards."""
+    if not phone_verified or not _wants_swap_followup(msg):
+        return None
+    if slots and is_signal_lane_intent(slots) and str(slots.get("goal") or "") == "save_signal":
+        return None
+    recent = (
+        str(session_ctx.get("active_intent") or "") in _BLOCK_LOG_CONTEXT_INTENTS
+        or _history_recent_block_log(history)
+    )
+    if not recent and not _wants_block_log(msg, slots or {}):
+        return None
+    try:
+        entries = fetch_my_block_log(user_jwt)
+    except HTTPException:
+        return None
+    swap_entries = filter_block_log_for_signal(entries, signal_intent="swap_seek")
+    if not swap_entries and filter_block_log_for_signal(entries, signal_intent="swap_offer"):
+        swap_entries = filter_block_log_for_signal(entries, signal_intent="swap_offer")
+    if not swap_entries:
+        return None
+    ctx_base = dict(session_ctx)
+    reply = format_block_log_reply(swap_entries)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=phase or PHASE_PREVIEW,
+        active_intent=INTENT_SHOW_BLOCK_LOG,
+    )
+    stamp_block_log_ctx(ctx, swap_entries)
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "swap_block_log_followup")
+    _clear_peer_surface(ctx)
+    ctx.pop("activity_previews", None)
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_block_log_intro_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+    history: list[dict[str, Any]] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Propose intro to a numbered block-log swap match (not identity peer cards)."""
+    if not phone_verified or not wants_neighbor_intro(msg):
+        return None
+    if session_ctx.get("pending_intro_offer") or session_ctx.get("intro_proposal"):
+        return None
+    if not _intro_should_use_block_log(msg, session_ctx, history):
+        return None
+    try:
+        entries = fetch_my_block_log(user_jwt)
+    except HTTPException:
+        return None
+    swap_entries = [
+        row for row in entries
+        if str(row.get("match_type") or "") in ("inbound_for_my_seek", "inbound_for_my_offer")
+    ]
+    if not swap_entries:
+        return None
+    row = pick_block_log_entry_for_intro(swap_entries, msg=msg)
+    if not row:
+        return None
+    peer_id = str(row.get("peer_user_id") or "").strip()
+    if not peer_id:
+        return None
+
+    peer = block_log_peer_from_entry(normalize_block_log_row(row))
+    summary = block_log_match_summary(row)
+    match_reason = summary or "Swap match on your block."
+    if summary and not summary.lower().startswith("they"):
+        match_reason = f"Swap match — {summary}"
+
+    entry_id = str(row.get("id") or row.get("entry_id") or "").strip()
+    try:
+        intro = propose_neighbor_intro(
+            user_jwt,
+            candidate_user_id=peer_id,
+            match_reason=match_reason[:280],
+            shared_dimensions=["swap"],
+            match_score=float(row["match_strength"])
+            if row.get("match_strength") is not None
+            else None,
+        )
+    except HTTPException as exc:
+        if "duplicate_intro" in str(exc.detail or "").lower():
+            reply = format_duplicate_intro_reply(peer=peer, user_jwt=user_jwt)
+            ctx_base = dict(session_ctx)
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=phase or PHASE_PREVIEW,
+                active_intent=INTENT_SHOW_BLOCK_LOG,
+            )
+            stamp_block_log_ctx(ctx, swap_entries)
+            _clear_peer_surface(ctx)
+            ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "block_log_intro_duplicate")
+            return reply, ctx, ctx["last_routing"], []
+        raise
+
+    if not intro.get("intro_id"):
+        if str(intro.get("status") or "") == "duplicate":
+            reply = format_duplicate_intro_reply(peer=peer, user_jwt=user_jwt)
+            ctx_base = dict(session_ctx)
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=phase or PHASE_PREVIEW,
+                active_intent=INTENT_SHOW_BLOCK_LOG,
+            )
+            stamp_block_log_ctx(ctx, swap_entries)
+            _clear_peer_surface(ctx)
+            ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "block_log_intro_duplicate")
+            return reply, ctx, ctx["last_routing"], []
+        return None
+
+    if entry_id:
+        try:
+            block_log_take_action(user_jwt, entry_id, "nudged")
+        except HTTPException:
+            pass
+
+    reply = format_intro_proposed_reply(peer, match_reason)
+    ctx_base = dict(session_ctx)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=phase or PHASE_PREVIEW,
+        active_intent=INTENT_PROPOSE_INTRO,
+    )
+    stamp_block_log_ctx(ctx, swap_entries)
+    stamp_intro_proposal_ctx(ctx, intro=intro, peer=peer)
+    attach_pending_intros_after_propose(ctx, user_jwt=user_jwt, intro=intro, peer=peer)
+    _clear_peer_surface(ctx)
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "block_log_propose_intro")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_block_log_nudge_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+    history: list[dict[str, Any]] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Nudge a block-log match when user asks for intro in swap/tip context."""
+    if not phone_verified or not wants_neighbor_intro(msg):
+        return None
+    if session_ctx.get("pending_intro_offer") or session_ctx.get("intro_proposal"):
+        return None
+    recent = (
+        str(session_ctx.get("active_intent") or "") in _BLOCK_LOG_CONTEXT_INTENTS
+        or _history_recent_block_log(history)
+    )
+    if not recent:
+        return None
+    try:
+        entries = fetch_my_block_log(user_jwt)
+    except HTTPException:
+        return None
+    swap_entries = [
+        row for row in entries
+        if str(row.get("match_type") or "") in ("inbound_for_my_seek", "inbound_for_my_offer")
+    ]
+    if not swap_entries:
+        return None
+    row = swap_entries[0]
+    entry_id = str(row.get("id") or row.get("entry_id") or "").strip()
+    nick = str(row.get("peer_preview_label") or "A neighbor").strip()
+    summary = block_log_match_summary(row)
+    if entry_id:
+        try:
+            block_log_take_action(user_jwt, entry_id, "nudged")
+        except HTTPException:
+            pass
+    ctx_base = dict(session_ctx)
+    ctx = _routing_ctx(
+        ctx_base,
+        phase=phase or PHASE_PREVIEW,
+        active_intent=INTENT_SHOW_BLOCK_LOG,
+    )
+    stamp_block_log_ctx(ctx, swap_entries)
+    _clear_peer_surface(ctx)
+    bit = f" — {summary}" if summary else ""
+    reply = (
+        f"I nudged {nick}{bit}. If they're interested, they'll get a notification "
+        "and can reply in Lana. Say show my block log to see all swap matches."
+    )
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "block_log_nudge")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_tip_seek_fast_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+    slots: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    if not _TIP_SEEK_RE.search(str(msg or "")):
+        return None
+    if slots:
+        linear = slots_linear_intent(slots)
+        if linear and is_signal_lane_intent(slots) and intent_confidence_met(slots, linear):
+            return None
+    category = "food"
+    if re.search(r"\b(?:doctor|pediatrician|plumber|tutor)\b", msg, re.I):
+        category = "health" if "doctor" in msg.lower() or "pediatrician" in msg.lower() else "home"
+    tip_slots = {
+        "goal": "save_signal",
+        "confidence": 0.88,
+        "signal_intent": "tip_seek",
+        "signal_detail": str(msg or "").strip()[:200],
+        "signal_category": category,
+        "linear_intent": "looking.tip",
+        "in_discovery": False,
+    }
+    return _try_save_signal_turn(
+        msg=msg,
+        slots=tip_slots,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        phase=phase,
+    )
 
 
 def _try_show_block_log_turn(
@@ -1359,6 +2054,53 @@ def _update_discovery_goal_from_slots(
         session_ctx["discovery_goal"] = slot_goal
 
 
+_PIVOT_SLOT_GOALS = frozenset({
+    "save_signal",
+    "show_block_log",
+    "profile_photo",
+    "login",
+    "logout",
+    "list_intros",
+    "propose_intro",
+    "verify",
+    "chat",
+})
+
+_PIVOT_LINEAR_INTENTS = frozenset({
+    "discovery.block_log",
+    "identity.show_my_profile",
+    "settings.change_name",
+    "discovery.show_peer_profile",
+    "discovery.explain_peer_match",
+    "identity.edit_claim",
+    "identity.complete_profile",
+    "settings.change_zip",
+    "help.what_can_you_do",
+    "help.who_are_you",
+    "social.list_intros",
+    "social.propose_intro",
+    "auth.signup_phone",
+    "auth.login_phone",
+    "auth.logout",
+})
+
+
+def _should_clear_discovery_goal(slots: dict[str, Any], msg: str) -> bool:
+    """Drop sticky peers/activities goal when the user pivots this turn."""
+    slot_goal = str(slots.get("goal") or "none").lower()
+    conf = float(slots.get("confidence", 0.0))
+    if slot_goal in _PIVOT_SLOT_GOALS and conf >= 0.5:
+        return True
+    enriched = enrich_slots(dict(slots), msg=msg)
+    linear = slots_linear_intent(enriched)
+    if linear in _PIVOT_LINEAR_INTENTS and intent_confidence_met(enriched, linear):
+        return True
+    if linear and linear.startswith(("looking.", "sharing.")):
+        if intent_confidence_met(enriched, linear):
+            return True
+    return False
+
+
 def _effective_discovery_goal(
     msg: str,
     session_ctx: dict[str, Any],
@@ -1368,19 +2110,34 @@ def _effective_discovery_goal(
     Browse goal for this turn: Flash when explicit; else persisted across ZIP/continue steps.
     Updates session.discovery_goal when user pivots (e.g. peers → activities).
     """
-    if wants_activities_browse(msg):
-        session_ctx["discovery_goal"] = "activities"
-    _update_discovery_goal_from_slots(session_ctx, slots)
-    stored = str(session_ctx.get("discovery_goal") or "none")
     slot_goal = str(slots.get("goal") or "none").lower()
     conf = float(slots.get("confidence", 0.0))
+
+    if wants_activities_browse(msg) or (slot_goal == "activities" and conf >= 0.45):
+        session_ctx["discovery_goal"] = "activities"
+        return "activities"
+
+    if _should_clear_discovery_goal(slots, msg):
+        session_ctx.pop("discovery_goal", None)
+
+    _update_discovery_goal_from_slots(session_ctx, slots)
+    stored = str(session_ctx.get("discovery_goal") or "none")
 
     if slot_goal in _DISCOVERY_GOALS and conf >= 0.45:
         return slot_goal
     if slot_goal == "continue" and stored in _DISCOVERY_GOALS:
+        if stored == "activities" and not wants_activities_browse(msg):
+            session_ctx.pop("discovery_goal", None)
+            return "peers"
         return stored
     if extract_zip(msg) and stored in _DISCOVERY_GOALS:
+        if stored == "activities" and not wants_activities_browse(msg):
+            session_ctx.pop("discovery_goal", None)
+            return "peers"
         return stored
+    if stored == "activities" and not wants_activities_browse(msg):
+        session_ctx.pop("discovery_goal", None)
+        return slot_goal if slot_goal not in ("none",) else "peers"
     return stored if stored in _DISCOVERY_GOALS else slot_goal
 
 
@@ -1452,6 +2209,13 @@ def invalid_zip_hint(text: str) -> str | None:
 def _is_affirmative(msg: str) -> bool:
     lower = str(msg or "").strip().lower().rstrip(".!")
     return lower in _AFFIRMATIVE_REPLIES or any(lower.startswith(f"{a} ") for a in _AFFIRMATIVE_REPLIES)
+
+
+def _is_negative(msg: str) -> bool:
+    lower = str(msg or "").strip().lower().rstrip(".!")
+    if lower in {"no", "nope", "nah", "cancel"}:
+        return True
+    return lower.startswith(("no ", "nope ", "nah "))
 
 
 def _is_peer_find_command(msg: str) -> bool:
@@ -1545,8 +2309,6 @@ def _explicit_funnel_input(
     if session_ctx and session_ctx.get("pending_signup_gate"):
         return True
     if _turn_wants_signup_gate(msg, slots, session_ctx or {}):
-        return True
-    if wants_verify_help(msg) or wants_more_peer_detail(msg):
         return True
     if wants_rsvp_intent(msg) or wants_activities_browse(msg):
         return True
@@ -2292,6 +3054,103 @@ def handle_discovery_turn(
         ctx["unified_mode"] = True
         return reply, ctx, routing, peers
 
+    change_name_turn = _try_change_name_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_id=user_id,
+        phase=phase,
+    )
+    if change_name_turn is not None:
+        reply, ctx, routing, peers = change_name_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
+
+    respond_turn = _try_respond_nudge_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        phase=phase,
+    )
+    if respond_turn is not None:
+        reply, ctx, routing, peers = respond_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
+
+    if phone_verified and wants_neighbor_intro(msg):
+        intro_block = resolve_block_id(session_ctx, home_block_id)
+        block_intro_turn = _try_block_log_intro_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            phase=phase,
+            history=history,
+        )
+        if block_intro_turn is not None:
+            reply, ctx, routing, peers = block_intro_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+        if intro_block:
+            intro_turn = _try_neighbor_intro_turn(
+                msg=msg,
+                session_ctx=session_ctx,
+                ctx_base=dict(session_ctx),
+                user_jwt=user_jwt,
+                block_id=intro_block,
+                phone_verified=phone_verified,
+                goal=str((slots or {}).get("goal") or "none"),
+                slots=slots,
+                history=history,
+            )
+            if intro_turn is not None:
+                reply, ctx, routing, peers = intro_turn
+                ctx["unified_mode"] = True
+                return reply, ctx, routing, peers
+
+    list_turn = _try_list_intros_turn(
+        msg=msg,
+        slots=slots or {},
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        phase=phase,
+    )
+    if list_turn is not None:
+        reply, ctx, routing, peers = list_turn
+        ctx["unified_mode"] = True
+        _clear_peer_surface(ctx)
+        return reply, ctx, routing, peers
+
+    heritage_pending_turn = _try_pending_heritage_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_id=user_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        phase=phase,
+        slots=slots,
+    )
+    if heritage_pending_turn is not None:
+        reply, ctx, routing, peers = heritage_pending_turn
+        ctx["unified_mode"] = True
+        ctx["skip_claims_background_extract"] = True
+        return reply, ctx, routing, peers
+
+    heritage_conflict_turn = _try_heritage_conflict_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_id=user_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        phase=phase,
+        slots=slots,
+    )
+    if heritage_conflict_turn is not None:
+        reply, ctx, routing, peers = heritage_conflict_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
+
     if discovery_ai_enabled() and slots:
         signal_turn = _try_signal_lane_turn(
             msg=msg,
@@ -2304,6 +3163,34 @@ def handle_discovery_turn(
         )
         if signal_turn is not None:
             reply, ctx, routing, peers = signal_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        tip_turn = _try_tip_seek_fast_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+            slots=slots,
+        )
+        if tip_turn is not None:
+            reply, ctx, routing, peers = tip_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        swap_followup_turn = _try_swap_block_log_followup_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            phase=phase,
+            history=history,
+            slots=slots,
+        )
+        if swap_followup_turn is not None:
+            reply, ctx, routing, peers = swap_followup_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 
@@ -2362,18 +3249,17 @@ def handle_discovery_turn(
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 
-        list_turn = _try_list_intros_turn(
+        block_nudge_turn = _try_block_log_nudge_turn(
             msg=msg,
-            slots=slots,
             session_ctx=session_ctx,
             user_jwt=user_jwt,
             phone_verified=phone_verified,
             phase=phase,
+            history=history,
         )
-        if list_turn is not None:
-            reply, ctx, routing, peers = list_turn
+        if block_nudge_turn is not None:
+            reply, ctx, routing, peers = block_nudge_turn
             ctx["unified_mode"] = True
-            _clear_peer_surface(ctx)
             return reply, ctx, routing, peers
 
         block_log_turn = _try_show_block_log_turn(
@@ -2388,24 +3274,6 @@ def handle_discovery_turn(
             reply, ctx, routing, peers = block_log_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
-
-        if phone_verified and wants_neighbor_intro(msg):
-            intro_block = resolve_block_id(session_ctx, home_block_id)
-            if intro_block:
-                intro_turn = _try_neighbor_intro_turn(
-                    msg=msg,
-                    session_ctx=session_ctx,
-                    ctx_base=dict(session_ctx),
-                    user_jwt=user_jwt,
-                    block_id=intro_block,
-                    phone_verified=phone_verified,
-                    goal=str(slots.get("goal") or "none"),
-                    slots=slots,
-                )
-                if intro_turn is not None:
-                    reply, ctx, routing, peers = intro_turn
-                    ctx["unified_mode"] = True
-                    return reply, ctx, routing, peers
 
     if phase == PHASE_AWAIT_LOGOUT or session_ctx.get("auth_intent") == "logout":
         if wants_cancel_logout(msg):
@@ -2609,7 +3477,7 @@ def handle_discovery_turn(
         or "your block"
     )
 
-    if goal == "activities" or wants_activities_browse(msg):
+    if goal == "activities":
         return _show_activities_preview(
             ctx_base=ctx_base,
             block_id=block_id,
@@ -2652,6 +3520,16 @@ def handle_discovery_turn(
         )
 
     if phase == PHASE_PREVIEW:
+        block_intro_turn = _try_block_log_intro_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            phase=phase,
+            history=history,
+        )
+        if block_intro_turn is not None:
+            return block_intro_turn
         intro_turn = _try_neighbor_intro_turn(
             msg=msg,
             session_ctx=session_ctx,
@@ -2661,6 +3539,7 @@ def handle_discovery_turn(
             phone_verified=phone_verified,
             goal=effective_goal,
             slots=slots,
+            history=history,
         )
         if intro_turn is not None:
             return intro_turn
@@ -2832,6 +3711,9 @@ def handle_discovery_turn(
         slots=slots,
         session_ctx=session_ctx,
     ):
+        return None
+
+    if goal in ("chat", "none"):
         return None
 
     if phase != PHASE_PREVIEW or wants_peers or wants_more_peer_detail(msg):

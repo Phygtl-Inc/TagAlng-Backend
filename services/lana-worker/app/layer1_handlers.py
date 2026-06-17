@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import HTTPException
 
 from app.auth import service_client
 from app.claims_persist import (
+    claim_from_pending,
     dismiss_claims_from_edit_message,
-    extract_and_upsert_claims_from_message,
     extract_display_name_reply,
+    heritage_conflict_prompt,
     persist_profile_patch,
+    try_upsert_claims_from_message,
 )
 from app.claim_search import (
     ClaimFilter,
@@ -359,6 +362,116 @@ def peers_to_match_rows(
     return out
 
 
+def fetch_peer_profile(user_jwt: str, peer_user_id: str) -> dict[str, Any]:
+    raw = call_rpc(user_jwt, "get_peer_profile", {"p_user_id": peer_user_id})
+    return raw if isinstance(raw, dict) else {}
+
+
+def format_peer_profile_reply(
+    profile: dict[str, Any],
+    *,
+    match_label: str | None = None,
+) -> str:
+    nick = str(profile.get("nickname") or "This neighbor").strip()
+    public = profile.get("public_claims") if isinstance(profile.get("public_claims"), list) else []
+    labels: list[str] = []
+    seen: set[str] = set()
+    for claim in public[:16]:
+        if not isinstance(claim, dict):
+            continue
+        label = str(claim.get("label") or claim.get("concept") or "").strip()
+        key = label.lower()
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    lines = [f"Here's what {nick} has shared publicly on your block:"]
+    if labels:
+        lines.append(" · ".join(labels[:12]))
+    else:
+        lines.append("No public identity threads saved yet.")
+    if match_label:
+        lines.append(f"In your match preview they appeared as: {match_label}.")
+    shared = int(profile.get("shared_claim_count") or 0)
+    if shared:
+        lines.append(
+            f"You share {shared} public claim{'s' if shared != 1 else ''} with them."
+        )
+    lines.append("Want an intro? Say their name or neighbor number.")
+    return " ".join(lines)
+
+
+def format_peer_match_explanation(
+    peer: dict[str, Any],
+    *,
+    identity_snippet: str | None = None,
+) -> str:
+    nick = str(peer.get("nickname") or "A neighbor").strip()
+    label = str(peer.get("matching_peer_label") or "shared traits").strip()
+    concept = str(peer.get("matching_peer_concept") or "").strip()
+    score = peer.get("similarity_score")
+    pct = ""
+    if score is not None:
+        try:
+            pct = f"{int(float(score) * 100)}%"
+        except (TypeError, ValueError):
+            pct = ""
+    parts: list[str] = []
+    if pct:
+        parts.append(
+            f"The {pct} on {nick} is similarity between your saved identity threads and "
+            f"theirs in our embedding match — not a quiz score."
+        )
+    parts.append(f"The preview headline for them is \"{label}\".")
+    if concept:
+        parts.append(f"Strongest overlapping concept: {concept}.")
+    if peer.get("has_exact_concept_match"):
+        parts.append("They share at least one exact public claim with you.")
+    elif pct:
+        parts.append(
+            "It's overlap across several threads — the label summarizes the top match, "
+            "not every trait they have."
+        )
+    if identity_snippet:
+        parts.append(f"Your last matching ask was: {identity_snippet[:120]}.")
+    return " ".join(parts)
+
+
+def format_match_list_explanation(
+    peers: list[dict[str, Any]],
+    *,
+    identity_snippet: str | None = None,
+) -> str:
+    if not peers:
+        return (
+            "I don't have neighbor matches loaded — say find people like me first, "
+            "then ask about a specific match."
+        )
+    if len(peers) == 1:
+        return format_peer_match_explanation(peers[0], identity_snippet=identity_snippet)
+    lines = [
+        "Each % is embedding similarity between your identity threads and theirs — "
+        "higher means more overlap, not a perfect fit on every label."
+    ]
+    for i, peer in enumerate(peers[:5]):
+        if not isinstance(peer, dict):
+            continue
+        nick = str(peer.get("nickname") or f"Neighbor {i + 1}").strip()
+        label = str(peer.get("matching_peer_label") or "shared traits").strip()
+        score = peer.get("similarity_score")
+        pct = ""
+        if score is not None:
+            try:
+                pct = f" ({int(float(score) * 100)}%)"
+            except (TypeError, ValueError):
+                pct = ""
+        lines.append(f"• {nick}{pct} — {label}")
+    if identity_snippet:
+        lines.append(f"You asked about: {identity_snippet[:120]}.")
+    lines.append("Ask about a name for their full public claims.")
+    return "\n".join(lines)
+
+
 def format_peer_detail_reply(
     peer: dict[str, Any],
     *,
@@ -382,6 +495,13 @@ def format_peer_detail_reply(
     )
 
 
+def _short_peer_label(label: str, *, max_traits: int = 2) -> str:
+    parts = [p.strip() for p in str(label or "").split("·") if p.strip()]
+    if len(parts) <= max_traits:
+        return str(label or "shared traits").strip() or "shared traits"
+    return " · ".join(parts[:max_traits]) + " · …"
+
+
 def format_attr_peers_reply(
     peers: list[dict[str, Any]],
     *,
@@ -398,10 +518,14 @@ def format_attr_peers_reply(
             f"I don't see neighbors matching \"{filter_text}\" on your block yet. "
             "Try broadening the description or complete your profile so I can match better."
         )
-    lines = [f"I found {len(peers)} neighbor{'s' if len(peers) != 1 else ''} matching \"{filter_text}\":"]
+    n = len(peers)
+    lines = [
+        f"I found {n} neighbor{'s' if n != 1 else ''} matching \"{filter_text}\" — "
+        "see the cards below."
+    ]
     for p in peers[:5]:
         nick = str(p.get("nickname") or "A neighbor")
-        label = str(p.get("matching_peer_label") or "shared traits")
+        label = _short_peer_label(str(p.get("matching_peer_label") or "shared traits"))
         lines.append(f"• {nick} — {label}")
     lines.append("Want me to introduce you to any of them?")
     return "\n".join(lines)
@@ -431,18 +555,33 @@ def handle_add_or_edit_claim(
     message: str,
     *,
     linear_intent: str,
-) -> tuple[str, int]:
+    force_heritage_replace: bool = False,
+) -> tuple[str, int, dict[str, Any] | None]:
     if not user_id:
         return (
             "Verify your phone first — then I can save identity threads to your profile.",
             0,
+            None,
         )
     dismissed = 0
     if linear_intent == "identity.edit_claim" or re.search(
         r"\b(?:remove|delete|drop|clear)\b", message, re.I
     ):
         dismissed = dismiss_claims_from_edit_message(user_id, message)
-    saved = extract_and_upsert_claims_from_message(user_id, message)
+    result = try_upsert_claims_from_message(
+        user_id,
+        message,
+        force_heritage_replace=force_heritage_replace,
+    )
+    if result.heritage_conflict:
+        from_label = str(result.heritage_conflict.get("from_label") or "your prior heritage")
+        pending_claim = claim_from_pending(result.heritage_conflict)
+        return (
+            heritage_conflict_prompt(from_label, pending_claim),
+            result.saved,
+            result.heritage_conflict,
+        )
+    saved = result.saved
     total = dismissed + saved
     if total > 0:
         parts: list[str] = []
@@ -453,10 +592,12 @@ def handle_add_or_edit_claim(
         return (
             f"Got it — I {' and '.join(parts)} identity thread{'s' if total != 1 else ''} on your profile.",
             total,
+            None,
         )
     return (
         "Tell me more — heritage, life stage, interests, language, faith, or what you like to do.",
         0,
+        None,
     )
 
 

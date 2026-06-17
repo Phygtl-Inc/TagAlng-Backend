@@ -2,11 +2,13 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.claims_persist import (
+    detect_heritage_conflict,
     dismiss_claims_from_edit_message,
     extract_display_name_reply,
     extract_nickname_from_message,
     filter_extracted_claims,
     is_discovery_query_message,
+    is_explicit_heritage_correction,
     is_negative_claim,
     reconcile_heritage_claims,
     should_extract_claims_from_message,
@@ -29,10 +31,18 @@ class TestNicknameExtract(unittest.TestCase):
     def test_single_word_when_asked(self) -> None:
         self.assertEqual(extract_display_name_reply("brigade"), "Brigade")
 
+    def test_affirmative_not_treated_as_name(self) -> None:
+        self.assertIsNone(extract_display_name_reply("ok"))
+        self.assertIsNone(extract_display_name_reply("okay"))
+
     def test_change_name_to(self) -> None:
         self.assertEqual(
             extract_nickname_from_message("change my name to Sofia"),
             "Sofia",
+        )
+        self.assertEqual(
+            extract_nickname_from_message("add my name as Ada"),
+            "Ada",
         )
 
     def test_sofia_reply(self) -> None:
@@ -60,7 +70,9 @@ class TestShouldExtractClaims(unittest.TestCase):
 
     def test_skips_discovery_queries(self) -> None:
         self.assertFalse(should_extract_claims_from_message("find pakistani mom"))
+        self.assertFalse(should_extract_claims_from_message("introduce me to Natasha"))
         self.assertTrue(is_discovery_query_message("find brazilian mom"))
+        self.assertTrue(is_discovery_query_message("introduce me to Natasha"))
 
 
 class TestClaimFilters(unittest.TestCase):
@@ -148,6 +160,63 @@ class TestReconcileHeritage(unittest.TestCase):
         reconcile_heritage_claims("user-1", batch)
         dismissed = mock_dismiss.call_args[0][1]
         self.assertEqual(set(dismissed), {"c1", "c2", "c3"})
+
+    @patch("app.claims_persist._dismiss_claims_by_ids")
+    @patch("app.claims_persist.service_client")
+    def test_reconcile_replaces_american_with_brazilian(
+        self, mock_client: MagicMock, mock_dismiss: MagicMock
+    ) -> None:
+        sb = MagicMock()
+        mock_client.return_value = sb
+        table = MagicMock()
+        sb.table.return_value = table
+        chain = MagicMock()
+        table.select.return_value = chain
+        chain.eq.return_value = chain
+        chain.is_.return_value = chain
+        chain.execute.return_value = MagicMock(
+            data=[
+                {"id": "c1", "concept": "american_heritage", "label": "American", "bucket": "heritage"},
+            ]
+        )
+        batch = [
+            ExtractedClaim(
+                concept="brazilian_heritage",
+                label="Brazilian",
+                confidence=0.9,
+                bucket="heritage",
+            )
+        ]
+        reconcile_heritage_claims("user-1", batch)
+        dismissed = mock_dismiss.call_args[0][1]
+        self.assertEqual(dismissed, ["c1"])
+
+
+class TestHeritageConflict(unittest.TestCase):
+    @patch("app.claims_persist.fetch_active_heritage_claims")
+    def test_detects_conflicting_heritage(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = [("american_heritage", "American")]
+        conflict = detect_heritage_conflict(
+            "user-1",
+            [
+                ExtractedClaim(
+                    concept="brazilian_heritage",
+                    label="Brazilian",
+                    confidence=0.9,
+                    bucket="heritage",
+                )
+            ],
+        )
+        self.assertIsNotNone(conflict)
+        assert conflict is not None
+        self.assertEqual(conflict[0], "American")
+        self.assertEqual(conflict[1].label, "Brazilian")
+
+    def test_explicit_correction_flag(self) -> None:
+        self.assertTrue(
+            is_explicit_heritage_correction("ok so i am not brazilian. I am american")
+        )
+        self.assertFalse(is_explicit_heritage_correction("I am Brazilian"))
 
 
 class TestDismissClaimsFromEdit(unittest.TestCase):

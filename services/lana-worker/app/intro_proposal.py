@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from app.claim_search import peer_matches_identity_snippet
 from app.intro_list import format_duplicate_intro_reply
+from app.layer1_tier import wants_respond_intro
 from app.supabase_rpc import call_rpc
 
 INTENT_PROPOSE_INTRO = "social.propose_intro"
@@ -30,14 +31,17 @@ _AFFIRMATIVE = frozenset(
 )
 
 _INTRO_REQUEST_RE = re.compile(
-    r"\b(introduce|introduction|connect me|put (?:us|me) together|meet (?:them|her|him)|"
+    r"\b(?:int(?:ro)?duce|introduction|connect me|put (?:us|me) together|meet (?:them|her|him)|"
     r"reach out|say hi|send (?:a )?nudge|talk to)\b",
     re.I,
 )
 
 
 def wants_neighbor_intro(msg: str) -> bool:
-    return bool(_INTRO_REQUEST_RE.search(str(msg or "").strip()))
+    text = str(msg or "").strip()
+    if wants_respond_intro(text):
+        return False
+    return bool(_INTRO_REQUEST_RE.search(text))
 
 
 def accepts_intro_offer(msg: str) -> bool:
@@ -61,18 +65,76 @@ def build_match_reason(
     return f"Lana matched you with {label} on your block."
 
 
-def _peer_index_from_message(msg: str) -> int | None:
+_INTRO_NAME_RE = re.compile(
+    r"\b(?:int(?:ro)?duce(?:\s+me)?\s+to|connect\s+me\s+to|meet|talk\s+to)\s+([a-z][a-z'-]{1,30})\b",
+    re.I,
+)
+
+
+def requested_peer_name(msg: str) -> str | None:
+    """Explicit neighbor name in an intro request (e.g. 'introduce me to Kashaf')."""
+    m = _INTRO_NAME_RE.search(str(msg or ""))
+    if not m:
+        return None
+    name = str(m.group(1) or "").strip().lower()
+    if name in ("a", "an", "the", "my", "that", "them", "her", "him", "neighbor", "neighbour"):
+        return None
+    return name
+
+
+def peer_index_from_message(msg: str) -> int | None:
     lower = str(msg or "").lower()
-    if re.search(r"\b(?:first|1st|#1)\b", lower):
+    hash_match = re.search(r"#(\d+)\b", lower)
+    if hash_match:
+        return int(hash_match.group(1)) - 1
+    if re.search(r"\b(?:first|1st)\b", lower):
         return 0
-    if re.search(r"\b(?:second|2nd|#2)\b", lower):
+    if re.search(r"\b(?:second|2nd)\b", lower):
         return 1
-    if re.search(r"\b(?:third|3rd|#3)\b", lower):
+    if re.search(r"\b(?:third|3rd)\b", lower):
         return 2
-    m = re.search(r"\b(?:neighbor|neighbour|person|match|#)\s*(\d+)\b", lower)
+    m = re.search(r"\b(?:neighbor|neighbour|person|match)\s*(\d+)\b", lower)
     if m:
         return int(m.group(1)) - 1
     return None
+
+
+_peer_index_from_message = peer_index_from_message
+
+
+def pick_block_log_entry_for_intro(
+    entries: list[dict[str, Any]],
+    *,
+    msg: str,
+) -> dict[str, Any] | None:
+    """Pick a numbered block-log row when user says introduce me to #N."""
+    if not entries:
+        return None
+    idx = peer_index_from_message(msg)
+    if idx is not None:
+        if 0 <= idx < len(entries):
+            return entries[idx]
+        return entries[0]
+    lower = str(msg or "").lower()
+    if re.search(
+        r"\b(?:swap|regarding|about\s+the|block\s*log|neighbor\s+match|bicycle|bike)\b",
+        lower,
+    ):
+        return entries[0]
+    return None
+
+
+def block_log_peer_from_entry(row: dict[str, Any]) -> dict[str, Any]:
+    nick = str(row.get("peer_preview_label") or "A neighbor").strip()
+    if nick == "A neighbor on your block":
+        nick = "A neighbor"
+    return {
+        "peer_user_id": row.get("peer_user_id"),
+        "nickname": None if nick == "A neighbor" else nick,
+        "matching_peer_label": str(row.get("match_summary") or "").strip()
+        or str((row.get("match_reasons") or [""])[0] or "").strip()
+        or "swap match on your block",
+    }
 
 
 def pick_peer_for_intro(
@@ -81,13 +143,34 @@ def pick_peer_for_intro(
     msg: str,
     pending: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if pending:
+    requested = requested_peer_name(msg)
+
+    if pending and not requested:
         pid = str(pending.get("candidate_user_id") or "").strip()
         if pid:
             for p in peers:
                 if str(p.get("peer_user_id") or "") == pid:
                     return p
-            return pending
+            pending_peer = {
+                "peer_user_id": pid,
+                "nickname": pending.get("candidate_nickname"),
+                "matching_peer_label": pending.get("matching_peer_label"),
+                "similarity_score": pending.get("match_score"),
+                "matching_peer_concept": pending.get("matching_peer_concept"),
+            }
+            return pending_peer
+
+    if pending and requested:
+        pid = str(pending.get("candidate_user_id") or "").strip()
+        pend_nick = str(pending.get("candidate_nickname") or "").lower()
+        if pid and pend_nick and (
+            pend_nick == requested
+            or requested in pend_nick
+            or pend_nick in requested
+        ):
+            for p in peers:
+                if str(p.get("peer_user_id") or "") == pid:
+                    return p
 
     identified = [p for p in peers if p.get("peer_user_id")]
     if not identified:
@@ -98,12 +181,19 @@ def pick_peer_for_intro(
         return identified[idx]
 
     lower = str(msg or "").lower()
+    if requested:
+        for p in identified:
+            nick = str(p.get("nickname") or "").lower()
+            if nick and (nick == requested or requested in nick or nick in requested):
+                return p
+        return None
+
     for p in identified:
         label = str(p.get("matching_peer_label") or "").lower()
         nick = str(p.get("nickname") or "").lower()
-        if label and label in lower:
+        if label and len(label) > 3 and label in lower:
             return p
-        if nick and nick in lower:
+        if nick and len(nick) > 2 and nick in lower:
             return p
     if idx is not None and identified:
         return identified[0]
@@ -239,6 +329,14 @@ def try_propose_intro_from_preview(
                 {"status": "need_verify"},
             )
         raise
+
+    if not intro.get("intro_id"):
+        if str(intro.get("status") or "") == "duplicate":
+            return (
+                format_duplicate_intro_reply(peer=peer, user_jwt=user_jwt),
+                {"status": "duplicate", "candidate_user_id": peer.get("peer_user_id")},
+            )
+        return None
 
     reply = format_intro_proposed_reply(peer, reason)
     return reply, intro

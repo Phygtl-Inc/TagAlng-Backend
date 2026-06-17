@@ -31,13 +31,30 @@ class TestLocalSignalsHelpers(unittest.TestCase):
             detail="3T rain boots",
         )
         self.assertIn("rain boots", reply)
-        self.assertIn("2 new matches", reply)
+        self.assertIn("2 match", reply)
+
+    def test_format_signal_saved_reply_lists_entries(self) -> None:
+        reply = format_signal_saved_reply(
+            {"intent": "swap_seek", "matches_created": 1},
+            detail="bicycle for my kid",
+            matches_shown=1,
+            entries=[{
+                "peer_preview_label": "Kashaf",
+                "peer_signal_intent": "swap_offer",
+                "peer_signal_detail": "kids bicycle",
+                "my_signal_intent": "swap_seek",
+                "my_signal_detail": "bicycle for my kid",
+            }],
+        )
+        self.assertIn("Kashaf", reply)
+        self.assertIn("kids bicycle", reply)
 
     def test_format_block_log_empty(self) -> None:
         self.assertIn("quiet", format_block_log_reply([]))
 
     def test_block_log_match_summary_meet_host(self) -> None:
         summary = block_log_match_summary({
+            "match_type": "meet_invite_potential",
             "peer_signal_intent": "meet_seek",
             "peer_signal_detail": "weekend stroller walk",
             "my_signal_intent": "host_meet",
@@ -46,9 +63,32 @@ class TestLocalSignalsHelpers(unittest.TestCase):
         self.assertIn("weekend stroller walk", summary)
         self.assertIn("Saturday coffee at Foxtail", summary)
 
+    def test_block_log_match_summary_prefers_peer_offer(self) -> None:
+        summary = block_log_match_summary({
+            "match_type": "inbound_for_my_seek",
+            "peer_signal_intent": "swap_offer",
+            "peer_signal_detail": "kids bicycle",
+            "my_signal_intent": "swap_seek",
+            "my_signal_detail": "bicycle for my kid",
+        })
+        self.assertIn("offering", summary.lower())
+        self.assertIn("kids bicycle", summary)
+        self.assertNotIn("You're looking for", summary)
+
+    def test_block_log_match_summary_uses_reason_when_peer_empty(self) -> None:
+        summary = block_log_match_summary({
+            "match_type": "inbound_for_my_seek",
+            "my_signal_intent": "swap_seek",
+            "my_signal_detail": "bicycle for my kid",
+            "match_reasons": ["kids bicycle matches your ask: bicycle for my kid"],
+        })
+        self.assertIn("kids bicycle", summary)
+        self.assertNotIn("You're looking for", summary)
+
     def test_format_block_log_with_signal_details(self) -> None:
         reply = format_block_log_reply([
             {
+                "match_type": "meet_invite_potential",
                 "peer_preview_label": "A neighbor on your block",
                 "match_strength": 0.84,
                 "peer_signal_intent": "meet_seek",
@@ -143,7 +183,7 @@ class TestDiscoverySignalRouting(unittest.TestCase):
         self.assertIn("rain boots", reply)
         self.assertEqual(ctx.get("active_intent"), "looking.swap")
         self.assertIn("signal_saved", ctx)
-        self.assertNotIn("block_log_entries", ctx)
+        self.assertFalse(ctx.get("block_log_entries"))
         mock_save.assert_called_once()
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
@@ -183,7 +223,7 @@ class TestDiscoverySignalRouting(unittest.TestCase):
         )
         self.assertEqual(ctx.get("active_intent"), "looking.meet")
         self.assertIn("signal_saved", ctx)
-        self.assertNotIn("block_log_entries", ctx)
+        self.assertFalse(ctx.get("block_log_entries"))
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.fetch_my_block_log")

@@ -86,6 +86,11 @@ class BlockLogEntryRow(BaseModel):
     peer_preview_label: str | None = None
     match_strength: float | None = None
     match_reasons: list[str] = Field(default_factory=list)
+    match_summary: str | None = None
+    peer_signal_detail: str | None = None
+    peer_signal_intent: str | None = None
+    my_signal_detail: str | None = None
+    my_signal_intent: str | None = None
     created_at: str | None = None
     expires_at: str | None = None
     notification_sent_to_peer: bool = False

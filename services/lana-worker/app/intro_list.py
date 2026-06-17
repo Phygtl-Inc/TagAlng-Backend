@@ -5,9 +5,26 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from fastapi import HTTPException
+
 from app.supabase_rpc import call_rpc
 
 INTENT_LIST_INTROS = "social.list_intros"
+
+_LIST_INTROS_PHRASES = (
+    "show my intros",
+    "show intros",
+    "my intros",
+    "pending intros",
+    "list intros",
+    "intro inbox",
+    "any intros",
+)
+
+
+def wants_list_intros_phrase(msg: str) -> bool:
+    lower = str(msg or "").lower()
+    return any(phrase in lower for phrase in _LIST_INTROS_PHRASES)
 
 
 def fetch_my_intros(
@@ -87,6 +104,46 @@ def format_intros_list_reply(intros: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def intro_row_from_proposal(
+    intro: dict[str, Any],
+    peer: dict[str, Any],
+    *,
+    direction: str = "sent",
+) -> dict[str, Any]:
+    """Synthetic inbox row when get_my_intros lags or RLS blocked (fallback)."""
+    nick = str(peer.get("nickname") or peer.get("matching_peer_label") or "A neighbor").strip()
+    return {
+        "id": intro.get("intro_id"),
+        "intro_id": intro.get("intro_id"),
+        "other_user_id": intro.get("candidate_user_id") or peer.get("peer_user_id"),
+        "nickname": nick,
+        "avatar_url": peer.get("avatar_url"),
+        "status": intro.get("status") or "proposed",
+        "match_reason": intro.get("match_reason") or peer.get("matching_peer_label"),
+        "shared_dimensions": intro.get("shared_dimensions") or [],
+        "direction": direction,
+    }
+
+
+def attach_pending_intros_after_propose(
+    ctx: dict[str, Any],
+    *,
+    user_jwt: str,
+    intro: dict[str, Any],
+    peer: dict[str, Any],
+) -> None:
+    """Show sent intro on propose turn — fetch DB first, else use just-created intro."""
+    rows: list[dict[str, Any]] = []
+    try:
+        rows = fetch_my_intros(user_jwt, direction="sent")
+    except HTTPException:
+        rows = []
+    if not rows and intro.get("intro_id"):
+        rows = [intro_row_from_proposal(intro, peer, direction="sent")]
+    if rows:
+        ctx["pending_intros"] = [normalize_intro_row(r) for r in rows]
+
+
 def stamp_pending_intros_ctx(ctx: dict[str, Any], intros: list[dict[str, Any]]) -> None:
     ctx["pending_intros"] = [normalize_intro_row(row) for row in intros]
     ctx["active_intent"] = INTENT_LIST_INTROS
@@ -94,18 +151,7 @@ def stamp_pending_intros_ctx(ctx: dict[str, Any], intros: list[dict[str, Any]]) 
 
 def infer_intro_direction(msg: str, slots: dict[str, Any] | None = None) -> str:
     lower = str(msg or "").lower()
-    if any(
-        phrase in lower
-        for phrase in (
-            "show my intros",
-            "show intros",
-            "my intros",
-            "pending intros",
-            "list intros",
-            "intro inbox",
-            "any intros",
-        )
-    ):
+    if wants_list_intros_phrase(lower):
         return "all"
     if any(w in lower for w in ("i sent", "outgoing", "waiting on them", "they respond")):
         return "sent"
@@ -151,6 +197,8 @@ def format_duplicate_intro_reply(
             reply += f" I matched you on: {reason}."
         return reply
     return (
-        f"There's already a recent intro between you and {nick}. "
-        "Say 'show my intros' to see what's pending."
+        f"There's already a recent intro between you and {nick} in the last 30 days. "
+        "Your inbox only shows pending intros — if it's empty, that one was likely "
+        "accepted, expired, or declined. Say show my intros to check, or pick another "
+        "block-log match (e.g. introduce me to #2)."
     )

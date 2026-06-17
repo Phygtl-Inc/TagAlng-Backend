@@ -106,6 +106,23 @@ class TestSignalDraftAbandon(unittest.TestCase):
         }
         self.assertFalse(should_abandon_signal_draft("3T", draft, slots={}))
 
+    def test_keep_category_answer_despite_ai_reclassify(self) -> None:
+        draft = {
+            "phase": "signal_confirm_missing",
+            "confirm_field": "category",
+            "detail": "good restaurant near me",
+            "linear_intent": "looking.tip",
+            "intent": "tip_seek",
+        }
+        slots = {
+            "linear_intent": "sharing.tip",
+            "signal_intent": "tip_share",
+            "confidence": 0.9,
+        }
+        self.assertFalse(
+            should_abandon_signal_draft("food", draft, slots=slots),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

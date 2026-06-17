@@ -10,7 +10,6 @@ from app.layer1_intents import (
     LINEAR_INTENTS,
     enrich_slots,
     normalize_attr_filter_text,
-    phrase_linear_intent,
     slots_want_layer1_handling,
 )
 from app.orchestrator.llm import llm_configured, llm_json, router_model
@@ -74,7 +73,7 @@ _SYSTEM = (
     "save_signal = user is seeking OR offering something on their block — swap/borrow items, meetups/playgroups, "
     "or local tips/recommendations (any phrasing: looking for rain boots, I have a stroller to give, "
     "host a coffee morning, know a good pediatrician, anyone want to swap); "
-    "show_block_log = user wants **their own** pending match log (show my block log, who matched with me, my matches); "
+    "show_block_log = user wants **their own** pending match log (show my block log(s), who matched with me, my matches); "
     "NOT what neighbors are posting — for 'what are people looking for on my block' use goal=peers or find_in_block, NOT show_block_log. "
     "profile_photo = user wants to add/change/upload a profile picture, agrees to Lana's photo suggestion "
     "(yes/sure), says they finished uploading, or cancels photo upload; "
@@ -87,23 +86,24 @@ _SYSTEM = (
     "When goal=save_signal set signal_intent: swap_seek|swap_offer|meet_seek|host_meet|tip_seek|tip_share, "
     "signal_detail = what they want/offer (short phrase from message), signal_category = optional bucket. "
     "Classify save_signal by MEANING (infinite phrasing is normal): "
-    "meet_seek = wants a NEIGHBOR to do something WITH them (bicycle buddy, walking buddy, playdate, "
-    "coffee walk, stroller walk) — even if 'bike' or 'bicycle' appears; NOT swap_seek. "
-    "swap_seek/swap_offer = physical ITEMS to borrow/swap/buy from neighbors (laptop, rain boots, "
-    "kids bicycle, stroller, furniture) — NOT meet_seek, NOT tip_seek. "
-    "sharing.swap when user HAS the item: 'swap my coat', 'give away my rain coat', "
-    "'giveup my bike', 'give up my bike', 'I have boots to swap'. "
-    "looking.swap when user WANTS the item: 'looking for a rain coat', 'need rain boots'. "
-    "Possessive my + swap/give away = sharing.swap even if they say 'looking to swap my …'. "
+    "meet_seek = wants a NEIGHBOR to do an ACTIVITY WITH them (jogging partner, walking buddy, playdate) — "
+    "NOT acquiring items. "
+    "swap_seek/swap_offer = physical ITEMS to borrow/swap/get for kids or home — NOT meet_seek. "
+    "Possessive my + swap/give away = sharing.swap; looking for item = looking.swap. "
     "Kids clothing/gear (boots, onesies) may need size; bikes/electronics/furniture do not use 3T. "
     "Adult clothing (adult/adults/grown-up) never needs kid size like 3T. "
     "tip_seek/tip_share = local SERVICE or place RECOMMENDATION (teacher, tutor, pediatrician, restaurant, "
-    "plumber) — set signal_category education|health|food|home|activities; NOT swap_seek. "
+    "plumber) — set signal_category education|health|food|home|activities; NOT swap_seek, NOT discovery. "
+    "'do you know a good restaurant' / 'recommend a plumber' = tip_seek + looking.tip — NEVER tip_share. "
+    "tip_share ONLY when user OFFERS or RECOMMENDS (I recommend, try Dr Smith, my favorite pizza place). "
+    "NEVER tip_seek when user wants to FIND/SHOW NEIGHBORS by heritage, life stage, or traits "
+    "(find italian moms, find italian dads, brazilian parents on my block) — that is discovery.find_by_attrs. "
     "Set linear_intent: looking.meet for meet_seek, looking.swap for swap_seek, looking.tip for tip_seek, "
     "sharing.swap for swap_offer, sharing.host for host_meet, sharing.tip for tip_share. "
     "When goal=show_block_log set intro_direction null. "
     "LAYER 1 CATALOG — set linear_intent to the best match (confidence ≥ 0.85 when sure): "
-    "discovery.find_peers|discovery.find_by_attrs|discovery.find_in_block|discovery.find_activities|discovery.block_log; "
+    "discovery.find_peers|discovery.find_by_attrs|discovery.find_in_block|discovery.find_activities|"
+    "discovery.block_log|discovery.show_peer_profile|discovery.explain_peer_match; "
     "identity.add_claim|identity.edit_claim|identity.complete_profile|identity.show_my_profile; "
     "looking.swap|looking.meet|looking.tip|sharing.swap|sharing.host|sharing.tip; "
     "tier.send_nudge|tier.respond_nudge|social.list_intros|social.propose_intro; "
@@ -111,10 +111,22 @@ _SYSTEM = (
     "settings.change_name|settings.change_zip|settings.notification_prefs; "
     "help.what_can_you_do|help.who_are_you. "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
+    "Use discovery.show_peer_profile when user asks about a SPECIFIC neighbor's identity claims/profile "
+    "(show Kashaf's claims, what identity threads does Kashaf have) — set peer_name, goal=chat, "
+    "in_discovery=false, NOT goal=peers, NOT identity.show_my_profile. "
+    "Use discovery.explain_peer_match when user asks HOW/WHY match % on shown cards "
+    "(how is 100% match, what is matching, what things are matching) — goal=chat, in_discovery=false, "
+    "optional peer_name if they name someone; NEVER re-run find_peers. "
     "Use identity.add_claim when user describes themselves (heritage, stage, interests). "
     "Use identity.edit_claim for corrections ('I'm not X, I'm Y', 'edit my identity'). "
+    "Heritage is one slot — if user states a new heritage that contradicts prior, ask to confirm before replacing. "
+    "Use discovery.find_by_attrs when user wants neighbors matching traits (ANY heritage/adjective + "
+    "mom/dad/parent/language/stage — infinite phrasing). Set attr_filter to the trait phrase "
+    "(e.g. italian moms, italian dads, brazilian parents). NOT looking.tip, NOT save_signal. "
+    "Use discovery.find_in_block for block activity browse (what's on my block, what are people swapping). "
     "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
-    "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes. "
+    "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes "
+    "(change my name, call me X, my name is X). "
     "Use help.what_can_you_do for help/what can you do; help.who_are_you for who are you. "
     "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.)."
 )
@@ -255,6 +267,8 @@ def ai_parse_discovery_turn(
         signal_when_s = str(signal_when).strip()[:120] if signal_when else None
         attr_filter = raw.get("attr_filter")
         attr_filter_s = str(attr_filter).strip()[:200] if attr_filter else None
+        peer_name = raw.get("peer_name")
+        peer_name_s = str(peer_name).strip()[:80] if peer_name else None
         intro_direction = raw.get("intro_direction")
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
@@ -285,6 +299,7 @@ def ai_parse_discovery_turn(
             "signal_stage": signal_stage_s,
             "signal_when": signal_when_s,
             "attr_filter": attr_filter_s,
+            "peer_name": peer_name_s,
             "confidence": float(raw.get("confidence", 0.0)),
         }, msg=text)
     except Exception:
@@ -323,6 +338,7 @@ def _discovery_slot_payload(
         '  "signal_stage": "string or null",\n'
         '  "signal_when": "string or null",\n'
         '  "attr_filter": "string or null",\n'
+        '  "peer_name": "neighbor name if asking about one person, else null",\n'
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
@@ -439,6 +455,8 @@ def slots_want_discovery_handling(
     if slots_want_layer1_handling(enriched, routing_phase=routing_phase):
         return True
     goal = str(enriched.get("goal") or "none")
+    if goal == "save_signal":
+        return float(enriched.get("confidence", 0.0)) >= 0.5
     if goal in ("chat", "none", "profile_photo", "login", "logout"):
         return False
     return False
