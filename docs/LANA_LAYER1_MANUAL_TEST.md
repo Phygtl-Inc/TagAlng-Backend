@@ -68,7 +68,7 @@ After Part 1, send **one phrase at a time**. Use a **fresh line** in chat for ea
 | `what's happening on my block` | `discovery.find_in_block` | Block summary (neighbor count, quiet/active) |
 | `show my block log` | `discovery.block_log` | Block log / match cards |
 | `who matched with me` | `discovery.block_log` | Same |
-| `what activities are nearby` | `discovery.find_activities` | Activity previews (if any on block) |
+| `what activities are nearby` | `discovery.find_activities` | Activity previews (if any on block`) |
 
 ---
 

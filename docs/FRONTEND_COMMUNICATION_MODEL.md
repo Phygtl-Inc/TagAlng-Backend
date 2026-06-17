@@ -1,19 +1,23 @@
-# TagAlng — Frontend Integration: Communication Model (Features 1–5)
+# TagAlng — Frontend Integration: Communication Model
 
-This is the frontend contract for the neighbor-to-neighbor communication model:
-**discover → connect → chat (under nicknames) → reveal names → meet up / swap items**,
+This doc is the **Supabase RPC contract** for neighbor-to-neighbor comms:
+**discover → connect → chat (nicknames) → reveal names → meet / swap**,
 plus safety (block & report).
 
-Everything is exposed as **Supabase RPC functions**. There is no separate REST layer to
-learn — you call each function by name with the logged-in user's session.
+**Related docs (read together):**
+
+| Doc | Use for |
+|-----|---------|
+| [`LANA_LAYER1_MANUAL_TEST.md`](LANA_LAYER1_MANUAL_TEST.md) | Lana chat turn fields (`signal_saved`, `block_log_entries`, `ui_intent`) |
+| [`LANA_WHAT_WE_BUILT.md`](LANA_WHAT_WE_BUILT.md) | What is demo-ready vs not yet |
 
 ---
 
 ## 0. How to call everything
 
-Every endpoint below is a Postgres function reachable two ways:
+Most endpoints are **Postgres RPCs** — call by name with the logged-in user's JWT.
 
-**Supabase JS client (recommended):**
+**Supabase JS (direct RPC):**
 ```ts
 const { data, error } = await supabase.rpc('send_nudge', {
   p_recipient_id: otherUserId,
@@ -21,396 +25,386 @@ const { data, error } = await supabase.rpc('send_nudge', {
 });
 ```
 
-**Raw REST (if needed):** `POST {SUPABASE_URL}/rest/v1/rpc/{function_name}` with headers
-`apikey`, `Authorization: Bearer <user JWT>`, `Content-Type: application/json`, and the
-`p_`-prefixed params as the JSON body.
+**Lana worker (conversational path — PWA `/chat` today):**
+```ts
+// POST {LANA_WORKER_URL}/lana/sessions/{id}/messages
+// Response includes assistant_message + structured cards (see §0.2)
+```
+
+Lana **calls RPCs on your behalf** for many flows (signals, block log, intros). You render the turn JSON; you do not need to call those RPCs from the PWA unless building a native screen.
 
 ### Auth
-- The user must be **signed in** (a valid Supabase session). The function reads `auth.uid()` from the JWT.
-- Comms actions also require the user to be **non-anonymous and phone-verified** — otherwise you get `phone_not_verified` / `anonymous_user_comms_blocked` (403).
+- User must be **signed in** (`auth.uid()` from JWT).
+- Comms actions require **non-anonymous + phone-verified** — else `phone_not_verified` / `anonymous_user_comms_blocked`.
 
 ### Error shape
-On failure, `error` is populated (JS) / HTTP is 4xx (REST). Business errors look like:
 ```json
 { "code": "P0001", "message": "blocked" }
 ```
-Handle the `message` string (e.g. `blocked`, `not_thread_member`, `unmask_already_pending`). All listed below per endpoint.
 
 ### Return shape
-- **Scalar** functions return a bare value (a UUID string, or a tier string like `"acquaintance"`).
-- **Table** functions return an **array of rows**.
-- A couple return a small **JSON object** (noted inline).
+- **Scalar** — UUID string or tier string (`"acquaintance"`).
+- **Table** — array of rows.
+- **JSON object** — noted inline (`save_local_signal`, `create_inquiry`, etc.).
 
 ### Action vs Read
-- 🟢 **ACTION** = mutates state (send/accept/block/etc.). Call on user gesture.
-- 🔵 **READ** = query for rendering a screen.
+- 🟢 **ACTION** — mutates state (send/accept/block/etc.).
+- 🔵 **READ** — query for rendering a screen.
 
-### The tier ladder (the backbone)
+### Tier ladder
 ```
 stranger → nudge → acquaintance → direct → irl_peer
 ```
-- `acquaintance` = chatting under **nicknames** (shielded).
-- `direct` = **real names** revealed (both consented).
-- `irl_peer` = met in person.
-- `blocked` is a separate state (not a tier) — handled by block/unblock.
+`blocked` is separate (not a tier). Use 🔵 `get_relationship_tier` before rendering a neighbor.
 
-Use 🔵 `get_relationship_tier` anytime to know what to render for a given person.
+---
+
+## 0.1 Two swap systems (do not confuse them)
+
+TagAlng has **two** ways to swap/give items on a block. They use different tables and UX.
+
+| | **§2 Local signals + block log** | **§6 Marketplace** |
+|---|----------------------------------|---------------------|
+| **How user starts** | Talk to Lana: *"I want to give away my kid's bicycle"* | Native UI: list item → browse → Message |
+| **Storage** | `local_signals` → matcher → `block_log_entries` | `marketplace_items` → `inquiries` → chat thread |
+| **Match model** | Opposing intents on same block (`swap_seek` ↔ `swap_offer`) | Inquiry on a listing |
+| **Chat opens** | After intro/nudge tier — not automatic from signal alone | `create_inquiry` opens inquiry thread |
+| **Live in Lana chat today** | ✅ Yes | ❌ Not wired through Lana yet |
+| **Live in PWA native screens** | Block log cards from Lana turns only | RPCs exist; full UI TBD |
+
+**Example:** Kashaf saying *"swap my kids bicycle"* in Lana → `save_local_signal` with `swap_offer`. That is **not** `list_marketplace_item`.
+
+### Signal intents (`local_signals.intent`)
+
+| DB intent | Meaning | Layer 1 linear intent |
+|-----------|---------|------------------------|
+| `swap_seek` | Looking for an item | `looking.swap` |
+| `swap_offer` | Offering / giving away an item | `sharing.swap` |
+| `meet_seek` | Wants a neighbor to do something with | `looking.meet` |
+| `host_meet` | Offering to host a meetup | `sharing.host` |
+| `tip_seek` | Wants a local recommendation | `looking.tip` |
+| `tip_share` | Sharing a recommendation | `sharing.tip` |
+
+Matcher pairs **opposing** intents only (e.g. `swap_seek` ↔ `swap_offer`, `meet_seek` ↔ `host_meet`).
+
+---
+
+## 0.2 Lana integration map (v0.1)
+
+What the **lana-worker** calls vs what **FE must call directly** for native screens.
+
+| Capability | RPC / surface | Lana chat | PWA today |
+|------------|---------------|-----------|-----------|
+| Peer discovery | `find_peers_*` (via worker) | ✅ `peer_matches` | ✅ cards in chat |
+| Post ask/offer (swap/meet/tip) | `save_local_signal` | ✅ `signal_saved` | ✅ card in chat |
+| Block log / matches | `get_my_block_log`, `refresh_my_signal_matches` | ✅ `block_log_entries` | ✅ cards in chat |
+| Dismiss/save match | `block_log_action` | ⚠️ RPC exists; FE gesture TBD | ❌ |
+| Formal intro | `propose_intro`, `get_my_intros` | ✅ partial | ✅ list via Lana |
+| Accept/decline intro | `accept_intro`, `decline_intro` | ✅ `tier.respond_nudge`* | ✅ via chat phrases |
+| Nudge | `send_nudge`, `accept_nudge` | ⚠️ orchestrator tool only | ❌ no nudge inbox UI |
+| 1:1 chat | `get_my_threads`, `send_message` | ❌ | ❌ |
+| Unmask | `propose_unmask`, `accept_unmask` | ❌ | ❌ |
+| Marketplace | `list_marketplace_item`, `create_inquiry`, … | ❌ | ❌ |
+| Block/report | `block_user`, `report_message` | ⚠️ via intro decline path | ❌ |
+
+\* **`tier.respond_nudge` is a misnomer in Layer 1** — it handles **intro** accept/decline/block (`accept_intro` / `decline_intro`), not `accept_nudge`. Nudge inbox is §1.
+
+### Lana turn JSON (render these in `/chat`)
+
+Inspect `POST .../messages` response. See [`LANA_LAYER1_MANUAL_TEST.md`](LANA_LAYER1_MANUAL_TEST.md) for test phrases.
+
+| Field | UI |
+|-------|-----|
+| `assistant_message` | Lana bubble text |
+| `ui_intent` | Which card template (`signal_saved`, `show_block_log`, …) |
+| `active_intent` | Layer 1 intent (debug / analytics) |
+| `peer_matches` | Neighbor preview cards |
+| `block_log_entries` | Match log cards (swap/meet/tip matches) |
+| `signal_saved` | “Posted to your block” confirmation |
+| `identity_profile` | Claims card |
+| `pending_intros` | Intro inbox |
+
+**Note:** `matches_created` on save reflects **new** matcher rows for that save. Existing matches may already be in `block_log_entries` even when the reply says “I'll let you know when a neighbor matches.” Say **show my block log** to surface them.
 
 ---
 
 ## 1. Discover & connect — Nudge and Intro
 
-> **Story:** AK sees AM in Discover. She taps **Nudge** and sends a friendly opener. AM gets
-> it, taps **Accept** — and instantly a shielded (nickname-only) chat opens between them.
-> Separately, Lana might suggest AK formally **introduce** herself to AM with a "why you two
-> match" note; if AM accepts that intro, the same thing happens.
+> **Story:** AK sees AM in Discover. She **nudges** AM. AM **accepts** → shielded chat opens.
+> Separately, Lana can **propose an intro** with a match reason; AM accepts → same outcome.
 
-### 🟢 `send_nudge` — wave at a neighbor (first contact)
+### 🟢 `send_nudge`
 ```ts
 supabase.rpc('send_nudge', { p_recipient_id, p_context_message })
 ```
-| Param | Type | Required | Notes |
-|---|---|---|---|
-| `p_recipient_id` | uuid | ✅ | the other user |
-| `p_context_message` | text | optional | a short opener |
-**Returns:** `nudge_id` (uuid string).
-**Errors:** `recipient_not_on_block`, `invalid_recipient`, `nudge_rate_limit_daily` (5/day), `phone_not_verified`.
+**Returns:** `nudge_id`. **Errors:** `recipient_not_on_block`, `nudge_rate_limit_daily`, `phone_not_verified`.
 
-### 🟢 `accept_nudge` — accept a wave → become acquaintances + open chat
+### 🟢 `accept_nudge` → `"acquaintance"` + shielded chat
 ```ts
 supabase.rpc('accept_nudge', { p_nudge_id })
 ```
-**Returns:** the new tier, `"acquaintance"`. **Side effect:** a `shielded` chat thread is opened (fetch it via `get_my_threads`).
-**Errors:** `nudge_not_found_or_already_handled`.
 
 ### 🟢 `decline_nudge`
 ```ts
 supabase.rpc('decline_nudge', { p_nudge_id })
 ```
-**Returns:** none. **Errors:** `nudge_not_found_or_already_handled`.
 
-### 🔵 `get_my_nudges` — nudge inbox
+### 🔵 `get_my_nudges`
 ```ts
 supabase.rpc('get_my_nudges', { p_direction: 'received' }) // or 'sent'
 ```
-**Returns:** array of `{ id, other_user_id, nickname, avatar_url, sent_at, status, context_message, shared_count }`.
 
-### 🔵 `get_my_intros` — pending intro inbox
+### 🔵 `get_my_intros`
 ```ts
 supabase.rpc('get_my_intros', { p_direction: 'all' }) // or 'sent' | 'received'
 ```
-**Returns:** array of `{ id, other_user_id, nickname, avatar_url, created_at, expires_at, status, match_reason, shared_dimensions, direction }` where `status = 'proposed'` and not expired.
-**Lana:** ask "show my pending intros" → `ui_intent: show_pending_intros`, `pending_intros[]`, `active_intent: social.list_intros`.
+**Lana:** “show my intros” → `pending_intros[]`, `active_intent: social.list_intros`.
 
-### 🟢 `propose_intro` — Lana-style "let me introduce you" (follow-up after a nudge)
+### 🟢 `propose_intro`
 ```ts
-supabase.rpc('propose_intro', { p_candidate_id, p_match_reason, p_shared_dimensions })
+supabase.rpc('propose_intro', {
+  p_candidate_id,
+  p_match_reason,
+  p_shared_dimensions,
+  p_match_score,
+  p_joint_moment_id,
+})
 ```
-| Param | Type | Required | Notes |
-|---|---|---|---|
-| `p_candidate_id` | uuid | ✅ | the other user |
-| `p_match_reason` | text | ✅ | 10–280 chars ("you both run mornings") |
-| `p_shared_dimensions` | text[] | optional | e.g. `["running","toddlers"]` |
-| `p_match_score` | real | optional | |
-| `p_joint_moment_id` | uuid | optional | |
-**Returns:** `intro_id` (uuid). **Prerequisite:** you must already be at `nudge` tier with them.
-**Errors:** `tier_too_low_send_nudge_first`, `candidate_consent_missing`, `match_reason_too_short`, `duplicate_intro_recent`, `candidate_not_on_block`.
+**Prerequisite:** tier ≥ `nudge` with candidate. **Errors:** `tier_too_low_send_nudge_first`, `match_reason_too_short`.
 
-### 🟢 `accept_intro` — accept an intro → acquaintance + open chat
+**Lana:** “introduce me to …” after peer preview → worker calls this (or equivalent).
+
+### 🟢 `accept_intro` / `decline_intro`
 ```ts
 supabase.rpc('accept_intro', { p_intro_id })
-```
-**Returns:** `"acquaintance"`. **Side effect:** opens a shielded chat (same as accepting a nudge).
-**Errors:** `intro_not_found_or_expired`.
-
-### 🟢 `decline_intro`
-```ts
 supabase.rpc('decline_intro', { p_intro_id })
 ```
-**Returns:** none.
+**Lana:** user says “yes introduce” / “not now” on pending intro → `accept_intro` / `decline_intro` (via `tier.respond_nudge` handler).
 
-### 🔵 `get_relationship_tier` — what tier am I at with this person?
+### 🔵 `get_relationship_tier`
 ```ts
 supabase.rpc('get_relationship_tier', { p_other_user_id })
 ```
-**Returns:** a tier string: `"stranger" | "nudge" | "acquaintance" | "direct" | "irl_peer"`.
-⚠️ Pass the **other** person's id — passing your own id returns `"stranger"`.
 
 ---
 
-## 2. Chat (shielded & direct)
+## 2. Local signals & block log (Lana Layer 1)
 
-> **Story:** Now connected, AK opens the chat with "BlueJay" (AM's nickname), sees Lana's
-> welcome line, and types "Nice to meet you!". AM gets it in real time, reads it, replies.
+> **Story:** AM tells Lana *“I'm looking for 3T rain boots”* or *“I want to give away my kid's bicycle.”*
+> Lana saves a **local signal**, the matcher finds neighbors with the **opposite** intent on the same block,
+> and results land in the **block log**. This is the live conversational swap/meet/tip path — not §6 Marketplace.
 
-### 🔵 `get_my_threads` — the 1:1 chat list
+**Requires:** phone-verified user with `home_block_id` set.
+
+### 🟢 `save_local_signal` — post ask or offer
+```ts
+const { data } = await supabase.rpc('save_local_signal', {
+  p_intent: 'swap_offer',           // swap_seek | swap_offer | meet_seek | host_meet | tip_seek | tip_share
+  p_detail_text: "kids bicycle",
+  p_category: null,                 // optional; tips may use education|health|food|home|activities
+  p_block_id: null,                 // defaults to home_block_id
+  p_zip: null,
+  p_stage: null,                    // optional size hint e.g. "3T", "adult"
+});
+```
+**Returns (JSON):**
+```json
+{
+  "signal_id": "uuid",
+  "intent": "swap_offer",
+  "detail_text": "kids bicycle",
+  "block_id": "8a2a1072…",
+  "matches_created": 1
+}
+```
+`matches_created` = **new** `block_log_entries` rows written for this save (0 if no opposite signal or deduped within 24h).
+
+**Errors:** `not_authenticated`, `invalid_intent`, `detail_required`, `block_required`.
+
+**Lana:** user phrases like “looking for rain boots” / “give away my bicycle” → worker calls this after confirm cascade. FE reads `signal_saved` on the turn — do not call RPC from PWA unless building a non-Lana form.
+
+### 🔵 `get_my_block_log` — pending matches for me
+```ts
+const { data } = await supabase.rpc('get_my_block_log', {});
+```
+**Returns:** array of rows (newest / strongest first, limit 20):
+
+| Column | Notes |
+|--------|--------|
+| `id` | block log entry id |
+| `match_type` | `inbound_for_my_seek`, `inbound_for_my_offer`, `meet_*`, `tip_match`, … |
+| `peer_user_id` | neighbor (nickname hidden until verified in UI policy) |
+| `peer_preview_label` | e.g. nickname or “A neighbor on your block” |
+| `match_strength` | 0–1 |
+| `match_reasons` | human-readable strings |
+| `my_signal_detail`, `peer_signal_detail` | linked `local_signals.detail_text` (when migration applied) |
+| `my_signal_intent`, `peer_signal_intent` | linked intents |
+| `block_name` | block display name |
+
+**Lana:** “show my block log” → worker calls `refresh_my_signal_matches` then `get_my_block_log` → `block_log_entries` on turn.
+
+### 🟢 `refresh_my_signal_matches` — re-run matcher (optional)
+```ts
+const { data } = await supabase.rpc('refresh_my_signal_matches', {});
+```
+**Returns:** count of new rows inserted. Worker calls this before `get_my_block_log` when matches may be stale.
+
+### 🟢 `block_log_action` — dismiss / save / nudge a match
+```ts
+await supabase.rpc('block_log_action', {
+  p_entry_id: entryUuid,
+  p_action: 'dismissed',  // nudged | dismissed | saved | ignored
+});
+```
+
+### Match types (for FE filtering)
+
+| `match_type` | When shown to me |
+|--------------|------------------|
+| `inbound_for_my_seek` | I was **seeking**; neighbor **offered** |
+| `inbound_for_my_offer` | I **offered**; neighbor was **seeking** |
+| `meet_attendee_potential` | I sought meet; neighbor hosts |
+| `meet_invite_potential` | I host; neighbor sought meet |
+| `tip_match` | tip seek ↔ tip share |
+
+When rendering after a **swap offer** save, show only swap-related types (`inbound_for_my_offer`), not meet rows from older signals.
+
+### SQL sanity check (admin / SQL editor)
+
+`auth.uid()` is null in SQL editor as `postgres` — use explicit `user_id`:
+
+```sql
+select created_at, intent, detail_text, status
+from public.local_signals
+where user_id = 'YOUR_USER_UUID'
+order by created_at desc
+limit 20;
+```
+
+---
+
+## 3. Chat (shielded & direct)
+
+> **Story:** Connected neighbors chat under nicknames (`shielded`) or real names (`direct`).
+> **Not wired in PWA v0.1** — RPCs exist for native chat screens.
+
+### 🔵 `get_my_threads`
 ```ts
 supabase.rpc('get_my_threads')
 ```
-**Returns:** array of `{ thread_id, kind, other_user_id, other_nickname, other_avatar_url, tier, last_message_at, last_message_preview, unread_count }`.
-`kind` is `"shielded"` (nicknames) or `"direct"` (real names). Render the name based on `tier`.
+**Returns:** `{ thread_id, kind, other_user_id, other_nickname, tier, last_message_at, unread_count, … }`.
 
 ### 🟢 `send_message`
 ```ts
-supabase.rpc('send_message', { p_thread_id, p_content, p_client_dedupe_key, p_reply_to })
+supabase.rpc('send_message', {
+  p_thread_id,
+  p_content,
+  p_client_dedupe_key,  // fresh UUID per send — idempotent retries
+  p_reply_to,
+})
 ```
-| Param | Type | Required | Notes |
-|---|---|---|---|
-| `p_thread_id` | uuid | ✅ | |
-| `p_content` | text | ✅ | 1–8000 chars |
-| `p_client_dedupe_key` | uuid | ✅ | **generate a fresh UUID per message** — makes retries safe (idempotent) |
-| `p_reply_to` | uuid | optional | message being replied to |
-**Returns:** `message_id` (uuid). Re-sending with the same `p_client_dedupe_key` returns the same id (no duplicate).
-**Errors:** `not_thread_member`, `blocked`, `empty_message`, `message_too_long`, `reply_to_not_in_thread`.
 
-### 🔵 `get_thread_messages` — history (newest first, paginated)
-```ts
-supabase.rpc('get_thread_messages', { p_thread_id, p_limit: 50, p_before: null })
-```
-| Param | Type | Notes |
-|---|---|---|
-| `p_thread_id` | uuid | |
-| `p_limit` | int | default 50, max 100 |
-| `p_before` | timestamptz | pass the oldest loaded `sent_at` to page back |
-**Returns:** array of `{ id, sender_id, kind, content, reply_to, sent_at, deleted, is_mine }`.
-`sender_id` is `null` for Lana/system messages (`kind` = `"lana"`/`"system"`). `deleted=true` → render a "message deleted" placeholder.
-
-### 🟢 `mark_thread_read`
-```ts
-supabase.rpc('mark_thread_read', { p_thread_id, p_up_to_message_id })
-```
-`p_up_to_message_id` optional (defaults to now). **Returns:** none. Resets `unread_count`.
-
-### 🟢 `delete_message`
-```ts
-supabase.rpc('delete_message', { p_message_id, p_kind: 'for_everyone' }) // or 'for_me'
-```
-`for_everyone` allowed only by the sender within 1 hour. **Returns:** none.
-**Errors:** `not_message_sender`, `delete_window_expired`, `invalid_delete_kind`.
+### 🔵 `get_thread_messages` · 🟢 `mark_thread_read` · 🟢 `delete_message`
+See prior patterns; params unchanged.
 
 ---
 
-## 3. Unmask — reveal real names (acquaintance → direct)
+## 4. Unmask (acquaintance → direct)
 
-> **Story:** After chatting a while, AK taps "Ask to unmask". AM gets a request and accepts.
-> Their real names appear, the chat upgrades to **direct**, and Lana posts "You're connected
-> directly now."
-
-### 🟢 `propose_unmask`
-```ts
-supabase.rpc('propose_unmask', { p_other_user_id })
-```
-**Returns:** `request_id` (uuid). **Prerequisite:** must be `acquaintance`.
-**Errors:** `must_be_acquaintance_to_unmask`, `unmask_already_pending`, `unmask_cooldown` (48h after a decline), `blocked`.
-
-### 🟢 `accept_unmask` — both consented → direct
-```ts
-supabase.rpc('accept_unmask', { p_request_id })
-```
-**Returns:** `"direct"`. **Side effect:** the existing chat thread flips `shielded → direct`; a Lana system message is posted. Now `get_my_threads`/profiles show **real names**.
-**Errors:** `unmask_not_found_or_expired`.
-
-### 🟢 `decline_unmask`
-```ts
-supabase.rpc('decline_unmask', { p_request_id })
-```
-**Returns:** none. Starts a 48h cooldown.
+RPCs: `propose_unmask`, `accept_unmask`, `decline_unmask`. **Not wired in Lana/PWA v0.1.**
 
 ---
 
-## 4. Group chats & meeting in real life
+## 5. Group chats & meeting in real life
 
-> **Story:** AK hosts a "Park playdate". A group chat is created automatically with AK in it.
-> AM asks to join; AK approves; AM is auto-added to the group. They chat as a group. Later,
-> AK & AM (already `direct`) confirm they met in person → they become `irl_peer`.
+| Endpoint | Type | Notes |
+|----------|------|--------|
+| `create_event` | 🟢 | auto-creates group chat |
+| `request_to_join_event` | 🟢 | |
+| `decide_event_request` | 🟢 | approved → added to group chat |
+| `get_my_group_threads` | 🔵 | group chat list |
+| `confirm_irl_met` | 🟢 | mutual direct → `irl_peer` |
 
-### Event lifecycle (existing RPCs — group chat is auto-wired on top)
-| Endpoint | Type | Params | Returns |
-|---|---|---|---|
-| `create_event` | 🟢 | `{ p_fields: { title, lat, lng, starts_at, ends_at?, venue_name?, cohort_tags?, max_attendees? } }` | `event_id` (uuid) — **a group chat is auto-created** |
-| `request_to_join_event` | 🟢 | `{ p_event_id, p_message }` | `request_id` (uuid) |
-| `decide_event_request` | 🟢 | `{ p_request_id, p_decision: 'approved' \| 'declined' }` | none — on `approved`, requester is **auto-added** to the group chat |
-| `cancel_event_request` | 🟢 | `{ p_request_id }` | none — requester is removed from the group chat |
-
-> Group threads use the **same** `send_message` / `get_thread_messages` / `mark_thread_read`
-> endpoints as 1:1 chats. Lana posts no welcome in groups. Blocking in a group only hides the
-> blocked person's messages (you can still post).
-
-### 🔵 `get_my_group_threads` — the group chat list
-```ts
-supabase.rpc('get_my_group_threads')
-```
-**Returns:** array of `{ thread_id, event_id, event_title, last_message_at, last_message_preview, unread_count, member_count }`.
-
-### 🟢 `confirm_irl_met` — "we met in person" (mutual; direct → irl_peer)
-```ts
-supabase.rpc('confirm_irl_met', { p_other_user_id })
-```
-**Returns:** the current tier — `"direct"` if only you've confirmed so far, `"irl_peer"` once **both** have.
-**Prerequisite:** must be `direct`. **Errors:** `must_be_direct_to_confirm_irl`.
-*(There is also an automatic path: co-attending an event then 24h passes — handled server-side, no FE call.)*
+Group threads reuse §3 chat endpoints.
 
 ---
 
-## 5. Marketplace (free / swap — no selling)
+## 6. Marketplace (formal listings — not Lana voice swap)
 
-> **Story:** AM lists a "Toddler bike" to swap. AK browses, sees it, taps Message → an inquiry
-> chat opens. They agree on a time/place; both confirm the handoff; both confirm the swap
-> happened. Optionally both tap "Stay in touch" → if they were strangers, they become
-> acquaintances with a fresh chat.
+> **Story:** AM lists “Toddler bike” in a **marketplace shelf**. AK browses, taps Message → inquiry chat.
+> Handoff + completion + optional “Stay in touch.”
+
+**This is separate from §2.** Lana conversational *“give away my bicycle”* does **not** create a `marketplace_items` row.
 
 ### 🟢 `list_marketplace_item`
 ```ts
-supabase.rpc('list_marketplace_item', { p_title, p_description, p_intent_type: 'free', p_category, p_photos })
+supabase.rpc('list_marketplace_item', {
+  p_title,
+  p_description,
+  p_intent_type: 'free',  // or 'swap' — no selling in v0.1
+  p_category,
+  p_photos,
+  p_block_id,
+})
 ```
-| Param | Type | Notes |
-|---|---|---|
-| `p_title` | text | ✅ 1–80 chars |
-| `p_description` | text | optional, ≤500 |
-| `p_intent_type` | text | `'free'` or `'swap'` only (no selling) |
-| `p_category` | text | optional |
-| `p_photos` | jsonb | optional, default `[]` |
-| `p_block_id` | text | optional, defaults to your home block |
-**Returns:** `item_id` (uuid). **Errors:** `selling_not_allowed_v01`, `title_required`.
 
-### 🔵 `get_marketplace_items` — browse active listings on your block
-```ts
-supabase.rpc('get_marketplace_items', { p_block_id: null, p_limit: 50 })
-```
-**Returns:** array of `{ item_id, seller_id, seller_nickname, title, description, category, intent_type, photos, created_at }`.
+### 🔵 `get_marketplace_items` · 🟢 `create_inquiry` · 🟢 `confirm_handoff` · 🟢 `confirm_completion` · 🟢 `mark_acquaintance_from_inquiry` · 🟢 `close_inquiry` · 🔵 `get_my_inquiries`
 
-### 🟢 `create_inquiry` — message a seller (opens an inquiry chat)
-```ts
-supabase.rpc('create_inquiry', { p_item_id, p_opening_text })
-```
-**Returns (JSON object):** `{ "inquiry_id": "...", "thread_id": "..." }`. Use `thread_id` with the normal chat endpoints.
-**Errors:** `item_not_active`, `cannot_inquire_own_item`, `inquiry_already_open`, `blocked`.
-
-### 🟢 `confirm_handoff` — agree on time + place (both sides)
-```ts
-supabase.rpc('confirm_handoff', { p_inquiry_id, p_when, p_where, p_lat, p_lng })
-```
-| Param | Type | Notes |
-|---|---|---|
-| `p_when` | timestamptz (ISO) | meetup time |
-| `p_where` | text | place |
-| `p_lat` / `p_lng` | float | optional |
-**Returns:** `"one_side"` (waiting on the other) or `"committed"` (both agreed).
-**Errors:** `inquiry_not_open`, `inquiry_not_found`.
-
-### 🟢 `confirm_completion` — "the swap happened" (both sides)
-```ts
-supabase.rpc('confirm_completion', { p_inquiry_id })
-```
-**Returns:** `"one_side"` or `"completed"` (item becomes `sold`). **Errors:** `inquiry_not_committed`.
-
-### 🟢 `mark_acquaintance_from_inquiry` — optional "Stay in touch" (both sides)
-```ts
-supabase.rpc('mark_acquaintance_from_inquiry', { p_inquiry_id, p_consent: true })
-```
-**Returns (JSON object):**
-- `{ "status": "recorded_waiting_other" }` — you opted in, waiting on the other
-- `{ "status": "both_consented_promoted", "new_chat_id": "..." }` — both opted in → promoted to `acquaintance` + new shielded chat
-- `{ "status": "already_connected" }` — you were already connected (no change)
-- `{ "status": "skipped" }` — you passed (`p_consent:false`)
-**Errors:** `inquiry_not_completed`. *(Completion alone never connects you — only this mutual opt-in does.)*
-
-### 🟢 `close_inquiry`
-```ts
-supabase.rpc('close_inquiry', { p_inquiry_id, p_reason })
-```
-**Returns:** none. **Errors:** `inquiry_already_finalized`.
-
-### 🔵 `get_my_inquiries` — your buying/selling conversations
-```ts
-supabase.rpc('get_my_inquiries')
-```
-**Returns:** array of `{ inquiry_id, thread_id, item_id, item_title, role, other_user_id, other_nickname, status, last_message_at, created_at }`. `role` is `"buyer"` or `"seller"`.
+Params and return shapes unchanged from v1 doc. **RPCs exist; Lana + PWA marketplace UI not shipped.**
 
 ---
 
-## 6. Safety — block & report (works everywhere)
+## 7. Safety — block & report
 
-> **Story:** AM feels uncomfortable. She blocks AK — their chat archives, AK can no longer
-> message her, and AK disappears from her lists. She can also report a specific message.
+### 🟢 `block_user` · 🟢 `unblock_user` · 🟢 `report_message`
 
-### 🟢 `block_user`
-```ts
-supabase.rpc('block_user', { p_blocked_user_id, p_reason_category, p_reason })
-```
-`p_reason_category`: `'harassment'|'threat'|'sexual'|'self_harm'|'csam'|'discomfort'|'spam'|'other'` (optional).
-**Returns:** none. **Side effects:** cancels pending nudges/unmasks, archives the shared chat. After this, `send_message` between them returns `blocked`.
-
-### 🟢 `unblock_user`
-```ts
-supabase.rpc('unblock_user', { p_blocked_user_id })
-```
-**Returns:** the restored tier (e.g. `"acquaintance"`). If they were `direct`, they're restored to `acquaintance` and the chat **re-shields** (names hidden again). **Errors:** `not_blocked`, `unblock_requires_support` (IRL-peer safety blocks).
-
-### 🟢 `report_message`
-```ts
-supabase.rpc('report_message', { p_category, p_message_id, p_thread_id, p_target_user_id, p_description })
-```
-`p_category`: `'harassment'|'spam'|'sexual'|'self_harm'|'threat'|'off_platform_ask'|'csam'|'other'`. Provide `p_message_id` (preferred) or `p_target_user_id`.
-**Returns:** `report_id` (uuid). The target never knows they were reported. **Errors:** `cannot_report_self`, `report_rate_limit`, `report_target_required`.
+Work across chat, intros, and marketplace. Lana can call `block_user` when user declines an intro with “block.”
 
 ---
 
-## 7. Realtime (live updates)
+## 8. Realtime
 
-Subscribe to Postgres changes; RLS guarantees you only receive your own rows.
+Subscribe to Postgres changes (best-effort UX; RPCs are source of truth).
 
-```ts
-// New / changed messages in a thread you're viewing
-supabase.channel('thread:' + threadId)
-  .on('postgres_changes',
-      { event: '*', schema: 'public', table: 'messages', filter: `thread_id=eq.${threadId}` },
-      payload => { /* append / update bubble */ })
-  .subscribe();
-```
-
-Useful tables to subscribe to:
 | Table | Watch for |
-|---|---|
-| `messages` (filter `thread_id`) | incoming messages, deletions |
-| `chat_threads` | new threads, `kind` flip (unmask), archive (block) |
-| `unmask_requests` | incoming unmask proposals / acceptances |
-| `inquiries` | inquiry status changes (committed/completed) |
-| `marketplace_items` | listing status (e.g. `sold`) |
-| `moderation_actions` (your own) | you got suspended mid-session |
-
-> Realtime is best-effort for UX; the RPCs above are the source of truth. After reconnecting, refetch with the 🔵 read endpoints.
+|-------|-----------|
+| `messages` | incoming chat |
+| `chat_threads` | new thread, unmask flip |
+| `inquiries` | marketplace status |
+| `block_log_entries` | new matches (optional; Lana turn is primary today) |
 
 ---
 
-## 8. End-to-end happy path (ties it together)
+## 9. End-to-end happy paths
 
+### A. Social graph (native screens — §1 + §3)
 ```
-1. get_relationship_tier(AM)               → "stranger"
-2. send_nudge(AM, "Hi!")                    → nudge_id            [AK]
-3. accept_nudge(nudge_id)                   → "acquaintance"      [AM]  (+ shielded chat opens)
-4. get_my_threads()                         → [ { thread_id, kind:"shielded", other_nickname } ]
-5. send_message(thread_id, "Hey!", uuid())  → message_id          [AK]
-6. get_thread_messages(thread_id)           → [...]               [AM]
-7. mark_thread_read(thread_id)              →                     [AM]
-8. propose_unmask(AM)                        → request_id         [AK]
-9. accept_unmask(request_id)                → "direct"            [AM]  (chat flips to direct)
-10. confirm_irl_met(AM) x2                   → "irl_peer"         (after they meet)
+get_relationship_tier → send_nudge → accept_nudge → get_my_threads → send_message
+→ propose_unmask → accept_unmask → confirm_irl_met
 ```
 
-Marketplace and group chats branch off the same primitives (`create_inquiry`/`create_event` →
-a thread → the same chat endpoints).
+### B. Conversational swap (Lana — §2)
+```
+User: "I want to give away my kid's bicycle"
+  → Lana: save_local_signal(swap_offer) → signal_saved card
+  → If matches_created > 0: block_log_entries cards
+  → Else: "I'll let you know…" (matches may already exist — say "show my block log")
+
+User: "show my block log"
+  → get_my_block_log → block_log_entries cards
+```
+
+### C. Formal marketplace (§6 — future native UI)
+```
+list_marketplace_item → get_marketplace_items → create_inquiry → chat → confirm_handoff → confirm_completion
+```
 
 ---
 
-## Quick reference — all action vs read endpoints
+## Quick reference
 
-**🟢 Actions:** `send_nudge`, `accept_nudge`, `decline_nudge`, `propose_intro`, `accept_intro`,
-`decline_intro`, `send_message`, `mark_thread_read`, `delete_message`, `propose_unmask`,
-`accept_unmask`, `decline_unmask`, `block_user`, `unblock_user`, `report_message`,
-`create_event`, `request_to_join_event`, `decide_event_request`, `cancel_event_request`,
-`confirm_irl_met`, `list_marketplace_item`, `create_inquiry`, `confirm_handoff`,
-`confirm_completion`, `mark_acquaintance_from_inquiry`, `close_inquiry`.
+**🟢 Actions:** `send_nudge`, `accept_nudge`, `decline_nudge`, `propose_intro`, `accept_intro`, `decline_intro`, `save_local_signal`, `refresh_my_signal_matches`, `block_log_action`, `send_message`, `mark_thread_read`, `delete_message`, `propose_unmask`, `accept_unmask`, `decline_unmask`, `block_user`, `unblock_user`, `report_message`, `create_event`, `request_to_join_event`, `decide_event_request`, `confirm_irl_met`, `list_marketplace_item`, `create_inquiry`, `confirm_handoff`, `confirm_completion`, `mark_acquaintance_from_inquiry`, `close_inquiry`.
 
-**🔵 Reads:** `get_relationship_tier`, `get_my_nudges`, `get_my_threads`, `get_thread_messages`,
-`get_my_group_threads`, `get_marketplace_items`, `get_my_inquiries`.
+**🔵 Reads:** `get_relationship_tier`, `get_my_nudges`, `get_my_intros`, `get_my_block_log`, `get_my_threads`, `get_thread_messages`, `get_my_group_threads`, `get_marketplace_items`, `get_my_inquiries`.
+
+**Lana turn fields (not RPCs):** `peer_matches`, `block_log_entries`, `signal_saved`, `identity_profile`, `pending_intros`, `ui_intent` — see [`LANA_LAYER1_MANUAL_TEST.md`](LANA_LAYER1_MANUAL_TEST.md).

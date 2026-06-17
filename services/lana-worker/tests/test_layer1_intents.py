@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app.discovery_route import PHASE_PREVIEW, handle_discovery_turn
-from app.layer1_handlers import format_identity_profile_reply
+from app.layer1_handlers import format_identity_profile_reply, stamp_identity_profile_ctx
 from app.layer1_intents import (
     attr_filter_tokens,
     enrich_slots,
@@ -10,11 +10,13 @@ from app.layer1_intents import (
     phrase_linear_intent,
     slots_linear_intent,
 )
+from app.layer1_intents import phrase_linear_intent
 from app.signal_capture import (
     PHASE_SIGNAL_CONFIRM,
     advance_signal_draft,
     draft_from_slots,
     needs_confirm,
+    normalize_size_answer,
 )
 from app.ui_intent import UI_INTENT_SHOW_IDENTITY_PROFILE, derive_ui_intent
 
@@ -119,6 +121,19 @@ class TestLayer1IntentCatalog(unittest.TestCase):
         self.assertIn("Brazilian mom", reply)
         self.assertIn("2 identity threads", reply)
 
+    def test_stamp_identity_profile_sorts_heritage_first(self) -> None:
+        ctx: dict = {}
+        stamp_identity_profile_ctx(ctx, {
+            "profile": {"nickname": "Kashaf"},
+            "claims": [
+                {"label": "Walking", "bucket": "activity", "confidence": 0.95},
+                {"label": "Brazilian", "bucket": "heritage", "confidence": 0.85},
+                {"label": "Mom", "bucket": "stage", "confidence": 0.9},
+            ],
+        })
+        labels = [c.get("label") for c in ctx["identity_profile"]["claims"]]
+        self.assertEqual(labels[0], "Brazilian")
+
 
 class TestSignalCapture(unittest.TestCase):
     def test_swap_short_detail_triggers_confirm(self) -> None:
@@ -186,7 +201,69 @@ class TestSignalCapture(unittest.TestCase):
         need, field, prompt = needs_confirm(draft)
         self.assertTrue(need)
         self.assertEqual(field, "stage")
-        self.assertIn("3t", prompt.lower())
+        self.assertIn("kid", prompt.lower())
+
+    def test_adult_rain_coat_skips_size_prompt(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.swap",
+                "confidence": 0.9,
+                "signal_detail": "rain coat for adults",
+            },
+            msg="rain coat for adults",
+        )
+        need, field, _ = needs_confirm(draft)
+        self.assertFalse(need)
+        self.assertEqual(field, "")
+
+    def test_normalize_size_answer_adults(self) -> None:
+        self.assertEqual(normalize_size_answer("for adults"), "adult")
+        self.assertEqual(normalize_size_answer("adults"), "adult")
+
+    def test_swap_my_coat_is_offer_intent(self) -> None:
+        self.assertEqual(
+            phrase_linear_intent("I am looking to swap my rain coat"),
+            "sharing.swap",
+        )
+
+    def test_looking_for_raincoat_is_seek_not_tip(self) -> None:
+        self.assertEqual(
+            phrase_linear_intent("i am looking for a rain coat to wear"),
+            "looking.swap",
+        )
+
+    def test_giveup_bicycle_is_offer_intent(self) -> None:
+        self.assertEqual(
+            phrase_linear_intent("i want to giveup my kids bicycle"),
+            "sharing.swap",
+        )
+
+    def test_swap_offer_detail_strips_giveup_verb(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "sharing.swap",
+                "confidence": 0.9,
+                "signal_detail": "give up my kids bicycle",
+            },
+            msg="i want to giveup my kids bicycle",
+        )
+        self.assertEqual(str(draft.get("detail") or ""), "kids bicycle")
+
+    def test_adults_answer_advances_draft(self) -> None:
+        draft = draft_from_slots(
+            {
+                "linear_intent": "looking.swap",
+                "confidence": 0.9,
+                "signal_detail": "rain coat",
+            },
+            msg="rain coat",
+        )
+        draft["phase"] = "signal_confirm_missing"
+        draft["confirm_field"] = "stage"
+        updated, prompt, ready = advance_signal_draft(draft, msg="for adults")
+        self.assertTrue(ready)
+        self.assertIsNone(prompt)
+        self.assertIn("adult", str(updated.get("detail") or "").lower())
 
     def test_teacher_tip_infers_education_category(self) -> None:
         draft = draft_from_slots(

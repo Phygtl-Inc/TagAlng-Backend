@@ -41,8 +41,10 @@ def _format_shown_peer_preview(session_ctx: dict[str, Any] | None) -> str | None
     if block:
         parts.append(f"Block/ZIP context: {block}")
     parts.append(
-        "If preview labels do not match what the user asked for, say so honestly — "
-        "these are anonymized sample neighbors on the block, not a filtered search yet. "
+        "Preview labels (heritage, Mom, interests) are what those neighbors shared on the block — "
+        "use them to answer trait questions (e.g. if label includes Brazilian, say yes). "
+        "If labels do not match what the user asked for, say so honestly. "
+        "Do NOT claim you cannot see heritage when labels list it. "
         "Do NOT repeat the same bullet list unless user asks to see it again."
     )
     return "\n".join(parts)

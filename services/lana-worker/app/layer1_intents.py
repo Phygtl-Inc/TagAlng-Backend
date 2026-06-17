@@ -134,6 +134,25 @@ _TIP_SEEK_RE = re.compile(
     r"looking for a?|need a?|find a?|any tips? for)\b",
     re.I,
 )
+_SWAP_OFFER_RE = re.compile(
+    r"\b(?:"
+    r"give(?:\s+)?away|giving away|give(?:\s+)?up|giveup|"
+    r"(?:want|wanna|looking) to (?:give(?:\s+)?away|swap|trade)\s+my|"
+    r"(?:want|wanna|looking) to give(?:\s+)?up\s+my|"
+    r"(?:swap|trade) my|offering my|"
+    r"i have (?:a |my )|(?:have|got) (?:a |my ).+ to (?:give|swap|trade|offer)"
+    r")\b",
+    re.I,
+)
+_PHYSICAL_SWAP_ITEM_RE = re.compile(
+    r"\b(?:rain\s*coats?|coats?|boots?|jacket|pants|dress|shirt|onesie|"
+    r"laptop|bicycle|bikes?|stroller|furniture|crib|wagon|scooter|diaper)\b",
+    re.I,
+)
+_SWAP_SEEK_RE = re.compile(
+    r"\b(?:looking for|need(?: a)?|want(?: a)?)\b",
+    re.I,
+)
 _TIP_SHARE_RE = re.compile(
     r"\b(?:i recommend|my recommendation|"
     r"(?:dr\.?|doctor)\s+[\w.]+\s+is\s+(?:\w+\s+)*(?:great|good|awesome|the best)|"
@@ -205,8 +224,17 @@ def phrase_linear_intent(msg: str) -> str | None:
         return "discovery.find_peers"
     if _FIND_BY_ATTRS_RE.search(text):
         return "discovery.find_by_attrs"
+    if _SWAP_OFFER_RE.search(text):
+        return "sharing.swap"
+    if (
+        _SWAP_SEEK_RE.search(text)
+        and _PHYSICAL_SWAP_ITEM_RE.search(text)
+        and not _SWAP_OFFER_RE.search(text)
+    ):
+        return "looking.swap"
     if _TIP_SEEK_RE.search(text) and not _TIP_SHARE_RE.search(text):
-        return "looking.tip"
+        if not _PHYSICAL_SWAP_ITEM_RE.search(text):
+            return "looking.tip"
     if _TIP_SHARE_RE.search(text):
         return "sharing.tip"
     return None
