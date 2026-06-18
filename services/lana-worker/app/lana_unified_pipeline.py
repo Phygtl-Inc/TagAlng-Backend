@@ -133,7 +133,12 @@ def _event_published_reply(reply: str, draft: dict[str, Any]) -> str:
     title = str((draft or {}).get("title") or "your event").strip() or "your event"
     note = f"🎉 Done — **{title}** is live on your block. Neighbors who match can RSVP now."
     base = str(reply or "").strip()
-    return f"{base}\n\n{note}" if base else note
+    # The orchestrator wrote `base` without knowing we'd publish this turn. If it's
+    # still asking for a detail ("…where will the jog start?"), keeping it contradicts
+    # the publish — so drop any question and lead only with a clean acknowledgment.
+    if base and "?" not in base:
+        return f"{base}\n\n{note}"
+    return note
 
 
 def run_lana_unified_pipeline(
