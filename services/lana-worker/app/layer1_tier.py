@@ -60,6 +60,7 @@ def wants_respond_intro(msg: str) -> bool:
 
 
 def parse_nudge_response(msg: str) -> str:
+    """Deterministic accept/decline/block read — fallback when AI is unavailable."""
     text = str(msg or "").strip()
     if _INTRO_PROPOSE_RE.search(text):
         return "unknown"
@@ -72,6 +73,23 @@ def parse_nudge_response(msg: str) -> str:
     return "unknown"
 
 
+def resolve_nudge_action(msg: str, *, nickname: str | None = None) -> str:
+    """AI reads the reply first; regex parser is the offline/fallback path.
+
+    A new "introduce me to X" request is never an accept/decline of a pending
+    intro, so keep that structural guard ahead of the model.
+    """
+    text = str(msg or "").strip()
+    if _INTRO_PROPOSE_RE.search(text):
+        return "unknown"
+    from app.intro_response_ai import interpret_nudge_response
+
+    ai = interpret_nudge_response(text, nickname=nickname)
+    if ai:
+        return ai
+    return parse_nudge_response(text)
+
+
 def handle_respond_nudge(
     msg: str,
     *,
@@ -79,7 +97,6 @@ def handle_respond_nudge(
     session_ctx: dict[str, Any],
 ) -> tuple[str, dict[str, Any] | None, str]:
     """tier.respond_nudge — accept/decline/block pending received intro."""
-    action = parse_nudge_response(msg)
     pending = session_ctx.get("pending_intro_respond")
     intro_id: str | None = None
     other_user_id: str | None = None
@@ -103,6 +120,9 @@ def handle_respond_nudge(
         intro_id = str(row.get("id") or "")
         other_user_id = str(row.get("other_user_id") or "") or None
         nick = str(row.get("nickname") or nick)
+
+    # AI reads accept/decline/block with the neighbor name in context.
+    action = resolve_nudge_action(msg, nickname=nick if nick != "your neighbor" else None)
 
     if action == "unknown":
         return (

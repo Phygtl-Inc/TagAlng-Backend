@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -m pytest tests/test_ui_intent.py tests/test_layer1_intents.py -q)",
+      "Bash(python3 -c ' *)",
+      "Bash(.venv/bin/python -m pytest tests/test_layer1_intents.py tests/test_discovery_route.py tests/test_claims_persist.py tests/test_tip_surface.py tests/test_ui_intent.py tests/test_signal_capture.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_layer1_intents.py tests/test_discovery_route.py tests/test_claims_persist.py tests/test_tip_surface.py tests/test_ui_intent.py -q)",
+      "Bash(git stash *)",
+      "Bash(.venv/bin/python -m pytest tests/test_discovery_route.py -q)",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(sed -n '1,30p' tests/test_layer1_intents.py)",
+      "Bash(sed -n '1,25p' tests/test_claims_persist.py)",
+      "Bash(.venv/bin/python -m pytest tests/test_layer1_intents.py tests/test_claims_persist.py tests/test_tip_surface.py tests/test_ui_intent.py tests/test_hosting_surface.py -q)"
+    ]
+  }
+}

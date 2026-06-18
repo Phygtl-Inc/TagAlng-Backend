@@ -165,6 +165,25 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
             s = str(m).strip()
             if s:
                 missing.append(s[:64])
+    # Per-event affinity prompt + quick-reply chips (display only; the user's choice
+    # is folded into cohort_tags by the model, which already drives matching).
+    affinity_prompt = field("affinity_prompt", 160)
+    options_raw = raw.get("affinity_options") or []
+    affinity_options: list[str] = []
+    if isinstance(options_raw, list):
+        for opt in options_raw[:3]:
+            label = str(opt).strip()[:60]
+            if label and label not in affinity_options:
+                affinity_options.append(label)
+    # Generic tappable quick-replies for whatever Lana is asking this turn
+    # (place / time / title…), including a "decide later" where optional.
+    suggestions_raw = raw.get("suggestions") or []
+    suggestions: list[str] = []
+    if isinstance(suggestions_raw, list):
+        for opt in suggestions_raw[:4]:
+            label = str(opt).strip()[:60]
+            if label and label not in suggestions:
+                suggestions.append(label)
     return {
         "title": title,
         "description": description,
@@ -174,6 +193,8 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
         "duration_minutes": duration_minutes,
         "max_attendees": max_attendees,
         "cohort_tags": cohort_tags,
+        "affinity_prompt": affinity_prompt,
+        "affinity_options": affinity_options,
         "missing": missing,
     }
 
@@ -198,6 +219,11 @@ def merge_event_drafts(
             merged[key] = new[key]
     if new.get("cohort_tags"):
         merged["cohort_tags"] = new["cohort_tags"]
+    # Affinity prompt/options are transient per turn — take the latest (clears once
+    # the host answers and the model stops re-asking).
+    merged["affinity_prompt"] = new.get("affinity_prompt")
+    merged["affinity_options"] = new.get("affinity_options") or []
+    merged["suggestions"] = new.get("suggestions") or []
     if new.get("missing") is not None:
         merged["missing"] = new["missing"]
     return merged

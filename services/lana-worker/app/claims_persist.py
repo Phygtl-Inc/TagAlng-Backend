@@ -53,7 +53,7 @@ _NAME_INTRO_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:i'?m|this is)\s+([A-Z][a-z]{1,28})(?:\s+and\b|[.,!?\s]*$)",
+        r"\b(?:[Ii]'?m|[Ii] am|[Tt]his is)\s+([A-Z][a-z]{1,28})(?:\s+and\b|[.,!?\s]*$)",
     ),
     re.compile(
         r"\b(?:change my name to|update my name to|rename me to)\s+([A-Za-z][A-Za-z'-]{1,28})\b",
@@ -179,6 +179,7 @@ def persist_nickname_if_stated(user_id: str, message: str) -> str | None:
 class ClaimExtractResult:
     saved: int = 0
     heritage_conflict: dict[str, Any] | None = None
+    nickname: str | None = None
 
 
 def _heritage_root(concept: str, label: str) -> str | None:
@@ -589,22 +590,24 @@ def try_upsert_claims_from_message(
     skip_heritage: bool = False,
 ) -> ClaimExtractResult:
     """Flash extract from one user line → upsert claims; confirm heritage conflicts."""
-    persist_nickname_if_stated(user_id, message)
+    stated_nick = persist_nickname_if_stated(user_id, message)
     if not should_extract_claims_from_message(message):
-        return ClaimExtractResult()
+        return ClaimExtractResult(nickname=stated_nick)
     try:
         data = incremental_claims_from_utterance(message)
         nickname, claims = parse_incremental_claims_data(data)
     except Exception:
         logger.exception("incremental_claim_extract_failed")
-        return ClaimExtractResult()
-    if nickname:
-        persist_profile_patch(user_id, {"nickname": _normalize_nickname(nickname)})
+        return ClaimExtractResult(nickname=stated_nick)
+    if nickname and not stated_nick:
+        nickname = _normalize_nickname(nickname)
+        persist_profile_patch(user_id, {"nickname": nickname})
+        stated_nick = nickname
     if not claims:
-        return ClaimExtractResult()
+        return ClaimExtractResult(nickname=stated_nick)
     claims = filter_extracted_claims(message, claims)
     if not claims:
-        return ClaimExtractResult()
+        return ClaimExtractResult(nickname=stated_nick)
 
     heritage = [c for c in claims if c.bucket == "heritage"]
     other = [c for c in claims if c.bucket != "heritage"]
@@ -620,10 +623,11 @@ def try_upsert_claims_from_message(
             return ClaimExtractResult(
                 saved=saved,
                 heritage_conflict=pending_heritage_from_claim(from_label, new_claim),
+                nickname=stated_nick,
             )
 
     saved = upsert_claims(user_id, claims)
-    return ClaimExtractResult(saved=saved)
+    return ClaimExtractResult(saved=saved, nickname=stated_nick)
 
 
 def extract_and_upsert_claims_from_message(

@@ -206,6 +206,11 @@ def _enforce_lana_discovery(
     from app.guest_capabilities import wants_host_activity, wants_peer_find
 
     phase = str(session_ctx.get("routing_phase") or "")
+    # Sticky host mode: the orchestrator owns the whole event flow. Never override to
+    # find_peers here, or "weekday playground meet with other moms" gets hijacked into
+    # a neighbour search via the "moms" term.
+    if session_ctx.get("event_host_active"):
+        return None
     in_funnel = wants_discovery_turn(utterance, session_ctx, history)
     if not in_funnel:
         return None

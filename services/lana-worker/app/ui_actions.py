@@ -240,9 +240,28 @@ def attach_intro_row_actions(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def event_created_actions() -> list[dict[str, Any]]:
+    """After an event publishes — invite specific moms, or finish."""
+    return [
+        _action(
+            action_id="event_invite_moms",
+            label="Send to a mom",
+            message="who can I invite to this event?",
+            style="primary",
+        ),
+        _action(
+            action_id="event_done_later",
+            label="Maybe later",
+            message="not now",
+            style="secondary",
+        ),
+    ]
+
+
 def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any]]:
     """Top-level bubble CTAs (outside chat composer) for the current turn."""
     from app.ui_intent import (
+        UI_INTENT_EVENT_CREATED,
         UI_INTENT_OFFER_NEIGHBOR_INTRO,
         UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
         UI_INTENT_RESPOND_PENDING_INTRO,
@@ -251,6 +270,9 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
         UI_INTENT_SHOW_PENDING_INTROS,
         UI_INTENT_SIGNAL_SAVED,
     )
+
+    if ui_intent == UI_INTENT_EVENT_CREATED:
+        return event_created_actions()
 
     if ui_intent == UI_INTENT_RESPOND_PENDING_INTRO:
         pending = ctx.get("pending_intro_respond")

@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any
 
@@ -46,6 +47,7 @@ from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lana_unified_pipeline import run_lana_unified_pipeline
+from app.discovery_route import looks_like_host_event_entry
 from app.models import (
     ActivityPreviewRow,
     AuthActionPayload,
@@ -111,6 +113,8 @@ from app.ui_intent import (
 )
 from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
+
+_LOG = logging.getLogger(__name__)
 
 app = FastAPI(title="TagAlng lana-worker", version="0.5.4")
 
@@ -336,6 +340,7 @@ def _turn_debug_from_ctx(
         ui_intent=ui_intent,
         handler=routing.get("tool_to_call"),
         orchestrator=orchestrator,
+        event_host_active=bool(ctx.get("event_host_active")),
         slots={k: v for k, v in (slots or {}).items() if not k.startswith("_")} or None,
     )
 
@@ -1051,6 +1056,15 @@ def send_lana_message(
     if purpose in ("lana", "profile_intake"):
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
+    # Deterministic entry into the in-chat event-host flow — from the "A meet to host"
+    # CTA hint OR an explicit "host/plan a <event>" message (no classifier dependency).
+    if purpose == "lana" and (
+        body.intent_hint == "host_event"
+        or looks_like_host_event_entry(body.message)
+    ):
+        session_ctx_in["event_host_active"] = True
+        session_ctx_in["event_host_turns"] = 0
+        session_ctx_in["event_affinity_asked"] = False
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -1171,21 +1185,28 @@ def send_lana_message(
 
     ready = status == "ready_to_complete"
     ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
+    # Debug + timing stay on the backend (logged) but are no longer sent to the FE —
+    # they were noise on the wire and nothing in the client reads them.
     debug = _turn_debug_from_ctx(
         merged, ui_intent=ob.get("ui_intent"), orchestrator=orch_used
     )
+    _LOG.debug(
+        "lana_turn session=%s msgs=%s timing=%s debug=%s",
+        session_id,
+        len(all_msgs),
+        timing_ms,
+        debug.model_dump() if debug is not None else None,
+    )
+    ob.pop("onboarding_step", None)  # not read by the FE
     return SendMessageResponse(
         session_id=session_id,
         status=status,
         assistant_message=reply,
         ready_to_complete=ready,
-        message_count=len(all_msgs),
         ui=ui,
         event_draft=event_draft,
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
-        timing_ms=timing_ms,
-        debug=debug,
         **ob,
     )
 

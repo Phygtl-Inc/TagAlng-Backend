@@ -594,9 +594,18 @@ def handle_add_or_edit_claim(
             parts.append(f"removed {dismissed}")
         if saved:
             parts.append(f"updated {saved}")
+        prefix = f"Nice to meet you, {result.nickname} — " if result.nickname else "Got it — "
         return (
-            f"Got it — I {' and '.join(parts)} identity thread{'s' if total != 1 else ''} on your profile.",
+            f"{prefix}I {' and '.join(parts)} identity thread{'s' if total != 1 else ''} on your profile.",
             total,
+            None,
+        )
+    if result.nickname:
+        # A name with no other identity content is still a successful capture.
+        return (
+            f"Nice to meet you, {result.nickname}! I'll remember that. "
+            "Tell me about yourself — heritage, life stage, or interests — and I'll map you to neighbors.",
+            1,
             None,
         )
     return (

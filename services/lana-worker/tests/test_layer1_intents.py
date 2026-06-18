@@ -354,6 +354,156 @@ class TestSignalCapture(unittest.TestCase):
         self.assertEqual(updated.get("category"), "food")
 
 
+class TestTipSeekVsShare(unittest.TestCase):
+    def test_requests_are_seeks(self) -> None:
+        from app.layer1_intents import (
+            utterance_indicates_tip_seek,
+            utterance_indicates_tip_share,
+        )
+
+        for msg in (
+            "can you suggest me good doctors in my block",
+            "suggest me a dentist",
+            "do you know a good pediatrician",
+            "find me a tutor",
+        ):
+            self.assertTrue(utterance_indicates_tip_seek(msg), msg)
+            self.assertFalse(utterance_indicates_tip_share(msg), msg)
+
+    def test_named_provider_is_share(self) -> None:
+        from app.layer1_intents import (
+            utterance_indicates_tip_seek,
+            utterance_indicates_tip_share,
+        )
+
+        for msg in (
+            "I recommend Dr Smith",
+            "Dr Patel is a great dentist",
+            "my favorite pizza is Tonys",
+        ):
+            self.assertTrue(utterance_indicates_tip_share(msg), msg)
+            self.assertFalse(utterance_indicates_tip_seek(msg), msg)
+
+
+class TestConfirmAiFirst(unittest.TestCase):
+    def test_answer_verdict_is_applied(self) -> None:
+        from app.signal_capture import apply_confirm_answer_ai_first
+
+        draft = {
+            "linear_intent": "looking.swap",
+            "intent": "swap_seek",
+            "detail": "rain boots",
+            "phase": PHASE_SIGNAL_CONFIRM,
+            "confirm_field": "stage",
+        }
+        # AI read "for the little one" as a kid size — regex never would.
+        verdict = {"verdict": "answer", "field": "stage", "value": "kids", "linear_intent": None}
+        out = apply_confirm_answer_ai_first(draft, "for the little one", ai_verdict=verdict)
+        self.assertEqual(out.get("stage"), "kids")
+
+    def test_falls_back_to_regex_when_no_verdict(self) -> None:
+        from app.signal_capture import apply_confirm_answer_ai_first
+
+        draft = {
+            "linear_intent": "looking.tip",
+            "intent": "tip_seek",
+            "detail": "good place",
+            "phase": PHASE_SIGNAL_CONFIRM,
+            "confirm_field": "category",
+        }
+        # ai_verdict=None (LLM down) → deterministic parser still fills the slot.
+        out = apply_confirm_answer_ai_first(draft, "food", ai_verdict=None)
+        self.assertEqual(out.get("category"), "food")
+
+
+class TestConfirmVerdict(unittest.TestCase):
+    DRAFT = {
+        "intent": "tip_seek",
+        "linear_intent": "looking.tip",
+        "confirm_field": "category",
+        "detail": "good place",
+    }
+
+    def test_cancel_verdict(self) -> None:
+        from app.signal_confirm_ai import interpret_signal_confirm_reply
+
+        with patch("app.signal_confirm_ai.llm_configured", return_value=True), patch(
+            "app.signal_confirm_ai.llm_json", return_value={"verdict": "cancel"}
+        ):
+            self.assertEqual(
+                interpret_signal_confirm_reply(self.DRAFT, "no don't do this"),
+                {"verdict": "cancel"},
+            )
+
+    def test_reroute_verdict(self) -> None:
+        from app.signal_confirm_ai import interpret_signal_confirm_reply
+
+        with patch("app.signal_confirm_ai.llm_configured", return_value=True), patch(
+            "app.signal_confirm_ai.llm_json", return_value={"verdict": "reroute"}
+        ):
+            self.assertEqual(
+                interpret_signal_confirm_reply(self.DRAFT, "can you do this instead"),
+                {"verdict": "reroute"},
+            )
+
+    def test_answer_verdict_carries_value(self) -> None:
+        from app.signal_confirm_ai import interpret_signal_confirm_reply
+
+        with patch("app.signal_confirm_ai.llm_configured", return_value=True), patch(
+            "app.signal_confirm_ai.llm_json",
+            return_value={"verdict": "answer", "field": "category", "value": "health"},
+        ):
+            res = interpret_signal_confirm_reply(self.DRAFT, "health")
+        self.assertEqual(res.get("verdict"), "answer")
+        self.assertEqual(res.get("value"), "health")
+
+    def test_none_when_llm_down(self) -> None:
+        from app.signal_confirm_ai import interpret_signal_confirm_reply
+
+        with patch("app.signal_confirm_ai.llm_configured", return_value=False):
+            self.assertIsNone(interpret_signal_confirm_reply(self.DRAFT, "health"))
+
+
+class TestSignalAbort(unittest.TestCase):
+    DRAFT = {
+        "linear_intent": "looking.tip",
+        "phase": PHASE_SIGNAL_CONFIRM,
+        "confirm_field": "category",
+    }
+
+    def test_cancel_aborts(self) -> None:
+        from app.signal_capture import is_signal_cancel, should_abort_signal_draft
+
+        msg = "get me out of the collect_signal_detail loop"
+        self.assertTrue(is_signal_cancel(msg))
+        self.assertTrue(should_abort_signal_draft(msg, self.DRAFT, {"confidence": 0.2}))
+
+    def test_pivot_to_other_lane_aborts(self) -> None:
+        from app.signal_capture import should_abort_signal_draft
+
+        slots = {"goal": "save_signal", "linear_intent": "sharing.swap", "confidence": 0.8}
+        self.assertTrue(should_abort_signal_draft("I want to swap a shoe", self.DRAFT, slots))
+
+    def test_pivot_to_nudge_aborts(self) -> None:
+        from app.signal_capture import should_abort_signal_draft
+
+        slots = {"goal": "none", "linear_intent": "tier.send_nudge", "confidence": 0.8}
+        self.assertTrue(should_abort_signal_draft("I want to nudge someone", self.DRAFT, slots))
+
+    def test_slot_answer_does_not_abort(self) -> None:
+        from app.signal_capture import should_abort_signal_draft
+
+        # A plain category/when answer must keep the draft alive.
+        self.assertFalse(
+            should_abort_signal_draft(
+                "health", self.DRAFT, {"goal": "save_signal", "linear_intent": "looking.tip", "confidence": 0.9}
+            )
+        )
+        self.assertFalse(
+            should_abort_signal_draft("this weekend", self.DRAFT, {"goal": "continue", "confidence": 0.3})
+        )
+
+
 class TestLayer1DiscoveryRouting(unittest.TestCase):
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.fetch_identity_dashboard")

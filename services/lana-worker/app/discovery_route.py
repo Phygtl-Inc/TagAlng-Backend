@@ -167,8 +167,10 @@ from app.signal_capture import (
     advance_signal_draft,
     clear_signal_draft,
     draft_from_slots,
+    is_signal_cancel,
     is_signal_lane_intent,
     should_abandon_signal_draft,
+    should_abort_signal_draft,
 )
 
 PHASE_NEED_ZIP = "need_zip"
@@ -1417,6 +1419,31 @@ def _try_signal_lane_turn(
         and str(draft.get("phase") or "") == PHASE_SIGNAL_CONFIRM
         and draft.get("confirm_field")
     )
+    # Confirm phase: the AI reads the reply and decides answer vs cancel vs reroute.
+    # cancel/reroute (or a confident pivot from the main classifier) escape the cascade,
+    # so a reply that isn't an answer is never force-filled into the slot.
+    confirm_verdict: dict[str, Any] | None = None
+    if isinstance(draft, dict) and confirming:
+        from app.signal_confirm_ai import interpret_signal_confirm_reply
+
+        confirm_verdict = interpret_signal_confirm_reply(draft, msg)
+        verdict = str((confirm_verdict or {}).get("verdict") or "")
+        cancel = verdict == "cancel" or (confirm_verdict is None and is_signal_cancel(msg))
+        reroute = verdict == "reroute" or should_abort_signal_draft(msg, draft, slots)
+        if cancel or reroute:
+            clear_signal_draft(ctx_base)
+            # Persist the clear even if a different handler wins this re-routed turn.
+            session_ctx["signal_draft"] = None
+            confirm_verdict = None
+            if cancel:
+                return (
+                    "No problem — I've dropped that. What would you like to do instead?",
+                    _routing_ctx(ctx_base, phase="listening", active_intent="none"),
+                    _discovery_routing_stub("listening", "signal_draft_cancelled"),
+                    [],
+                )
+            draft = None
+            confirming = False
     if isinstance(draft, dict) and not confirming and should_abandon_signal_draft(msg, draft, slots):
         clear_signal_draft(ctx_base)
         draft = None
@@ -1461,7 +1488,7 @@ def _try_signal_lane_turn(
             )
 
     if isinstance(draft, dict):
-        updated, prompt, ready = advance_signal_draft(draft, msg=msg)
+        updated, prompt, ready = advance_signal_draft(draft, msg=msg, ai_verdict=confirm_verdict)
         ctx_base["signal_draft"] = updated
         route_phase = str(updated.get("phase") or PHASE_SIGNAL_EXTRACT)
         active = str(updated.get("linear_intent") or INTENT_SAVE_SIGNAL)
@@ -2782,6 +2809,64 @@ def _zip_prompt(discovery_goal: str) -> str:
     return "What ZIP code is your block? That helps me find neighbors near you."
 
 
+_DECLINE_INPUT_RE = re.compile(
+    r"\b(?:don'?t want to|do not want to|rather not|won'?t|will not|"
+    r"not (?:right )?now|not yet|maybe later|later|skip|no thanks?|"
+    r"prefer not|why do you need|none of your)\b",
+    re.I,
+)
+
+
+def _declines_to_answer(msg: str) -> bool:
+    """User is refusing the question being asked (e.g. won't give a ZIP) — off-ramp,
+    don't re-prompt. Safety valve only; the AI still drives normal routing."""
+    return bool(_DECLINE_INPUT_RE.search(str(msg or "").strip())) or is_signal_cancel(msg)
+
+
+def _host_via_orchestrator() -> bool:
+    """Hosting a full event runs through the orchestrator (OpenAI) in-chat, not the
+    lightweight host_meet signal. Falls back to the signal lane when orchestrator off."""
+    try:
+        from app.orchestrator.pipeline import orchestrator_enabled
+
+        return bool(orchestrator_enabled())
+    except Exception:
+        return False
+
+
+# While hosting, ONLY an explicit pivot leaves the flow — narrow patterns so an event
+# description ("weekday playground meet with kids") is never mistaken for a pivot.
+_HOST_PIVOT_RE = re.compile(
+    r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
+    r"\bshow my (?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b",
+    re.I,
+)
+# Backstop so a verified user can never be trapped in host mode.
+_EVENT_HOST_TURN_CAP = 12
+
+
+def _pivots_out_of_host(msg: str) -> bool:
+    return bool(_HOST_PIVOT_RE.search(str(msg or "").strip()))
+
+
+# Explicit "host/throw/plan a <event>" — a deterministic entry into the event flow that
+# does NOT depend on the CTA hint or the classifier. Requires a host verb + an event
+# noun so "I want to meet people" (discovery) is never caught.
+_HOST_ENTRY_RE = re.compile(
+    r"\bhost(?:ing)?\b.{0,30}\b(?:meet|meet-?up|event|gathering|playgroup|play\s?group|"
+    r"playdate|play\s?date|brunch|coffee|breakfast|picnic|hang(?:out)?|get[- ]?together|"
+    r"party|potluck|walk|stroll|playground|class|circle|club)\b|"
+    r"\b(?:throw|organi[sz]e|plan|set up)\b.{0,30}\b(?:meetup|meet-?up|gathering|playgroup|"
+    r"play\s?group|playdate|brunch|picnic|party|potluck|get[- ]?together|event)\b",
+    re.I,
+)
+
+
+def looks_like_host_event_entry(msg: str) -> bool:
+    """Deterministic 'host an event' entry — host/plan verb + an event noun."""
+    return bool(_HOST_ENTRY_RE.search(str(msg or "").strip()))
+
+
 def _show_activities_preview(
     *,
     ctx_base: dict[str, Any],
@@ -3608,6 +3693,23 @@ def handle_discovery_turn(
     phase = str(session_ctx.get("routing_phase") or "")
     active = session_ctx.get("active_intent")
 
+    # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
+    # conversation so an event line ("weekday playground meet with kids") isn't
+    # hijacked into a neighbour search. Only an explicit cancel/pivot — or the turn
+    # cap — releases it, so the user is never trapped in a loop.
+    if session_ctx.get("event_host_active") and _host_via_orchestrator():
+        if is_signal_cancel(msg) or _pivots_out_of_host(msg):
+            session_ctx["event_host_active"] = False
+            session_ctx["event_host_turns"] = 0
+        else:
+            turns = int(session_ctx.get("event_host_turns") or 0) + 1
+            session_ctx["event_host_turns"] = turns
+            if turns <= _EVENT_HOST_TURN_CAP:
+                return None  # defer the entire turn to the orchestrator's event flow
+            # Cap reached without publishing — release rather than loop.
+            session_ctx["event_host_active"] = False
+            session_ctx["event_host_turns"] = 0
+
     had_block = bool(resolve_block_id(session_ctx, home_block_id))
     has_profile_photo = bool(user_profile_photo_url(user_id))
     slots: dict[str, Any] = {}
@@ -3658,6 +3760,13 @@ def handle_discovery_turn(
     if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
         hosting_slots = enrich_slots(dict(slots), msg=msg)
         if slots_indicate_hosting_signal(hosting_slots) or utterance_indicates_hosting_plan(msg):
+            # Hosting an event is a full create_event flow (what/where/when/affinity →
+            # publish). When the orchestrator is on it owns this in-chat (OpenAI), so
+            # defer to it and pin host mode so the follow-up turns stay with it.
+            if _host_via_orchestrator():
+                session_ctx["event_host_active"] = True
+                session_ctx["event_host_turns"] = int(session_ctx.get("event_host_turns") or 0) + 1
+                return None
             hosting_turn = _try_signal_lane_turn(
                 msg=msg,
                 slots=hosting_slots,
@@ -4221,6 +4330,27 @@ def handle_discovery_turn(
                     discovery_goal=ctx_base.get("discovery_goal"),
                 ),
                 _discovery_routing_stub(PHASE_NEED_ZIP),
+                [],
+            )
+        # Off-ramp: user is declining the ZIP — don't re-prompt the same question forever.
+        # Skip the off-ramp when the AI says they still want discovery (e.g. "find me
+        # people, stop asking questions" is frustration, not a refusal to proceed).
+        _decline_goal = str((slots or {}).get("goal") or "")
+        if _declines_to_answer(msg) and _decline_goal not in (
+            "peers",
+            "activities",
+            "both",
+            "continue",
+            "save_signal",
+            "verify",
+        ):
+            off = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+            off["discovery_goal"] = None
+            return (
+                "No problem — we can skip that for now. Tell me what you're looking for, "
+                "or share your ZIP whenever you're ready and I'll find your block.",
+                off,
+                _discovery_routing_stub("listening", "zip_declined"),
                 [],
             )
         zip_hint = invalid_zip_hint(msg)

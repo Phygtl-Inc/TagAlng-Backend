@@ -27,6 +27,15 @@ class TestNicknameExtract(unittest.TestCase):
     def test_does_not_treat_heritage_as_name(self) -> None:
         self.assertIsNone(extract_nickname_from_message("I am an italian mom"))
 
+    def test_i_am_name(self) -> None:
+        # "I am Karen" (not just "I'm Karen") must be captured as a name.
+        self.assertEqual(extract_nickname_from_message("I am Karen"), "Karen")
+        self.assertEqual(extract_nickname_from_message("I'm Karen"), "Karen")
+
+    def test_i_am_self_description_not_name(self) -> None:
+        self.assertIsNone(extract_nickname_from_message("I am from singapore"))
+        self.assertIsNone(extract_nickname_from_message("I am a teacher"))
+
     def test_single_word_when_asked(self) -> None:
         self.assertEqual(extract_display_name_reply("brigade"), "Brigade")
 
