@@ -154,7 +154,9 @@ class TestIntroProposalHelpers(unittest.TestCase):
             },
             peer={"peer_user_id": "u1", "nickname": "Sam", "matching_peer_label": "Runner"},
         )
-        self.assertNotIn("pending_intro_offer", ctx)
+        # None is the delete-on-merge sentinel (see db.py _INTRO_STATE_NULL_DELETES):
+        # the stale offer is dropped from the persisted session on merge.
+        self.assertIsNone(ctx.get("pending_intro_offer"))
         self.assertEqual(ctx["intro_proposal"]["intro_id"], "intro-1")
         self.assertEqual(derive_ui_intent(ctx), UI_INTENT_PROPOSE_NEIGHBOR_INTRO)
 

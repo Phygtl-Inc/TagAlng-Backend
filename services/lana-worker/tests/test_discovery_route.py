@@ -1343,6 +1343,150 @@ class TestHeritageIntroRouting(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_pending_heritage_yields_to_doctor_tip_seek(self) -> None:
+        pending = {
+            "from_label": "American Heritage",
+            "label": "Brazilian Heritage",
+            "claim": {
+                "concept": "brazilian_heritage",
+                "label": "Brazilian Heritage",
+                "confidence": 0.9,
+                "bucket": "heritage",
+            },
+        }
+        result = _try_pending_heritage_turn(
+            msg="Is there any good doctor in our block",
+            session_ctx={"pending_heritage_change": pending},
+            user_id="user-1",
+            user_jwt="jwt",
+            phone_verified=True,
+            phase=PHASE_PREVIEW,
+            slots={"goal": "peers", "confidence": 0.9},
+        )
+        self.assertIsNone(result)
+
+
+class TestSignalPivotRouting(unittest.TestCase):
+    @patch("app.discovery_route.save_local_signal")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    @patch("app.discovery_route.fetch_peer_matches")
+    def test_doctor_query_not_peer_preview(
+        self, mock_peers, mock_slots, _mock_ai, mock_save
+    ) -> None:
+        mock_save.return_value = {"signal_id": "sig-1", "matches_created": 0}
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.92,
+            "identity_snippet": "brazilian mom",
+        }
+        mock_peers.return_value = [
+            {"nickname": "Natasha", "match_score": 1.0, "traits": ["Mom"]},
+        ]
+        pending = {
+            "from_label": "American Heritage",
+            "label": "Brazilian Heritage",
+            "claim": {"concept": "brazilian_heritage", "label": "Brazilian Heritage"},
+        }
+        result = handle_discovery_turn(
+            "Is there any good doctor in our block",
+            session_ctx={
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-a",
+                "discovery_goal": "peers",
+                "identity_snippet": "brazilian mom",
+                "pending_heritage_change": pending,
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-a",
+            is_anonymous=False,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, _, _, peers = result
+        assert reply is not None
+        mock_peers.assert_not_called()
+        self.assertEqual(peers, [])
+        self.assertNotIn("I found 5 neighbors", reply)
+
+    @patch("app.discovery_route.save_local_signal")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    @patch("app.discovery_route.fetch_peer_matches")
+    def test_computer_swap_not_peer_preview(
+        self, mock_peers, mock_slots, _mock_ai, mock_save
+    ) -> None:
+        mock_save.return_value = {"signal_id": "sig-2", "matches_created": 0}
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.92,
+            "identity_snippet": "brazilian mom",
+        }
+        mock_peers.return_value = [
+            {"nickname": "Natasha", "match_score": 1.0, "traits": ["Mom"]},
+        ]
+        result = handle_discovery_turn(
+            "I am looking for a computer for my kid",
+            session_ctx={
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-a",
+                "discovery_goal": "peers",
+                "identity_snippet": "brazilian mom",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-a",
+            is_anonymous=False,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, _, _, peers = result
+        assert reply is not None
+        mock_peers.assert_not_called()
+        self.assertEqual(peers, [])
+        self.assertNotIn("I found 5 neighbors", reply)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    @patch("app.discovery_route.fetch_peer_matches")
+    def test_meta_chat_not_peer_preview(
+        self, mock_peers, mock_slots, _mock_ai
+    ) -> None:
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.92,
+        }
+        mock_peers.return_value = [
+            {"nickname": "Natasha", "match_score": 1.0, "traits": ["Mom"]},
+        ]
+        result = handle_discovery_turn(
+            "Are you dumb?",
+            session_ctx={
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-a",
+                "discovery_goal": "peers",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-a",
+            is_anonymous=False,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, _, _, peers = result
+        assert reply is not None
+        mock_peers.assert_not_called()
+        self.assertEqual(peers, [])
+        self.assertIn("Lana", reply)
+        self.assertNotIn("I found 5 neighbors", reply)
+
 
 class TestBlockLogIntroRouting(unittest.TestCase):
     def test_pick_block_log_entry_for_intro_index(self) -> None:

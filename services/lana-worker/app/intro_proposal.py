@@ -279,7 +279,9 @@ def stamp_intro_proposal_ctx(
         "status": intro.get("status") or "proposed",
     }
     ctx["active_intent"] = INTENT_PROPOSE_INTRO
-    ctx.pop("pending_intro_offer", None)
+    from app.intro_list import clear_intro_offer_ctx
+
+    clear_intro_offer_ctx(ctx)
 
 
 def stamp_intro_offer_ctx(

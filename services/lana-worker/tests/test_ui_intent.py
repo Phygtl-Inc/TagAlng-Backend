@@ -123,6 +123,25 @@ class TestDeriveUiIntent(unittest.TestCase):
             UI_INTENT_OFFER_NEIGHBOR_INTRO,
         )
 
+    def test_duplicate_intro_beats_stale_offer(self) -> None:
+        from app.ui_intent import UI_INTENT_SHOW_BLOCK_LOG
+
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "recent_intro_duplicate": {
+                        "candidate_user_id": "u1",
+                        "candidate_nickname": "Natasha",
+                    },
+                    "pending_intro_offer": {
+                        "candidate_user_id": "u1",
+                        "candidate_nickname": "Natasha",
+                    },
+                }
+            ),
+            UI_INTENT_SHOW_BLOCK_LOG,
+        )
+
     def test_propose_neighbor_intro(self) -> None:
         self.assertEqual(
             derive_ui_intent({"intro_proposal": {"intro_id": "i1"}}),
