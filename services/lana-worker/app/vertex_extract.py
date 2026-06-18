@@ -202,6 +202,28 @@ def vertex_extract_claims_from_utterance(message: str) -> Any:
     return parse_json_object(response.text or "")
 
 
+def incremental_claims_from_utterance(message: str) -> Any:
+    """Extract claims via orchestrator LLM when configured; else Vertex."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    text = str(message or "").strip()
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if llm_configured():
+            return llm_json(
+                model=router_model(),
+                system=INCREMENTAL_EXTRACT_PROMPT,
+                user_payload=text,
+                max_tokens=512,
+                temperature=0.2,
+            )
+    except Exception:
+        log.exception("llm_incremental_claim_extract_failed")
+    return vertex_extract_claims_from_utterance(text)
+
+
 def vertex_extract_from_transcript(
     transcript: str,
 ) -> tuple[list[ExtractedClaim], str, str | None, list[MappedSpan]]:

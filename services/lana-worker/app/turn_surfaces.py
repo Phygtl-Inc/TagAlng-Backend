@@ -10,6 +10,7 @@ TURN_SCOPED_SURFACES = frozenset({
     "signal_saved",
     "identity_profile",
     "pending_intros",
+    "recent_intro_duplicate",
 })
 
 

@@ -9,7 +9,10 @@ from typing import Any
 from app.layer1_intents import (
     LINEAR_INTENTS,
     enrich_slots,
+    intent_confidence_met,
     normalize_attr_filter_text,
+    slots_indicate_hosting_signal,
+    slots_linear_intent,
     slots_want_layer1_handling,
 )
 from app.orchestrator.llm import llm_configured, llm_json, router_model
@@ -40,8 +43,16 @@ _SYSTEM = (
     "(activities stays activities, peers stays peers) — use goal=continue, in_discovery=true. "
     "Mid-funnel pushback or topic change in preview → in_discovery=false, goal=chat. "
     "When routing_phase=preview and phone_verified=true: user wants Lana to introduce them to a "
-    "shown neighbor (introduce me, connect us, put us together, meet them, yes introduce) "
-    "→ goal=propose_intro, in_discovery=true. "
+    "shown neighbor (introduce me, connect us, put us together, meet them, send intro to X, "
+    "send an intro to Kashaf, yes introduce) "
+    "→ goal=propose_intro, in_discovery=true, set peer_name when they name someone. "
+    "NUMBERED INTRO — resolve WHO from RECENT TURNS + session active_intent (not a new peer search): "
+    "If the latest assistant turn listed block-log swap/match rows (numbered 1., 2., 'active matches', "
+    "'introduce me to #1') → goal=propose_intro, linear_intent=social.propose_intro, "
+    "intro_source=block_log, intro_list_index=N (1-based from user message). NOT goal=peers. "
+    "If the latest assistant turn showed identity neighbor preview cards (heritage %, Kashaf, etc.) "
+    "→ goal=propose_intro, intro_source=peer_preview, intro_list_index=N and/or peer_name. NOT goal=peers. "
+    "When user picks from a list Lana already showed, NEVER goal=peers — they are accepting a shown match. "
     "When routing_phase=preview and Lana just offered an intro (pending) and user says yes/sure/ok "
     "→ goal=propose_intro, in_discovery=true. "
     "'are these Brazilian?', 'why moms not dads?') → in_discovery=false, goal=chat — NOT peers. "
@@ -98,6 +109,10 @@ _SYSTEM = (
     "tip_share ONLY when user OFFERS or RECOMMENDS (I recommend, try Dr Smith, my favorite pizza place). "
     "NEVER tip_seek when user wants to FIND/SHOW NEIGHBORS by heritage, life stage, or traits "
     "(find italian moms, find italian dads, brazilian parents on my block) — that is discovery.find_by_attrs. "
+    "host_meet = user wants to PLAN or HOST an activity on the block (I want brazilian coffee this weekend, "
+    "host a brunch Saturday, plan a playdate at the park) — sharing.host + goal=save_signal; "
+    "NOT discovery.find_by_attrs even if a heritage word appears. Heritage + mom/dad/parent/neighbor = find people; "
+    "heritage + coffee/brunch/meetup/gathering + time = host. "
     "Set linear_intent: looking.meet for meet_seek, looking.swap for swap_seek, looking.tip for tip_seek, "
     "sharing.swap for swap_offer, sharing.host for host_meet, sharing.tip for tip_share. "
     "When goal=show_block_log set intro_direction null. "
@@ -111,8 +126,13 @@ _SYSTEM = (
     "settings.change_name|settings.change_zip|settings.notification_prefs; "
     "help.what_can_you_do|help.who_are_you. "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
+    "When session_active_intent is identity.show_my_profile and the user describes THEMSELVES "
+    "(I am american, I have a young child, I'm a teacher) → identity.add_claim, goal=chat, "
+    "in_discovery=false, identity_snippet=null (do NOT set goal=peers). "
+    "When user corrects heritage (I'm not X, I'm Y, I told you I am american) → identity.edit_claim. "
     "Use discovery.show_peer_profile when user asks about a SPECIFIC neighbor's identity claims/profile "
-    "(show Kashaf's claims, what identity threads does Kashaf have) — set peer_name, goal=chat, "
+    "OR wants to find/locate someone BY NAME on the block "
+    "(find Kashaf on my block, is Sofia on my block, check neighbors for Sofia) — set peer_name, goal=chat, "
     "in_discovery=false, NOT goal=peers, NOT identity.show_my_profile. "
     "Use discovery.explain_peer_match when user asks HOW/WHY match % on shown cards "
     "(how is 100% match, what is matching, what things are matching) — goal=chat, in_discovery=false, "
@@ -121,8 +141,9 @@ _SYSTEM = (
     "Use identity.edit_claim for corrections ('I'm not X, I'm Y', 'edit my identity'). "
     "Heritage is one slot — if user states a new heritage that contradicts prior, ask to confirm before replacing. "
     "Use discovery.find_by_attrs when user wants neighbors matching traits (ANY heritage/adjective + "
-    "mom/dad/parent/language/stage — infinite phrasing). Set attr_filter to the trait phrase "
-    "(e.g. italian moms, italian dads, brazilian parents). NOT looking.tip, NOT save_signal. "
+    "mom/dad/parent/language/stage — infinite phrasing: show me american moms, find italian dads, "
+    "brazilian parents on my block). Set attr_filter to the trait phrase "
+    "(e.g. american moms, italian dads). NOT identity.add_claim, NOT identity.edit_claim, goal=peers. "
     "Use discovery.find_in_block for block activity browse (what's on my block, what are people swapping). "
     "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
     "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes "
@@ -162,6 +183,8 @@ def _empty_slots() -> dict[str, Any]:
         "linear_intent": None,
         "goal": "none",
         "intro_direction": None,
+        "intro_source": None,
+        "intro_list_index": None,
         "zip": None,
         "identity_snippet": None,
         "profile_photo_action": "none",
@@ -181,6 +204,7 @@ def ai_parse_discovery_turn(
     has_identity: bool,
     phone_verified: bool = False,
     has_profile_photo: bool = False,
+    session_ctx: dict[str, Any] | None = None,
     timer: TurnTimer | None = None,
 ) -> dict[str, Any]:
     """One Flash call: discovery yes/no, goal (peers/activities/profile_photo), zip, identity snippet."""
@@ -204,8 +228,9 @@ def ai_parse_discovery_turn(
                         has_identity=has_identity,
                         phone_verified=phone_verified,
                         has_profile_photo=has_profile_photo,
+                        session_ctx=session_ctx,
                     ),
-                    max_tokens=128,
+                    max_tokens=160,
                     temperature=0.0,
                     llm_attempts=attempts_box,
                 )
@@ -223,8 +248,9 @@ def ai_parse_discovery_turn(
                     has_identity=has_identity,
                     phone_verified=phone_verified,
                     has_profile_photo=has_profile_photo,
+                    session_ctx=session_ctx,
                 ),
-                max_tokens=128,
+                max_tokens=160,
                 temperature=0.0,
             )
         goal = str(raw.get("goal") or "none").lower()
@@ -273,6 +299,19 @@ def ai_parse_discovery_turn(
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
             intro_direction_s = None
+        intro_source = raw.get("intro_source")
+        intro_source_s = str(intro_source).strip().lower() if intro_source else None
+        if intro_source_s not in ("block_log", "peer_preview"):
+            intro_source_s = None
+        intro_list_index_s: int | None = None
+        intro_list_index_raw = raw.get("intro_list_index")
+        if intro_list_index_raw is not None:
+            try:
+                intro_list_index_s = int(intro_list_index_raw)
+                if intro_list_index_s < 1:
+                    intro_list_index_s = None
+            except (TypeError, ValueError):
+                intro_list_index_s = None
         photo_action = str(raw.get("profile_photo_action") or "none").lower()
         if photo_action not in ("start", "accept", "skip", "done", "none"):
             photo_action = "none"
@@ -290,6 +329,8 @@ def ai_parse_discovery_turn(
             "linear_intent": linear_intent,
             "goal": goal,
             "intro_direction": intro_direction_s,
+            "intro_source": intro_source_s,
+            "intro_list_index": intro_list_index_s,
             "zip": zip_s,
             "identity_snippet": ident_s,
             "profile_photo_action": photo_action,
@@ -315,13 +356,16 @@ def _discovery_slot_payload(
     has_identity: bool,
     phone_verified: bool,
     has_profile_photo: bool = False,
+    session_ctx: dict[str, Any] | None = None,
 ) -> str:
+    active_intent = str((session_ctx or {}).get("active_intent") or "").strip() or "none"
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"
         f"has_identity_in_session: {has_identity}\n"
         f"phone_verified: {phone_verified}\n"
-        f"has_profile_photo: {has_profile_photo}\n\n"
+        f"has_profile_photo: {has_profile_photo}\n"
+        f"session_active_intent: {active_intent}\n\n"
         "RECENT TURNS:\n"
         f"{_format_history(history)}\n\n"
         f"LATEST USER MESSAGE:\n{text}\n\n"
@@ -332,6 +376,8 @@ def _discovery_slot_payload(
         '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
         '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"none",\n'
         '  "intro_direction": "sent"|"received"|"all"|null,\n'
+        '  "intro_source": "block_log"|"peer_preview"|null,\n'
+        '  "intro_list_index": 1-based integer when user picks #N from a shown list, else null,\n'
         '  "signal_intent": "swap_seek"|"swap_offer"|"meet_seek"|"host_meet"|"tip_seek"|"tip_share"|null,\n'
         '  "signal_detail": "string or null",\n'
         '  "signal_category": "string or null",\n'
@@ -373,6 +419,7 @@ def discovery_slots_for_turn(
         has_identity=has_identity,
         phone_verified=phone_verified,
         has_profile_photo=has_profile_photo,
+        session_ctx=session_ctx,
         timer=timer,
     )
     if text:
@@ -381,11 +428,67 @@ def discovery_slots_for_turn(
     return slots
 
 
+def slots_want_propose_intro(slots: dict[str, Any]) -> bool:
+    """AI decided user is accepting a shown match — not browsing for new peers."""
+    goal = str(slots.get("goal") or "")
+    linear = str(slots.get("linear_intent") or "")
+    if goal != "propose_intro" and linear != "social.propose_intro":
+        return False
+    return float(slots.get("confidence", 0.0)) >= 0.5
+
+
+def slots_peer_name(slots: dict[str, Any] | None) -> str | None:
+    """Neighbor name from AI slots (not utterance regex)."""
+    if not slots:
+        return None
+    name = str(slots.get("peer_name") or "").strip().lower()
+    if not name or name in ("a", "an", "the", "neighbor", "neighbour"):
+        return None
+    return name
+
+
+def slots_picking_shown_peer(
+    slots: dict[str, Any] | None,
+    session_ctx: dict[str, Any],
+) -> bool:
+    """AI + session: user is choosing from cards Lana already showed — not a new search."""
+    if not slots:
+        return False
+    if slots_want_propose_intro(slots):
+        return True
+    enriched = enrich_slots(dict(slots))
+    if str(enriched.get("intro_source") or "").strip():
+        return True
+    if enriched.get("intro_list_index") is not None and session_ctx.get("peer_matches"):
+        return True
+    name = slots_peer_name(enriched)
+    if not name:
+        return False
+    stored = session_ctx.get("peer_matches")
+    if not isinstance(stored, list):
+        return False
+    for row in stored:
+        if not isinstance(row, dict):
+            continue
+        nick = str(row.get("nickname") or "").strip().lower()
+        if nick and (nick == name or name in nick or nick in name):
+            return True
+    return False
+
+
 def slots_want_preview_refetch(
     slots: dict[str, Any],
     session_ctx: dict[str, Any],
 ) -> bool:
     """AI-only: re-run peer preview when user supplied new matching criteria (not questions)."""
+    if slots_want_propose_intro(slots) or slots_picking_shown_peer(slots, session_ctx):
+        return False
+    linear = str(slots.get("linear_intent") or "")
+    if linear.startswith("identity.") or linear in (
+        "discovery.show_peer_profile",
+        "discovery.explain_peer_match",
+    ):
+        return False
     goal = str(slots.get("goal") or "none")
     if goal not in ("peers", "both") or not slots.get("in_discovery"):
         return False
@@ -443,6 +546,63 @@ def slots_want_signup_gate(slots: dict[str, Any] | None) -> bool:
         str(slots.get("goal") or "none") == "verify"
         and float(slots.get("confidence", 0.0)) >= _AUTH_SLOT_CONF
     )
+
+
+_IDENTITY_PROFILE_LINEAR = frozenset({
+    "identity.add_claim",
+    "identity.edit_claim",
+    "identity.show_my_profile",
+    "discovery.show_peer_profile",
+})
+
+
+_DISCOVERY_LINEAR_INTENTS = frozenset({
+    "discovery.find_peers",
+    "discovery.find_by_attrs",
+    "discovery.find_in_block",
+    "discovery.find_activities",
+    "discovery.explain_peer_match",
+})
+
+
+def slots_indicate_peer_discovery(slots: dict[str, Any] | None) -> bool:
+    """AI classified neighbor search — not self-identity (no regex on utterance)."""
+    if not slots:
+        return False
+    enriched = enrich_slots(dict(slots))
+    if slots_indicate_hosting_signal(enriched):
+        return False
+    goal = str(enriched.get("goal") or "none")
+    if goal in ("peers", "both", "activities"):
+        if float(enriched.get("confidence", 0.0)) >= 0.5:
+            return True
+    if str(enriched.get("attr_filter") or "").strip():
+        return True
+    linear = slots_linear_intent(enriched)
+    if linear in _DISCOVERY_LINEAR_INTENTS:
+        if intent_confidence_met(enriched, linear):
+            return True
+        if linear in ("discovery.find_peers", "discovery.find_by_attrs"):
+            return float(enriched.get("confidence", 0.0)) >= 0.5
+    return False
+
+
+def slots_want_identity_profile_handling(slots: dict[str, Any] | None) -> bool:
+    """AI classified show/add/edit own profile or look up a named neighbor."""
+    if not slots:
+        return False
+    enriched = enrich_slots(dict(slots))
+    goal = str(enriched.get("goal") or "none")
+    if goal in ("peers", "both", "activities"):
+        return False
+    if str(enriched.get("attr_filter") or "").strip():
+        return False
+    linear = slots_linear_intent(enriched)
+    if linear in _DISCOVERY_LINEAR_INTENTS:
+        return False
+    if linear not in _IDENTITY_PROFILE_LINEAR:
+        return False
+    return intent_confidence_met(enriched, linear)
 
 
 def slots_want_discovery_handling(

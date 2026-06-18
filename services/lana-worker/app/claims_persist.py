@@ -12,6 +12,7 @@ from app.claim_embed import claim_embedding_text
 from app.models import ExtractedClaim
 from app.vertex_extract import (
     parse_incremental_claims_data,
+    incremental_claims_from_utterance,
     vertex_embed,
     vertex_extract_claims_from_utterance,
 )
@@ -21,16 +22,6 @@ logger = logging.getLogger(__name__)
 MIN_CLAIM_CONFIDENCE = 0.65
 _SKIP_OK = frozenset({"ok", "okay", "yes", "no", "yep", "nope", "sure", "thanks", "thank you"})
 
-_DISCOVERY_QUERY_RE = re.compile(
-    r"\b(?:find|show|search|look(?:ing)?\s+for|who\s+(?:is|are))\b"
-    r"(?:\s+(?:people|neighbors|neighbours|someone|moms?|dads?|parents?))?",
-    re.I,
-)
-_INTRO_ACTION_RE = re.compile(
-    r"\b(?:int(?:ro)?duce|introduction|connect me|put (?:us|me) together|meet (?:them|her|him)|"
-    r"reach out|say hi|send (?:a )?nudge|talk to)\b",
-    re.I,
-)
 _NEGATIVE_CLAIM_RE = re.compile(
     r"\b(?:no|not|without|non[-\s]?)\s+(?:\w+\s+){0,3}"
     r"(?:heritage|background|from|speaker|brazilian|italian|pakistani|latino|latina)",
@@ -207,7 +198,11 @@ def heritage_claim_key(concept: str, label: str) -> str:
 
 def is_explicit_heritage_correction(message: str) -> bool:
     """User is correcting or removing heritage — apply without confirmation."""
-    return bool(_HERITAGE_CORRECTION_RE.search(str(message or "")))
+    text = str(message or "")
+    if _HERITAGE_CORRECTION_RE.search(text):
+        return True
+    low = text.lower()
+    return bool(re.search(r"\bi told you\b", low) and message_might_assert_heritage(text))
 
 
 def message_might_assert_heritage(message: str) -> bool:
@@ -310,20 +305,11 @@ def is_negative_claim(claim: ExtractedClaim) -> bool:
     return bool(re.match(r"^(no|not)\b", blob.strip()))
 
 
-def is_discovery_query_message(message: str) -> bool:
-    text = message.strip()
-    if _INTRO_ACTION_RE.search(text):
-        return True
-    return bool(_DISCOVERY_QUERY_RE.search(text))
-
-
 def filter_extracted_claims(
     message: str,
     claims: list[ExtractedClaim],
 ) -> list[ExtractedClaim]:
-    """Drop negative, search-target, and vague junk before persist."""
-    if is_discovery_query_message(message):
-        return []
+    """Drop negative and vague junk before persist."""
     out: list[ExtractedClaim] = []
     for c in claims:
         if is_negative_claim(c):
@@ -389,9 +375,14 @@ def dismiss_claims_from_edit_message(user_id: str, message: str) -> int:
     if not re.search(r"\b(?:remove|delete|drop|clear|get rid of)\b", low):
         return 0
     roots_to_remove: set[str] = set()
-    for root, terms in _HERITAGE_ROOT_TERMS.items():
-        if any(re.search(rf"\b{re.escape(t)}\b", low) for t in terms):
-            roots_to_remove.add(root)
+    for m in re.finditer(
+        r"\b(?:remove|delete|drop|clear|get rid of)\b[^.;!?]{0,80}",
+        low,
+    ):
+        chunk = m.group(0)
+        for root, terms in _HERITAGE_ROOT_TERMS.items():
+            if any(re.search(rf"\b{re.escape(t)}\b", chunk) for t in terms):
+                roots_to_remove.add(root)
     sb = service_client()
     res = (
         sb.table("user_identity_claims")
@@ -439,8 +430,6 @@ def should_extract_claims_from_message(message: str) -> bool:
         return False
     digits = re.sub(r"\D", "", text)
     if digits and len(digits) >= 10 and re.fullmatch(r"[\d\s+\-().]+", text):
-        return False
-    if is_discovery_query_message(text):
         return False
     return True
 
@@ -527,6 +516,71 @@ def replace_all_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
         sb.table("user_identity_claims").insert(rows).execute()
 
 
+def regex_claims_from_message(message: str) -> list[ExtractedClaim]:
+    """Rule-based fallback when Flash extract returns nothing for clear self-claims."""
+    text = str(message or "").strip()
+    low = text.lower()
+    if not text or not re.search(r"\b(?:i(?:'m| am)|i have(?: a)?|we(?:'re| are))\b", low):
+        return []
+    quote = text[:120]
+    out: list[ExtractedClaim] = []
+
+    for root, terms in _HERITAGE_ROOT_TERMS.items():
+        if not any(re.search(rf"\b{re.escape(t)}\b", low) for t in terms):
+            continue
+        if not re.search(r"\b(?:i(?:'m| am)|my heritage)\b", low):
+            continue
+        label = "American" if root == "american" else f"{root.title()} Heritage"
+        out.append(
+            ExtractedClaim(
+                concept=f"{root}_heritage",
+                label=label,
+                confidence=0.88,
+                disclosure="public",
+                source_quote=quote,
+                bucket="heritage",
+            )
+        )
+        break
+
+    if re.search(r"\b(?:young child|toddler|newborn|infant)\b", low):
+        out.append(
+            ExtractedClaim(
+                concept="parent_young_child",
+                label="Parent of young child",
+                confidence=0.88,
+                disclosure="public",
+                source_quote=quote,
+                bucket="stage",
+            )
+        )
+    elif re.search(r"\bi have\b", low) and re.search(r"\b(?:child|kid)\b", low):
+        out.append(
+            ExtractedClaim(
+                concept="parent",
+                label="Parent",
+                confidence=0.85,
+                disclosure="public",
+                source_quote=quote,
+                bucket="stage",
+            )
+        )
+
+    if re.search(r"\bteacher\b", low):
+        out.append(
+            ExtractedClaim(
+                concept="teacher",
+                label="Teacher",
+                confidence=0.88,
+                disclosure="public",
+                source_quote=quote,
+                bucket="activity",
+            )
+        )
+
+    return out[:4]
+
+
 def try_upsert_claims_from_message(
     user_id: str,
     message: str,
@@ -539,7 +593,7 @@ def try_upsert_claims_from_message(
     if not should_extract_claims_from_message(message):
         return ClaimExtractResult()
     try:
-        data = vertex_extract_claims_from_utterance(message)
+        data = incremental_claims_from_utterance(message)
         nickname, claims = parse_incremental_claims_data(data)
     except Exception:
         logger.exception("incremental_claim_extract_failed")

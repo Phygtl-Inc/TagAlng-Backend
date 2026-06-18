@@ -19,6 +19,7 @@ UI_INTENT_SIGN_OUT = "sign_out"
 UI_INTENT_OFFER_NEIGHBOR_INTRO = "offer_neighbor_intro"
 UI_INTENT_PROPOSE_NEIGHBOR_INTRO = "propose_neighbor_intro"
 UI_INTENT_SHOW_PENDING_INTROS = "show_pending_intros"
+UI_INTENT_RESPOND_PENDING_INTRO = "respond_pending_intro"
 UI_INTENT_SHOW_BLOCK_LOG = "show_block_log"
 UI_INTENT_SIGNAL_SAVED = "signal_saved"
 UI_INTENT_SHOW_IDENTITY_PROFILE = "show_identity_profile"
@@ -83,24 +84,28 @@ def derive_ui_intent(
     if ctx.get("intro_proposal"):
         return UI_INTENT_PROPOSE_NEIGHBOR_INTRO
 
-    if ctx.get("pending_intro_offer"):
-        return UI_INTENT_OFFER_NEIGHBOR_INTRO
-
     active = str(ctx.get("active_intent") or "").strip()
-
-    if active == _INTENT_LIST_INTROS and ctx.get("pending_intros") is not None:
-        return UI_INTENT_SHOW_PENDING_INTROS
-
-    if active == _INTENT_BLOCK_LOG:
-        return UI_INTENT_SHOW_BLOCK_LOG
-
-    if active == _INTENT_SHOW_PROFILE and ctx.get("identity_profile") is not None:
-        return UI_INTENT_SHOW_IDENTITY_PROFILE
 
     if ctx.get("signal_saved") and (
         active.startswith(_SIGNAL_ACTIVE_PREFIXES) or active == "signal.capture"
     ):
         return UI_INTENT_SIGNAL_SAVED
+
+    if active == _INTENT_BLOCK_LOG and ctx.get("block_log_entries") is not None:
+        return UI_INTENT_SHOW_BLOCK_LOG
+
+    if active == _INTENT_LIST_INTROS and ctx.get("pending_intros") is not None:
+        return UI_INTENT_SHOW_PENDING_INTROS
+
+    # Respond beats stale offer — only while an intro is actually waiting on the user.
+    if ctx.get("pending_intro_respond"):
+        return UI_INTENT_RESPOND_PENDING_INTRO
+
+    if ctx.get("pending_intro_offer"):
+        return UI_INTENT_OFFER_NEIGHBOR_INTRO
+
+    if active == _INTENT_SHOW_PROFILE and ctx.get("identity_profile") is not None:
+        return UI_INTENT_SHOW_IDENTITY_PROFILE
 
     if ctx.get("signal_draft"):
         return UI_INTENT_COLLECT_SIGNAL_DETAIL

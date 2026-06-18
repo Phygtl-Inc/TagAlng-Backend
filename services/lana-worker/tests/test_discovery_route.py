@@ -1294,6 +1294,55 @@ class TestHeritageIntroRouting(unittest.TestCase):
         reply, _, _, _ = result
         self.assertIn("heritage", reply.lower())
 
+    def test_pending_heritage_yields_to_attr_peer_search(self) -> None:
+        pending = {
+            "from_label": "Brazilian Heritage",
+            "label": "American Heritage",
+            "claim": {
+                "concept": "american_heritage",
+                "label": "American Heritage",
+                "confidence": 0.9,
+                "bucket": "heritage",
+            },
+        }
+        result = _try_pending_heritage_turn(
+            msg="show me american moms",
+            session_ctx={"pending_heritage_change": pending},
+            user_id="user-1",
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+            slots={"linear_intent": "discovery.find_by_attrs", "goal": "peers", "confidence": 0.9},
+        )
+        self.assertIsNone(result)
+
+    def test_pending_heritage_yields_to_find_me_american_moms(self) -> None:
+        pending = {
+            "from_label": "Brazilian Heritage",
+            "label": "American Heritage",
+            "claim": {
+                "concept": "american_heritage",
+                "label": "American Heritage",
+                "confidence": 0.9,
+                "bucket": "heritage",
+            },
+        }
+        result = _try_pending_heritage_turn(
+            msg="i said find me american moms",
+            session_ctx={"pending_heritage_change": pending},
+            user_id="user-1",
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+            slots={
+                "linear_intent": "discovery.find_by_attrs",
+                "goal": "peers",
+                "attr_filter": "american moms",
+                "confidence": 0.9,
+            },
+        )
+        self.assertIsNone(result)
+
 
 class TestBlockLogIntroRouting(unittest.TestCase):
     def test_pick_block_log_entry_for_intro_index(self) -> None:
@@ -1312,6 +1361,9 @@ class TestBlockLogIntroRouting(unittest.TestCase):
                 ctx,
                 None,
             )
+        )
+        self.assertFalse(
+            _intro_should_use_block_log("introduce me to Kashaf", ctx, None),
         )
 
     @patch("app.discovery_route.propose_neighbor_intro")

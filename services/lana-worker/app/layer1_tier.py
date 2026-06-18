@@ -18,7 +18,13 @@ _DECLINE_RE = re.compile(
     r"\b(no|not now|not yet|maybe later|decline|pass|skip)\b",
     re.I,
 )
-_BLOCK_RE = re.compile(r"\b(block|report|don'?t contact)\b", re.I)
+# Geographic "my block" must not trigger block-user — only explicit block/report actions.
+_BLOCK_RE = re.compile(
+    r"\b(?:block|report)\s+(?:them|him|her|this|that|user)\b|"
+    r"\bdon'?t contact\b|"
+    r"\bblock\s+user\b",
+    re.I,
+)
 _INTRO_PROPOSE_RE = re.compile(
     r"\b(?:int(?:ro)?duce\s+me|connect\s+me|put\s+me)\b",
     re.I,

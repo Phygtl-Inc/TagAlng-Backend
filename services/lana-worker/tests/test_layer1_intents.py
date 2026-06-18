@@ -44,6 +44,25 @@ class TestLayer1IntentCatalog(unittest.TestCase):
         ):
             self.assertIsNone(phrase_linear_intent(msg), msg)
 
+    def test_enrich_slots_hosting_overrides_misclassified_attr_filter(self) -> None:
+        slots = enrich_slots({
+            "linear_intent": "discovery.find_by_attrs",
+            "attr_filter": "brazilian",
+            "confidence": 0.88,
+            "goal": "peers",
+            "in_discovery": True,
+        }, msg="i want brazilian coffee this weekend")
+        self.assertEqual(slots_linear_intent(slots), "sharing.host")
+        self.assertEqual(slots.get("signal_intent"), "host_meet")
+        self.assertEqual(slots.get("goal"), "save_signal")
+        self.assertNotIn("attr_filter", slots)
+
+    def test_utterance_indicates_hosting_plan(self) -> None:
+        from app.layer1_intents import utterance_indicates_hosting_plan
+
+        self.assertTrue(utterance_indicates_hosting_plan("i want brazilian coffee this weekend"))
+        self.assertFalse(utterance_indicates_hosting_plan("show me brazilian moms"))
+
     def test_enrich_slots_ai_find_by_attrs_not_overridden_by_regex(self) -> None:
         slots = enrich_slots({
             "linear_intent": "discovery.find_by_attrs",
@@ -449,3 +468,70 @@ class TestLayer1DiscoveryRouting(unittest.TestCase):
         )
         self.assertEqual(ctx.get("active_intent"), "help.what_can_you_do")
         self.assertIn("concierge", reply.lower())
+
+
+class TestSlotsIndicatePeerDiscovery(unittest.TestCase):
+    def test_attr_filter_slots(self) -> None:
+        from app.discovery_slots import slots_indicate_peer_discovery
+
+        self.assertTrue(
+            slots_indicate_peer_discovery(
+                {
+                    "linear_intent": "discovery.find_by_attrs",
+                    "goal": "peers",
+                    "attr_filter": "american moms",
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+    def test_identity_slots_not_discovery(self) -> None:
+        from app.discovery_slots import slots_indicate_peer_discovery
+
+        self.assertFalse(
+            slots_indicate_peer_discovery(
+                {
+                    "linear_intent": "identity.add_claim",
+                    "goal": "none",
+                    "confidence": 0.9,
+                }
+            )
+        )
+
+    def test_no_slots_not_discovery(self) -> None:
+        from app.discovery_slots import slots_indicate_peer_discovery
+
+        self.assertFalse(slots_indicate_peer_discovery(None))
+        self.assertFalse(slots_indicate_peer_discovery({}))
+
+
+class TestSlotsPickingShownPeer(unittest.TestCase):
+    def test_peer_name_in_session_cards(self) -> None:
+        from app.discovery_slots import slots_picking_shown_peer
+
+        session = {
+            "peer_matches": [
+                {"peer_user_id": "u1", "nickname": "Ada"},
+                {"peer_user_id": "u2", "nickname": "Kashaf"},
+            ]
+        }
+        self.assertTrue(
+            slots_picking_shown_peer(
+                {"goal": "peers", "peer_name": "Kashaf", "confidence": 0.8},
+                session,
+            )
+        )
+
+    def test_propose_intro_goal(self) -> None:
+        from app.discovery_slots import slots_picking_shown_peer
+
+        self.assertTrue(
+            slots_picking_shown_peer(
+                {
+                    "goal": "propose_intro",
+                    "linear_intent": "social.propose_intro",
+                    "confidence": 0.9,
+                },
+                {},
+            )
+        )

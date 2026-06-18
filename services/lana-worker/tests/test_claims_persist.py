@@ -7,7 +7,6 @@ from app.claims_persist import (
     extract_display_name_reply,
     extract_nickname_from_message,
     filter_extracted_claims,
-    is_discovery_query_message,
     is_explicit_heritage_correction,
     is_negative_claim,
     reconcile_heritage_claims,
@@ -68,11 +67,10 @@ class TestShouldExtractClaims(unittest.TestCase):
     def test_skips_short_ack(self) -> None:
         self.assertFalse(should_extract_claims_from_message("ok"))
 
-    def test_skips_discovery_queries(self) -> None:
-        self.assertFalse(should_extract_claims_from_message("find pakistani mom"))
-        self.assertFalse(should_extract_claims_from_message("introduce me to Natasha"))
-        self.assertTrue(is_discovery_query_message("find brazilian mom"))
-        self.assertTrue(is_discovery_query_message("introduce me to Natasha"))
+    def test_accepts_discovery_phrases_for_background_guard(self) -> None:
+        """Discovery routing skips extract via skip_claims_background_extract + AI slots."""
+        self.assertTrue(should_extract_claims_from_message("find pakistani mom"))
+        self.assertTrue(should_extract_claims_from_message("show me american moms"))
 
 
 class TestClaimFilters(unittest.TestCase):
@@ -85,13 +83,13 @@ class TestClaimFilters(unittest.TestCase):
         )
         self.assertTrue(is_negative_claim(claim))
 
-    def test_filter_drops_negatives_and_search(self) -> None:
+    def test_filter_drops_negatives(self) -> None:
         claims = filter_extracted_claims(
-            "find brazilian mom",
+            "not italian heritage",
             [
                 ExtractedClaim(
-                    concept="brazilian_heritage",
-                    label="Brazilian",
+                    concept="no_italian_heritage",
+                    label="No Italian Heritage",
                     confidence=0.9,
                     bucket="heritage",
                 )

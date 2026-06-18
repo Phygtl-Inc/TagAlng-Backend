@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.supabase_rpc import call_rpc
+from app.ui_actions import attach_intro_row_actions
 
 INTENT_LIST_INTROS = "social.list_intros"
 
@@ -145,8 +146,64 @@ def attach_pending_intros_after_propose(
 
 
 def stamp_pending_intros_ctx(ctx: dict[str, Any], intros: list[dict[str, Any]]) -> None:
-    ctx["pending_intros"] = [normalize_intro_row(row) for row in intros]
+    # Null (not pop) so merge_session_context drops stale respond/offer from prior turns.
+    ctx["pending_intro_respond"] = None
+    ctx["pending_intro_offer"] = None
+    ctx["pending_intros"] = [
+        attach_intro_row_actions(normalize_intro_row(row)) for row in intros
+    ]
     ctx["active_intent"] = INTENT_LIST_INTROS
+
+
+
+def stamp_duplicate_intro_sent(
+    ctx: dict[str, Any],
+    *,
+    peer: dict[str, Any],
+    match_reason: str | None = None,
+) -> None:
+    """Already sent intro — steer FE to inbox, not another nudge."""
+    nick = str(peer.get("nickname") or peer.get("matching_peer_label") or "").strip()
+    ctx["recent_intro_duplicate"] = {
+        "candidate_user_id": peer.get("peer_user_id"),
+        "candidate_nickname": nick or "that neighbor",
+        "match_reason": str(match_reason or peer.get("matching_peer_label") or "").strip(),
+    }
+    ctx.pop("pending_intro_offer", None)
+    ctx.pop("intro_offer_shown", None)
+    ctx.pop("pending_intro_respond", None)
+
+
+def stamp_intro_respond_from_peer(
+    ctx: dict[str, Any],
+    *,
+    user_jwt: str,
+    peer: dict[str, Any],
+) -> bool:
+    """Duplicate / waiting-on-you intro — surface respond CTAs for FE."""
+    peer_id = str(peer.get("peer_user_id") or "").strip()
+    try:
+        intros = fetch_my_intros(user_jwt, direction="all")
+    except HTTPException:
+        return False
+    for row in intros:
+        if peer_id and str(row.get("other_user_id") or "") != peer_id:
+            continue
+        if str(row.get("direction") or "") != "received":
+            return False
+        norm = normalize_intro_row(row)
+        ctx["pending_intro_respond"] = {
+            "intro_id": norm.get("intro_id") or norm.get("id"),
+            "other_user_id": norm.get("other_user_id"),
+            "nickname": norm.get("nickname"),
+        }
+        ctx["pending_intros"] = [norm]
+        ctx["active_intent"] = "tier.respond_nudge"
+        ctx.pop("pending_intro_offer", None)
+        ctx.pop("intro_offer_shown", None)
+        ctx.pop("peer_matches", None)
+        return True
+    return False
 
 
 def infer_intro_direction(msg: str, slots: dict[str, Any] | None = None) -> str:
@@ -177,8 +234,13 @@ def format_duplicate_intro_reply(
     *,
     peer: dict[str, Any],
     user_jwt: str,
+    attempt_summary: str | None = None,
 ) -> str:
-    nick = str(peer.get("nickname") or peer.get("matching_peer_label") or "them").strip()
+    raw_nick = str(peer.get("nickname") or "").strip()
+    if raw_nick and raw_nick.lower() not in ("a neighbor", "them"):
+        nick = raw_nick
+    else:
+        nick = "that neighbor"
     peer_id = str(peer.get("peer_user_id") or "")
     try:
         intros = fetch_my_intros(user_jwt, direction="all")
@@ -190,12 +252,22 @@ def format_duplicate_intro_reply(
         direction = str(row.get("direction") or "")
         reason = str(row.get("match_reason") or "").strip()
         if direction == "received":
-            reply = f"{nick} already introduced you — it's waiting on you to respond."
+            reply = (
+                f"{nick} already introduced you — it's waiting on you to respond. "
+                "Tap below to accept or pass."
+            )
         else:
             reply = f"You already sent an intro to {nick} — give them a little time to respond."
         if reason:
             reply += f" I matched you on: {reason}."
         return reply
+    attempt = str(attempt_summary or "").strip()
+    if attempt:
+        return (
+            f"You already nudged {nick} in the last 30 days"
+            f" (your last intro wasn't about this match: {attempt}). "
+            "Pick another block-log row — e.g. introduce me to #2 — or say show my intros."
+        )
     return (
         f"There's already a recent intro between you and {nick} in the last 30 days. "
         "Your inbox only shows pending intros — if it's empty, that one was likely "

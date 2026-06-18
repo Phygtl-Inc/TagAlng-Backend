@@ -9,6 +9,7 @@ from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import unified_rules_first_enabled
 from app.orchestrator.pipeline import run_turn
+from app.turn_surfaces import clear_turn_surfaces
 from app.turn_timing import TurnTimer
 
 
@@ -71,6 +72,7 @@ def run_lana_unified_pipeline(
             status = "ready_to_complete" if ctx.get("ready_to_complete") else "continue"
             return reply, status, ctx, ui, ctx.get("event_draft")
 
+        clear_turn_surfaces(session_ctx)
     if use_orchestrator:
         reply, status, turn_ctx, ui, draft = run_turn(
             user_id=user_id,

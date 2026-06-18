@@ -212,16 +212,34 @@ def filter_block_log_for_signal(
     entries: list[dict[str, Any]],
     *,
     signal_intent: str | None,
+    signal_id: str | None = None,
+    detail_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Keep only block-log rows for the signal family just saved (swap vs meet vs tip)."""
     allowed = _MATCH_TYPES_BY_SIGNAL_INTENT.get(str(signal_intent or "").strip().lower())
     if not allowed:
-        return entries
-    return [
-        row
-        for row in entries
-        if str(row.get("match_type") or "") in allowed
-    ]
+        filtered = entries
+    else:
+        filtered = [
+            row
+            for row in entries
+            if str(row.get("match_type") or "") in allowed
+        ]
+    sid = str(signal_id or "").strip()
+    if sid:
+        filtered = [
+            row
+            for row in filtered
+            if str(row.get("my_signal_id") or row.get("signal_id") or "") == sid
+        ]
+    detail = str(detail_text or "").strip().lower()
+    if detail:
+        filtered = [
+            row
+            for row in filtered
+            if str(row.get("my_signal_detail") or "").strip().lower() == detail
+        ]
+    return filtered
 
 
 def normalize_block_log_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -268,23 +286,21 @@ def format_signal_saved_reply(
     if matches > 0 and entries:
         bit += f" I found {matches} neighbor match{'es' if matches != 1 else ''} on your block:"
         lines = [bit]
-        for row in entries[:4]:
+        for row in entries[:1]:
             nick = str(row.get("peer_preview_label") or "A neighbor").strip()
             summary = block_log_match_summary(row)
             if summary:
                 lines.append(f"• {nick} — {summary}")
             else:
                 lines.append(f"• {nick}")
-        if len(entries) > 4:
-            lines.append(f"…and {len(entries) - 4} more in your block log.")
-        lines.append(
-            "Say show my block log for the full list, or introduce me to #1 to nudge a neighbor."
-        )
+        if len(entries) > 1:
+            lines.append(f"…and {len(entries) - 1} more in your block log.")
+        lines.append("Say show my block log for the full list.")
         return "\n".join(lines)
     if matches > 0:
         bit += f" I found {matches} match{'es' if matches != 1 else ''} on your block — check your block log."
     else:
-        bit += " I'll let you know when a neighbor matches."
+        bit += " I'll let you know when a neighbor on your block matches."
     return bit
 
 
@@ -295,7 +311,7 @@ def format_block_log_reply(entries: list[dict[str, Any]]) -> str:
             "neighbors, matches will show up here."
         )
     lines = [f"You have {len(entries)} active match{'es' if len(entries) != 1 else ''} on your block:"]
-    for idx, row in enumerate(entries[:6], start=1):
+    for idx, row in enumerate(entries[:1], start=1):
         nick = str(row.get("peer_preview_label") or "A neighbor").strip()
         reason = block_log_match_summary(row)
         if not reason:
@@ -312,10 +328,17 @@ def format_block_log_reply(entries: list[dict[str, Any]]) -> str:
             except (TypeError, ValueError):
                 pass
         lines.append(bit)
-    if len(entries) > 6:
-        lines.append(f"…and {len(entries) - 6} more.")
+    if len(entries) > 1:
+        lines.append(f"…and {len(entries) - 1} more below.")
     lines.append("Say introduce me to #1 to nudge a neighbor about a swap or meetup.")
     return "\n".join(lines)
+
+
+def _clear_stale_intro_ctx(ctx: dict[str, Any]) -> None:
+    ctx["pending_intro_respond"] = None
+    ctx["pending_intro_offer"] = None
+    ctx["pending_intros"] = None
+    ctx.pop("intro_proposal", None)
 
 
 def stamp_signal_saved_ctx(
@@ -323,7 +346,13 @@ def stamp_signal_saved_ctx(
     result: dict[str, Any],
     *,
     active_intent: str | None = None,
+    when_hint: str | None = None,
+    where_hint: str | None = None,
+    block_name: str | None = None,
 ) -> None:
+    _clear_stale_intro_ctx(ctx)
+    ctx.pop("block_log_intro_list", None)
+    ctx.pop("pending_hosting_offer", None)
     ctx["signal_saved"] = {
         "signal_id": result.get("signal_id"),
         "intent": result.get("intent"),
@@ -332,10 +361,28 @@ def stamp_signal_saved_ctx(
         "block_id": result.get("block_id"),
         "matches_created": result.get("matches_created"),
     }
+    from app.hosting_surface import attach_hosting_to_signal_saved
+    from app.tip_surface import attach_tip_to_signal_saved
+
+    attach_hosting_to_signal_saved(
+        ctx["signal_saved"],
+        ctx,
+        when_hint=when_hint,
+        block_name=block_name,
+    )
+    attach_tip_to_signal_saved(
+        ctx["signal_saved"],
+        where_hint=where_hint,
+    )
     ctx["active_intent"] = active_intent or INTENT_SAVE_SIGNAL
     clear_signal_draft(ctx)
 
 
 def stamp_block_log_ctx(ctx: dict[str, Any], entries: list[dict[str, Any]]) -> None:
-    ctx["block_log_entries"] = [normalize_block_log_row(row) for row in entries]
+    _clear_stale_intro_ctx(ctx)
+    ctx.pop("signal_saved", None)
+    normalized = [normalize_block_log_row(row) for row in entries]
+    ctx["block_log_entries"] = normalized
+    # Persist numbered list for "introduce me to #N" on the next turn (same order user saw).
+    ctx["block_log_intro_list"] = list(normalized)
     ctx["active_intent"] = INTENT_SHOW_BLOCK_LOG

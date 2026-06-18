@@ -56,6 +56,8 @@ from app.models import (
     CompleteSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    DiscoverySurfacePayload,
+    DiscoveryWeakPeerRow,
     EventDraft,
     ProfilePhotoUploadResponse,
     ExtractedClaim,
@@ -67,6 +69,9 @@ from app.models import (
     IntroProposalPayload,
     PendingIntroRow,
     SignalSavedPayload,
+    HostingDraftPayload,
+    TipDraftPayload,
+    UiActionRow,
     LanaTurnUi,
     PeerMatchRow,
     SendMessageRequest,
@@ -89,10 +94,13 @@ from app.claims_persist import (
     should_extract_claims_from_message,
 )
 from app.profile_photo import upload_profile_photo_bytes
+from app.ui_actions import derive_ui_actions
 from app.ui_intent import (
     PEER_DISCOVERY_ACTIVE_INTENTS,
     PEER_SURFACE_UI_INTENTS,
+    UI_INTENT_OFFER_NEIGHBOR_INTRO,
     UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
+    UI_INTENT_RESPOND_PENDING_INTRO,
     UI_INTENT_SHOW_ACTIVITY_PREVIEW,
     UI_INTENT_SHOW_BLOCK_LOG,
     UI_INTENT_SHOW_IDENTITY_PROFILE,
@@ -355,6 +363,24 @@ def _intro_proposal_from_dict(raw: dict[str, Any] | None) -> IntroProposalPayloa
     )
 
 
+def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRow]:
+    out: list[UiActionRow] = []
+    for row in derive_ui_actions(ctx, ui_intent):
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        out.append(
+            UiActionRow(
+                id=str(row["id"]),
+                label=str(row.get("label") or ""),
+                message=str(row.get("message") or ""),
+                style=row.get("style") or "primary",
+                intro_id=str(row.get("intro_id") or "") or None,
+                peer_user_id=str(row.get("peer_user_id") or "") or None,
+            )
+        )
+    return out
+
+
 def _pending_intros_from_ctx(ctx: dict[str, Any]) -> list[PendingIntroRow]:
     raw = ctx.get("pending_intros")
     if not isinstance(raw, list):
@@ -366,6 +392,10 @@ def _pending_intros_from_ctx(ctx: dict[str, Any]) -> list[PendingIntroRow]:
         dims = row.get("shared_dimensions")
         if not isinstance(dims, list):
             dims = []
+        actions_raw = row.get("actions")
+        actions: list[UiActionRow] = []
+        if isinstance(actions_raw, list):
+            actions = _ui_action_rows_from_raw(actions_raw)
         out.append(
             PendingIntroRow(
                 intro_id=str(row.get("intro_id") or "") or None,
@@ -378,6 +408,7 @@ def _pending_intros_from_ctx(ctx: dict[str, Any]) -> list[PendingIntroRow]:
                 match_reason=str(row.get("match_reason") or "") or None,
                 shared_dimensions=[str(d) for d in dims[:8]],
                 direction=str(row.get("direction") or "") or None,
+                actions=actions,
             )
         )
     return out
@@ -395,6 +426,49 @@ def _auth_action_from_ctx(ctx: dict[str, Any]) -> AuthActionPayload | None:
     )
 
 
+def _ui_action_rows_from_raw(actions_raw: Any) -> list[UiActionRow]:
+    actions: list[UiActionRow] = []
+    if not isinstance(actions_raw, list):
+        return actions
+    for act in actions_raw[:4]:
+        if not isinstance(act, dict) or not act.get("id"):
+            continue
+        actions.append(
+            UiActionRow(
+                id=str(act["id"]),
+                label=str(act.get("label") or ""),
+                message=str(act.get("message") or ""),
+                style=act.get("style") or "primary",
+                intro_id=str(act.get("intro_id") or "") or None,
+                peer_user_id=str(act.get("peer_user_id") or "") or None,
+            )
+        )
+    return actions
+
+
+def _discovery_surface_from_ctx(ctx: dict[str, Any]) -> DiscoverySurfacePayload | None:
+    raw = ctx.get("discovery_surface")
+    if not isinstance(raw, dict):
+        return None
+    weak_raw = raw.get("weak_peer")
+    weak_peer: DiscoveryWeakPeerRow | None = None
+    if isinstance(weak_raw, dict):
+        weak_peer = DiscoveryWeakPeerRow(
+            peer_user_id=str(weak_raw.get("peer_user_id") or "") or None,
+            nickname=str(weak_raw.get("nickname") or "") or None,
+            match_stars=weak_raw.get("match_stars"),
+            match_badge=str(weak_raw.get("match_badge") or "") or None,
+        )
+    return DiscoverySurfacePayload(
+        strong_count=int(raw.get("strong_count") or 0),
+        partial_count=int(raw.get("partial_count") or 0),
+        weak_count=int(raw.get("weak_count") or 0),
+        status_label=str(raw.get("status_label") or "") or None,
+        weak_peer=weak_peer,
+        ranked_summary=str(raw.get("ranked_summary") or "") or None,
+    )
+
+
 def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list):
@@ -403,6 +477,9 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
     for row in raw[:8]:
         if not isinstance(row, dict):
             continue
+        tags = row.get("trait_tags")
+        if not isinstance(tags, list):
+            tags = []
         out.append(
             PeerMatchRow(
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
@@ -413,6 +490,11 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 matching_peer_concept=str(row.get("matching_peer_concept") or "") or None,
                 has_exact_concept_match=bool(row.get("has_exact_concept_match")),
                 preview=bool(row.get("preview")),
+                match_stars=row.get("match_stars"),
+                match_band=str(row.get("match_band") or "") or None,
+                match_badge=str(row.get("match_badge") or "") or None,
+                trait_tags=[str(t) for t in tags[:6]],
+                actions=_ui_action_rows_from_raw(row.get("actions")),
             )
         )
     return out
@@ -475,10 +557,46 @@ def _block_log_from_ctx(ctx: dict[str, Any]) -> list[BlockLogEntryRow]:
     return out
 
 
+def _hosting_draft_from_raw(raw: Any) -> HostingDraftPayload | None:
+    if not isinstance(raw, dict):
+        return None
+    tags = raw.get("trait_tags")
+    if not isinstance(tags, list):
+        tags = []
+    return HostingDraftPayload(
+        title=str(raw.get("title") or "") or None,
+        headline=str(raw.get("headline") or "") or None,
+        when_label=str(raw.get("when_label") or "") or None,
+        where_label=str(raw.get("where_label") or "") or None,
+        who_label=str(raw.get("who_label") or "") or None,
+        trait_tags=[str(t) for t in tags[:6]],
+        status_label=str(raw.get("status_label") or "") or None,
+        outreach_copy=str(raw.get("outreach_copy") or "") or None,
+    )
+
+
+def _tip_draft_from_raw(raw: Any) -> TipDraftPayload | None:
+    if not isinstance(raw, dict):
+        return None
+    tags = raw.get("trait_tags")
+    if not isinstance(tags, list):
+        tags = []
+    return TipDraftPayload(
+        title=str(raw.get("title") or "") or None,
+        headline=str(raw.get("headline") or "") or None,
+        where_label=str(raw.get("where_label") or "") or None,
+        trait_tags=[str(t) for t in tags[:6]],
+        status_label=str(raw.get("status_label") or "") or None,
+        outreach_copy=str(raw.get("outreach_copy") or "") or None,
+    )
+
+
 def _signal_saved_from_ctx(ctx: dict[str, Any]) -> SignalSavedPayload | None:
     raw = ctx.get("signal_saved")
     if not raw or not isinstance(raw, dict):
         return None
+    hosting = _hosting_draft_from_raw(raw.get("hosting"))
+    tip = _tip_draft_from_raw(raw.get("tip"))
     return SignalSavedPayload(
         signal_id=str(raw.get("signal_id") or "") or None,
         intent=str(raw.get("intent") or "") or None,
@@ -486,6 +604,8 @@ def _signal_saved_from_ctx(ctx: dict[str, Any]) -> SignalSavedPayload | None:
         detail_text=str(raw.get("detail_text") or "") or None,
         block_id=str(raw.get("block_id") or "") or None,
         matches_created=raw.get("matches_created"),
+        hosting=hosting,
+        tip=tip,
     )
 
 
@@ -562,6 +682,9 @@ def _onboarding_fields(
     *,
     ready_to_complete: bool = False,
 ) -> dict[str, Any]:
+    from app.peer_discovery_surface import stamp_peer_discovery_ctx
+
+    stamp_peer_discovery_ctx(ctx, phone_verified=auth.phone_verified)
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
     intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
     ui_intent = derive_ui_intent(
@@ -576,6 +699,7 @@ def _onboarding_fields(
         if ui_intent
         in (
             UI_INTENT_SHOW_PENDING_INTROS,
+            UI_INTENT_RESPOND_PENDING_INTRO,
             UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
         )
         else []
@@ -599,8 +723,22 @@ def _onboarding_fields(
         bool(peers_raw) and active in PEER_DISCOVERY_ACTIVE_INTENTS
     )
     peers = peers_raw if show_peers else []
+    if ui_intent == UI_INTENT_OFFER_NEIGHBOR_INTRO and peers:
+        offer = ctx.get("pending_intro_offer")
+        candidate_id = (
+            str(offer.get("candidate_user_id") or "")
+            if isinstance(offer, dict)
+            else ""
+        )
+        if candidate_id:
+            focused = [p for p in peers if str(p.peer_user_id or "") == candidate_id]
+            peers = focused[:1] if focused else peers[:1]
+        else:
+            peers = peers[:1]
     if ui_intent != UI_INTENT_SHOW_ACTIVITY_PREVIEW:
         activities = []
+    discovery_surface = _discovery_surface_from_ctx(ctx) if show_peers else None
+    ui_actions = _ui_actions_from_ctx(ctx, ui_intent)
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
@@ -613,6 +751,7 @@ def _onboarding_fields(
         "phone_verified": auth.phone_verified,
         "home_block_assigned": bool(auth.home_block_id or ctx.get("preview_block_id")),
         "peer_matches": peers,
+        "discovery_surface": discovery_surface,
         "activity_previews": activities,
         "auth_intent": ctx.get("auth_intent"),
         "login_phone": ctx.get("login_phone"),
@@ -622,6 +761,7 @@ def _onboarding_fields(
         "active_intent": ctx.get("active_intent"),
         "routing_phase": routing_phase,
         "ui_intent": ui_intent,
+        "ui_actions": ui_actions,
     }
 
 

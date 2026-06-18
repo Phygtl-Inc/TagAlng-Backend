@@ -110,6 +110,27 @@ class TestLocalSignalsHelpers(unittest.TestCase):
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0].get("peer_preview_label"), "Sam")
 
+    def test_filter_block_log_for_saved_detail_only(self) -> None:
+        rows = [
+            {
+                "match_type": "inbound_for_my_seek",
+                "my_signal_detail": "buy a bicycle (for my kid)",
+                "peer_signal_detail": "kids bicycle",
+            },
+            {
+                "match_type": "inbound_for_my_seek",
+                "my_signal_detail": "3t rain boots",
+                "peer_signal_detail": "rain boots 3T",
+            },
+        ]
+        filtered = filter_block_log_for_signal(
+            rows,
+            signal_intent="swap_seek",
+            detail_text="3t rain boots",
+        )
+        self.assertEqual(len(filtered), 1)
+        self.assertIn("rain boots", str(filtered[0].get("peer_signal_detail") or ""))
+
     @patch("app.local_signals.call_rpc")
     def test_fetch_my_block_log_refreshes_before_read(self, mock_rpc) -> None:
         mock_rpc.side_effect = [3, [{"id": "e1", "peer_preview_label": "Sam"}]]

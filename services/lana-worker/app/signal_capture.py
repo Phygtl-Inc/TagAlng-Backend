@@ -21,6 +21,11 @@ _WHEN_HINT = re.compile(
     r"today|tomorrow|am|pm|\d{1,2}\s*(?:am|pm))\b",
     re.I,
 )
+_WHERE_IN_DETAIL_RE = re.compile(
+    r"\b(?:near|around|in|on|at)\s+[\w]|cross[\s-]?street|neighborhood|"
+    r"\b(?:block|downtown|uptown)\b",
+    re.I,
+)
 _KIDS_SIZED_CLOTHING_RE = re.compile(
     r"\b(?:boots?|rain\s*boots?|onesie|diaper|jacket|coat|shirt|pants|dress|"
     r"\d+t\b|size\s*\d+)\b",
@@ -68,6 +73,27 @@ def normalize_category_answer(text: str) -> str:
     if raw in ("doctor", "dentist", "clinic", "medical"):
         return "health"
     return str(text or "").strip()[:120]
+
+
+def _normalize_tip_share_detail(text: str) -> str:
+    raw = str(text or "").strip()
+    m = re.search(
+        r"\b(?:dr\.?\s+)?([\w'.-]+)\s+is\s+(?:a\s+)?"
+        r"(?:great|good|wonderful|amazing|excellent)\s+(\w+)",
+        raw,
+        re.I,
+    )
+    if m:
+        name = str(m.group(1) or "").strip().title()
+        role = str(m.group(2) or "").strip().lower()
+        if not name.lower().startswith("dr"):
+            name = f"Dr. {name}"
+        return f"{name} · {role}"
+    return raw[:500]
+
+
+def _has_where_hint(text: str) -> bool:
+    return bool(_WHERE_IN_DETAIL_RE.search(str(text or "")))
 
 
 def _has_when_hint(text: str) -> bool:
@@ -147,6 +173,8 @@ def draft_from_slots(slots: dict[str, Any], *, msg: str) -> dict[str, Any]:
     detail = str(slots.get("signal_detail") or msg or "").strip()[:500]
     if intent == "tip_seek":
         detail = _normalize_tip_detail(detail)
+    elif intent == "tip_share":
+        detail = _normalize_tip_share_detail(detail or msg)
     elif intent in ("swap_seek", "swap_offer"):
         detail = _normalize_swap_detail(detail)
     category = str(slots.get("signal_category") or "").strip() or None
@@ -214,6 +242,10 @@ def _confirm_prompt(field: str, attempt: int) -> str:
         if attempt <= 1:
             return "When works for you — weekday morning, weekend, something else?"
         return "Any rough timing — mornings, weekends, flexible?"
+    if field == "where_hint":
+        if attempt <= 1:
+            return "I have most of it. **Where, roughly?**"
+        return "A neighborhood or cross-street is enough — or say skip."
     if field == "category":
         if attempt <= 1:
             return "What kind of tip is this — health, food, home, activities, or something else?"
@@ -248,6 +280,9 @@ def needs_confirm(draft: dict[str, Any]) -> tuple[bool, str, str]:
         if not category and not _infer_tip_category(detail):
             field = "category"
             return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
+        if intent == "tip_share" and not draft.get("where_hint") and not _has_where_hint(detail):
+            field = "where_hint"
+            return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
     return False, "", ""
 
 
@@ -276,6 +311,10 @@ def apply_confirm_answer(draft: dict[str, Any], msg: str) -> dict[str, Any]:
     elif field == "when_hint":
         out["when_hint"] = text
         out["detail"] = f"{out['detail']} — {text}".strip(" —")
+    elif field == "where_hint":
+        out["where_hint"] = text
+        if text.lower() not in str(out.get("detail") or "").lower():
+            out["detail"] = f"{out['detail']} — {text}".strip(" —")
     elif field == "category":
         out["category"] = normalize_category_answer(text)
     elif not field and text:
@@ -314,6 +353,9 @@ def _ai_assist_confirm(draft: dict[str, Any], msg: str) -> dict[str, Any]:
     elif field == "when_hint" and value:
         out["when_hint"] = value
         out["detail"] = f"{out.get('detail', '')} — {value}".strip(" —")
+    elif field == "where_hint" and value:
+        out["where_hint"] = value
+        out["detail"] = f"{out.get('detail', '')} — {value}".strip(" —")
     elif field == "category" and value:
         out["category"] = normalize_category_answer(value)
     out["confirm_field"] = None
@@ -337,6 +379,9 @@ def _force_accept_pending_field(draft: dict[str, Any], msg: str) -> dict[str, An
         out["detail"] = text
     elif field == "when_hint":
         out["when_hint"] = text
+        out["detail"] = f"{out.get('detail', '')} — {text}".strip(" —")
+    elif field == "where_hint":
+        out["where_hint"] = text
         out["detail"] = f"{out.get('detail', '')} — {text}".strip(" —")
     elif field == "category":
         out["category"] = normalize_category_answer(text)

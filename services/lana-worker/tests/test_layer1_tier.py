@@ -18,6 +18,15 @@ class TestLayer1Tier(unittest.TestCase):
         self.assertEqual(parse_nudge_response("introduce me to Kashaf"), "unknown")
         self.assertEqual(parse_nudge_response("yes introduce us"), "accept")
 
+    def test_parse_nudge_response_ignores_geographic_block(self) -> None:
+        self.assertEqual(parse_nudge_response("can you find kashaf in my block?"), "unknown")
+        self.assertEqual(parse_nudge_response("find sofia from my block"), "unknown")
+        self.assertEqual(parse_nudge_response("block them please"), "block")
+
+    def test_wants_respond_intro_ignores_find_on_block(self) -> None:
+        self.assertFalse(wants_respond_intro("can you find kashaf in my block?"))
+        self.assertFalse(wants_respond_intro("find sofia from my block"))
+
     def test_yes_introduce_us_not_neighbor_intro(self) -> None:
         self.assertFalse(wants_neighbor_intro("yes introduce us"))
 

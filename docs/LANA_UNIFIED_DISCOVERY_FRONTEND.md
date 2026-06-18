@@ -2,7 +2,7 @@
 
 **Audience:** mobile / PWA frontend team  
 **Backend:** `tagalng-dev` · Lana worker on Cloud Run  
-**Status:** v1.3 — unified chat + `ui_intent` + in-chat auth + logout + profile photo upload (June 2026)  
+**Status:** v1.6 — unified chat + ranked peers + hosting/tip cards + CTA matrix (June 2026)  
 **Postman:** `docs/postman/TagAlng-Lana-Unified-Full-E2E.postman_collection.json`  
 **Reference FE:** `apps/admin/app/lana/meet/page.tsx` + `apps/admin/lib/demo-user.ts`
 
@@ -69,7 +69,11 @@ flowchart LR
 | **Incremental claims** | Each identity message → background extract → `user_identity_claims` upsert |
 | **Nickname** | `"my name is …"` → `users.nickname` sync; discovery asks name if missing |
 | **`activity_previews`** | Activity browse returns cards separate from `peer_matches` |
-| **Tests** | `tests/test_discovery_route.py`, `tests/test_ui_intent.py`, `tests/test_claims_persist.py` |
+| **Ranked peer discovery (C-FIND-MOM-RESULTS)** | `peer_discovery_surface.py` — `match_stars`, badges, trait chips, per-card **Nudge**, `discovery_surface` summary |
+| **Hosting draft (C-4-EVENT-P3)** | `hosting_surface.py` — structured `signal_saved.hosting` + **Open the meet up** / **Send to a mom** for `host_meet` |
+| **Tip share draft (C-4-RECO-P3)** | `tip_surface.py` — structured `signal_saved.tip` + **Pass the tip along** / **Send to a mom** for `tip_share` |
+| **CTA routing fixes** | Duplicate-intro → **Show my intros**; swap/meet/tip seek save → **Show my block log**; turn-scoped surfaces prevent stale buttons |
+| **Tests** | `tests/test_discovery_route.py`, `tests/test_ui_intent.py`, `tests/test_ui_actions.py`, `tests/test_claims_persist.py`, `tests/test_peer_discovery_surface.py`, `tests/test_hosting_cta.py` |
 
 **Not in this slice**
 
@@ -156,9 +160,15 @@ Content-Type: application/json
 | `active_intent` | string \| null | e.g. `discovery.find_peers` |
 | `routing_phase` | string \| null | Debug / analytics phase (see table below) |
 | `ui_intent` | string \| null | **Drive input UI** — phone field, OTP field, ZIP, etc. (see table) |
+| `ui_actions` | array | **Bubble CTAs** — render buttons; tap → POST `message` to Lana |
+| `pending_intros` | array | Intro inbox rows; `direction: received` rows include `actions` |
+| `intro_proposal` | object \| null | Just-sent intro metadata |
+| `signal_saved` | object \| null | Listening / dropped-in signal summary |
+| `block_log_entries` | array | Block log match cards |
 | `phone_verified` | boolean | **Source of truth** for verified state |
 | `home_block_assigned` | boolean | User has `home_block_id` on profile |
-| `peer_matches` | array | Preview or full neighbor cards |
+| `peer_matches` | array | Preview or full neighbor cards (see **Ranked peer cards** below) |
+| `discovery_surface` | object \| null | Summary pill + weak-match prompt metadata when peers are shown |
 | `activity_previews` | array | Activity browse cards (when user asks for events) |
 | `auth_action` | object \| null | **When set, call Supabase immediately** (same turn as user message) |
 | `auth_intent` | string \| null | `login` \| `logout` during auth sub-flows (analytics / debug) |
@@ -179,11 +189,126 @@ Read **`ui_intent` every turn** (session create + each message). Switch UI based
 | `collect_display_name` | First-name field — saved to `users.nickname` |
 | `collect_phone` | Phone field (`type=tel`) + **Continue** → send as Lana message |
 | `collect_otp` | OTP field (6 digits) + **Verify** → send as Lana message, then run `auth_action` |
-| `show_peer_preview` | Redacted neighbor cards (`peer_matches`, `preview: true`) |
+| `show_peer_preview` | Ranked neighbor cards (`peer_matches`) + optional weak-match `ui_actions` |
 | `show_activity_preview` | Activity cards (`activity_previews`) |
 | `confirm_profile` | “That’s me ✓” / `POST …/complete` when `ready_to_complete` |
 | `upload_profile_photo` | **Add photo** button → file picker / camera → `POST /lana/profile-photo` (not a URL field) |
 | `sign_out` | **Sign out** — call Supabase `signOut()` via `auth_action: logout` (same turn) |
+| `show_pending_intros` | Intro inbox (`pending_intros`) — received rows include per-row `actions` |
+| `respond_pending_intro` | Single intro waiting on user — use top-level `ui_actions` (C-8 accept / not now) |
+| `offer_neighbor_intro` | Match card + `ui_actions` e.g. **Send Maria a nudge** / **Not yet** |
+| `propose_neighbor_intro` | Intro sent — `intro_proposal` + optional `pending_intros` |
+| `show_block_log` | Block log cards (`block_log_entries`) + bubble `ui_actions` (see matrix below) |
+| `signal_saved` | Signal card (`signal_saved`) + bubble `ui_actions` — varies by `signal_saved.intent` (see matrix) |
+| `show_identity_profile` | Claims dashboard (`identity_profile`) |
+| `collect_signal_detail` | Signal capture confirm — e.g. **Where, roughly?** for tip share |
+
+### `ui_intent` → surfaces → `ui_actions` (master matrix)
+
+**Rule:** render bubble `ui_actions` only when the array is non-empty. Tapping a button **POSTs `action.message`** to Lana (same as typing). Per-card `peer_matches[].actions` and `pending_intros[].actions` use the same shape.
+
+| `ui_intent` | Render these payloads | Bubble `ui_actions` (when set) | Notes |
+|-------------|----------------------|------------------------------|-------|
+| `chat` | composer only | `[]` | Default |
+| `collect_zip` | ZIP field | `[]` | `routing_phase: need_zip` |
+| `collect_identity` | free text | `[]` | |
+| `collect_display_name` | name field | `[]` | |
+| `collect_phone` | phone field | `[]` | Send phone as Lana message first |
+| `collect_otp` | OTP field | `[]` | Then run `auth_action` |
+| `collect_signal_detail` | composer (+ optional draft chips) | `[]` | `signal_draft` active — tip may ask **Where, roughly?** |
+| `show_peer_preview` | `peer_matches` + `discovery_surface` | weak-match pair **or** `[]` | Per-card **Nudge** on each row |
+| `show_activity_preview` | `activity_previews` | `[]` | |
+| `show_identity_profile` | `identity_profile` | `[]` | |
+| `confirm_profile` | confirm UI | `[]` | `ready_to_complete` |
+| `upload_profile_photo` | file picker | `[]` | `POST /lana/profile-photo` |
+| `sign_out` | logout confirm | `[]` | run `auth_action: logout` |
+| `offer_neighbor_intro` | match context | **Send {nick} a nudge** / **Not yet** | `intro_propose` / `intro_pass` |
+| `respond_pending_intro` | intro context | **Yes, introduce us** / **Not now** | `intro_accept` / `intro_decline` |
+| `propose_neighbor_intro` | `intro_proposal` + optional `pending_intros` | **Got it** → `show my intros` | `intro_sent_ack` |
+| `show_pending_intros` | `pending_intros` inbox | `[]` | row-level `actions` on `direction: received` |
+| `show_block_log` | `block_log_entries` | see **block log** row below | duplicate intro overrides nudge |
+| `signal_saved` | `signal_saved` card | see **signal_saved** row below | `hosting` / `tip` sub-cards when present |
+
+#### Bubble `ui_actions` by scenario
+
+| Scenario | `id` | Label | `message` | `style` |
+|----------|------|-------|-----------|---------|
+| **Peer weak-match** (bottom, `show_peer_preview`) | `peer_wait_stronger` | Wait for stronger | `wait for stronger matches` | secondary |
+| | `peer_nudge_weak` | Nudge {nick} anyway | `introduce me to {nickname}` | primary |
+| **Intro offer** (`offer_neighbor_intro`) | `intro_propose` | Send {nick} a nudge | `introduce me to {nick}` | primary |
+| | `intro_pass` | Not yet | `not now` | secondary |
+| **Intro respond** (`respond_pending_intro`) | `intro_accept` | Yes, introduce us | `yes introduce us` | primary |
+| | `intro_decline` | Not now | `not now` | secondary |
+| **Intro already sent** (`show_block_log` + `recent_intro_duplicate`) | `intro_show_inbox` | Show my intros | `show my intros` | primary |
+| | `intro_pass` | Not yet | `not now` | secondary |
+| **Intro just sent** (`propose_neighbor_intro`) | `intro_sent_ack` | Got it | `show my intros` | primary |
+| **Block log — new match** (`show_block_log`, no duplicate) | `block_log_nudge` | Introduce me to #1 **or** Send {nick} a nudge | `introduce me to #1` **or** `introduce me to {nick}` | primary |
+| | `block_log_pass` | Not now | `maybe later` | secondary |
+| **Signal saved — swap/meet/tip seek** (`signal_saved`, intent ≠ host/tip_share) | `signal_show_block_log` | Show my block log | `show my block log` | primary |
+| | `signal_wait` | Not yet | `maybe later` | secondary |
+| **Signal saved — host_meet** (`signal_saved.intent === host_meet`, not opened) | `hosting_open` | Open the meet up | `open the meet up` | primary |
+| | `hosting_send` | Send to a mom | `send to a mom` | secondary |
+| **Signal saved — host_meet opened** | — | *(none)* | — | `hosting_opened: true` → empty `ui_actions` |
+| **Signal saved — tip_share** (`signal_saved.intent === tip_share`, not passed) | `tip_pass` | Pass the tip along | `pass the tip along` | primary |
+| | `tip_send_mom` | Send to a mom | `send to a mom` | secondary |
+
+#### Per-card `actions` (not bubble `ui_actions`)
+
+| Surface | `id` | Label | `message` |
+|---------|------|-------|-----------|
+| `peer_matches[]` (ranked discovery) | `peer_card_nudge` | Nudge | `introduce me to {nickname}` |
+| `pending_intros[]` (`direction: received`, `status: proposed`) | `intro_accept` | Yes, introduce us | `yes introduce us` |
+| | `intro_decline` | Not now | `not now` |
+
+**Do not confuse:**
+
+| User goal | Correct CTA | Wrong CTA |
+|-----------|-------------|-----------|
+| Posted swap/meet/tip **seek** — check matches | **Show my block log** | Show my intros |
+| Already **sent intro** — check inbox | **Show my intros** | Send them a nudge |
+| **Block log** row — first nudge | **Introduce me to #1** / Send {nick} a nudge | Show my intros |
+
+**Turn-scoped payloads** (cleared each turn unless backend re-stamps): `signal_saved`, `block_log_entries`, `identity_profile`, `pending_intros`, `recent_intro_duplicate`. Stale session values must not drive buttons on unrelated turns.
+
+### `ui_actions` — field shape
+
+Every turn may include `ui_actions: []`. When non-empty, render as primary/secondary buttons **below the Lana bubble** (per walkthrough C-8, C-4 SNAP-P3).
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | Stable action id — see matrix above |
+| `label` | string | Button copy |
+| `message` | string | **POST this as the user message** to Lana on tap (same as typing) |
+| `style` | `primary` \| `secondary` \| `ghost` | Visual weight |
+| `intro_id` | string? | Target intro when accepting/declining |
+| `peer_user_id` | string? | Target neighbor for nudge |
+
+### `active_intent` (debug / analytics — not primary FE driver)
+
+Backend sets `active_intent` from Layer 1 routing. Pair with `ui_intent` for logging only.
+
+| `active_intent` | Typical `ui_intent` |
+|-----------------|---------------------|
+| `discovery.find_peers` / `discovery.find_by_attrs` | `show_peer_preview` |
+| `discovery.block_log` | `show_block_log` |
+| `looking.swap` / `looking.meet` / `looking.tip` | `signal_saved` or `collect_signal_detail` |
+| `sharing.swap` / `sharing.host` / `sharing.tip` | `signal_saved` |
+| `social.list_intros` | `show_pending_intros` |
+| `social.propose_intro` | `propose_neighbor_intro` or `offer_neighbor_intro` |
+| `tier.respond_nudge` | `respond_pending_intro` |
+| `identity.show_my_profile` | `show_identity_profile` |
+
+`signal_saved.intent` values: `swap_seek`, `swap_offer`, `meet_seek`, `host_meet`, `tip_seek`, `tip_share`.
+
+### `ui_actions` — implementation
+
+```ts
+async function onUiAction(action: LanaUiAction) {
+  await sendMessage(token, sessionId, action.message);
+}
+```
+
+`pending_intros[].actions` uses the same shape for per-row buttons in the inbox list.
 
 **Pairing with `auth_action`:** user can type phone/OTP in chat *or* use dedicated fields — both work. On the turn where Lana parses phone/OTP, check `auth_action` and call Supabase **before** treating auth as done.
 
@@ -289,6 +414,147 @@ Show label only — **no names, IDs, or avatars**.
 ```
 
 Only returned when `phone_verified: true` and user has block context.
+
+### Ranked peer cards (v1.4 — C-FIND-MOM-RESULTS)
+
+When `ui_intent` is `show_peer_preview` (or peers surface during discovery), each **verified** row may include enrichment fields. All are **optional** — legacy clients can keep rendering `matching_peer_label` + `%` score.
+
+```json
+{
+  "peer_user_id": "uuid",
+  "nickname": "Kashaf",
+  "similarity_score": 0.88,
+  "matching_peer_label": "American mom · Weekend hikes",
+  "preview": false,
+  "match_stars": 5,
+  "match_band": "strong",
+  "match_badge": "PERFECT FIT",
+  "trait_tags": ["American mom", "Weekend hikes"],
+  "actions": [
+    {
+      "id": "peer_card_nudge",
+      "label": "Nudge",
+      "message": "introduce me to Kashaf",
+      "style": "primary",
+      "peer_user_id": "uuid"
+    }
+  ]
+}
+```
+
+| Field | FE use |
+|-------|--------|
+| `match_stars` | `1`–`5` star display (prefer over raw `%` when present) |
+| `match_badge` | Chip: `PERFECT FIT`, `STRONG`, `PARTIAL`, `WEAK` |
+| `trait_tags` | Short chips parsed from `matching_peer_label` |
+| `actions` | Per-card **Nudge** — same tap contract as `ui_actions` |
+
+Top-level `discovery_surface` (when peers are shown):
+
+```json
+{
+  "strong_count": 2,
+  "partial_count": 1,
+  "weak_count": 1,
+  "status_label": "2 strong fits · 1 partial",
+  "weak_peer": {
+    "peer_user_id": "uuid",
+    "nickname": "Helena",
+    "match_stars": 2,
+    "match_badge": "WEAK"
+  },
+  "ranked_summary": "KASHAF 5/5 · ADA 4/5"
+}
+```
+
+| Field | FE use |
+|-------|--------|
+| `status_label` | Status pill above Lana (e.g. **2 strong fits · 1 partial**) |
+| `weak_peer` | When set with mixed strong/partial + weak rows, render bottom `ui_actions` |
+
+When `weak_peer` is set and `ui_intent === show_peer_preview`, `ui_actions` may include:
+
+| `id` | Label | `message` |
+|------|-------|-----------|
+| `peer_wait_stronger` | Wait for stronger | `wait for stronger matches` |
+| `peer_nudge_weak` | Nudge {name} anyway | `introduce me to {nickname}` |
+
+Preview rows (`preview: true`) still omit names, scores, `actions`, and `discovery_surface` is omitted until full matches.
+
+### Hosting draft card (v1.5 — C-4-EVENT-P3)
+
+Swap, tip seek, and meet seek signals use the simple `signal_saved` card and **Show my block log** / **Not yet** CTAs.
+
+When `sharing.host` saves a meetup (`signal_saved.intent === "host_meet"`), the turn includes a structured **`hosting`** object on `signal_saved`:
+
+```json
+{
+  "signal_saved": {
+    "intent": "host_meet",
+    "detail_text": "Brazilian coffee Saturday morning at Foxtail",
+    "matches_created": 3,
+    "hosting": {
+      "title": "Brazilian coffee",
+      "headline": "Heard you — Brazilian coffee.",
+      "when_label": "Saturday morning",
+      "where_label": "Foxtail · Lake Nona",
+      "who_label": "Neighbors on your block",
+      "trait_tags": ["Brazilian coffee", "Saturday morning", "Foxtail · Lake Nona"],
+      "status_label": "Ready to open it up",
+      "outreach_copy": "I'll text the 3 closest fits on your block."
+    }
+  },
+  "ui_intent": "signal_saved",
+  "ui_actions": [
+    { "id": "hosting_open", "label": "Open the meet up", "message": "open the meet up", "style": "primary" },
+    { "id": "hosting_send", "label": "Send to a mom", "message": "send to a mom", "style": "secondary" }
+  ]
+}
+```
+
+| Field | FE use |
+|-------|--------|
+| `hosting` | EVENT-P3 card — WHEN / WHERE / WHO + trait chips |
+| `hosting.status_label` | Status pill — e.g. **Lana · ready to open it up** or **open on your block** after CTA |
+| `hosting_opened` | When true — hide hosting CTAs; card shows **Open on your block** |
+| `ui_actions` | **Open the meet up** / **Send to a mom** (`host_meet` only) |
+
+### Tip share card (v1.6 — C-4-RECO-P3)
+
+When `sharing.tip` saves a recommendation (`signal_saved.intent === "tip_share"`), the turn may include **`tip`** on `signal_saved`:
+
+```json
+{
+  "signal_saved": {
+    "intent": "tip_share",
+    "category": "health",
+    "detail_text": "Dr. Smith · doctor",
+    "tip": {
+      "title": "Dr. Smith · doctor",
+      "headline": "Heard you — Dr. Smith · doctor.",
+      "where_label": "Lake Nona",
+      "trait_tags": ["gentle", "takes insurance"],
+      "status_label": "Ready to pass it along",
+      "outreach_copy": "I'll listen for moms on your block who need this."
+    }
+  },
+  "ui_intent": "signal_saved",
+  "ui_actions": [
+    { "id": "tip_pass", "label": "Pass the tip along", "message": "pass the tip along", "style": "primary" },
+    { "id": "tip_send_mom", "label": "Send to a mom", "message": "send to a mom", "style": "secondary" }
+  ]
+}
+```
+
+| Field | FE use |
+|-------|--------|
+| `tip` | RECO-P3 card — title, trait chips, WHERE when known |
+| `tip.status_label` | Status pill — e.g. **Lana · ready to pass it along** |
+| `collect_signal_detail` | May precede save — Lana asks **Where, roughly?** before card is final |
+
+**Tip seek** (`tip_seek`, looking for a recommendation) uses the simple signal card + **Show my block log** / **Not yet** (same as swap seek).
+
+**Do not** show hosting card for doctor/tip utterances — `signal_saved.intent` must be `tip_share`, not `host_meet`.
 
 ---
 
@@ -692,6 +958,14 @@ Expect `phone_verified: true` and full `peer_matches`.
 - [ ] **`upload_profile_photo`:** show file/camera picker → `POST /lana/profile-photo` → optional `done` message
 - [ ] Do **not** use `signInWithOtp` for login during an active anonymous Lana session
 - [ ] Render `peer_matches` / `activity_previews` — respect `preview: true` (hide names/avatars)
+- [ ] **v1.4:** render `match_stars` / `match_badge` / `trait_tags`; per-card `actions` → `sendMessage(action.message)`
+- [ ] **v1.4:** status pill from `discovery_surface.status_label` on peer-result turns
+- [ ] **v1.4:** weak-match bottom CTAs from `ui_actions` when `discovery_surface.weak_peer` is set
+- [ ] **v1.5:** hosting card from `signal_saved.hosting`; CTAs **Open the meet up** / **Send to a mom**
+- [ ] **v1.6:** tip card from `signal_saved.tip`; CTAs **Pass the tip along** / **Send to a mom**
+- [ ] **v1.6:** swap/meet/tip **seek** save → **Show my block log** / **Not yet** (not intros)
+- [ ] **v1.6:** duplicate intro → **Show my intros** / **Not yet** (not another nudge)
+- [ ] Implement full CTA matrix from **§ ui_intent → surfaces → ui_actions** above
 - [ ] Gate connect CTAs on `phone_verified === true`
 - [ ] Fresh test phone per signup run (Supabase Dashboard → Phone → test numbers)
 - [ ] Copy handler from `apps/admin/lib/demo-user.ts` or Postman `TagAlng-Lana-Unified-Full-E2E`
@@ -751,6 +1025,11 @@ Set `anon_key` in environment. Use a **fresh test phone** per run for signup (`t
 | `apps/admin/lib/lana-client.ts` | Lana worker client + `LanaUiIntent` types |
 | `apps/admin/app/lana/meet/page.tsx` | Full chat UI + `ui_intent` phone/OTP fields + `pushTurn` |
 | `services/lana-worker/app/ui_intent.py` | Backend `ui_intent` derivation |
+| `services/lana-worker/app/ui_actions.py` | CTA derivation — `derive_ui_actions` |
+| `services/lana-worker/app/hosting_surface.py` | Hosting draft card payload |
+| `services/lana-worker/app/tip_surface.py` | Tip share draft card payload |
+| `services/lana-worker/app/turn_surfaces.py` | Turn-scoped payload clearing |
+| `tagalng-pwa-main/src/lib/lana.ts` | PWA types — `LanaUiIntent`, `LanaUiAction`, `SignalSaved`, `TipDraft` |
 | `services/lana-worker/app/discovery_route.py` | Discovery + auth phases |
 | `services/lana-worker/app/profile_photo.py` | Profile photo intent + storage upload |
 | `docs/postman/TagAlng-Lana-Unified-Full-E2E.postman_collection.json` | End-to-end REST sequence |

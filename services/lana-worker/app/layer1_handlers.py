@@ -13,6 +13,7 @@ from app.claims_persist import (
     dismiss_claims_from_edit_message,
     extract_display_name_reply,
     heritage_conflict_prompt,
+    is_explicit_heritage_correction,
     persist_profile_patch,
     try_upsert_claims_from_message,
 )
@@ -571,7 +572,11 @@ def handle_add_or_edit_claim(
     result = try_upsert_claims_from_message(
         user_id,
         message,
-        force_heritage_replace=force_heritage_replace,
+        force_heritage_replace=(
+            force_heritage_replace
+            or linear_intent == "identity.edit_claim"
+            or is_explicit_heritage_correction(message)
+        ),
     )
     if result.heritage_conflict:
         from_label = str(result.heritage_conflict.get("from_label") or "your prior heritage")
@@ -595,7 +600,8 @@ def handle_add_or_edit_claim(
             None,
         )
     return (
-        "Tell me more — heritage, life stage, interests, language, faith, or what you like to do.",
+        "I heard you, but I couldn't pull a clear identity thread from that — "
+        "try one at a time (heritage, life stage, or interest).",
         0,
         None,
     )

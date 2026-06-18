@@ -141,46 +141,32 @@ def pick_peer_for_intro(
     peers: list[dict[str, Any]],
     *,
     msg: str,
+    peer_name: str | None = None,
     pending: dict[str, Any] | None = None,
+    list_index: int | None = None,
 ) -> dict[str, Any] | None:
-    requested = requested_peer_name(msg)
-
-    if pending and not requested:
-        pid = str(pending.get("candidate_user_id") or "").strip()
-        if pid:
-            for p in peers:
-                if str(p.get("peer_user_id") or "") == pid:
-                    return p
-            pending_peer = {
-                "peer_user_id": pid,
-                "nickname": pending.get("candidate_nickname"),
-                "matching_peer_label": pending.get("matching_peer_label"),
-                "similarity_score": pending.get("match_score"),
-                "matching_peer_concept": pending.get("matching_peer_concept"),
-            }
-            return pending_peer
-
-    if pending and requested:
-        pid = str(pending.get("candidate_user_id") or "").strip()
-        pend_nick = str(pending.get("candidate_nickname") or "").lower()
-        if pid and pend_nick and (
-            pend_nick == requested
-            or requested in pend_nick
-            or pend_nick in requested
-        ):
-            for p in peers:
-                if str(p.get("peer_user_id") or "") == pid:
-                    return p
+    requested = str(peer_name or "").strip().lower() or None
+    if not requested:
+        requested = requested_peer_name(msg)
 
     identified = [p for p in peers if p.get("peer_user_id")]
     if not identified:
         return None
 
+    lower = str(msg or "").lower()
+
+    if list_index is not None:
+        try:
+            pick_idx = int(list_index) - 1
+            if 0 <= pick_idx < len(identified):
+                return identified[pick_idx]
+        except (TypeError, ValueError):
+            pass
+
     idx = _peer_index_from_message(msg)
     if idx is not None and 0 <= idx < len(identified):
         return identified[idx]
 
-    lower = str(msg or "").lower()
     if requested:
         for p in identified:
             nick = str(p.get("nickname") or "").lower()
@@ -188,12 +174,29 @@ def pick_peer_for_intro(
                 return p
         return None
 
+    # Name from shown cards in message beats stale pending_intro_offer (e.g. "send intro to Kashaf").
+    for p in identified:
+        nick = str(p.get("nickname") or "").lower()
+        if nick and len(nick) > 2 and nick in lower:
+            return p
+
+    if pending:
+        pid = str(pending.get("candidate_user_id") or "").strip()
+        if pid:
+            for p in identified:
+                if str(p.get("peer_user_id") or "") == pid:
+                    return p
+            return {
+                "peer_user_id": pid,
+                "nickname": pending.get("candidate_nickname"),
+                "matching_peer_label": pending.get("matching_peer_label"),
+                "similarity_score": pending.get("match_score"),
+                "matching_peer_concept": pending.get("matching_peer_concept"),
+            }
+
     for p in identified:
         label = str(p.get("matching_peer_label") or "").lower()
-        nick = str(p.get("nickname") or "").lower()
         if label and len(label) > 3 and label in lower:
-            return p
-        if nick and len(nick) > 2 and nick in lower:
             return p
     if idx is not None and identified:
         return identified[0]
@@ -244,6 +247,21 @@ def format_intro_offer_reply(peer: dict[str, Any], match_reason: str) -> str:
     )
 
 
+def format_intro_offer_turn(peer: dict[str, Any], match_reason: str) -> str:
+    """C-8 single featured match — replaces the multi-neighbor preview list in copy."""
+    nick = str(peer.get("nickname") or "").strip()
+    label = str(peer.get("matching_peer_label") or "a neighbor on your block").strip()
+    who = nick or label
+    reason = str(match_reason or "").strip().rstrip(".")
+    lines = [f"I think I found a fit — {who}."]
+    if nick and label and label.lower() != nick.lower():
+        lines.append(label + ".")
+    if reason:
+        lines.append(f"{reason}.")
+    lines.append("Want me to introduce you two?")
+    return " ".join(lines)
+
+
 def stamp_intro_proposal_ctx(
     ctx: dict[str, Any],
     *,
@@ -289,13 +307,25 @@ def try_propose_intro_from_preview(
     peers: list[dict[str, Any]],
     identity_snippet: str | None,
     force: bool = False,
+    peer_name: str | None = None,
+    list_index: int | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Return (reply, intro_payload) or None if cannot propose."""
     pending = session_ctx.get("pending_intro_offer")
-    if not force and not wants_neighbor_intro(msg) and not (pending and accepts_intro_offer(msg)):
+    if (
+        not force
+        and not wants_neighbor_intro(msg)
+        and not (pending and accepts_intro_offer(msg))
+    ):
         return None
 
-    peer = pick_peer_for_intro(peers, msg=msg, pending=pending if isinstance(pending, dict) else None)
+    peer = pick_peer_for_intro(
+        peers,
+        msg=msg,
+        peer_name=peer_name,
+        pending=pending if isinstance(pending, dict) else None,
+        list_index=list_index,
+    )
     if not peer or not peer.get("peer_user_id"):
         return None
 
