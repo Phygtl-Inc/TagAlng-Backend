@@ -286,6 +286,9 @@ def _apply_discovery_linear_slots(out: dict[str, Any], linear: str, *, msg: str)
     elif linear == "discovery.block_log":
         out["goal"] = "show_block_log"
         out["in_discovery"] = True
+        out.pop("signal_intent", None)
+        out.pop("signal_detail", None)
+        out.pop("signal_category", None)
     elif linear == "social.propose_intro":
         out["goal"] = "propose_intro"
         out["in_discovery"] = True
@@ -321,12 +324,86 @@ def utterance_indicates_tip_share(msg: str) -> bool:
     return bool(_TIP_SHARE_RE.search(text))
 
 
+_TIP_SEEK_UTTERANCE_RE = re.compile(
+    r"\b(?:do you know|know (?:of )?a good|any good|recommend(?:ation)?|"
+    r"looking for (?:a )?good|is there (?:a )?good)\b",
+    re.I,
+)
+_TIP_SEEK_SERVICE_RE = re.compile(
+    r"\b(?:doctor|pediatrician|dentist|plumber|tutor|teacher|lawyer|vet|"
+    r"restaurant|pizza|contractor|handyman)\b",
+    re.I,
+)
+_SWAP_SEEK_ITEM_RE = re.compile(
+    r"\b(?:computer|laptop|bike|bicycle|boots|toy|stroller|phone|ipad|tablet|"
+    r"rain\s+coat|jacket|car\s+seat|crib|high\s+chair)\b",
+    re.I,
+)
+
+
+def utterance_indicates_tip_seek(msg: str) -> bool:
+    """Seeking a local service/places recommendation — not sharing a tip or finding moms."""
+    text = str(msg or "").strip()
+    if not text or _FIND_NEIGHBORS_RE.search(text):
+        return False
+    if utterance_indicates_tip_share(text):
+        return False
+    if _TIP_SEEK_SERVICE_RE.search(text):
+        return True
+    return bool(_TIP_SEEK_UTTERANCE_RE.search(text) and _TIP_SEEK_SERVICE_RE.search(text))
+
+
+_SWAP_OFFER_PHRASE_RE = re.compile(
+    r"\b(?:giv(?:e|ing)\s*(?:up|away)?|gave\s*away|giveaway|donat\w*|"
+    r"offer(?:ing)?|hand(?:ing)?\s+(?:down|off)|get\s+rid\s+of)\b",
+    re.I,
+)
+
+
+def utterance_indicates_swap_offer(msg: str) -> bool:
+    """Offering/giving away a physical item — not a seek (must not downgrade to seek)."""
+    text = str(msg or "").strip()
+    if not text:
+        return False
+    return bool(_SWAP_OFFER_PHRASE_RE.search(text) and _SWAP_SEEK_ITEM_RE.search(text))
+
+
+def utterance_indicates_swap_seek(msg: str) -> bool:
+    """Seeking/borrowing a physical item — not neighbor identity browse, not an offer."""
+    text = str(msg or "").strip()
+    if not text or _FIND_NEIGHBORS_RE.search(text):
+        return False
+    if utterance_indicates_tip_seek(text) or utterance_indicates_hosting_plan(text):
+        return False
+    if utterance_indicates_swap_offer(text):
+        return False
+    if not re.search(r"\b(?:looking for|need(?:ing)?|want)\b", text, re.I):
+        return False
+    return bool(_SWAP_SEEK_ITEM_RE.search(text))
+
+
 def slots_indicate_tip_share_signal(slots: dict[str, Any]) -> bool:
     signal_intent = str(slots.get("signal_intent") or "").strip().lower()
     if signal_intent == "tip_share":
         return True
     linear = normalize_linear_intent(slots.get("linear_intent"))
     return linear == "sharing.tip"
+
+
+def slots_indicate_tip_seek_signal(slots: dict[str, Any]) -> bool:
+    signal_intent = str(slots.get("signal_intent") or "").strip().lower()
+    if signal_intent == "tip_seek":
+        return True
+    linear = normalize_linear_intent(slots.get("linear_intent"))
+    return linear == "looking.tip"
+
+
+def slots_indicate_swap_seek_signal(slots: dict[str, Any]) -> bool:
+    signal_intent = str(slots.get("signal_intent") or "").strip().lower()
+    if signal_intent in ("swap_seek", "swap_offer"):
+        return True
+    linear = normalize_linear_intent(slots.get("linear_intent"))
+    return linear in ("looking.swap", "sharing.swap")
 
 
 def slots_indicate_hosting_signal(slots: dict[str, Any]) -> bool:
@@ -338,10 +415,41 @@ def slots_indicate_hosting_signal(slots: dict[str, Any]) -> bool:
     return linear == "sharing.host"
 
 
+def _reconcile_defer_to_llm(
+    out: dict[str, Any], target_linear: str, *, utterance_match: bool = False
+) -> bool:
+    """Trust a confident LLM signal-lane pick; only override sticky peer-browse.
+
+    Phrasing is infinite, so the LLM is the router. These regex reconcilers exist
+    only to rescue the *known* failure mode — the model returns peer/activity
+    discovery when the user is really posting a swap/tip/host signal. When the
+    model already chose a different signal lane with confidence, defer to it.
+    """
+    # A high-precision structural utterance match ("Dr X is a great dentist",
+    # "coffee this weekend") is allowed to correct the model — don't defer then.
+    if utterance_match:
+        return False
+    linear = normalize_linear_intent(out.get("linear_intent"))
+    if not linear or linear == target_linear:
+        return False
+    if float(out.get("confidence", 0.0)) < 0.6:
+        return False
+    if linear.startswith("discovery.") or str(out.get("goal") or "") in (
+        "peers",
+        "both",
+        "activities",
+    ):
+        return False
+    return linear in LOOKING_SHARING_INTENTS
+
+
 def reconcile_tip_share_signal(out: dict[str, Any], *, msg: str) -> None:
     """Recommendation share — wins over misclassified hosting or peer discovery."""
-    tip = utterance_indicates_tip_share(msg) or slots_indicate_tip_share_signal(out)
+    tip_utterance = utterance_indicates_tip_share(msg)
+    tip = tip_utterance or slots_indicate_tip_share_signal(out)
     if not tip:
+        return
+    if _reconcile_defer_to_llm(out, "sharing.tip", utterance_match=tip_utterance):
         return
     if utterance_indicates_hosting_plan(msg) and not utterance_indicates_tip_share(msg):
         return
@@ -356,12 +464,76 @@ def reconcile_tip_share_signal(out: dict[str, Any], *, msg: str) -> None:
         out["signal_detail"] = detail
 
 
+def reconcile_tip_seek_signal(out: dict[str, Any], *, msg: str) -> None:
+    """Local service/places seek — wins over heritage pending and peer browse."""
+    if utterance_indicates_tip_share(msg):
+        return
+    tip_utterance = utterance_indicates_tip_seek(msg)
+    tip = tip_utterance or slots_indicate_tip_seek_signal(out)
+    if not tip:
+        return
+    if _reconcile_defer_to_llm(out, "looking.tip", utterance_match=tip_utterance):
+        return
+    out.pop("attr_filter", None)
+    out["goal"] = "save_signal"
+    out["in_discovery"] = False
+    out["signal_intent"] = "tip_seek"
+    out["linear_intent"] = "looking.tip"
+    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    detail = str(out.get("signal_detail") or msg or "").strip()[:500]
+    if detail:
+        out["signal_detail"] = detail
+    if not str(out.get("signal_category") or "").strip():
+        low = detail.lower()
+        if any(w in low for w in ("doctor", "pediatrician", "dentist", "vet")):
+            out["signal_category"] = "health"
+        elif any(w in low for w in ("tutor", "teacher", "school")):
+            out["signal_category"] = "education"
+        elif any(w in low for w in ("restaurant", "pizza", "food")):
+            out["signal_category"] = "food"
+
+
+def _slots_already_swap_offer(slots: dict[str, Any]) -> bool:
+    if str(slots.get("signal_intent") or "").strip().lower() == "swap_offer":
+        return True
+    return normalize_linear_intent(slots.get("linear_intent")) == "sharing.swap"
+
+
+def reconcile_swap_seek_signal(out: dict[str, Any], *, msg: str) -> None:
+    """Item swap/borrow seek — wins over sticky peer browse, but never a real offer."""
+    if utterance_indicates_tip_seek(msg) or utterance_indicates_tip_share(msg):
+        return
+    # An offer (give away / sharing.swap) must not be downgraded to a seek.
+    if _slots_already_swap_offer(out) or utterance_indicates_swap_offer(msg):
+        return
+    # "looking for stroller walk buddies" is a MEET, not a swap — the swap-seek
+    # utterance pattern (verb + any item noun) is too blunt to override a
+    # confident different-lane LLM pick, so defer without the utterance bypass.
+    if _reconcile_defer_to_llm(out, "looking.swap"):
+        return
+    swap = utterance_indicates_swap_seek(msg) or slots_indicate_swap_seek_signal(out)
+    if not swap:
+        return
+    out.pop("attr_filter", None)
+    out["goal"] = "save_signal"
+    out["in_discovery"] = False
+    out["signal_intent"] = "swap_seek"
+    out["linear_intent"] = "looking.swap"
+    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    detail = str(out.get("signal_detail") or msg or "").strip()[:500]
+    if detail:
+        out["signal_detail"] = detail
+
+
 def reconcile_hosting_peer_slot_conflict(out: dict[str, Any], *, msg: str) -> None:
     """When Flash mixes heritage attr_filter with hosting, hosting wins."""
     if utterance_indicates_tip_share(msg) or slots_indicate_tip_share_signal(out):
         return
-    hosting = slots_indicate_hosting_signal(out) or utterance_indicates_hosting_plan(msg)
+    hosting_utterance = utterance_indicates_hosting_plan(msg)
+    hosting = slots_indicate_hosting_signal(out) or hosting_utterance
     if not hosting:
+        return
+    if _reconcile_defer_to_llm(out, "sharing.host", utterance_match=hosting_utterance):
         return
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
@@ -419,9 +591,15 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
                     out.setdefault("linear_intent", li)
                     break
     reconcile_tip_share_signal(out, msg=msg)
+    reconcile_tip_seek_signal(out, msg=msg)
+    reconcile_swap_seek_signal(out, msg=msg)
     reconcile_hosting_peer_slot_conflict(out, msg=msg)
     if utterance_indicates_tip_share(msg):
         reconcile_tip_share_signal(out, msg=msg)
+    if str(out.get("goal") or "") == "show_block_log":
+        out.pop("signal_intent", None)
+        out.pop("signal_detail", None)
+        out.pop("signal_category", None)
     return out
 
 

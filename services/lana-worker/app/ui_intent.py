@@ -97,6 +97,10 @@ def derive_ui_intent(
     if active == _INTENT_LIST_INTROS and ctx.get("pending_intros") is not None:
         return UI_INTENT_SHOW_PENDING_INTROS
 
+    dup = ctx.get("recent_intro_duplicate")
+    if isinstance(dup, dict) and dup.get("candidate_user_id"):
+        return UI_INTENT_SHOW_BLOCK_LOG
+
     # Respond beats stale offer — only while an intro is actually waiting on the user.
     if ctx.get("pending_intro_respond"):
         return UI_INTENT_RESPOND_PENDING_INTRO

@@ -8,6 +8,7 @@ from app.discovery_route import handle_discovery_turn
 from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import unified_rules_first_enabled
+from app.loop_guard import discovery_reply_is_stuck, reset_sticky_discovery_state
 from app.orchestrator.pipeline import run_turn
 from app.turn_surfaces import clear_turn_surfaces
 from app.turn_timing import TurnTimer
@@ -54,23 +55,28 @@ def run_lana_unified_pipeline(
         if discovery is not None:
             reply, ctx, routing, peers = discovery
             reply = sanitize_assistant_message(reply)
-            ctx["last_routing"] = routing
-            ctx["_orchestrator_turn"] = False
-            ctx["timing_ms"] = timer.to_dict()
-            if ctx.get("activity_previews"):
-                ctx["peer_matches"] = []
-            elif peers:
-                ctx["peer_matches"] = peers
-                ctx.pop("activity_previews", None)
-            elif "peer_matches" not in ctx:
-                ctx["peer_matches"] = []
-            ui = {
-                "bucket": None,
-                "focus_phrase": None,
-                "highlights": [],
-            }
-            status = "ready_to_complete" if ctx.get("ready_to_complete") else "continue"
-            return reply, status, ctx, ui, ctx.get("event_draft")
+            # Loop breaker: if the rule layer is about to repeat the same reply for
+            # the Nth turn, hand off to the orchestrator (LLM) instead of looping.
+            if use_orchestrator and discovery_reply_is_stuck(history, reply, ctx):
+                reset_sticky_discovery_state(session_ctx)
+            else:
+                ctx["last_routing"] = routing
+                ctx["_orchestrator_turn"] = False
+                ctx["timing_ms"] = timer.to_dict()
+                if ctx.get("activity_previews"):
+                    ctx["peer_matches"] = []
+                elif peers:
+                    ctx["peer_matches"] = peers
+                    ctx.pop("activity_previews", None)
+                elif "peer_matches" not in ctx:
+                    ctx["peer_matches"] = []
+                ui = {
+                    "bucket": None,
+                    "focus_phrase": None,
+                    "highlights": [],
+                }
+                status = "ready_to_complete" if ctx.get("ready_to_complete") else "continue"
+                return reply, status, ctx, ui, ctx.get("event_draft")
 
         clear_turn_surfaces(session_ctx)
     if use_orchestrator:

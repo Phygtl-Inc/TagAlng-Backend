@@ -77,6 +77,7 @@ from app.models import (
     SendMessageRequest,
     SendMessageResponse,
     SessionDetailResponse,
+    TurnDebug,
     TurnRouting,
 )
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
@@ -305,6 +306,37 @@ def _routing_from_ctx(ctx: dict[str, Any]) -> TurnRouting | None:
         confidence=raw.get("confidence"),
         tool_called=raw.get("tool_to_call"),
         capture_fired=bool(raw.get("capture_fired")),
+    )
+
+
+def _turn_debug_from_ctx(
+    ctx: dict[str, Any],
+    *,
+    ui_intent: str | None,
+    orchestrator: bool,
+) -> TurnDebug:
+    """Surface why this turn routed the way it did (slots + handler + phase)."""
+    slots = ctx.get("_discovery_slots")
+    slots = slots if isinstance(slots, dict) else None
+    routing = ctx.get("last_routing")
+    routing = routing if isinstance(routing, dict) else {}
+    confidence = None
+    if slots and slots.get("confidence") is not None:
+        try:
+            confidence = float(slots.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = None
+    return TurnDebug(
+        intent=(slots or {}).get("linear_intent"),
+        goal=(slots or {}).get("goal"),
+        confidence=confidence,
+        signal_intent=(slots or {}).get("signal_intent"),
+        active_intent=ctx.get("active_intent"),
+        routing_phase=ctx.get("routing_phase"),
+        ui_intent=ui_intent,
+        handler=routing.get("tool_to_call"),
+        orchestrator=orchestrator,
+        slots={k: v for k, v in (slots or {}).items() if not k.startswith("_")} or None,
     )
 
 
@@ -1139,6 +1171,9 @@ def send_lana_message(
 
     ready = status == "ready_to_complete"
     ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
+    debug = _turn_debug_from_ctx(
+        merged, ui_intent=ob.get("ui_intent"), orchestrator=orch_used
+    )
     return SendMessageResponse(
         session_id=session_id,
         status=status,
@@ -1150,6 +1185,7 @@ def send_lana_message(
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
         timing_ms=timing_ms,
+        debug=debug,
         **ob,
     )
 

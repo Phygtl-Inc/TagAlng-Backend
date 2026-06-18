@@ -14,7 +14,10 @@ from app.layer1_intents import (
     slots_indicate_hosting_signal,
     slots_linear_intent,
     slots_want_layer1_handling,
+    utterance_indicates_swap_seek,
+    utterance_indicates_tip_seek,
 )
+from app.signal_capture import is_signal_lane_intent
 from app.orchestrator.llm import llm_configured, llm_json, router_model
 from app.turn_timing import TurnTimer
 
@@ -144,7 +147,8 @@ _SYSTEM = (
     "mom/dad/parent/language/stage — infinite phrasing: show me american moms, find italian dads, "
     "brazilian parents on my block). Set attr_filter to the trait phrase "
     "(e.g. american moms, italian dads). NOT identity.add_claim, NOT identity.edit_claim, goal=peers. "
-    "Use discovery.find_in_block for block activity browse (what's on my block, what are people swapping). "
+    "Use discovery.find_in_block for block activity browse (what's on my block, what is happening on my block, "
+    "what are people swapping, neighborhood activity) — NOT social.propose_intro even if a prior turn offered an intro. "
     "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
     "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes "
     "(change my name, call me X, my name is X). "
@@ -479,22 +483,35 @@ def slots_picking_shown_peer(
 def slots_want_preview_refetch(
     slots: dict[str, Any],
     session_ctx: dict[str, Any],
+    *,
+    msg: str = "",
 ) -> bool:
     """AI-only: re-run peer preview when user supplied new matching criteria (not questions)."""
-    if slots_want_propose_intro(slots) or slots_picking_shown_peer(slots, session_ctx):
+    enriched = enrich_slots(dict(slots), msg=msg)
+    if str(enriched.get("goal") or "") == "save_signal":
         return False
-    linear = str(slots.get("linear_intent") or "")
-    if linear.startswith("identity.") or linear in (
-        "discovery.show_peer_profile",
-        "discovery.explain_peer_match",
+    linear = slots_linear_intent(enriched)
+    if linear and is_signal_lane_intent(enriched) and intent_confidence_met(enriched, linear):
+        return False
+    if msg and (utterance_indicates_tip_seek(msg) or utterance_indicates_swap_seek(msg)):
+        return False
+    if slots_want_propose_intro(enriched) or slots_picking_shown_peer(enriched, session_ctx):
+        return False
+    if linear and (
+        linear.startswith("identity.")
+        or linear
+        in (
+            "discovery.show_peer_profile",
+            "discovery.explain_peer_match",
+        )
     ):
         return False
-    goal = str(slots.get("goal") or "none")
-    if goal not in ("peers", "both") or not slots.get("in_discovery"):
+    goal = str(enriched.get("goal") or "none")
+    if goal not in ("peers", "both") or not enriched.get("in_discovery"):
         return False
-    if float(slots.get("confidence", 0.0)) < 0.5:
+    if float(enriched.get("confidence", 0.0)) < 0.5:
         return False
-    raw = slots.get("identity_snippet")
+    raw = enriched.get("identity_snippet")
     if not raw:
         return False
     new_sn = str(raw).strip()[:400]

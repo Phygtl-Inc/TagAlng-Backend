@@ -156,6 +156,12 @@ def stamp_pending_intros_ctx(ctx: dict[str, Any], intros: list[dict[str, Any]]) 
 
 
 
+def clear_intro_offer_ctx(ctx: dict[str, Any]) -> None:
+    """Drop offer UI — None so merge_session_context removes stale session keys."""
+    ctx["pending_intro_offer"] = None
+    ctx["intro_offer_shown"] = None
+
+
 def stamp_duplicate_intro_sent(
     ctx: dict[str, Any],
     *,
@@ -169,9 +175,8 @@ def stamp_duplicate_intro_sent(
         "candidate_nickname": nick or "that neighbor",
         "match_reason": str(match_reason or peer.get("matching_peer_label") or "").strip(),
     }
-    ctx.pop("pending_intro_offer", None)
-    ctx.pop("intro_offer_shown", None)
-    ctx.pop("pending_intro_respond", None)
+    clear_intro_offer_ctx(ctx)
+    ctx["pending_intro_respond"] = None
 
 
 def stamp_intro_respond_from_peer(
@@ -199,8 +204,7 @@ def stamp_intro_respond_from_peer(
         }
         ctx["pending_intros"] = [norm]
         ctx["active_intent"] = "tier.respond_nudge"
-        ctx.pop("pending_intro_offer", None)
-        ctx.pop("intro_offer_shown", None)
+        clear_intro_offer_ctx(ctx)
         ctx.pop("peer_matches", None)
         return True
     return False

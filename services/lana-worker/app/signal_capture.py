@@ -236,7 +236,7 @@ def _confirm_prompt(field: str, attempt: int) -> str:
         return "No worries — kid or adult works. Just say it your way and I'll post it."
     if field == "detail":
         if attempt <= 1:
-            return "Can you tell me a bit more — what item, and anything helpful like condition?"
+            return "Can you be a bit more specific — what item, and anything helpful like condition?"
         return "What are you looking for or offering? A short phrase is fine."
     if field == "when_hint":
         if attempt <= 1:
@@ -461,6 +461,31 @@ def clear_signal_draft(ctx: dict[str, Any]) -> None:
     ctx["signal_draft"] = None
 
 
+def _signal_draft_new_topic(
+    text: str,
+    draft: dict[str, Any],
+    slots: dict[str, Any] | None,
+) -> bool:
+    """User pivoted away from the in-progress draft to a different ask."""
+    linear = slots_linear_intent(slots) if slots else None
+    if linear and linear != draft.get("linear_intent"):
+        return True
+    if slots:
+        new_detail = str(slots.get("signal_detail") or "").strip().lower()
+        old_detail = str(draft.get("detail") or "").strip().lower()
+        if (
+            new_detail
+            and old_detail
+            and len(new_detail) > 8
+            and new_detail not in old_detail
+            and old_detail not in new_detail
+        ):
+            return True
+    if re.search(r"\b(?:for my|my kid|my child)\b", text, re.I):
+        return True
+    return bool(_TOPIC_CHANGE_RE.search(text))
+
+
 def should_abandon_signal_draft(
     msg: str,
     draft: dict[str, Any],
@@ -478,39 +503,19 @@ def should_abandon_signal_draft(
         return False
     if field == "when_hint" and len(text) <= 80:
         return False
-    if field == "stage" and normalize_size_answer(text):
-        return False
-    if field == "stage" and not _looks_like_size_answer(text):
-        linear = slots_linear_intent(slots) if slots else None
-        if linear in LOOKING_SHARING_INTENTS and linear != draft.get("linear_intent"):
-            return True
-        if re.search(r"\b(?:for my|my kid|my child)\b", text, re.I):
-            return True
-        if len(text) > 32:
-            return True
-        return False
+
+    new_topic = _signal_draft_new_topic(text, draft, slots)
+
+    # Size/stage step: a size answer keeps the draft; a pivot (different ask,
+    # "for my kid", "do you know a good pizza shop") abandons it so the new
+    # intent can route instead of looping on the same confirm prompt.
+    if field == "stage":
+        if not new_topic and normalize_size_answer(text):
+            return False
+        if not _looks_like_size_answer(text):
+            return new_topic or len(text) > 32
+        return new_topic
+
     if len(text) > 32:
         return True
-    linear = slots_linear_intent(slots) if slots else None
-    if linear and linear != draft.get("linear_intent"):
-        return True
-    if slots and phase == PHASE_SIGNAL_CONFIRM:
-        new_detail = str(slots.get("signal_detail") or "").strip().lower()
-        old_detail = str(draft.get("detail") or "").strip().lower()
-        if (
-            new_detail
-            and old_detail
-            and len(new_detail) > 8
-            and new_detail not in old_detail
-            and old_detail not in new_detail
-        ):
-            return True
-    if re.search(
-        r"\b(buddy|buddies|teacher|tutor|also looking|know a good|recommend|"
-        r"bicycl\w*|bike|pizza|restaurant|shop|i wanna swap|want to swap|offering|"
-        r"give away|wanna buy|want to buy|looking for)\b",
-        text,
-        re.I,
-    ):
-        return True
-    return False
+    return new_topic

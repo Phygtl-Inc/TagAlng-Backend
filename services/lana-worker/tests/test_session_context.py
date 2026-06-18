@@ -58,6 +58,28 @@ class TestMergeSessionContext(unittest.TestCase):
         self.assertEqual(merged["active_intent"], "social.list_intros")
         self.assertEqual(merged["pending_intros"][0]["nickname"], "Ada")
 
+    def test_clears_pending_intro_offer_when_none(self) -> None:
+        merged = merge_session_context(
+            {
+                "pending_intro_offer": {
+                    "candidate_user_id": "u1",
+                    "candidate_nickname": "Natasha",
+                },
+                "intro_offer_shown": True,
+            },
+            {
+                "recent_intro_duplicate": {
+                    "candidate_user_id": "u1",
+                    "candidate_nickname": "Natasha",
+                },
+                "pending_intro_offer": None,
+                "intro_offer_shown": None,
+            },
+        )
+        self.assertNotIn("pending_intro_offer", merged)
+        self.assertNotIn("intro_offer_shown", merged)
+        self.assertIn("recent_intro_duplicate", merged)
+
 
 class TestSignalDraftAbandon(unittest.TestCase):
     def test_abandon_on_bicycle_typo_while_confirming_size(self) -> None:

@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -253,6 +253,21 @@ class TurnRouting(BaseModel):
     capture_fired: bool = False
 
 
+class TurnDebug(BaseModel):
+    """Why this turn routed the way it did — for inbox/debug tooling, not end users."""
+
+    intent: str | None = None
+    goal: str | None = None
+    confidence: float | None = None
+    signal_intent: str | None = None
+    active_intent: str | None = None
+    routing_phase: str | None = None
+    ui_intent: str | None = None
+    handler: str | None = None
+    orchestrator: bool = False
+    slots: dict[str, Any] | None = None
+
+
 class SendMessageResponse(BaseModel):
     session_id: str
     status: str
@@ -286,6 +301,7 @@ class SendMessageResponse(BaseModel):
     routing_phase: str | None = None
     ui_intent: str | None = None
     ui_actions: list[UiActionRow] = Field(default_factory=list)
+    debug: TurnDebug | None = None
 
 
 class BlockLogActionRequest(BaseModel):
