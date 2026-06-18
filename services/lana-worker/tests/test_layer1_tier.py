@@ -30,6 +30,28 @@ class TestLayer1Tier(unittest.TestCase):
     def test_yes_introduce_us_not_neighbor_intro(self) -> None:
         self.assertFalse(wants_neighbor_intro("yes introduce us"))
 
+    def test_resolve_nudge_action_prefers_ai(self) -> None:
+        from app.layer1_tier import resolve_nudge_action
+
+        # AI reads an ambiguous reply the regex would have mis-accepted.
+        with patch(
+            "app.intro_response_ai.interpret_nudge_response", return_value="decline"
+        ):
+            self.assertEqual(resolve_nudge_action("ok but who is it first"), "decline")
+        # New "introduce me to X" is never an accept/decline of a pending intro.
+        with patch(
+            "app.intro_response_ai.interpret_nudge_response", return_value="accept"
+        ) as m:
+            self.assertEqual(resolve_nudge_action("introduce me to Kashaf"), "unknown")
+            m.assert_not_called()
+
+    def test_resolve_nudge_action_falls_back_to_regex(self) -> None:
+        from app.layer1_tier import resolve_nudge_action
+
+        with patch("app.intro_response_ai.interpret_nudge_response", return_value=None):
+            self.assertEqual(resolve_nudge_action("not now"), "decline")
+            self.assertEqual(resolve_nudge_action("yes introduce us"), "accept")
+
 
 class TestRespondNudgeRouting(unittest.TestCase):
     @patch("app.discovery_route.handle_respond_nudge")

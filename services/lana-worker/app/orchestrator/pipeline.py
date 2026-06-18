@@ -359,6 +359,11 @@ def _should_reconcile_event_turn(
         return True
     if purpose != "lana":
         return False
+    # Sticky host mode: once we're collecting an event in-chat, extract details from
+    # every turn ("Friday evening", "the playground") so the draft accumulates even
+    # when the utterance has no host keyword and the router calls no tool.
+    if session_ctx.get("event_host_active"):
+        return True
     if wants_host_activity(utterance):
         return True
     if session_ctx.get("pending_confirmation"):

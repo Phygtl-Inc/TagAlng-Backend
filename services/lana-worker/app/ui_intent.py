@@ -24,6 +24,8 @@ UI_INTENT_SHOW_BLOCK_LOG = "show_block_log"
 UI_INTENT_SIGNAL_SAVED = "signal_saved"
 UI_INTENT_SHOW_IDENTITY_PROFILE = "show_identity_profile"
 UI_INTENT_COLLECT_SIGNAL_DETAIL = "collect_signal_detail"
+UI_INTENT_COLLECT_EVENT_DETAIL = "collect_event_detail"
+UI_INTENT_EVENT_CREATED = "event_created"
 
 _INTENT_BLOCK_LOG = "discovery.block_log"
 _INTENT_LIST_INTROS = "social.list_intros"
@@ -84,6 +86,12 @@ def derive_ui_intent(
     if ctx.get("intro_proposal"):
         return UI_INTENT_PROPOSE_NEIGHBOR_INTRO
 
+    # In-chat event hosting — the draft card while capturing, the created card on publish.
+    if ctx.get("event_published_now"):
+        return UI_INTENT_EVENT_CREATED
+    if ctx.get("event_host_active"):
+        return UI_INTENT_COLLECT_EVENT_DETAIL
+
     active = str(ctx.get("active_intent") or "").strip()
 
     if ctx.get("signal_saved") and (
@@ -114,7 +122,8 @@ def derive_ui_intent(
     if ctx.get("signal_draft"):
         return UI_INTENT_COLLECT_SIGNAL_DETAIL
 
-    if ready_to_complete:
+    # confirm_profile is profile-intake only — never leak it onto a hosted event.
+    if ready_to_complete and not ctx.get("event_host_active") and not ctx.get("event_published_now"):
         return UI_INTENT_CONFIRM_PROFILE
 
     phase = str(ctx.get("routing_phase") or "").strip()

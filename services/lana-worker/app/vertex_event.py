@@ -55,6 +55,8 @@ Output ONLY valid JSON (no markdown):
     "duration_minutes": 90,
     "max_attendees": 12,
     "cohort_tags": ["coffee_stroller"],
+    "affinity_prompt": "one short tailored 'who is this for?' question for THIS meet, or null",
+    "affinity_options": ["2-3 short tappable answers"],
     "missing": ["starts_at"]
   }},
   "ui": {{
@@ -67,6 +69,15 @@ Output ONLY valid JSON (no markdown):
 }}
 
 Use status "ready_to_complete" when title, starts_at, and venue_name are all set; otherwise "continue".
+
+Affinity (who the meet is for) — ONE tailored question, never a blocker:
+- Once you know the activity, ask ONE short question about who it's for, phrased for THIS meet,
+  and offer 2-3 quick answers in affinity_options. Put the question in affinity_prompt.
+  Example (playground meet): affinity_prompt "Anyone with a similar kid-stage matters?",
+  affinity_options ["Same kid-stage", "Any toddler mom", "Open · all moms"].
+- When the host answers (taps an option or replies), fold their choice into cohort_tags using the
+  allowed Purpose ids, then set affinity_prompt null and affinity_options []. Ask it at most once.
+- NEVER block ready_to_complete on affinity — title + when + place are the only blockers.
 
 Rules:
 - status "continue" — missing title, starts_at, or venue_name; set ui.focus_phrase to the phrase you clarify.
@@ -249,12 +260,30 @@ def _call_event_lana(
     *,
     attempts_out: list[int] | None = None,
 ) -> Any:
+    suffix = EVENT_TURN_SUFFIX.replace("{purpose_ids}", _purpose_ids_block(purpose_ids))
+    system = build_event_host_system_prompt() + "\n\n---\n\n" + suffix
+
+    # Use the configured chat LLM (OpenAI/Claude) so in-chat hosting works without
+    # Vertex. Only fall back to the Vertex client when Vertex/Gemini is the provider.
+    from app.orchestrator.llm import llm_json, provider, synthesizer_model
+
+    if provider() in ("openai", "claude"):
+        attempts_box: list[int] = []
+        data = llm_json(
+            model=synthesizer_model(),
+            system=system,
+            user_payload=payload,
+            max_tokens=EVENT_MAX_OUTPUT_TOKENS,
+            temperature=0.45,
+            llm_attempts=attempts_box,
+        )
+        if attempts_out is not None:
+            attempts_out[:] = attempts_box or [1]
+        return data
+
     client = _vertex_client()
     model = os.environ.get("VERTEX_LANA_MODEL", os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"))
     from google.genai import types
-
-    suffix = EVENT_TURN_SUFFIX.replace("{purpose_ids}", _purpose_ids_block(purpose_ids))
-    system = build_event_host_system_prompt() + "\n\n---\n\n" + suffix
 
     def _generate(user: str) -> str:
         response = client.models.generate_content(

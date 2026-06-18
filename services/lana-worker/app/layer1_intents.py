@@ -135,7 +135,8 @@ _TIP_SHARE_RE = re.compile(
     r"\b(?:"
     r"(?:dr\.?\s+)?[\w'.-]+\s+is\s+(?:a\s+)?(?:great|good|wonderful|amazing|excellent)\s+"
     r"(?:doctor|dentist|pediatrician|tutor|teacher|plumber|therapist|clinic)|"
-    r"(?:i\s+)?(?:recommend|suggest)\s+(?:dr\.?\s+)?[\w'.-]+|"
+    # First-person offer only — "I recommend X" shares; "can you suggest me X" is a SEEK.
+    r"i\s+(?:recommend|suggest)\s+(?!me\b|us\b)(?:dr\.?\s+)?[\w'.-]+|"
     r"try\s+dr\.?\s+[\w'.-]+|"
     r"my\s+favorite\s+(?:doctor|dentist|restaurant|pizza|place|spot)"
     r")\b",
@@ -326,17 +327,30 @@ def utterance_indicates_tip_share(msg: str) -> bool:
 
 _TIP_SEEK_UTTERANCE_RE = re.compile(
     r"\b(?:do you know|know (?:of )?a good|any good|recommend(?:ation)?|"
+    r"(?:can you |could you |please )?suggest|"
     r"looking for (?:a )?good|is there (?:a )?good)\b",
     re.I,
 )
 _TIP_SEEK_SERVICE_RE = re.compile(
     r"\b(?:doctor|pediatrician|dentist|plumber|tutor|teacher|lawyer|vet|"
-    r"restaurant|pizza|contractor|handyman)\b",
+    r"restaurant|pizza|contractor|handyman|physician|nanny|babysitter|"
+    r"daycare|electrician|mechanic|barber|hairdresser|salon)s?\b",
     re.I,
 )
 _SWAP_SEEK_ITEM_RE = re.compile(
     r"\b(?:computer|laptop|bike|bicycle|boots|toy|stroller|phone|ipad|tablet|"
     r"rain\s+coat|jacket|car\s+seat|crib|high\s+chair)\b",
+    re.I,
+)
+# First-person self-description ("I am a teacher", "I'm a doctor") — identity, not a seek.
+_SELF_DESCRIPTION_RE = re.compile(
+    r"\b(?:i'?m|i am|i've been|i have been|we're|we are)\b",
+    re.I,
+)
+# Request/seek cues that turn a service noun into an actual tip seek.
+_TIP_SEEK_CUE_RE = re.compile(
+    r"\b(?:do you know|know (?:of )?(?:a|any)|any good|recommend|suggest|"
+    r"looking for|need|want|find|is there|where (?:can|do)|got a|have a)\b",
     re.I,
 )
 
@@ -347,6 +361,10 @@ def utterance_indicates_tip_seek(msg: str) -> bool:
     if not text or _FIND_NEIGHBORS_RE.search(text):
         return False
     if utterance_indicates_tip_share(text):
+        return False
+    # "I am a teacher" / "I'm a doctor" describes the user — it is an identity claim,
+    # NOT a request for a teacher/doctor. Only treat it as a seek if a request cue exists.
+    if _SELF_DESCRIPTION_RE.search(text) and not _TIP_SEEK_CUE_RE.search(text):
         return False
     if _TIP_SEEK_SERVICE_RE.search(text):
         return True
@@ -415,24 +433,37 @@ def slots_indicate_hosting_signal(slots: dict[str, Any]) -> bool:
     return linear == "sharing.host"
 
 
+# Intents the model owns outright — a regex signal reconciler must NEVER reclassify
+# these as a swap/tip/host. ("I am a teacher" = identity, not a request for a teacher.)
+_AI_OWNED_PREFIXES = ("identity.", "settings.", "help.", "social.", "tier.", "auth.")
+
+
 def _reconcile_defer_to_llm(
     out: dict[str, Any], target_linear: str, *, utterance_match: bool = False
 ) -> bool:
-    """Trust a confident LLM signal-lane pick; only override sticky peer-browse.
+    """Trust the LLM; regex reconcilers are a fallback, not an override.
 
     Phrasing is infinite, so the LLM is the router. These regex reconcilers exist
     only to rescue the *known* failure mode — the model returns peer/activity
-    discovery when the user is really posting a swap/tip/host signal. When the
-    model already chose a different signal lane with confidence, defer to it.
+    discovery when the user is really posting a swap/tip/host signal. They must not
+    overrule a confident model decision.
     """
+    linear = normalize_linear_intent(out.get("linear_intent"))
+    conf = float(out.get("confidence", 0.0))
+
+    # A confident pick of an AI-owned intent (identity/settings/help/social/tier/auth)
+    # always wins — even over a "high-precision" regex utterance match. This is the
+    # structural fix for regex hijacking the model (e.g. "I am a teacher" → tip_seek).
+    if linear and conf >= 0.6 and any(linear.startswith(p) for p in _AI_OWNED_PREFIXES):
+        return True
+
     # A high-precision structural utterance match ("Dr X is a great dentist",
-    # "coffee this weekend") is allowed to correct the model — don't defer then.
+    # "coffee this weekend") may correct the model only among signal lanes.
     if utterance_match:
         return False
-    linear = normalize_linear_intent(out.get("linear_intent"))
     if not linear or linear == target_linear:
         return False
-    if float(out.get("confidence", 0.0)) < 0.6:
+    if conf < 0.6:
         return False
     if linear.startswith("discovery.") or str(out.get("goal") or "") in (
         "peers",

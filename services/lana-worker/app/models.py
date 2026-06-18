@@ -194,6 +194,9 @@ class EventDraft(BaseModel):
     duration_minutes: int | None = None
     max_attendees: int | None = None
     cohort_tags: list[str] = Field(default_factory=list)
+    affinity_prompt: str | None = None
+    affinity_options: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
 
 
@@ -243,6 +246,9 @@ class CreateSessionResponse(BaseModel):
 
 class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
+    # Deterministic intent from a tapped CTA (e.g. "host_event" from "A meet to host").
+    # Lets the server enter a flow without depending on fuzzy classification.
+    intent_hint: str | None = None
 
 
 class TurnRouting(BaseModel):
@@ -265,6 +271,7 @@ class TurnDebug(BaseModel):
     ui_intent: str | None = None
     handler: str | None = None
     orchestrator: bool = False
+    event_host_active: bool = False
     slots: dict[str, Any] | None = None
 
 
@@ -273,13 +280,10 @@ class SendMessageResponse(BaseModel):
     status: str
     assistant_message: str
     ready_to_complete: bool = False
-    message_count: int = 0
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
     routing: TurnRouting | None = None
     orchestrator: bool = False
-    timing_ms: dict[str, int] | None = None
-    onboarding_step: str | None = None
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
     intro_proposal: IntroProposalPayload | None = None
@@ -301,7 +305,6 @@ class SendMessageResponse(BaseModel):
     routing_phase: str | None = None
     ui_intent: str | None = None
     ui_actions: list[UiActionRow] = Field(default_factory=list)
-    debug: TurnDebug | None = None
 
 
 class BlockLogActionRequest(BaseModel):

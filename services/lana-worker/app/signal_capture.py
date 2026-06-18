@@ -58,6 +58,12 @@ _TOPIC_CHANGE_RE = re.compile(
     r"buddy|teacher|tutor|pizza|swap|borrow|offer|host|bicycl\w*|bike|give away)\b",
     re.I,
 )
+_CANCEL_RE = re.compile(
+    r"\b(?:cancel|never\s*mind|nevermind|forget (?:it|this|that)|"
+    r"get me out|drop (?:it|this|that)|start over|nvm|abort|"
+    r"stop (?:this|asking|it)|out of the .* loop)\b",
+    re.I,
+)
 _AFFIRMATIVE = frozenset({"yes", "yeah", "yep", "sure", "ok", "okay", "correct", "right"})
 _TIP_CATEGORIES = frozenset({"health", "food", "home", "activities", "education", "other"})
 
@@ -327,16 +333,10 @@ def apply_confirm_answer(draft: dict[str, Any], msg: str) -> dict[str, Any]:
     return out
 
 
-def _ai_assist_confirm(draft: dict[str, Any], msg: str) -> dict[str, Any]:
-    """Use AI when regex misses a short confirm answer."""
-    from app.signal_confirm_ai import interpret_signal_confirm_reply
-
-    pending = str(draft.get("confirm_field") or "")
-    if not pending:
-        return draft
-    ai = interpret_signal_confirm_reply(draft, msg)
-    if not ai:
-        return draft
+def _apply_ai_confirm_result(
+    draft: dict[str, Any], ai: dict[str, Any], pending: str
+) -> dict[str, Any]:
+    """Store a parsed AI confirm result into the draft."""
     out = dict(draft)
     linear = str(ai.get("linear_intent") or "").strip()
     if linear in SIGNAL_INTENT_BY_LINEAR and pending != "category":
@@ -361,6 +361,23 @@ def _ai_assist_confirm(draft: dict[str, Any], msg: str) -> dict[str, Any]:
     out["confirm_field"] = None
     out["phase"] = PHASE_SIGNAL_LISTENING
     return out
+
+
+def apply_confirm_answer_ai_first(
+    draft: dict[str, Any],
+    msg: str,
+    *,
+    ai_verdict: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Store a confirm-phase answer. Uses the AI verdict (verdict == 'answer') when the
+    caller already fetched one; otherwise falls back to the deterministic parser. The
+    caller is responsible for handling 'cancel'/'reroute' verdicts (they escape the
+    cascade rather than filling a slot).
+    """
+    pending = str(draft.get("confirm_field") or "")
+    if pending and ai_verdict and ai_verdict.get("verdict") == "answer":
+        return _apply_ai_confirm_result(draft, ai_verdict, pending)
+    return apply_confirm_answer(draft, msg)
 
 
 def _force_accept_pending_field(draft: dict[str, Any], msg: str) -> dict[str, Any]:
@@ -400,9 +417,14 @@ def advance_signal_draft(
     draft: dict[str, Any],
     *,
     msg: str,
+    ai_verdict: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str | None, bool]:
     """
     Advance cascade. Returns (updated_draft, confirm_prompt, ready_to_save).
+
+    ai_verdict is the pre-fetched confirm-reply verdict (verdict == 'answer') so the
+    dispatcher's single LLM read is reused here. cancel/reroute verdicts are handled by
+    the caller before this runs — they never reach the slot-fill.
     """
     phase = str(draft.get("phase") or PHASE_SIGNAL_EXTRACT)
     attempts = dict(draft.get("confirm_attempts") or {})
@@ -412,15 +434,13 @@ def advance_signal_draft(
         if pending:
             attempts[pending] = int(attempts.get(pending, 0)) + 1
 
-        updated = apply_confirm_answer(draft, msg)
+        # AI verdict (if any) reads the reply; deterministic parser is the offline fallback.
+        updated = apply_confirm_answer_ai_first(draft, msg, ai_verdict=ai_verdict)
         updated["confirm_attempts"] = attempts
 
         need, field, _prompt = needs_confirm(updated)
+        # Still missing the same field after a re-ask → accept their words, don't loop.
         if need and field == pending and int(attempts.get(field, 0)) >= 2:
-            updated = _ai_assist_confirm({**updated, "confirm_field": field}, msg)
-            need, field, _prompt = needs_confirm(updated)
-
-        if need and field == pending and int(attempts.get(field, 0)) >= 3:
             updated = _force_accept_pending_field({**updated, "confirm_field": field}, msg)
             need, field, _prompt = needs_confirm(updated)
 
@@ -519,3 +539,67 @@ def should_abandon_signal_draft(
     if len(text) > 32:
         return True
     return new_topic
+
+
+def is_signal_cancel(msg: str) -> bool:
+    """User explicitly wants out of the signal-capture cascade."""
+    return bool(_CANCEL_RE.search(str(msg or "").strip()))
+
+
+def should_abort_signal_draft(
+    msg: str,
+    draft: dict[str, Any],
+    slots: dict[str, Any] | None = None,
+) -> bool:
+    """Bail out of an in-progress confirm cascade when the user is no longer
+    answering the confirm question — an explicit cancel, or a confident pivot
+    to a different intent. Unlike should_abandon_signal_draft (listening/extract
+    phases only), this is evaluated DURING the confirm phase so slot-fill cannot
+    swallow a new ask. Plain slot answers (category word, size, "this weekend")
+    must NOT trigger this.
+    """
+    text = str(msg or "").strip()
+    if is_signal_cancel(text):
+        return True
+    if not slots:
+        return False
+    try:
+        confidence = float(slots.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < 0.55:
+        return False
+    linear = slots_linear_intent(slots)
+    # Pivot to a *different* signal lane (e.g. mid-tip, user says "swap a shoe").
+    if (
+        linear
+        and linear in LOOKING_SHARING_INTENTS
+        and linear != str(draft.get("linear_intent") or "")
+    ):
+        return True
+    # Pivot to a non-signal actionable intent (discovery / intro / block log / auth).
+    goal = str(slots.get("goal") or "")
+    if goal in (
+        "peers",
+        "both",
+        "activities",
+        "propose_intro",
+        "list_intros",
+        "show_block_log",
+        "verify",
+        "login",
+        "logout",
+    ):
+        return True
+    if linear in (
+        "social.propose_intro",
+        "social.list_intros",
+        "discovery.block_log",
+        "discovery.find_peers",
+        "discovery.find_by_attrs",
+        "discovery.find_in_block",
+        "tier.send_nudge",
+        "tier.respond_nudge",
+    ):
+        return True
+    return False

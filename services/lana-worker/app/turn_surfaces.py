@@ -11,6 +11,7 @@ TURN_SCOPED_SURFACES = frozenset({
     "identity_profile",
     "pending_intros",
     "recent_intro_duplicate",
+    "event_published_now",
 })
 
 
