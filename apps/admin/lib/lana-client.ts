@@ -106,6 +106,11 @@ export type BlockLogEntryRow = {
   peer_preview_label?: string | null;
   match_strength?: number | null;
   match_reasons?: string[];
+  match_summary?: string | null;
+  peer_signal_detail?: string | null;
+  peer_signal_intent?: string | null;
+  my_signal_detail?: string | null;
+  my_signal_intent?: string | null;
   created_at?: string | null;
   expires_at?: string | null;
   notification_sent_to_peer?: boolean;

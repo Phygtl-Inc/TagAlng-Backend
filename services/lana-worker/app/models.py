@@ -29,6 +29,27 @@ class PeerMatchRow(BaseModel):
     matching_peer_concept: str | None = None
     has_exact_concept_match: bool = False
     preview: bool = False
+    match_stars: int | None = None
+    match_band: str | None = None
+    match_badge: str | None = None
+    trait_tags: list[str] = Field(default_factory=list)
+    actions: list["UiActionRow"] = Field(default_factory=list)
+
+
+class DiscoveryWeakPeerRow(BaseModel):
+    peer_user_id: str | None = None
+    nickname: str | None = None
+    match_stars: int | None = None
+    match_badge: str | None = None
+
+
+class DiscoverySurfacePayload(BaseModel):
+    strong_count: int = 0
+    partial_count: int = 0
+    weak_count: int = 0
+    status_label: str | None = None
+    weak_peer: DiscoveryWeakPeerRow | None = None
+    ranked_summary: str | None = None
 
 
 class ActivityPreviewRow(BaseModel):
@@ -77,6 +98,17 @@ class PendingIntroRow(BaseModel):
     match_reason: str | None = None
     shared_dimensions: list[str] = Field(default_factory=list)
     direction: str | None = None
+    actions: list["UiActionRow"] = Field(default_factory=list)
+
+
+class UiActionRow(BaseModel):
+    """Tap → POST `message` to Lana (same contract as typing in chat)."""
+    id: str
+    label: str
+    message: str
+    style: Literal["primary", "secondary", "ghost"] = "primary"
+    intro_id: str | None = None
+    peer_user_id: str | None = None
 
 
 class BlockLogEntryRow(BaseModel):
@@ -86,11 +118,36 @@ class BlockLogEntryRow(BaseModel):
     peer_preview_label: str | None = None
     match_strength: float | None = None
     match_reasons: list[str] = Field(default_factory=list)
+    match_summary: str | None = None
+    peer_signal_detail: str | None = None
+    peer_signal_intent: str | None = None
+    my_signal_detail: str | None = None
+    my_signal_intent: str | None = None
     created_at: str | None = None
     expires_at: str | None = None
     notification_sent_to_peer: bool = False
     block_id: str | None = None
     block_name: str | None = None
+
+
+class HostingDraftPayload(BaseModel):
+    title: str | None = None
+    headline: str | None = None
+    when_label: str | None = None
+    where_label: str | None = None
+    who_label: str | None = None
+    trait_tags: list[str] = Field(default_factory=list)
+    status_label: str | None = None
+    outreach_copy: str | None = None
+
+
+class TipDraftPayload(BaseModel):
+    title: str | None = None
+    headline: str | None = None
+    where_label: str | None = None
+    trait_tags: list[str] = Field(default_factory=list)
+    status_label: str | None = None
+    outreach_copy: str | None = None
 
 
 class SignalSavedPayload(BaseModel):
@@ -100,6 +157,8 @@ class SignalSavedPayload(BaseModel):
     detail_text: str | None = None
     block_id: str | None = None
     matches_created: int | None = None
+    hosting: "HostingDraftPayload | None" = None
+    tip: TipDraftPayload | None = None
 
 
 class IdentityClaimRow(BaseModel):
@@ -169,6 +228,7 @@ class CreateSessionResponse(BaseModel):
     signal_saved: SignalSavedPayload | None = None
     identity_profile: IdentityProfilePayload | None = None
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
@@ -178,6 +238,7 @@ class CreateSessionResponse(BaseModel):
     active_intent: str | None = None
     routing_phase: str | None = None
     ui_intent: str | None = None
+    ui_actions: list[UiActionRow] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):
@@ -214,6 +275,7 @@ class SendMessageResponse(BaseModel):
     phone_verified: bool = False
     home_block_assigned: bool = False
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
@@ -223,6 +285,7 @@ class SendMessageResponse(BaseModel):
     active_intent: str | None = None
     routing_phase: str | None = None
     ui_intent: str | None = None
+    ui_actions: list[UiActionRow] = Field(default_factory=list)
 
 
 class BlockLogActionRequest(BaseModel):

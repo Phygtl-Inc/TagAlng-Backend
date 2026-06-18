@@ -29,6 +29,35 @@ class TestMergeSessionContext(unittest.TestCase):
         merged = merge_session_context({"signal_draft": {"detail": "old"}}, {"signal_draft": draft})
         self.assertEqual(merged["signal_draft"], draft)
 
+    def test_clears_stale_intro_respond_when_listing_inbox(self) -> None:
+        from app.intro_list import stamp_pending_intros_ctx
+
+        turn_ctx: dict = {}
+        stamp_pending_intros_ctx(
+            turn_ctx,
+            [
+                {
+                    "id": "i1",
+                    "nickname": "Ada",
+                    "direction": "sent",
+                    "status": "proposed",
+                },
+            ],
+        )
+        merged = merge_session_context(
+            {
+                "pending_intro_respond": {
+                    "intro_id": "stale",
+                    "nickname": "Kashaf",
+                },
+                "active_intent": "tier.respond_nudge",
+            },
+            turn_ctx,
+        )
+        self.assertNotIn("pending_intro_respond", merged)
+        self.assertEqual(merged["active_intent"], "social.list_intros")
+        self.assertEqual(merged["pending_intros"][0]["nickname"], "Ada")
+
 
 class TestSignalDraftAbandon(unittest.TestCase):
     def test_abandon_on_bicycle_typo_while_confirming_size(self) -> None:
@@ -105,6 +134,23 @@ class TestSignalDraftAbandon(unittest.TestCase):
             "intent": "swap_seek",
         }
         self.assertFalse(should_abandon_signal_draft("3T", draft, slots={}))
+
+    def test_keep_category_answer_despite_ai_reclassify(self) -> None:
+        draft = {
+            "phase": "signal_confirm_missing",
+            "confirm_field": "category",
+            "detail": "good restaurant near me",
+            "linear_intent": "looking.tip",
+            "intent": "tip_seek",
+        }
+        slots = {
+            "linear_intent": "sharing.tip",
+            "signal_intent": "tip_share",
+            "confidence": 0.9,
+        }
+        self.assertFalse(
+            should_abandon_signal_draft("food", draft, slots=slots),
+        )
 
 
 if __name__ == "__main__":

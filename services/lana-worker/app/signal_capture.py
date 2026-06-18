@@ -8,7 +8,6 @@ from typing import Any
 from app.layer1_intents import (
     LOOKING_SHARING_INTENTS,
     SIGNAL_INTENT_BY_LINEAR,
-    phrase_linear_intent,
     slots_linear_intent,
 )
 
@@ -20,6 +19,11 @@ _WHEN_HINT = re.compile(
     r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"morning|afternoon|evening|weekend|weekday|daily|weekly|"
     r"today|tomorrow|am|pm|\d{1,2}\s*(?:am|pm))\b",
+    re.I,
+)
+_WHERE_IN_DETAIL_RE = re.compile(
+    r"\b(?:near|around|in|on|at)\s+[\w]|cross[\s-]?street|neighborhood|"
+    r"\b(?:block|downtown|uptown)\b",
     re.I,
 )
 _KIDS_SIZED_CLOTHING_RE = re.compile(
@@ -55,6 +59,41 @@ _TOPIC_CHANGE_RE = re.compile(
     re.I,
 )
 _AFFIRMATIVE = frozenset({"yes", "yeah", "yep", "sure", "ok", "okay", "correct", "right"})
+_TIP_CATEGORIES = frozenset({"health", "food", "home", "activities", "education", "other"})
+
+
+def normalize_category_answer(text: str) -> str:
+    raw = str(text or "").strip().lower()
+    if raw in _TIP_CATEGORIES:
+        return raw
+    if raw in ("school", "tutor", "teacher"):
+        return "education"
+    if raw in ("restaurant", "cafe", "pizza", "dining"):
+        return "food"
+    if raw in ("doctor", "dentist", "clinic", "medical"):
+        return "health"
+    return str(text or "").strip()[:120]
+
+
+def _normalize_tip_share_detail(text: str) -> str:
+    raw = str(text or "").strip()
+    m = re.search(
+        r"\b(?:dr\.?\s+)?([\w'.-]+)\s+is\s+(?:a\s+)?"
+        r"(?:great|good|wonderful|amazing|excellent)\s+(\w+)",
+        raw,
+        re.I,
+    )
+    if m:
+        name = str(m.group(1) or "").strip().title()
+        role = str(m.group(2) or "").strip().lower()
+        if not name.lower().startswith("dr"):
+            name = f"Dr. {name}"
+        return f"{name} · {role}"
+    return raw[:500]
+
+
+def _has_where_hint(text: str) -> bool:
+    return bool(_WHERE_IN_DETAIL_RE.search(str(text or "")))
 
 
 def _has_when_hint(text: str) -> bool:
@@ -72,7 +111,7 @@ def _normalize_tip_detail(text: str) -> str:
     if m:
         return m.group(1).strip()[:500]
     m = re.search(
-        r"\b(pediatrician|dentist|doctor|tutor|teacher|plumber|restaurant|pizza)\b",
+        r"\b(pediatrician|dentist|doctor|tutor|teacher|plumber|restaurant|resturant|pizza)\b",
         raw,
         re.I,
     )
@@ -122,11 +161,10 @@ def normalize_size_answer(text: str) -> str:
 
 
 def _linear_from_message(msg: str, slots: dict[str, Any]) -> str:
-    phrase = phrase_linear_intent(msg)
-    if phrase in LOOKING_SHARING_INTENTS:
-        return phrase
     linear = slots_linear_intent(slots)
-    return linear if linear in LOOKING_SHARING_INTENTS else "looking.swap"
+    if linear in LOOKING_SHARING_INTENTS:
+        return linear
+    return "looking.swap"
 
 
 def draft_from_slots(slots: dict[str, Any], *, msg: str) -> dict[str, Any]:
@@ -135,6 +173,8 @@ def draft_from_slots(slots: dict[str, Any], *, msg: str) -> dict[str, Any]:
     detail = str(slots.get("signal_detail") or msg or "").strip()[:500]
     if intent == "tip_seek":
         detail = _normalize_tip_detail(detail)
+    elif intent == "tip_share":
+        detail = _normalize_tip_share_detail(detail or msg)
     elif intent in ("swap_seek", "swap_offer"):
         detail = _normalize_swap_detail(detail)
     category = str(slots.get("signal_category") or "").strip() or None
@@ -180,7 +220,7 @@ def _infer_tip_category(detail: str) -> str | None:
     low = str(detail or "").lower()
     if re.search(r"\b(teacher|tutor|school|lesson|math|reading)\b", low):
         return "education"
-    if re.search(r"\b(pizza|restaurant|food|cafe|coffee|bakery)\b", low):
+    if re.search(r"\b(pizza|restaurant|resturant|food|cafe|coffee|bakery)\b", low):
         return "food"
     if re.search(r"\b(pediatrician|doctor|dentist|therapist|clinic)\b", low):
         return "health"
@@ -202,6 +242,10 @@ def _confirm_prompt(field: str, attempt: int) -> str:
         if attempt <= 1:
             return "When works for you — weekday morning, weekend, something else?"
         return "Any rough timing — mornings, weekends, flexible?"
+    if field == "where_hint":
+        if attempt <= 1:
+            return "I have most of it. **Where, roughly?**"
+        return "A neighborhood or cross-street is enough — or say skip."
     if field == "category":
         if attempt <= 1:
             return "What kind of tip is this — health, food, home, activities, or something else?"
@@ -236,6 +280,9 @@ def needs_confirm(draft: dict[str, Any]) -> tuple[bool, str, str]:
         if not category and not _infer_tip_category(detail):
             field = "category"
             return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
+        if intent == "tip_share" and not draft.get("where_hint") and not _has_where_hint(detail):
+            field = "where_hint"
+            return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
     return False, "", ""
 
 
@@ -264,8 +311,12 @@ def apply_confirm_answer(draft: dict[str, Any], msg: str) -> dict[str, Any]:
     elif field == "when_hint":
         out["when_hint"] = text
         out["detail"] = f"{out['detail']} — {text}".strip(" —")
+    elif field == "where_hint":
+        out["where_hint"] = text
+        if text.lower() not in str(out.get("detail") or "").lower():
+            out["detail"] = f"{out['detail']} — {text}".strip(" —")
     elif field == "category":
-        out["category"] = text[:120]
+        out["category"] = normalize_category_answer(text)
     elif not field and text:
         out["detail"] = text
     inferred = _infer_tip_category(str(out.get("detail") or ""))
@@ -288,7 +339,7 @@ def _ai_assist_confirm(draft: dict[str, Any], msg: str) -> dict[str, Any]:
         return draft
     out = dict(draft)
     linear = str(ai.get("linear_intent") or "").strip()
-    if linear in SIGNAL_INTENT_BY_LINEAR:
+    if linear in SIGNAL_INTENT_BY_LINEAR and pending != "category":
         out = _apply_linear_correction(out, linear)
     value = str(ai.get("value") or "").strip()
     field = str(ai.get("field") or pending).strip()
@@ -302,8 +353,11 @@ def _ai_assist_confirm(draft: dict[str, Any], msg: str) -> dict[str, Any]:
     elif field == "when_hint" and value:
         out["when_hint"] = value
         out["detail"] = f"{out.get('detail', '')} — {value}".strip(" —")
+    elif field == "where_hint" and value:
+        out["where_hint"] = value
+        out["detail"] = f"{out.get('detail', '')} — {value}".strip(" —")
     elif field == "category" and value:
-        out["category"] = value[:120]
+        out["category"] = normalize_category_answer(value)
     out["confirm_field"] = None
     out["phase"] = PHASE_SIGNAL_LISTENING
     return out
@@ -326,8 +380,11 @@ def _force_accept_pending_field(draft: dict[str, Any], msg: str) -> dict[str, An
     elif field == "when_hint":
         out["when_hint"] = text
         out["detail"] = f"{out.get('detail', '')} — {text}".strip(" —")
+    elif field == "where_hint":
+        out["where_hint"] = text
+        out["detail"] = f"{out.get('detail', '')} — {text}".strip(" —")
     elif field == "category":
-        out["category"] = text[:120]
+        out["category"] = normalize_category_answer(text)
     out["confirm_field"] = None
     out["phase"] = PHASE_SIGNAL_LISTENING
     return out
@@ -417,13 +474,21 @@ def should_abandon_signal_draft(
     if phase != PHASE_SIGNAL_CONFIRM:
         return False
     field = str(draft.get("confirm_field") or "")
+    if field == "category":
+        return False
+    if field == "when_hint" and len(text) <= 80:
+        return False
     if field == "stage" and normalize_size_answer(text):
         return False
     if field == "stage" and not _looks_like_size_answer(text):
-        if phrase_linear_intent(text) in LOOKING_SHARING_INTENTS:
+        linear = slots_linear_intent(slots) if slots else None
+        if linear in LOOKING_SHARING_INTENTS and linear != draft.get("linear_intent"):
+            return True
+        if re.search(r"\b(?:for my|my kid|my child)\b", text, re.I):
             return True
         if len(text) > 32:
             return True
+        return False
     if len(text) > 32:
         return True
     linear = slots_linear_intent(slots) if slots else None

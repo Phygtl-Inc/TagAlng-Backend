@@ -13,6 +13,8 @@ LINEAR_INTENTS: frozenset[str] = frozenset({
     "discovery.find_in_block",
     "discovery.find_activities",
     "discovery.block_log",
+    "discovery.show_peer_profile",
+    "discovery.explain_peer_match",
     # Identity
     "identity.add_claim",
     "identity.edit_claim",
@@ -84,6 +86,8 @@ LAYER1_DEFAULT_CONFIDENCE = 0.85
 INTENT_CONFIDENCE: dict[str, float] = {
     "discovery.find_peers": 0.45,
     "discovery.find_by_attrs": 0.55,
+    "discovery.show_peer_profile": 0.55,
+    "discovery.explain_peer_match": 0.55,
     "discovery.find_activities": 0.45,
     "identity.add_claim": 0.55,
     "identity.edit_claim": 0.55,
@@ -106,12 +110,47 @@ INTENT_CONFIDENCE: dict[str, float] = {
 for _li in LOOKING_SHARING_INTENTS:
     INTENT_CONFIDENCE[_li] = 0.55
 
-# Phrase overrides — classifier often confuses discovery intents; regex wins when confident.
-_FIND_PEERS_RE = re.compile(
-    r"\b(?:find (?:people|neighbors|moms?|parents)|people like me|neighbors like me|"
-    r"who(?:'s| is) around(?: me)?|show me nearby|like me on (?:the )?block)\b",
+# Structural hosting vs neighbor-search — NOT open-ended discovery regex.
+_HOSTING_PLAN_RE = re.compile(
+    r"\b(?:want|wanna|plan(?:ning)?|host(?:ing)?|throw|organize|set up)\b.{0,60}"
+    r"\b(?:coffee|brunch|breakfast|meetup|meet-up|playdate|play date|gathering|picnic)\b",
     re.I,
 )
+_FIND_NEIGHBORS_RE = re.compile(
+    r"\b(?:find|show me|looking for)\s+(?:\w+\s+){0,4}"
+    r"(?:moms?|dads?|parents?|neighbors?|people|families)\b",
+    re.I,
+)
+_HOSTING_EVENT_NOUNS = frozenset({
+    "coffee",
+    "brunch",
+    "breakfast",
+    "meetup",
+    "playdate",
+    "gathering",
+    "picnic",
+    "morning",
+})
+_TIP_SHARE_RE = re.compile(
+    r"\b(?:"
+    r"(?:dr\.?\s+)?[\w'.-]+\s+is\s+(?:a\s+)?(?:great|good|wonderful|amazing|excellent)\s+"
+    r"(?:doctor|dentist|pediatrician|tutor|teacher|plumber|therapist|clinic)|"
+    r"(?:i\s+)?(?:recommend|suggest)\s+(?:dr\.?\s+)?[\w'.-]+|"
+    r"try\s+dr\.?\s+[\w'.-]+|"
+    r"my\s+favorite\s+(?:doctor|dentist|restaurant|pizza|place|spot)"
+    r")\b",
+    re.I,
+)
+
+# Phrase overrides — ONLY structural/policy cases where regex is safe.
+# Open-ended intent (find neighbors, swap, tip, heritage filters) is classified by Flash in discovery_slots.
+PHRASE_POLICY_OVERRIDES: frozenset[str] = frozenset({
+    "identity.complete_profile",
+    "identity.edit_claim",
+    "settings.change_name",
+    "discovery.block_log",
+})
+
 _BLOCK_BROWSE_PHRASE = (
     r"what (?:are|is) people (?:looking for|offering|swapping)|"
     r"who(?:'s| is) (?:looking for|offering|swapping)|"
@@ -122,51 +161,13 @@ _BLOCK_BROWSE_PHRASE = (
     r"show me what(?:'s| is) on (?:the )?block|"
     r"what(?:'s| is) on (?:the )?block(?: marketplace)?"
 )
-_FIND_IN_BLOCK_RE = re.compile(
-    rf"\b(?:what(?:'s| is) happening (?:on|in) (?:my )?block|"
-    rf"who(?:'s| is) new (?:on )?(?:my )?block|block status|"
-    rf"what(?:'s| is) (?:going on|new) (?:on|in) (?:my )?block|"
-    rf"{_BLOCK_BROWSE_PHRASE})\b",
-    re.I,
-)
-_TIP_SEEK_RE = re.compile(
-    r"\b(?:know a good|know any good|do you know a good|recommend(?:ation)?(?: for)? a?|"
-    r"looking for a?|need a?|find a?|any tips? for)\b",
-    re.I,
-)
-_SWAP_OFFER_RE = re.compile(
-    r"\b(?:"
-    r"give(?:\s+)?away|giving away|give(?:\s+)?up|giveup|"
-    r"(?:want|wanna|looking) to (?:give(?:\s+)?away|swap|trade)\s+my|"
-    r"(?:want|wanna|looking) to give(?:\s+)?up\s+my|"
-    r"(?:swap|trade) my|offering my|"
-    r"i have (?:a |my )|(?:have|got) (?:a |my ).+ to (?:give|swap|trade|offer)"
-    r")\b",
-    re.I,
-)
-_PHYSICAL_SWAP_ITEM_RE = re.compile(
-    r"\b(?:rain\s*coats?|coats?|boots?|jacket|pants|dress|shirt|onesie|"
-    r"laptop|bicycle|bikes?|stroller|furniture|crib|wagon|scooter|diaper)\b",
-    re.I,
-)
-_SWAP_SEEK_RE = re.compile(
-    r"\b(?:looking for|need(?: a)?|want(?: a)?)\b",
-    re.I,
-)
-_TIP_SHARE_RE = re.compile(
-    r"\b(?:i recommend|my recommendation|"
-    r"(?:dr\.?|doctor)\s+[\w.]+\s+is\s+(?:\w+\s+)*(?:great|good|awesome|the best)|"
-    r"(?:great|good|awesome)\s+(?:pediatrician|dentist|doctor|tutor|teacher|plumber|restaurant)|"
-    r"i have a tip|here'?s a tip|tip for you|try\s+(?:dr\.?|doctor))\b",
-    re.I,
-)
 _BLOCK_LOG_RE = re.compile(
-    r"\b(?:show (?:my )?block log|block log|who matched(?: with me)?|what matched|"
+    r"\b(?:show (?:my )?block logs?|block logs?|who matched(?: with me)?|what matched|"
     r"block radar|my matches on (?:the )?block)\b",
     re.I,
 )
 _CHANGE_NAME_RE = re.compile(
-    r"\b(?:change my name|update my name|rename me|call me)\b",
+    r"\b(?:change my name|update my name|rename me|call me|my name is|add my name)\b",
     re.I,
 )
 _EDIT_CLAIM_RE = re.compile(
@@ -176,12 +177,6 @@ _EDIT_CLAIM_RE = re.compile(
 _PROFILE_ACK_RE = re.compile(
     r"^\s*(?:ok\s+)?(?:that'?s me|that is me|sounds? good|looks? good|correct|"
     r"good to go|yes that'?s (?:me|right))[\s!.?]*$",
-    re.I,
-)
-_FIND_BY_ATTRS_RE = re.compile(
-    r"\bfind\b(?:(?!people like me|neighbors like me).)*\b(?:"
-    r"mom|dad|parent|brazilian|pakistani|portuguese|toddler|toddlers|heritage|speak|"
-    r"language|runner|christian|latino|mexican)\b",
     re.I,
 )
 _ATTR_FILTER_STOP = frozenset({
@@ -203,9 +198,9 @@ def is_block_activity_browse(msg: str) -> bool:
 def phrase_linear_intent(msg: str) -> str | None:
     """Narrow policy overrides only — NOT open-ended routing.
 
-    Flash classifies looking.swap / meet / tip and all item phrasing.
-    Regex here is only for cases where a wrong AI label causes bad side effects
-    (claim pollution, stale peer cards, discovery vs identity confusion).
+    Flash (discovery_slots) classifies find neighbors, swap/meet/tip, heritage filters,
+    and all natural phrasing. Regex here is only for structural cases where a wrong AI
+    label causes bad side effects (claim pollution, block-log vs marketplace confusion).
     """
     text = str(msg or "").strip()
     if not text:
@@ -216,27 +211,8 @@ def phrase_linear_intent(msg: str) -> str | None:
         return "identity.edit_claim"
     if _CHANGE_NAME_RE.search(text):
         return "settings.change_name"
-    if _BLOCK_LOG_RE.search(text):
+    if _BLOCK_LOG_RE.search(text) and not is_block_activity_browse(text):
         return "discovery.block_log"
-    if _FIND_IN_BLOCK_RE.search(text):
-        return "discovery.find_in_block"
-    if _FIND_PEERS_RE.search(text):
-        return "discovery.find_peers"
-    if _FIND_BY_ATTRS_RE.search(text):
-        return "discovery.find_by_attrs"
-    if _SWAP_OFFER_RE.search(text):
-        return "sharing.swap"
-    if (
-        _SWAP_SEEK_RE.search(text)
-        and _PHYSICAL_SWAP_ITEM_RE.search(text)
-        and not _SWAP_OFFER_RE.search(text)
-    ):
-        return "looking.swap"
-    if _TIP_SEEK_RE.search(text) and not _TIP_SHARE_RE.search(text):
-        if not _PHYSICAL_SWAP_ITEM_RE.search(text):
-            return "looking.tip"
-    if _TIP_SHARE_RE.search(text):
-        return "sharing.tip"
     return None
 
 
@@ -293,34 +269,137 @@ def slots_linear_intent(slots: dict[str, Any]) -> str | None:
     return None
 
 
+def _apply_discovery_linear_slots(out: dict[str, Any], linear: str, *, msg: str) -> None:
+    """Derive goal/attr_filter from AI linear_intent (not regex)."""
+    if linear == "discovery.find_peers":
+        out.setdefault("goal", "peers")
+        out["in_discovery"] = True
+    elif linear == "discovery.find_by_attrs":
+        out.setdefault("goal", "peers")
+        out["in_discovery"] = True
+        filt = str(out.get("attr_filter") or "").strip() or normalize_attr_filter_text(msg, out)
+        if filt:
+            out["attr_filter"] = filt
+    elif linear == "discovery.find_in_block":
+        out.setdefault("goal", "peers")
+        out["in_discovery"] = True
+    elif linear == "discovery.block_log":
+        out["goal"] = "show_block_log"
+        out["in_discovery"] = True
+    elif linear == "social.propose_intro":
+        out["goal"] = "propose_intro"
+        out["in_discovery"] = True
+    elif linear in ("identity.edit_claim", "identity.complete_profile", "identity.show_my_profile"):
+        out["goal"] = "chat"
+        out["in_discovery"] = False
+    elif linear == "discovery.show_peer_profile":
+        out["goal"] = "chat"
+        out["in_discovery"] = False
+    elif linear == "identity.add_claim":
+        out["goal"] = "chat"
+        out["in_discovery"] = False
+    elif linear == "settings.change_name":
+        out["goal"] = "chat"
+        out["in_discovery"] = False
+
+
+def utterance_indicates_hosting_plan(msg: str) -> bool:
+    """Structural event-planning phrasing — not neighbor trait search."""
+    text = str(msg or "").strip()
+    if not text or _FIND_NEIGHBORS_RE.search(text):
+        return False
+    if utterance_indicates_tip_share(text):
+        return False
+    return bool(_HOSTING_PLAN_RE.search(text))
+
+
+def utterance_indicates_tip_share(msg: str) -> bool:
+    """Structural recommendation phrasing — not hosting or neighbor search."""
+    text = str(msg or "").strip()
+    if not text or _FIND_NEIGHBORS_RE.search(text):
+        return False
+    return bool(_TIP_SHARE_RE.search(text))
+
+
+def slots_indicate_tip_share_signal(slots: dict[str, Any]) -> bool:
+    signal_intent = str(slots.get("signal_intent") or "").strip().lower()
+    if signal_intent == "tip_share":
+        return True
+    linear = normalize_linear_intent(slots.get("linear_intent"))
+    return linear == "sharing.tip"
+
+
+def slots_indicate_hosting_signal(slots: dict[str, Any]) -> bool:
+    """AI slots (or reconciled hosting) — hosting/meetup save, not peer discovery."""
+    signal_intent = str(slots.get("signal_intent") or "").strip().lower()
+    if signal_intent == "host_meet":
+        return True
+    linear = normalize_linear_intent(slots.get("linear_intent"))
+    return linear == "sharing.host"
+
+
+def reconcile_tip_share_signal(out: dict[str, Any], *, msg: str) -> None:
+    """Recommendation share — wins over misclassified hosting or peer discovery."""
+    tip = utterance_indicates_tip_share(msg) or slots_indicate_tip_share_signal(out)
+    if not tip:
+        return
+    if utterance_indicates_hosting_plan(msg) and not utterance_indicates_tip_share(msg):
+        return
+    out.pop("attr_filter", None)
+    out["goal"] = "save_signal"
+    out["in_discovery"] = False
+    out["signal_intent"] = "tip_share"
+    out["linear_intent"] = "sharing.tip"
+    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    detail = str(out.get("signal_detail") or msg or "").strip()[:500]
+    if detail:
+        out["signal_detail"] = detail
+
+
+def reconcile_hosting_peer_slot_conflict(out: dict[str, Any], *, msg: str) -> None:
+    """When Flash mixes heritage attr_filter with hosting, hosting wins."""
+    if utterance_indicates_tip_share(msg) or slots_indicate_tip_share_signal(out):
+        return
+    hosting = slots_indicate_hosting_signal(out) or utterance_indicates_hosting_plan(msg)
+    if not hosting:
+        return
+    out.pop("attr_filter", None)
+    out["goal"] = "save_signal"
+    out["in_discovery"] = False
+    out["signal_intent"] = "host_meet"
+    out["linear_intent"] = "sharing.host"
+    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    detail = str(out.get("signal_detail") or msg or "").strip()[:500]
+    if detail:
+        out["signal_detail"] = detail
+    when = str(out.get("signal_when") or "").strip()
+    if not when:
+        from app.signal_capture import _WHEN_HINT
+
+        m = _WHEN_HINT.search(str(msg or ""))
+        if m:
+            out["signal_when"] = m.group(0).strip()
+
+
 def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
     """Derive linear_intent, goal, and signal_intent for handlers."""
     out = dict(slots)
     phrase = phrase_linear_intent(msg) if msg else None
-    if phrase:
+    ai_linear = normalize_linear_intent(out.get("linear_intent"))
+    ai_conf = float(out.get("confidence", 0.0))
+
+    if phrase in PHRASE_POLICY_OVERRIDES:
         out["linear_intent"] = phrase
-        out["confidence"] = max(float(out.get("confidence", 0.0)), 0.9)
-        if phrase == "discovery.find_peers":
-            out["goal"] = "peers"
-            out["in_discovery"] = True
-        elif phrase == "discovery.find_by_attrs":
-            out["goal"] = "peers"
-            out["in_discovery"] = True
-            filt = normalize_attr_filter_text(msg, out)
-            if filt:
-                out["attr_filter"] = filt
-        elif phrase == "discovery.find_in_block":
-            out["goal"] = "peers"
-            out["in_discovery"] = True
-        elif phrase == "discovery.block_log":
-            out["goal"] = "show_block_log"
-            out["in_discovery"] = True
-        elif phrase in ("identity.edit_claim", "identity.complete_profile"):
-            out["goal"] = "chat"
-            out["in_discovery"] = False
-        elif phrase == "settings.change_name":
-            out["goal"] = "chat"
-            out["in_discovery"] = False
+        out["confidence"] = max(ai_conf, 0.9)
+        _apply_discovery_linear_slots(out, phrase, msg=msg)
+    elif ai_linear:
+        out["linear_intent"] = ai_linear
+        _apply_discovery_linear_slots(out, ai_linear, msg=msg)
+    elif phrase:
+        out["linear_intent"] = phrase
+        out["confidence"] = max(ai_conf, 0.85)
+        _apply_discovery_linear_slots(out, phrase, msg=msg)
+
     linear = slots_linear_intent(out)
     if linear:
         out["linear_intent"] = linear
@@ -332,6 +411,17 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
             if li == linear:
                 out.setdefault("goal", goal)
                 break
+    if str(out.get("goal") or "") == "save_signal":
+        sig = str(out.get("signal_intent") or "").strip().lower()
+        if sig:
+            for li, si in SIGNAL_INTENT_BY_LINEAR.items():
+                if si == sig:
+                    out.setdefault("linear_intent", li)
+                    break
+    reconcile_tip_share_signal(out, msg=msg)
+    reconcile_hosting_peer_slot_conflict(out, msg=msg)
+    if utterance_indicates_tip_share(msg):
+        reconcile_tip_share_signal(out, msg=msg)
     return out
 
 
@@ -361,6 +451,8 @@ def slots_want_layer1_handling(
         "settings.notification_prefs",
         "discovery.find_in_block",
         "discovery.block_log",
+        "discovery.show_peer_profile",
+        "discovery.explain_peer_match",
     ):
         return intent_confidence_met(enriched, linear)
     goal = str(enriched.get("goal") or "none")

@@ -12,6 +12,7 @@ from app.ui_intent import (
     UI_INTENT_OFFER_NEIGHBOR_INTRO,
     UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
     UI_INTENT_SHOW_PENDING_INTROS,
+    UI_INTENT_SIGNAL_SAVED,
     derive_ui_intent,
 )
 
@@ -39,6 +40,32 @@ class TestDeriveUiIntent(unittest.TestCase):
         self.assertEqual(
             derive_ui_intent({"routing_phase": "preview"}, peer_count=2),
             UI_INTENT_SHOW_PEER_PREVIEW,
+        )
+
+    def test_preview_peers_beat_activities_when_peer_intent(self) -> None:
+        from app.ui_intent import UI_INTENT_SHOW_ACTIVITY_PREVIEW
+
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "routing_phase": "preview",
+                    "active_intent": "discovery.find_by_attrs",
+                },
+                peer_count=3,
+                activity_count=2,
+            ),
+            UI_INTENT_SHOW_PEER_PREVIEW,
+        )
+        self.assertEqual(
+            derive_ui_intent(
+                {
+                    "routing_phase": "preview",
+                    "active_intent": "discovery.find_activities",
+                },
+                peer_count=3,
+                activity_count=2,
+            ),
+            UI_INTENT_SHOW_ACTIVITY_PREVIEW,
         )
 
     def test_verify_signup_otp_on_preview_uses_collect_otp(self) -> None:

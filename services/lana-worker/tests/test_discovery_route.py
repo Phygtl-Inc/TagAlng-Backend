@@ -8,7 +8,11 @@ from app.discovery_route import (
     PHASE_NEED_IDENTITY,
     PHASE_NEED_ZIP,
     PHASE_PREVIEW,
+    _effective_discovery_goal,
+    _intro_should_use_block_log,
+    _try_block_log_intro_turn,
     _try_neighbor_intro_turn,
+    _try_pending_heritage_turn,
     extract_zip,
     fetch_blocks_for_zip,
     format_preview_message,
@@ -18,6 +22,7 @@ from app.discovery_route import (
     wants_more_peer_detail,
     wants_verify_help,
 )
+from app.intro_proposal import pick_block_log_entry_for_intro
 from app.lana_dispatch import lana_unified_opening
 
 
@@ -35,10 +40,31 @@ class TestDiscoveryHelpers(unittest.TestCase):
     def test_wants_more(self) -> None:
         self.assertTrue(wants_more_peer_detail("show me their names"))
         self.assertFalse(wants_more_peer_detail("ok whats my name"))
+        self.assertFalse(wants_more_peer_detail("show me identity claims of kashaf"))
+        self.assertFalse(wants_more_peer_detail("how is it 100% match"))
 
     def test_wants_verify_help(self) -> None:
         self.assertTrue(wants_verify_help("How can I verify"))
         self.assertTrue(wants_verify_help("verify my phone please"))
+
+    def test_effective_goal_clears_stale_activities(self) -> None:
+        session: dict = {"discovery_goal": "activities"}
+        slots = {"goal": "chat", "confidence": 0.9}
+        goal = _effective_discovery_goal("my name is Zane", session, slots)
+        self.assertEqual(goal, "chat")
+        self.assertNotIn("discovery_goal", session)
+
+    def test_effective_goal_pivots_on_save_signal(self) -> None:
+        session: dict = {"discovery_goal": "activities"}
+        slots = {
+            "goal": "save_signal",
+            "confidence": 0.9,
+            "linear_intent": "looking.swap",
+            "signal_intent": "swap_seek",
+        }
+        goal = _effective_discovery_goal("looking for a toy car", session, slots)
+        self.assertEqual(goal, "save_signal")
+        self.assertNotIn("discovery_goal", session)
 
 
 class TestDiscoveryRouting(unittest.TestCase):
@@ -1204,6 +1230,207 @@ class TestPeerTraitAndRefine(unittest.TestCase):
         self.assertIn("brazilian", reply.lower())
         self.assertEqual(ctx.get("active_intent"), "discovery.find_by_attrs")
         self.assertEqual(len(peers), 1)
+
+    def test_attr_refine_ignores_casual_i_want_pizza(self) -> None:
+        from app.discovery_route import _try_attr_refine_turn
+
+        result = _try_attr_refine_turn(
+            msg="I want a pizza",
+            slots={},
+            session_ctx={
+                "peer_matches": [{"matching_peer_label": "Mom", "preview": True}],
+                "routing_phase": PHASE_PREVIEW,
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            phase=PHASE_PREVIEW,
+        )
+        self.assertIsNone(result)
+
+
+class TestHeritageIntroRouting(unittest.TestCase):
+    def test_pending_heritage_yields_to_intro_request(self) -> None:
+        pending = {
+            "from_label": "American",
+            "label": "Brazilian Heritage",
+            "claim": {
+                "concept": "brazilian_heritage",
+                "label": "Brazilian Heritage",
+                "confidence": 0.9,
+                "bucket": "heritage",
+            },
+        }
+        result = _try_pending_heritage_turn(
+            msg="introduce me to Natasha",
+            session_ctx={"pending_heritage_change": pending},
+            user_id="user-1",
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+        )
+        self.assertIsNone(result)
+
+    def test_pending_heritage_still_asks_on_ambiguous_reply(self) -> None:
+        pending = {
+            "from_label": "American",
+            "label": "Brazilian Heritage",
+            "claim": {
+                "concept": "brazilian_heritage",
+                "label": "Brazilian Heritage",
+                "confidence": 0.9,
+                "bucket": "heritage",
+            },
+        }
+        result = _try_pending_heritage_turn(
+            msg="maybe later",
+            session_ctx={"pending_heritage_change": pending},
+            user_id="user-1",
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+        )
+        self.assertIsNotNone(result)
+        reply, _, _, _ = result
+        self.assertIn("heritage", reply.lower())
+
+    def test_pending_heritage_yields_to_attr_peer_search(self) -> None:
+        pending = {
+            "from_label": "Brazilian Heritage",
+            "label": "American Heritage",
+            "claim": {
+                "concept": "american_heritage",
+                "label": "American Heritage",
+                "confidence": 0.9,
+                "bucket": "heritage",
+            },
+        }
+        result = _try_pending_heritage_turn(
+            msg="show me american moms",
+            session_ctx={"pending_heritage_change": pending},
+            user_id="user-1",
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+            slots={"linear_intent": "discovery.find_by_attrs", "goal": "peers", "confidence": 0.9},
+        )
+        self.assertIsNone(result)
+
+    def test_pending_heritage_yields_to_find_me_american_moms(self) -> None:
+        pending = {
+            "from_label": "Brazilian Heritage",
+            "label": "American Heritage",
+            "claim": {
+                "concept": "american_heritage",
+                "label": "American Heritage",
+                "confidence": 0.9,
+                "bucket": "heritage",
+            },
+        }
+        result = _try_pending_heritage_turn(
+            msg="i said find me american moms",
+            session_ctx={"pending_heritage_change": pending},
+            user_id="user-1",
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+            slots={
+                "linear_intent": "discovery.find_by_attrs",
+                "goal": "peers",
+                "attr_filter": "american moms",
+                "confidence": 0.9,
+            },
+        )
+        self.assertIsNone(result)
+
+
+class TestBlockLogIntroRouting(unittest.TestCase):
+    def test_pick_block_log_entry_for_intro_index(self) -> None:
+        entries = [{"id": "e1"}, {"id": "e2"}, {"id": "e3"}]
+        self.assertEqual(
+            pick_block_log_entry_for_intro(entries, msg="introduce me to #2")["id"],
+            "e2",
+        )
+
+    def test_intro_should_use_block_log_after_block_log_turn(self) -> None:
+        ctx = {"active_intent": "discovery.block_log", "block_log_entries": [{"id": "e1"}]}
+        self.assertTrue(_intro_should_use_block_log("introduce me to #1", ctx, None))
+        self.assertTrue(
+            _intro_should_use_block_log(
+                "introduce me to neighbour regarding the swap",
+                ctx,
+                None,
+            )
+        )
+        self.assertFalse(
+            _intro_should_use_block_log("introduce me to Kashaf", ctx, None),
+        )
+
+    @patch("app.discovery_route.propose_neighbor_intro")
+    @patch("app.discovery_route.fetch_my_block_log")
+    @patch("app.discovery_route.block_log_take_action")
+    def test_block_log_intro_targets_swap_peer_not_identity_card(
+        self, mock_action, mock_log, mock_propose
+    ) -> None:
+        mock_log.return_value = [
+            {
+                "id": "entry-1",
+                "entry_id": "entry-1",
+                "peer_user_id": "swap-peer-1",
+                "peer_preview_label": "A neighbor on your block",
+                "match_type": "inbound_for_my_seek",
+                "match_strength": 0.76,
+                "peer_signal_detail": "kid bicycle",
+                "my_signal_detail": "bicycle for my kid",
+                "peer_signal_intent": "swap_offer",
+                "my_signal_intent": "swap_seek",
+                "match_reasons": ["kid bicycle matches your ask"],
+            }
+        ]
+        mock_propose.return_value = {
+            "intro_id": "intro-swap-1",
+            "candidate_user_id": "swap-peer-1",
+        }
+        result = _try_block_log_intro_turn(
+            msg="introduce me to #1",
+            session_ctx={"active_intent": "discovery.block_log"},
+            user_jwt="jwt",
+            phone_verified=True,
+            phase=PHASE_PREVIEW,
+            history=None,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        self.assertIn("introduced", reply.lower())
+        mock_propose.assert_called_once()
+        self.assertEqual(mock_propose.call_args.kwargs["candidate_user_id"], "swap-peer-1")
+        self.assertEqual(ctx.get("active_intent"), "social.propose_intro")
+        self.assertFalse(ctx.get("peer_matches"))
+
+    @patch("app.discovery_route.try_propose_intro_from_preview")
+    @patch("app.discovery_route._preview_peers_with_ids")
+    def test_neighbor_intro_skipped_when_block_log_context(
+        self, mock_preview, mock_intro
+    ) -> None:
+        mock_preview.return_value = [
+            {"peer_user_id": "peer-1", "nickname": "Natasha", "matching_peer_label": "Mom"},
+        ]
+        result = _try_neighbor_intro_turn(
+            msg="introduce me to #1",
+            session_ctx={
+                "routing_phase": PHASE_PREVIEW,
+                "active_intent": "discovery.block_log",
+                "block_log_entries": [{"entry_id": "e1"}],
+            },
+            ctx_base={"routing_phase": PHASE_PREVIEW},
+            user_jwt="jwt",
+            block_id="block-1",
+            phone_verified=True,
+            goal="propose_intro",
+            slots={"goal": "propose_intro", "confidence": 0.95},
+        )
+        self.assertIsNone(result)
+        mock_intro.assert_not_called()
 
 
 class TestUnifiedOpening(unittest.TestCase):

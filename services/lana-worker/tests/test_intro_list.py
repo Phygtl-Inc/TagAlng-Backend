@@ -3,10 +3,12 @@ from unittest.mock import patch
 
 from app.intro_list import (
     INTENT_LIST_INTROS,
+    attach_pending_intros_after_propose,
     fetch_my_intros,
     format_duplicate_intro_reply,
     format_intros_list_reply,
     infer_intro_direction,
+    intro_row_from_proposal,
     normalize_intro_row,
     stamp_pending_intros_ctx,
 )
@@ -109,6 +111,26 @@ class TestIntroList(unittest.TestCase):
         self.assertEqual(ctx["active_intent"], INTENT_LIST_INTROS)
         self.assertEqual(len(ctx["pending_intros"]), 1)
         self.assertEqual(derive_ui_intent(ctx), UI_INTENT_SHOW_PENDING_INTROS)
+
+    def test_intro_row_from_proposal(self) -> None:
+        row = intro_row_from_proposal(
+            {"intro_id": "i1", "candidate_user_id": "u2", "match_reason": "Both moms"},
+            {"nickname": "Ada", "matching_peer_label": "Block Resident"},
+        )
+        self.assertEqual(row["intro_id"], "i1")
+        self.assertEqual(row["direction"], "sent")
+        self.assertEqual(row["nickname"], "Ada")
+
+    def test_attach_pending_intros_after_propose_fallback(self) -> None:
+        ctx: dict = {"active_intent": "social.propose_intro"}
+        attach_pending_intros_after_propose(
+            ctx,
+            user_jwt="jwt",
+            intro={"intro_id": "i1", "candidate_user_id": "u2", "match_reason": "Swap match"},
+            peer={"nickname": "Ada"},
+        )
+        self.assertEqual(len(ctx["pending_intros"]), 1)
+        self.assertEqual(ctx["pending_intros"][0]["nickname"], "Ada")
 
     @patch("app.intro_list.call_rpc")
     def test_fetch_my_intros(self, mock_rpc) -> None:

@@ -19,6 +19,7 @@ UI_INTENT_SIGN_OUT = "sign_out"
 UI_INTENT_OFFER_NEIGHBOR_INTRO = "offer_neighbor_intro"
 UI_INTENT_PROPOSE_NEIGHBOR_INTRO = "propose_neighbor_intro"
 UI_INTENT_SHOW_PENDING_INTROS = "show_pending_intros"
+UI_INTENT_RESPOND_PENDING_INTRO = "respond_pending_intro"
 UI_INTENT_SHOW_BLOCK_LOG = "show_block_log"
 UI_INTENT_SIGNAL_SAVED = "signal_saved"
 UI_INTENT_SHOW_IDENTITY_PROFILE = "show_identity_profile"
@@ -34,6 +35,15 @@ PEER_SURFACE_UI_INTENTS = frozenset({
     UI_INTENT_SHOW_PEER_PREVIEW,
     UI_INTENT_OFFER_NEIGHBOR_INTRO,
     UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
+})
+
+# Peer-match turns — FE should render cards when peer_matches is populated.
+PEER_DISCOVERY_ACTIVE_INTENTS = frozenset({
+    "discovery.find_peers",
+    "discovery.find_by_attrs",
+    "discovery.find_in_block",
+    "discovery.show_peer_profile",
+    "discovery.explain_peer_match",
 })
 
 _PHASE_TO_INTENT: dict[str, str] = {
@@ -74,24 +84,28 @@ def derive_ui_intent(
     if ctx.get("intro_proposal"):
         return UI_INTENT_PROPOSE_NEIGHBOR_INTRO
 
-    if ctx.get("pending_intro_offer"):
-        return UI_INTENT_OFFER_NEIGHBOR_INTRO
-
     active = str(ctx.get("active_intent") or "").strip()
-
-    if active == _INTENT_LIST_INTROS and ctx.get("pending_intros") is not None:
-        return UI_INTENT_SHOW_PENDING_INTROS
-
-    if active == _INTENT_BLOCK_LOG:
-        return UI_INTENT_SHOW_BLOCK_LOG
-
-    if active == _INTENT_SHOW_PROFILE and ctx.get("identity_profile") is not None:
-        return UI_INTENT_SHOW_IDENTITY_PROFILE
 
     if ctx.get("signal_saved") and (
         active.startswith(_SIGNAL_ACTIVE_PREFIXES) or active == "signal.capture"
     ):
         return UI_INTENT_SIGNAL_SAVED
+
+    if active == _INTENT_BLOCK_LOG and ctx.get("block_log_entries") is not None:
+        return UI_INTENT_SHOW_BLOCK_LOG
+
+    if active == _INTENT_LIST_INTROS and ctx.get("pending_intros") is not None:
+        return UI_INTENT_SHOW_PENDING_INTROS
+
+    # Respond beats stale offer — only while an intro is actually waiting on the user.
+    if ctx.get("pending_intro_respond"):
+        return UI_INTENT_RESPOND_PENDING_INTRO
+
+    if ctx.get("pending_intro_offer"):
+        return UI_INTENT_OFFER_NEIGHBOR_INTRO
+
+    if active == _INTENT_SHOW_PROFILE and ctx.get("identity_profile") is not None:
+        return UI_INTENT_SHOW_IDENTITY_PROFILE
 
     if ctx.get("signal_draft"):
         return UI_INTENT_COLLECT_SIGNAL_DETAIL
@@ -123,10 +137,14 @@ def derive_ui_intent(
         return UI_INTENT_COLLECT_PHONE
 
     if phase == "preview":
-        if activity_count > 0:
+        if peer_count > 0 and active in PEER_DISCOVERY_ACTIVE_INTENTS:
+            return UI_INTENT_SHOW_PEER_PREVIEW
+        if activity_count > 0 and active == "discovery.find_activities":
             return UI_INTENT_SHOW_ACTIVITY_PREVIEW
         if peer_count > 0:
             return UI_INTENT_SHOW_PEER_PREVIEW
+        if activity_count > 0:
+            return UI_INTENT_SHOW_ACTIVITY_PREVIEW
         return UI_INTENT_CHAT
 
     if ctx.get("requires_phone_verification"):

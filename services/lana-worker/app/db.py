@@ -8,7 +8,10 @@ from app.auth import service_client
 from app.turn_surfaces import TURN_SCOPED_SURFACES
 
 # Keys set to None in a turn ctx are removed from persisted session (shallow merge otherwise keeps stale values).
-_CTX_NULL_DELETES = frozenset({"signal_draft", *TURN_SCOPED_SURFACES})
+_INTRO_STATE_NULL_DELETES = frozenset({"pending_intro_respond", "pending_intro_offer"})
+_CTX_NULL_DELETES = frozenset(
+    {"signal_draft", *_INTRO_STATE_NULL_DELETES, *TURN_SCOPED_SURFACES}
+)
 
 
 def merge_session_context(

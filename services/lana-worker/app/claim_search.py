@@ -10,6 +10,9 @@ from app.layer1_intents import attr_filter_tokens, normalize_attr_filter_text
 
 # bucket → canonical terms + synonyms for query parsing
 _HERITAGE: dict[str, list[str]] = {
+    "american": ["american", "america", "usa"],
+    "british": ["british", "britain", "uk", "english"],
+    "canadian": ["canadian", "canada"],
     "pakistani": ["pakistani", "pakistan"],
     "brazilian": ["brazilian", "brazil", "latina", "latino"],
     "italian": ["italian", "italy"],

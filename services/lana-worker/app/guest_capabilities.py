@@ -7,6 +7,12 @@ from typing import Any
 
 from app.supabase_rpc import call_rpc
 
+_HOST_RE = re.compile(
+    r"\b(host|plan|create|start|organize|set up)\b.*\b(activity|event|meetup|gathering|"
+    r"playdate|brunch|coffee)\b"
+    r"|\b(host an activity|plan something|host something)\b",
+    re.I,
+)
 _PEER_FIND_RE = re.compile(
     r"\b(find|show|match|meet|connect with|introduce me to|people|neighbors?|neighbours?|fellows|"
     r"moms?|dads?|parents?|users)\b.*\b(like me|similar|same|my vibe|on the block|nearby|near me|in my block)\b"
@@ -16,12 +22,6 @@ _PEER_FIND_RE = re.compile(
     r"|\bnew here\b.*\b(find|meet|people|neighbors|neighbours|users)\b"
     r"|\b(find|show)\b.*\b(me )?(people|users|neighbors|neighbours)\b"
     r"|\b(i wanna|i want to)\b.*\bmeet\b.*\b(neighbors|neighbours|people)\b",
-    re.I,
-)
-_HOST_RE = re.compile(
-    r"\b(host|plan|create|start|organize|set up)\b.*\b(activity|event|meetup|gathering|"
-    r"playdate|brunch|coffee)\b"
-    r"|\b(host an activity|plan something|host something)\b",
     re.I,
 )
 

@@ -20,6 +20,7 @@ from app.orchestrator.router import route_turn
 from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
 from app.orchestrator.tools import execute_tool
 from app.context import load_user_context
+from app.turn_surfaces import clear_turn_surfaces
 from app.turn_timing import TurnTimer
 from app.guest_capabilities import wants_host_activity
 from app.orchestrator.slots import has_partial_event_args
@@ -81,6 +82,7 @@ def run_turn(
     timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     timer = timer or TurnTimer()
+    clear_turn_surfaces(session_ctx)
     with timer.stage("load_user_context"):
         ctx_pack = load_user_context(user_id)
     block_id = ctx_pack.get("home_block_id")

@@ -14,6 +14,7 @@ import {
   type LanaTurn,
   type LanaUiIntent,
   type ActivityPreviewRow,
+  type BlockLogEntryRow,
   type PeerMatchRow,
 } from '@/lib/lana-client';
 import {
@@ -101,6 +102,7 @@ export default function MeetLanaPage() {
   const [uiIntent, setUiIntent] = useState<LanaUiIntent>('chat');
   const [loginPhoneHint, setLoginPhoneHint] = useState<string | null>(null);
   const [peerMatches, setPeerMatches] = useState<PeerMatchRow[]>([]);
+  const [blockLogEntries, setBlockLogEntries] = useState<BlockLogEntryRow[]>([]);
   const [activityPreviews, setActivityPreviews] = useState<ActivityPreviewRow[]>([]);
   const [lastOrchestrator, setLastOrchestrator] = useState<boolean | null>(null);
   const [signedInUser, setSignedInUser] = useState<DemoAuthProfile | null>(null);
@@ -142,6 +144,7 @@ export default function MeetLanaPage() {
     }
     if (turn.login_phone) setLoginPhoneHint(turn.login_phone);
     setPeerMatches(turn.peer_matches ?? []);
+    setBlockLogEntries(turn.block_log_entries ?? []);
     setActivityPreviews(turn.activity_previews ?? []);
     if (typeof turn.orchestrator === 'boolean') setLastOrchestrator(turn.orchestrator);
 
@@ -717,7 +720,37 @@ export default function MeetLanaPage() {
               </div>
             )}
 
-            {peerMatches.length > 0 && activityPreviews.length === 0 && !showJointCard && (
+            {blockLogEntries.length > 0 && !showJointCard && (
+              <div className="meet-lana-peer-preview-list">
+                {blockLogEntries.slice(0, 6).map((row, i) => {
+                  const label =
+                    row.match_summary ||
+                    row.match_reasons?.[0] ||
+                    row.peer_signal_detail ||
+                    'Block match';
+                  const pct =
+                    row.match_strength != null
+                      ? ` · ${Math.round(row.match_strength * 100)}%`
+                      : '';
+                  return (
+                    <div key={`bl-${row.entry_id || i}`} className="meet-lana-peer-card meet-lana-blocklog-card">
+                      <div className="meet-lana-peer-avatar meet-lana-activity-icon">⇄</div>
+                      <div>
+                        <div className="meet-lana-peer-name">
+                          {row.peer_preview_label || `Match ${i + 1}`}
+                        </div>
+                        <div className="meet-lana-peer-meta">
+                          {label}
+                          {pct}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {peerMatches.length > 0 && activityPreviews.length === 0 && blockLogEntries.length === 0 && !showJointCard && (
               <div className="meet-lana-peer-preview-list">
                 {peerMatches.slice(0, 3).map((p, i) => (
                   <div key={`peer-${i}`} className="meet-lana-peer-card">
