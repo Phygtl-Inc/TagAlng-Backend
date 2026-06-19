@@ -28,6 +28,8 @@ UI_INTENT_COLLECT_EVENT_DETAIL = "collect_event_detail"
 UI_INTENT_EVENT_CREATED = "event_created"
 UI_INTENT_COLLECT_ITEM_DETAIL = "collect_item_detail"
 UI_INTENT_ITEM_LISTED = "item_listed"
+UI_INTENT_COLLECT_TIP_DETAIL = "collect_tip_detail"
+UI_INTENT_TIP_LISTED = "tip_listed"
 
 _INTENT_BLOCK_LOG = "discovery.block_log"
 _INTENT_LIST_INTROS = "social.list_intros"
@@ -99,6 +101,12 @@ def derive_ui_intent(
         return UI_INTENT_ITEM_LISTED
     if ctx.get("pass_along_active"):
         return UI_INTENT_COLLECT_ITEM_DETAIL
+
+    # In-chat "share a tip" — the tip card while capturing, listed card once passed along.
+    if ctx.get("tip_listed_now"):
+        return UI_INTENT_TIP_LISTED
+    if ctx.get("tip_share_active"):
+        return UI_INTENT_COLLECT_TIP_DETAIL
 
     active = str(ctx.get("active_intent") or "").strip()
 

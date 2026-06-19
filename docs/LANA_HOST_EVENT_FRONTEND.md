@@ -285,3 +285,57 @@ notifies them. The photo rides along on the match.
 - Render `item_draft.chips[]` (colored, tap → `fix:<field>`) + `item_draft.suggestions[]`
   (tap → text). All backend-driven.
 - Photo: `POST /lana/sessions/{id}/signal-photo` (multipart) → then send `list it`.
+
+---
+
+# Lana — Share a Tip / Recommendation (in-chat) · Frontend Integration
+
+_Added: 2026-06-19_
+
+The **"A tip to share"** CTA opens an in-chat recommendation capture, same patterns as
+pass-along. Saved as a `tip_share` so neighbors asking for that category get matched.
+
+## 1. Entry
+```ts
+sendMessage(sessionId, "I have a tip to share", "tip_share")
+```
+Lana asks what to recommend → extracts name/category/trait → asks the missing piece
+(who/where, with **real nearby places from Google** when it's place-based) → shows an
+assembled card with a **dual CTA**.
+
+## 2. `ui_intent`
+- `collect_tip_detail` → render the tip card (`tip_draft`).
+- `tip_listed` → render the "on your block" confirmation.
+
+## 3. `tip_draft`
+```jsonc
+"tip_draft": {
+  "name": "Dr. Sarah",
+  "category": "pediatric dentist",
+  "trait": "twin-friendly",
+  "locality": "Lake Nona",
+  "chips": [ { "label": "★ Recommendation", "tone": "amber", "field": "category" }, … ],
+  "suggestions": ["Lake Nona Family Park", "Crescent Park"],  // Places results OR option chips
+  "ready": false,   // true → render the dual CTA
+  "listed": false
+}
+```
+- `chips[]` — tap → send `fix:<field>` (re-asks that entity). Same contract as items.
+- `suggestions[]` — tap → send the text. For place-based tips these are **real nearby
+  places** (Google Places, searched around the block); otherwise AI-tailored options.
+
+## 4. Dual CTA (when `tip_draft.ready === true`)
+- **Pass the tip along →** : send `"pass the tip along"` → saves to the block (`tip_listed`).
+- **Send to a mom you know** : open the native share sheet with the tip text, then also
+  send `"pass the tip along"` so it's posted too.
+
+## 5. Matching
+Saved as `tip_share` in `local_signals` → the matcher pairs it with any `tip_seek`
+("anyone know a good pediatric dentist?") on the block and pings them.
+
+## 6. TL;DR
+- CTA sends `intent_hint: "tip_share"`.
+- Switch on `ui_intent`: `collect_tip_detail` / `tip_listed`.
+- Render `tip_draft.chips[]` (tap → `fix:<field>`) + `tip_draft.suggestions[]` (tap → text).
+- When `tip_draft.ready`, show the two CTAs (Pass along / Send to a mom).
+- Nearby place options come from Google Places — no FE work, they arrive in `suggestions`.

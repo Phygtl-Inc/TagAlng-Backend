@@ -225,6 +225,21 @@ class ItemDraft(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+class TipDraft(BaseModel):
+    """In-chat "share a tip / recommendation" draft (the tip_share flow)."""
+
+    name: str | None = None
+    category: str | None = None
+    trait: str | None = None
+    locality: str | None = None
+    chips: list[ItemChip] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    ready: bool = False
+    listed: bool = False
+    signal_id: str | None = None
+    missing: list[str] = Field(default_factory=list)
+
+
 class ProfilePhotoUploadResponse(BaseModel):
     profile_photo_url: str
 
@@ -312,6 +327,7 @@ class SendMessageResponse(BaseModel):
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
     item_draft: ItemDraft | None = None
+    tip_draft: TipDraft | None = None
     routing: TurnRouting | None = None
     orchestrator: bool = False
     requires_phone_verification: bool = False

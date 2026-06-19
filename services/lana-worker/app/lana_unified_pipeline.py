@@ -192,6 +192,29 @@ def run_lana_unified_pipeline(
         ui = {"bucket": None, "focus_phrase": None, "highlights": []}
         return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
+    # Sticky "share a tip" capture — same self-contained pattern as pass-along.
+    if session_ctx.get("tip_share_active"):
+        from app.tip_share import run_tip_share_turn
+
+        reply = sanitize_assistant_message(
+            run_tip_share_turn(
+                user_message=user_message,
+                session_ctx=session_ctx,
+                history=history,
+                user_jwt=user_jwt,
+                home_block_id=home_block_id,
+            )
+        )
+        session_ctx["_orchestrator_turn"] = False
+        session_ctx["timing_ms"] = timer.to_dict()
+        session_ctx["last_routing"] = {
+            "outcome": "tip_share",
+            "intent_class": "discovery",
+            "tool_called": "save_local_signal" if session_ctx.get("tip_listed_now") else None,
+        }
+        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
     if unified_rules_first_enabled():
         discovery = handle_discovery_turn(
             user_message,

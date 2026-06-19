@@ -49,6 +49,7 @@ from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
+from app.tip_share import looks_like_tip_share_entry
 from app.models import (
     ActivityPreviewRow,
     AuthActionPayload,
@@ -65,6 +66,7 @@ from app.models import (
     ItemDraft,
     ProfilePhotoUploadResponse,
     SignalPhotoUploadResponse,
+    TipDraft,
     ExtractedClaim,
     HighlightSpan,
     JointMomentCandidate,
@@ -373,6 +375,13 @@ def _item_draft_from_dict(raw: dict[str, Any] | None) -> ItemDraft | None:
         return None
     fields = set(ItemDraft.model_fields)
     return ItemDraft(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _tip_draft_from_dict(raw: dict[str, Any] | None) -> TipDraft | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    fields = set(TipDraft.model_fields)
+    return TipDraft(**{k: v for k, v in raw.items() if k in fields})
 
 
 def _joint_moment_from_dict(raw: dict[str, Any] | None) -> JointMomentPayload | None:
@@ -1087,6 +1096,17 @@ def send_lana_message(
         session_ctx_in["pass_along_turns"] = 0
         session_ctx_in["pass_along_photo_prompted"] = False
         session_ctx_in["item_draft"] = None
+    # Deterministic entry into the in-chat "share a tip" flow — from the "A tip to
+    # share" CTA hint OR an explicit recommendation phrase.
+    if purpose == "lana" and not session_ctx_in.get("pass_along_active") and (
+        body.intent_hint == "tip_share"
+        or looks_like_tip_share_entry(body.message)
+    ):
+        session_ctx_in["tip_share_active"] = True
+        session_ctx_in["tip_turns"] = 0
+        session_ctx_in["tip_ready"] = None
+        session_ctx_in["tip_enrich_count"] = 0
+        session_ctx_in["tip_draft"] = None
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -1175,6 +1195,7 @@ def send_lana_message(
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
         item_draft = _item_draft_from_dict(merged.get("item_draft"))
+        tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -1229,6 +1250,7 @@ def send_lana_message(
         ui=ui,
         event_draft=event_draft,
         item_draft=item_draft,
+        tip_draft=tip_draft,
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
         **ob,
