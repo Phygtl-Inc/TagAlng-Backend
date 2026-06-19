@@ -12,6 +12,7 @@ TURN_SCOPED_SURFACES = frozenset({
     "pending_intros",
     "recent_intro_duplicate",
     "event_published_now",
+    "item_listed_now",
 })
 
 

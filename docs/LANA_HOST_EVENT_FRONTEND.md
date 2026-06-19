@@ -50,6 +50,8 @@ hosting. On a host turn most non-host fields are just empty.
 | `collect_signal_detail`  | Signal capture follow-up                                     | —                        |
 | **`collect_event_detail`** | **Event card (in progress) + tappable option chips**       | **`event_draft`**        |
 | **`event_created`**      | **Published "it's live" card + CTA buttons**                 | **`event_draft`, `ui_actions`** |
+| **`collect_item_detail`** | **Pass-along item card + entity chips + suggestions/photo** | **`item_draft`**         |
+| **`item_listed`**        | **"Listed on your block" card**                             | **`item_draft`**         |
 | `show_peer_preview`      | Peer match list                                              | `peer_matches`           |
 | `show_activity_preview`  | Activity cards                                               | `activity_previews`      |
 | `show_identity_profile`  | Identity profile card                                        | `identity_profile`       |
@@ -184,3 +186,102 @@ publish, on an explicit cancel/topic-change, or after a turn cap (never loops).
   (capturing) and `event_created` (published).
 - `debug`, `timing_ms`, `message_count`, `onboarding_step` are **removed** from the
   response — don't depend on them.
+
+---
+
+# Lana — Pass Along an Item (in-chat) · Frontend Integration
+
+_Added: 2026-06-19_
+
+The **"Something to pass along"** flow (give away / swap an item) runs in the same
+unified chat, the same way hosting does. Same turn endpoint, same tap contract.
+
+## 1. Entry
+
+The "Something to pass along" CTA sends an intent hint so the backend enters the
+flow deterministically:
+
+```ts
+sendMessage(sessionId, "I have something to pass along", "pass_along")
+// → body: { message: "...", intent_hint: "pass_along" }
+```
+
+Lana then: asks what the item is → extracts entities → asks the one missing detail
+(free/swap, condition) with options → offers a photo → **lists it** to the block as
+a `swap_offer` (so neighbors who are *looking for* that item get matched + pinged).
+
+## 2. `ui_intent`
+
+- `collect_item_detail` → render the item card (`item_draft`).
+- `item_listed` → render the "listed" confirmation (`item_draft`).
+
+## 3. `item_draft` — card contents, chips, suggestions
+
+```jsonc
+"item_draft": {
+  "title": "3T rain boots",          // card header (null until known → P1 "what is it?")
+  "category": "kids clothing",
+  "condition": "slightly worn",
+  "stage": "3T",
+  "intent_type": "free",             // "free" | "swap"
+  "photo_url": null,                 // set after upload (see §4)
+
+  // "Heard you" colored entity chips — tap to CORRECT that field
+  "chips": [
+    { "label": "Pass along",  "tone": "coral",  "field": "intent_type" },
+    { "label": "3T",          "tone": "sky",    "field": "stage" },
+    { "label": "Free",        "tone": "green",  "field": "intent_type" },
+    { "label": "slightly worn","tone": "amber", "field": "condition" }
+  ],
+
+  // tappable answers for the current question (condition / free-or-swap)
+  "suggestions": ["Brand new", "Lightly used", "Well-loved"],
+
+  "listed": false,
+  "signal_id": null
+}
+```
+
+| Field | Render | On tap |
+|-------|--------|--------|
+| `chips[]` | colored pills (`tone` → coral/sky/green/amber/violet) | send **`fix:<field>`** (re-asks that entity) |
+| `suggestions[]` | neutral pills | send the pill **text** |
+
+**Chip correction contract:** tapping a chip sends `fix:<field>` (e.g. `fix:condition`)
+as the next message — the backend clears that field and re-asks it. That's the only
+special string; everything else is plain text.
+
+## 4. Photo
+
+When the item is shaped and no question is pending, the card shows **Add photo** /
+**List it now**. Photo upload is a separate multipart endpoint:
+
+```
+POST /lana/sessions/{session_id}/signal-photo   (multipart, field: file)
+→ { "photo_url": "https://…" }
+```
+
+The backend stores the photo AND attaches the URL to the session's item draft. After
+a successful upload, send `list it` to finalize — the next turn lists the item with
+its photo and flips `ui_intent` to `item_listed`.
+
+```ts
+await uploadSignalPhoto(sessionId, file);   // returns photo_url, attaches to draft
+sendMessage(sessionId, "list it");          // → item_listed
+```
+
+To list **without** a photo, just send `list it` (or tap "List it now").
+
+## 5. Matching (why this is a `swap_offer`, not a marketplace listing)
+
+The item is saved to `local_signals` as a `swap_offer`, so the existing matcher pairs
+it with anyone who has a `swap_seek` ("I'm looking for a bicycle") on the block and
+notifies them. The photo rides along on the match.
+
+## 6. TL;DR
+
+- CTA sends `intent_hint: "pass_along"`.
+- Switch on `ui_intent`: `collect_item_detail` (capturing) / `item_listed` (done).
+- Render `item_draft.chips[]` (colored, tap → `fix:<field>`) + `item_draft.suggestions[]`
+  (tap → text). All backend-driven.
+- Photo: `POST /lana/sessions/{id}/signal-photo` (multipart) → then send `list it`.

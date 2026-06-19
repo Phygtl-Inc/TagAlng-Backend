@@ -167,6 +167,31 @@ def run_lana_unified_pipeline(
         "unified_mode": True,
     }
 
+    # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
+    # structured extraction), the same way event_host_active does. It releases on
+    # save, cancel, or a turn cap, so other flows are never affected.
+    if session_ctx.get("pass_along_active"):
+        from app.pass_along import run_pass_along_turn
+
+        reply = sanitize_assistant_message(
+            run_pass_along_turn(
+                user_message=user_message,
+                session_ctx=session_ctx,
+                history=history,
+                user_jwt=user_jwt,
+                home_block_id=home_block_id,
+            )
+        )
+        session_ctx["_orchestrator_turn"] = False
+        session_ctx["timing_ms"] = timer.to_dict()
+        session_ctx["last_routing"] = {
+            "outcome": "pass_along",
+            "intent_class": "swap",
+            "tool_called": "save_local_signal" if session_ctx.get("item_listed_now") else None,
+        }
+        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
     if unified_rules_first_enabled():
         discovery = handle_discovery_turn(
             user_message,

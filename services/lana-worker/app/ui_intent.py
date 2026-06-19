@@ -26,6 +26,8 @@ UI_INTENT_SHOW_IDENTITY_PROFILE = "show_identity_profile"
 UI_INTENT_COLLECT_SIGNAL_DETAIL = "collect_signal_detail"
 UI_INTENT_COLLECT_EVENT_DETAIL = "collect_event_detail"
 UI_INTENT_EVENT_CREATED = "event_created"
+UI_INTENT_COLLECT_ITEM_DETAIL = "collect_item_detail"
+UI_INTENT_ITEM_LISTED = "item_listed"
 
 _INTENT_BLOCK_LOG = "discovery.block_log"
 _INTENT_LIST_INTROS = "social.list_intros"
@@ -91,6 +93,12 @@ def derive_ui_intent(
         return UI_INTENT_EVENT_CREATED
     if ctx.get("event_host_active"):
         return UI_INTENT_COLLECT_EVENT_DETAIL
+
+    # In-chat "pass along an item" — the item card while capturing, listed card on save.
+    if ctx.get("item_listed_now"):
+        return UI_INTENT_ITEM_LISTED
+    if ctx.get("pass_along_active"):
+        return UI_INTENT_COLLECT_ITEM_DETAIL
 
     active = str(ctx.get("active_intent") or "").strip()
 

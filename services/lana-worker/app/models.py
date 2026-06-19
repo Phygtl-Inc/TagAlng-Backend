@@ -200,8 +200,37 @@ class EventDraft(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+class ItemChip(BaseModel):
+    """A colored entity chip in the 'Heard you' item card. `field` is the draft key
+    it represents, so a tap can send `fix:<field>` to re-ask just that entity."""
+
+    label: str
+    tone: str = "coral"  # coral | sky | green | amber | violet
+    field: str | None = None
+
+
+class ItemDraft(BaseModel):
+    """In-chat 'pass along an item' draft (the swap_offer flow)."""
+
+    title: str | None = None
+    category: str | None = None
+    condition: str | None = None
+    stage: str | None = None
+    intent_type: str | None = None  # "free" | "swap"
+    photo_url: str | None = None
+    chips: list[ItemChip] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    listed: bool = False
+    signal_id: str | None = None
+    missing: list[str] = Field(default_factory=list)
+
+
 class ProfilePhotoUploadResponse(BaseModel):
     profile_photo_url: str
+
+
+class SignalPhotoUploadResponse(BaseModel):
+    photo_url: str
 
 
 class CreateSessionRequest(BaseModel):
@@ -282,6 +311,7 @@ class SendMessageResponse(BaseModel):
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
+    item_draft: ItemDraft | None = None
     routing: TurnRouting | None = None
     orchestrator: bool = False
     requires_phone_verification: bool = False
