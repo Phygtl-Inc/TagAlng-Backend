@@ -48,6 +48,9 @@ from app.guest_intake import lana_profile_guest_turn
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.discovery_route import looks_like_host_event_entry
+from app.pass_along import looks_like_pass_along_entry
+from app.tip_share import looks_like_tip_share_entry
+from app.look_meet import looks_like_look_meet_entry
 from app.models import (
     ActivityPreviewRow,
     AuthActionPayload,
@@ -61,7 +64,11 @@ from app.models import (
     DiscoverySurfacePayload,
     DiscoveryWeakPeerRow,
     EventDraft,
+    ItemDraft,
+    LookDraft,
     ProfilePhotoUploadResponse,
+    SignalPhotoUploadResponse,
+    TipDraft,
     ExtractedClaim,
     HighlightSpan,
     JointMomentCandidate,
@@ -97,6 +104,7 @@ from app.claims_persist import (
     should_extract_claims_from_message,
 )
 from app.profile_photo import upload_profile_photo_bytes
+from app.signal_photo import upload_signal_photo_bytes
 from app.ui_actions import derive_ui_actions
 from app.ui_intent import (
     PEER_DISCOVERY_ACTIVE_INTENTS,
@@ -362,6 +370,27 @@ def _draft_from_dict(raw: dict[str, Any] | None) -> EventDraft | None:
     if not raw:
         return None
     return EventDraft(**raw)
+
+
+def _item_draft_from_dict(raw: dict[str, Any] | None) -> ItemDraft | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    fields = set(ItemDraft.model_fields)
+    return ItemDraft(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _tip_draft_from_dict(raw: dict[str, Any] | None) -> TipDraft | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    fields = set(TipDraft.model_fields)
+    return TipDraft(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _look_draft_from_dict(raw: dict[str, Any] | None) -> LookDraft | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    fields = set(LookDraft.model_fields)
+    return LookDraft(**{k: v for k, v in raw.items() if k in fields})
 
 
 def _joint_moment_from_dict(raw: dict[str, Any] | None) -> JointMomentPayload | None:
@@ -1065,6 +1094,52 @@ def send_lana_message(
         session_ctx_in["event_host_active"] = True
         session_ctx_in["event_host_turns"] = 0
         session_ctx_in["event_affinity_asked"] = False
+        session_ctx_in["event_when_date"] = None
+        session_ctx_in["event_when_time"] = None
+    # Deterministic entry into the in-chat "pass along an item" flow — from the
+    # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
+    # dependency, so it engages before discovery classifies it as sharing.swap).
+    if purpose == "lana" and (
+        body.intent_hint == "pass_along"
+        or looks_like_pass_along_entry(body.message)
+    ):
+        session_ctx_in["pass_along_active"] = True
+        session_ctx_in["pass_along_turns"] = 0
+        session_ctx_in["pass_along_photo_prompted"] = False
+        session_ctx_in["item_draft"] = None
+        # Entering pass-along closes any in-flight tip flow + its card.
+        session_ctx_in["tip_share_active"] = False
+        session_ctx_in["tip_ready"] = None
+        session_ctx_in["tip_draft"] = None
+    # Deterministic entry into the in-chat "share a tip" flow — from the "A tip to
+    # share" CTA hint OR an explicit recommendation phrase.
+    if purpose == "lana" and not session_ctx_in.get("pass_along_active") and (
+        body.intent_hint == "tip_share"
+        or looks_like_tip_share_entry(body.message)
+    ):
+        session_ctx_in["tip_share_active"] = True
+        session_ctx_in["tip_turns"] = 0
+        session_ctx_in["tip_ready"] = None
+        session_ctx_in["tip_enrich_count"] = 0
+        session_ctx_in["tip_draft"] = None
+        # Entering tip-share closes any in-flight pass-along flow + its card.
+        session_ctx_in["pass_along_active"] = False
+        session_ctx_in["item_draft"] = None
+    # Deterministic entry into the in-chat "looking for a meet/playgroup" flow.
+    if purpose == "lana" and not session_ctx_in.get("pass_along_active") and not session_ctx_in.get(
+        "tip_share_active"
+    ) and (body.intent_hint == "look_meet" or looks_like_look_meet_entry(body.message)):
+        session_ctx_in["look_meet_active"] = True
+        session_ctx_in["look_turns"] = 0
+        session_ctx_in["look_ready"] = None
+        session_ctx_in["look_enrich_count"] = 0
+        session_ctx_in["look_affinity_asked"] = None
+        session_ctx_in["look_draft"] = None
+        # Button entry ("A meet or playgroup") carries a generic seed phrase with no
+        # real preference — skip mining a kind from it so the flow asks P1 ("what
+        # kind of meet?") and the user types or picks. A typed entry phrase keeps
+        # its detail and is mined normally.
+        session_ctx_in["look_meet_skip_seed"] = body.intent_hint == "look_meet"
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -1152,6 +1227,9 @@ def send_lana_message(
             )
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
+        item_draft = _item_draft_from_dict(merged.get("item_draft"))
+        tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
+        look_draft = _look_draft_from_dict(merged.get("look_draft"))
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -1205,6 +1283,9 @@ def send_lana_message(
         ready_to_complete=ready,
         ui=ui,
         event_draft=event_draft,
+        item_draft=item_draft,
+        tip_draft=tip_draft,
+        look_draft=look_draft,
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
         **ob,
@@ -1224,6 +1305,33 @@ async def upload_lana_profile_photo(
     content_type = (file.content_type or "").split(";")[0].strip().lower()
     url = upload_profile_photo_bytes(auth.user_id, raw, content_type)
     return ProfilePhotoUploadResponse(profile_photo_url=url)
+
+
+@app.post(
+    "/lana/sessions/{session_id}/signal-photo",
+    response_model=SignalPhotoUploadResponse,
+)
+async def upload_lana_signal_photo(
+    session_id: str,
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+):
+    """Upload a pass-along item photo to the `signal-photos` bucket and attach the
+    URL to the session's in-progress item draft, so it's saved with the signal."""
+    auth = verify_auth(authorization)
+    if auth.is_anonymous and not auth.phone_verified:
+        raise HTTPException(status_code=403, detail="phone_not_verified")
+    session = get_session_for_user(session_id, auth.user_id)
+    raw = await file.read()
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    url = upload_signal_photo_bytes(auth.user_id, raw, content_type)
+    # Stamp onto the active item draft so the next save persists it.
+    ctx = dict(session.get("context") or {})
+    draft = dict(ctx.get("item_draft") or {})
+    draft["photo_url"] = url
+    ctx["item_draft"] = draft
+    update_session_context(session_id, ctx)
+    return SignalPhotoUploadResponse(photo_url=url)
 
 
 @app.post("/lana/sessions/{session_id}/complete", response_model=CompleteSessionResponse)

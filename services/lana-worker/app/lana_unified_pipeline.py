@@ -77,15 +77,101 @@ _MORNING_SUGGESTIONS = ["8 AM", "9 AM", "10 AM", "11 AM"]
 _EVENING_SUGGESTIONS = ["5 PM", "6 PM", "7 PM"]
 _PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere on the block"]
 
+# Bare words the extractor mistakes for a title (from "host a meet" etc.) — not real names.
+_GENERIC_TITLES = {
+    "meet", "meetup", "meet up", "a meet", "the meet", "event", "an event", "the event",
+    "meeting", "gathering", "a gathering", "get together", "get-together",
+    "a get together", "get-together meet", "hangout", "a hangout", "party", "a party",
+}
 
-def _inject_event_quick_replies(draft: dict[str, Any], question: str = "") -> None:
+
+def _is_generic_title(title: Any) -> bool:
+    return str(title or "").strip().lower().strip(".!?") in _GENERIC_TITLES
+
+
+_WEEKDAYS = {
+    "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "friday": 4, "fri": 4, "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _resolve_event_date(text: str) -> str | None:
+    """Deterministically resolve a date phrase → ISO 'YYYY-MM-DD' for the NEXT occurrence
+    (correct year), since the LLM extractor mis-guesses the year. None if no date found."""
+    import re
+    from datetime import datetime, timedelta
+
+    t = str(text or "").lower()
+    today = datetime.now().date()
+
+    # "jun 20" / "june 20" / "20 jun"
+    m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", t)
+    m = m or re.search(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", t)
+    if m:
+        g1, g2 = m.group(1), m.group(2)
+        mon = _MONTHS.get(g1) or _MONTHS.get(g2)
+        day = int(g2 if g1 in _MONTHS else g1)
+        for yr in (today.year, today.year + 1):
+            try:
+                d = datetime(yr, mon, day).date()
+            except ValueError:
+                return None
+            if d >= today:
+                return d.isoformat()
+        return None
+    if "tomorrow" in t:
+        return (today + timedelta(days=1)).isoformat()
+    if "today" in t or "tonight" in t:
+        return today.isoformat()
+    if "this weekend" in t or "weekend" in t:
+        return (today + timedelta(days=(5 - today.weekday()) % 7)).isoformat()
+    for name, wd in _WEEKDAYS.items():
+        if re.search(rf"\b{name}\b", t):
+            return (today + timedelta(days=(wd - today.weekday()) % 7)).isoformat()
+    return None
+
+
+def _resolve_event_time(text: str) -> str | None:
+    """Deterministically resolve a time phrase → 'HH:MM' (24h). None if none found."""
+    import re
+
+    t = str(text or "").lower()
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", t)
+    if m:
+        h = int(m.group(1)) % 12
+        if m.group(3) == "pm":
+            h += 12
+        return f"{h:02d}:{int(m.group(2) or 0):02d}"
+    # Order matters: "afternoon" contains "noon", so check the periods first.
+    if "afternoon" in t:
+        return "14:00"
+    if "morning" in t:
+        return "10:00"
+    if "evening" in t or "night" in t:
+        return "18:00"
+    if "noon" in t:
+        return "12:00"
+    return None
+
+
+def _inject_event_quick_replies(
+    draft: dict[str, Any], question: str = "", *, title_suggestions: list[str] | None = None
+) -> None:
     """Tappable options for the current question. Reads the question Lana actually
     asked (so 'what time in the afternoon?' → afternoon clock times), falling back to
-    the next missing blocker (title → when → place). Always present so chips show."""
+    the next missing blocker (title → when → place). Always present so chips show.
+    `title_suggestions` (AI, event-aware) replaces the generic title list when given."""
     import re
 
     if draft.get("affinity_prompt"):
         return  # a deliberate affinity gate owns the chips this turn
+
+    titles = title_suggestions or _TITLE_SUGGESTIONS
 
     # Lana often acknowledges the prior answer ("Friday evening sounds lovely!")
     # before asking the next thing ("Where would you host?"). Match on the actual
@@ -119,10 +205,10 @@ def _inject_event_quick_replies(draft: dict[str, Any], question: str = "") -> No
     elif re.search(r"\bwhere\b|\bplace\b|\blocation\b|\bvenue\b", q):
         draft["suggestions"] = _PLACE_SUGGESTIONS
     elif re.search(r"\bcall\b|\bname\b|\btitle\b|what kind|about", q):
-        draft["suggestions"] = _TITLE_SUGGESTIONS
+        draft["suggestions"] = titles
     # Fallback: next missing blocker (title → when → place).
     elif not has("title"):
-        draft["suggestions"] = _TITLE_SUGGESTIONS
+        draft["suggestions"] = titles
     elif not has("starts_at"):
         draft["suggestions"] = _when_suggestions()
     elif not has("venue_name"):
@@ -166,6 +252,82 @@ def run_lana_unified_pipeline(
         "phone_verified": phone_verified,
         "unified_mode": True,
     }
+
+    # Wipe per-turn surfaces (…_listed_now, …_published_now, saved cards) up front, so
+    # a one-shot card from a prior turn never leaks into this one — the early host /
+    # pass-along / tip gates return before the discovery-path clear would run.
+    clear_turn_surfaces(session_ctx)
+
+    # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
+    # structured extraction), the same way event_host_active does. It releases on
+    # save, cancel, or a turn cap, so other flows are never affected.
+    if session_ctx.get("pass_along_active"):
+        from app.pass_along import run_pass_along_turn
+
+        reply = sanitize_assistant_message(
+            run_pass_along_turn(
+                user_message=user_message,
+                session_ctx=session_ctx,
+                history=history,
+                user_jwt=user_jwt,
+                home_block_id=home_block_id,
+            )
+        )
+        session_ctx["_orchestrator_turn"] = False
+        session_ctx["timing_ms"] = timer.to_dict()
+        session_ctx["last_routing"] = {
+            "outcome": "pass_along",
+            "intent_class": "swap",
+            "tool_called": "save_local_signal" if session_ctx.get("item_listed_now") else None,
+        }
+        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+    # Sticky "share a tip" capture — same self-contained pattern as pass-along.
+    if session_ctx.get("tip_share_active"):
+        from app.tip_share import run_tip_share_turn
+
+        reply = sanitize_assistant_message(
+            run_tip_share_turn(
+                user_message=user_message,
+                session_ctx=session_ctx,
+                history=history,
+                user_jwt=user_jwt,
+                home_block_id=home_block_id,
+            )
+        )
+        session_ctx["_orchestrator_turn"] = False
+        session_ctx["timing_ms"] = timer.to_dict()
+        session_ctx["last_routing"] = {
+            "outcome": "tip_share",
+            "intent_class": "discovery",
+            "tool_called": "save_local_signal" if session_ctx.get("tip_listed_now") else None,
+        }
+        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+    # Sticky "looking for a meet/playgroup" capture — same self-contained pattern.
+    if session_ctx.get("look_meet_active"):
+        from app.look_meet import run_look_meet_turn
+
+        reply = sanitize_assistant_message(
+            run_look_meet_turn(
+                user_message=user_message,
+                session_ctx=session_ctx,
+                history=history,
+                user_jwt=user_jwt,
+                home_block_id=home_block_id,
+            )
+        )
+        session_ctx["_orchestrator_turn"] = False
+        session_ctx["timing_ms"] = timer.to_dict()
+        session_ctx["last_routing"] = {
+            "outcome": "look_meet",
+            "intent_class": "discovery",
+            "tool_called": "save_local_signal" if session_ctx.get("look_meet_saved_now") else None,
+        }
+        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
     if unified_rules_first_enabled():
         discovery = handle_discovery_turn(
@@ -252,25 +414,79 @@ def run_lana_unified_pipeline(
             ed.pop("suggestions", None)
             ed.pop("affinity_prompt", None)
             ed.pop("affinity_options", None)
-            complete = _event_draft_complete(ed)
-            affinity_done = bool(ed.get("cohort_tags")) or bool(
-                session_ctx.get("event_affinity_asked")
-            )
+            # The extractor over-eagerly pulls a "title" from the entry phrase ("host a
+            # meet" → "Meet"). Drop bare generic words so we still ask for a real name.
+            if _is_generic_title(ed.get("title")):
+                ed.pop("title", None)
+
+            # Deterministic when-resolution — the LLM extractor mis-guesses the year
+            # ("Jun 20" → 2023) and drops the time-of-day. Parse the user's own words /
+            # tapped chips into a real date + clock time, then build starts_at ourselves.
+            # Persist on turn_ctx (the RETURNED context) — session_ctx mutations here are
+            # dropped, which previously lost the date and made it re-ask "when?".
+            wd = turn_ctx.get("event_when_date")
+            wt = turn_ctx.get("event_when_time")
+            nd = _resolve_event_date(user_message)
+            if nd:
+                wd = nd
+            ntime = _resolve_event_time(user_message)
+            if ntime:
+                wt = ntime
+            turn_ctx["event_when_date"] = wd
+            turn_ctx["event_when_time"] = wt
+            if wd:
+                ed["starts_at"] = f"{wd}T{wt or '00:00'}:00"
+
+            _title = str(ed.get("title") or "").strip()
+            has_venue = bool(str(ed.get("venue_name") or "").strip())
+            complete = bool(_title) and has_venue and bool(wd) and bool(wt)
+            # Ask the affinity question once, gated ONLY on whether we've asked — not on
+            # cohort_tags (the extractor auto-fills those, which used to skip the question).
+            affinity_done = bool(session_ctx.get("event_affinity_asked"))
+
+            # Event-aware AI suggestions (tailored titles + "who's it for?") — only on the
+            # turns that need them (naming the event, or the one affinity gate).
+            sugg: dict[str, Any] = {}
+            if not _title or (complete and not affinity_done):
+                from app.event_suggest import event_suggestions
+
+                sugg = event_suggestions(history=history, user_message=user_message, draft=ed)
+
             if complete and not affinity_done:
-                # Ask "who's it for?" once with tappable options before going live.
-                ed["affinity_prompt"] = "Who’s it for — anyone with a similar kid-stage?"
-                ed["affinity_options"] = ["Same kid-stage", "Any toddler mom", "Open · all moms"]
+                aff = sugg.get("affinity") if isinstance(sugg.get("affinity"), dict) else {}
+                ed["affinity_prompt"] = aff.get("question") or "Who’s it for?"
+                ed["affinity_options"] = aff.get("options") or [
+                    "Same kid-stage",
+                    "Any toddler mom",
+                    "Open · all moms",
+                ]
                 ed["suggestions"] = []
                 turn_ctx["event_affinity_asked"] = True
+                reply = f"Perfect — **{_title or 'your meetup'}** is all set! One last thing before I post it:"
             elif complete:
                 event_id = _auto_publish_event(user_id, user_jwt, ed)
                 if event_id:
                     turn_ctx["event_id"] = event_id
                     turn_ctx["event_published_now"] = True
                     turn_ctx["event_affinity_asked"] = False
+                    turn_ctx["event_when_date"] = None
+                    turn_ctx["event_when_time"] = None
                     reply = _event_published_reply(reply, ed)
             else:
-                _inject_event_quick_replies(ed, reply)
+                # Deterministic question + chips for the next missing field (title → day →
+                # time → place), so the bubble ALWAYS matches the chips.
+                if not _title:
+                    reply = "Love it! What would you like to call it?"
+                    ed["suggestions"] = sugg.get("title_suggestions") or _TITLE_SUGGESTIONS
+                elif not wd:
+                    reply = f"Got it — **{_title}**. When works for you?"
+                    ed["suggestions"] = _when_suggestions()
+                elif not wt:
+                    reply = f"Great — **{_title}**. What time should it start?"
+                    ed["suggestions"] = _START_TIME_SUGGESTIONS
+                else:
+                    reply = f"Almost there — **{_title}**. Where would you like to host it?"
+                    ed["suggestions"] = _PLACE_SUGGESTIONS
             turn_ctx["event_draft"] = ed
             draft = ed  # surface to the FE (5th return → response.event_draft)
 

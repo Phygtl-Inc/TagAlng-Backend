@@ -26,6 +26,12 @@ UI_INTENT_SHOW_IDENTITY_PROFILE = "show_identity_profile"
 UI_INTENT_COLLECT_SIGNAL_DETAIL = "collect_signal_detail"
 UI_INTENT_COLLECT_EVENT_DETAIL = "collect_event_detail"
 UI_INTENT_EVENT_CREATED = "event_created"
+UI_INTENT_COLLECT_ITEM_DETAIL = "collect_item_detail"
+UI_INTENT_ITEM_LISTED = "item_listed"
+UI_INTENT_COLLECT_TIP_DETAIL = "collect_tip_detail"
+UI_INTENT_TIP_LISTED = "tip_listed"
+UI_INTENT_COLLECT_LOOK_MEET_DETAIL = "collect_look_meet_detail"
+UI_INTENT_LOOK_MEET_SAVED = "look_meet_saved"
 
 _INTENT_BLOCK_LOG = "discovery.block_log"
 _INTENT_LIST_INTROS = "social.list_intros"
@@ -91,6 +97,24 @@ def derive_ui_intent(
         return UI_INTENT_EVENT_CREATED
     if ctx.get("event_host_active"):
         return UI_INTENT_COLLECT_EVENT_DETAIL
+
+    # In-chat "pass along an item" — the item card while capturing, listed card on save.
+    if ctx.get("item_listed_now"):
+        return UI_INTENT_ITEM_LISTED
+    if ctx.get("pass_along_active"):
+        return UI_INTENT_COLLECT_ITEM_DETAIL
+
+    # In-chat "share a tip" — the tip card while capturing, listed card once passed along.
+    if ctx.get("tip_listed_now"):
+        return UI_INTENT_TIP_LISTED
+    if ctx.get("tip_share_active"):
+        return UI_INTENT_COLLECT_TIP_DETAIL
+
+    # In-chat "looking for a meet" — the look card while capturing, saved card once listening.
+    if ctx.get("look_meet_saved_now"):
+        return UI_INTENT_LOOK_MEET_SAVED
+    if ctx.get("look_meet_active"):
+        return UI_INTENT_COLLECT_LOOK_MEET_DETAIL
 
     active = str(ctx.get("active_intent") or "").strip()
 

@@ -55,6 +55,7 @@ def save_local_signal(
     block_id: str | None = None,
     zip_code: str | None = None,
     stage: str | None = None,
+    photo_url: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "p_intent": intent,
@@ -68,6 +69,8 @@ def save_local_signal(
         payload["p_zip"] = zip_code
     if stage:
         payload["p_stage"] = stage
+    if photo_url:
+        payload["p_photo_url"] = photo_url
     try:
         raw = call_rpc(user_jwt, "save_local_signal", payload)
     except HTTPException as exc:

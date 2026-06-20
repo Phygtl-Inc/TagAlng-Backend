@@ -1,0 +1,422 @@
+"""In-chat "looking for a meet / playgroup" capture (the meet_seek flow), mirroring the
+tip / pass-along flows: the LLM does STRUCTURED extraction, the questions are driven in
+code so it stays on-script and never loops.
+
+Flow (matches the C-4-look-meet mock):
+  P1  "What kind of meet would help?"            (nothing captured yet)
+  P2  "Got it — weekday playground meet" + chips (kind / day / trait)
+  P3  "Anyone with a similar kid-stage matter?"  (affinity, tappable options)
+  P4  assembled card → "Start listening for me" / "Send to a mom"
+  →   saved to local_signals (meet_seek); the matcher pairs it with host_meet (phase C
+      adds semantic embedding matching so "playground meet" ≈ "park playdate").
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+_KIND_SUGGESTIONS = ["Playground meet", "Stroller walk", "Coffee & kids", "Library storytime"]
+_AFFINITY_QUESTION = "Anyone with a similar kid-stage matter?"
+_AFFINITY_OPTIONS = ["Same kid-stage", "Any toddler mom", "Open · all moms"]
+_MAX_ENRICH = 2
+
+_CANCEL_RE = re.compile(
+    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
+    re.IGNORECASE,
+)
+# The "Start listening for me" CTA / any go-ahead to post the seek.
+_LISTEN_RE = re.compile(
+    r"\b(start listening|listen for me|listening for me|post it|that'?s it|"
+    r"go ahead|done|sounds good|do it)\b",
+    re.IGNORECASE,
+)
+_LOOK_MEET_TURN_CAP = 12
+
+# Deterministic entry backstop (the "a meet or playgroup" CTA), so it engages even
+# without the FE intent_hint. Matches SEEKING a meetup — not hosting one.
+_ENTRY_RE = re.compile(
+    r"\b(looking (?:for|to)\s+(?:a\s+)?(?:meet|playgroup|playdate|hang|mom)|"
+    r"want to meet|meet (?:other )?moms|a playgroup|stroller walk|"
+    r"find (?:a )?(?:meet|playgroup|moms))\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_look_meet_entry(message: str) -> bool:
+    """True when the message looks like the user wants to FIND a meet/playgroup."""
+    return bool(_ENTRY_RE.search(str(message or "").strip()))
+
+
+_MEET_VALUE_FIELDS = ("kind", "day", "place", "trait")
+
+_EXTRACT_SYSTEM = """You extract structured fields about a kind of MEET-UP / playgroup a \
+neighbor is LOOKING FOR (not hosting), and propose ONE smart follow-up question.
+
+Return ONE compact JSON object with exactly these keys:
+{"kind","day","place","trait","ask"}
+
+- kind: the type of meet they want, e.g. "playground meet","stroller walk","library storytime","coffee & kids". null if not stated.
+- day: a day/time preference, e.g. "weekday","weekend","mornings","Saturday". null if not stated.
+- place: a place preference if mentioned, e.g. "the park","Lake Nona". null otherwise.
+- trait: a standout preference about the meet, e.g. "stroller-friendly","with other moms","toddler-paced". null if not stated.
+- ask: the single MOST useful follow-up to sharpen the match, TAILORED to what's unknown,
+  with 2-4 tappable answers that fit. Shape: {"field": <snake_case>, "question": <one short question>, "options":[...]}.
+  Return null for `ask` when kind + day + trait is already enough. Do NOT ask about who-it's-for (that's a separate step).
+
+Use null for any string the text does not support. Never invent a value."""
+
+
+def _extract_meet_fields(
+    *, history: list[dict[str, Any]], user_message: str, prev: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """LLM structured extraction. Returns (fields_found, ask). ({}, None) on failure."""
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return {}, None
+        convo = "\n".join(
+            f"{m.get('role', '?')}: {str(m.get('content') or '').strip()}"
+            for m in (history or [])[-8:]
+            if str(m.get("content") or "").strip()
+        )
+        known = {k: prev.get(k) for k in _MEET_VALUE_FIELDS}
+        payload = "\n\n".join(
+            [
+                "CURRENT MEET DRAFT (merge updates into this):\n"
+                + json.dumps(known, ensure_ascii=False),
+                "CONVERSATION SO FAR:\n" + (convo or "(none)"),
+                f"USER'S NEW MESSAGE:\n{user_message.strip()}",
+            ]
+        )
+        data = llm_json(
+            model=synthesizer_model(),
+            system=_EXTRACT_SYSTEM,
+            user_payload=payload,
+            max_tokens=300,
+            temperature=0.2,
+        )
+        if not isinstance(data, dict):
+            return {}, None
+        out: dict[str, Any] = {}
+        for k in _MEET_VALUE_FIELDS:
+            v = data.get(k)
+            if isinstance(v, str) and v.strip() and v.strip().lower() != "null":
+                out[k] = v.strip()
+        ask = data.get("ask")
+        if isinstance(ask, dict):
+            q = str(ask.get("question") or "").strip()
+            opts = [
+                str(o).strip()
+                for o in (ask.get("options") or [])
+                if isinstance(o, str) and str(o).strip()
+            ][:4]
+            ask = {"field": str(ask.get("field") or "detail").strip(), "question": q, "options": opts} if (q and len(opts) >= 2) else None
+        else:
+            ask = None
+        return out, ask
+    except Exception:  # noqa: BLE001 - extraction is best-effort
+        import logging
+
+        logging.getLogger(__name__).exception("look_meet_extract_failed")
+        return {}, None
+
+
+def _has(draft: dict[str, Any], key: str) -> bool:
+    return bool(str(draft.get(key) or "").strip())
+
+
+def _build_chips(draft: dict[str, Any]) -> list[dict[str, str]]:
+    """The 'Got it' chips — kind + day + trait + the affinity choice. Tap to correct."""
+    chips: list[dict[str, str]] = [{"label": "Looking for", "tone": "sky", "field": "kind"}]
+    if _has(draft, "kind"):
+        chips.append({"label": str(draft["kind"]), "tone": "coral", "field": "kind"})
+    if _has(draft, "day"):
+        chips.append({"label": str(draft["day"]), "tone": "sky", "field": "day"})
+    if _has(draft, "trait"):
+        chips.append({"label": str(draft["trait"]), "tone": "amber", "field": "trait"})
+    for d in (draft.get("details") or []):
+        if str(d).strip():
+            chips.append({"label": str(d).strip(), "tone": "violet", "field": "details"})
+    if _has(draft, "affinity"):
+        chips.append({"label": str(draft["affinity"]), "tone": "green", "field": "affinity"})
+    return chips
+
+
+def _question_for_field(field: str) -> tuple[str, list[str]]:
+    if field == "kind":
+        return "What kind of meet would help?", _KIND_SUGGESTIONS
+    if field == "affinity":
+        return _AFFINITY_QUESTION, _AFFINITY_OPTIONS
+    if field == "details":
+        return "What detail should I update?", []
+    return "What should I change?", []
+
+
+def _summary(draft: dict[str, Any]) -> str:
+    bits = []
+    if _has(draft, "day"):
+        bits.append(str(draft["day"]))
+    bits.append(str(draft.get("kind") or "meet").strip())
+    if _has(draft, "trait"):
+        bits.append(str(draft["trait"]))
+    return " ".join(b for b in bits if b)
+
+
+def _detail_text(draft: dict[str, Any]) -> str:
+    parts = []
+    if _has(draft, "day"):
+        parts.append(str(draft["day"]).strip())
+    parts.append(str(draft.get("kind") or "").strip())
+    if _has(draft, "trait"):
+        parts.append(str(draft["trait"]).strip())
+    parts += [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()]
+    if _has(draft, "place"):
+        parts.append(str(draft["place"]).strip())
+    return " · ".join([p for p in parts if p]) or str(draft.get("kind") or "meet")
+
+
+def _affinity_tags(draft: dict[str, Any]) -> list[str]:
+    a = str(draft.get("affinity") or "").strip().lower()
+    if not a or a.startswith("open"):
+        return []
+    if "same" in a or "kid-stage" in a or "kid stage" in a:
+        return ["same_kid_stage"]
+    if "toddler" in a:
+        return ["toddler"]
+    return [a.replace(" ", "_")[:40]]
+
+
+def _find_block_events(
+    *, user_jwt: str, kind: str | None, zip_code: str | None, block_id: str | None, limit: int = 3
+) -> list[dict[str, Any]]:
+    """Existing open meets near the seeker (next 14 days), kind-matched first.
+
+    Events are the source of truth for real meetups; the meet_seek signal matcher
+    only pairs latent demand (host_meet signals). So to actually surface joinable
+    meets — including ones hosted as events — we read get_nearby_activities here.
+
+    get_nearby_activities needs a location. The look flow runs before discovery sets
+    the session zip, so we fall back to the home block's centroid (every verified
+    neighbour has a home_block_id) — that's what actually makes this fire.
+    """
+    args: dict[str, Any] = {"p_limit": 20}
+    if zip_code:
+        args["p_zip"] = zip_code
+    else:
+        try:
+            from app.places import _centroid
+
+            loc = _centroid(zip_code, block_id)
+        except Exception:  # noqa: BLE001
+            loc = None
+        if not loc:
+            return []
+        args["p_lat"], args["p_lng"] = loc[0], loc[1]
+    try:
+        from app.supabase_rpc import call_rpc
+
+        rows = call_rpc(user_jwt, "get_nearby_activities", args)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(rows, list):
+        return []
+
+    keywords = [w for w in re.findall(r"[a-z]+", str(kind or "").lower()) if len(w) > 2]
+
+    def relevance(ev: dict[str, Any]) -> int:
+        hay = (str(ev.get("title") or "") + " " + " ".join(ev.get("cohort_tags") or [])).lower()
+        return sum(1 for w in keywords if w in hay)
+
+    ranked = sorted(
+        (e for e in rows if isinstance(e, dict) and e.get("id")),
+        key=relevance,
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    for e in ranked[:limit]:
+        out.append({
+            "event_id": str(e.get("id")),
+            "title": str(e.get("title") or "A neighbourhood meet"),
+            "starts_at": e.get("starts_at"),
+            "venue_name": e.get("venue_name"),
+        })
+    return out
+
+
+def _save_meet_seek(
+    *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
+) -> dict[str, Any] | None:
+    try:
+        from app.local_signals import save_local_signal
+
+        return save_local_signal(
+            user_jwt,
+            intent="meet_seek",
+            detail_text=_detail_text(draft),
+            category=str(draft.get("kind") or "").strip() or "meetup",
+            block_id=block_id,
+            zip_code=zip_code,
+        )
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).exception("look_meet_save_failed")
+        return None
+
+
+def run_look_meet_turn(
+    *,
+    user_message: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_jwt: str,
+    home_block_id: str | None,
+) -> str:
+    """Drive one look-meet capture turn. Mutates session_ctx (look_draft,
+    look_meet_active, look_meet_saved_now, routing_phase). Returns Lana's reply."""
+    msg = str(user_message or "").strip()
+    draft: dict[str, Any] = dict(session_ctx.get("look_draft") or {})
+    zip_code = str(session_ctx.get("zip_code") or session_ctx.get("zip") or "").strip() or None
+    session_ctx["look_meet_saved_now"] = False
+
+    # ── Loop safety ──
+    turns = int(session_ctx.get("look_turns") or 0) + 1
+    session_ctx["look_turns"] = turns
+    if _CANCEL_RE.search(msg) or turns > _LOOK_MEET_TURN_CAP:
+        for k in ("look_meet_active", "look_draft", "look_ready", "look_pending_ask",
+                  "look_enrich_count", "look_affinity_asked"):
+            session_ctx[k] = None
+        session_ctx["look_turns"] = 0
+        session_ctx["routing_phase"] = "listening"
+        return "No problem — we can do that another time. What else can I help with?"
+
+    # ── The "Start listening for me" CTA on the ready card → save the seek ──
+    if session_ctx.get("look_ready") and _LISTEN_RE.search(msg):
+        saved = _save_meet_seek(draft=draft, user_jwt=user_jwt, block_id=home_block_id, zip_code=zip_code)
+        for k in ("look_meet_active", "look_ready", "look_pending_ask", "look_affinity_asked"):
+            session_ctx[k] = None
+        session_ctx["look_turns"] = 0
+        session_ctx["look_enrich_count"] = 0
+        session_ctx["routing_phase"] = "listening"
+        if not saved:
+            session_ctx["look_draft"] = None
+            return "I couldn't save that just now — let's try again in a moment."
+        matches = int(saved.get("matches_created") or 0)
+        draft["signal_id"] = saved.get("signal_id")
+        draft["saved"] = True
+        draft["chips"] = _build_chips(draft)
+        session_ctx["look_draft"] = draft
+        session_ctx["look_meet_saved_now"] = True
+        tail = (
+            f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+            if matches
+            else " I'll text you when another mom wants the same near you."
+        )
+        return f"✅ Saved — I'm listening for a **{_summary(draft)}**.{tail}"
+
+    # ── Correction: chip tap "fix:<field>" → clear + re-ask that field ──
+    fix = re.match(r"\s*fix:(\w+)\s*$", msg)
+    if fix:
+        field = fix.group(1)
+        if field == "details":
+            draft["details"] = []
+            session_ctx["look_pending_ask"] = "details"
+            session_ctx["look_enrich_count"] = 0
+        elif field == "affinity":
+            draft.pop("affinity", None)
+            session_ctx["look_affinity_asked"] = None
+        elif field in _MEET_VALUE_FIELDS:
+            draft.pop(field, None)
+        session_ctx["look_ready"] = None
+        q, opts = _question_for_field(field)
+        draft["chips"] = _build_chips(draft)
+        draft["suggestions"] = opts
+        session_ctx["look_draft"] = draft
+        session_ctx["look_meet_active"] = True
+        session_ctx["routing_phase"] = "listening"
+        return f"Sure — {q}"
+
+    # ── Seed turn from the "A meet or playgroup" button: don't mine the generic
+    #    entry phrase — drop it so P1 ("what kind of meet?") asks fresh. ──
+    if session_ctx.get("look_meet_skip_seed"):
+        session_ctx["look_meet_skip_seed"] = False
+        msg = ""
+
+    # ── Capture a pending answer (enrichment detail, or the affinity choice) ──
+    pending = session_ctx.get("look_pending_ask")
+    if pending and msg and not _LISTEN_RE.search(msg):
+        if pending == "affinity":
+            draft["affinity"] = msg
+        else:
+            details = list(draft.get("details") or [])
+            if msg not in details:
+                details.append(msg)
+            draft["details"] = details
+        session_ctx["look_pending_ask"] = None
+
+    # ── Extract fields + tailored follow-up ──
+    ask: dict[str, Any] | None = None
+    if msg and not fix:
+        found, ask = _extract_meet_fields(history=history, user_message=msg, prev=draft)
+        for k, v in found.items():
+            draft[k] = v
+
+    # ── P1: nothing yet → "What kind of meet would help?" ──
+    if not _has(draft, "kind"):
+        draft["suggestions"] = _KIND_SUGGESTIONS
+        session_ctx["look_draft"] = draft
+        session_ctx["look_meet_active"] = True
+        session_ctx["routing_phase"] = "listening"
+        return "Love it — what kind of meet would help?"
+
+    chips = _build_chips(draft)
+
+    # ── AI-tailored enrichment (day / place / vibe), capped ──
+    enrich_count = int(session_ctx.get("look_enrich_count") or 0)
+    if ask and enrich_count < _MAX_ENRICH and not _has(draft, "affinity"):
+        session_ctx["look_pending_ask"] = ask["field"]
+        session_ctx["look_enrich_count"] = enrich_count + 1
+        draft["chips"] = chips
+        draft["suggestions"] = ask["options"]
+        session_ctx["look_draft"] = draft
+        session_ctx["look_meet_active"] = True
+        session_ctx["routing_phase"] = "listening"
+        return f"Got it — **{_summary(draft)}**. {ask['question']}"
+
+    # ── P3: affinity (who's it for?) once ──
+    if not _has(draft, "affinity") and not session_ctx.get("look_affinity_asked"):
+        draft["chips"] = chips
+        draft["suggestions"] = _AFFINITY_OPTIONS
+        session_ctx["look_pending_ask"] = "affinity"
+        session_ctx["look_affinity_asked"] = True
+        session_ctx["look_draft"] = draft
+        session_ctx["look_meet_active"] = True
+        session_ctx["routing_phase"] = "listening"
+        return f"Got it — **{_summary(draft)}**. {_AFFINITY_QUESTION}"
+
+    # ── P4: ready → assembled card + dual CTA (saved only when they confirm) ──
+    events = _find_block_events(
+        user_jwt=user_jwt, kind=draft.get("kind"), zip_code=zip_code, block_id=home_block_id
+    )
+    draft["chips"] = chips
+    draft["suggestions"] = []
+    draft["events"] = events
+    draft["ready"] = True
+    session_ctx["look_draft"] = draft
+    session_ctx["look_meet_active"] = True
+    session_ctx["look_ready"] = True
+    session_ctx["routing_phase"] = "listening"
+    if events:
+        n = len(events)
+        return (
+            f"Here's what I've got — **{_summary(draft)}**. I also found {n} meet"
+            f"{'s' if n != 1 else ''} on your block you could join — take a look below, or "
+            "**Start listening for me** and I'll text you when a mom wants the same."
+        )
+    return (
+        f"Here's what I've got — **{_summary(draft)}**. **Start listening for me** and "
+        "I'll text you when a mom wants the same, or send it to a mom you know."
+    )

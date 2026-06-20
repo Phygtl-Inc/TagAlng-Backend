@@ -200,8 +200,79 @@ class EventDraft(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+class ItemChip(BaseModel):
+    """A colored entity chip in the 'Heard you' item card. `field` is the draft key
+    it represents, so a tap can send `fix:<field>` to re-ask just that entity."""
+
+    label: str
+    tone: str = "coral"  # coral | sky | green | amber | violet
+    field: str | None = None
+
+
+class ItemDraft(BaseModel):
+    """In-chat 'pass along an item' draft (the swap_offer flow)."""
+
+    title: str | None = None
+    category: str | None = None
+    condition: str | None = None
+    stage: str | None = None
+    intent_type: str | None = None  # "free" | "swap"
+    photo_url: str | None = None
+    chips: list[ItemChip] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    listed: bool = False
+    signal_id: str | None = None
+    missing: list[str] = Field(default_factory=list)
+
+
+class TipDraft(BaseModel):
+    """In-chat "share a tip / recommendation" draft (the tip_share flow)."""
+
+    name: str | None = None
+    category: str | None = None
+    trait: str | None = None
+    locality: str | None = None
+    chips: list[ItemChip] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    ready: bool = False
+    listed: bool = False
+    signal_id: str | None = None
+    missing: list[str] = Field(default_factory=list)
+
+
+class LookEvent(BaseModel):
+    """An existing block meet the seeker could join, surfaced on the ready card."""
+
+    event_id: str
+    title: str
+    starts_at: str | None = None
+    venue_name: str | None = None
+
+
+class LookDraft(BaseModel):
+    """In-chat "looking for a meet / playgroup" draft (the meet_seek flow)."""
+
+    kind: str | None = None
+    day: str | None = None
+    place: str | None = None
+    trait: str | None = None
+    affinity: str | None = None
+    chips: list[ItemChip] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    # Existing block events matching the seek (the source of truth for real meets).
+    events: list[LookEvent] = Field(default_factory=list)
+    ready: bool = False
+    saved: bool = False
+    signal_id: str | None = None
+    missing: list[str] = Field(default_factory=list)
+
+
 class ProfilePhotoUploadResponse(BaseModel):
     profile_photo_url: str
+
+
+class SignalPhotoUploadResponse(BaseModel):
+    photo_url: str
 
 
 class CreateSessionRequest(BaseModel):
@@ -282,6 +353,9 @@ class SendMessageResponse(BaseModel):
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
+    item_draft: ItemDraft | None = None
+    tip_draft: TipDraft | None = None
+    look_draft: LookDraft | None = None
     routing: TurnRouting | None = None
     orchestrator: bool = False
     requires_phone_verification: bool = False
