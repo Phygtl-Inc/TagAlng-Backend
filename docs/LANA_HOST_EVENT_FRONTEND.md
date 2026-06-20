@@ -110,11 +110,16 @@ The `suggestions` are **context-aware** — they match the question Lana just as
 
 | Lana asks…                            | `suggestions` you'll get                                  |
 |---------------------------------------|-----------------------------------------------------------|
-| what to call it / what kind           | `["Playdate at the park", "Weekend playgroup", …]`        |
+| what to call it / what kind           | **AI-tailored titles** for this event, e.g. `["Brazilian Moms Meetup", "Brazil Heritage Mixer"]` |
 | when / which day                      | concrete dates: `["Sat Jun 20", "Sun Jun 21", …]`         |
 | what time to start                    | `["9 AM", "12 PM", "3 PM", "6 PM"]`                       |
 | what time in the afternoon            | `["12 PM", "1 PM", "2 PM", "3 PM"]`                       |
 | where / which place                   | `["The playground", "The park", "My place", …]`           |
+
+The **affinity question** (`affinity_prompt` + `affinity_options`) is also AI-tailored to
+the event now — e.g. a Brazilian-moms event gets `"Who's it for?"` →
+`["Brazilian moms only", "All Latina moms", "Open to everyone"]`, and it always shows
+once before publishing (it no longer gets skipped when a cohort tag was auto-detected).
 
 Dates are computed live, so they're always real upcoming days.
 

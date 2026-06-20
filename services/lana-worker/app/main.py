@@ -50,6 +50,7 @@ from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
 from app.tip_share import looks_like_tip_share_entry
+from app.look_meet import looks_like_look_meet_entry
 from app.models import (
     ActivityPreviewRow,
     AuthActionPayload,
@@ -64,6 +65,7 @@ from app.models import (
     DiscoveryWeakPeerRow,
     EventDraft,
     ItemDraft,
+    LookDraft,
     ProfilePhotoUploadResponse,
     SignalPhotoUploadResponse,
     TipDraft,
@@ -382,6 +384,13 @@ def _tip_draft_from_dict(raw: dict[str, Any] | None) -> TipDraft | None:
         return None
     fields = set(TipDraft.model_fields)
     return TipDraft(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _look_draft_from_dict(raw: dict[str, Any] | None) -> LookDraft | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    fields = set(LookDraft.model_fields)
+    return LookDraft(**{k: v for k, v in raw.items() if k in fields})
 
 
 def _joint_moment_from_dict(raw: dict[str, Any] | None) -> JointMomentPayload | None:
@@ -1085,6 +1094,8 @@ def send_lana_message(
         session_ctx_in["event_host_active"] = True
         session_ctx_in["event_host_turns"] = 0
         session_ctx_in["event_affinity_asked"] = False
+        session_ctx_in["event_when_date"] = None
+        session_ctx_in["event_when_time"] = None
     # Deterministic entry into the in-chat "pass along an item" flow — from the
     # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
     # dependency, so it engages before discovery classifies it as sharing.swap).
@@ -1096,6 +1107,10 @@ def send_lana_message(
         session_ctx_in["pass_along_turns"] = 0
         session_ctx_in["pass_along_photo_prompted"] = False
         session_ctx_in["item_draft"] = None
+        # Entering pass-along closes any in-flight tip flow + its card.
+        session_ctx_in["tip_share_active"] = False
+        session_ctx_in["tip_ready"] = None
+        session_ctx_in["tip_draft"] = None
     # Deterministic entry into the in-chat "share a tip" flow — from the "A tip to
     # share" CTA hint OR an explicit recommendation phrase.
     if purpose == "lana" and not session_ctx_in.get("pass_along_active") and (
@@ -1107,6 +1122,24 @@ def send_lana_message(
         session_ctx_in["tip_ready"] = None
         session_ctx_in["tip_enrich_count"] = 0
         session_ctx_in["tip_draft"] = None
+        # Entering tip-share closes any in-flight pass-along flow + its card.
+        session_ctx_in["pass_along_active"] = False
+        session_ctx_in["item_draft"] = None
+    # Deterministic entry into the in-chat "looking for a meet/playgroup" flow.
+    if purpose == "lana" and not session_ctx_in.get("pass_along_active") and not session_ctx_in.get(
+        "tip_share_active"
+    ) and (body.intent_hint == "look_meet" or looks_like_look_meet_entry(body.message)):
+        session_ctx_in["look_meet_active"] = True
+        session_ctx_in["look_turns"] = 0
+        session_ctx_in["look_ready"] = None
+        session_ctx_in["look_enrich_count"] = 0
+        session_ctx_in["look_affinity_asked"] = None
+        session_ctx_in["look_draft"] = None
+        # Button entry ("A meet or playgroup") carries a generic seed phrase with no
+        # real preference — skip mining a kind from it so the flow asks P1 ("what
+        # kind of meet?") and the user types or picks. A typed entry phrase keeps
+        # its detail and is mined normally.
+        session_ctx_in["look_meet_skip_seed"] = body.intent_hint == "look_meet"
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -1196,6 +1229,7 @@ def send_lana_message(
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
         item_draft = _item_draft_from_dict(merged.get("item_draft"))
         tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
+        look_draft = _look_draft_from_dict(merged.get("look_draft"))
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -1251,6 +1285,7 @@ def send_lana_message(
         event_draft=event_draft,
         item_draft=item_draft,
         tip_draft=tip_draft,
+        look_draft=look_draft,
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
         **ob,

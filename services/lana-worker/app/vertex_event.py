@@ -47,7 +47,7 @@ Output ONLY valid JSON (no markdown):
   "assistant_message": "Your reply (include quoted focus phrase when clarifying)",
   "status": "continue",
   "event_draft": {{
-    "title": "short event title or null",
+    "title": "short event title or null — leave null for a generic hosting phrase like 'host a meet', 'plan a meetup', 'a get-together'; only set it once the user gives a real, specific name",
     "description": "full friendly description for the event page or null",
     "venue_name": "place name without street number or null",
     "starts_at": "ISO8601 timestamptz if inferable else null",

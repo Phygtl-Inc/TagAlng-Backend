@@ -13,6 +13,8 @@ TURN_SCOPED_SURFACES = frozenset({
     "recent_intro_duplicate",
     "event_published_now",
     "item_listed_now",
+    "tip_listed_now",
+    "look_meet_saved_now",
 })
 
 
