@@ -64,8 +64,12 @@ from app.models import (
     DiscoverySurfacePayload,
     DiscoveryWeakPeerRow,
     EventDraft,
+    EventVenueRequest,
     ItemDraft,
     LookDraft,
+    PlaceResult,
+    PlaceSearchRequest,
+    PlaceSearchResponse,
     ProfilePhotoUploadResponse,
     SignalPhotoUploadResponse,
     TipDraft,
@@ -1096,6 +1100,8 @@ def send_lana_message(
         session_ctx_in["event_affinity_asked"] = False
         session_ctx_in["event_when_date"] = None
         session_ctx_in["event_when_time"] = None
+        session_ctx_in["event_place_asked"] = False
+        session_ctx_in["event_venue"] = None
     # Deterministic entry into the in-chat "pass along an item" flow — from the
     # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
     # dependency, so it engages before discovery classifies it as sharing.swap).
@@ -1286,6 +1292,7 @@ def send_lana_message(
         item_draft=item_draft,
         tip_draft=tip_draft,
         look_draft=look_draft,
+        event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
         **ob,
@@ -1332,6 +1339,53 @@ async def upload_lana_signal_photo(
     ctx["item_draft"] = draft
     update_session_context(session_id, ctx)
     return SignalPhotoUploadResponse(photo_url=url)
+
+
+@app.post("/lana/sessions/{session_id}/event-venue")
+def set_event_venue(
+    session_id: str,
+    body: EventVenueRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Stamp the exact picked place onto the session's event draft, so the next host
+    turn completes the where-step with the precise pin (lat/lng/address/place_id) and
+    publish stores it — instead of re-geocoding the venue name."""
+    auth = verify_auth(authorization)
+    session = get_session_for_user(session_id, auth.user_id)
+    ctx = dict(session.get("context") or {})
+    draft = dict(ctx.get("event_draft") or {})
+    draft["venue_name"] = body.name.strip()
+    draft["venue_address"] = (body.address or "").strip() or None
+    draft["place_id"] = (body.place_id or "").strip() or None
+    draft["venue_lat"] = body.lat
+    draft["venue_lng"] = body.lng
+    ctx["event_draft"] = draft
+    ctx["event_venue"] = {
+        "name": draft["venue_name"],
+        "address": draft["venue_address"],
+        "place_id": draft["place_id"],
+        "lat": body.lat,
+        "lng": body.lng,
+    }
+    ctx["event_place_asked"] = True  # the where-step is satisfied precisely now
+    update_session_context(session_id, ctx)
+    return {"ok": True}
+
+
+@app.post("/lana/places/search", response_model=PlaceSearchResponse)
+def search_places_endpoint(
+    body: PlaceSearchRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Free-text place search (Google Places), biased to the caller's block. Powers the
+    "search a place" box in the host where-step. Server-side proxy — the Maps key never
+    reaches the browser. POST (not GET) so the PWA service worker doesn't intercept it.
+    Returns [] when the key isn't configured."""
+    auth = verify_auth(authorization)
+    from app.places import search_places
+
+    rows = search_places(query=body.q, block_id=auth.home_block_id, user_id=auth.user_id)
+    return PlaceSearchResponse(results=[PlaceResult(**r) for r in rows])
 
 
 @app.post("/lana/sessions/{session_id}/complete", response_model=CompleteSessionResponse)

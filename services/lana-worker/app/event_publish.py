@@ -77,13 +77,21 @@ def build_create_event_fields(
     if not title:
         raise HTTPException(status_code=400, detail="event_title_required")
 
-    lat, lng, block_id = resolve_event_location(user_id, draft.venue_name)
+    # Prefer the EXACT picked place's coordinates (Google Places); only re-geocode the
+    # name when we don't have them — so the saved pin is the place the host actually chose.
+    if draft.venue_lat is not None and draft.venue_lng is not None:
+        _, _, block_id = resolve_event_location(user_id, None)
+        lat, lng = float(draft.venue_lat), float(draft.venue_lng)
+    else:
+        lat, lng, block_id = resolve_event_location(user_id, draft.venue_name)
     fields: dict[str, Any] = {
         "lat": lat,
         "lng": lng,
         "title": title[:80],
         "description": (draft.description or "").strip()[:500] or None,
         "venue_name": (draft.venue_name or "").strip()[:120] or None,
+        "venue_address": (draft.venue_address or "").strip()[:300] or None,
+        "place_id": (draft.place_id or "").strip()[:300] or None,
         "cohort_tags": _filter_cohort_tags(draft.cohort_tags),
         "block_id": block_id,
     }

@@ -189,6 +189,11 @@ class EventDraft(BaseModel):
     title: str | None = None
     description: str | None = None
     venue_name: str | None = None
+    # Exact picked place (Google Places) — so neighbors navigate to the right pin.
+    venue_address: str | None = None
+    place_id: str | None = None
+    venue_lat: float | None = None
+    venue_lng: float | None = None
     starts_at: str | None = None
     ends_at: str | None = None
     duration_minutes: int | None = None
@@ -275,6 +280,33 @@ class SignalPhotoUploadResponse(BaseModel):
     photo_url: str
 
 
+class PlaceSearchRequest(BaseModel):
+    q: str
+
+
+class EventVenueRequest(BaseModel):
+    """The exact place the host picked from search — stamped onto the session's event
+    draft so publish stores the precise pin (not a re-geocoded name)."""
+
+    name: str
+    address: str = ""
+    lat: float | None = None
+    lng: float | None = None
+    place_id: str | None = None
+
+
+class PlaceResult(BaseModel):
+    name: str
+    address: str = ""
+    place_id: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+
+
+class PlaceSearchResponse(BaseModel):
+    results: list[PlaceResult] = Field(default_factory=list)
+
+
 class CreateSessionRequest(BaseModel):
     purpose: Literal["lana", "profile_intake", "event_draft"] = "lana"
     force_new: bool = False
@@ -353,6 +385,8 @@ class SendMessageResponse(BaseModel):
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
+    # Set once an event publishes — the FE builds a shareable /meet/{id} link from it.
+    event_id: str | None = None
     item_draft: ItemDraft | None = None
     tip_draft: TipDraft | None = None
     look_draft: LookDraft | None = None
