@@ -18,6 +18,10 @@ _EVENT_DRAFT_FIELDS = {
     "title",
     "description",
     "venue_name",
+    "venue_address",
+    "place_id",
+    "venue_lat",
+    "venue_lng",
     "starts_at",
     "ends_at",
     "duration_minutes",
@@ -76,6 +80,27 @@ _AFTERNOON_SUGGESTIONS = ["12 PM", "1 PM", "2 PM", "3 PM"]
 _MORNING_SUGGESTIONS = ["8 AM", "9 AM", "10 AM", "11 AM"]
 _EVENING_SUGGESTIONS = ["5 PM", "6 PM", "7 PM"]
 _PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere on the block"]
+# Sentinel suggestion — the FE swaps this chip for a Google place-search field.
+_SEARCH_PLACE_OPTION = "🔍 Search a place"
+
+
+def _nearby_host_places(
+    zip_code: str | None, block_id: str | None, user_id: str | None
+) -> list[str]:
+    """Real nearby venues to host at (Google Places around the block). [] with no key
+    or no results, so the where-step falls back to the generic chips."""
+    try:
+        from app.places import nearby_place_suggestions
+
+        return nearby_place_suggestions(
+            query="park playground community center",
+            zip_code=zip_code,
+            block_id=block_id,
+            user_id=user_id,
+            limit=3,
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        return []
 
 # Bare words the extractor mistakes for a title (from "host a meet" etc.) — not real names.
 _GENERIC_TITLES = {
@@ -437,9 +462,23 @@ def run_lana_unified_pipeline(
             if wd:
                 ed["starts_at"] = f"{wd}T{wt or '00:00'}:00"
 
+            # Exact picked place (stamped via /event-venue) — overrides any venue the
+            # extractor lifted, and carries the precise pin through to publish.
+            ev = session_ctx.get("event_venue")
+            if isinstance(ev, dict) and str(ev.get("name") or "").strip():
+                ed["venue_name"] = ev["name"]
+                ed["venue_address"] = ev.get("address")
+                ed["place_id"] = ev.get("place_id")
+                ed["venue_lat"] = ev.get("lat")
+                ed["venue_lng"] = ev.get("lng")
+
             _title = str(ed.get("title") or "").strip()
             has_venue = bool(str(ed.get("venue_name") or "").strip())
-            complete = bool(_title) and has_venue and bool(wd) and bool(wt)
+            # Gate on whether we've ASKED where — not just on a venue being present, since
+            # the extractor lifts one from the title ("Playdate at the Park" → "Park") and
+            # that used to skip the where-step entirely.
+            place_asked = bool(turn_ctx.get("event_place_asked"))
+            complete = bool(_title) and bool(wd) and bool(wt) and place_asked and has_venue
             # Ask the affinity question once, gated ONLY on whether we've asked — not on
             # cohort_tags (the extractor auto-fills those, which used to skip the question).
             affinity_done = bool(session_ctx.get("event_affinity_asked"))
@@ -471,6 +510,8 @@ def run_lana_unified_pipeline(
                     turn_ctx["event_affinity_asked"] = False
                     turn_ctx["event_when_date"] = None
                     turn_ctx["event_when_time"] = None
+                    turn_ctx["event_place_asked"] = False
+                    turn_ctx["event_venue"] = None
                     reply = _event_published_reply(reply, ed)
             else:
                 # Deterministic question + chips for the next missing field (title → day →
@@ -485,8 +526,21 @@ def run_lana_unified_pipeline(
                     reply = f"Great — **{_title}**. What time should it start?"
                     ed["suggestions"] = _START_TIME_SUGGESTIONS
                 else:
-                    reply = f"Almost there — **{_title}**. Where would you like to host it?"
-                    ed["suggestions"] = _PLACE_SUGGESTIONS
+                    # Where-step — asked once. Drop any venue the extractor lifted from
+                    # the title so the user answers explicitly (fixes the skipped "where?").
+                    if not place_asked:
+                        ed.pop("venue_name", None)
+                        turn_ctx["event_place_asked"] = True
+                        reply = f"Almost there — **{_title}**. Where in the block would you like to host it?"
+                    else:
+                        reply = f"Where would you like to host **{_title}**?"
+                    nearby = _nearby_host_places(
+                        str(session_ctx.get("zip_code") or "").strip() or None,
+                        home_block_id,
+                        user_id,
+                    )
+                    base = (nearby + ["My place"]) if nearby else list(_PLACE_SUGGESTIONS)
+                    ed["suggestions"] = base + [_SEARCH_PLACE_OPTION]
             turn_ctx["event_draft"] = ed
             draft = ed  # surface to the FE (5th return → response.event_draft)
 
