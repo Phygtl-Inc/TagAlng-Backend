@@ -63,6 +63,7 @@ class ActivityPreviewRow(BaseModel):
 class AuthActionPayload(BaseModel):
     type: str
     phone: str | None = None
+    email: str | None = None
     token: str | None = None
     verify_type: str | None = None
 
