@@ -126,6 +126,8 @@ from app.ui_intent import (
 from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
+from app.analytics import track as amplitude_track
+
 _LOG = logging.getLogger(__name__)
 
 app = FastAPI(title="TagAlng lana-worker", version="0.5.4")
@@ -1098,10 +1100,18 @@ def send_lana_message(
         session_ctx_in["event_host_active"] = True
         session_ctx_in["event_host_turns"] = 0
         session_ctx_in["event_affinity_asked"] = False
+        # Start a fresh draft — don't inherit a prior session's event (the stale
+        # "dads meetup" card). event_id too, so a past publish doesn't skip the flow.
+        session_ctx_in["event_draft"] = None
+        session_ctx_in["event_id"] = None
         session_ctx_in["event_when_date"] = None
         session_ctx_in["event_when_time"] = None
         session_ctx_in["event_place_asked"] = False
         session_ctx_in["event_venue"] = None
+        session_ctx_in["event_settings"] = None
+        session_ctx_in["event_cap_asked"] = False
+        session_ctx_in["event_approval_asked"] = False
+        session_ctx_in["event_share_asked"] = False
     # Deterministic entry into the in-chat "pass along an item" flow — from the
     # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
     # dependency, so it engages before discovery classifies it as sharing.swap).
@@ -1282,6 +1292,32 @@ def send_lana_message(
         debug.model_dump() if debug is not None else None,
     )
     ob.pop("onboarding_step", None)  # not read by the FE
+
+    # Server-truth product analytics (Amplitude) — fire-and-forget, same user_id as the
+    # browser so events stitch. Tracks the turn + the conversions the client can't be
+    # trusted to report (publish / save actually happened server-side).
+    _ui = ob.get("ui_intent")
+    amplitude_track("lana_turn", user_id=auth.user_id, event_properties={"ui_intent": _ui})
+    _conversions = {
+        "event_created": "event_hosted",
+        "item_listed": "item_listed",
+        "tip_listed": "tip_shared",
+        "look_meet_saved": "meet_seek_saved",
+    }
+    if _ui in _conversions:
+        amplitude_track(
+            _conversions[_ui],
+            user_id=auth.user_id,
+            event_properties={"event_id": merged.get("event_id")} if _ui == "event_created" else None,
+        )
+    elif _ui == "signal_saved":
+        _sig = merged.get("signal_saved") if isinstance(merged.get("signal_saved"), dict) else {}
+        amplitude_track(
+            "signal_saved",
+            user_id=auth.user_id,
+            event_properties={"intent": (_sig or {}).get("intent"), "category": (_sig or {}).get("category")},
+        )
+
     return SendMessageResponse(
         session_id=session_id,
         status=status,
