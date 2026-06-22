@@ -105,6 +105,10 @@ def build_create_event_fields(
         cap = int(draft.max_attendees)
         if 1 <= cap <= 200:
             fields["max_attendees"] = cap
+    if draft.auto_approve is not None:
+        fields["auto_approve"] = bool(draft.auto_approve)
+    if draft.allow_attendee_share is not None:
+        fields["allow_attendee_share"] = bool(draft.allow_attendee_share)
     if cohost_id:
         fields["cohost_id"] = cohost_id
     return fields

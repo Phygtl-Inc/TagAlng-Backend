@@ -2663,14 +2663,29 @@ def _turn_wants_signup_gate(
     return wants_signup_intent(msg)
 
 
+# Deterministic logout phrases — a backstop so "log me out" always works even when the
+# Flash classifier misses it (goal≠logout). Matched as a whole-intent, not substring.
+_LOGOUT_RE = re.compile(
+    r"\b(?:log|sign)\s*(?:me\s+)?out\b|\b(?:logout|signout)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_logout(message: str) -> bool:
+    """True for clear logout requests (log out / log me out / sign me out / logout)."""
+    return bool(_LOGOUT_RE.search(str(message or "").strip()))
+
+
 def _turn_wants_logout(
     msg: str,
     slots: dict[str, Any] | None,
     session_ctx: dict[str, Any],
 ) -> bool:
+    # AI classification OR the deterministic phrase backstop — so logout never silently
+    # fails when Flash classifies "log me out" as chat.
     if discovery_ai_enabled():
-        return slots_want_logout(slots)
-    return wants_logout_intent(msg)
+        return slots_want_logout(slots) or looks_like_logout(msg)
+    return wants_logout_intent(msg) or looks_like_logout(msg)
 
 
 def wants_activities_browse(text: str) -> bool:

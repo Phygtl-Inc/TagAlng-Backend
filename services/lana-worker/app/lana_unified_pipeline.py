@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.discovery_route import handle_discovery_turn
+from app.discovery_route import handle_discovery_turn, looks_like_logout
 from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import unified_rules_first_enabled
@@ -26,6 +26,8 @@ _EVENT_DRAFT_FIELDS = {
     "ends_at",
     "duration_minutes",
     "max_attendees",
+    "auto_approve",
+    "allow_attendee_share",
     "cohort_tags",
     "affinity_prompt",
     "affinity_options",
@@ -82,6 +84,38 @@ _EVENING_SUGGESTIONS = ["5 PM", "6 PM", "7 PM"]
 _PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere on the block"]
 # Sentinel suggestion — the FE swaps this chip for a Google place-search field.
 _SEARCH_PLACE_OPTION = "🔍 Search a place"
+
+# Host join-settings chip options (capacity / approval / share).
+_CAPACITY_SUGGESTIONS = ["Up to 6", "Up to 10", "Up to 15", "Open · no limit"]
+_APPROVAL_SUGGESTIONS = ["Anyone can join", "I'll approve each request"]
+_SHARE_SUGGESTIONS = ["Yes, let them share", "My invites only"]
+
+
+def _parse_event_settings(message: str, settings: dict[str, Any]) -> None:
+    """Read capacity / approval / share signals from the user's tap (or words) into the
+    settings dict. Matches the chip labels; harmless on unrelated messages."""
+    import re
+
+    m = str(message or "").lower()
+    # capacity
+    if re.search(r"no limit|unlimited|\bopen\b|any number|as many", m):
+        settings["max_attendees"] = None  # unlimited
+        settings["_cap_set"] = True
+    else:
+        num = re.search(r"\b(\d{1,3})\b", m)
+        if num:
+            settings["max_attendees"] = int(num.group(1))
+            settings["_cap_set"] = True
+    # approval (require approval = NOT auto_approve)
+    if re.search(r"\bapprove\b|approval|i'?ll approve|vet|screen", m):
+        settings["auto_approve"] = False
+    elif re.search(r"anyone can join|open join|anyone|no approval|just join", m):
+        settings["auto_approve"] = True
+    # attendee share
+    if re.search(r"invites only|my invites|don'?t share|keep it private|private|no share", m):
+        settings["allow_attendee_share"] = False
+    elif re.search(r"let them share|can share|share it|invite others|yes.*share|share.*yes", m):
+        settings["allow_attendee_share"] = True
 
 
 def _nearby_host_places(
@@ -283,6 +317,15 @@ def run_lana_unified_pipeline(
     # pass-along / tip gates return before the discovery-path clear would run.
     clear_turn_surfaces(session_ctx)
 
+    # A logout request must escape any sticky capture mode — otherwise "log me out" gets
+    # swallowed as an item/tip/meet answer and does nothing. Clear the flags so the turn
+    # falls through to discovery's logout handler.
+    if looks_like_logout(user_message):
+        for _k in (
+            "pass_along_active", "tip_share_active", "look_meet_active", "event_host_active"
+        ):
+            session_ctx[_k] = False
+
     # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
     # structured extraction), the same way event_host_active does. It releases on
     # save, cancel, or a turn cap, so other flows are never affected.
@@ -472,13 +515,32 @@ def run_lana_unified_pipeline(
                 ed["venue_lat"] = ev.get("lat")
                 ed["venue_lng"] = ev.get("lng")
 
+            # Join settings (capacity / approval / share) — parsed from the user's chip
+            # taps, kept in session_ctx so the extractor's redraw can't drop them.
+            settings = dict(session_ctx.get("event_settings") or {})
+            _parse_event_settings(user_message, settings)
+            session_ctx["event_settings"] = settings
+            if settings.get("_cap_set"):
+                ed["max_attendees"] = settings.get("max_attendees")
+            if "auto_approve" in settings:
+                ed["auto_approve"] = settings["auto_approve"]
+            if "allow_attendee_share" in settings:
+                ed["allow_attendee_share"] = settings["allow_attendee_share"]
+
             _title = str(ed.get("title") or "").strip()
             has_venue = bool(str(ed.get("venue_name") or "").strip())
             # Gate on whether we've ASKED where — not just on a venue being present, since
             # the extractor lifts one from the title ("Playdate at the Park" → "Park") and
             # that used to skip the where-step entirely.
             place_asked = bool(turn_ctx.get("event_place_asked"))
-            complete = bool(_title) and bool(wd) and bool(wt) and place_asked and has_venue
+            # Settings are asked once each (capacity → approval → share), after place.
+            cap_asked = bool(turn_ctx.get("event_cap_asked"))
+            approval_asked = bool(turn_ctx.get("event_approval_asked"))
+            share_asked = bool(turn_ctx.get("event_share_asked"))
+            settings_done = cap_asked and approval_asked and share_asked
+            complete = (
+                bool(_title) and bool(wd) and bool(wt) and place_asked and has_venue and settings_done
+            )
             # Ask the affinity question once, gated ONLY on whether we've asked — not on
             # cohort_tags (the extractor auto-fills those, which used to skip the question).
             affinity_done = bool(session_ctx.get("event_affinity_asked"))
@@ -512,6 +574,10 @@ def run_lana_unified_pipeline(
                     turn_ctx["event_when_time"] = None
                     turn_ctx["event_place_asked"] = False
                     turn_ctx["event_venue"] = None
+                    turn_ctx["event_settings"] = None
+                    turn_ctx["event_cap_asked"] = False
+                    turn_ctx["event_approval_asked"] = False
+                    turn_ctx["event_share_asked"] = False
                     reply = _event_published_reply(reply, ed)
             else:
                 # Deterministic question + chips for the next missing field (title → day →
@@ -525,7 +591,7 @@ def run_lana_unified_pipeline(
                 elif not wt:
                     reply = f"Great — **{_title}**. What time should it start?"
                     ed["suggestions"] = _START_TIME_SUGGESTIONS
-                else:
+                elif not place_asked or not has_venue:
                     # Where-step — asked once. Drop any venue the extractor lifted from
                     # the title so the user answers explicitly (fixes the skipped "where?").
                     if not place_asked:
@@ -541,6 +607,18 @@ def run_lana_unified_pipeline(
                     )
                     base = (nearby + ["My place"]) if nearby else list(_PLACE_SUGGESTIONS)
                     ed["suggestions"] = base + [_SEARCH_PLACE_OPTION]
+                elif not cap_asked:
+                    reply = f"Great — **{_title}**. How many can come?"
+                    ed["suggestions"] = _CAPACITY_SUGGESTIONS
+                    turn_ctx["event_cap_asked"] = True
+                elif not approval_asked:
+                    reply = "Who can join — open, or you approve each request?"
+                    ed["suggestions"] = _APPROVAL_SUGGESTIONS
+                    turn_ctx["event_approval_asked"] = True
+                else:  # not share_asked
+                    reply = "Last bit — can attendees invite others?"
+                    ed["suggestions"] = _SHARE_SUGGESTIONS
+                    turn_ctx["event_share_asked"] = True
             turn_ctx["event_draft"] = ed
             draft = ed  # surface to the FE (5th return → response.event_draft)
 

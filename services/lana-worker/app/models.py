@@ -198,6 +198,9 @@ class EventDraft(BaseModel):
     ends_at: str | None = None
     duration_minutes: int | None = None
     max_attendees: int | None = None
+    # Join settings captured in the host flow.
+    auto_approve: bool | None = None  # True = anyone joins; False = host approves each
+    allow_attendee_share: bool | None = None
     cohort_tags: list[str] = Field(default_factory=list)
     affinity_prompt: str | None = None
     affinity_options: list[str] = Field(default_factory=list)
