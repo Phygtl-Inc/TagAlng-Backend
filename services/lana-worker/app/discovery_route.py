@@ -191,6 +191,10 @@ _FUNNEL_PHASES = frozenset(
     {PHASE_NEED_ZIP, PHASE_NEED_IDENTITY, PHASE_NEED_DISPLAY_NAME}
 )
 
+# Cap consecutive unparsed name replies so the user is never trapped re-answering
+# "what should I call you?" — mirrors the event-host turn cap below.
+NAME_CHANGE_MAX_ATTEMPTS = 2
+
 _MORE_DETAIL_RE = re.compile(
     r"\b(?:(?:show|see)\s+(?:me\s+)?(?:their\s+)?names?|"
     r"introduce|connect(?:\s+me)?|who are they|"
@@ -705,14 +709,22 @@ def _try_change_name_turn(
     if phrase_linear_intent(msg) != "settings.change_name":
         return None
     reply, nick = handle_change_name(user_id, msg)
-    ctx = _routing_ctx(
-        dict(session_ctx),
-        phase=phase or "listening",
-        active_intent="settings.change_name",
-    )
     if nick:
+        # Success — release the flow so the next turn classifies fresh.
+        ctx = _routing_ctx(dict(session_ctx), phase="listening", active_intent=None)
         ctx["display_name_saved"] = True
-    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "change_display_name")
+        ctx["nickname"] = nick
+        ctx.pop("awaiting_name_change", None)
+        ctx.pop("name_change_attempts", None)
+    else:
+        # Couldn't parse a name — await one (the continuation handler caps retries).
+        ctx = _routing_ctx(
+            dict(session_ctx),
+            phase=PHASE_NEED_DISPLAY_NAME,
+            active_intent="settings.change_name",
+        )
+        ctx["awaiting_name_change"] = True
+    ctx["last_routing"] = _discovery_routing_stub(ctx["routing_phase"], "change_display_name")
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -882,18 +894,38 @@ def _try_awaiting_name_change_turn(
     if not awaiting and not rename_flow:
         return None
     reply, nick = handle_change_name(user_id, msg)
-    ctx = _routing_ctx(
-        session_ctx,
-        phase=(phase or "listening") if nick else PHASE_NEED_DISPLAY_NAME,
-        active_intent="settings.change_name",
-    )
     if nick:
+        # Success — release the flow (neutral phase, cleared intent) so the next
+        # turn is classified fresh instead of re-entering the name gate.
+        ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
         ctx["display_name_saved"] = True
         ctx["nickname"] = nick
         ctx.pop("awaiting_name_change", None)
-    else:
-        ctx["awaiting_name_change"] = True
-    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_name")
+        ctx.pop("name_change_attempts", None)
+        ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+        return reply, ctx, ctx["last_routing"], []
+
+    # No name parsed — cap retries so a non-name reply can't trap the user here.
+    attempts = int(session_ctx.get("name_change_attempts") or 0) + 1
+    if attempts >= NAME_CHANGE_MAX_ATTEMPTS:
+        ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+        ctx.pop("awaiting_name_change", None)
+        ctx.pop("name_change_attempts", None)
+        ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+        return (
+            "No problem — I'll keep your current name. What would you like to do next?",
+            ctx,
+            ctx["last_routing"],
+            [],
+        )
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=PHASE_NEED_DISPLAY_NAME,
+        active_intent="settings.change_name",
+    )
+    ctx["awaiting_name_change"] = True
+    ctx["name_change_attempts"] = attempts
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -1328,18 +1360,21 @@ def _try_layer1_intent_turn(
 
     if linear == "settings.change_name":
         reply, nick = handle_change_name(user_id, msg)
-        ctx = _routing_ctx(
-            ctx_base,
-            phase=(phase or "listening") if nick else PHASE_NEED_DISPLAY_NAME,
-            active_intent="settings.change_name",
-        )
         if nick:
+            # Success — release the flow so the next turn classifies fresh.
+            ctx = _routing_ctx(ctx_base, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
             ctx["nickname"] = nick
             ctx.pop("awaiting_name_change", None)
+            ctx.pop("name_change_attempts", None)
         else:
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=PHASE_NEED_DISPLAY_NAME,
+                active_intent="settings.change_name",
+            )
             ctx["awaiting_name_change"] = True
-        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_name")
+        ctx["last_routing"] = _discovery_routing_stub(ctx["routing_phase"], "update_user_name")
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "settings.notification_prefs":
@@ -2649,7 +2684,9 @@ def _turn_wants_login(
     if _login_flow_active(session_ctx):
         return True
     if discovery_ai_enabled():
-        return slots_want_login(slots)
+        # Flash classification OR the deterministic phrase backstop — so "sign me in"
+        # never silently fails when Flash labels it as chat/discovery (mirrors logout).
+        return slots_want_login(slots) or wants_login_intent(msg)
     return wants_login_intent(msg)
 
 

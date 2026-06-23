@@ -206,6 +206,19 @@ def handle_guest_login(
         )
 
     if step in ("early_chat", "intro_declined"):
+        # If the user already gave their email this turn, send the code straight away
+        # instead of re-asking and throwing the email they just typed away.
+        email = extract_email(msg)
+        if email:
+            return (
+                f"Got it — I sent a 6-digit code to {email}. Enter it here when it arrives.",
+                _login_ctx(
+                    session_ctx,
+                    guest_step=GUEST_STEP_LOGIN_OTP,
+                    login_phone=email,
+                    requires_login_otp=True,
+                ),
+            )
         return (
             "Sure — what's the email on your account?",
             _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
