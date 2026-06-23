@@ -9,7 +9,8 @@ UI_INTENT_CHAT = "chat"
 UI_INTENT_COLLECT_ZIP = "collect_zip"
 UI_INTENT_COLLECT_IDENTITY = "collect_identity"
 UI_INTENT_COLLECT_DISPLAY_NAME = "collect_display_name"
-UI_INTENT_COLLECT_PHONE = "collect_phone"
+UI_INTENT_COLLECT_PHONE = "collect_phone"  # legacy — kept for back-compat, no longer emitted
+UI_INTENT_COLLECT_EMAIL = "collect_email"  # the identifier step (app is email-auth)
 UI_INTENT_COLLECT_OTP = "collect_otp"
 UI_INTENT_SHOW_PEER_PREVIEW = "show_peer_preview"
 UI_INTENT_SHOW_ACTIVITY_PREVIEW = "show_activity_preview"
@@ -58,11 +59,11 @@ _PHASE_TO_INTENT: dict[str, str] = {
     "need_zip": UI_INTENT_COLLECT_ZIP,
     "need_identity": UI_INTENT_COLLECT_IDENTITY,
     "need_display_name": UI_INTENT_COLLECT_DISPLAY_NAME,
-    "await_signup_phone": UI_INTENT_COLLECT_PHONE,
+    "await_signup_phone": UI_INTENT_COLLECT_EMAIL,
     "await_signup_otp": UI_INTENT_COLLECT_OTP,
-    "await_login_phone": UI_INTENT_COLLECT_PHONE,
+    "await_login_phone": UI_INTENT_COLLECT_EMAIL,
     "await_login_otp": UI_INTENT_COLLECT_OTP,
-    "gate_verify": UI_INTENT_COLLECT_PHONE,
+    "gate_verify": UI_INTENT_COLLECT_EMAIL,
     "await_profile_photo": UI_INTENT_UPLOAD_PROFILE_PHOTO,
     "await_logout": UI_INTENT_SIGN_OUT,
     "signal_extract": UI_INTENT_COLLECT_SIGNAL_DETAIL,
@@ -71,7 +72,7 @@ _PHASE_TO_INTENT: dict[str, str] = {
 }
 
 _GUEST_STEP_TO_INTENT: dict[str, str] = {
-    "await_phone": UI_INTENT_COLLECT_PHONE,
+    "await_phone": UI_INTENT_COLLECT_EMAIL,
     "awaiting_intro_name": UI_INTENT_COLLECT_DISPLAY_NAME,
 }
 
@@ -171,7 +172,7 @@ def derive_ui_intent(
         return _GUEST_STEP_TO_INTENT[guest_step]
 
     if not phone_verified and ctx.get("requires_phone_verification"):
-        return UI_INTENT_COLLECT_PHONE
+        return UI_INTENT_COLLECT_EMAIL
 
     if phase == "preview":
         if peer_count > 0 and active in PEER_DISCOVERY_ACTIVE_INTENTS:
@@ -185,7 +186,7 @@ def derive_ui_intent(
         return UI_INTENT_CHAT
 
     if ctx.get("requires_phone_verification"):
-        return UI_INTENT_COLLECT_PHONE
+        return UI_INTENT_COLLECT_EMAIL
 
     if ctx.get("auth_intent") == "logout" or phase == "await_logout":
         return UI_INTENT_SIGN_OUT
