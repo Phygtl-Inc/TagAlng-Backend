@@ -45,11 +45,12 @@ hosting. On a host turn most non-host fields are just empty.
 | `collect_zip`            | ZIP input                                                    | —                        |
 | `collect_identity`       | Identity prompt                                              | —                        |
 | `collect_display_name`   | Display-name input                                           | —                        |
-| `collect_phone`          | Phone input (auth gate)                                      | `auth_action`            |
+| `collect_email`          | **Email input (auth gate)** — the identifier step           | `auth_action`            |
+| `collect_phone`          | _Deprecated_ — legacy alias for `collect_email`; render the email input | `auth_action`            |
 | `collect_otp`            | OTP input                                                    | `auth_action`            |
 | `collect_signal_detail`  | Signal capture follow-up                                     | —                        |
 | **`collect_event_detail`** | **Event card (in progress) + tappable option chips**       | **`event_draft`**        |
-| **`event_created`**      | **Published "it's live" card + CTA buttons**                 | **`event_draft`, `ui_actions`** |
+| **`event_created`**      | **Published "it's live" card + native CTAs (Open the meet up / Share)** | **`event_draft`, `event_id`** |
 | **`collect_item_detail`** | **Pass-along item card + entity chips + suggestions/photo** | **`item_draft`**         |
 | **`item_listed`**        | **"Listed on your block" card**                             | **`item_draft`**         |
 | `show_peer_preview`      | Peer match list                                              | `peer_matches`           |
@@ -125,29 +126,38 @@ Dates are computed live, so they're always real upcoming days.
 
 ---
 
-## 4. `ui_actions` — post-publish CTA buttons
+## 4. Post-publish CTAs — rendered natively (NOT `ui_actions`)
 
-On `ui_intent: "event_created"`, render `response.ui_actions` as buttons:
+> **Changed.** `event_created` turns used to return `ui_actions` pills (`"Send to a
+> mom"` / `"Maybe later"`). That is **removed** — `ui_actions` is now empty (`[]`) on
+> `event_created`. The post-publish CTAs *navigate* and open the *share sheet*, which a
+> message-sending `ui_action` can't express, so the FE renders them itself from
+> `event_id`:
 
-```jsonc
-"ui_actions": [
-  { "id": "invite_mom", "label": "Send to a mom", "message": "who can I invite to this event?", "style": "primary" },
-  { "id": "later",      "label": "Maybe later",   "message": "not now",                          "style": "secondary" }
-]
+| CTA | Action |
+|-----|--------|
+| **Open the meet up** | navigate to `/meet/{event_id}` (the meet hub) |
+| **Share with a mom** | native share / clipboard of `${origin}/meet/{event_id}` |
+
+```ts
+// event_created turn — event_id is on the turn
+renderPublishedCard(turn.event_draft);
+openMeetButton(() => router.push(`/meet/${turn.event_id}`));
+shareButton(() => share(`${origin}/meet/${turn.event_id}`));
 ```
 
-Shape (`UiActionRow`):
+> **`ui_actions` is still used by other intents** (intro offers/responses, etc.) — its
+> shape is unchanged (`{ id, label, message, style, intro_id?, peer_user_id? }`, tap =
+> `sendMessage(sessionId, action.message)`). It's just no longer populated for
+> `event_created`.
 
-| Field          | Type                                   | Notes                              |
-|----------------|----------------------------------------|------------------------------------|
-| `id`           | string                                 | stable key                         |
-| `label`        | string                                 | button text                        |
-| `message`      | string                                 | **send this** as the next turn on tap |
-| `style`        | `"primary" \| "secondary" \| "ghost"`  | button variant                     |
-| `intro_id`     | string \| null                         | present on intro actions only      |
-| `peer_user_id` | string \| null                         | present on peer actions only       |
+### Publish can fail — gate the card on `event_id`
 
-Same tap contract: `onClick={() => sendMessage(sessionId, action.message)}`.
+Publishing is best-effort and can be rejected (e.g. host not verified, venue not
+mappable). On failure the turn comes back with **`event_id: null`** and an honest
+`assistant_message` (not an "all set!" line), and host mode stays active so the next
+message retries. **Only render the "it's live" card + CTAs when `turn.event_id` is
+present** — don't assume `ui_intent === "event_created"` implies a real event.
 
 ---
 
@@ -168,8 +178,13 @@ switch (turn.ui_intent) {
     break;
 
   case "event_created":
+    if (!turn.event_id) {                        // publish failed — show the message only
+      break;                                     // (host mode stays active; next msg retries)
+    }
     renderPublishedCard(turn.event_draft);       // "it's live"
-    renderActions(turn.ui_actions);              // tap → sendMessage(action.message)
+    // Native CTAs (NOT ui_actions):
+    openMeetButton(() => router.push(`/meet/${turn.event_id}`));
+    shareButton(() => share(`${origin}/meet/${turn.event_id}`));
     break;
 
   // …other intents unchanged
@@ -184,11 +199,16 @@ publish, on an explicit cancel/topic-change, or after a turn cap (never loops).
 
 ## 6. TL;DR for the FE team
 
-- All chips/buttons come from the **backend** — render `event_draft.suggestions`,
-  `event_draft.affinity_prompt` + `affinity_options`, and `ui_actions[]`.
-- **Tap = send the chip/action text as the next message.** Always.
-- Switch your UI on `response.ui_intent`. Two new values: `collect_event_detail`
+- Capture chips still come from the **backend** — render `event_draft.suggestions` and
+  `event_draft.affinity_prompt` + `affinity_options`. **Tap = send the chip text** as the
+  next message.
+- Switch your UI on `response.ui_intent`. Host-flow values: `collect_event_detail`
   (capturing) and `event_created` (published).
+- **Auth identifier step is now `collect_email`** (render the email input). `collect_phone`
+  is a deprecated alias — keep handling it as the email step for back-compat.
+- **`event_created` no longer returns `ui_actions`.** Render the post-publish CTAs
+  natively from `event_id`: *Open the meet up* → `/meet/{event_id}`, *Share with a mom* →
+  share `/meet/{event_id}`. **Gate the card on `event_id` being non-null** (publish can fail).
 - `debug`, `timing_ms`, `message_count`, `onboarding_step` are **removed** from the
   response — don't depend on them.
 
