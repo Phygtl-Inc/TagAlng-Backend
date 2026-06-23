@@ -128,7 +128,7 @@ def handle_profile_photo_turn(
 
     if is_anonymous and not phone_verified:
         return (
-            "Verify your phone first — then I can save a profile photo for you.",
+            "Verify your email first — then I can save a profile photo for you.",
             {**session_ctx, "routing_phase": "listening"},
         )
 

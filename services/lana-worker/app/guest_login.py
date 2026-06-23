@@ -107,22 +107,16 @@ def extract_otp_code(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def extract_phone_e164(text: str) -> str | None:
-    """Best-effort E.164 from user message (US-focused dev numbers)."""
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def extract_email(text: str) -> str | None:
+    """Best-effort email address from a user message (lower-cased)."""
     raw = str(text or "").strip()
     if not raw:
         return None
-    m = re.search(r"\+(\d{10,15})\b", raw.replace(" ", ""))
-    if m:
-        return f"+{m.group(1)}"
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) == 10:
-        return f"+1{digits}"
-    if len(digits) == 11 and digits.startswith("1"):
-        return f"+{digits}"
-    if 10 <= len(digits) <= 15:
-        return f"+{digits}"
-    return None
+    m = _EMAIL_RE.search(raw)
+    return m.group(0).lower() if m else None
 
 
 def _login_ctx(
@@ -166,19 +160,18 @@ def handle_guest_login(
                 "No problem — what would you like to do? Find neighbors, plan something, or tell me about yourself.",
                 _exit_login_ctx(session_ctx),
             )
-        phone = extract_phone_e164(msg)
-        if not phone:
+        email = extract_email(msg)
+        if not email:
             return (
-                "I didn't catch a valid phone number — include country code if you can "
-                "(e.g. +15550000000).",
+                "I didn't catch a valid email — something like you@example.com.",
                 _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
             )
         return (
-            f"Got it — I sent a 6-digit code to {phone}. Enter it here when it arrives.",
+            f"Got it — I sent a 6-digit code to {email}. Enter it here when it arrives.",
             _login_ctx(
                 session_ctx,
                 guest_step=GUEST_STEP_LOGIN_OTP,
-                login_phone=phone,
+                login_phone=email,
                 requires_login_otp=True,
             ),
         )
@@ -191,9 +184,9 @@ def handle_guest_login(
             )
         otp = extract_otp_code(msg)
         if not otp:
-            phone = str(session_ctx.get("login_phone") or "your phone")
+            email = str(session_ctx.get("login_phone") or "your email")
             return (
-                f"Enter the 6-digit code we sent to {phone}.",
+                f"Enter the 6-digit code we sent to {email}.",
                 _login_ctx(
                     session_ctx,
                     guest_step=GUEST_STEP_LOGIN_OTP,
@@ -213,8 +206,21 @@ def handle_guest_login(
         )
 
     if step in ("early_chat", "intro_declined"):
+        # If the user already gave their email this turn, send the code straight away
+        # instead of re-asking and throwing the email they just typed away.
+        email = extract_email(msg)
+        if email:
+            return (
+                f"Got it — I sent a 6-digit code to {email}. Enter it here when it arrives.",
+                _login_ctx(
+                    session_ctx,
+                    guest_step=GUEST_STEP_LOGIN_OTP,
+                    login_phone=email,
+                    requires_login_otp=True,
+                ),
+            )
         return (
-            "Sure — what's the phone number on your account?",
+            "Sure — what's the email on your account?",
             _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
         )
 

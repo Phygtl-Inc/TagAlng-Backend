@@ -239,7 +239,7 @@ def lana_profile_guest_turn(
             if existing:
                 reply = (
                     f"Perfect, {existing}! Before I introduce you to {nick}, "
-                    "verify your phone — use the button below to enter your number."
+                    "verify your email — use the button below to enter your email."
                 )
                 ctx = _merge_guest_ctx(
                     session_ctx,
@@ -275,7 +275,7 @@ def lana_profile_guest_turn(
             return reply, "continue", ctx, _ui_joint_moment(), joint_moment
         reply = (
             f"Perfect, {name}! Before I introduce you to {nick}, "
-            "verify your phone — use the button below to enter your number."
+            "verify your email — use the button below to enter your email."
         )
         ctx = _merge_guest_ctx(
             session_ctx,
@@ -296,7 +296,7 @@ def lana_profile_guest_turn(
             ctx["requires_phone_verification"] = False
             return reply, "continue", ctx, _ui_joint_moment(), joint_moment
         reply = (
-            "Almost there — verify your phone with the button below, "
+            "Almost there — verify your email with the button below, "
             "then send me a quick message and we'll keep going."
         )
         ctx = _merge_guest_ctx(

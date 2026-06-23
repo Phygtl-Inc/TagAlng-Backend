@@ -63,7 +63,7 @@ class TestProfilePhotoSlots(unittest.TestCase):
         self.assertIsNotNone(result)
         reply, _ = result
         assert reply is not None
-        self.assertIn("verify your phone", reply.lower())
+        self.assertIn("verify your email", reply.lower())
 
     def test_accept_after_suggestion(self) -> None:
         slots = {

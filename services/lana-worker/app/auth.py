@@ -14,6 +14,9 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 class AuthSession:
     user_id: str
     is_anonymous: bool
+    # Auth gate flag. Now fed by EMAIL verification (email OTP), not SMS. The name
+    # is kept because ~50 downstream call sites in discovery_* read `phone_verified`
+    # as the generic "is this a permanent, verified account?" signal.
     phone_verified: bool
     home_block_id: str | None
 
@@ -41,7 +44,7 @@ def verify_auth(authorization: str | None) -> AuthSession:
     return AuthSession(
         user_id=str(user_id),
         is_anonymous=bool(user.get("is_anonymous")),
-        phone_verified=_resolve_phone_verified(str(user_id), user, profile),
+        phone_verified=_resolve_verified(str(user_id), user, profile),
         home_block_id=profile.get("home_block_id"),
     )
 
@@ -82,14 +85,14 @@ def service_client():
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-def phone_has_registered_account(phone: str) -> bool:
+def email_has_registered_account(email: str) -> bool:
     """
-    True when phone belongs to a verified non-anonymous account.
+    True when email belongs to a verified non-anonymous account.
 
-    Used during anonymous signup gate to route existing numbers to login OTP
-    instead of link_phone_signup (which 422s on duplicate phone).
+    Used during anonymous signup gate to route existing emails to login OTP
+    instead of link_email_signup (which 422s on a duplicate email).
     """
-    normalized = str(phone or "").strip()
+    normalized = str(email or "").strip().lower()
     if not normalized:
         return False
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
@@ -98,15 +101,15 @@ def phone_has_registered_account(phone: str) -> bool:
         sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         res = (
             sb.table("users")
-            .select("id, phone_verified_at")
-            .eq("phone", normalized)
+            .select("id, email_verified_at")
+            .eq("email", normalized)
             .limit(1)
             .execute()
         )
         if not res.data:
             return False
         row = res.data[0]
-        if not row.get("phone_verified_at"):
+        if not row.get("email_verified_at"):
             return False
         user_id = str(row.get("id") or "")
         if not user_id:
@@ -122,21 +125,30 @@ def phone_has_registered_account(phone: str) -> bool:
         if auth_res.status_code != 200:
             return True
         user = auth_res.json()
-        return bool(user.get("phone")) and not user.get("is_anonymous")
+        return bool(user.get("email")) and not user.get("is_anonymous")
     except Exception:
         return False
 
 
-def _resolve_phone_verified(user_id: str, user: dict, profile: dict) -> bool:
-    """Auth confirm time is source of truth; public.users may lag the sync trigger."""
-    if profile.get("phone_verified_at"):
+def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
+    """
+    Email confirmation is the source of truth; public.users may lag the sync
+    trigger. Falls back to legacy phone verification so any pre-migration
+    phone-verified accounts still count as verified.
+    """
+    if profile.get("email_verified_at") or profile.get("phone_verified_at"):
         return True
-    confirmed = user.get("phone_confirmed_at")
+    confirmed = user.get("email_confirmed_at")
+    column = "email_verified_at"
+    if not confirmed:
+        # Legacy phone-verified accounts (pre email migration).
+        confirmed = user.get("phone_confirmed_at")
+        column = "phone_verified_at"
     if confirmed and not user.get("is_anonymous"):
-        if SUPABASE_SERVICE_ROLE_KEY and not profile.get("phone_verified_at"):
+        if SUPABASE_SERVICE_ROLE_KEY:
             try:
                 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-                sb.table("users").update({"phone_verified_at": confirmed}).eq(
+                sb.table("users").update({column: confirmed}).eq(
                     "id", user_id
                 ).execute()
             except Exception:
@@ -149,6 +161,11 @@ def _load_user_profile(user_id: str) -> dict:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
     sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    profile = sb.table("users").select("home_block_id, phone_verified_at").eq("id", user_id).execute()
+    profile = (
+        sb.table("users")
+        .select("home_block_id, phone_verified_at, email_verified_at")
+        .eq("id", user_id)
+        .execute()
+    )
     row = profile.data[0] if profile.data else {}
     return row if isinstance(row, dict) else {}

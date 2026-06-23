@@ -68,7 +68,7 @@ def lana_unified_turn(
     msg = str(user_message or "").strip().lower()
     if not discovery_ai_enabled() and wants_login_intent(msg):
         # handle_discovery_turn already tried login; fallback
-        reply = "Sure — what's the phone number on your account?"
+        reply = "Sure — what's the email on your account?"
         ctx = {
             **session_ctx,
             "unified_mode": True,

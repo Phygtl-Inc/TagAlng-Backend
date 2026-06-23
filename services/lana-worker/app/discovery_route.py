@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.auth import phone_has_registered_account, service_client
+from app.auth import email_has_registered_account, service_client
 from app.claim_search import (
     heritage_terms_in_text,
     parse_claim_filters,
@@ -100,7 +100,7 @@ from app.guest_login import (
     _login_ctx,
     _logout_ctx,
     extract_otp_code,
-    extract_phone_e164,
+    extract_email,
     handle_guest_login,
     wants_cancel_logout,
     wants_login as wants_login_intent,
@@ -190,6 +190,10 @@ _DISCOVERY_GOALS = frozenset({"peers", "activities", "both"})
 _FUNNEL_PHASES = frozenset(
     {PHASE_NEED_ZIP, PHASE_NEED_IDENTITY, PHASE_NEED_DISPLAY_NAME}
 )
+
+# Cap consecutive unparsed name replies so the user is never trapped re-answering
+# "what should I call you?" — mirrors the event-host turn cap below.
+NAME_CHANGE_MAX_ATTEMPTS = 2
 
 _MORE_DETAIL_RE = re.compile(
     r"\b(?:(?:show|see)\s+(?:me\s+)?(?:their\s+)?names?|"
@@ -705,14 +709,22 @@ def _try_change_name_turn(
     if phrase_linear_intent(msg) != "settings.change_name":
         return None
     reply, nick = handle_change_name(user_id, msg)
-    ctx = _routing_ctx(
-        dict(session_ctx),
-        phase=phase or "listening",
-        active_intent="settings.change_name",
-    )
     if nick:
+        # Success — release the flow so the next turn classifies fresh.
+        ctx = _routing_ctx(dict(session_ctx), phase="listening", active_intent=None)
         ctx["display_name_saved"] = True
-    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "change_display_name")
+        ctx["nickname"] = nick
+        ctx.pop("awaiting_name_change", None)
+        ctx.pop("name_change_attempts", None)
+    else:
+        # Couldn't parse a name — await one (the continuation handler caps retries).
+        ctx = _routing_ctx(
+            dict(session_ctx),
+            phase=PHASE_NEED_DISPLAY_NAME,
+            active_intent="settings.change_name",
+        )
+        ctx["awaiting_name_change"] = True
+    ctx["last_routing"] = _discovery_routing_stub(ctx["routing_phase"], "change_display_name")
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -882,18 +894,38 @@ def _try_awaiting_name_change_turn(
     if not awaiting and not rename_flow:
         return None
     reply, nick = handle_change_name(user_id, msg)
-    ctx = _routing_ctx(
-        session_ctx,
-        phase=(phase or "listening") if nick else PHASE_NEED_DISPLAY_NAME,
-        active_intent="settings.change_name",
-    )
     if nick:
+        # Success — release the flow (neutral phase, cleared intent) so the next
+        # turn is classified fresh instead of re-entering the name gate.
+        ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
         ctx["display_name_saved"] = True
         ctx["nickname"] = nick
         ctx.pop("awaiting_name_change", None)
-    else:
-        ctx["awaiting_name_change"] = True
-    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_name")
+        ctx.pop("name_change_attempts", None)
+        ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+        return reply, ctx, ctx["last_routing"], []
+
+    # No name parsed — cap retries so a non-name reply can't trap the user here.
+    attempts = int(session_ctx.get("name_change_attempts") or 0) + 1
+    if attempts >= NAME_CHANGE_MAX_ATTEMPTS:
+        ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+        ctx.pop("awaiting_name_change", None)
+        ctx.pop("name_change_attempts", None)
+        ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+        return (
+            "No problem — I'll keep your current name. What would you like to do next?",
+            ctx,
+            ctx["last_routing"],
+            [],
+        )
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=PHASE_NEED_DISPLAY_NAME,
+        active_intent="settings.change_name",
+    )
+    ctx["awaiting_name_change"] = True
+    ctx["name_change_attempts"] = attempts
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
     return reply, ctx, ctx["last_routing"], []
 
 
@@ -987,7 +1019,7 @@ def _try_layer1_intent_turn(
     if linear == "identity.show_my_profile":
         if not phone_verified:
             return (
-                "Verify your phone first — then I can show your full profile and claims.",
+                "Verify your email first — then I can show your full profile and claims.",
                 _routing_ctx(
                     ctx_base,
                     phase=phase or "listening",
@@ -1012,7 +1044,7 @@ def _try_layer1_intent_turn(
     if linear in ("discovery.show_peer_profile", "discovery.explain_peer_match"):
         if not phone_verified:
             return (
-                "Verify your phone first — then I can show neighbor profiles and explain matches.",
+                "Verify your email first — then I can show neighbor profiles and explain matches.",
                 _routing_ctx(
                     ctx_base,
                     phase=phase or "listening",
@@ -1154,7 +1186,7 @@ def _try_layer1_intent_turn(
     if linear == "discovery.block_log":
         if not phone_verified:
             return (
-                "Verify your phone first — then I can show your block log.",
+                "Verify your email first — then I can show your block log.",
                 _routing_ctx(
                     ctx_base,
                     phase=phase or "listening",
@@ -1265,7 +1297,7 @@ def _try_layer1_intent_turn(
             return None
         if not phone_verified:
             return (
-                "Verify your phone first — then I can search neighbors by those traits.",
+                "Verify your email first — then I can search neighbors by those traits.",
                 _routing_ctx(
                     ctx_base,
                     phase=phase or "listening",
@@ -1328,18 +1360,21 @@ def _try_layer1_intent_turn(
 
     if linear == "settings.change_name":
         reply, nick = handle_change_name(user_id, msg)
-        ctx = _routing_ctx(
-            ctx_base,
-            phase=(phase or "listening") if nick else PHASE_NEED_DISPLAY_NAME,
-            active_intent="settings.change_name",
-        )
         if nick:
+            # Success — release the flow so the next turn classifies fresh.
+            ctx = _routing_ctx(ctx_base, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
             ctx["nickname"] = nick
             ctx.pop("awaiting_name_change", None)
+            ctx.pop("name_change_attempts", None)
         else:
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=PHASE_NEED_DISPLAY_NAME,
+                active_intent="settings.change_name",
+            )
             ctx["awaiting_name_change"] = True
-        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "update_user_name")
+        ctx["last_routing"] = _discovery_routing_stub(ctx["routing_phase"], "update_user_name")
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "settings.notification_prefs":
@@ -1457,7 +1492,7 @@ def _try_signal_lane_turn(
     if active_linear or isinstance(draft, dict):
         if not phone_verified:
             return (
-                "Verify your phone first — then I can post that to your block.",
+                "Verify your email first — then I can post that to your block.",
                 _routing_ctx(
                     ctx_base,
                     phase=phase or "listening",
@@ -1809,7 +1844,7 @@ def _try_list_intros_turn(
     ctx_base = dict(session_ctx)
     if not phone_verified:
         return (
-            "Verify your phone first — then I can show your pending intros.",
+            "Verify your email first — then I can show your pending intros.",
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
             _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
             [],
@@ -1823,7 +1858,7 @@ def _try_list_intros_turn(
     except HTTPException as exc:
         if exc.detail == "phone_not_verified":
             return (
-                "Verify your phone first — then I can show your pending intros.",
+                "Verify your email first — then I can show your pending intros.",
                 _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
                 _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
                 [],
@@ -1884,7 +1919,7 @@ def _try_save_signal_turn(
 
     if not phone_verified:
         return (
-            "Verify your phone first — then I can post that to your block.",
+            "Verify your email first — then I can post that to your block.",
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
             _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
             [],
@@ -2558,7 +2593,7 @@ def _try_show_block_log_turn(
     ctx_base = dict(session_ctx)
     if not phone_verified:
         return (
-            "Verify your phone first — then I can show your block log.",
+            "Verify your email first — then I can show your block log.",
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
             _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
             [],
@@ -2649,7 +2684,9 @@ def _turn_wants_login(
     if _login_flow_active(session_ctx):
         return True
     if discovery_ai_enabled():
-        return slots_want_login(slots)
+        # Flash classification OR the deterministic phrase backstop — so "sign me in"
+        # never silently fails when Flash labels it as chat/discovery (mirrors logout).
+        return slots_want_login(slots) or wants_login_intent(msg)
     return wants_login_intent(msg)
 
 
@@ -3495,7 +3532,7 @@ def format_activities_message(
     if phone_verified:
         lines.append("Want to RSVP to one of these, or should I find neighbors like you?")
     else:
-        lines.append("Verify your phone to RSVP — or ask me to find neighbors like you.")
+        lines.append("Verify your email to RSVP — or ask me to find neighbors like you.")
     return "\n".join(lines)
 
 
@@ -3528,9 +3565,9 @@ def _verify_gate_reply(
     event_label: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     if event_label:
-        lead = f"To join {event_label}, verify your phone first — I'll text you a code."
+        lead = f"To join {event_label}, verify your email first — I'll send you a code."
     else:
-        lead = "I can see neighbors nearby — to show names and connect you, verify your phone first."
+        lead = "I can see neighbors nearby — to show names and connect you, verify your email first."
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_AWAIT_SIGNUP_PHONE,
@@ -3539,7 +3576,7 @@ def _verify_gate_reply(
     ctx["requires_phone_verification"] = True
     ctx["peer_matches"] = []
     return (
-        f"{lead} What's your number?",
+        f"{lead} What's your email?",
         ctx,
         _discovery_routing_stub(PHASE_GATE_VERIFY),
         [],
@@ -3568,7 +3605,7 @@ def format_preview_message(
         )
     else:
         lines.append(
-            "Verify your phone to see names and connect — or tell me more about you for sharper matches."
+            "Verify your email to see names and connect — or tell me more about you for sharper matches."
         )
     return "\n".join(lines)
 
@@ -3640,20 +3677,20 @@ def _handle_signup_phone_message(
     *,
     is_anonymous: bool = True,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """Parse phone → await_signup_otp + link_phone_signup, or login OTP if phone exists."""
-    phone = extract_phone_e164(msg)
-    if not phone:
+    """Parse email → await_signup_otp + link_email_signup, or login OTP if email exists."""
+    email = extract_email(msg)
+    if not email:
         return (
-            "What's your phone number? I'll text you a code to verify.",
+            "What's your email? I'll send you a code to verify.",
             _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_PHONE),
             _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE),
             [],
         )
-    if is_anonymous and phone_has_registered_account(phone):
+    if is_anonymous and email_has_registered_account(email):
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
-            login_phone=phone,
+            login_phone=email,
             requires_login_otp=True,
         )
         ctx.pop("signup_phone", None)
@@ -3661,11 +3698,11 @@ def _handle_signup_phone_message(
         ctx["unified_mode"] = True
         ctx["auth_action"] = _auth_action(
             type="send_login_otp",
-            phone=phone,
-            verify_type="sms",
+            email=email,
+            verify_type="email",
         )
         return (
-            f"I found your account — I sent a login code to {phone}. Enter it when it arrives.",
+            f"I found your account — I sent a login code to {email}. Enter it when it arrives.",
             ctx,
             _discovery_routing_stub(GUEST_STEP_LOGIN_OTP),
             [],
@@ -3673,15 +3710,15 @@ def _handle_signup_phone_message(
     ctx = _routing_ctx(
         session_ctx,
         phase=PHASE_AWAIT_SIGNUP_OTP,
-        signup_phone=phone,
+        signup_phone=email,
     )
     ctx["auth_action"] = _auth_action(
-        type="link_phone_signup",
-        phone=phone,
-        verify_type="phone_change",
+        type="link_email_signup",
+        email=email,
+        verify_type="email_change",
     )
     return (
-        f"Got it — I sent a 6-digit code to {phone}. Enter it here when it arrives.",
+        f"Got it — I sent a 6-digit code to {email}. Enter it here when it arrives.",
         ctx,
         _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
         [],
@@ -3853,29 +3890,29 @@ def handle_discovery_turn(
     if (
         not phone_verified
         and session_ctx.get("requires_phone_verification")
-        and extract_phone_e164(msg)
+        and extract_email(msg)
     ):
         return _handle_signup_phone_message(msg, session_ctx, is_anonymous=is_anonymous)
 
     if phase == PHASE_AWAIT_SIGNUP_OTP:
         otp = extract_otp_code(msg)
-        phone = str(session_ctx.get("signup_phone") or "")
+        email = str(session_ctx.get("signup_phone") or "")
         if not otp:
             return (
-                f"Enter the 6-digit code we sent to {phone or 'your phone'}.",
-                _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_OTP, signup_phone=phone or None),
+                f"Enter the 6-digit code we sent to {email or 'your email'}.",
+                _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_OTP, signup_phone=email or None),
                 _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
                 [],
             )
-        ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=phone)
+        ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=email)
         ctx["pending_post_verify"] = True
         ctx["requires_phone_verification"] = False
         ctx.pop("pending_signup_gate", None)
         ctx["auth_action"] = _auth_action(
             type="verify_signup_otp",
-            phone=phone,
+            email=email,
             token=otp,
-            verify_type="phone_change",
+            verify_type="email_change",
         )
         return (
             "Perfect — verifying you now. Once you're verified, tell me your first name "
@@ -4241,10 +4278,10 @@ def handle_discovery_turn(
         )
 
     if _signup_verify_in_flight(session_ctx, phase) and _turn_wants_login(msg, slots, session_ctx):
-        phone = str(session_ctx.get("signup_phone") or "your phone")
+        email = str(session_ctx.get("signup_phone") or "your email")
         if phase == PHASE_AWAIT_SIGNUP_OTP:
             return (
-                f"You're signing up — enter the 6-digit code I sent to {phone}.",
+                f"You're signing up — enter the 6-digit code I sent to {email}.",
                 _routing_ctx(
                     session_ctx,
                     phase=PHASE_AWAIT_SIGNUP_OTP,
@@ -4254,7 +4291,7 @@ def handle_discovery_turn(
                 [],
             )
         return (
-            "You're in the middle of signing up — what's the phone number for your account?",
+            "You're in the middle of signing up — what's the email for your account?",
             _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_PHONE),
             _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE),
             [],

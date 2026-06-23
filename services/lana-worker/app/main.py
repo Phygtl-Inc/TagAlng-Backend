@@ -1547,7 +1547,7 @@ def _complete_event_draft(
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":
                 closing = (
-                    "Your event draft is ready — verify your phone in settings, "
+                    "Your event draft is ready — verify your email in settings, "
                     "then publish from the form or call complete again."
                 )
             else:

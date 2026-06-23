@@ -357,7 +357,7 @@ def try_propose_intro_from_preview(
             )
         if detail == "phone_not_verified":
             return (
-                "Verify your phone first — then I can introduce you to neighbors.",
+                "Verify your email first — then I can introduce you to neighbors.",
                 {"status": "need_verify"},
             )
         raise

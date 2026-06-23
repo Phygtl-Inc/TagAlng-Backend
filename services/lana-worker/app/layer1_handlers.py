@@ -560,7 +560,7 @@ def handle_add_or_edit_claim(
 ) -> tuple[str, int, dict[str, Any] | None]:
     if not user_id:
         return (
-            "Verify your phone first — then I can save identity threads to your profile.",
+            "Verify your email first — then I can save identity threads to your profile.",
             0,
             None,
         )
