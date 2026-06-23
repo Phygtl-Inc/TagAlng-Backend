@@ -42,20 +42,49 @@ def _event_draft_complete(draft: Any) -> bool:
     return all(str(draft.get(k) or "").strip() for k in ("title", "venue_name", "starts_at"))
 
 
-def _auto_publish_event(user_id: str, user_jwt: str, draft: dict[str, Any]) -> str | None:
-    """Create the event via create_event. Returns event_id, or None on any failure
-    (never raises — a publish problem must not break the chat turn)."""
+def _auto_publish_event(
+    user_id: str, user_jwt: str, draft: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """Create the event via create_event. Returns (event_id, None) on success or
+    (None, error_detail) on failure (never raises — a publish problem must not break
+    the chat turn, but the caller surfaces the reason instead of faking success)."""
+    import logging
+
+    from fastapi import HTTPException
+
     try:
         from app.event_publish import publish_event
         from app.models import EventDraft
 
         clean = {k: v for k, v in draft.items() if k in _EVENT_DRAFT_FIELDS}
-        return publish_event(user_id, user_jwt, EventDraft(**clean)) or None
-    except Exception:  # noqa: BLE001 - publish is best-effort; chat continues regardless
-        import logging
-
+        event_id = publish_event(user_id, user_jwt, EventDraft(**clean)) or None
+        return event_id, None
+    except HTTPException as exc:
+        logging.getLogger(__name__).warning("auto_publish_event_failed: %s", exc.detail)
+        return None, str(exc.detail)
+    except Exception as exc:  # noqa: BLE001 - publish is best-effort; chat continues
         logging.getLogger(__name__).exception("auto_publish_event_failed")
-        return None
+        return None, str(exc) or "unknown_error"
+
+
+def _publish_failure_reply(error: str | None, title: str) -> str:
+    """Honest message when create_event is rejected — never fake a successful post."""
+    name = f"**{title}**" if title else "your event"
+    detail = (error or "").lower()
+    if "phone_not_verified" in detail or ":403" in detail or "not_authenticated" in detail:
+        return (
+            f"{name} is all set, but I can't post it until your account is verified. "
+            "Verify your email and I'll publish it right away."
+        )
+    if "location" in detail or "venue" in detail:
+        return (
+            f"I have everything for {name} except a spot I can place on the map. "
+            "Pick a place or share an address and I'll post it."
+        )
+    return (
+        f"I hit a snag posting {name} just now — give it another try in a moment "
+        "and I'll get it up."
+    )
 
 
 _TITLE_SUGGESTIONS = ["Playdate at the park", "Weekend playgroup", "Morning meetup"]
@@ -565,7 +594,7 @@ def run_lana_unified_pipeline(
                 turn_ctx["event_affinity_asked"] = True
                 reply = f"Perfect — **{_title or 'your meetup'}** is all set! One last thing before I post it:"
             elif complete:
-                event_id = _auto_publish_event(user_id, user_jwt, ed)
+                event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
                 if event_id:
                     turn_ctx["event_id"] = event_id
                     turn_ctx["event_published_now"] = True
@@ -579,6 +608,16 @@ def run_lana_unified_pipeline(
                     turn_ctx["event_approval_asked"] = False
                     turn_ctx["event_share_asked"] = False
                     reply = _event_published_reply(reply, ed)
+                else:
+                    # Publish was rejected — tell the user why instead of letting the
+                    # orchestrator's "all set!" text fake success. Host mode stays active
+                    # (set below), so once they verify / fix the spot a follow-up retries.
+                    detail = (publish_error or "").lower()
+                    if "location" in detail or "venue" in detail:
+                        # Re-open the where-step so they can pick a resolvable place.
+                        turn_ctx["event_place_asked"] = False
+                        ed.pop("venue_name", None)
+                    reply = _publish_failure_reply(publish_error, _title)
             else:
                 # Deterministic question + chips for the next missing field (title → day →
                 # time → place), so the bubble ALWAYS matches the chips.

@@ -241,21 +241,10 @@ def attach_intro_row_actions(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def event_created_actions() -> list[dict[str, Any]]:
-    """After an event publishes — invite specific moms, or finish."""
-    return [
-        _action(
-            action_id="event_invite_moms",
-            label="Send to a mom",
-            message="who can I invite to this event?",
-            style="primary",
-        ),
-        _action(
-            action_id="event_done_later",
-            label="Maybe later",
-            message="not now",
-            style="secondary",
-        ),
-    ]
+    """After an event publishes the FE renders the native CTAs (Open the meet up /
+    Share with a mom) — those navigate / open the share sheet, which a message-sending
+    ui_action can't do — so no server-driven pills here."""
+    return []
 
 
 def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any]]:

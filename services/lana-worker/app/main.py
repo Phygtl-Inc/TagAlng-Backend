@@ -1263,7 +1263,7 @@ def send_lana_message(
             extract_and_upsert_claims_from_message,
             auth.user_id,
             body.message.strip(),
-            bool(merged.get("skip_heritage_background_extract")),
+            skip_heritage=bool(merged.get("skip_heritage_background_extract")),
         )
 
     with timer.stage("db_list_messages_final"):
