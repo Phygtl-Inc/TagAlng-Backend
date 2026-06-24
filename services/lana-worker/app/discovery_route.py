@@ -236,7 +236,9 @@ _PEER_TRAIT_QUESTION_RE = re.compile(
     re.I,
 )
 _ATTR_REFINE_RE = re.compile(
-    r"\b(?:no|nope|not that)[,.\s!]*(?:(?:i\s+)?want|show\s+me|find|looking\s+for)\s+(.+)",
+    r"\b(?:no|nope|nah|not\s+(?:that|these|those|them)|none\s+of\s+(?:these|those)|"
+    r"instead|actually)\b[,.\s!:-]*"
+    r"(?:(?:i\s+)?(?:want|need|prefer)|show\s+me|find(?:\s+me)?|look(?:ing)?\s+for)\s+(.+)",
     re.I,
 )
 _VERIFY_HELP_RE = re.compile(
@@ -396,6 +398,13 @@ def _try_phrase_policy_turn(
 def _clear_peer_surface(ctx: dict[str, Any]) -> None:
     """Drop stale peer cards when this turn is not a peer-match response."""
     ctx["peer_matches"] = []
+
+
+def _clear_peer_selection_state(ctx: dict[str, Any]) -> None:
+    """A new search invalidates any offer tied to the previous result set."""
+    ctx.pop("pending_intro_offer", None)
+    ctx.pop("intro_offer_shown", None)
+    ctx.pop("recent_intro_duplicate", None)
 
 
 def _wants_block_log(msg: str, slots: dict[str, Any]) -> bool:
@@ -1506,6 +1515,7 @@ def _try_layer1_intent_turn(
             active_intent="discovery.find_by_attrs",
             identity_snippet=filter_text,
         )
+        _clear_peer_selection_state(ctx)
         ctx["peer_matches"] = peer_rows
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
         ctx["skip_claims_background_extract"] = True
@@ -1910,6 +1920,7 @@ def _try_attr_refine_turn(
         identity_snippet=filter_text,
         preview_block_id=block_id,
     )
+    _clear_peer_selection_state(ctx)
     ctx["peer_matches"] = peer_rows
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
     ctx.pop("activity_previews", None)
@@ -6005,6 +6016,44 @@ def handle_discovery_turn(
         if refined:
             ctx_base["identity_snippet"] = refined
         if phone_verified:
+            if refined:
+                try:
+                    peers = fetch_peers_by_attr_filter(
+                        user_jwt,
+                        refined,
+                        limit=5,
+                        slots=slots,
+                    )
+                except HTTPException:
+                    peers = []
+                partial_summary = None
+                if not peers:
+                    partial_summary = summarize_partial_claim_matches(
+                        user_jwt,
+                        parse_claim_filters(refined, slots),
+                    )
+                reply = format_attr_peers_reply(
+                    peers,
+                    filter_text=refined,
+                    partial_summary=partial_summary,
+                )
+                peer_rows = peers_to_match_rows(peers, phone_verified=True)
+                ctx = _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_PREVIEW,
+                    active_intent="discovery.find_by_attrs",
+                    identity_snippet=refined,
+                    preview_block_id=block_id,
+                )
+                _clear_peer_selection_state(ctx)
+                ctx["peer_matches"] = peer_rows
+                ctx["last_routing"] = _discovery_routing_stub(
+                    PHASE_PREVIEW,
+                    "find_peers_by_attr_filter",
+                )
+                ctx["skip_claims_background_extract"] = True
+                ctx.pop("activity_previews", None)
+                return reply, ctx, ctx["last_routing"], peer_rows
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
             try:
                 peers = fetch_peer_matches(user_jwt, limit=5)
