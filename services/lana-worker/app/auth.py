@@ -130,6 +130,30 @@ def email_has_registered_account(email: str) -> bool:
         return False
 
 
+def registered_user_id_for_email(email: str) -> str | None:
+    """User id of the verified non-anonymous account for `email`, else None. Used to
+    stash a guest's in-progress event against the account they're logging into."""
+    normalized = str(email or "").strip().lower()
+    if not normalized or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return None
+    try:
+        sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        res = (
+            sb.table("users")
+            .select("id, email_verified_at")
+            .eq("email", normalized)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+        if not isinstance(row, dict) or not row.get("email_verified_at"):
+            return None
+        uid = str(row.get("id") or "")
+        return uid or None
+    except Exception:
+        return None
+
+
 def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
     """
     Email confirmation is the source of truth; public.users may lag the sync

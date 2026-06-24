@@ -8,7 +8,12 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.auth import email_has_registered_account, service_client
+from app.auth import (
+    email_has_registered_account,
+    registered_user_id_for_email,
+    service_client,
+)
+from app.db import extract_host_ctx, stash_pending_event_draft
 from app.claim_search import (
     heritage_terms_in_text,
     parse_claim_filters,
@@ -1235,6 +1240,33 @@ def _try_layer1_intent_turn(
             user_jwt=user_jwt,
             phone_verified=phone_verified,
         )
+        # Resolve a ZIP the user just typed into a block. This handler runs BEFORE the
+        # main ZIP funnel and short-circuits it, so without resolving the ZIP here a guest
+        # who answers "what's on my block?" with their ZIP just gets re-asked "what ZIP?"
+        # every turn (the message ZIP is never read).
+        if not block_id:
+            zip_from_msg = extract_zip(msg) or slots.get("zip")
+            if zip_from_msg:
+                blocks = fetch_blocks_for_zip(user_jwt, zip_from_msg)
+                if blocks:
+                    block_id = str(blocks[0].get("block_id") or "")
+                    ctx_base["preview_block_id"] = block_id
+                    ctx_base["preview_zip"] = zip_from_msg
+                    ctx_base["preview_block_label"] = str(
+                        blocks[0].get("label") or blocks[0].get("name") or zip_from_msg
+                    )
+                elif not phone_verified:
+                    return (
+                        f"I couldn't find blocks for ZIP {zip_from_msg}. Try another ZIP "
+                        "(e.g. 32827 for Lake Nona).",
+                        _routing_ctx(
+                            ctx_base,
+                            phase=PHASE_NEED_ZIP,
+                            active_intent="discovery.find_in_block",
+                        ),
+                        _discovery_routing_stub(PHASE_NEED_ZIP, "block_summary_zip_not_found"),
+                        [],
+                    )
         if not block_id and not phone_verified:
             return (
                 "What ZIP are you in? Once I know your block I can summarize what's happening nearby.",
@@ -2907,6 +2939,30 @@ def _pivots_out_of_host(msg: str) -> bool:
     return bool(_HOST_PIVOT_RE.search(str(msg or "").strip()))
 
 
+def _release_host_mode(session_ctx: dict[str, Any]) -> None:
+    """Exit the sticky event-host flow and drop the in-progress draft, so a later
+    'host an event' starts clean instead of resuming this abandoned one. Keys are set
+    to None (falsy) rather than popped — the session merge keeps {**old, **new}, so a
+    missing key would let the stale value survive; an explicit None clears it."""
+    session_ctx["event_host_active"] = False
+    session_ctx["event_host_turns"] = 0
+    for key in (
+        "host_publish_pending",
+        "event_draft",
+        "event_when_date",
+        "event_when_time",
+        "event_place_asked",
+        "event_venue",
+        "event_settings",
+        "event_cap_asked",
+        "event_approval_asked",
+        "event_share_asked",
+        "event_affinity_asked",
+        "requires_phone_verification",
+    ):
+        session_ctx[key] = None
+
+
 # Explicit "host/throw/plan a <event>" — a deterministic entry into the event flow that
 # does NOT depend on the CTA hint or the classifier. Requires a host verb + an event
 # noun so "I want to meet people" (discovery) is never caught.
@@ -3693,6 +3749,15 @@ def _handle_signup_phone_message(
             [],
         )
     if is_anonymous and email_has_registered_account(email):
+        # Guest is logging into an account they already have. The JWT swap + force_new
+        # session reset would orphan an event they just built, so stash it against the
+        # destination account — its next session recovers and publishes it.
+        if session_ctx.get("host_publish_pending"):
+            host_ctx = extract_host_ctx(session_ctx)
+            if host_ctx.get("event_draft"):
+                dest_uid = registered_user_id_for_email(email)
+                if dest_uid:
+                    stash_pending_event_draft(dest_uid, host_ctx)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
@@ -3751,23 +3816,9 @@ def handle_discovery_turn(
     phase = str(session_ctx.get("routing_phase") or "")
     active = session_ctx.get("active_intent")
 
-    # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
-    # conversation so an event line ("weekday playground meet with kids") isn't
-    # hijacked into a neighbour search. Only an explicit cancel/pivot — or the turn
-    # cap — releases it, so the user is never trapped in a loop.
-    if session_ctx.get("event_host_active") and _host_via_orchestrator():
-        if is_signal_cancel(msg) or _pivots_out_of_host(msg):
-            session_ctx["event_host_active"] = False
-            session_ctx["event_host_turns"] = 0
-        else:
-            turns = int(session_ctx.get("event_host_turns") or 0) + 1
-            session_ctx["event_host_turns"] = turns
-            if turns <= _EVENT_HOST_TURN_CAP:
-                return None  # defer the entire turn to the orchestrator's event flow
-            # Cap reached without publishing — release rather than loop.
-            session_ctx["event_host_active"] = False
-            session_ctx["event_host_turns"] = 0
-
+    # Classify the turn once (cached for the rest of the turn) BEFORE the host-mode gate,
+    # so exiting hosting is semantic — the AI's read that the user is backing out — rather
+    # than a fixed cancel-keyword list that "I have mixed feelings" / "I don't wanna" slip past.
     had_block = bool(resolve_block_id(session_ctx, home_block_id))
     has_profile_photo = bool(user_profile_photo_url(user_id))
     slots: dict[str, Any] = {}
@@ -3790,6 +3841,43 @@ def handle_discovery_turn(
             # suppress background extraction when we're NOT collecting identity.
             if (phase or "") != PHASE_NEED_IDENTITY:
                 session_ctx["skip_claims_background_extract"] = True
+
+    # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
+    # conversation so an event line ("weekday playground meet with kids") isn't hijacked
+    # into a neighbour search. Release on a semantic back-out (the AI's `abandon` read,
+    # not just cancel keywords), an explicit pivot, or the turn cap — so the user is never
+    # trapped re-answering the same question.
+    if session_ctx.get("event_host_active") and _host_via_orchestrator():
+        # While the finished event waits on email verification, the email/OTP turns must
+        # reach the signup handlers below (the orchestrator can't parse them) — don't defer.
+        host_verifying = bool(session_ctx.get("host_publish_pending")) and phase in (
+            PHASE_AWAIT_SIGNUP_PHONE,
+            PHASE_AWAIT_SIGNUP_OTP,
+        )
+        wants_out = (
+            bool(slots.get("abandon")) or is_signal_cancel(msg) or _pivots_out_of_host(msg)
+        )
+        if wants_out:
+            _release_host_mode(session_ctx)
+            # A pivot ("find people") falls through so its target handler answers; a plain
+            # back-out gets an explicit acknowledgement, not a silent topic switch.
+            if not _pivots_out_of_host(msg):
+                return (
+                    "No worries — we don't have to set up an event. Want to find neighbors, "
+                    "see what's happening on your block, or something else?",
+                    _routing_ctx(session_ctx, phase="listening", active_intent="none"),
+                    _discovery_routing_stub("listening"),
+                    [],
+                )
+        elif host_verifying:
+            pass  # fall through to the signup/verify sub-flow handlers
+        else:
+            turns = int(session_ctx.get("event_host_turns") or 0) + 1
+            session_ctx["event_host_turns"] = turns
+            if turns <= _EVENT_HOST_TURN_CAP:
+                return None  # defer the entire turn to the orchestrator's event flow
+            # Cap reached without publishing — release rather than loop.
+            _release_host_mode(session_ctx)
 
     hosting_cta_turn = _try_hosting_cta_turn(
         msg=msg,

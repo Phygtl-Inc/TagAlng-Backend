@@ -26,6 +26,7 @@ from app.db import (
     get_session_for_user,
     insert_message,
     list_messages,
+    pop_pending_event_draft,
     transcript_text,
     update_session_context,
     merge_session_context,
@@ -994,9 +995,32 @@ def create_lana_session(
 
         use_orch = use_orchestrator_for_purpose(purpose)
         if purpose == "lana":
-            opening, status, session_ctx, ui_raw = lana_unified_opening()
-            draft_raw = None
-            use_orch = False
+            # Recover an event a guest built before logging into this (existing) account —
+            # the login reset would otherwise lose it. Seed the host context so their next
+            # message republishes it, and greet with the event instead of the cold opening.
+            recovered = (
+                pop_pending_event_draft(auth.user_id) if not auth.is_anonymous else None
+            )
+            if recovered and isinstance(recovered.get("event_draft"), dict):
+                session_ctx = {
+                    **recovered,
+                    "event_host_active": True,
+                    "host_publish_pending": True,
+                    "unified_mode": True,
+                }
+                _rec_title = str(recovered["event_draft"].get("title") or "your event")
+                opening = (
+                    f"Welcome back! I still have **{_rec_title}** ready to go — "
+                    "send a message and I'll post it to your block."
+                )
+                status = "continue"
+                ui_raw = None
+                draft_raw = recovered["event_draft"]
+                use_orch = False
+            else:
+                opening, status, session_ctx, ui_raw = lana_unified_opening()
+                draft_raw = None
+                use_orch = False
         elif use_orch:
             opening, status, session_ctx, ui_raw, draft_raw = run_opening(
                 user_id=auth.user_id,

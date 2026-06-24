@@ -112,8 +112,9 @@ for _li in LOOKING_SHARING_INTENTS:
 
 # Structural hosting vs neighbor-search — NOT open-ended discovery regex.
 _HOSTING_PLAN_RE = re.compile(
-    r"\b(?:want|wanna|plan(?:ning)?|host(?:ing)?|throw|organize|set up)\b.{0,60}"
-    r"\b(?:coffee|brunch|breakfast|meetup|meet-up|playdate|play date|gathering|picnic)\b",
+    r"\b(?:want|wanna|plan(?:ning)?|host(?:ing)?|throw|organi[sz]e|set up|creat(?:e|ing)|put together)\b.{0,60}"
+    r"\b(?:coffee|brunch|breakfast|meetup|meet-up|playdate|play date|gathering|get-?together|"
+    r"picnic|event|party|hang ?out|block hang|barbecue|bbq|potluck|cookout)\b",
     re.I,
 )
 _FIND_NEIGHBORS_RE = re.compile(

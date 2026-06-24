@@ -94,6 +94,19 @@ _SYSTEM = (
     "chat = companionship / profile read / any non-funnel question; "
     "continue = user is answering the current funnel step (supplying ZIP or identity snippet); "
     "none = not discovery. "
+    "abandon (separate boolean, any goal) = the user wants to STOP the activity Lana is currently "
+    "helping with (hosting an event, a signal capture, the funnel) ENTIRELY, with NO replacement — "
+    "classify by MEANING, not keywords. Set abandon=true only for phrasing that means 'stop / not "
+    "now / drop it, and I'm not proposing anything instead': I don't wanna create an event, let's not "
+    "for now, I have mixed feelings, maybe later, actually no, forget it, my plans changed, never mind. "
+    "CRITICAL — abandon=false when the user rejects the CURRENT plan but proposes a DIFFERENT activity "
+    "or detail in the same breath: that is a CHANGE, not a quit. 'I don't wanna host a bbq, what if we "
+    "do a movie night?', 'scrap the picnic, let's do brunch', 'not Saturday — make it Sunday', 'make "
+    "it for everyone instead' all keep the event alive (abandon=false) — they are editing it. Only "
+    "abandon when they stop with no alternative. "
+    "Also abandon=false for: answering a question (a title, a time, a chip tap) or mild uncertainty "
+    "about ONE detail (not sure what to call it, what time is good?). abandon means quitting the whole "
+    "task, never editing or swapping a part of it. "
     "When goal=profile_photo set profile_photo_action: start (wants upload), accept (yes after Lana suggested), "
     "done (finished uploading), skip (cancel/not now), none. "
     "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action. "
@@ -118,10 +131,19 @@ _SYSTEM = (
     "If no specific name/place is given, it is NOT tip_share. "
     "NEVER tip_seek when user wants to FIND/SHOW NEIGHBORS by heritage, life stage, or traits "
     "(find italian moms, find italian dads, brazilian parents on my block) — that is discovery.find_by_attrs. "
-    "host_meet = user wants to PLAN or HOST an activity on the block (I want brazilian coffee this weekend, "
-    "host a brunch Saturday, plan a playdate at the park) — sharing.host + goal=save_signal; "
-    "NOT discovery.find_by_attrs even if a heritage word appears. Heritage + mom/dad/parent/neighbor = find people; "
-    "heritage + coffee/brunch/meetup/gathering + time = host. "
+    "host_meet = the user is the ORGANIZER who wants to bring neighbors together for a gathering THEY "
+    "create — classify by MEANING, not by specific words. Any phrasing where the user is hosting, "
+    "planning, throwing, setting up, organizing, or creating something others attend is host_meet "
+    "(I want to create an event, I'm planning a party, let's throw a get-together, I want to host "
+    "something this weekend, set up a block hang, organize a brunch, plan a playdate at the park). "
+    "It is STILL host_meet when NO specific activity type is named yet (a bare 'I want to create an "
+    "event' / 'I want to host something') — the activity can be collected later; what matters is the "
+    "user is the organizer INVITING/GATHERING others, not asking to be shown people. "
+    "sharing.host + goal=save_signal. "
+    "Contrast with discovery.find_by_attrs/find_peers, where the user wants to BE SHOWN matching "
+    "neighbors (find/show me ...). This holds even if a heritage word appears: heritage + "
+    "mom/dad/parent/neighbor with a search verb = find people; the user organizing a gathering "
+    "(host/plan/create/throw/set up, optionally with an activity or time) = host. "
     "Set linear_intent: looking.meet for meet_seek, looking.swap for swap_seek, looking.tip for tip_seek, "
     "sharing.swap for swap_offer, sharing.host for host_meet, sharing.tip for tip_share. "
     "When goal=show_block_log set intro_direction null. "
@@ -210,6 +232,7 @@ def _empty_slots() -> dict[str, Any]:
         "signal_intent": None,
         "signal_detail": None,
         "signal_category": None,
+        "abandon": False,
         "confidence": 0.0,
     }
 
@@ -360,6 +383,7 @@ def ai_parse_discovery_turn(
             "signal_when": signal_when_s,
             "attr_filter": attr_filter_s,
             "peer_name": peer_name_s,
+            "abandon": bool(raw.get("abandon")),
             "confidence": float(raw.get("confidence", 0.0)),
         }, msg=text)
     except Exception:
@@ -407,6 +431,7 @@ def _discovery_slot_payload(
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
+        '  "abandon": true|false,\n'
         '  "confidence": 0.0-1.0\n'
         "}"
     )

@@ -648,17 +648,50 @@ def run_lana_unified_pipeline(
                     turn_ctx["event_cap_asked"] = False
                     turn_ctx["event_approval_asked"] = False
                     turn_ctx["event_share_asked"] = False
+                    # Verification (if any) is done — drop the resume markers so a later
+                    # turn doesn't re-enter the verify funnel after a clean publish.
+                    turn_ctx["host_publish_pending"] = None
+                    turn_ctx["pending_post_verify"] = None
                     reply = _event_published_reply(reply, ed)
                 else:
                     # Publish was rejected — tell the user why instead of letting the
                     # orchestrator's "all set!" text fake success. Host mode stays active
                     # (set below), so once they verify / fix the spot a follow-up retries.
                     detail = (publish_error or "").lower()
-                    if "location" in detail or "venue" in detail:
-                        # Re-open the where-step so they can pick a resolvable place.
-                        turn_ctx["event_place_asked"] = False
-                        ed.pop("venue_name", None)
-                    reply = _publish_failure_reply(publish_error, _title)
+                    not_verified = (
+                        "phone_not_verified" in detail
+                        or "not_authenticated" in detail
+                        or ":403" in detail
+                    )
+                    if not_verified and not phone_verified:
+                        # Proactive verify: the event is fully built but the guest isn't
+                        # verified yet. Drive verification right here (email → OTP) instead
+                        # of dead-ending on a "can't post" message with nothing to tap.
+                        # Host mode + the complete draft stay set, so the turn after
+                        # verification re-enters this branch and publishes for real.
+                        # The discovery gate's signup/verify handlers own the email/OTP
+                        # turns (see handle_discovery_turn's host-verify escape).
+                        turn_ctx["requires_phone_verification"] = True
+                        turn_ctx["host_publish_pending"] = True
+                        if not session_ctx.get("host_publish_pending"):
+                            turn_ctx["routing_phase"] = "await_signup_phone"
+                            reply = (
+                                f"Perfect — **{_title or 'your event'}** is all set! "
+                                "To post it I just need to verify your email — what's your email?"
+                            )
+                        else:
+                            # Already mid-verify (JWT can lag a turn after OTP) — hold the
+                            # event and nudge, don't re-ask for the email.
+                            reply = (
+                                "Finishing verification — send one more message and I'll "
+                                f"post **{_title or 'your event'}** right away."
+                            )
+                    else:
+                        if "location" in detail or "venue" in detail:
+                            # Re-open the where-step so they can pick a resolvable place.
+                            turn_ctx["event_place_asked"] = False
+                            ed.pop("venue_name", None)
+                        reply = _publish_failure_reply(publish_error, _title)
             else:
                 # Deterministic question + chips for the next missing field (title → day →
                 # time → place), so the bubble ALWAYS matches the chips.
