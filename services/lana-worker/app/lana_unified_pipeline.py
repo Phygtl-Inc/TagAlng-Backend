@@ -354,6 +354,15 @@ def run_lana_unified_pipeline(
             "pass_along_active", "tip_share_active", "look_meet_active", "event_host_active"
         ):
             session_ctx[_k] = False
+        # Drop any half-built capture draft + step flags so the stale card and its chips
+        # don't keep rendering after the user has left the flow via logout.
+        for _k in (
+            "event_draft", "item_draft", "tip_draft", "look_draft",
+            "event_when_date", "event_when_time", "event_place_asked", "event_venue",
+            "event_settings", "event_cap_asked", "event_approval_asked",
+            "event_share_asked", "event_affinity_asked",
+        ):
+            session_ctx[_k] = None
 
     # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
     # structured extraction), the same way event_host_active does. It releases on
@@ -533,6 +542,17 @@ def run_lana_unified_pipeline(
             turn_ctx["event_when_time"] = wt
             if wd:
                 ed["starts_at"] = f"{wd}T{wt or '00:00'}:00"
+                # Rebuild ends_at off our corrected start — the LLM extractor mis-years
+                # ends_at (e.g. 2023) while we compute the real future date here, which
+                # used to ship a wrong-year ends_at through to publish.
+                from datetime import datetime as _dt, timedelta as _td
+
+                try:
+                    _start = _dt.fromisoformat(ed["starts_at"])
+                    _dur = int(ed.get("duration_minutes") or 90)
+                    ed["ends_at"] = (_start + _td(minutes=_dur)).isoformat()
+                except (ValueError, TypeError):
+                    ed.pop("ends_at", None)
 
             # Exact picked place (stamped via /event-venue) — overrides any venue the
             # extractor lifted, and carries the precise pin through to publish.
@@ -562,6 +582,22 @@ def run_lana_unified_pipeline(
             # the extractor lifts one from the title ("Playdate at the Park" → "Park") and
             # that used to skip the where-step entirely.
             place_asked = bool(turn_ctx.get("event_place_asked"))
+            # If the host named a real venue inline ("...at Tampines Park") before we
+            # asked, honor it instead of re-asking — re-asking a place they already gave
+            # is the "ignores info I gave" bug. Only drop a venue the extractor merely
+            # lifted FROM THE TITLE ("Playdate at the Park" → "Park").
+            if has_venue and not place_asked:
+                import re as _re
+
+                _v = str(ed.get("venue_name") or "").strip()
+                _title_words = set(_re.findall(r"[a-z]+", _title.lower()))
+                _venue_words = set(_re.findall(r"[a-z]+", _v.lower()))
+                if _venue_words and _venue_words <= _title_words:
+                    ed.pop("venue_name", None)
+                    has_venue = False
+                else:
+                    turn_ctx["event_place_asked"] = True
+                    place_asked = True
             # Settings are asked once each (capacity → approval → share), after place.
             cap_asked = bool(turn_ctx.get("event_cap_asked"))
             approval_asked = bool(turn_ctx.get("event_approval_asked"))

@@ -70,12 +70,14 @@ _EXTRACT_SYSTEM = """You extract structured fields about a second-hand item a ne
 wants to pass along (give away free, or swap), and propose ONE smart follow-up question.
 
 Return ONE compact JSON object with exactly these keys:
-{"title","category","condition","intent_type","ask"}
+{"title","category","condition","intent_type","other_items","ask"}
 
 - title: short noun phrase for the item, e.g. "3T rain boots", "kids bicycle", "MacBook Air". null if not stated.
 - category: broad bucket, e.g. "kids clothing","toys","furniture","electronics","books","baby gear","other". null if unclear.
 - condition: e.g. "brand new","like new","lightly used","well-loved". null if not stated.
 - intent_type: "free" if giving it away, "swap" if they want to trade, null if unclear.
+- other_items: if the user named MORE THAN ONE distinct item to pass along ("a tennis racket and a stroller"),
+  list the OTHER item titles here as an array of short strings (exclude the primary `title`). Empty array [] if only one item.
 - ask: the single MOST useful follow-up to make this a strong listing, TAILORED to THIS item and
   to what's still unknown — and the tappable answers must fit the item:
     • kids clothing/shoes → size ("3T", "Size 8", "Newborn", …)
@@ -130,6 +132,12 @@ def _extract_item_fields(
             v = data.get(k)
             if isinstance(v, str) and v.strip() and v.strip().lower() != "null":
                 out[k] = v.strip()
+        # additional items the user bundled in one message (so we never silently drop one)
+        others = data.get("other_items")
+        if isinstance(others, list):
+            clean = [str(o).strip() for o in others if isinstance(o, str) and str(o).strip()]
+            if clean:
+                out["other_items"] = clean[:4]
         # normalize intent_type
         it = str(out.get("intent_type") or "").lower()
         if it:
@@ -269,6 +277,8 @@ def run_pass_along_turn(
         session_ctx["pass_along_turns"] = 0
         session_ctx["pass_along_pending_ask"] = None
         session_ctx["pass_along_enrich_count"] = 0
+        session_ctx["pass_along_asked_fields"] = []
+        session_ctx["pass_along_other_items"] = []
         session_ctx["item_draft"] = None
         session_ctx["routing_phase"] = "listening"
         return "No problem — we can do that another time. What else can I help with?"
@@ -309,8 +319,13 @@ def run_pass_along_turn(
     ask: dict[str, Any] | None = None
     if msg:
         found, ask = _extract_item_fields(history=history, user_message=msg, prev=draft)
+        others = found.pop("other_items", None)
         for k, v in found.items():
             draft[k] = v
+        # Remember extra items the user bundled in, so we can offer them after this one
+        # is listed instead of silently dropping them ("tennis racket and a stroller").
+        if others and not session_ctx.get("pass_along_other_items"):
+            session_ctx["pass_along_other_items"] = others
 
     # ── P1: no item yet → ask what it is ──
     if not _has(draft, "title"):
@@ -333,9 +348,15 @@ def run_pass_along_turn(
         return f"Heard you — **{_summary(draft)}**. {question}"
 
     # ── P2b: AI-tailored enrichment (size / specs / dimensions — item-appropriate
-    # options the model picked), capped so capture stays short ──
+    # options the model picked), capped so capture stays short. Never re-ask a field
+    # we already asked: when the user's answer doesn't parse as that attribute the model
+    # re-proposes the same question, which caused an identical re-ask loop
+    # ("What color?" → "What color?"). ──
     enrich_count = int(session_ctx.get("pass_along_enrich_count") or 0)
-    if ask and enrich_count < _MAX_ENRICH:
+    asked_fields = set(session_ctx.get("pass_along_asked_fields") or [])
+    if ask and ask["field"] not in asked_fields and enrich_count < _MAX_ENRICH:
+        asked_fields.add(ask["field"])
+        session_ctx["pass_along_asked_fields"] = list(asked_fields)
         session_ctx["pass_along_pending_ask"] = ask["field"]
         session_ctx["pass_along_enrich_count"] = enrich_count + 1
         session_ctx["pass_along_photo_prompted"] = False
@@ -392,4 +413,18 @@ def run_pass_along_turn(
         if matches
         else " I'll ping anyone on your block who's looking for it."
     )
-    return f"🎉 Done — **{_summary(draft)}** is listed on your block.{tail}"
+    # If they bundled several items in one message, offer the next instead of dropping it.
+    queued = list(session_ctx.get("pass_along_other_items") or [])
+    session_ctx["pass_along_other_items"] = []
+    extra = ""
+    if queued:
+        names = (
+            queued[0] if len(queued) == 1
+            else ", ".join(queued[:-1]) + f" and {queued[-1]}"
+        )
+        that = "that" if len(queued) == 1 else "those"
+        extra = (
+            f" You also mentioned {names} — want to pass {that} along too? "
+            "Just tell me about the next one."
+        )
+    return f"🎉 Done — **{_summary(draft)}** is listed on your block.{tail}{extra}"

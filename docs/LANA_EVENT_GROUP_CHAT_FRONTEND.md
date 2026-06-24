@@ -26,8 +26,12 @@ or adds members:
     (re-approval clears a previous `left_at`).
   - request becomes **`cancelled` / `declined`** → that member's `left_at` is set (removed).
 
-So: host publishes → thread exists with host in it. Host approves a join request → that
+So: host publishes → thread exists with host in it. A join request becomes `approved` → that
 neighbour is in the chat. The FE just reads/writes; it never manages membership.
+
+- **`approved` can happen with no host step.** On an **"anyone can join"** event with room,
+  `request_to_join_event` writes the request straight to `approved` — so the joiner lands in
+  the group chat immediately, no approval queue. See **§9. Join settings** for the full rules.
 
 - **Lana is not in group threads** (no assistant messages).
 - **Blocking is read-side** for groups: a blocked sender's messages are hidden per-viewer
@@ -223,3 +227,57 @@ and doesn't reinvent threading.
 
 > **DB sanity check (prod, this is live):** `chat_threads` by `kind` — `group_event` 32,
 > `shielded` 2, `direct` 1, `inquiry` 1. Both flows are creating threads correctly.
+
+---
+
+## 9. Join settings — auto-approve · capacity · attendee sharing
+
+> **Backend status: done in code; needs the migration applied.** Migration
+> `20260718120000_event_join_enforcement.sql` rewrites `request_to_join_event` and adds
+> `event_allows_attendee_share`. Until it's applied, every join is still `pending`
+> regardless of settings (the old behavior). Apply via Dashboard SQL Editor or the pooler
+> URL (`...pooler.supabase.com:6543`).
+
+The host picks these in the host flow (backend-only chips — they are **not** in
+`event_draft`); `create_event` persists them on the `events` row. They are now **enforced
+at join time**, so the FE mostly just gets the right outcome for free — with **one** FE
+action (the Share gate, below).
+
+### What `request_to_join_event(p_event_id, p_message?)` now does
+
+It reads the event's `auto_approve` + `max_attendees` and sets the new request's status:
+
+| Host setting | At join time | Resulting `status` | Group chat |
+|---|---|---|---|
+| **"Anyone can join"** (`auto_approve = true`), room left | — | **`approved`** instantly | joiner added immediately |
+| **"Anyone can join"**, but `max_attendees` reached | full | **`pending`** (falls back to host) | not yet |
+| **"I'll approve each"** (`auto_approve = false`) | — | **`pending`** | on host approval |
+
+**FE implication:** after `requestToJoinEvent(...)` resolves, **re-read `my_request_status`
+from the event preview** (or optimistically check) — it may already be `approved`, not
+`pending`. Render "**You're in! 🎉**" for `approved`, and "on the list — host will confirm"
+only for `pending`. Don't hard-code the "host will confirm" copy anymore.
+
+Errors (`P0001`) unchanged + `not_verified`: `event_not_open`, `host_cannot_request_own_event`,
+`request_already_exists`.
+
+### Attendee sharing — gate the Share button
+
+`allow_attendee_share` controls whether **anyone but the host** may surface the Share /
+invite affordance. New read RPC (granted to `anon` + `authenticated`):
+
+```ts
+// returns boolean; false for closed/unknown events or on error
+const allowed = await supabase.rpc('event_allows_attendee_share', { p_event_id });
+```
+
+**Render rule (already wired in `meet-view.tsx`):**
+
+```ts
+const canShare = isHost || attendeeShareAllowed;   // attendeeShareAllowed = the RPC result
+// show the Share button only when canShare
+```
+
+- Host → always sees Share.
+- Everyone else → sees Share only when the host chose **"let attendees share."**
+- Helper `fetchEventSharePolicy(eventId)` in `src/lib/events.ts` wraps the RPC.

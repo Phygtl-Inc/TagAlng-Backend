@@ -151,6 +151,21 @@ shareButton(() => share(`${origin}/meet/${turn.event_id}`));
 > `sendMessage(sessionId, action.message)`). It's just no longer populated for
 > `event_created`.
 
+### Join settings (capacity · approve · share) are backend-only — and now **enforced**
+
+Lana also captures **how many can come**, **open vs. approve-each**, and **let attendees
+share** as chip questions mid-flow. These are **not** in `event_draft` (no FE render); they
+persist on the event and are now enforced at join time:
+
+- **"Anyone can join"** → joiners are **auto-approved** (no host queue) until capacity, then
+  fall back to host approval.
+- **"Let attendees share"** → gates who sees the Share button on the meet page (host always).
+
+The FE consequences live on the **meet page**, not the host card — see
+**`LANA_EVENT_GROUP_CHAT_FRONTEND.md` §9** (re-read `my_request_status` after a join; gate
+Share via `event_allows_attendee_share`). Requires migration
+`20260718120000_event_join_enforcement.sql`.
+
 ### Publish can fail — gate the card on `event_id`
 
 Publishing is best-effort and can be rejected (e.g. host not verified, venue not

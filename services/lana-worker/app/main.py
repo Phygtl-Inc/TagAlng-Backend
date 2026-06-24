@@ -63,7 +63,9 @@ from app.models import (
     CreateSessionResponse,
     DiscoverySurfacePayload,
     DiscoveryWeakPeerRow,
+    EventDecisionHookRequest,
     EventDraft,
+    EventJoinHookRequest,
     EventVenueRequest,
     ItemDraft,
     LookDraft,
@@ -127,6 +129,7 @@ from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
+from app.notifications import email_html, notify_user
 
 _LOG = logging.getLogger(__name__)
 
@@ -1310,6 +1313,25 @@ def send_lana_message(
             user_id=auth.user_id,
             event_properties={"event_id": merged.get("event_id")} if _ui == "event_created" else None,
         )
+        # A meet just published → confirm to the host via push + email.
+        if _ui == "event_created" and merged.get("event_id"):
+            _eid = str(merged.get("event_id"))
+            _etitle = (
+                getattr(event_draft, "title", None) or "your meet"
+            ) if event_draft else "your meet"
+            notify_user(
+                auth.user_id,
+                title="Your meet is live 🎉",
+                body=f"“{_etitle}” is posted to your block — I’ll tell you when neighbors ask to join.",
+                url=f"/meet/{_eid}",
+                email_subject=f"Your meet “{_etitle}” is live",
+                email_html=email_html(
+                    "Your meet is live 🎉",
+                    f"“{_etitle}” is now posted to your block. I’ll let you know as neighbors ask to join.",
+                    cta_label="Open the meet",
+                    cta_path=f"/meet/{_eid}",
+                ),
+            )
     elif _ui == "signal_saved":
         _sig = merged.get("signal_saved") if isinstance(merged.get("signal_saved"), dict) else {}
         amplitude_track(
@@ -1405,6 +1427,160 @@ def set_event_venue(
     }
     ctx["event_place_asked"] = True  # the where-step is satisfied precisely now
     update_session_context(session_id, ctx)
+    return {"ok": True}
+
+
+@app.post("/hooks/event-join")
+def hook_event_join(
+    body: EventJoinHookRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Called by the JOINER's client right after request_to_join_event. Notifies the host
+    (someone wants in / joined) and the joiner (request sent / you're in). Sending is
+    server-side via the service client; the caller's JWT just authorizes they're the joiner."""
+    auth = verify_auth(authorization)
+    from app.auth import service_client
+    from app.notifications import _user_contact
+
+    sb = service_client()
+    if sb is None:
+        return {"ok": False}
+    try:
+        ev = (
+            sb.table("events").select("title,host_id").eq("id", body.event_id).single().execute().data
+            or {}
+        )
+        req = (
+            sb.table("event_requests")
+            .select("status")
+            .eq("event_id", body.event_id)
+            .eq("requester_id", auth.user_id)
+            .single()
+            .execute()
+            .data
+            or {}
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+
+    title = ev.get("title") or "a meet"
+    host_id = ev.get("host_id")
+    auto = (req.get("status") or "pending") in ("approved", "attended")
+    _, joiner_nick = _user_contact(auth.user_id)
+    who = joiner_nick or "A neighbor"
+    eid = body.event_id
+
+    # → host
+    if host_id and host_id != auth.user_id:
+        if auto:
+            notify_user(
+                host_id,
+                title=f"{who} joined",
+                body=f"{who} just joined “{title}”.",
+                url=f"/meet/{eid}/requests",
+                email_subject=f"{who} joined “{title}”",
+                email_html=email_html(
+                    f"{who} joined “{title}”", f"{who} is in — see everyone going.",
+                    "View attendees", f"/meet/{eid}/requests",
+                ),
+            )
+        else:
+            notify_user(
+                host_id,
+                title="New join request",
+                body=f"{who} wants to join “{title}”.",
+                url=f"/meet/{eid}/requests",
+                email_subject=f"{who} wants to join “{title}”",
+                email_html=email_html(
+                    "New join request", f"{who} asked to join “{title}”. Approve or decline.",
+                    "Review request", f"/meet/{eid}/requests",
+                ),
+            )
+
+    # → joiner
+    if auto:
+        notify_user(
+            auth.user_id,
+            title="You’re in 🎉",
+            body=f"You joined “{title}”.",
+            url=f"/meet/{eid}",
+            email_subject=f"You’re in: “{title}”",
+            email_html=email_html(
+                "You’re in 🎉", f"You joined “{title}”. See the details and group chat.",
+                "Open the meet", f"/meet/{eid}",
+            ),
+        )
+    else:
+        notify_user(
+            auth.user_id,
+            title="Request sent",
+            body=f"Your request to join “{title}” is in — the host will confirm.",
+            url=f"/meet/{eid}",
+            email_subject=f"Request sent: “{title}”",
+            email_html=email_html(
+                "Request sent", f"Your request to join “{title}” is in. The host will confirm.",
+                "Open the meet", f"/meet/{eid}",
+            ),
+        )
+    return {"ok": True}
+
+
+@app.post("/hooks/event-decision")
+def hook_event_decision(
+    body: EventDecisionHookRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Called by the HOST's client right after decide_event_request. Notifies the requester
+    of the outcome. The caller's JWT authorizes; the row + host ownership are re-checked."""
+    auth = verify_auth(authorization)
+    from app.auth import service_client
+
+    sb = service_client()
+    if sb is None:
+        return {"ok": False}
+    try:
+        req = (
+            sb.table("event_requests")
+            .select("event_id,requester_id,status")
+            .eq("id", body.request_id)
+            .single()
+            .execute()
+            .data
+            or {}
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+    requester_id = req.get("requester_id")
+    eid = req.get("event_id")
+    status = req.get("status")
+    if not requester_id or not eid:
+        return {"ok": False}
+    try:
+        ev = sb.table("events").select("title,host_id").eq("id", eid).single().execute().data or {}
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+    if ev.get("host_id") != auth.user_id:  # only the host may trigger this
+        return {"ok": False}
+    title = ev.get("title") or "a meet"
+    if status == "approved":
+        notify_user(
+            requester_id,
+            title="You’re in 🎉",
+            body=f"You’re approved for “{title}”.",
+            url=f"/meet/{eid}",
+            email_subject=f"You’re in: “{title}”",
+            email_html=email_html(
+                "You’re in 🎉", f"The host approved you for “{title}”. See the details and group chat.",
+                "Open the meet", f"/meet/{eid}",
+            ),
+        )
+    elif status == "declined":
+        notify_user(
+            requester_id,
+            title=f"Update on “{title}”",
+            body="The host couldn’t fit you in this time.",
+            url=f"/meet/{eid}",
+        )
     return {"ok": True}
 
 

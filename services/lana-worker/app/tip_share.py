@@ -236,7 +236,7 @@ def run_tip_share_turn(
     turns = int(session_ctx.get("tip_turns") or 0) + 1
     session_ctx["tip_turns"] = turns
     if _CANCEL_RE.search(msg) or turns > _TIP_TURN_CAP:
-        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_enrich_count"):
+        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_enrich_count", "tip_asked_fields"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["routing_phase"] = "listening"
@@ -331,9 +331,15 @@ def run_tip_share_turn(
         session_ctx["routing_phase"] = "listening"
         return f"Heard you — **{_summary(draft)}**. What kind of recommendation is it?"
 
-    # ── AI-tailored enrichment (cuisine / age-fit / why-great), capped ──
+    # ── AI-tailored enrichment (cuisine / age-fit / why-great), capped. Never re-ask a
+    # field already asked: a non-matching answer ("great for toddlers" to "Which
+    # community center?") makes the model re-propose the same question — an identical
+    # re-ask loop. ──
     enrich_count = int(session_ctx.get("tip_enrich_count") or 0)
-    if ask and enrich_count < _MAX_ENRICH:
+    asked_fields = set(session_ctx.get("tip_asked_fields") or [])
+    if ask and ask["field"] not in asked_fields and enrich_count < _MAX_ENRICH:
+        asked_fields.add(ask["field"])
+        session_ctx["tip_asked_fields"] = list(asked_fields)
         session_ctx["tip_pending_ask"] = ask["field"]
         session_ctx["tip_enrich_count"] = enrich_count + 1
         draft["chips"] = chips
