@@ -515,6 +515,11 @@ def run_lana_unified_pipeline(
         already_published = bool(turn_ctx.get("event_id") or prev_event_id)
         if host_active and not already_published:
             ed: dict[str, Any] = dict(event_draft) if isinstance(event_draft, dict) else {}
+            # This turn renders the structured host card — not a discovery / "thinking"
+            # turn. Drop the orchestrator's leaked eyebrow ("GENERAL · reflecting on …")
+            # and any stale peer-preview cards so neither bleeds in beside the host prompt.
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            turn_ctx["peer_matches"] = []
             # Chips + affinity are transient per-turn UI — never inherit last turn's
             # set, or the early-out keeps showing stale options for the new question.
             ed.pop("suggestions", None)
