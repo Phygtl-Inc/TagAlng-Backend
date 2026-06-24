@@ -299,6 +299,18 @@ class EventVenueRequest(BaseModel):
     place_id: str | None = None
 
 
+class EventJoinHookRequest(BaseModel):
+    """FE calls this right after request_to_join_event so the host + joiner get notified."""
+
+    event_id: str
+
+
+class EventDecisionHookRequest(BaseModel):
+    """FE calls this right after decide_event_request so the requester gets the outcome."""
+
+    request_id: str
+
+
 class PlaceResult(BaseModel):
     name: str
     address: str = ""

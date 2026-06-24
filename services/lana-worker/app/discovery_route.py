@@ -1295,6 +1295,12 @@ def _try_layer1_intent_turn(
     if linear == "discovery.find_by_attrs":
         if slots_indicate_hosting_signal(slots):
             return None
+        # At the identity onboarding step, "find by attrs" is really the user
+        # answering "tell me about you" with their own traits — let it fall through
+        # to identity capture (which persists the claims and matches off the snippet)
+        # instead of a literal neighbor search that bounces "no matching neighbors".
+        if (phase or "") == PHASE_NEED_IDENTITY:
+            return None
         if not phone_verified:
             return (
                 "Verify your email first — then I can search neighbors by those traits.",
@@ -3778,7 +3784,12 @@ def handle_discovery_turn(
             timer=timer,
         )
         if slots_indicate_peer_discovery(slots):
-            session_ctx["skip_claims_background_extract"] = True
+            # During the identity onboarding step the user is describing THEMSELVES
+            # ("I'm Asian with a teenager") in answer to "tell me about you" — persist
+            # those claims even though the classifier read it as peer discovery. Only
+            # suppress background extraction when we're NOT collecting identity.
+            if (phase or "") != PHASE_NEED_IDENTITY:
+                session_ctx["skip_claims_background_extract"] = True
 
     hosting_cta_turn = _try_hosting_cta_turn(
         msg=msg,

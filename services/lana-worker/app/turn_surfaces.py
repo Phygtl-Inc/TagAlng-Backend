@@ -15,6 +15,11 @@ TURN_SCOPED_SURFACES = frozenset({
     "item_listed_now",
     "tip_listed_now",
     "look_meet_saved_now",
+    # Per-turn signal to main.py's background claim extractor. Must NOT persist: a
+    # prior peer-discovery turn (e.g. ZIP entry) set it True, and {**old, **new} merge
+    # leaked that True into the identity turn — suppressing the claim-save so the user's
+    # self-description never persisted. Re-stamped each turn by handlers that need it.
+    "skip_claims_background_extract",
 })
 
 
