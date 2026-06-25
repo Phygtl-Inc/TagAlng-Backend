@@ -34,19 +34,164 @@ _LISTEN_RE = re.compile(
 )
 _LOOK_MEET_TURN_CAP = 12
 
-# Deterministic entry backstop (the "a meet or playgroup" CTA), so it engages even
-# without the FE intent_hint. Matches SEEKING a meetup — not hosting one.
-_ENTRY_RE = re.compile(
-    r"\b(looking (?:for|to)\s+(?:a\s+)?(?:meet|playgroup|playdate|hang|mom)|"
-    r"want to meet|meet (?:other )?moms|a playgroup|stroller walk|"
-    r"find (?:a )?(?:meet|playgroup|moms))\b",
+# NL entry into this flow is owned by the AI classifier (find-activities → look_meet, or
+# a stated meet_seek), not a keyword backstop — only the explicit "A meet or playgroup"
+# CTA (intent_hint) enters deterministically. See main.py / handle_discovery_turn.
+
+
+# Explicit pivot to another intent — release the capture so normal routing handles it.
+# Needs a find/show verb + a people noun so a meet answer ("all moms") is never a pivot.
+_PIVOT_OUT_RE = re.compile(
+    r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
+    r"\bshow (?:my )?(?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b|"
+    r"\b(?:host|create|throw|plan|organi[sz]e)\s+(?:an?\s+|my\s+)?(?:event|party|meetup|gathering)\b",
     re.IGNORECASE,
 )
 
 
-def looks_like_look_meet_entry(message: str) -> bool:
-    """True when the message looks like the user wants to FIND a meet/playgroup."""
-    return bool(_ENTRY_RE.search(str(message or "").strip()))
+def look_meet_should_release(
+    message: str,
+    session_ctx: dict[str, Any],
+    slots: dict[str, Any] | None = None,
+) -> bool:
+    """Whether the sticky meet capture should release this turn and hand back to routing.
+
+    Uses the AI classifier's read (the ``abandon`` flag + the intent lane) when ``slots``
+    are supplied — so a *semantic* quit ("eh, maybe later") or a pivot to another intent
+    ("I'd rather meet dads for poker") escapes, not just hard-coded cancel words — and
+    always frees a ready card from any non-confirm message. Stays in the flow for genuine
+    answers, chip edits, the confirm CTA, and explicit cancels (a graceful in-flow exit).
+    """
+    msg = str(message or "").strip()
+    if not msg:
+        return False
+    if _CANCEL_RE.search(msg):
+        return False  # cancel is a graceful in-flow exit, not a reroute
+
+    # AI: a genuine abandon (stop, with no replacement) releases at any point.
+    if slots and slots.get("abandon"):
+        return True
+
+    # Explicit cross-lane phrasing — cheap backstop, independent of the classifier.
+    if _PIVOT_OUT_RE.search(msg):
+        return True
+
+    # AI: read the classifier's lane. Use the RAW goal/intent (not the enriched form,
+    # which maps the benign "continue" answer-goal onto find_peers).
+    if slots:
+        from app.layer1_intents import normalize_linear_intent
+
+        conf = float(slots.get("confidence", 0.0))
+        goal = str(slots.get("goal") or "")
+        linear = normalize_linear_intent(slots.get("linear_intent")) or ""
+        signal_intent = str(slots.get("signal_intent") or "")
+        if conf >= 0.6 and goal not in ("", "continue", "none"):
+            # A confident pivot to a DIFFERENT lane is never an answer to a meet question.
+            if (
+                goal in ("peers", "both", "propose_intro", "list_intros",
+                         "verify", "login", "logout", "show_block_log")
+                or linear.startswith(("identity.", "social.", "auth.", "settings.", "tier."))
+                or linear in ("discovery.find_peers", "discovery.find_by_attrs",
+                              "discovery.find_in_block", "discovery.block_log",
+                              "sharing.host", "sharing.swap", "looking.swap",
+                              "sharing.tip", "looking.tip")
+                or signal_intent in ("host_meet", "swap_seek", "swap_offer",
+                                     "tip_seek", "tip_share")
+            ):
+                return True
+            # A different activity/meet ONCE a kind is captured = a changed request, not an
+            # answer — release so a fresh capture starts. Guarded so it never fires at P1
+            # (no kind yet), where an activity-shaped reply IS the answer to "what kind?".
+            draft = session_ctx.get("look_draft")
+            kind_set = isinstance(draft, dict) and bool(str(draft.get("kind") or "").strip())
+            meet_intent = (
+                goal == "activities"
+                or linear == "discovery.find_activities"
+                or (goal == "save_signal" and signal_intent == "meet_seek")
+            )
+            if kind_set and meet_intent:
+                return True
+
+    # On the ready card, anything that isn't a confirm / chip edit is a new request.
+    if session_ctx.get("look_ready"):
+        return not (_LISTEN_RE.search(msg) or re.match(r"\s*fix:\w+\s*$", msg))
+    return False
+
+
+def look_meet_user_moved_on(message: str, session_ctx: dict[str, Any]) -> bool:
+    """Regex/ready-only release check (no classifier). Retained for callers without AI
+    slots; ``look_meet_should_release`` is the AI-driven decision used in the pipeline."""
+    return look_meet_should_release(message, session_ctx, slots=None)
+
+
+def reset_look_meet_state(session_ctx: dict[str, Any]) -> None:
+    """Drop the in-progress (unsaved) meet capture and its flags so the turn falls
+    through to normal routing. Keys set to None (not popped) so the {**old, **new}
+    session merge clears them instead of letting a stale value survive."""
+    for k in (
+        "look_meet_active",
+        "look_draft",
+        "look_ready",
+        "look_pending_ask",
+        "look_enrich_count",
+        "look_affinity_asked",
+        "look_meet_skip_seed",
+    ):
+        session_ctx[k] = None
+    session_ctx["look_turns"] = 0
+
+
+def _gate_guest_before_save(session_ctx: dict[str, Any], draft: dict[str, Any]) -> str:
+    """A guest tapped 'Start listening' — stash the ready seek and gate into verify.
+
+    Releases the look_meet flow (so the email/OTP turns route to the signup handler) and
+    flips on the verify gate. `look_seek_pending` survives the merge and is saved by
+    save_pending_meet_seek once the user is verified. The phase literal matches
+    PHASE_AWAIT_SIGNUP_PHONE — kept as a string to avoid a circular import.
+    """
+    session_ctx["look_seek_pending"] = dict(draft)
+    for k in ("look_meet_active", "look_ready", "look_pending_ask", "look_affinity_asked"):
+        session_ctx[k] = None
+    session_ctx["look_turns"] = 0
+    session_ctx["requires_phone_verification"] = True
+    session_ctx["routing_phase"] = "await_signup_phone"
+    return (
+        "Love it — to start listening and text you when a mom wants the same, I just need "
+        "to verify you. What's your email? (Already have an account? I'll log you right in.)"
+    )
+
+
+def save_pending_meet_seek(
+    *,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    block_id: str | None,
+    zip_code: str | None,
+) -> str | None:
+    """Save a seek that was stashed when a guest hit 'Start listening', once verified.
+
+    Returns Lana's reply, or None when there is nothing pending. Sets look_meet_saved_now
+    so the FE shows the saved card.
+    """
+    draft = session_ctx.get("look_seek_pending")
+    if not isinstance(draft, dict) or not draft:
+        return None
+    session_ctx["look_seek_pending"] = None
+    saved = _save_meet_seek(draft=draft, user_jwt=user_jwt, block_id=block_id, zip_code=zip_code)
+    if not saved:
+        return "You're verified! I couldn't save your listing just now — say 'start listening' to retry."
+    draft["signal_id"] = saved.get("signal_id")
+    draft["saved"] = True
+    draft["chips"] = _build_chips(draft)
+    session_ctx["look_draft"] = draft
+    session_ctx["look_meet_saved_now"] = True
+    matches = int(saved.get("matches_created") or 0)
+    tail = (
+        f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+        if matches
+        else " I'll text you when another mom wants the same near you."
+    )
+    return f"✅ You're in — I'm listening for a **{_summary(draft)}**.{tail}"
 
 
 _MEET_VALUE_FIELDS = ("kind", "day", "place", "trait")
@@ -295,6 +440,11 @@ def run_look_meet_turn(
 
     # ── The "Start listening for me" CTA on the ready card → save the seek ──
     if session_ctx.get("look_ready") and _LISTEN_RE.search(msg):
+        # Guests must verify before we can save under a real account (same email prompt
+        # logs in an existing account or signs up a new one). Stash the ready seek and
+        # gate into verify; it auto-saves the moment they're verified.
+        if not session_ctx.get("phone_verified"):
+            return _gate_guest_before_save(session_ctx, draft)
         saved = _save_meet_seek(draft=draft, user_jwt=user_jwt, block_id=home_block_id, zip_code=zip_code)
         for k in ("look_meet_active", "look_ready", "look_pending_ask", "look_affinity_asked"):
             session_ctx[k] = None
@@ -366,11 +516,19 @@ def run_look_meet_turn(
 
     # ── P1: nothing yet → "What kind of meet would help?" ──
     if not _has(draft, "kind"):
-        draft["suggestions"] = _KIND_SUGGESTIONS
-        session_ctx["look_draft"] = draft
-        session_ctx["look_meet_active"] = True
-        session_ctx["routing_phase"] = "listening"
-        return "Love it — what kind of meet would help?"
+        # Ask the kind question (with chips) ONCE. If they reply again without a nameable
+        # kind, take their words as the kind and move on — never re-ask the identical
+        # question, which dead-ended vague input like "any fun activity". The flag rides on
+        # the draft, so it resets whenever the capture does.
+        if draft.get("_p1_asked") and msg:
+            draft["kind"] = msg[:80]
+        else:
+            draft["_p1_asked"] = True
+            draft["suggestions"] = _KIND_SUGGESTIONS
+            session_ctx["look_draft"] = draft
+            session_ctx["look_meet_active"] = True
+            session_ctx["routing_phase"] = "listening"
+            return "Love it — what kind of meet would help?"
 
     chips = _build_chips(draft)
 

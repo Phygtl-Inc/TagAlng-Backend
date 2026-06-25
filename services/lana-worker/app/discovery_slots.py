@@ -94,6 +94,19 @@ _SYSTEM = (
     "chat = companionship / profile read / any non-funnel question; "
     "continue = user is answering the current funnel step (supplying ZIP or identity snippet); "
     "none = not discovery. "
+    "abandon (separate boolean, any goal) = the user wants to STOP the activity Lana is currently "
+    "helping with (hosting an event, a signal capture, the funnel) ENTIRELY, with NO replacement — "
+    "classify by MEANING, not keywords. Set abandon=true only for phrasing that means 'stop / not "
+    "now / drop it, and I'm not proposing anything instead': I don't wanna create an event, let's not "
+    "for now, I have mixed feelings, maybe later, actually no, forget it, my plans changed, never mind. "
+    "CRITICAL — abandon=false when the user rejects the CURRENT plan but proposes a DIFFERENT activity "
+    "or detail in the same breath: that is a CHANGE, not a quit. 'I don't wanna host a bbq, what if we "
+    "do a movie night?', 'scrap the picnic, let's do brunch', 'not Saturday — make it Sunday', 'make "
+    "it for everyone instead' all keep the event alive (abandon=false) — they are editing it. Only "
+    "abandon when they stop with no alternative. "
+    "Also abandon=false for: answering a question (a title, a time, a chip tap) or mild uncertainty "
+    "about ONE detail (not sure what to call it, what time is good?). abandon means quitting the whole "
+    "task, never editing or swapping a part of it. "
     "When goal=profile_photo set profile_photo_action: start (wants upload), accept (yes after Lana suggested), "
     "done (finished uploading), skip (cancel/not now), none. "
     "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action. "
@@ -118,10 +131,53 @@ _SYSTEM = (
     "If no specific name/place is given, it is NOT tip_share. "
     "NEVER tip_seek when user wants to FIND/SHOW NEIGHBORS by heritage, life stage, or traits "
     "(find italian moms, find italian dads, brazilian parents on my block) — that is discovery.find_by_attrs. "
-    "host_meet = user wants to PLAN or HOST an activity on the block (I want brazilian coffee this weekend, "
-    "host a brunch Saturday, plan a playdate at the park) — sharing.host + goal=save_signal; "
-    "NOT discovery.find_by_attrs even if a heritage word appears. Heritage + mom/dad/parent/neighbor = find people; "
-    "heritage + coffee/brunch/meetup/gathering + time = host. "
+    "host_meet = the user is the ORGANIZER who wants to bring neighbors together for a gathering THEY "
+    "create — classify by MEANING, not by specific words. Any phrasing where the user is hosting, "
+    "planning, throwing, setting up, organizing, or creating something others attend is host_meet "
+    "(I want to create an event, I'm planning a party, let's throw a get-together, I want to host "
+    "something this weekend, set up a block hang, organize a brunch, plan a playdate at the park). "
+    "It is STILL host_meet when NO specific activity type is named yet (a bare 'I want to create an "
+    "event' / 'I want to host something') — the activity can be collected later; what matters is the "
+    "user is the organizer INVITING/GATHERING others, not asking to be shown people. "
+    "sharing.host + goal=save_signal. "
+    "Contrast with discovery.find_by_attrs/find_peers, where the user wants to BE SHOWN matching "
+    "neighbors (find/show me ...). This holds even if a heritage word appears: heritage + "
+    "mom/dad/parent/neighbor with a search verb = find people; the user organizing a gathering "
+    "(host/plan/create/throw/set up, optionally with an activity or time) = host. "
+    "FIND-AN-EVENT vs HOST-AN-EVENT — the single most important create-vs-discover split; "
+    "decide by MEANING, never by the presence of an event noun. "
+    "discovery.find_activities (goal=activities, in_discovery=true) = the user wants to BE SHOWN "
+    "events/activities/gatherings/parties that ALREADY exist near them — they are a SEEKER/attendee, "
+    "NOT the organizer. The same wish is phrased infinitely: 'find friends events happening near me', "
+    "'any parties happening nearby', 'what's going on this weekend', 'I'm looking for activities', "
+    "'show me meetups around here', 'are there playdates near me', 'find moms activities', "
+    "'sports activities near me', 'anything fun to do around here', 'is there a party tonight'. "
+    "A seeking/browsing frame (find / looking for / show me / any / is there / what's happening / "
+    "going on / near me / around here / nearby) over an event/activity/party noun is ALWAYS "
+    "discovery.find_activities — NEVER host_meet, even though it mentions an event or party. "
+    "host_meet (sharing.host) is ONLY when the user is the ORGANIZER bringing others together "
+    "(I want to host/throw/set up/organize/plan/create ...). They INVITE others; they do not ask to be "
+    "shown what exists. When genuinely ambiguous between attending and organizing (a bare 'a party this "
+    "weekend?'), prefer discovery.find_activities unless the user clearly signals they are the organizer. "
+    "If the user pivots mid-chat from one search to another ('actually not that, find me moms activities "
+    "instead', 'what about sports activities') that is STILL discovery.find_activities with the new "
+    "criteria — abandon=false, re-classify to what they now want. "
+    "BROWSE existing activities vs SEEK a meet — a second split WITHIN finding-something-to-do; decide "
+    "by MEANING: "
+    "discovery.find_activities (goal=activities) = the user wants to SEE/BROWSE events that ALREADY "
+    "exist on the block ('what's happening this weekend', 'any events near me', 'show me what's going "
+    "on', 'anything fun nearby') — they want to be shown a list and pick. "
+    "meet_seek (looking.meet, goal=save_signal) = the user wants a NEIGHBOR or group to do an activity "
+    "WITH them and to be MATCHED ('I want a tennis partner', 'looking for a stroller-walk buddy', 'find "
+    "me moms to hang out with', 'set me up with people for a fifa night') — they broadcast a want to be "
+    "paired, not browse a calendar. "
+    "Decide by whether they want to BE SHOWN what exists (find_activities) or be MATCHED to people "
+    "(meet_seek). "
+    "WHEN YOU GENUINELY CANNOT TELL — the message fits BOTH equally and the user's goal is truly "
+    "underspecified ('I want to do something fun this weekend', 'anything fifa this weekend?', 'help me "
+    "find something to do with people') — do NOT guess: set clarify='browse_or_meet' AND still give your "
+    "best-guess linear_intent. In every clear case set clarify=null. Use clarify ONLY for the genuine "
+    "browse-vs-seek tie — never for other intents. "
     "Set linear_intent: looking.meet for meet_seek, looking.swap for swap_seek, looking.tip for tip_seek, "
     "sharing.swap for swap_offer, sharing.host for host_meet, sharing.tip for tip_share. "
     "When goal=show_block_log set intro_direction null. "
@@ -210,6 +266,8 @@ def _empty_slots() -> dict[str, Any]:
         "signal_intent": None,
         "signal_detail": None,
         "signal_category": None,
+        "clarify": None,
+        "abandon": False,
         "confidence": 0.0,
     }
 
@@ -343,6 +401,8 @@ def ai_parse_discovery_turn(
         ident_s = str(ident).strip()[:400] if ident else None
         linear_raw = str(raw.get("linear_intent") or "").strip().lower()
         linear_intent = linear_raw if linear_raw in LINEAR_INTENTS else None
+        clarify_raw = str(raw.get("clarify") or "").strip().lower()
+        clarify = clarify_raw if clarify_raw == "browse_or_meet" else None
         return enrich_slots({
             "in_discovery": bool(raw.get("in_discovery")),
             "linear_intent": linear_intent,
@@ -360,6 +420,8 @@ def ai_parse_discovery_turn(
             "signal_when": signal_when_s,
             "attr_filter": attr_filter_s,
             "peer_name": peer_name_s,
+            "clarify": clarify,
+            "abandon": bool(raw.get("abandon")),
             "confidence": float(raw.get("confidence", 0.0)),
         }, msg=text)
     except Exception:
@@ -404,9 +466,11 @@ def _discovery_slot_payload(
         '  "signal_when": "string or null",\n'
         '  "attr_filter": "string or null",\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
+        '  "clarify": "browse_or_meet"|null,\n'
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
+        '  "abandon": true|false,\n'
         '  "confidence": 0.0-1.0\n'
         "}"
     )

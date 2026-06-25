@@ -53,6 +53,7 @@ class DiscoverySurfacePayload(BaseModel):
 
 
 class ActivityPreviewRow(BaseModel):
+    activity_id: str | None = None
     title: str
     starts_at: str | None = None
     starts_label: str | None = None

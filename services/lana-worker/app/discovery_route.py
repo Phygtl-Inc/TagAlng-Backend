@@ -8,7 +8,12 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.auth import email_has_registered_account, service_client
+from app.auth import (
+    email_has_registered_account,
+    registered_user_id_for_email,
+    service_client,
+)
+from app.db import extract_host_ctx, stash_pending_event_draft
 from app.claim_search import (
     heritage_terms_in_text,
     parse_claim_filters,
@@ -154,7 +159,6 @@ from app.layer1_intents import (
     slots_indicate_hosting_signal,
     slots_indicate_tip_share_signal,
     slots_linear_intent,
-    utterance_indicates_hosting_plan,
     utterance_indicates_tip_share,
     utterance_indicates_tip_seek,
     utterance_indicates_swap_seek,
@@ -1235,6 +1239,33 @@ def _try_layer1_intent_turn(
             user_jwt=user_jwt,
             phone_verified=phone_verified,
         )
+        # Resolve a ZIP the user just typed into a block. This handler runs BEFORE the
+        # main ZIP funnel and short-circuits it, so without resolving the ZIP here a guest
+        # who answers "what's on my block?" with their ZIP just gets re-asked "what ZIP?"
+        # every turn (the message ZIP is never read).
+        if not block_id:
+            zip_from_msg = extract_zip(msg) or slots.get("zip")
+            if zip_from_msg:
+                blocks = fetch_blocks_for_zip(user_jwt, zip_from_msg)
+                if blocks:
+                    block_id = str(blocks[0].get("block_id") or "")
+                    ctx_base["preview_block_id"] = block_id
+                    ctx_base["preview_zip"] = zip_from_msg
+                    ctx_base["preview_block_label"] = str(
+                        blocks[0].get("label") or blocks[0].get("name") or zip_from_msg
+                    )
+                elif not phone_verified:
+                    return (
+                        f"I couldn't find blocks for ZIP {zip_from_msg}. Try another ZIP "
+                        "(e.g. 32827 for Lake Nona).",
+                        _routing_ctx(
+                            ctx_base,
+                            phase=PHASE_NEED_ZIP,
+                            active_intent="discovery.find_in_block",
+                        ),
+                        _discovery_routing_stub(PHASE_NEED_ZIP, "block_summary_zip_not_found"),
+                        [],
+                    )
         if not block_id and not phone_verified:
             return (
                 "What ZIP are you in? Once I know your block I can summarize what's happening nearby.",
@@ -2133,7 +2164,7 @@ def _peer_find_turn_blocked(
         return True
     if slots_want_propose_intro(enriched):
         return True
-    if slots_indicate_hosting_signal(enriched) or utterance_indicates_hosting_plan(msg):
+    if slots_indicate_hosting_signal(enriched):
         return True
     if slots_picking_shown_peer(enriched, session_ctx):
         return True
@@ -2487,7 +2518,7 @@ def _try_signal_seek_early_turn(
         return None
     if slots_indicate_tip_share_signal(seek_slots) or utterance_indicates_tip_share(msg):
         return None
-    if slots_indicate_hosting_signal(seek_slots) or utterance_indicates_hosting_plan(msg):
+    if slots_indicate_hosting_signal(seek_slots):
         return None
     goal = str(seek_slots.get("goal") or "")
     signal_intent = str(seek_slots.get("signal_intent") or "")
@@ -2839,15 +2870,14 @@ def _effective_discovery_goal(
 
     if slot_goal in _DISCOVERY_GOALS and conf >= 0.45:
         return slot_goal
+    # Answering the funnel (goal=continue) or sending a bare ZIP keeps the goal the user
+    # already chose. A real pivot away from activities was already cleared above by
+    # _should_clear_discovery_goal, so an activities browser must NOT be downgraded to
+    # peers just because "32827" (or an identity snippet) carries no activity keyword —
+    # that bug made every activities search collapse into a neighbor search after ZIP.
     if slot_goal == "continue" and stored in _DISCOVERY_GOALS:
-        if stored == "activities" and not wants_activities_browse(msg):
-            session_ctx.pop("discovery_goal", None)
-            return "peers"
         return stored
     if extract_zip(msg) and stored in _DISCOVERY_GOALS:
-        if stored == "activities" and not wants_activities_browse(msg):
-            session_ctx.pop("discovery_goal", None)
-            return "peers"
         return stored
     if stored == "activities" and not wants_activities_browse(msg):
         session_ctx.pop("discovery_goal", None)
@@ -2905,6 +2935,30 @@ _EVENT_HOST_TURN_CAP = 12
 
 def _pivots_out_of_host(msg: str) -> bool:
     return bool(_HOST_PIVOT_RE.search(str(msg or "").strip()))
+
+
+def _release_host_mode(session_ctx: dict[str, Any]) -> None:
+    """Exit the sticky event-host flow and drop the in-progress draft, so a later
+    'host an event' starts clean instead of resuming this abandoned one. Keys are set
+    to None (falsy) rather than popped — the session merge keeps {**old, **new}, so a
+    missing key would let the stale value survive; an explicit None clears it."""
+    session_ctx["event_host_active"] = False
+    session_ctx["event_host_turns"] = 0
+    for key in (
+        "host_publish_pending",
+        "event_draft",
+        "event_when_date",
+        "event_when_time",
+        "event_place_asked",
+        "event_venue",
+        "event_settings",
+        "event_cap_asked",
+        "event_approval_asked",
+        "event_share_asked",
+        "event_affinity_asked",
+        "requires_phone_verification",
+    ):
+        session_ctx[key] = None
 
 
 # Explicit "host/throw/plan a <event>" — a deterministic entry into the event flow that
@@ -3465,6 +3519,7 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
             continue
         out.append(
             {
+                "activity_id": str(ev.get("id") or "") or None,
                 "title": str(ev.get("title") or "Activity"),
                 "starts_at": str(ev.get("starts_at") or "") or None,
                 "starts_label": _format_event_when(ev.get("starts_at")),
@@ -3480,19 +3535,27 @@ def fetch_preview_events_on_block(
     *,
     limit: int = 5,
     weekend_only: bool = False,
+    pool: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Upcoming open events on preview block (service role)."""
+    """Upcoming open events on preview block (service role).
+
+    `pool` overrides how many rows to pull from the DB before slicing to `limit` —
+    callers that filter the result downstream (date/host/topic) pass a larger pool so
+    the candidate set isn't pre-truncated to just the soonest few. `with_host_name`
+    attaches each host's nickname for host-aware filtering.
+    """
     try:
         sb = service_client()
         now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+        fetch_n = pool if pool and pool > 0 else limit * 3
         res = (
             sb.table("events")
-            .select("title, starts_at, venue_name, cohort_tags")
+            .select("id, title, starts_at, venue_name, cohort_tags, host_id")
             .eq("block_id", block_id)
             .eq("status", "open")
             .gte("starts_at", now_iso)
             .order("starts_at")
-            .limit(limit * 3)
+            .limit(fetch_n)
             .execute()
         )
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
@@ -3693,6 +3756,15 @@ def _handle_signup_phone_message(
             [],
         )
     if is_anonymous and email_has_registered_account(email):
+        # Guest is logging into an account they already have. The JWT swap + force_new
+        # session reset would orphan an event they just built, so stash it against the
+        # destination account — its next session recovers and publishes it.
+        if session_ctx.get("host_publish_pending"):
+            host_ctx = extract_host_ctx(session_ctx)
+            if host_ctx.get("event_draft"):
+                dest_uid = registered_user_id_for_email(email)
+                if dest_uid:
+                    stash_pending_event_draft(dest_uid, host_ctx)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
@@ -3731,6 +3803,131 @@ def _handle_signup_phone_message(
     )
 
 
+def _browse_or_seek_decision(slots: dict[str, Any], msg: str) -> str | None:
+    """AI-first router for the find-something-to-do space.
+
+    Returns 'browse' (show the block's real events), 'seek' (look_meet capture + match),
+    'clarify' (genuinely ambiguous — ask one question), or None (not this space). The AI
+    owns the call: it sets clarify='browse_or_meet' when torn, and a low-confidence read in
+    this space also clarifies rather than guesses. Hosting is its own lane.
+    """
+    if not slots:
+        return None
+    enriched = enrich_slots(dict(slots), msg=msg)
+    if slots_indicate_hosting_signal(enriched):
+        return None
+    linear = slots_linear_intent(enriched) or ""
+    goal = str(enriched.get("goal") or "")
+    signal_intent = str(enriched.get("signal_intent") or "")
+    is_browse = linear == "discovery.find_activities" or goal == "activities"
+    is_seek = linear == "looking.meet" or signal_intent == "meet_seek"
+    if not (is_browse or is_seek):
+        return None
+    if str(slots.get("clarify") or "") == "browse_or_meet":
+        return "clarify"
+    if is_browse and is_seek:
+        return "clarify"  # both signals, model didn't disambiguate → ask
+    if is_browse:
+        # A browse intent → the events browse; ask if the model isn't confident.
+        return "browse" if float(enriched.get("confidence", 0.0)) >= 0.55 else "clarify"
+    # A clear meet_seek is owned by the existing signal-capture flow — don't divert here.
+    return None
+
+
+def _resolve_browse_or_meet_answer(msg: str, slots: dict[str, Any] | None) -> str:
+    """Interpret the user's reply to the browse-or-meet clarifier. Always resolves to
+    'browse' or 'seek' (never re-asks) — defaults to 'browse' (show what exists)."""
+    low = str(msg or "").lower()
+    if re.search(
+        r"\b(meet|set ?up|match(?:ed)?|buddy|partner|together|with (?:other )?"
+        r"(?:people|moms?|dads?|neighbou?rs?))\b",
+        low,
+    ):
+        return "seek"
+    if re.search(r"\b(see|show|what'?s|happening|going on|browse|events?|activit|list|nearby)\b", low):
+        return "browse"
+    return "seek" if _browse_or_seek_decision(slots or {}, msg) == "seek" else "browse"
+
+
+def _ask_browse_or_meet(
+    session_ctx: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """One-tap clarifier when the AI can't tell browse from seek."""
+    session_ctx["browse_or_meet_pending"] = True
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="discovery.find_activities")
+    ctx["suggestions"] = ["See what's happening", "Set up a meet"]
+    return (
+        "Happy to help! Want me to show what's already happening on your block, or set you "
+        "up with a meet so I can match you with neighbors who want the same?",
+        ctx,
+        _discovery_routing_stub("listening", "clarify_browse_or_meet"),
+        [],
+    )
+
+
+def _start_activity_browse_from_discovery(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+    user_jwt: str,
+    home_block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Begin the agentic events-browse and return its first turn (asks the interest). The
+    sticky flow continues on later turns via the pipeline's activity_browse_active gate."""
+    from app.activity_browse import run_activity_browse_turn
+
+    session_ctx["activity_browse_active"] = True
+    session_ctx["browse_turns"] = 0
+    session_ctx["browse_draft"] = None
+    reply = run_activity_browse_turn(
+        user_message=msg,
+        session_ctx=session_ctx,
+        history=history or [],
+        user_jwt=user_jwt,
+        home_block_id=home_block_id,
+    )
+    phase = str(session_ctx.get("routing_phase") or "listening")
+    ctx = _routing_ctx(session_ctx, phase=phase, active_intent="discovery.find_activities")
+    return reply, ctx, _discovery_routing_stub(phase, "activity_browse"), []
+
+
+def _start_look_meet_from_discovery(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+    user_jwt: str,
+    home_block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Begin the meet_seek capture for a find-activities intent and return its first turn.
+
+    Mirrors the deterministic entry in main.py (look_meet_active + reset flags) so the
+    sticky flow continues on later turns via the pipeline's look_meet_active gate. The
+    find_activities browse path is left intact for explicit entry, just not auto-triggered.
+    """
+    from app.look_meet import run_look_meet_turn
+
+    session_ctx["look_meet_active"] = True
+    session_ctx["look_turns"] = 0
+    session_ctx["look_ready"] = None
+    session_ctx["look_enrich_count"] = 0
+    session_ctx["look_affinity_asked"] = None
+    session_ctx["look_draft"] = None
+    # Mine the user's own phrasing for a kind (a typed entry, not the generic CTA button).
+    session_ctx["look_meet_skip_seed"] = False
+    reply = run_look_meet_turn(
+        user_message=msg,
+        session_ctx=session_ctx,
+        history=history or [],
+        user_jwt=user_jwt,
+        home_block_id=home_block_id,
+    )
+    phase = str(session_ctx.get("routing_phase") or "listening")
+    ctx = _routing_ctx(session_ctx, phase=phase, active_intent="looking.meet")
+    return reply, ctx, _discovery_routing_stub(phase, "look_meet"), []
+
+
 def handle_discovery_turn(
     user_message: str,
     *,
@@ -3751,23 +3948,9 @@ def handle_discovery_turn(
     phase = str(session_ctx.get("routing_phase") or "")
     active = session_ctx.get("active_intent")
 
-    # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
-    # conversation so an event line ("weekday playground meet with kids") isn't
-    # hijacked into a neighbour search. Only an explicit cancel/pivot — or the turn
-    # cap — releases it, so the user is never trapped in a loop.
-    if session_ctx.get("event_host_active") and _host_via_orchestrator():
-        if is_signal_cancel(msg) or _pivots_out_of_host(msg):
-            session_ctx["event_host_active"] = False
-            session_ctx["event_host_turns"] = 0
-        else:
-            turns = int(session_ctx.get("event_host_turns") or 0) + 1
-            session_ctx["event_host_turns"] = turns
-            if turns <= _EVENT_HOST_TURN_CAP:
-                return None  # defer the entire turn to the orchestrator's event flow
-            # Cap reached without publishing — release rather than loop.
-            session_ctx["event_host_active"] = False
-            session_ctx["event_host_turns"] = 0
-
+    # Classify the turn once (cached for the rest of the turn) BEFORE the host-mode gate,
+    # so exiting hosting is semantic — the AI's read that the user is backing out — rather
+    # than a fixed cancel-keyword list that "I have mixed feelings" / "I don't wanna" slip past.
     had_block = bool(resolve_block_id(session_ctx, home_block_id))
     has_profile_photo = bool(user_profile_photo_url(user_id))
     slots: dict[str, Any] = {}
@@ -3790,6 +3973,61 @@ def handle_discovery_turn(
             # suppress background extraction when we're NOT collecting identity.
             if (phase or "") != PHASE_NEED_IDENTITY:
                 session_ctx["skip_claims_background_extract"] = True
+
+    # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
+    # conversation so an event line ("weekday playground meet with kids") isn't hijacked
+    # into a neighbour search. Release on a semantic back-out (the AI's `abandon` read,
+    # not just cancel keywords), an explicit pivot, or the turn cap — so the user is never
+    # trapped re-answering the same question.
+    if session_ctx.get("event_host_active") and _host_via_orchestrator():
+        # While the finished event waits on email verification, the email/OTP turns must
+        # reach the signup handlers below (the orchestrator can't parse them) — don't defer.
+        host_verifying = bool(session_ctx.get("host_publish_pending")) and phase in (
+            PHASE_AWAIT_SIGNUP_PHONE,
+            PHASE_AWAIT_SIGNUP_OTP,
+        )
+        wants_out = (
+            bool(slots.get("abandon")) or is_signal_cancel(msg) or _pivots_out_of_host(msg)
+        )
+        if wants_out:
+            _release_host_mode(session_ctx)
+            # A pivot ("find people") falls through so its target handler answers; a plain
+            # back-out gets an explicit acknowledgement, not a silent topic switch.
+            if not _pivots_out_of_host(msg):
+                return (
+                    "No worries — we don't have to set up an event. Want to find neighbors, "
+                    "see what's happening on your block, or something else?",
+                    _routing_ctx(session_ctx, phase="listening", active_intent="none"),
+                    _discovery_routing_stub("listening"),
+                    [],
+                )
+        elif host_verifying:
+            pass  # fall through to the signup/verify sub-flow handlers
+        else:
+            turns = int(session_ctx.get("event_host_turns") or 0) + 1
+            session_ctx["event_host_turns"] = turns
+            if turns <= _EVENT_HOST_TURN_CAP:
+                return None  # defer the entire turn to the orchestrator's event flow
+            # Cap reached without publishing — release rather than loop.
+            _release_host_mode(session_ctx)
+
+    # A guest who hit "Start listening" while building a meet was gated into verify; the
+    # moment they come back verified, save the stashed seek (mirrors host publish-after-
+    # verify) so they don't have to re-confirm.
+    if phone_verified and session_ctx.get("look_seek_pending"):
+        from app.look_meet import save_pending_meet_seek
+
+        zip_code = str(session_ctx.get("zip") or session_ctx.get("zip_code") or "").strip() or None
+        pending_reply = save_pending_meet_seek(
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            block_id=resolve_block_id(session_ctx, home_block_id),
+            zip_code=zip_code,
+        )
+        if pending_reply is not None:
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent="looking.meet")
+            ctx["look_meet_saved_now"] = session_ctx.get("look_meet_saved_now") or None
+            return pending_reply, ctx, _discovery_routing_stub("listening", "look_meet"), []
 
     hosting_cta_turn = _try_hosting_cta_turn(
         msg=msg,
@@ -3822,7 +4060,11 @@ def handle_discovery_turn(
 
     if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
         hosting_slots = enrich_slots(dict(slots), msg=msg)
-        if slots_indicate_hosting_signal(hosting_slots) or utterance_indicates_hosting_plan(msg):
+        # AI is the arbiter: enrich_slots already folds in the hosting regex as a
+        # low-confidence fallback (reconcile_hosting_peer_slot_conflict). Do NOT OR a
+        # raw utterance regex here — that lets "wanna find ... event" hijack a confident
+        # discovery classification into the create-event flow.
+        if slots_indicate_hosting_signal(hosting_slots):
             # Hosting an event is a full create_event flow (what/where/when/affinity →
             # publish). When the orchestrator is on it owns this in-chat (OpenAI), so
             # defer to it and pin host mode so the follow-up turns stay with it.
@@ -3858,6 +4100,33 @@ def handle_discovery_turn(
             reply, ctx, routing, peers = block_log_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
+
+    # Browse-vs-seek router (AI-driven), before the ZIP funnel:
+    #   browse  → agentic "what's happening" events browse (show real events, refine)
+    #   seek    → look_meet capture ("what kind of meet?" → match to a host)
+    #   clarify → one-tap question when the AI genuinely can't tell
+    if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
+        # Resolve a pending clarifier answer first (always lands on browse or seek).
+        if session_ctx.get("browse_or_meet_pending"):
+            session_ctx["browse_or_meet_pending"] = None
+            if _resolve_browse_or_meet_answer(msg, slots) == "seek":
+                return _start_look_meet_from_discovery(
+                    msg=msg, session_ctx=session_ctx, history=history,
+                    user_jwt=user_jwt, home_block_id=home_block_id,
+                )
+            return _start_activity_browse_from_discovery(
+                msg=msg, session_ctx=session_ctx, history=history,
+                user_jwt=user_jwt, home_block_id=home_block_id,
+            )
+        _decision = _browse_or_seek_decision(slots, msg)
+        if _decision == "browse":
+            return _start_activity_browse_from_discovery(
+                msg=msg, session_ctx=session_ctx, history=history,
+                user_jwt=user_jwt, home_block_id=home_block_id,
+            )
+        if _decision == "clarify":
+            return _ask_browse_or_meet(session_ctx)
+        # A clear meet_seek falls through to the existing signal-capture flow below.
 
     if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
         seek_turn = _try_signal_seek_early_turn(
@@ -4351,7 +4620,7 @@ def handle_discovery_turn(
         return None
 
     hosting_guard = enrich_slots(dict(slots or {}), msg=msg)
-    if slots_indicate_hosting_signal(hosting_guard) or utterance_indicates_hosting_plan(msg):
+    if slots_indicate_hosting_signal(hosting_guard):
         return None
 
     if wants_host_activity(msg) and not wants_peer_find(msg) and str(slots.get("goal") or "") not in (

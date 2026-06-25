@@ -17,6 +17,71 @@ _CTX_NULL_DELETES = frozenset(
     {"signal_draft", *_INTRO_STATE_NULL_DELETES, *TURN_SCOPED_SURFACES}
 )
 
+# Session keys that together describe a complete, ready-to-publish event the host flow
+# built. Stashed/recovered as a unit when a guest verifies into an existing account and
+# the session resets (see pending_event_drafts migration).
+HOST_CTX_KEYS = (
+    "event_draft",
+    "event_when_date",
+    "event_when_time",
+    "event_place_asked",
+    "event_venue",
+    "event_settings",
+    "event_cap_asked",
+    "event_approval_asked",
+    "event_share_asked",
+    "event_affinity_asked",
+)
+
+
+def extract_host_ctx(session_ctx: dict[str, Any] | None) -> dict[str, Any]:
+    """Pull the host-flow context subset from a session, for stashing across a login."""
+    ctx = session_ctx or {}
+    out = {k: ctx[k] for k in HOST_CTX_KEYS if ctx.get(k) is not None}
+    return out
+
+
+def stash_pending_event_draft(user_id: str, host_ctx: dict[str, Any]) -> None:
+    """Persist a guest's in-progress event for `user_id` to recover after they log in.
+    Best-effort: a stash failure must not break the verification turn."""
+    if not user_id or not isinstance(host_ctx, dict) or not host_ctx.get("event_draft"):
+        return
+    try:
+        service_client().table("pending_event_drafts").upsert(
+            {
+                "user_id": user_id,
+                "host_ctx": host_ctx,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="user_id",
+        ).execute()
+    except Exception:
+        return
+
+
+def pop_pending_event_draft(user_id: str) -> dict[str, Any] | None:
+    """Read and delete the pending event for `user_id` (one-shot recovery). Returns the
+    stashed host context, or None if there's nothing waiting / on any error."""
+    if not user_id:
+        return None
+    try:
+        sb = service_client()
+        res = (
+            sb.table("pending_event_drafts")
+            .select("host_ctx")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+        if not isinstance(row, dict):
+            return None
+        sb.table("pending_event_drafts").delete().eq("user_id", user_id).execute()
+        host_ctx = row.get("host_ctx")
+        return host_ctx if isinstance(host_ctx, dict) and host_ctx.get("event_draft") else None
+    except Exception:
+        return None
+
 
 def merge_session_context(
     old: dict[str, Any] | None,
