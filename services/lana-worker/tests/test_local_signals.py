@@ -213,22 +213,24 @@ class TestDiscoverySignalRouting(unittest.TestCase):
     def test_save_signal_clears_stale_block_log(
         self, mock_slots, mock_save, _mock_ai
     ) -> None:
+        # A swap_seek goes through the generic signal save (meet_seek now routes to the
+        # look_meet capture instead) — either way a saved signal must clear a stale block log.
         mock_slots.return_value = {
             "goal": "save_signal",
             "in_discovery": True,
             "confidence": 0.9,
-            "signal_intent": "meet_seek",
-            "signal_detail": "walking buddy — weekend",
-            "linear_intent": "looking.meet",
+            "signal_intent": "swap_seek",
+            "signal_detail": "rain boots — size 8",
+            "linear_intent": "looking.swap",
         }
         mock_save.return_value = {
             "signal_id": "sig-2",
-            "intent": "meet_seek",
-            "detail_text": "walking buddy — weekend",
+            "intent": "swap_seek",
+            "detail_text": "rain boots — size 8",
             "matches_created": 0,
         }
         _reply, ctx, _, _ = handle_discovery_turn(
-            "walking buddy on weekends",
+            "looking for rain boots size 8",
             session_ctx={
                 "routing_phase": PHASE_PREVIEW,
                 "preview_block_id": "block-a",
@@ -242,7 +244,7 @@ class TestDiscoverySignalRouting(unittest.TestCase):
             history=[],
             user_id="user-1",
         )
-        self.assertEqual(ctx.get("active_intent"), "looking.meet")
+        self.assertEqual(ctx.get("active_intent"), "looking.swap")
         self.assertIn("signal_saved", ctx)
         self.assertFalse(ctx.get("block_log_entries"))
 

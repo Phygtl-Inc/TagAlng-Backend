@@ -44,11 +44,12 @@ class TestLayer1IntentCatalog(unittest.TestCase):
         ):
             self.assertIsNone(phrase_linear_intent(msg), msg)
 
-    def test_enrich_slots_hosting_overrides_misclassified_attr_filter(self) -> None:
+    def test_enrich_slots_hosting_rescues_low_confidence_misclassification(self) -> None:
+        """Regex is a FALLBACK: it rescues hosting only when the model was unsure."""
         slots = enrich_slots({
             "linear_intent": "discovery.find_by_attrs",
             "attr_filter": "brazilian",
-            "confidence": 0.88,
+            "confidence": 0.4,  # model not confident → regex fallback may correct it
             "goal": "peers",
             "in_discovery": True,
         }, msg="i want brazilian coffee this weekend")
@@ -56,6 +57,29 @@ class TestLayer1IntentCatalog(unittest.TestCase):
         self.assertEqual(slots.get("signal_intent"), "host_meet")
         self.assertEqual(slots.get("goal"), "save_signal")
         self.assertNotIn("attr_filter", slots)
+
+    def test_enrich_slots_confident_discovery_not_overridden_by_hosting_regex(self) -> None:
+        """AI is the arbiter: a confident discovery pick is never flipped by the regex."""
+        slots = enrich_slots({
+            "linear_intent": "discovery.find_by_attrs",
+            "attr_filter": "brazilian",
+            "confidence": 0.88,  # confident → model wins over the hosting regex
+            "goal": "peers",
+            "in_discovery": True,
+        }, msg="i want brazilian coffee this weekend")
+        self.assertEqual(slots_linear_intent(slots), "discovery.find_by_attrs")
+        self.assertNotEqual(slots.get("signal_intent"), "host_meet")
+
+    def test_enrich_slots_find_event_not_hijacked_into_hosting(self) -> None:
+        """'find ... event happening near me' stays discovery, not create-an-event."""
+        slots = enrich_slots({
+            "linear_intent": "discovery.find_activities",
+            "confidence": 0.8,
+            "goal": "activities",
+            "in_discovery": True,
+        }, msg="i wanna find friends event happening near me")
+        self.assertEqual(slots_linear_intent(slots), "discovery.find_activities")
+        self.assertNotEqual(slots.get("signal_intent"), "host_meet")
 
     def test_utterance_indicates_hosting_plan(self) -> None:
         from app.layer1_intents import utterance_indicates_hosting_plan

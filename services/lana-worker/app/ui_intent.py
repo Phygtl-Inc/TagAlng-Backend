@@ -117,6 +117,10 @@ def derive_ui_intent(
     if ctx.get("look_meet_active"):
         return UI_INTENT_COLLECT_LOOK_MEET_DETAIL
 
+    # Agentic "what's happening" browse — shows the block's real events with refine chips.
+    if ctx.get("activity_browse_active"):
+        return UI_INTENT_SHOW_ACTIVITY_PREVIEW
+
     active = str(ctx.get("active_intent") or "").strip()
 
     if ctx.get("signal_saved") and (

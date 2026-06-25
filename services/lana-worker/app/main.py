@@ -51,7 +51,6 @@ from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
 from app.tip_share import looks_like_tip_share_entry
-from app.look_meet import looks_like_look_meet_entry
 from app.models import (
     ActivityPreviewRow,
     AuthActionPayload,
@@ -363,7 +362,8 @@ def _turn_debug_from_ctx(
     )
 
 
-def _ui_from_dict(raw: dict[str, Any]) -> LanaTurnUi:
+def _ui_from_dict(raw: dict[str, Any] | None) -> LanaTurnUi:
+    raw = raw or {}
     highlights = [
         HighlightSpan(text=h["text"], bucket=h.get("bucket") or "general")
         for h in raw.get("highlights") or []
@@ -589,6 +589,7 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
             continue
         out.append(
             ActivityPreviewRow(
+                activity_id=str(row.get("activity_id") or "") or None,
                 title=title,
                 starts_at=str(row.get("starts_at") or "") or None,
                 starts_label=str(row.get("starts_label") or "") or None,
@@ -1168,21 +1169,22 @@ def send_lana_message(
         # Entering tip-share closes any in-flight pass-along flow + its card.
         session_ctx_in["pass_along_active"] = False
         session_ctx_in["item_draft"] = None
-    # Deterministic entry into the in-chat "looking for a meet/playgroup" flow.
+    # Entry into the in-chat "looking for a meet/playgroup" flow — ONLY the explicit
+    # "A meet or playgroup" CTA button (intent_hint). Natural language is left to the AI
+    # classifier downstream (find-activities → look_meet capture, or a stated meet_seek),
+    # so a blunt keyword can't flip a guest into this flow before the model reads intent.
     if purpose == "lana" and not session_ctx_in.get("pass_along_active") and not session_ctx_in.get(
         "tip_share_active"
-    ) and (body.intent_hint == "look_meet" or looks_like_look_meet_entry(body.message)):
+    ) and body.intent_hint == "look_meet":
         session_ctx_in["look_meet_active"] = True
         session_ctx_in["look_turns"] = 0
         session_ctx_in["look_ready"] = None
         session_ctx_in["look_enrich_count"] = 0
         session_ctx_in["look_affinity_asked"] = None
         session_ctx_in["look_draft"] = None
-        # Button entry ("A meet or playgroup") carries a generic seed phrase with no
-        # real preference — skip mining a kind from it so the flow asks P1 ("what
-        # kind of meet?") and the user types or picks. A typed entry phrase keeps
-        # its detail and is mined normally.
-        session_ctx_in["look_meet_skip_seed"] = body.intent_hint == "look_meet"
+        # Button entry carries a generic seed phrase with no real preference — skip mining
+        # a kind so the flow asks P1 ("what kind of meet?") and the user types or picks.
+        session_ctx_in["look_meet_skip_seed"] = True
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None

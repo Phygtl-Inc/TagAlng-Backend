@@ -583,55 +583,30 @@ class TestDiscoveryRouting(unittest.TestCase):
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
-    def test_activities_zip_turn_shows_events_not_neighbors(
-        self, mock_slots, _mock_ai
-    ) -> None:
-        mock_slots.side_effect = [
-            {
-                "goal": "activities",
-                "in_discovery": True,
-                "confidence": 0.92,
-                "identity_snippet": None,
-            },
-            {
-                "goal": "continue",
-                "in_discovery": True,
-                "confidence": 0.9,
-                "identity_snippet": None,
-            },
-        ]
-        with patch("app.discovery_route.fetch_blocks_for_zip") as mock_blocks, patch(
-            "app.discovery_route.fetch_preview_events_on_block"
-        ) as mock_events:
-            mock_blocks.return_value = [{"block_id": "block-1", "label": "Lake Nona"}]
-            mock_events.return_value = [{"title": "Park walk", "venue_name": "Central"}]
-            first = handle_discovery_turn(
-                "help me find activites",
+    def test_find_activities_starts_browse(self, mock_slots, _mock_ai) -> None:
+        """A browse intent starts the agentic events browse (ask interest first)."""
+        mock_slots.return_value = {
+            "goal": "activities",
+            "in_discovery": True,
+            "confidence": 0.92,
+            "identity_snippet": None,
+        }
+        with patch("app.discovery_route.fetch_preview_events_on_block") as mock_events:
+            result = handle_discovery_turn(
+                "what's happening near me this weekend",
                 session_ctx={"routing_phase": "listening"},
                 user_jwt="jwt",
                 phone_verified=False,
                 home_block_id=None,
                 is_anonymous=True,
             )
-            self.assertIsNotNone(first)
-            _, ctx1, _, _ = first
-            self.assertEqual(ctx1.get("discovery_goal"), "activities")
-            self.assertIn("activities", first[0].lower())
-
-            second = handle_discovery_turn(
-                "32827",
-                session_ctx=ctx1,
-                user_jwt="jwt",
-                phone_verified=False,
-                home_block_id=None,
-                is_anonymous=True,
-            )
-            self.assertIsNotNone(second)
-            reply, ctx2, _, peers = second
-            self.assertIn("Park walk", reply)
+            self.assertIsNotNone(result)
+            reply, ctx, _, peers = result
+            # Enters the browse flow and asks the refining question before fetching events.
+            self.assertTrue(ctx.get("activity_browse_active"))
             self.assertEqual(peers, [])
-            self.assertEqual(ctx2.get("discovery_goal"), "activities")
-            self.assertEqual(len(ctx2.get("activity_previews") or []), 1)
+            self.assertIn("what kind of thing", reply.lower())
+            mock_events.assert_not_called()
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
@@ -675,6 +650,8 @@ class TestDiscoveryRouting(unittest.TestCase):
             self.assertIsNotNone(peers_turn)
             self.assertTrue(peers_turn[3])
 
+            # Pivoting to activities hands off to the agentic browse (ask interest first) —
+            # no peer rows, no events fetch yet, browse now active.
             activities_turn = handle_discovery_turn(
                 "find activities",
                 session_ctx=peers_turn[1],
@@ -685,9 +662,10 @@ class TestDiscoveryRouting(unittest.TestCase):
             )
             self.assertIsNotNone(activities_turn)
             reply, ctx, _, peer_rows = activities_turn
-            self.assertIn("Stroller walk", reply)
+            self.assertTrue(ctx.get("activity_browse_active"))
             self.assertEqual(peer_rows, [])
-            self.assertEqual(ctx.get("discovery_goal"), "activities")
+            self.assertIn("what kind of thing", reply.lower())
+            mock_events.assert_not_called()
 
     @patch("app.discovery_route.fetch_preview_events_on_block")
     def test_activities_in_preview_not_peer_loop(self, mock_events) -> None:

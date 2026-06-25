@@ -440,14 +440,18 @@ _AI_OWNED_PREFIXES = ("identity.", "settings.", "help.", "social.", "tier.", "au
 
 
 def _reconcile_defer_to_llm(
-    out: dict[str, Any], target_linear: str, *, utterance_match: bool = False
+    out: dict[str, Any],
+    target_linear: str,
+    *,
+    utterance_match: bool = False,
+    protect_discovery: bool = False,
 ) -> bool:
     """Trust the LLM; regex reconcilers are a fallback, not an override.
 
     Phrasing is infinite, so the LLM is the router. These regex reconcilers exist
     only to rescue the *known* failure mode — the model returns peer/activity
     discovery when the user is really posting a swap/tip/host signal. They must not
-    overrule a confident model decision.
+    overrule a confident model decision. Returns True to DEFER to the model.
     """
     linear = normalize_linear_intent(out.get("linear_intent"))
     conf = float(out.get("confidence", 0.0))
@@ -456,6 +460,21 @@ def _reconcile_defer_to_llm(
     # always wins — even over a "high-precision" regex utterance match. This is the
     # structural fix for regex hijacking the model (e.g. "I am a teacher" → tip_seek).
     if linear and conf >= 0.6 and any(linear.startswith(p) for p in _AI_OWNED_PREFIXES):
+        return True
+
+    # The hosting regex is low-precision (any want-verb + any event noun, so it fires on
+    # "wanna find ... event"). A confident find-people / browse-activities pick must
+    # therefore beat it — even on an utterance match. Scoped to hosting only; the
+    # high-precision tip/swap seek regexes still rescue a misclassified peers pick.
+    if (
+        protect_discovery
+        and conf >= 0.6
+        and linear
+        and (
+            linear.startswith("discovery.")
+            or str(out.get("goal") or "") in ("peers", "both", "activities")
+        )
+    ):
         return True
 
     # A high-precision structural utterance match ("Dr X is a great dentist",
@@ -565,7 +584,9 @@ def reconcile_hosting_peer_slot_conflict(out: dict[str, Any], *, msg: str) -> No
     hosting = slots_indicate_hosting_signal(out) or hosting_utterance
     if not hosting:
         return
-    if _reconcile_defer_to_llm(out, "sharing.host", utterance_match=hosting_utterance):
+    if _reconcile_defer_to_llm(
+        out, "sharing.host", utterance_match=hosting_utterance, protect_discovery=True
+    ):
         return
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"

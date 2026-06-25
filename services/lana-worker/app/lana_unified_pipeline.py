@@ -351,13 +351,14 @@ def run_lana_unified_pipeline(
     # falls through to discovery's logout handler.
     if looks_like_logout(user_message):
         for _k in (
-            "pass_along_active", "tip_share_active", "look_meet_active", "event_host_active"
+            "pass_along_active", "tip_share_active", "look_meet_active",
+            "activity_browse_active", "event_host_active"
         ):
             session_ctx[_k] = False
         # Drop any half-built capture draft + step flags so the stale card and its chips
         # don't keep rendering after the user has left the flow via logout.
         for _k in (
-            "event_draft", "item_draft", "tip_draft", "look_draft",
+            "event_draft", "item_draft", "tip_draft", "look_draft", "browse_draft",
             "event_when_date", "event_when_time", "event_place_asked", "event_venue",
             "event_settings", "event_cap_asked", "event_approval_asked",
             "event_share_asked", "event_affinity_asked",
@@ -412,28 +413,96 @@ def run_lana_unified_pipeline(
         ui = {"bucket": None, "focus_phrase": None, "highlights": []}
         return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
-    # Sticky "looking for a meet/playgroup" capture — same self-contained pattern.
+    # Sticky "looking for a meet/playgroup" capture — same self-contained pattern, but it
+    # must not trap the user: if they pivot away (a new request once the card is ready, or
+    # an explicit switch to another intent), drop the unsaved capture and fall through to
+    # normal routing so the new request is handled fresh.
     if session_ctx.get("look_meet_active"):
-        from app.look_meet import run_look_meet_turn
-
-        reply = sanitize_assistant_message(
-            run_look_meet_turn(
-                user_message=user_message,
-                session_ctx=session_ctx,
-                history=history,
-                user_jwt=user_jwt,
-                home_block_id=home_block_id,
-            )
+        from app.discovery_slots import discovery_slots_for_turn
+        from app.look_meet import (
+            look_meet_should_release,
+            reset_look_meet_state,
+            run_look_meet_turn,
         )
-        session_ctx["_orchestrator_turn"] = False
-        session_ctx["timing_ms"] = timer.to_dict()
-        session_ctx["last_routing"] = {
-            "outcome": "look_meet",
-            "intent_class": "discovery",
-            "tool_called": "save_local_signal" if session_ctx.get("look_meet_saved_now") else None,
-        }
-        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
-        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+        # Classify the turn so the capture releases on a semantic abandon or a pivot to
+        # another intent — the AI's read, not just hard-coded cancel words (mirrors how
+        # event-host releases). Cached by message, so handle_discovery_turn reuses it
+        # after a release without a second model call.
+        pivot_slots = discovery_slots_for_turn(
+            session_ctx,
+            user_message,
+            routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+            has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        if look_meet_should_release(user_message, session_ctx, pivot_slots):
+            reset_look_meet_state(session_ctx)
+        else:
+            reply = sanitize_assistant_message(
+                run_look_meet_turn(
+                    user_message=user_message,
+                    session_ctx=session_ctx,
+                    history=history,
+                    user_jwt=user_jwt,
+                    home_block_id=home_block_id,
+                )
+            )
+            session_ctx["_orchestrator_turn"] = False
+            session_ctx["timing_ms"] = timer.to_dict()
+            session_ctx["last_routing"] = {
+                "outcome": "look_meet",
+                "intent_class": "discovery",
+                "tool_called": "save_local_signal" if session_ctx.get("look_meet_saved_now") else None,
+            }
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+    # Sticky agentic "what's happening" browse — ask interest, show the block's real events,
+    # re-filter on follow-ups ("show me cricket ones"). A different ACTIVITY stays in-flow as
+    # a refine; only a pivot to another intent (find people / a meet / RSVP) or abandon releases.
+    if session_ctx.get("activity_browse_active"):
+        from app.activity_browse import (
+            activity_browse_should_release,
+            reset_activity_browse_state,
+            run_activity_browse_turn,
+        )
+        from app.discovery_slots import discovery_slots_for_turn
+
+        browse_slots = discovery_slots_for_turn(
+            session_ctx,
+            user_message,
+            routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+            has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        if activity_browse_should_release(user_message, session_ctx, browse_slots):
+            reset_activity_browse_state(session_ctx)
+        else:
+            reply = sanitize_assistant_message(
+                run_activity_browse_turn(
+                    user_message=user_message,
+                    session_ctx=session_ctx,
+                    history=history,
+                    user_jwt=user_jwt,
+                    home_block_id=home_block_id,
+                )
+            )
+            session_ctx["_orchestrator_turn"] = False
+            session_ctx["timing_ms"] = timer.to_dict()
+            session_ctx["last_routing"] = {
+                "outcome": "activity_browse",
+                "intent_class": "discovery",
+                "tool_called": None,
+            }
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
     if unified_rules_first_enabled():
         discovery = handle_discovery_turn(

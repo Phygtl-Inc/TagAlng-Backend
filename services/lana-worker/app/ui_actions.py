@@ -240,6 +240,20 @@ def attach_intro_row_actions(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def activity_browse_actions() -> list[dict[str, Any]]:
+    """Interest refine chips for the agentic 'what's happening' browse — tapping one
+    posts the label back, which the browse flow reads as the interest / re-filter."""
+    return [
+        _action(
+            action_id=f"browse_{label.split()[0].lower()}",
+            label=label,
+            message=label,
+            style="secondary",
+        )
+        for label in ("Sports", "Family & kids", "Outdoors", "Social")
+    ]
+
+
 def event_created_actions() -> list[dict[str, Any]]:
     """After an event publishes the FE renders the native CTAs (Open the meet up /
     Share with a mom) — those navigate / open the share sheet, which a message-sending
@@ -254,6 +268,7 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
         UI_INTENT_OFFER_NEIGHBOR_INTRO,
         UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
         UI_INTENT_RESPOND_PENDING_INTRO,
+        UI_INTENT_SHOW_ACTIVITY_PREVIEW,
         UI_INTENT_SHOW_BLOCK_LOG,
         UI_INTENT_SHOW_PEER_PREVIEW,
         UI_INTENT_SHOW_PENDING_INTROS,
@@ -262,6 +277,10 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
 
     if ui_intent == UI_INTENT_EVENT_CREATED:
         return event_created_actions()
+
+    # Agentic browse — refine chips so the user can narrow ("Sports", "Outdoors").
+    if ui_intent == UI_INTENT_SHOW_ACTIVITY_PREVIEW and ctx.get("activity_browse_active"):
+        return activity_browse_actions()
 
     if ui_intent == UI_INTENT_RESPOND_PENDING_INTRO:
         pending = ctx.get("pending_intro_respond")
