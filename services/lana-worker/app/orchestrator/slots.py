@@ -41,13 +41,32 @@ def is_placeholder(value: Any) -> bool:
     return False
 
 
+_CLEAR_FIELD_ALIASES = {"when": "starts_at", "where": "venue_name", "name": "title"}
+
+
 def normalize_event_args(args: dict[str, Any]) -> dict[str, Any]:
     out = dict(args)
     if "when" in out and "starts_at" not in out:
         out["starts_at"] = out.pop("when")
     if "where" in out and "venue_name" not in out:
         out["venue_name"] = out.pop("where")
+    # Map the router's slot aliases ("when"/"where"/"name") onto canonical field names
+    # so a reset request lines up with the draft keys the merge clears.
+    raw_clear = out.get("clear_fields")
+    if isinstance(raw_clear, list):
+        out["clear_fields"] = [
+            _CLEAR_FIELD_ALIASES.get(str(f).strip().lower(), str(f).strip().lower())
+            for f in raw_clear
+            if str(f).strip()
+        ]
     return out
+
+
+def event_clear_fields(tool_args: dict[str, Any] | None) -> list[str]:
+    """Canonical list of slots the host asked to reset this turn (router signal)."""
+    patch = normalize_event_args(tool_args or {})
+    raw = patch.get("clear_fields")
+    return [f for f in raw if f] if isinstance(raw, list) else []
 
 
 def merged_event_draft(
@@ -56,12 +75,13 @@ def merged_event_draft(
 ) -> dict[str, Any]:
     prev = session_ctx.get("event_draft") or {}
     patch = normalize_event_args(tool_args or {})
+    clear = patch.get("clear_fields") if isinstance(patch.get("clear_fields"), list) else None
     clean = {
         k: v
         for k, v in patch.items()
-        if v is not None and not is_placeholder(v)
+        if k != "clear_fields" and v is not None and not is_placeholder(v)
     }
-    return merge_event_drafts(prev, parse_event_draft(clean))
+    return merge_event_drafts(prev, parse_event_draft(clean), clear_fields=clear)
 
 
 def event_missing_slots(draft: dict[str, Any]) -> list[str]:

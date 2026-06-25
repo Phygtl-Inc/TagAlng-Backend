@@ -599,6 +599,35 @@ def run_lana_unified_pipeline(
             if _is_generic_title(ed.get("title")):
                 ed.pop("title", None)
 
+            # Host asked to redo a slot they'd already filled ("don't call it X", "change
+            # the time"). The merge already blanked the field on the draft; here we also
+            # reset the matching step flags so the deterministic flow re-asks that slot
+            # instead of marching on to the next one (the "stuck on where?" loop).
+            cleared = session_ctx.get("event_cleared_fields") or []
+            if cleared:
+                if "starts_at" in cleared:
+                    # Drop the resolved date/time so the when/time steps re-engage.
+                    turn_ctx["event_when_date"] = None
+                    turn_ctx["event_when_time"] = None
+                    ed.pop("starts_at", None)
+                    ed.pop("ends_at", None)
+                if "venue_name" in cleared:
+                    # Re-open the where-step and forget the picked pin so the venue isn't
+                    # silently re-stamped from event_venue below.
+                    turn_ctx["event_place_asked"] = False
+                    turn_ctx["event_venue"] = None
+                    session_ctx["event_venue"] = None
+                    ed.pop("venue_name", None)
+                if "max_attendees" in cleared:
+                    turn_ctx["event_cap_asked"] = False
+                    settings_box = dict(session_ctx.get("event_settings") or {})
+                    settings_box.pop("max_attendees", None)
+                    settings_box.pop("_cap_set", None)
+                    session_ctx["event_settings"] = settings_box
+                    ed.pop("max_attendees", None)
+                # title clears itself — an empty title re-enters the "what to call it?" step.
+                turn_ctx["event_cleared_fields"] = None
+
             # Deterministic when-resolution — the LLM extractor mis-guesses the year
             # ("Jun 20" → 2023) and drops the time-of-day. Parse the user's own words /
             # tapped chips into a real date + clock time, then build starts_at ourselves.

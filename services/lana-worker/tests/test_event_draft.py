@@ -24,6 +24,20 @@ class TestEventDraft(unittest.TestCase):
         self.assertEqual(merged["title"], "Brunch")
         self.assertEqual(merged["venue_name"], "Lake Nona Commons")
 
+    def test_clear_fields_resets_slot(self) -> None:
+        # Host rejects the name they gave; clearing it without a replacement blanks it
+        # so the flow re-asks "what to call it?" instead of looping on the next slot.
+        prev = {"title": "Spooky Movie Gathering", "starts_at": "2026-06-27T18:00:00", "venue_name": None}
+        merged = merge_event_drafts(prev, {}, clear_fields=["title"])
+        self.assertIsNone(merged["title"])
+        self.assertEqual(merged["starts_at"], "2026-06-27T18:00:00")
+
+    def test_clear_fields_yields_to_same_turn_value(self) -> None:
+        # A rename that supplies the new name wins over the reset (no blank flash).
+        prev = {"title": "Spooky Movie Gathering"}
+        merged = merge_event_drafts(prev, {"title": "Game Night"}, clear_fields=["title"])
+        self.assertEqual(merged["title"], "Game Night")
+
     def test_ui_strips_none_highlights(self) -> None:
         ui = parse_event_turn_ui(
             {

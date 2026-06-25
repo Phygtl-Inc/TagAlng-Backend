@@ -199,9 +199,25 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
     }
 
 
+_CLEARABLE_EVENT_FIELDS = frozenset(
+    {
+        "title",
+        "description",
+        "venue_name",
+        "starts_at",
+        "ends_at",
+        "duration_minutes",
+        "max_attendees",
+        "cohort_tags",
+    }
+)
+
+
 def merge_event_drafts(
     previous: dict[str, Any] | None,
     incoming: dict[str, Any] | None,
+    *,
+    clear_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     base = parse_event_draft(previous or {})
     new = parse_event_draft(incoming or {})
@@ -219,6 +235,16 @@ def merge_event_drafts(
             merged[key] = new[key]
     if new.get("cohort_tags"):
         merged["cohort_tags"] = new["cohort_tags"]
+    # Honor explicit resets — the host wants to redo a slot they'd already filled
+    # ("don't call it X", "change the time"). Slot-filling is otherwise monotonic, so
+    # without this a rejected value sticks forever and the flow re-asks the NEXT slot
+    # in a loop. Only clear when this turn didn't also supply a fresh value for the slot
+    # (e.g. "rename it to Game Night" sets the new title instead of blanking it).
+    for key in clear_fields or []:
+        if key not in _CLEARABLE_EVENT_FIELDS:
+            continue
+        if new.get(key) in (None, "", []):
+            merged[key] = [] if key == "cohort_tags" else None
     # Affinity prompt/options are transient per turn — take the latest (clears once
     # the host answers and the model stops re-asking).
     merged["affinity_prompt"] = new.get("affinity_prompt")

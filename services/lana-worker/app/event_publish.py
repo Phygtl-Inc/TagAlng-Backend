@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import HTTPException
@@ -50,6 +51,19 @@ def _filter_cohort_tags(tags: list[str]) -> list[str]:
     return out[:6]
 
 
+_DEFAULT_EVENT_TZ = "America/New_York"
+
+
+def _event_tz() -> ZoneInfo:
+    """The timezone a host's wall-clock time ("6 PM") is anchored to. Single-region
+    today (Orlando / Eastern); override with EVENT_DEFAULT_TZ when that changes."""
+    name = (os.environ.get("EVENT_DEFAULT_TZ") or _DEFAULT_EVENT_TZ).strip() or _DEFAULT_EVENT_TZ
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo(_DEFAULT_EVENT_TZ)
+
+
 def _parse_iso_ts(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -61,7 +75,10 @@ def _parse_iso_ts(raw: str | None) -> str | None:
             text = text[:-1] + "+00:00"
         dt = datetime.fromisoformat(text)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            # The host typed a wall-clock time with no zone (e.g. "6 PM"). It means 6 PM
+            # in the EVENT's local timezone, not UTC — anchor it there before converting
+            # to the stored UTC instant, so the saved time is the time they intended.
+            dt = dt.replace(tzinfo=_event_tz())
         return dt.astimezone(timezone.utc).isoformat()
     except ValueError:
         return None
