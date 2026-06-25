@@ -6,7 +6,12 @@ from app.auth import service_client
 from app.event_publish import publish_event
 from app.models import EventDraft
 from app.orchestrator.recall import execute_recall_tool
-from app.orchestrator.slots import event_missing_slots, merged_event_draft, normalize_event_args
+from app.orchestrator.slots import (
+    event_clear_fields,
+    event_missing_slots,
+    merged_event_draft,
+    normalize_event_args,
+)
 from app.supabase_rpc import call_rpc
 from app.vertex_extract import vertex_embed
 
@@ -349,6 +354,11 @@ def _update_event_draft(*, session_ctx: dict[str, Any], args: dict[str, Any]) ->
     missing = event_missing_slots(merged)
     merged["missing"] = missing
     session_ctx["event_draft"] = merged
+    # Surface any reset slots so the deterministic host flow re-asks them (re-opening the
+    # where-step, re-prompting for a name, etc.). Transient — consumed next turn.
+    cleared = event_clear_fields(args)
+    if cleared:
+        session_ctx["event_cleared_fields"] = cleared
     return {
         "status": "ok",
         "tool": "update_event_draft",
