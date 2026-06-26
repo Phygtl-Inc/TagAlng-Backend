@@ -13,7 +13,14 @@ from app.auth import (
     registered_user_id_for_email,
     service_client,
 )
-from app.db import extract_host_ctx, stash_pending_event_draft
+from app.db import (
+    extract_host_ctx,
+    log_feature_request,
+    log_moderation_flag,
+    stash_pending_event_draft,
+    stash_pending_meet_seek,
+)
+from app.orchestrator.guardrails import utterance_is_unsafe
 from app.claim_search import (
     heritage_terms_in_text,
     parse_claim_filters,
@@ -2940,47 +2947,43 @@ def _pivots_out_of_host(msg: str) -> bool:
 # Lanes the host capture does NOT own — a confident classification into any is a pivot
 # away from hosting (sharing.host / host_meet is THIS lane). Browsing events
 # (find_activities) and looking for a meet (meet_seek) are pivots too.
-_HOST_FOREIGN_GOALS = frozenset(
-    {"peers", "both", "propose_intro", "list_intros", "verify", "login",
-     "logout", "show_block_log", "rsvp", "activities"}
-)
-_HOST_FOREIGN_LINEAR_PREFIXES = ("identity.", "social.", "auth.", "settings.", "tier.")
-_HOST_FOREIGN_LINEARS = frozenset(
-    {"discovery.find_peers", "discovery.find_by_attrs", "discovery.find_in_block",
-     "discovery.block_log", "discovery.find_activities", "looking.meet",
-     "sharing.swap", "looking.swap", "sharing.tip", "looking.tip"}
-)
-_HOST_FOREIGN_SIGNALS = frozenset({"meet_seek", "swap_seek", "swap_offer", "tip_seek", "tip_share"})
+# What THIS lane owns: hosting/creating an event (sharing.host / host_meet). Browsing
+# events (find_activities), being matched to a meet (meet_seek), find people, swap, tip,
+# out_of_scope, unsafe, auth, … are all off-lane and release. We list only what we own; the
+# open-ended rest is handled generically (see is_confident_off_lane).
+_HOST_NATIVE_GOALS: frozenset[str] = frozenset()
+_HOST_NATIVE_LINEARS = frozenset({"sharing.host"})
+_HOST_NATIVE_SIGNALS = frozenset({"host_meet"})
 
 
 def _host_confident_foreign(slots: dict[str, Any] | None) -> bool:
     """AI-driven: the classifier confidently reads this turn as a DIFFERENT lane, so the
     host capture should release rather than treat it as an event detail."""
-    from app.lane_decision import is_confident_foreign
+    from app.lane_decision import is_confident_off_lane
 
-    return is_confident_foreign(
+    return is_confident_off_lane(
         slots,
-        foreign_goals=_HOST_FOREIGN_GOALS,
-        foreign_linear_prefixes=_HOST_FOREIGN_LINEAR_PREFIXES,
-        foreign_linears=_HOST_FOREIGN_LINEARS,
-        foreign_signals=_HOST_FOREIGN_SIGNALS,
+        native_goals=_HOST_NATIVE_GOALS,
+        native_linears=_HOST_NATIVE_LINEARS,
+        native_signals=_HOST_NATIVE_SIGNALS,
     )
 
 
 def _host_confident_foreign_action(slots: dict[str, Any] | None) -> bool:
-    """Like ``_host_confident_foreign`` but WITHOUT the goal match — only a concrete foreign
-    ACTION (a foreign linear_intent / signal_intent, e.g. find_activities, meet_seek,
-    find_peers). Used at the naming step, where a legitimate title that names an activity
-    ("Soccer in the park") reads as bare goal="activities" — that must stay as the title —
-    but an explicit pivot ("I wanna search a meet") carries a concrete foreign action and
-    must release, so the very first step can never trap the user (see [[no-sticky-flows]])."""
-    from app.lane_decision import is_confident_foreign
+    """Like ``_host_confident_foreign`` but the GOAL alone never releases — only a concrete
+    foreign ACTION (a foreign linear_intent / signal_intent, e.g. find_activities, meet_seek,
+    find_peers) or a universal exit (out_of_scope / unsafe). Used at the naming step, where a
+    legitimate title that names an activity ("Soccer in the park") reads as bare
+    goal="activities" — that must stay as the title — but an explicit pivot ("I wanna search
+    a meet") carries a concrete foreign action and must release, so the very first step can
+    never trap the user (see [[no-sticky-flows]])."""
+    from app.lane_decision import is_confident_off_lane
 
-    return is_confident_foreign(
+    return is_confident_off_lane(
         slots,
-        foreign_linear_prefixes=_HOST_FOREIGN_LINEAR_PREFIXES,
-        foreign_linears=_HOST_FOREIGN_LINEARS,
-        foreign_signals=_HOST_FOREIGN_SIGNALS,
+        native_linears=_HOST_NATIVE_LINEARS,
+        native_signals=_HOST_NATIVE_SIGNALS,
+        ignore_goal=True,
     )
 
 
@@ -3248,6 +3251,16 @@ def wants_discovery_turn(
         return False
 
     if session_ctx.get("signal_draft"):
+        return True
+
+    # A pending out-of-scope clarifier must always resolve in the discovery handler, even
+    # if the reply ('yeah, do it') reads as plain chat — otherwise the flag leaks forward.
+    if session_ctx.get("out_of_scope_pending"):
+        return True
+
+    # Egregious unsafe content must reach the discovery handler so the refusal fires, even
+    # if the AI router misread it as chat — the regex backstop only works if we get here.
+    if utterance_is_unsafe(msg)[0]:
         return True
 
     if _explicit_funnel_input(msg, slots=slots, session_ctx=session_ctx):
@@ -3874,14 +3887,19 @@ def _handle_signup_phone_message(
         )
     if is_anonymous and email_has_registered_account(email):
         # Guest is logging into an account they already have. The JWT swap + force_new
-        # session reset would orphan an event they just built, so stash it against the
-        # destination account — its next session recovers and publishes it.
+        # session reset would orphan an event/meet-seek they just built, so stash it against
+        # the destination account — its next session recovers and publishes/saves it.
         if session_ctx.get("host_publish_pending"):
             host_ctx = extract_host_ctx(session_ctx)
             if host_ctx.get("event_draft"):
                 dest_uid = registered_user_id_for_email(email)
                 if dest_uid:
                     stash_pending_event_draft(dest_uid, host_ctx)
+        pending_seek = session_ctx.get("look_seek_pending")
+        if isinstance(pending_seek, dict) and pending_seek:
+            dest_uid = registered_user_id_for_email(email)
+            if dest_uid:
+                stash_pending_meet_seek(dest_uid, pending_seek)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
@@ -3968,18 +3986,216 @@ def _resolve_browse_or_meet_answer(msg: str, slots: dict[str, Any] | None) -> st
 
 def _ask_browse_or_meet(
     session_ctx: dict[str, Any],
+    *,
+    question: str = "",
+    options: list[str] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """One-tap clarifier when the AI can't tell browse from seek."""
+    """One-tap clarifier when the AI can't tell browse from seek. Uses the classifier's
+    own contextual question/options (Lana's voice, grounded in what the user said) when
+    present — consistent with the scope/intent clarifiers — and falls back to the template
+    only when the model returned nothing."""
     session_ctx["browse_or_meet_pending"] = True
     ctx = _routing_ctx(session_ctx, phase="listening", active_intent="discovery.find_activities")
-    ctx["suggestions"] = ["See what's happening", "Set up a meet"]
-    return (
+    opts = [o for o in (options or []) if str(o).strip()] or ["See what's happening", "Set up a meet"]
+    ctx["suggestions"] = opts
+    ctx["clarify_options"] = opts
+    q = (question or "").strip() or (
         "Happy to help! Want me to show what's already happening on your block, or set you "
-        "up with a meet so I can match you with neighbors who want the same?",
+        "up with a meet so I can match you with neighbors who want the same?"
+    )
+    return (
+        q,
         ctx,
         _discovery_routing_stub("listening", "clarify_browse_or_meet"),
         [],
     )
+
+
+_SUPPORTED_PIVOT_GOALS = frozenset(
+    {"peers", "activities", "both", "save_signal", "verify", "login", "logout",
+     "propose_intro", "list_intros", "show_block_log", "profile_photo", "rsvp"}
+)
+
+
+def _out_of_scope_decision(slots: dict[str, Any], msg: str) -> str | None:
+    """AI-driven out-of-scope router. Returns:
+      'decline' — confidently an errand TagAlng can't do → refuse + log,
+      'clarify' — might be unsupported, ask one question before refusing,
+      None       — not an out-of-scope turn.
+
+    Confidence IS the gate: the classifier sets goal=out_of_scope with a confidence that
+    reflects how sure it is the ask is unsupported, and clarify='scope' when genuinely torn.
+    A clear ask declines outright; a doubtful one asks first so Lana never guesses 'no'.
+    """
+    if not slots:
+        return None
+    enriched = enrich_slots(dict(slots), msg=msg)
+    goal = str(enriched.get("goal") or "")
+    linear = slots_linear_intent(enriched) or ""
+    if goal != "out_of_scope" and linear != "system.out_of_scope":
+        return None
+    if str(slots.get("clarify") or "") == "scope":
+        return "clarify"
+    return "decline" if float(enriched.get("confidence", 0.0)) >= 0.9 else "clarify"
+
+
+def _reply_pivots_to_supported(slots: dict[str, Any], msg: str) -> bool:
+    """After Lana asked the scope-clarifier, does the reply reveal a SUPPORTED intent
+    (so we fall through to its handler) rather than confirm the unsupported ask? Default is
+    to confirm the decline — only a confident pivot to a real TagAlng lane escapes it."""
+    if not slots:
+        return False
+    enriched = enrich_slots(dict(slots), msg=msg)
+    goal = str(enriched.get("goal") or "")
+    if goal not in _SUPPORTED_PIVOT_GOALS:
+        return False
+    return float(enriched.get("confidence", 0.0)) >= 0.5
+
+
+def _ask_out_of_scope(
+    session_ctx: dict[str, Any],
+    *,
+    question: str = "",
+    options: list[str] | None = None,
+    detail: str = "",
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Ask the clarifying question the CLASSIFIER wrote (Lana's voice, grounded in what the
+    user actually said) when it can't tell a supported request from an errand Lana can't run
+    — a bare want ('I want pizza') might be a neighbor activity (a pizza night) OR an errand
+    (order me one). The template below is only a fallback if the model returned no question."""
+    session_ctx["out_of_scope_pending"] = True
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    q = (question or "").strip()
+    opts = [o for o in (options or []) if str(o).strip()]
+    if not q:
+        thing = (detail or "").strip()
+        if thing:
+            q = (
+                f"Ooh, {thing}! Do you want to get neighbors together for that on your block, "
+                f"or are you asking me to order/handle it for you?"
+            )
+        else:
+            q = (
+                "Just so I get this right — do you want to get neighbors together for that on "
+                "your block, or are you asking me to handle it for you directly?"
+            )
+    ctx["suggestions"] = opts or ["Get neighbors together", "Just handle it for me"]
+    ctx["clarify_options"] = ctx["suggestions"]
+    return (
+        q,
+        ctx,
+        _discovery_routing_stub("listening", "clarify_out_of_scope"),
+        [],
+    )
+
+
+def _ask_general_clarify(
+    session_ctx: dict[str, Any],
+    *,
+    question: str = "",
+    options: list[str] | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """ASK-WHEN-UNSURE gate: the classifier could not confidently place this turn in a
+    supported lane (clarify='intent'), so ask the AI-written question grounded in what
+    TagAlng can do instead of guessing. The next turn re-classifies the answer normally —
+    the chips post a clear label that routes to the real lane (no pending interpretation
+    needed). The template below is only a fallback if the model returned no question."""
+    session_ctx["clarify_pending"] = True
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    q = (question or "").strip() or (
+        "I want to make sure I help with the right thing — are you hoping to meet neighbors, "
+        "find something happening nearby, or share or ask for a local tip?"
+    )
+    opts = [o for o in (options or []) if str(o).strip()]
+    ctx["suggestions"] = opts or ["Meet neighbors", "What's happening nearby", "Share a tip"]
+    ctx["clarify_options"] = ctx["suggestions"]
+    return (
+        q,
+        ctx,
+        _discovery_routing_stub("listening", "clarify_intent"),
+        [],
+    )
+
+
+def _decline_out_of_scope(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    home_block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Gracefully decline an unsupported ask, log the demand, and steer back to what
+    TagAlng does. The log is what lets the 'we'll let you know' promise be kept later."""
+    enriched = enrich_slots(dict(slots), msg=msg)
+    detail = str(enriched.get("signal_detail") or "").strip()
+    category = str(enriched.get("signal_category") or "").strip() or None
+    log_feature_request(
+        user_id=user_id,
+        block_id=resolve_block_id(session_ctx, home_block_id),
+        request_text=msg,
+        category=category or (detail or None),
+    )
+    what = detail or "that"
+    reply = (
+        f"Ah, {what} isn't something I can do yet — I'm here to connect you with neighbors "
+        "on your block: finding people, local activities, swapping things, and sharing tips. "
+        "I've noted your request though, and we'll let you know if we add it! "
+        "In the meantime, want to meet some neighbors or see what's happening nearby?"
+    )
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    ctx["suggestions"] = ["Meet neighbors", "What's happening nearby"]
+    return reply, ctx, _discovery_routing_stub("listening", "out_of_scope"), []
+
+
+_UNSAFE_HIGH_KINDS = frozenset({"sexual", "hate", "illegal"})
+
+
+def _unsafe_kind_for_turn(slots: dict[str, Any], msg: str) -> str | None:
+    """Return the unsafe kind if this turn is inappropriate/abusive — from the regex backstop
+    OR the AI router (goal=unsafe). Safety is NOT confidence-gated: any unsafe read refuses.
+    None when the turn is fine. Crisis content (self-harm/DV) is deliberately NOT caught here
+    — that is handled by the orchestrator's empathetic safety rails, not a flat refusal."""
+    matched, kind = utterance_is_unsafe(msg)
+    if matched:
+        return kind or "other"
+    if slots:
+        enriched = enrich_slots(dict(slots), msg=msg)
+        if str(enriched.get("goal") or "") == "unsafe" or slots_linear_intent(enriched) == "system.unsafe":
+            return str(enriched.get("unsafe_kind") or "").strip() or "other"
+    return None
+
+
+def _refuse_unsafe(
+    *,
+    msg: str,
+    kind: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Firm, calm boundary + redirect for inappropriate/abusive content. Logged to
+    moderation_flags (NEVER feature_requests — this is not product demand and gets no
+    'we'll add it' promise). No escalation: the same measured refusal every time. Preserves
+    any active flow's phase/intent so a one-off abusive turn doesn't derail the session."""
+    log_moderation_flag(
+        user_id=user_id,
+        block_id=resolve_block_id(session_ctx, home_block_id),
+        message=msg,
+        kind=kind,
+        severity="high" if kind in _UNSAFE_HIGH_KINDS else "medium",
+    )
+    reply = (
+        "I'm not able to help with that. I'm here to connect you with neighbors on your "
+        "block — finding people, local activities, swaps, and tips. Want to do any of those?"
+    )
+    keep_phase = phase or "listening"
+    ctx = _routing_ctx(
+        session_ctx, phase=keep_phase, active_intent=session_ctx.get("active_intent") or "none"
+    )
+    ctx["suggestions"] = ["Meet neighbors", "What's happening nearby"]
+    return reply, ctx, _discovery_routing_stub(keep_phase, "unsafe_refusal"), []
 
 
 def _start_activity_browse_from_discovery(
@@ -4091,6 +4307,19 @@ def handle_discovery_turn(
             if (phase or "") != PHASE_NEED_IDENTITY:
                 session_ctx["skip_claims_background_extract"] = True
 
+    # Safety FIRST — inappropriate/abusive content (NSFW, harassment, hate, illegal) is
+    # refused before any intent routing, so it can never be captured as a swap/tip, logged
+    # as a feature request, or funnelled into find_peers. Detected by the AI router
+    # (goal=unsafe) with a regex backstop; refused + logged to moderation_flags, no
+    # escalation. Crisis content (self-harm/DV) is intentionally excluded — the orchestrator
+    # answers those with empathetic resources, not this flat boundary.
+    _unsafe_kind = _unsafe_kind_for_turn(slots, msg)
+    if _unsafe_kind is not None:
+        return _refuse_unsafe(
+            msg=msg, kind=_unsafe_kind, session_ctx=session_ctx,
+            user_id=user_id, home_block_id=home_block_id, phase=phase,
+        )
+
     # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
     # conversation so an event line ("weekday playground meet with kids") isn't hijacked
     # into a neighbour search. Release on a semantic back-out (the AI's `abandon` read,
@@ -4112,7 +4341,18 @@ def handle_discovery_turn(
         confident_foreign = _host_confident_foreign(slots) and not _is_host_answer(
             msg, session_ctx, slots
         )
-        pivoted_away = _pivots_out_of_host(msg) or confident_foreign
+        # An abandon that ALSO surfaces a new request in the same breath ("don't host —
+        # find me fun activities instead") is a PIVOT, not a dead stop: fall through so the
+        # real handler answers it with a contextual (AI) reply, instead of the canned
+        # "no worries" acknowledgement. A bare abandon ("nah forget it") has no follow-on
+        # and still gets the acknowledgement. The classifier decides "is there a new
+        # intent?" — any clarify signal or a non-vague goal in the same turn.
+        _ab_slots = enrich_slots(dict(slots), msg=msg) if slots.get("abandon") else {}
+        abandon_with_followon = bool(slots.get("abandon")) and (
+            bool(str(_ab_slots.get("clarify") or "").strip())
+            or str(_ab_slots.get("goal") or "none") not in ("none", "chat")
+        )
+        pivoted_away = _pivots_out_of_host(msg) or confident_foreign or abandon_with_followon
         # Seed turn: the "A meet to host" button (or the host-entry regex) JUST entered this
         # flow deterministically, with payload "I want to host a meet" — that 'meet' noun can
         # read as find_activities, so re-classifying the button's own payload would release the
@@ -4168,6 +4408,26 @@ def handle_discovery_turn(
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent="looking.meet")
             ctx["look_meet_saved_now"] = session_ctx.get("look_meet_saved_now") or None
             return pending_reply, ctx, _discovery_routing_stub("listening", "look_meet"), []
+
+    # Resolve a pending out-of-scope clarifier BEFORE the lane handlers below, so a reply
+    # that pivots to a real intent ("organize it with neighbors") reaches its handler and
+    # the pending flag never leaks into a later turn. The reply either confirms the
+    # unsupported ask (decline + log) or surfaces a supported intent (fall through).
+    if discovery_ai_enabled() and slots and session_ctx.get("out_of_scope_pending"):
+        session_ctx["out_of_scope_pending"] = None
+        if not _reply_pivots_to_supported(slots, msg):
+            return _decline_out_of_scope(
+                msg=msg, slots=slots, session_ctx=session_ctx,
+                user_id=user_id, home_block_id=home_block_id,
+            )
+        # else: a supported intent surfaced — fall through to its handler below.
+
+    # Resolve a pending GENERAL clarify (clarify='intent'). The answer re-classifies and
+    # routes normally below; we only clear the flag and remember it so we never ask the
+    # same question twice in a row (no clarify loops).
+    clarify_was_pending = bool(session_ctx.get("clarify_pending"))
+    if clarify_was_pending:
+        session_ctx["clarify_pending"] = None
 
     hosting_cta_turn = _try_hosting_cta_turn(
         msg=msg,
@@ -4241,6 +4501,45 @@ def handle_discovery_turn(
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 
+    # Out-of-scope fresh detection (AI-driven): the user asked Lana to do something TagAlng
+    # has no feature for (deliver food, book a taxi). Confidence-gated — a clear ask is
+    # declined + logged immediately; an ambiguous one asks one clarifying question. This
+    # stops errands silently funnelling into find_peers. (The reply to that clarifier is
+    # resolved earlier, right after the funnel guards, so a pivot reaches its real handler.)
+    if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
+        _oos = _out_of_scope_decision(slots, msg)
+        if _oos == "clarify":
+            _oos_enriched = enrich_slots(dict(slots), msg=msg)
+            return _ask_out_of_scope(
+                session_ctx,
+                question=str(_oos_enriched.get("clarify_question") or ""),
+                options=list(_oos_enriched.get("clarify_options") or []),
+                detail=str(_oos_enriched.get("signal_detail") or "").strip(),
+            )
+        if _oos == "decline":
+            return _decline_out_of_scope(
+                msg=msg, slots=slots, session_ctx=session_ctx,
+                user_id=user_id, home_block_id=home_block_id,
+            )
+
+    # General uncertainty gate (ASK-WHEN-UNSURE) — the classifier could not confidently
+    # place this turn in a supported lane, so ask the one AI-written question (grounded in
+    # what TagAlng can do) instead of guessing or silently funnelling into find_peers. Never
+    # on the turn that just answered a clarify (no loops); never for hosting CTAs.
+    if (
+        discovery_ai_enabled()
+        and slots
+        and not is_hosting_ui_cta(msg)
+        and not clarify_was_pending
+        and str(slots.get("clarify") or "") == "intent"
+    ):
+        _clar = enrich_slots(dict(slots), msg=msg)
+        return _ask_general_clarify(
+            session_ctx,
+            question=str(_clar.get("clarify_question") or ""),
+            options=list(_clar.get("clarify_options") or []),
+        )
+
     # Browse-vs-seek router (AI-driven), before the ZIP funnel:
     #   browse  → agentic "what's happening" events browse (show real events, refine)
     #   seek    → look_meet capture ("what kind of meet?" → match to a host)
@@ -4265,7 +4564,12 @@ def handle_discovery_turn(
                 user_jwt=user_jwt, home_block_id=home_block_id,
             )
         if _decision == "clarify":
-            return _ask_browse_or_meet(session_ctx)
+            _bm = enrich_slots(dict(slots), msg=msg)
+            return _ask_browse_or_meet(
+                session_ctx,
+                question=str(_bm.get("clarify_question") or ""),
+                options=list(_bm.get("clarify_options") or []),
+            )
         # A clear meet_seek falls through to the existing signal-capture flow below.
 
     if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):

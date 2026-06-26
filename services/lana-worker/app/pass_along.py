@@ -252,6 +252,58 @@ def _save_item(
         return None
 
 
+# What this capture OWNS: the user offering/giving away an item (swap_offer). Anything the
+# AI confidently reads as a different lane — a meet/peer search, a tip, out_of_scope, unsafe
+# — is a pivot and releases. Self-maintaining via is_confident_off_lane (no foreign-list).
+_PASS_ALONG_NATIVE_GOALS = frozenset({"save_signal"})
+_PASS_ALONG_NATIVE_SIGNALS = frozenset({"swap_offer"})
+_PASS_ALONG_NATIVE_LINEARS = frozenset({"sharing.swap"})
+
+
+def _is_pass_along_answer(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None"
+) -> bool:
+    """Is this turn a genuine answer/refine for the give-away capture's current step?"""
+    from app.lane_decision import is_confident_off_lane, is_meta_or_chat
+
+    if is_meta_or_chat(slots):
+        return False
+    return not is_confident_off_lane(
+        slots,
+        native_goals=_PASS_ALONG_NATIVE_GOALS,
+        native_signals=_PASS_ALONG_NATIVE_SIGNALS,
+        native_linears=_PASS_ALONG_NATIVE_LINEARS,
+    )
+
+
+def pass_along_should_release(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """Release the sticky give-away flow on a semantic abandon or a confident pivot to
+    another intent (AI's read, not keywords), so the user is never trapped."""
+    from app.lane_decision import lane_should_continue
+
+    return not lane_should_continue(
+        message, session_ctx, slots, is_valid_answer=_is_pass_along_answer
+    )
+
+
+def reset_pass_along_state(session_ctx: dict[str, Any]) -> None:
+    """Drop the give-away flow + its half-built draft so the turn falls through to normal
+    routing. Keys set to None (not popped) so the {**old, **new} session merge clears them."""
+    for k in (
+        "pass_along_active",
+        "item_draft",
+        "pass_along_asked_fields",
+        "pass_along_other_items",
+        "pass_along_pending_ask",
+        "pass_along_photo_prompted",
+    ):
+        session_ctx[k] = None
+    session_ctx["pass_along_enrich_count"] = 0
+    session_ctx["pass_along_turns"] = 0
+
+
 def run_pass_along_turn(
     *,
     user_message: str,

@@ -42,18 +42,35 @@ def is_meta_or_chat(slots: dict[str, Any] | None) -> bool:
     return bool(slots) and str(slots.get("goal") or "") == "chat"
 
 
-def is_confident_foreign(
+# Universal exits — these release EVERY sticky lane, at every step, no matter what the lane
+# owns. An errand Lana can't run (out_of_scope) or abusive content (unsafe) must never be
+# swallowed as a field answer; the decline / refuse handlers downstream must get the turn.
+_ALWAYS_OFF_LANE_GOALS = ("out_of_scope", "unsafe")
+_ALWAYS_OFF_LANE_LINEARS = ("system.out_of_scope", "system.unsafe")
+
+
+def is_confident_off_lane(
     slots: dict[str, Any] | None,
     *,
-    foreign_goals: frozenset[str] = frozenset(),
-    foreign_linear_prefixes: tuple[str, ...] = (),
-    foreign_linears: frozenset[str] = frozenset(),
-    foreign_signals: frozenset[str] = frozenset(),
+    native_goals: frozenset[str] = frozenset(),
+    native_linears: frozenset[str] = frozenset(),
+    native_signals: frozenset[str] = frozenset(),
+    ignore_goal: bool = False,
 ) -> bool:
-    """True when the classifier confidently places this turn in a DIFFERENT lane.
+    """True when the classifier confidently reads this turn as an intent OUTSIDE this lane.
 
-    Used by each lane's answer predicate to refuse to treat an off-lane pivot as an
-    answer (e.g. "who lives near me?" while we're asking what kind of meet)."""
+    Self-maintaining inverse of the old "enumerate every foreign intent" approach: a lane
+    declares only the small, stable set of intents it OWNS (native_*). ANY confident
+    classification that is not native — peers, login, out_of_scope, unsafe, or any intent
+    added in the future — counts as off-lane and releases the sticky flow. We never list the
+    open-ended "everything else", so a newly added intent can't silently become an
+    unhandled escape hatch that traps the user (the bug this replaces).
+
+    ignore_goal: when True the goal alone never decides — only a concrete foreign
+    linear_intent / signal_intent releases (the universal exits still apply). Used by the
+    host naming step, where a bare title ("Soccer in the park") reads as goal=activities and
+    must STAY, while an explicit action pivot ("search a meet") must release.
+    """
     if not slots:
         return False
     from app.layer1_intents import normalize_linear_intent
@@ -64,12 +81,21 @@ def is_confident_foreign(
         return False
     linear = normalize_linear_intent(slots.get("linear_intent")) or ""
     signal_intent = str(slots.get("signal_intent") or "")
-    return (
-        goal in foreign_goals
-        or (bool(foreign_linear_prefixes) and linear.startswith(foreign_linear_prefixes))
-        or linear in foreign_linears
-        or signal_intent in foreign_signals
-    )
+
+    # Universal exits first — out_of_scope / unsafe always release, every lane, every step.
+    if goal in _ALWAYS_OFF_LANE_GOALS or linear in _ALWAYS_OFF_LANE_LINEARS:
+        return True
+
+    # A concrete action this lane owns (its linear/signal) → definitively an answer; stay.
+    if (linear and linear in native_linears) or (signal_intent and signal_intent in native_signals):
+        return False
+    # A concrete action this lane does NOT own → off-lane pivot; release.
+    if (linear and linear not in native_linears) or (signal_intent and signal_intent not in native_signals):
+        return True
+    # No concrete action named. Fall back to the goal (unless the caller suppresses it).
+    if ignore_goal:
+        return False
+    return goal not in native_goals
 
 
 def lane_should_continue(

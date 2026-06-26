@@ -401,49 +401,88 @@ def run_lana_unified_pipeline(
     # structured extraction), the same way event_host_active does. It releases on
     # save, cancel, or a turn cap, so other flows are never affected.
     if session_ctx.get("pass_along_active"):
-        from app.pass_along import run_pass_along_turn
-
-        reply = sanitize_assistant_message(
-            run_pass_along_turn(
-                user_message=user_message,
-                session_ctx=session_ctx,
-                history=history,
-                user_jwt=user_jwt,
-                home_block_id=home_block_id,
-            )
+        from app.discovery_slots import discovery_slots_for_turn
+        from app.pass_along import (
+            pass_along_should_release,
+            reset_pass_along_state,
+            run_pass_along_turn,
         )
-        session_ctx["_orchestrator_turn"] = False
-        session_ctx["timing_ms"] = timer.to_dict()
-        session_ctx["last_routing"] = {
-            "outcome": "pass_along",
-            "intent_class": "swap",
-            "tool_called": "save_local_signal" if session_ctx.get("item_listed_now") else None,
-        }
-        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
-        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+        # Classify so the capture releases on a semantic abandon ("no i dont wanna
+        # giveaway") or a pivot to another lane ("find me a jogging partner") — the AI's
+        # read, not just cancel keywords. Same pattern as look_meet / activity_browse.
+        pivot_slots = discovery_slots_for_turn(
+            session_ctx,
+            user_message,
+            routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+            has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        if pass_along_should_release(user_message, session_ctx, pivot_slots):
+            reset_pass_along_state(session_ctx)
+        else:
+            reply = sanitize_assistant_message(
+                run_pass_along_turn(
+                    user_message=user_message,
+                    session_ctx=session_ctx,
+                    history=history,
+                    user_jwt=user_jwt,
+                    home_block_id=home_block_id,
+                )
+            )
+            session_ctx["_orchestrator_turn"] = False
+            session_ctx["timing_ms"] = timer.to_dict()
+            session_ctx["last_routing"] = {
+                "outcome": "pass_along",
+                "intent_class": "swap",
+                "tool_called": "save_local_signal" if session_ctx.get("item_listed_now") else None,
+            }
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
     # Sticky "share a tip" capture — same self-contained pattern as pass-along.
     if session_ctx.get("tip_share_active"):
-        from app.tip_share import run_tip_share_turn
-
-        reply = sanitize_assistant_message(
-            run_tip_share_turn(
-                user_message=user_message,
-                session_ctx=session_ctx,
-                history=history,
-                user_jwt=user_jwt,
-                home_block_id=home_block_id,
-            )
+        from app.discovery_slots import discovery_slots_for_turn
+        from app.tip_share import (
+            reset_tip_share_state,
+            run_tip_share_turn,
+            tip_share_should_release,
         )
-        session_ctx["_orchestrator_turn"] = False
-        session_ctx["timing_ms"] = timer.to_dict()
-        session_ctx["last_routing"] = {
-            "outcome": "tip_share",
-            "intent_class": "discovery",
-            "tool_called": "save_local_signal" if session_ctx.get("tip_listed_now") else None,
-        }
-        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
-        return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+        pivot_slots = discovery_slots_for_turn(
+            session_ctx,
+            user_message,
+            routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+            has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        if tip_share_should_release(user_message, session_ctx, pivot_slots):
+            reset_tip_share_state(session_ctx)
+        else:
+            reply = sanitize_assistant_message(
+                run_tip_share_turn(
+                    user_message=user_message,
+                    session_ctx=session_ctx,
+                    history=history,
+                    user_jwt=user_jwt,
+                    home_block_id=home_block_id,
+                )
+            )
+            session_ctx["_orchestrator_turn"] = False
+            session_ctx["timing_ms"] = timer.to_dict()
+            session_ctx["last_routing"] = {
+                "outcome": "tip_share",
+                "intent_class": "discovery",
+                "tool_called": "save_local_signal" if session_ctx.get("tip_listed_now") else None,
+            }
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
     # Sticky "looking for a meet/playgroup" capture — same self-contained pattern, but it
     # must not trap the user: if they pivot away (a new request once the card is ready, or
@@ -602,10 +641,27 @@ def run_lana_unified_pipeline(
         host_active = bool(session_ctx.get("event_host_active"))
         # Self-engage: if the orchestrator is actively shaping an event_draft, pin host
         # mode even when entry classification was fuzzy or the CTA hint didn't arrive.
-        draft_in_progress = isinstance(draft, dict) and any(
-            draft.get(k) for k in ("title", "venue_name", "starts_at", "affinity_prompt")
+        _draft_for_progress = draft if isinstance(draft, dict) else session_ctx.get("event_draft")
+        draft_in_progress = isinstance(_draft_for_progress, dict) and any(
+            _draft_for_progress.get(k) for k in ("title", "venue_name", "starts_at", "affinity_prompt")
         )
         host_active = host_active or (draft_in_progress and not host_released)
+        # Deterministic back-out cleanup — works no matter who wrote the reply. A leaked
+        # event_host_active must never trap the user: when host mode is on but the flow has
+        # made NO progress (no title/venue/date yet) AND the classifier does not read THIS
+        # turn as hosting, the user has effectively left (e.g. a conversational abandon the
+        # orchestrator answered without touching the flag). Clear the flag so the host card
+        # can't re-appear next turn. Real draft progress protects the multi-step build; the
+        # entry turn is safe because it classified AS hosting. AI read, not keywords
+        # (see [[no-sticky-flows]] / [[sticky-lane-release-inversion]]).
+        if host_active and not draft_in_progress and not host_released:
+            from app.layer1_intents import slots_indicate_hosting_signal
+
+            if not slots_indicate_hosting_signal(session_ctx.get("_discovery_slots") or {}):
+                from app.discovery_route import _release_host_mode
+
+                _release_host_mode(session_ctx)
+                host_active = False
 
         # The orchestrator keeps the event draft in ctx — the 5th return value is None
         # for the `lana` purpose. Source it from ctx so we can attach chips + publish.

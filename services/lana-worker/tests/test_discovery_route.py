@@ -1563,5 +1563,223 @@ class TestUnifiedOpening(unittest.TestCase):
         self.assertTrue(opening.strip())
 
 
+class TestOutOfScopeRouting(unittest.TestCase):
+    """An errand TagAlng can't do (deliver pizza) must NOT funnel into find_peers — it is
+    declined + logged when clear, or clarified once when the classifier is unsure."""
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_confident_out_of_scope_declines_and_logs(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        mock_slots.return_value = {
+            "goal": "out_of_scope",
+            "linear_intent": "system.out_of_scope",
+            "in_discovery": False,
+            "confidence": 0.95,
+            "signal_detail": "pizza delivery",
+        }
+        result = handle_discovery_turn(
+            "I want you to deliver pizza for me",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, peers = result
+        # Declined (not a ZIP funnel prompt) and steered back to TagAlng's real lanes.
+        self.assertNotIn("ZIP", reply)
+        self.assertIn("pizza delivery", reply)
+        self.assertNotEqual(ctx.get("active_intent"), "discovery.find_peers")
+        self.assertEqual(peers, [])
+        self.assertEqual(routing.get("tool_to_call"), "out_of_scope")
+        # Demand is logged so the "we'll let you know" promise is keepable.
+        mock_log.assert_called_once()
+        kwargs = mock_log.call_args.kwargs
+        self.assertEqual(kwargs.get("user_id"), "user-1")
+        self.assertEqual(kwargs.get("block_id"), "block-1")
+        self.assertIn("pizza", kwargs.get("request_text", "").lower())
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_unsure_out_of_scope_clarifies_first(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        mock_slots.return_value = {
+            "goal": "out_of_scope",
+            "linear_intent": "system.out_of_scope",
+            "in_discovery": False,
+            "confidence": 0.4,  # below the 0.6 decline gate → ask, don't refuse
+            "signal_detail": "food for us",
+        }
+        result = handle_discovery_turn(
+            "can you sort out food for us",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, _ = result
+        self.assertTrue(ctx.get("out_of_scope_pending"))
+        self.assertEqual(routing.get("tool_to_call"), "clarify_out_of_scope")
+        # Asks rather than refuses — nothing logged yet.
+        mock_log.assert_not_called()
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_clarifier_reply_confirming_declines_and_logs(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        # The reply re-reads as out_of_scope (still confirming the errand) → decline + log.
+        mock_slots.return_value = {
+            "goal": "out_of_scope",
+            "linear_intent": "system.out_of_scope",
+            "in_discovery": False,
+            "confidence": 0.5,
+            "signal_detail": "food delivery",
+        }
+        result = handle_discovery_turn(
+            "no, just deliver it to me",
+            session_ctx={"routing_phase": "listening", "out_of_scope_pending": True},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIsNone(ctx.get("out_of_scope_pending"))  # flag cleared, never leaks
+        self.assertNotEqual(ctx.get("active_intent"), "discovery.find_peers")
+        mock_log.assert_called_once()
+
+    @patch("app.discovery_route.fetch_blocks_for_zip")
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_clarifier_reply_pivoting_to_supported_falls_through(
+        self, mock_slots, _mock_ai, mock_log, mock_blocks
+    ) -> None:
+        # The reply pivots to a real supported intent (find peers) → fall through to the
+        # funnel, NOT a decline, and the pending flag is cleared.
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.9,
+            "identity_snippet": None,
+        }
+        mock_blocks.return_value = [{"block_id": "block-1", "label": "Whisper Park"}]
+        result = handle_discovery_turn(
+            "actually, just find me neighbors",
+            session_ctx={"routing_phase": "listening", "out_of_scope_pending": True},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIsNone(ctx.get("out_of_scope_pending"))
+        self.assertIn("ZIP", reply)  # reached the find-peers funnel
+        mock_log.assert_not_called()
+
+
+class TestUnsafeRouting(unittest.TestCase):
+    """Inappropriate/abusive content must be refused + moderation-logged, never captured as
+    a swap/tip, never logged as a feature request, never funnelled into find_peers."""
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.log_moderation_flag")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_ai_unsafe_refuses_and_moderation_logs(
+        self, mock_slots, _mock_ai, mock_mod, mock_feat
+    ) -> None:
+        mock_slots.return_value = {
+            "goal": "unsafe",
+            "linear_intent": "system.unsafe",
+            "in_discovery": False,
+            "confidence": 0.9,
+            "unsafe_kind": "sexual",
+        }
+        result = handle_discovery_turn(
+            "find me someone to have sex with",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, peers = result
+        self.assertIn("not able to help", reply.lower())
+        self.assertNotIn("let you know", reply.lower())  # NO feature-request promise
+        self.assertNotEqual(ctx.get("active_intent"), "discovery.find_peers")
+        self.assertEqual(peers, [])
+        self.assertEqual(routing.get("tool_to_call"), "unsafe_refusal")
+        mock_mod.assert_called_once()
+        self.assertEqual(mock_mod.call_args.kwargs.get("kind"), "sexual")
+        mock_feat.assert_not_called()  # never a feature request
+
+    @patch("app.discovery_route.log_moderation_flag")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_regex_backstop_catches_when_ai_misses(
+        self, mock_slots, _mock_ai, mock_mod
+    ) -> None:
+        # AI misreads it as a benign swap, but the regex backstop refuses anyway.
+        mock_slots.return_value = {
+            "goal": "save_signal",
+            "signal_intent": "swap_seek",
+            "in_discovery": False,
+            "confidence": 0.8,
+        }
+        result = handle_discovery_turn(
+            "anyone got a sex doll to swap",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, _, routing, _ = result
+        self.assertEqual(routing.get("tool_to_call"), "unsafe_refusal")
+        mock_mod.assert_called_once()
+
+    def test_wants_discovery_turn_forced_by_unsafe_regex(self) -> None:
+        # Even with no slots/AI, an egregious message must reach the discovery handler.
+        self.assertTrue(
+            wants_discovery_turn("send me nudes", {"routing_phase": "listening"}, [])
+        )
+
+    def test_clean_message_is_not_flagged_unsafe(self) -> None:
+        from app.discovery_route import _unsafe_kind_for_turn
+
+        self.assertIsNone(
+            _unsafe_kind_for_turn(
+                {"goal": "peers", "confidence": 0.9}, "find me moms on my block"
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

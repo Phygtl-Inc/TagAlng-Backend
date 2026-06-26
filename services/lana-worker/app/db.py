@@ -83,6 +83,108 @@ def pop_pending_event_draft(user_id: str) -> dict[str, Any] | None:
         return None
 
 
+def stash_pending_meet_seek(user_id: str, seek: dict[str, Any]) -> None:
+    """Persist a guest's ready meet seek for `user_id` to save after they log into an
+    existing account (mirrors stash_pending_event_draft). Best-effort: a stash failure must
+    not break the verification turn."""
+    if not user_id or not isinstance(seek, dict) or not seek:
+        return
+    try:
+        service_client().table("pending_meet_seeks").upsert(
+            {
+                "user_id": user_id,
+                "seek": seek,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="user_id",
+        ).execute()
+    except Exception:
+        return
+
+
+def log_feature_request(
+    *,
+    user_id: str | None,
+    block_id: str | None,
+    request_text: str,
+    category: str | None = None,
+) -> None:
+    """Append an out-of-scope / unsupported ask to feature_requests (see migration).
+
+    Lana declines these to the user, but we log them so the team sees real demand and can
+    notify the user later — that's why user_id is captured. Best-effort: a logging failure
+    must never break the decline turn the user is seeing."""
+    text = str(request_text or "").strip()[:1000]
+    if not text:
+        return
+    try:
+        service_client().table("feature_requests").insert(
+            {
+                "user_id": user_id or None,
+                "block_id": block_id or None,
+                "request_text": text,
+                "category": (str(category).strip()[:120] or None) if category else None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).execute()
+    except Exception:
+        return
+
+
+def log_moderation_flag(
+    *,
+    user_id: str | None,
+    block_id: str | None,
+    message: str,
+    kind: str | None = None,
+    severity: str | None = None,
+) -> None:
+    """Append an inappropriate/abusive message Lana refused to moderation_flags (see
+    migration). DISTINCT from log_feature_request — this is NOT product demand and carries
+    no 'we'll add it' promise; it exists so trust & safety can review patterns / repeat
+    offenders. Best-effort: a logging failure must never break the refusal turn."""
+    text = str(message or "").strip()[:2000]
+    if not text:
+        return
+    try:
+        service_client().table("moderation_flags").insert(
+            {
+                "user_id": user_id or None,
+                "block_id": block_id or None,
+                "message": text,
+                "kind": (str(kind).strip()[:60] or None) if kind else None,
+                "severity": (str(severity).strip()[:20] or None) if severity else None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).execute()
+    except Exception:
+        return
+
+
+def pop_pending_meet_seek(user_id: str) -> dict[str, Any] | None:
+    """Read and delete the pending meet seek for `user_id` (one-shot recovery). Returns the
+    stashed seek draft, or None if there's nothing waiting / on any error."""
+    if not user_id:
+        return None
+    try:
+        sb = service_client()
+        res = (
+            sb.table("pending_meet_seeks")
+            .select("seek")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+        if not isinstance(row, dict):
+            return None
+        sb.table("pending_meet_seeks").delete().eq("user_id", user_id).execute()
+        seek = row.get("seek")
+        return seek if isinstance(seek, dict) and seek else None
+    except Exception:
+        return None
+
+
 def merge_session_context(
     old: dict[str, Any] | None,
     new: dict[str, Any] | None,

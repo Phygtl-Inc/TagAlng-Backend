@@ -27,6 +27,7 @@ from app.db import (
     insert_message,
     list_messages,
     pop_pending_event_draft,
+    pop_pending_meet_seek,
     transcript_text,
     update_session_context,
     merge_session_context,
@@ -970,7 +971,9 @@ def create_lana_session(
                 break
             if not opening:
                 if purpose == "lana":
-                    opening, status, session_ctx, ui_raw = lana_unified_opening()
+                    opening, status, session_ctx, ui_raw = lana_unified_opening(
+                        is_anonymous=auth.is_anonymous
+                    )
                     merged_ctx = {**merged_ctx, **session_ctx}
                     use_orch = False
                 else:
@@ -1002,6 +1005,15 @@ def create_lana_session(
             recovered = (
                 pop_pending_event_draft(auth.user_id) if not auth.is_anonymous else None
             )
+            # A meet seek the guest confirmed ("Start listening for me") just before logging
+            # into this existing account — stashed against this account at email entry. Only
+            # pop it when there's no event to recover this turn (event takes priority; the
+            # seek stays for the next session).
+            recovered_seek = (
+                pop_pending_meet_seek(auth.user_id)
+                if not auth.is_anonymous and not recovered
+                else None
+            )
             if recovered and isinstance(recovered.get("event_draft"), dict):
                 session_ctx = {
                     **recovered,
@@ -1018,8 +1030,31 @@ def create_lana_session(
                 ui_raw = None
                 draft_raw = recovered["event_draft"]
                 use_orch = False
+            elif recovered_seek:
+                # The guest already confirmed, so finish the save straight away (mirrors the
+                # event recovery above) and greet with the listening confirmation instead of
+                # the cold opening — otherwise the seek is silently lost on an existing-account
+                # login and never shows in their radar.
+                from app.look_meet import save_pending_meet_seek
+
+                opening, status, session_ctx, ui_raw = lana_unified_opening(
+                    is_anonymous=auth.is_anonymous
+                )
+                session_ctx["look_seek_pending"] = recovered_seek
+                saved_reply = save_pending_meet_seek(
+                    session_ctx=session_ctx,
+                    user_jwt=_bearer_token(authorization),
+                    block_id=auth.home_block_id,
+                    zip_code=None,
+                )
+                if saved_reply:
+                    opening = saved_reply
+                draft_raw = None
+                use_orch = False
             else:
-                opening, status, session_ctx, ui_raw = lana_unified_opening()
+                opening, status, session_ctx, ui_raw = lana_unified_opening(
+                    is_anonymous=auth.is_anonymous
+                )
                 draft_raw = None
                 use_orch = False
         elif use_orch:
@@ -1169,22 +1204,21 @@ def send_lana_message(
         # Entering tip-share closes any in-flight pass-along flow + its card.
         session_ctx_in["pass_along_active"] = False
         session_ctx_in["item_draft"] = None
-    # Entry into the in-chat "looking for a meet/playgroup" flow — ONLY the explicit
-    # "A meet or playgroup" CTA button (intent_hint). Natural language is left to the AI
-    # classifier downstream (find-activities → look_meet capture, or a stated meet_seek),
-    # so a blunt keyword can't flip a guest into this flow before the model reads intent.
+    # Entry into "looking for a meet/playgroup" — the explicit "A meet or playgroup" CTA
+    # (intent_hint). Meet ≡ activity: looking for a meet means SEARCHING the block's real
+    # activities first, so the CTA enters the activity-browse (search) flow. The seek to be
+    # MATCHED is offered only as a fallback when the search comes up empty (see
+    # activity_browse's _seek_offer). Natural language is left to the AI classifier downstream.
     if purpose == "lana" and not session_ctx_in.get("pass_along_active") and not session_ctx_in.get(
         "tip_share_active"
     ) and body.intent_hint == "look_meet":
-        session_ctx_in["look_meet_active"] = True
-        session_ctx_in["look_turns"] = 0
-        session_ctx_in["look_ready"] = None
-        session_ctx_in["look_enrich_count"] = 0
-        session_ctx_in["look_affinity_asked"] = None
-        session_ctx_in["look_draft"] = None
-        # Button entry carries a generic seed phrase with no real preference — skip mining
-        # a kind so the flow asks P1 ("what kind of meet?") and the user types or picks.
-        session_ctx_in["look_meet_skip_seed"] = True
+        session_ctx_in["activity_browse_active"] = True
+        session_ctx_in["browse_turns"] = 0
+        session_ctx_in["browse_draft"] = None
+        # Button entry carries a generic seed phrase with no real interest — skip mining it so
+        # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
+        # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
+        session_ctx_in["browse_skip_seed"] = True
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None

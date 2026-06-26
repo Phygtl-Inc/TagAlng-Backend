@@ -44,6 +44,9 @@ LINEAR_INTENTS: frozenset[str] = frozenset({
     "settings.notification_prefs",
     "help.what_can_you_do",
     "help.who_are_you",
+    # System
+    "system.out_of_scope",
+    "system.unsafe",
 })
 
 LOOKING_SHARING_INTENTS: frozenset[str] = frozenset({
@@ -78,6 +81,8 @@ _GOAL_TO_LINEAR: dict[str, str] = {
     "show_block_log": "discovery.block_log",
     "profile_photo": "auth.upload_photo",
     "continue": "discovery.find_peers",
+    "out_of_scope": "system.out_of_scope",
+    "unsafe": "system.unsafe",
 }
 
 LAYER1_DEFAULT_CONFIDENCE = 0.85
@@ -105,6 +110,11 @@ INTENT_CONFIDENCE: dict[str, float] = {
     "settings.notification_prefs": 0.55,
     "help.what_can_you_do": 0.5,
     "help.who_are_you": 0.5,
+    # The decline-vs-clarify gate: a confident out-of-scope read is declined outright;
+    # below this the router asks one clarifying question instead of guessing.
+    "system.out_of_scope": 0.6,
+    # Safety wins early; the route layer also has a regex backstop, so keep the bar low.
+    "system.unsafe": 0.5,
 }
 
 for _li in LOOKING_SHARING_INTENTS:
@@ -172,8 +182,11 @@ _CHANGE_NAME_RE = re.compile(
     r"\b(?:change my name|update my name|rename me|call me|my name is|add my name)\b",
     re.I,
 )
+# NOTE: "get rid of" deliberately excluded — it means decluttering/giving away items
+# (a swap offer), not editing a profile claim. It used to hijack "get rid of old baby
+# stuff" into identity.edit_claim. Claim edits read as remove/delete a stated attribute.
 _EDIT_CLAIM_RE = re.compile(
-    r"\b(?:remove|delete|drop|clear|get rid of)\b",
+    r"\b(?:remove|delete|drop|clear)\b",
     re.I,
 )
 _PROFILE_ACK_RE = re.compile(
@@ -436,7 +449,7 @@ def slots_indicate_hosting_signal(slots: dict[str, Any]) -> bool:
 
 # Intents the model owns outright — a regex signal reconciler must NEVER reclassify
 # these as a swap/tip/host. ("I am a teacher" = identity, not a request for a teacher.)
-_AI_OWNED_PREFIXES = ("identity.", "settings.", "help.", "social.", "tier.", "auth.")
+_AI_OWNED_PREFIXES = ("identity.", "settings.", "help.", "social.", "tier.", "auth.", "system.")
 
 
 def _reconcile_defer_to_llm(
@@ -613,17 +626,27 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
     ai_linear = normalize_linear_intent(out.get("linear_intent"))
     ai_conf = float(out.get("confidence", 0.0))
 
-    if phrase in PHRASE_POLICY_OVERRIDES:
-        out["linear_intent"] = phrase
-        out["confidence"] = max(ai_conf, 0.9)
-        _apply_discovery_linear_slots(out, phrase, msg=msg)
-    elif ai_linear:
+    # AI-AUTHORITATIVE routing. A regex phrase intent NEVER overrides the AI anymore — it is
+    # only a FALLBACK for when the AI did not confidently classify the turn (and did not ask
+    # to clarify). This removes the whole class of "a keyword hijacked the model" bugs
+    # (get-rid-of→edit_claim, etc.): the model sees the whole sentence, a keyword sees one
+    # word out of context. Two things stay deterministic because they are NOT intent
+    # decisions: format parsing (zip/otp/email) and the unsafe safety backstop — both live
+    # elsewhere. (See [[no-sticky-flows]] / [[sticky-lane-release-inversion]].)
+    if str(out.get("clarify") or "").strip():
+        phrase = None  # AI is asking — a keyword must not force a lane.
+    ai_confident = bool(ai_linear) and ai_conf >= 0.6
+
+    if ai_confident:
         out["linear_intent"] = ai_linear
         _apply_discovery_linear_slots(out, ai_linear, msg=msg)
     elif phrase:
         out["linear_intent"] = phrase
         out["confidence"] = max(ai_conf, 0.85)
         _apply_discovery_linear_slots(out, phrase, msg=msg)
+    elif ai_linear:
+        out["linear_intent"] = ai_linear
+        _apply_discovery_linear_slots(out, ai_linear, msg=msg)
 
     linear = slots_linear_intent(out)
     if linear:
@@ -693,6 +716,11 @@ def slots_want_layer1_handling(
         return False
     if not linear:
         return False
+    if linear in ("system.out_of_scope", "system.unsafe"):
+        # Discovery owns these at ANY confidence so they never fall through to the
+        # find_peers funnel: out_of_scope declines/clarifies, unsafe refuses. The route
+        # layer makes the actual call (and unsafe has a regex backstop too).
+        return True
     if linear == "discovery.find_in_block":
         return intent_confidence_met(enriched, linear)
     if linear in LOOKING_SHARING_INTENTS:

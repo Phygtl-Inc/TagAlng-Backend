@@ -217,6 +217,57 @@ def _save_tip(
         return None
 
 
+# What this capture OWNS: the user sharing a local tip/recommendation (tip_share). Anything
+# the AI confidently reads as a different lane — a search, a swap, out_of_scope, unsafe — is
+# a pivot and releases. Self-maintaining via is_confident_off_lane (no foreign-list).
+_TIP_SHARE_NATIVE_GOALS = frozenset({"save_signal"})
+_TIP_SHARE_NATIVE_SIGNALS = frozenset({"tip_share"})
+_TIP_SHARE_NATIVE_LINEARS = frozenset({"sharing.tip"})
+
+
+def _is_tip_share_answer(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None"
+) -> bool:
+    """Is this turn a genuine answer/refine for the tip-share capture's current step?"""
+    from app.lane_decision import is_confident_off_lane, is_meta_or_chat
+
+    if is_meta_or_chat(slots):
+        return False
+    return not is_confident_off_lane(
+        slots,
+        native_goals=_TIP_SHARE_NATIVE_GOALS,
+        native_signals=_TIP_SHARE_NATIVE_SIGNALS,
+        native_linears=_TIP_SHARE_NATIVE_LINEARS,
+    )
+
+
+def tip_share_should_release(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """Release the sticky tip-share flow on a semantic abandon or a confident pivot to
+    another intent (AI's read, not keywords), so the user is never trapped."""
+    from app.lane_decision import lane_should_continue
+
+    return not lane_should_continue(
+        message, session_ctx, slots, is_valid_answer=_is_tip_share_answer
+    )
+
+
+def reset_tip_share_state(session_ctx: dict[str, Any]) -> None:
+    """Drop the tip-share flow + its half-built draft so the turn falls through to normal
+    routing. Keys set to None (not popped) so the {**old, **new} session merge clears them."""
+    for k in (
+        "tip_share_active",
+        "tip_draft",
+        "tip_ready",
+        "tip_pending_ask",
+        "tip_asked_fields",
+    ):
+        session_ctx[k] = None
+    session_ctx["tip_enrich_count"] = 0
+    session_ctx["tip_turns"] = 0
+
+
 def run_tip_share_turn(
     *,
     user_message: str,
