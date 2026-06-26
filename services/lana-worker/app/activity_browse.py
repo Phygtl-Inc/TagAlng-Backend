@@ -51,6 +51,45 @@ def reset_activity_browse_state(session_ctx: dict[str, Any]) -> None:
     session_ctx["browse_turns"] = 0
 
 
+# Lanes this browse does NOT own — a confident classification into any of these is a
+# pivot, never a browse refinement. Note meet_seek/looking.meet ARE foreign here so the
+# user can switch from browsing events to being matched (handled by look_meet); plain
+# "activities" / find_activities is THIS lane = a re-filter, so it is NOT foreign.
+_FOREIGN_GOALS = frozenset(
+    {"peers", "both", "propose_intro", "list_intros", "verify", "login",
+     "logout", "show_block_log", "rsvp"}
+)
+_FOREIGN_LINEAR_PREFIXES = ("identity.", "social.", "auth.", "settings.", "tier.")
+_FOREIGN_LINEARS = frozenset(
+    {"discovery.find_peers", "discovery.find_by_attrs", "discovery.find_in_block",
+     "discovery.block_log", "looking.meet", "sharing.host", "sharing.swap",
+     "looking.swap", "sharing.tip", "looking.tip"}
+)
+_FOREIGN_SIGNALS = frozenset(
+    {"meet_seek", "host_meet", "swap_seek", "swap_offer", "tip_seek", "tip_share"}
+)
+
+
+def _is_browse_answer(
+    message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None
+) -> bool:
+    """Is this turn an answer/refine for the browse? Any non-foreign message is — the
+    interest at P1, or a re-filter ("show me cricket instead", "anything outdoors")
+    afterwards. A meta/question turn ("what's my zip?") or a confident pivot to another
+    lane is NOT — release so it's answered instead of used as an event filter."""
+    from app.lane_decision import is_confident_foreign, is_meta_or_chat
+
+    if is_meta_or_chat(slots):
+        return False
+    return not is_confident_foreign(
+        slots,
+        foreign_goals=_FOREIGN_GOALS,
+        foreign_linear_prefixes=_FOREIGN_LINEAR_PREFIXES,
+        foreign_linears=_FOREIGN_LINEARS,
+        foreign_signals=_FOREIGN_SIGNALS,
+    )
+
+
 def activity_browse_should_release(
     message: str,
     session_ctx: dict[str, Any],
@@ -58,43 +97,20 @@ def activity_browse_should_release(
 ) -> bool:
     """Whether the sticky browse flow should release this turn and hand back to routing.
 
-    A different ACTIVITY ("show me cricket instead", "anything outdoors") is a REFINE, not
-    a pivot — it stays in the flow. Releases (AI-driven) only on a semantic abandon, an
-    RSVP/seek/host/people pivot, or an explicit cross-lane phrase. Cancel exits in-flow.
-    """
-    msg = str(message or "").strip()
-    if not msg:
-        return False
-    if _CANCEL_RE.search(msg):
-        return False  # graceful in-flow exit
-    if slots and slots.get("abandon"):
-        return True
-    if _PIVOT_OUT_RE.search(msg):
-        return True
-    if slots:
-        from app.layer1_intents import normalize_linear_intent
+    Continue-only-on-match: the browse is kept for a genuine refine/answer
+    (``_is_browse_answer``) or an explicit cancel (a graceful in-flow exit). A confident
+    pivot to another lane, a semantic abandon, or a low-confidence read all release — so
+    the user is never trapped. A different ACTIVITY ("show me cricket instead") is a
+    refine and stays; switching to being matched (meet_seek) releases."""
+    from app.lane_decision import lane_should_continue
 
-        conf = float(slots.get("confidence", 0.0))
-        goal = str(slots.get("goal") or "")
-        linear = normalize_linear_intent(slots.get("linear_intent")) or ""
-        signal_intent = str(slots.get("signal_intent") or "")
-        if conf >= 0.6 and goal not in ("", "continue", "none"):
-            # A confident pivot to a DIFFERENT lane is never a browse refinement. Note:
-            # meet_seek/looking.meet releases so the user can switch from browsing to being
-            # matched (handled by look_meet). Plain "activities" stays — that's a re-filter.
-            if (
-                goal in ("peers", "both", "propose_intro", "list_intros",
-                         "verify", "login", "logout", "show_block_log", "rsvp")
-                or linear.startswith(("identity.", "social.", "auth.", "settings.", "tier."))
-                or linear in ("discovery.find_peers", "discovery.find_by_attrs",
-                              "discovery.find_in_block", "discovery.block_log",
-                              "looking.meet", "sharing.host", "sharing.swap",
-                              "looking.swap", "sharing.tip", "looking.tip")
-                or signal_intent in ("meet_seek", "host_meet", "swap_seek",
-                                     "swap_offer", "tip_seek", "tip_share")
-            ):
-                return True
-    return False
+    return not lane_should_continue(
+        message,
+        session_ctx,
+        slots,
+        is_valid_answer=_is_browse_answer,
+        pivot_re=_PIVOT_OUT_RE,
+    )
 
 
 # How many upcoming events to pull as the candidate pool BEFORE filtering. Larger than
@@ -313,15 +329,74 @@ def run_activity_browse_turn(
         session_ctx["routing_phase"] = "listening"
         return "Love it — what kind of thing are you up for?"
 
-    # ── The message is the interest (first answer) or a refinement ("no, cricket") ──
-    if msg:
+    from app.discovery_route import (
+        extract_zip,
+        fetch_blocks_for_zip,
+        resolve_block_id,
+    )
+
+    def _set_preview_block(zip5: str, blocks: list[dict[str, Any]]) -> str:
+        bid = str(blocks[0].get("block_id") or "")
+        session_ctx["preview_block_id"] = bid
+        session_ctx["preview_zip"] = zip5
+        session_ctx["preview_block_label"] = str(
+            blocks[0].get("label") or blocks[0].get("name") or zip5
+        )
+        # A verified user who gives their ZIP here should have it stick to their profile, so
+        # they aren't re-asked next session (best-effort; no-op if already assigned).
+        if phone_verified and not home_block_id:
+            try:
+                from app.discovery_route import _try_assign_home_block
+
+                _try_assign_home_block(user_jwt, session_ctx=session_ctx, home_block_id=None)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("activity_browse_assign_block_failed")
+        return bid
+
+    def _ask_zip(prompt: str) -> str:
+        draft["_need_zip"] = True
+        draft["suggestions"] = _INTEREST_SUGGESTIONS
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["routing_phase"] = "listening"
+        return prompt
+
+    # ── If we asked for a ZIP last turn, this message is the ZIP (don't treat it as the
+    #    interest). Otherwise the message is the interest (first answer) or a refinement. ──
+    if draft.get("_need_zip"):
+        zip5 = extract_zip(msg)
+        if not zip5:
+            return _ask_zip("What's your ZIP so I can see what's on your block?")
+        blocks = fetch_blocks_for_zip(user_jwt, zip5)
+        if not blocks:
+            return _ask_zip(
+                f"I couldn't find a block for ZIP {zip5}. Try another (e.g. 32827 for Lake Nona)."
+            )
+        _set_preview_block(zip5, blocks)
+        draft["_need_zip"] = None
+    elif msg:
         draft["interest"] = msg[:80]
     interest = str(draft.get("interest") or "")
+
+    # Resolve the block to read events from — a ZIP given anywhere in this conversation
+    # (session preview_block_id) counts, not just the persisted profile block. Ask for the
+    # ZIP in-flow rather than dead-ending on "Nothing on your block" when none is known.
+    block_id = resolve_block_id(session_ctx, home_block_id)
+    if not block_id:
+        zip5 = extract_zip(msg) or session_ctx.get("preview_zip")
+        if zip5:
+            blocks = fetch_blocks_for_zip(user_jwt, str(zip5))
+            if blocks:
+                block_id = _set_preview_block(str(zip5), blocks)
+        if not block_id:
+            return _ask_zip(
+                "What's your ZIP code? Once I know your block I can show what's happening nearby."
+            )
 
     # "weekend" is handled by the LLM date matcher too, but keep the SQL-side weekend
     # filter as a cheap pre-narrow when the word appears verbatim.
     weekend_only = bool(re.search(r"\bweekend\b", interest, re.I) or re.search(r"\bweekend\b", msg, re.I))
-    events = _fetch_block_events(user_jwt, home_block_id, weekend_only=weekend_only)
+    events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
     matched, label = _filter_events_by_query(events, interest)
 
     from app.discovery_route import activity_previews_from_events

@@ -49,6 +49,75 @@ _PIVOT_OUT_RE = re.compile(
 )
 
 
+# Lanes this meet capture does NOT own — a confident classification into any of these is a
+# pivot, never an answer to a meet question. (find_activities / meet_seek are THIS lane.)
+_FOREIGN_GOALS = frozenset(
+    {"peers", "both", "propose_intro", "list_intros", "verify", "login",
+     "logout", "show_block_log", "rsvp"}
+)
+_FOREIGN_LINEAR_PREFIXES = ("identity.", "social.", "auth.", "settings.", "tier.")
+_FOREIGN_LINEARS = frozenset(
+    {"discovery.find_peers", "discovery.find_by_attrs", "discovery.find_in_block",
+     "discovery.block_log", "sharing.host", "sharing.swap", "looking.swap",
+     "sharing.tip", "looking.tip"}
+)
+_FOREIGN_SIGNALS = frozenset({"host_meet", "swap_seek", "swap_offer", "tip_seek", "tip_share"})
+
+
+def _is_new_meet_kind(slots: dict[str, Any] | None) -> bool:
+    """The classifier reads this turn as a (re)statement of a meet to look for — i.e. a
+    CHANGED request once a kind is already captured, so we restart fresh rather than treat
+    it as an answer to the current draft."""
+    if not slots:
+        return False
+    from app.layer1_intents import normalize_linear_intent
+
+    goal = str(slots.get("goal") or "")
+    linear = normalize_linear_intent(slots.get("linear_intent")) or ""
+    signal_intent = str(slots.get("signal_intent") or "")
+    return (
+        goal == "activities"
+        or linear == "discovery.find_activities"
+        or (goal == "save_signal" and signal_intent == "meet_seek")
+    )
+
+
+def _is_look_meet_answer(
+    message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None
+) -> bool:
+    """Is this turn a genuine answer/refine/confirm for the meet capture's current step?"""
+    from app.lane_decision import is_confident_foreign, is_meta_or_chat
+
+    # A question / meta turn ("what's my zip?") is never an answer — release so it's
+    # answered, not captured as a meet field.
+    if is_meta_or_chat(slots):
+        return False
+    # A confident pivot to another lane is never an answer to a meet question.
+    if is_confident_foreign(
+        slots,
+        foreign_goals=_FOREIGN_GOALS,
+        foreign_linear_prefixes=_FOREIGN_LINEAR_PREFIXES,
+        foreign_linears=_FOREIGN_LINEARS,
+        foreign_signals=_FOREIGN_SIGNALS,
+    ):
+        return False
+    # On the ready card, only a confirm CTA or a chip edit counts; anything else is a new
+    # request and should release.
+    if session_ctx.get("look_ready"):
+        return bool(_LISTEN_RE.search(message) or re.match(r"\s*fix:\w+\s*$", message))
+    # Mid follow-up (affinity / detail) — any reply answers it.
+    if session_ctx.get("look_pending_ask"):
+        return True
+    draft = session_ctx.get("look_draft")
+    kind_set = isinstance(draft, dict) and bool(str(draft.get("kind") or "").strip())
+    # P1 (no kind yet) — any reply that isn't a foreign pivot IS the "what kind?" answer.
+    if not kind_set:
+        return True
+    # A kind is captured: a fresh meet statement = a changed request → release & restart;
+    # anything else (a day/place/trait detail) refines the current draft → stay.
+    return not _is_new_meet_kind(slots)
+
+
 def look_meet_should_release(
     message: str,
     session_ctx: dict[str, Any],
@@ -56,66 +125,28 @@ def look_meet_should_release(
 ) -> bool:
     """Whether the sticky meet capture should release this turn and hand back to routing.
 
-    Uses the AI classifier's read (the ``abandon`` flag + the intent lane) when ``slots``
-    are supplied — so a *semantic* quit ("eh, maybe later") or a pivot to another intent
-    ("I'd rather meet dads for poker") escapes, not just hard-coded cancel words — and
-    always frees a ready card from any non-confirm message. Stays in the flow for genuine
-    answers, chip edits, the confirm CTA, and explicit cancels (a graceful in-flow exit).
-    """
-    msg = str(message or "").strip()
-    if not msg:
+    Continue-only-on-match: the AI classifier drives the call (its ``abandon`` flag and
+    intent lane); the capture is kept only for a genuine answer / chip edit / confirm CTA
+    (``_is_look_meet_answer``) or an explicit cancel (a graceful in-flow exit). Everything
+    else — a pivot, a vague switch, or a low-confidence read — releases, so the user is
+    never trapped."""
+    from app.lane_decision import lane_should_continue
+
+    # Seed turn: the "A meet or playgroup" button just entered this flow and sends a generic
+    # payload ("I'm looking for a meet or playgroup"). That phrase is the user's EXPLICIT
+    # choice of this lane, not a pivot — and the classifier mis-reads "looking for a meet" as
+    # find_peers. Never release on the seed turn; run P1 ("what kind of meet?") first. After
+    # this turn the flag is consumed, so every later turn re-decides intent as normal.
+    if session_ctx.get("look_meet_skip_seed"):
         return False
-    if _CANCEL_RE.search(msg):
-        return False  # cancel is a graceful in-flow exit, not a reroute
 
-    # AI: a genuine abandon (stop, with no replacement) releases at any point.
-    if slots and slots.get("abandon"):
-        return True
-
-    # Explicit cross-lane phrasing — cheap backstop, independent of the classifier.
-    if _PIVOT_OUT_RE.search(msg):
-        return True
-
-    # AI: read the classifier's lane. Use the RAW goal/intent (not the enriched form,
-    # which maps the benign "continue" answer-goal onto find_peers).
-    if slots:
-        from app.layer1_intents import normalize_linear_intent
-
-        conf = float(slots.get("confidence", 0.0))
-        goal = str(slots.get("goal") or "")
-        linear = normalize_linear_intent(slots.get("linear_intent")) or ""
-        signal_intent = str(slots.get("signal_intent") or "")
-        if conf >= 0.6 and goal not in ("", "continue", "none"):
-            # A confident pivot to a DIFFERENT lane is never an answer to a meet question.
-            if (
-                goal in ("peers", "both", "propose_intro", "list_intros",
-                         "verify", "login", "logout", "show_block_log")
-                or linear.startswith(("identity.", "social.", "auth.", "settings.", "tier."))
-                or linear in ("discovery.find_peers", "discovery.find_by_attrs",
-                              "discovery.find_in_block", "discovery.block_log",
-                              "sharing.host", "sharing.swap", "looking.swap",
-                              "sharing.tip", "looking.tip")
-                or signal_intent in ("host_meet", "swap_seek", "swap_offer",
-                                     "tip_seek", "tip_share")
-            ):
-                return True
-            # A different activity/meet ONCE a kind is captured = a changed request, not an
-            # answer — release so a fresh capture starts. Guarded so it never fires at P1
-            # (no kind yet), where an activity-shaped reply IS the answer to "what kind?".
-            draft = session_ctx.get("look_draft")
-            kind_set = isinstance(draft, dict) and bool(str(draft.get("kind") or "").strip())
-            meet_intent = (
-                goal == "activities"
-                or linear == "discovery.find_activities"
-                or (goal == "save_signal" and signal_intent == "meet_seek")
-            )
-            if kind_set and meet_intent:
-                return True
-
-    # On the ready card, anything that isn't a confirm / chip edit is a new request.
-    if session_ctx.get("look_ready"):
-        return not (_LISTEN_RE.search(msg) or re.match(r"\s*fix:\w+\s*$", msg))
-    return False
+    return not lane_should_continue(
+        message,
+        session_ctx,
+        slots,
+        is_valid_answer=_is_look_meet_answer,
+        pivot_re=_PIVOT_OUT_RE,
+    )
 
 
 def look_meet_user_moved_on(message: str, session_ctx: dict[str, Any]) -> bool:

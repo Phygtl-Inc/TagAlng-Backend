@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.discovery_route import handle_discovery_turn, looks_like_logout
@@ -113,6 +114,22 @@ _EVENING_SUGGESTIONS = ["5 PM", "6 PM", "7 PM"]
 _PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere on the block"]
 # Sentinel suggestion — the FE swaps this chip for a Google place-search field.
 _SEARCH_PLACE_OPTION = "🔍 Search a place"
+
+# Block-local answers that resolve to the host's own block centroid — these need no
+# exact Google pin (there's no Places entry for "my backyard"). Any OTHER venue the
+# host names (a business, a park by name, a street) must be pinned via place-search so
+# we store the exact spot guests can navigate to — not a bare name we'd blind-geocode.
+_GENERIC_PLACES = {
+    "my place", "my home", "my house", "home", "at home", "our place", "my apartment",
+    "my backyard", "backyard", "the backyard", "my yard", "the yard",
+    "the park", "park", "the playground", "playground", "the pool", "the clubhouse",
+    "the community center", "community center", "the courtyard", "the lobby",
+    "the block", "on the block", "somewhere on the block", "my block", "the green",
+}
+
+
+def _is_generic_place(venue: Any) -> bool:
+    return str(venue or "").strip().lower().strip(".!?") in _GENERIC_PLACES
 
 # Host join-settings chip options (capacity / approval / share).
 _CAPACITY_SUGGESTIONS = ["Up to 6", "Up to 10", "Up to 15", "Open · no limit"]
@@ -365,6 +382,21 @@ def run_lana_unified_pipeline(
         ):
             session_ctx[_k] = None
 
+    # Guarantee the home block is persisted the moment a user is verified — independent of
+    # what they do this turn (browse, host, ask a question). Signing up always collects a
+    # ZIP, so a verified user should NEVER be left blockless; this closes the gap where the
+    # block was only saved on the peer-match turn. Idempotent + no-op once a block exists or
+    # when nothing is known yet (anonymous guest with no ZIP — they get asked in-flow).
+    if phone_verified and not home_block_id:
+        try:
+            from app.discovery_route import ensure_home_block_for_verified_user
+
+            assigned = ensure_home_block_for_verified_user(user_jwt, session_ctx=session_ctx)
+            if assigned:
+                home_block_id = assigned  # use it for the rest of THIS turn too
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception("verified_block_assign_failed")
+
     # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
     # structured extraction), the same way event_host_active does. It releases on
     # save, cancel, or a turn cap, so other flows are never affected.
@@ -563,13 +595,17 @@ def run_lana_unified_pipeline(
         turn_ctx["_orchestrator_turn"] = True
         # Keep sticky host mode across turns; clear it the moment the event publishes
         # (new event_id) so we don't re-enter the flow next turn.
+        # If the host gate released this turn (the user pivoted/abandoned), do NOT let a
+        # lingering draft re-pin host mode — that would re-trap the user we just freed.
+        host_released = bool(session_ctx.get("host_released_this_turn"))
+        session_ctx["host_released_this_turn"] = None
         host_active = bool(session_ctx.get("event_host_active"))
         # Self-engage: if the orchestrator is actively shaping an event_draft, pin host
         # mode even when entry classification was fuzzy or the CTA hint didn't arrive.
         draft_in_progress = isinstance(draft, dict) and any(
             draft.get(k) for k in ("title", "venue_name", "starts_at", "affinity_prompt")
         )
-        host_active = host_active or draft_in_progress
+        host_active = host_active or (draft_in_progress and not host_released)
 
         # The orchestrator keeps the event draft in ctx — the 5th return value is None
         # for the `lana` purpose. Source it from ctx so we can attach chips + publish.
@@ -635,10 +671,40 @@ def run_lana_unified_pipeline(
             # dropped, which previously lost the date and made it re-ask "when?".
             wd = turn_ctx.get("event_when_date")
             wt = turn_ctx.get("event_when_time")
-            nd = _resolve_event_date(user_message)
+            # Recover from the draft's persisted starts_at when the session keys were
+            # dropped mid-flow (a de-stick release nulls event_when_date but the orchestrator
+            # rebuilds starts_at from history — so the card kept the date while the step-gate
+            # thought it was missing and re-asked "when?"). The draft is the single source of
+            # truth; back-fill from it before re-deriving from the current message.
+            if (not wd or not wt) and ed.get("starts_at"):
+                from datetime import datetime as _dt_recover
+
+                try:
+                    _existing = _dt_recover.fromisoformat(str(ed["starts_at"]))
+                    if not wd:
+                        wd = _existing.date().isoformat()
+                    if not wt:
+                        wt = _existing.strftime("%H:%M")
+                except (ValueError, TypeError):
+                    pass
+            # AI-first when-resolution: the LLM (anchored on today's date inside
+            # resolve_event_when) handles ordinals ("28th June"), negation ("not on
+            # friday"), and relative phrasing the old regex choked on, and already
+            # snapped any past date to its next future occurrence. It returns None only
+            # when the LLM is unavailable/errors — then we fall back to the regex
+            # resolver. Trusting the model when it DID run also avoids the regex
+            # re-matching a stray weekday ("friday" in "not on friday").
+            from app.event_when import resolve_event_when
+
+            when = resolve_event_when(history=history, user_message=user_message, draft=ed)
+            if when is None:
+                nd = _resolve_event_date(user_message)
+                ntime = _resolve_event_time(user_message)
+            else:
+                nd = when.get("date")
+                ntime = when.get("time")
             if nd:
                 wd = nd
-            ntime = _resolve_event_time(user_message)
             if ntime:
                 wt = ntime
             turn_ctx["event_when_date"] = wd
@@ -706,8 +772,14 @@ def run_lana_unified_pipeline(
             approval_asked = bool(turn_ctx.get("event_approval_asked"))
             share_asked = bool(turn_ctx.get("event_share_asked"))
             settings_done = cap_asked and approval_asked and share_asked
+            # A named venue ("KFC", "Foxtail Coffee") is only resolvable once the host has
+            # picked the exact place (place_id) — otherwise publish would blind-geocode the
+            # name to *some* matching spot. Block-local answers ("my place", "the park")
+            # need no pin; they resolve to the host's block.
+            has_pin = bool(str(ed.get("place_id") or "").strip())
+            venue_resolvable = has_venue and (has_pin or _is_generic_place(ed.get("venue_name")))
             complete = (
-                bool(_title) and bool(wd) and bool(wt) and place_asked and has_venue and settings_done
+                bool(_title) and bool(wd) and bool(wt) and place_asked and venue_resolvable and settings_done
             )
             # Ask the affinity question once, gated ONLY on whether we've asked — not on
             # cohort_tags (the extractor auto-fills those, which used to skip the question).
@@ -802,22 +874,41 @@ def run_lana_unified_pipeline(
                 elif not wt:
                     reply = f"Great — **{_title}**. What time should it start?"
                     ed["suggestions"] = _START_TIME_SUGGESTIONS
-                elif not place_asked or not has_venue:
+                elif not place_asked or not venue_resolvable:
                     # Where-step — asked once. Drop any venue the extractor lifted from
                     # the title so the user answers explicitly (fixes the skipped "where?").
                     if not place_asked:
                         ed.pop("venue_name", None)
                         turn_ctx["event_place_asked"] = True
                         reply = f"Almost there — **{_title}**. Where in the block would you like to host it?"
-                    else:
+                        nearby = _nearby_host_places(
+                            str(session_ctx.get("zip_code") or "").strip() or None,
+                            home_block_id,
+                            user_id,
+                        )
+                        base = (nearby + ["My place"]) if nearby else list(_PLACE_SUGGESTIONS)
+                        ed["suggestions"] = base + [_SEARCH_PLACE_OPTION]
+                    elif not has_venue:
                         reply = f"Where would you like to host **{_title}**?"
-                    nearby = _nearby_host_places(
-                        str(session_ctx.get("zip_code") or "").strip() or None,
-                        home_block_id,
-                        user_id,
-                    )
-                    base = (nearby + ["My place"]) if nearby else list(_PLACE_SUGGESTIONS)
-                    ed["suggestions"] = base + [_SEARCH_PLACE_OPTION]
+                        nearby = _nearby_host_places(
+                            str(session_ctx.get("zip_code") or "").strip() or None,
+                            home_block_id,
+                            user_id,
+                        )
+                        base = (nearby + ["My place"]) if nearby else list(_PLACE_SUGGESTIONS)
+                        ed["suggestions"] = base + [_SEARCH_PLACE_OPTION]
+                    else:
+                        # Host named a venue but hasn't pinned the exact spot. Ask them to
+                        # pick it from search so we store the precise place (place_id) guests
+                        # can navigate to — instead of a bare name we'd blind-geocode.
+                        _vn = str(ed.get("venue_name") or "").strip()
+                        reply = (
+                            f"Which **{_vn}** exactly? Tap to pick it so your guests "
+                            "get the right spot to navigate to."
+                        )
+                        # Search is the goal; "My place" stays as an escape so a host whose
+                        # spot isn't in search (or with no Places key) is never trapped.
+                        ed["suggestions"] = [_SEARCH_PLACE_OPTION, "My place"]
                 elif not cap_asked:
                     reply = f"Great — **{_title}**. How many can come?"
                     ed["suggestions"] = _CAPACITY_SUGGESTIONS
