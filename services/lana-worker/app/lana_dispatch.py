@@ -9,9 +9,17 @@ from app.discovery_slots import discovery_ai_enabled
 from app.guest_login import wants_login as wants_login_intent
 
 LANA_UNIFIED_OPENING = "How can I help you today?"
+# Guests (not logged in) get a framing line that explains the two things Lana does;
+# signed-in moms go straight to the familiar prompt.
+LANA_UNIFIED_OPENING_GUEST = (
+    "I help you do two things · find something nearby · "
+    "or share something with nearby moms."
+)
 
 
-def lana_unified_opening() -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+def lana_unified_opening(
+    is_anonymous: bool = False,
+) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
     ui: dict[str, Any] = {
         "bucket": None,
         "focus_phrase": None,
@@ -28,7 +36,8 @@ def lana_unified_opening() -> tuple[str, str, dict[str, Any], dict[str, Any]]:
             "tool_to_call": None,
         },
     }
-    return LANA_UNIFIED_OPENING, "continue", ctx, ui
+    opening = LANA_UNIFIED_OPENING_GUEST if is_anonymous else LANA_UNIFIED_OPENING
+    return opening, "continue", ctx, ui
 
 
 def lana_unified_turn(

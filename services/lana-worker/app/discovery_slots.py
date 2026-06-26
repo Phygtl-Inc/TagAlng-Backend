@@ -26,6 +26,13 @@ _ZIP_IN_TEXT = re.compile(r"\b(\d{5})\b")
 _SYSTEM = (
     "You are the ONLY router for TagAlng Lana discovery vs chat on each user message. "
     "Output only valid JSON. "
+    "UNDERSTAND, DO NOT PATTERN-MATCH. Users can say ANYTHING, in infinite ways — your job is to "
+    "genuinely understand what THIS user means, then map that meaning to the closest TagAlng "
+    "capability. Every phrase and example in these instructions is an ILLUSTRATION of how to REASON, "
+    "never a checklist of words to match: a message that means the same thing in completely different "
+    "words must be classified the same way, and a message that happens to reuse an example's words but "
+    "MEANS something different must NOT. Reason about intent like a thoughtful human would, not by "
+    "keyword. When you genuinely cannot tell what the user wants, ASK (set clarify) instead of guessing. "
     "CONTEXT FIRST — always read the LATEST USER MESSAGE in the context of RECENT TURNS, "
     "routing_phase, session_active_intent and active_capture, and classify by MEANING, never by "
     "matching a noun in isolation. When active_capture is not 'none', a capture flow is in progress "
@@ -33,6 +40,18 @@ _SYSTEM = (
     "message is: (a) an ANSWER or REFINEMENT of that capture — keep the goal inside that lane (an "
     "activity topic/date/'any'/'whatever' while activity_browse; a meet kind/day/trait while "
     "look_meet; an event detail while event_host); (b) a PIVOT to a different intent — classify that "
+    "new intent normally — but a BARE ACTIVITY or meet kind while active_capture=look_meet is an ANSWER, "
+    "NOT a pivot. (See the look_meet rule below.) "
+    "WHILE active_capture=look_meet, the user is describing the kind of meet they are LOOKING FOR and the "
+    "last assistant turn just asked about it ('what kind of meet?', a day, a trait, who it's for). A bare "
+    "ACTIVITY or meet kind in reply ('stroller walk', 'playground meet', 'coffee & kids', 'library "
+    "storytime', 'park playdate', 'weekday mornings', 'toddler-paced') is the ANSWER to that question → "
+    "linear_intent=looking.meet, goal=save_signal, signal_intent=meet_seek (or goal=continue when only "
+    "refining), high confidence. It is NEVER discovery.find_peers / discovery.find_by_attrs, even though it "
+    "names no people — you FIND people but you MEET through an activity, and this capture already owns the "
+    "activity. Only a clear pivot with a people-search verb ('actually find me moms', 'show neighbors') or "
+    "an explicit switch (host an event, log out, my block log) leaves the look_meet lane. "
+    "Continuing (b): classify that "
     "new intent normally; (c) an ABANDON — set abandon=true; or (d) a QUESTION / meta turn that asks "
     "about the user's own info or the results rather than continuing the task ('what's my zip', "
     "'what's my block', 'who's coming', 'why these', 'what's my name') — set goal=chat (it is NOT an "
@@ -115,6 +134,30 @@ _SYSTEM = (
     "(yes/sure), says they finished uploading, or cancels photo upload; "
     "chat = companionship / profile read / any non-funnel question; "
     "continue = user is answering the current funnel step (supplying ZIP or identity snippet); "
+    "unsafe = the message is inappropriate or abusive and Lana must REFUSE — this takes PRIORITY "
+    "over EVERY other goal (out_of_scope, swap, peers, anything): sexual/NSFW content or requests "
+    "(find me a sex doll, sexual talk, explicit content), harassment/insults/abuse aimed at Lana or "
+    "another person, hate speech or slurs, or requests for help with something illegal or dangerous "
+    "(weapons, drugs, violence, harming someone). Set goal=unsafe, in_discovery=false, and "
+    "unsafe_kind=sexual|abuse|hate|illegal|other. Do NOT treat unsafe content as a swap/tip/out_of_scope "
+    "or a feature request. (Self-harm / domestic-violence / child-safety CRISIS messages are handled "
+    "elsewhere — those are goal=chat, NOT unsafe.) "
+    "out_of_scope = user is asking Lana to PERFORM a real-world errand TagAlng has NO feature for. "
+    "TagAlng ONLY connects neighbors on your block (find/meet people, browse or set up local "
+    "activities, swap items, share local tips, host events). DECIDE BY CONFIDENCE — this is the "
+    "decline-vs-ask gate, so be careful: "
+    "Mark out_of_scope with HIGH confidence (≥0.6) ONLY when the user EXPLICITLY asks YOU to carry "
+    "out an errand you cannot do — an errand verb aimed at Lana: 'deliver/order me a pizza', 'book "
+    "me a taxi/Uber/flight', 'buy me X', 'pay my bill', 'do my taxes', 'send money', 'make a call "
+    "for me'. "
+    "A BARE want with NO errand verb ('I want pizza', 'I need coffee', 'I'd love tacos', 'I want "
+    "a movie') is AMBIGUOUS — it might be a neighbor ACTIVITY the user could organize or join (a "
+    "pizza night, a coffee morning, a movie meetup) rather than an errand Lana must run. Do NOT "
+    "confidently refuse it: set confidence < 0.6 AND clarify='scope' so Lana ASKS whether they want "
+    "to get neighbors together for it vs. have it ordered — NEVER assume the errand on a bare want. "
+    "Set signal_detail to a SHORT noun phrase of the thing ('pizza', 'taxi'). in_discovery=false. "
+    "A request for a RECOMMENDATION of a local place/service ('know a good pizza place') is tip_seek, "
+    "NOT out_of_scope. NEVER route any of this to goal=peers / find_peers just because no other lane fits. "
     "none = not discovery. "
     "abandon (separate boolean, any goal) = the user wants to STOP the activity Lana is currently "
     "helping with (hosting an event, a signal capture, the funnel) ENTIRELY, with NO replacement — "
@@ -200,8 +243,36 @@ _SYSTEM = (
     "WHEN YOU GENUINELY CANNOT TELL — the message fits BOTH equally and the user's goal is truly "
     "underspecified ('I want to do something fun this weekend', 'anything fifa this weekend?', 'help me "
     "find something to do with people') — do NOT guess: set clarify='browse_or_meet' AND still give your "
-    "best-guess linear_intent. In every clear case set clarify=null. Use clarify ONLY for the genuine "
-    "browse-vs-seek tie — never for other intents. "
+    "best-guess linear_intent. Use clarify='browse_or_meet' for the genuine browse-vs-seek tie, and "
+    "clarify='scope' when you cannot tell whether an ask is a supported TagAlng action or an out-of-scope "
+    "errand. "
+    "GENERAL CLARIFY (clarify='intent') — ASK-WHEN-UNSURE is the default: if you are NOT clearly confident "
+    "which SUPPORTED TagAlng action the user wants — the message is vague, blurry, rambling, mixed, or you "
+    "would just be guessing a lane (confidence under ~0.65) — set clarify='intent' instead of guessing. "
+    "MULTIPLE INTENTS IN ONE MESSAGE: if the user mentions MORE THAN ONE distinct supported request in the "
+    "same message (e.g. meet people AND find activities AND give away items), do NOT silently pick one — set "
+    "clarify='intent' and ask which they want to START with, listing the ones you detected as clarify_options. "
+    "A long, multi-part 'I just moved / don't know anyone / kids are bored / want to get rid of stuff' "
+    "message is clarify='intent', NOT a confident find_activities. "
+    "Better to ask one short question than to silently pick the wrong lane. Only leave clarify=null when "
+    "the intent is genuinely clear. The clarify_question MUST be grounded in what TagAlng can actually do "
+    "(gather neighbors for an activity/host, find people, browse local activities, swap items, share/ask a "
+    "local tip) so the user learns the options AND gets unstuck in one tap — e.g. for a blurry message, "
+    "'I want to make sure I help with the right thing — are you hoping to meet neighbors, find something "
+    "happening nearby, or share/ask for a local tip?' with 2-3 matching clarify_options. Prefer scope (bare "
+    "errand-ish want) or browse_or_meet (do-something tie) when those fit; otherwise use intent. "
+    "WHENEVER you set clarify, you MUST also WRITE the question yourself in clarify_question — a warm, "
+    "natural one-line question in Lana's voice that quotes or paraphrases what the USER actually said and "
+    "asks precisely what you need to know to route them (do not output a generic template; sound like a "
+    "real assistant who understood them). Put 2-3 short tap-able answers in clarify_options. For a 'scope' "
+    "clarify on a bare want like 'I want pizza', a good question is e.g. 'Pizza sounds great! Do you want "
+    "to round up neighbors for a pizza night, or are you after a place to order from?' with options like "
+    "['Pizza night with neighbors','Just want to order']. For a multi-intent message like 'i just moved "
+    "here, don't know anyone, my kids are bored and i want to figure out what to do, also i want to get rid "
+    "of some old baby stuff', set clarify='intent' with a question like 'Welcome to the neighborhood! I can "
+    "help a few ways — want to meet neighbors, find things for the kids to do, or pass along that baby "
+    "gear?' and clarify_options ['Meet neighbors','Find kids activities','Give away baby stuff']. Leave "
+    "clarify_question null and clarify_options [] whenever clarify is null. "
     "Set linear_intent: looking.meet for meet_seek, looking.swap for swap_seek, looking.tip for tip_seek, "
     "sharing.swap for swap_offer, sharing.host for host_meet, sharing.tip for tip_share. "
     "When goal=show_block_log set intro_direction null. "
@@ -213,7 +284,9 @@ _SYSTEM = (
     "tier.send_nudge|tier.respond_nudge|social.list_intros|social.propose_intro; "
     "auth.signup_phone|auth.login_phone|auth.logout|auth.upload_photo; "
     "settings.change_name|settings.change_zip|settings.notification_prefs; "
-    "help.what_can_you_do|help.who_are_you. "
+    "help.what_can_you_do|help.who_are_you; "
+    "system.out_of_scope (set with goal=out_of_scope for an errand TagAlng cannot do); "
+    "system.unsafe (set with goal=unsafe for inappropriate/abusive content Lana must refuse). "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
@@ -258,7 +331,18 @@ def discovery_ai_enabled() -> bool:
 
 
 def _extract_model() -> str:
-    """Discovery slots use the orchestrator router model (gpt-4o-mini or Flash)."""
+    """Model for the discovery classifier.
+
+    LANA_DISCOVERY_MODEL overrides JUST this call so the classifier can run a
+    stronger model than the general orchestrator router — set it when the cheap
+    router tier misclassifies ambiguous / multi-intent turns (e.g. gpt-5.4-mini).
+    The override MUST match the active provider() — llm_json routes by provider,
+    not by the model string, so an OpenAI model id requires provider=openai
+    (LANA_LLM_PROVIDER=openai or OPENAI_API_KEY set). Falls back to the router model.
+    """
+    override = os.environ.get("LANA_DISCOVERY_MODEL", "").strip()
+    if override:
+        return override
     if llm_configured():
         return router_model()
     return os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
@@ -291,6 +375,9 @@ def _empty_slots() -> dict[str, Any]:
         "signal_detail": None,
         "signal_category": None,
         "clarify": None,
+        "clarify_question": None,
+        "clarify_options": [],
+        "unsafe_kind": None,
         "abandon": False,
         "confidence": 0.0,
     }
@@ -331,7 +418,7 @@ def ai_parse_discovery_turn(
                         has_profile_photo=has_profile_photo,
                         session_ctx=session_ctx,
                     ),
-                    max_tokens=160,
+                    max_tokens=512,
                     temperature=0.0,
                     llm_attempts=attempts_box,
                 )
@@ -351,7 +438,7 @@ def ai_parse_discovery_turn(
                     has_profile_photo=has_profile_photo,
                     session_ctx=session_ctx,
                 ),
-                max_tokens=160,
+                max_tokens=512,
                 temperature=0.0,
             )
         goal = str(raw.get("goal") or "none").lower()
@@ -370,6 +457,8 @@ def ai_parse_discovery_turn(
             "profile_photo",
             "chat",
             "continue",
+            "out_of_scope",
+            "unsafe",
             "none",
         ):
             goal = "none"
@@ -426,7 +515,19 @@ def ai_parse_discovery_turn(
         linear_raw = str(raw.get("linear_intent") or "").strip().lower()
         linear_intent = linear_raw if linear_raw in LINEAR_INTENTS else None
         clarify_raw = str(raw.get("clarify") or "").strip().lower()
-        clarify = clarify_raw if clarify_raw == "browse_or_meet" else None
+        clarify = clarify_raw if clarify_raw in ("browse_or_meet", "scope", "intent") else None
+        # The classifier writes the clarifying question itself (Lana's voice, contextual) so
+        # the route layer never hardcodes it. Only kept when a clarify is actually set.
+        clarify_question = (str(raw.get("clarify_question") or "").strip()[:300] or None) if clarify else None
+        clarify_options = (
+            [
+                str(o).strip()
+                for o in (raw.get("clarify_options") or [])
+                if isinstance(o, str) and str(o).strip()
+            ][:3]
+            if clarify
+            else []
+        )
         return enrich_slots({
             "in_discovery": bool(raw.get("in_discovery")),
             "linear_intent": linear_intent,
@@ -445,6 +546,9 @@ def ai_parse_discovery_turn(
             "attr_filter": attr_filter_s,
             "peer_name": peer_name_s,
             "clarify": clarify,
+            "clarify_question": clarify_question,
+            "clarify_options": clarify_options,
+            "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
             "confidence": float(raw.get("confidence", 0.0)),
         }, msg=text)
@@ -458,7 +562,10 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
     instead of noun-matching it to a lane. 'none' when no capture is active — so this
     line is inert for every non-capture turn."""
     if session_ctx.get("look_meet_active"):
-        return "look_meet — helping the user describe a meet/playgroup they are LOOKING FOR"
+        return (
+            "look_meet — helping the user describe a meet/playgroup they are LOOKING FOR; "
+            "their reply naming an activity/kind/day/trait stays in looking.meet, NEVER find_peers"
+        )
     if session_ctx.get("activity_browse_active"):
         return "activity_browse — showing events on the user's block; replies refine by topic/date"
     if session_ctx.get("event_host_active"):
@@ -496,7 +603,7 @@ def _discovery_slot_payload(
         '  "linear_intent": "<Layer 1 intent id or null>",\n'
         '  "in_discovery": true|false,\n'
         '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
-        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"none",\n'
+        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"none",\n'
         '  "intro_direction": "sent"|"received"|"all"|null,\n'
         '  "intro_source": "block_log"|"peer_preview"|null,\n'
         '  "intro_list_index": 1-based integer when user picks #N from a shown list, else null,\n'
@@ -507,7 +614,11 @@ def _discovery_slot_payload(
         '  "signal_when": "string or null",\n'
         '  "attr_filter": "string or null",\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
-        '  "clarify": "browse_or_meet"|null,\n'
+        '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
+        '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
+        'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'
+        '  "clarify_options": ["2-3 short tap-able answer labels for that question; else []"],\n'
+        '  "unsafe_kind": "sexual"|"abuse"|"hate"|"illegal"|"other"|null,\n'
         '  "zip": "5-digit string or null",\n'
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'

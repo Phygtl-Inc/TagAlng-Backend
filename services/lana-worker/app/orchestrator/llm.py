@@ -133,6 +133,14 @@ def _claude_client():
     return _claude_client_instance
 
 
+def _openai_uses_completion_tokens(model: str) -> bool:
+    """GPT-5.x and the o-series reasoning models replaced `max_tokens` with
+    `max_completion_tokens` and reject a custom `temperature` (only the default is
+    allowed). Older gpt-4* models still take `max_tokens` + `temperature`."""
+    m = str(model or "").lower()
+    return m.startswith(("gpt-5", "o1", "o3", "o4", "o5"))
+
+
 def _openai_generate(
     *,
     model: str,
@@ -142,16 +150,25 @@ def _openai_generate(
     temperature: float,
 ) -> str:
     client = _openai_client()
-    response = client.chat.completions.create(
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-        messages=[
+    params: dict[str, Any] = {
+        "model": model,
+        "response_format": {"type": "json_object"},
+        "messages": [
             {"role": "system", "content": system + _JSON_RULES},
             {"role": "user", "content": user_payload},
         ],
-    )
+    }
+    if _openai_uses_completion_tokens(model):
+        # GPT-5.x / o-series spend hidden REASONING tokens against this budget BEFORE any
+        # visible output, so a small cap (e.g. the classifier's 512) can be fully consumed
+        # by reasoning, returning EMPTY content — which silently degrades every downstream
+        # read (abandon, clarify, out_of_scope). Give generous headroom. temperature is
+        # fixed at the model default on these models, so it is not sent.
+        params["max_completion_tokens"] = max(int(max_tokens), 4096)
+    else:
+        params["max_tokens"] = max_tokens
+        params["temperature"] = temperature
+    response = client.chat.completions.create(**params)
     choice = response.choices[0].message.content if response.choices else None
     return choice or ""
 

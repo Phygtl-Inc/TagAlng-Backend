@@ -44,6 +44,28 @@ _SAFETY_TEMPLATES = {
     ),
 }
 
+# Deterministic backstop for inappropriate/abusive content. The AI router (system.unsafe)
+# is the primary detector; these high-precision patterns catch egregious cases even if the
+# classifier is bypassed or wrong. Kept narrow to avoid false positives on benign chat.
+_UNSAFE_PATTERNS: list[tuple[str, str]] = [
+    (r"\b(sex doll|blow ?job|porn|nudes?|dick pic|sext|horny|escort|hooker|onlyfans)\b", "sexual"),
+    (r"\bsend (?:me )?(?:your )?nudes?\b", "sexual"),
+    (r"\b(fuck you|cunt|bitch|motherfucker|retard|faggot|nigger|kys)\b", "abuse"),
+    (r"\b(buy|sell|score|get me)\s+(?:some\s+)?(?:cocaine|heroin|meth|crack|fentanyl)\b", "illegal"),
+    (r"\b(build|make)\s+(?:a\s+)?(?:bomb|explosive)\b", "illegal"),
+]
+
+
+def utterance_is_unsafe(utterance: str) -> tuple[bool, str | None]:
+    """Regex backstop for inappropriate/abusive content. Returns (matched, kind). Narrow by
+    design — the AI router is the main path; this only rescues obvious misses."""
+    lower = str(utterance or "").lower()
+    for pattern, kind in _UNSAFE_PATTERNS:
+        if re.search(pattern, lower, re.I):
+            return True, kind
+    return False, None
+
+
 _PII_PHONE = re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
 _PII_SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 

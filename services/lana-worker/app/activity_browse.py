@@ -46,47 +46,60 @@ _PIVOT_OUT_RE = re.compile(
 def reset_activity_browse_state(session_ctx: dict[str, Any]) -> None:
     """Drop the browse flow + its state so the turn falls through to normal routing.
     Keys set to None (not popped) so the {**old, **new} session merge clears them."""
-    for k in ("activity_browse_active", "browse_draft", "activity_previews"):
+    for k in ("activity_browse_active", "browse_draft", "activity_previews", "browse_skip_seed"):
         session_ctx[k] = None
     session_ctx["browse_turns"] = 0
+
+
+# The "yes, listen for me" acceptance of the seek fallback offered when a search comes up
+# empty (search-first model: looking for a meet ≡ searching activities; the seek to be
+# matched is the fallback). "widen" broadens the search instead.
+_ACCEPT_SEEK_RE = re.compile(
+    r"\b(yes|yeah|yep|yup|sure|ok(?:ay)?|please|do it|go ahead|sounds good|listen|"
+    r"text me|notify me|let me know)\b",
+    re.IGNORECASE,
+)
+_WIDEN_RE = re.compile(
+    r"\b(widen|broaden|wider|show all|everything|anything else|other|different|"
+    r"expand)\b",
+    re.IGNORECASE,
+)
 
 
 # Lanes this browse does NOT own — a confident classification into any of these is a
 # pivot, never a browse refinement. Note meet_seek/looking.meet ARE foreign here so the
 # user can switch from browsing events to being matched (handled by look_meet); plain
 # "activities" / find_activities is THIS lane = a re-filter, so it is NOT foreign.
-_FOREIGN_GOALS = frozenset(
-    {"peers", "both", "propose_intro", "list_intros", "verify", "login",
-     "logout", "show_block_log", "rsvp"}
-)
-_FOREIGN_LINEAR_PREFIXES = ("identity.", "social.", "auth.", "settings.", "tier.")
-_FOREIGN_LINEARS = frozenset(
-    {"discovery.find_peers", "discovery.find_by_attrs", "discovery.find_in_block",
-     "discovery.block_log", "looking.meet", "sharing.host", "sharing.swap",
-     "looking.swap", "sharing.tip", "looking.tip"}
-)
-_FOREIGN_SIGNALS = frozenset(
-    {"meet_seek", "host_meet", "swap_seek", "swap_offer", "tip_seek", "tip_share"}
-)
+# What THIS lane owns: browsing/finding existing activities on the block. Everything else
+# (find people, a meet to be matched, host, swap, tip, out_of_scope, unsafe, auth, …) is
+# off-lane and releases — we never enumerate that open-ended set (see is_confident_off_lane).
+_NATIVE_GOALS = frozenset({"activities"})
+_NATIVE_LINEARS = frozenset({"discovery.find_activities", "discovery.find_in_block"})
+_NATIVE_SIGNALS: frozenset[str] = frozenset()
 
 
 def _is_browse_answer(
     message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None
 ) -> bool:
-    """Is this turn an answer/refine for the browse? Any non-foreign message is — the
-    interest at P1, or a re-filter ("show me cricket instead", "anything outdoors")
-    afterwards. A meta/question turn ("what's my zip?") or a confident pivot to another
-    lane is NOT — release so it's answered instead of used as an event filter."""
-    from app.lane_decision import is_confident_foreign, is_meta_or_chat
+    """Is this turn an answer/refine for the browse? A re-filter ("show me cricket instead",
+    "anything outdoors") or a vague reply is — only a confident pivot to another lane, a
+    meta/question turn ("what's my zip?"), or an out_of_scope/unsafe turn releases."""
+    from app.lane_decision import is_confident_off_lane, is_meta_or_chat
 
     if is_meta_or_chat(slots):
         return False
-    return not is_confident_foreign(
+    # Awaiting the reply to the "want me to listen for you?" seek offer (shown when a search
+    # came up empty) — the reply (yes / widen / a new kind) belongs to THIS flow, the same way
+    # look_meet keeps a turn while a follow-up is pending. Stay and let the turn interpret it;
+    # a genuine pivot/abandon already released upstream via cancel / abandon / pivot_re.
+    draft = session_ctx.get("browse_draft")
+    if isinstance(draft, dict) and draft.get("_seek_offer"):
+        return True
+    return not is_confident_off_lane(
         slots,
-        foreign_goals=_FOREIGN_GOALS,
-        foreign_linear_prefixes=_FOREIGN_LINEAR_PREFIXES,
-        foreign_linears=_FOREIGN_LINEARS,
-        foreign_signals=_FOREIGN_SIGNALS,
+        native_goals=_NATIVE_GOALS,
+        native_linears=_NATIVE_LINEARS,
+        native_signals=_NATIVE_SIGNALS,
     )
 
 
@@ -103,6 +116,14 @@ def activity_browse_should_release(
     the user is never trapped. A different ACTIVITY ("show me cricket instead") is a
     refine and stays; switching to being matched (meet_seek) releases."""
     from app.lane_decision import lane_should_continue
+
+    # Seed turn: the "A meet or playgroup" CTA enters this flow with a generic payload
+    # ("I'm looking for a meet or playgroup"), which the classifier mis-reads as meet_seek
+    # (foreign here) and would release on entry — the same seed-turn trap look_meet has. The
+    # button is an explicit choice of the search lane; never release on the seed turn. The
+    # flag is consumed in run_activity_browse_turn, so later turns re-decide as normal.
+    if session_ctx.get("browse_skip_seed"):
+        return False
 
     return not lane_should_continue(
         message,
@@ -320,6 +341,42 @@ def run_activity_browse_turn(
         session_ctx["routing_phase"] = "listening"
         return "No problem — we can look another time. What else can I help with?"
 
+    # ── Seed turn: the "A meet or playgroup" CTA entered with a generic payload; don't mine
+    #    it as an interest — drop it so P1 asks fresh (mirrors look_meet_skip_seed). ──
+    if session_ctx.get("browse_skip_seed"):
+        session_ctx["browse_skip_seed"] = False
+        msg = ""
+
+    # ── Reply to the "want me to listen for you?" seek offer (search came up empty). The
+    #    reply is a tap on a known pill, so read it by label; the lane release already went
+    #    through the AI classifier. Accept → save a minimal seek; widen → drop the filter and
+    #    show everything; a new kind → fall through and re-search. ──
+    if draft.get("_seek_offer"):
+        if _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg):
+            from app.discovery_route import resolve_block_id
+            from app.look_meet import start_meet_seek_from_interest
+
+            interest = str(draft.get("interest") or "").strip()
+            zip_code = str(session_ctx.get("zip") or session_ctx.get("zip_code") or "").strip() or None
+            reply = start_meet_seek_from_interest(
+                interest=interest,
+                session_ctx=session_ctx,
+                user_jwt=user_jwt,
+                block_id=resolve_block_id(session_ctx, home_block_id),
+                zip_code=zip_code,
+            )
+            # Hand the lane off: a guest is now in the verify gate, a verified user is saved.
+            # Either way the browse flow is done (clears activity_browse_active for next turn).
+            reset_activity_browse_state(session_ctx)
+            return reply
+        if _WIDEN_RE.search(msg):
+            draft["interest"] = ""  # clear the filter → show everything below
+            draft["_seek_offer"] = None
+            msg = ""
+        else:
+            # Not an accept/widen tap — treat it as a fresh kind to search for.
+            draft["_seek_offer"] = None
+
     # ── P1: ask the interest ONCE (with chips), unless they already named one ──
     if not draft.get("interest") and not draft.get("_asked"):
         draft["_asked"] = True
@@ -401,6 +458,23 @@ def run_activity_browse_turn(
 
     from app.discovery_route import activity_previews_from_events
 
+    # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
+    # text them when a matching meet appears) rather than dead-ending. The accept/widen reply
+    # is read next turn. No interest (a "show me anything" browse) keeps the generic message.
+    if not matched and interest:
+        draft["_seek_offer"] = True
+        draft["suggestions"] = ["Yes, listen for me", "Widen the search"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["activity_previews"] = []
+        session_ctx["routing_phase"] = "listening"
+        return (
+            f"Nothing like **{interest}** on your block in the next couple weeks. "
+            "Want me to listen and text you the moment a neighbor wants the same — "
+            "or widen the search?"
+        )
+
+    draft["_seek_offer"] = None
     draft["suggestions"] = _INTEREST_SUGGESTIONS
     session_ctx["browse_draft"] = draft
     session_ctx["activity_browse_active"] = True

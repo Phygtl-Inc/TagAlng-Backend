@@ -49,19 +49,13 @@ _PIVOT_OUT_RE = re.compile(
 )
 
 
-# Lanes this meet capture does NOT own — a confident classification into any of these is a
-# pivot, never an answer to a meet question. (find_activities / meet_seek are THIS lane.)
-_FOREIGN_GOALS = frozenset(
-    {"peers", "both", "propose_intro", "list_intros", "verify", "login",
-     "logout", "show_block_log", "rsvp"}
-)
-_FOREIGN_LINEAR_PREFIXES = ("identity.", "social.", "auth.", "settings.", "tier.")
-_FOREIGN_LINEARS = frozenset(
-    {"discovery.find_peers", "discovery.find_by_attrs", "discovery.find_in_block",
-     "discovery.block_log", "sharing.host", "sharing.swap", "looking.swap",
-     "sharing.tip", "looking.tip"}
-)
-_FOREIGN_SIGNALS = frozenset({"host_meet", "swap_seek", "swap_offer", "tip_seek", "tip_share"})
+# What THIS meet capture owns: looking for a meet (meet_seek) and browsing activities to
+# find one (find_activities is search-first for a meet). Everything else — find people,
+# host, swap, tip, out_of_scope, unsafe, auth, … — is off-lane and releases. We list only
+# what we own; the open-ended rest is handled generically (see is_confident_off_lane).
+_NATIVE_GOALS = frozenset({"activities"})
+_NATIVE_LINEARS = frozenset({"discovery.find_activities", "looking.meet"})
+_NATIVE_SIGNALS = frozenset({"meet_seek"})
 
 
 def _is_new_meet_kind(slots: dict[str, Any] | None) -> bool:
@@ -86,19 +80,19 @@ def _is_look_meet_answer(
     message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None
 ) -> bool:
     """Is this turn a genuine answer/refine/confirm for the meet capture's current step?"""
-    from app.lane_decision import is_confident_foreign, is_meta_or_chat
+    from app.lane_decision import is_confident_off_lane, is_meta_or_chat
 
     # A question / meta turn ("what's my zip?") is never an answer — release so it's
     # answered, not captured as a meet field.
     if is_meta_or_chat(slots):
         return False
-    # A confident pivot to another lane is never an answer to a meet question.
-    if is_confident_foreign(
+    # A confident pivot to another lane (or an out_of_scope / unsafe turn) is never an
+    # answer to a meet question.
+    if is_confident_off_lane(
         slots,
-        foreign_goals=_FOREIGN_GOALS,
-        foreign_linear_prefixes=_FOREIGN_LINEAR_PREFIXES,
-        foreign_linears=_FOREIGN_LINEARS,
-        foreign_signals=_FOREIGN_SIGNALS,
+        native_goals=_NATIVE_GOALS,
+        native_linears=_NATIVE_LINEARS,
+        native_signals=_NATIVE_SIGNALS,
     ):
         return False
     # On the ready card, only a confirm CTA or a chip edit counts; anything else is a new
@@ -221,6 +215,43 @@ def save_pending_meet_seek(
         f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
         if matches
         else " I'll text you when another mom wants the same near you."
+    )
+    return f"✅ You're in — I'm listening for a **{_summary(draft)}**.{tail}"
+
+
+def start_meet_seek_from_interest(
+    *,
+    interest: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    block_id: str | None,
+    zip_code: str | None,
+) -> str:
+    """Save a MINIMAL meet seek built from a single interest phrase — the search-first
+    fallback: "looking for a meet" searched the block's activities, found none, and the user
+    said "listen for me". Guests are gated into verify (the seek auto-saves post-verify via
+    save_pending_meet_seek + the existing-account login recovery); verified users save now.
+    Returns Lana's reply. Sets look_draft + look_meet_saved_now so the FE shows the card.
+
+    Callers (e.g. activity_browse) must reset their own lane flags after this — the guest
+    gate only releases the look_meet flags, not theirs.
+    """
+    draft: dict[str, Any] = {"kind": str(interest or "").strip()[:80] or "a meet"}
+    if not session_ctx.get("phone_verified"):
+        return _gate_guest_before_save(session_ctx, draft)
+    saved = _save_meet_seek(draft=draft, user_jwt=user_jwt, block_id=block_id, zip_code=zip_code)
+    if not saved:
+        return "I couldn't set that up just now — say 'listen for me' to retry."
+    draft["signal_id"] = saved.get("signal_id")
+    draft["saved"] = True
+    draft["chips"] = _build_chips(draft)
+    session_ctx["look_draft"] = draft
+    session_ctx["look_meet_saved_now"] = True
+    matches = int(saved.get("matches_created") or 0)
+    tail = (
+        f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+        if matches
+        else " I'll text you when a mom wants the same near you."
     )
     return f"✅ You're in — I'm listening for a **{_summary(draft)}**.{tail}"
 
@@ -598,14 +629,23 @@ def run_look_meet_turn(
     session_ctx["look_meet_active"] = True
     session_ctx["look_ready"] = True
     session_ctx["routing_phase"] = "listening"
+    # Guests aren't saved until they verify (tapping "Start listening" gates into signup,
+    # then auto-saves). Say so up front so the "I'll text you" promise doesn't read as
+    # already-listening — sign-up comes first, then the seek is created.
+    guest = not session_ctx.get("phone_verified")
+    listen_promise = (
+        "**Start listening for me** — I'll get you signed up, then text you when a mom wants the same"
+        if guest
+        else "**Start listening for me** and I'll text you when a mom wants the same"
+    )
     if events:
         n = len(events)
         return (
             f"Here's what I've got — **{_summary(draft)}**. I also found {n} meet"
             f"{'s' if n != 1 else ''} on your block you could join — take a look below, or "
-            "**Start listening for me** and I'll text you when a mom wants the same."
+            f"{listen_promise}."
         )
     return (
-        f"Here's what I've got — **{_summary(draft)}**. **Start listening for me** and "
-        "I'll text you when a mom wants the same, or send it to a mom you know."
+        f"Here's what I've got — **{_summary(draft)}**. {listen_promise}, "
+        "or send it to a mom you know."
     )

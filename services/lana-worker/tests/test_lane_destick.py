@@ -6,7 +6,7 @@ import unittest
 
 from app.activity_browse import activity_browse_should_release as browse_release
 from app.discovery_route import _is_host_answer
-from app.lane_decision import is_confident_foreign, lane_should_continue
+from app.lane_decision import is_confident_off_lane, lane_should_continue
 from app.look_meet import look_meet_should_release as look_release
 
 
@@ -44,10 +44,18 @@ class LaneShouldContinueTests(unittest.TestCase):
             lane_should_continue("sports", {}, _slots(conf=0.2), is_valid_answer=lambda *a: True)
         )
 
-    def test_confident_foreign_requires_confidence_and_concrete_goal(self):
-        self.assertFalse(is_confident_foreign(_slots("peers", conf=0.3), foreign_goals=frozenset({"peers"})))
-        self.assertFalse(is_confident_foreign(_slots("continue", conf=0.9), foreign_goals=frozenset({"peers"})))
-        self.assertTrue(is_confident_foreign(_slots("peers", conf=0.9), foreign_goals=frozenset({"peers"})))
+    def test_off_lane_requires_confidence_and_concrete_goal(self):
+        # native lane = "activities"; a confident non-native goal is off-lane, vague/low-conf is not.
+        native = frozenset({"activities"})
+        self.assertFalse(is_confident_off_lane(_slots("peers", conf=0.3), native_goals=native))
+        self.assertFalse(is_confident_off_lane(_slots("continue", conf=0.9), native_goals=native))
+        self.assertTrue(is_confident_off_lane(_slots("peers", conf=0.9), native_goals=native))
+        self.assertFalse(is_confident_off_lane(_slots("activities", conf=0.9), native_goals=native))
+
+    def test_out_of_scope_and_unsafe_always_release(self):
+        # Universal exits: off-lane for ANY lane regardless of what it natively owns.
+        self.assertTrue(is_confident_off_lane(_slots("out_of_scope", conf=0.9), native_goals=frozenset()))
+        self.assertTrue(is_confident_off_lane(_slots("unsafe", conf=0.9), native_goals=frozenset()))
 
 
 class ActivityBrowseReleaseTests(unittest.TestCase):

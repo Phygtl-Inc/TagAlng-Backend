@@ -29,6 +29,25 @@ def _action(
     return row
 
 
+def clarify_chip_actions(options: list[str]) -> list[dict[str, Any]]:
+    """Tap-able answers for a clarify question (scope / browse-vs-meet). Tapping posts the
+    label back as a normal message, which the next turn re-classifies to route the user."""
+    rows: list[dict[str, Any]] = []
+    for i, opt in enumerate(options):
+        label = str(opt or "").strip()
+        if not label:
+            continue
+        rows.append(
+            _action(
+                action_id=f"clarify_{i}",
+                label=label,
+                message=label,
+                style="primary" if i == 0 else "secondary",
+            )
+        )
+    return rows[:3]
+
+
 def intro_respond_actions(
     *,
     nickname: str | None = None,
@@ -240,9 +259,18 @@ def attach_intro_row_actions(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def activity_browse_actions() -> list[dict[str, Any]]:
-    """Interest refine chips for the agentic 'what's happening' browse — tapping one
-    posts the label back, which the browse flow reads as the interest / re-filter."""
+def activity_browse_actions(ctx: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Pills for the agentic browse. Normally interest refine chips (tap → re-filter). When a
+    search came up empty we instead offer the seek fallback (listen for me / widen) — tapping
+    posts the label back, which run_activity_browse_turn reads as accept/widen."""
+    draft = (ctx or {}).get("browse_draft")
+    if isinstance(draft, dict) and draft.get("_seek_offer"):
+        return [
+            _action(action_id="browse_seek_yes", label="Yes, listen for me",
+                    message="Yes, listen for me", style="primary"),
+            _action(action_id="browse_seek_widen", label="Widen the search",
+                    message="Widen the search", style="secondary"),
+        ]
     return [
         _action(
             action_id=f"browse_{label.split()[0].lower()}",
@@ -275,12 +303,20 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
         UI_INTENT_SIGNAL_SAVED,
     )
 
+    # Clarify questions (scope / browse-vs-meet) carry their tap-able answers here. They
+    # render regardless of ui_intent (the turn is otherwise a plain "chat" reply).
+    clarify_opts = ctx.get("clarify_options")
+    if isinstance(clarify_opts, list) and clarify_opts:
+        chips = clarify_chip_actions([str(o) for o in clarify_opts])
+        if chips:
+            return chips
+
     if ui_intent == UI_INTENT_EVENT_CREATED:
         return event_created_actions()
 
     # Agentic browse — refine chips so the user can narrow ("Sports", "Outdoors").
     if ui_intent == UI_INTENT_SHOW_ACTIVITY_PREVIEW and ctx.get("activity_browse_active"):
-        return activity_browse_actions()
+        return activity_browse_actions(ctx)
 
     if ui_intent == UI_INTENT_RESPOND_PENDING_INTRO:
         pending = ctx.get("pending_intro_respond")
