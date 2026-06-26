@@ -2937,6 +2937,98 @@ def _pivots_out_of_host(msg: str) -> bool:
     return bool(_HOST_PIVOT_RE.search(str(msg or "").strip()))
 
 
+# Lanes the host capture does NOT own — a confident classification into any is a pivot
+# away from hosting (sharing.host / host_meet is THIS lane). Browsing events
+# (find_activities) and looking for a meet (meet_seek) are pivots too.
+_HOST_FOREIGN_GOALS = frozenset(
+    {"peers", "both", "propose_intro", "list_intros", "verify", "login",
+     "logout", "show_block_log", "rsvp", "activities"}
+)
+_HOST_FOREIGN_LINEAR_PREFIXES = ("identity.", "social.", "auth.", "settings.", "tier.")
+_HOST_FOREIGN_LINEARS = frozenset(
+    {"discovery.find_peers", "discovery.find_by_attrs", "discovery.find_in_block",
+     "discovery.block_log", "discovery.find_activities", "looking.meet",
+     "sharing.swap", "looking.swap", "sharing.tip", "looking.tip"}
+)
+_HOST_FOREIGN_SIGNALS = frozenset({"meet_seek", "swap_seek", "swap_offer", "tip_seek", "tip_share"})
+
+
+def _host_confident_foreign(slots: dict[str, Any] | None) -> bool:
+    """AI-driven: the classifier confidently reads this turn as a DIFFERENT lane, so the
+    host capture should release rather than treat it as an event detail."""
+    from app.lane_decision import is_confident_foreign
+
+    return is_confident_foreign(
+        slots,
+        foreign_goals=_HOST_FOREIGN_GOALS,
+        foreign_linear_prefixes=_HOST_FOREIGN_LINEAR_PREFIXES,
+        foreign_linears=_HOST_FOREIGN_LINEARS,
+        foreign_signals=_HOST_FOREIGN_SIGNALS,
+    )
+
+
+def _host_confident_foreign_action(slots: dict[str, Any] | None) -> bool:
+    """Like ``_host_confident_foreign`` but WITHOUT the goal match — only a concrete foreign
+    ACTION (a foreign linear_intent / signal_intent, e.g. find_activities, meet_seek,
+    find_peers). Used at the naming step, where a legitimate title that names an activity
+    ("Soccer in the park") reads as bare goal="activities" — that must stay as the title —
+    but an explicit pivot ("I wanna search a meet") carries a concrete foreign action and
+    must release, so the very first step can never trap the user (see [[no-sticky-flows]])."""
+    from app.lane_decision import is_confident_foreign
+
+    return is_confident_foreign(
+        slots,
+        foreign_linear_prefixes=_HOST_FOREIGN_LINEAR_PREFIXES,
+        foreign_linears=_HOST_FOREIGN_LINEARS,
+        foreign_signals=_HOST_FOREIGN_SIGNALS,
+    )
+
+
+def _is_host_answer(
+    message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None
+) -> bool:
+    """Is this turn a genuine answer to the host flow's CURRENT step?
+
+    While we're collecting a specific field, the reply IS that field — but the classifier
+    mis-reads a venue name ("South Econ Community Park") as discovery.find_activities and a
+    capacity chip ("Open · no limit") as off-lane noise. Taking those as confident pivots
+    used to release host mode mid-build, wiping the draft + the resolved date, so the flow
+    re-asked "when?" with the date still showing in the card. Step-awareness suppresses
+    that false positive; an explicit pivot (``_HOST_PIVOT_RE``), an abandon, or a meta /
+    question turn still releases."""
+    from app.lane_decision import is_meta_or_chat
+
+    # A question / meta turn ("what's my zip?", "who's coming?") is never a field answer —
+    # let normal routing answer it instead of capturing it as an event detail.
+    if is_meta_or_chat(slots):
+        return False
+    draft = session_ctx.get("event_draft")
+    draft = draft if isinstance(draft, dict) else {}
+    has_title = bool(str(draft.get("title") or "").strip())
+    has_venue = bool(str(draft.get("venue_name") or "").strip())
+    place_asked = bool(session_ctx.get("event_place_asked"))
+    cap_asked = bool(session_ctx.get("event_cap_asked"))
+    # Naming step (no title yet) — the reply is normally the title, BUT the AI must still be
+    # able to pivot the user out: a confident read of a concrete other action ("I wanna
+    # search a meet" -> find_activities / meet_seek) releases, so the first step never traps.
+    # A bare title that merely reads as goal="activities" ("Soccer in the park") still stays.
+    # An abandon ("I dont wanna host anything") is the AI's `abandon` flag, handled by the
+    # release gate — not this predicate (see [[no-sticky-flows]]).
+    if not has_title:
+        return not _host_confident_foreign_action(slots)
+    # Where-step (asked where, no venue pinned yet) — any reply is the place, even when the
+    # classifier reads a venue name as a find_activities search.
+    if place_asked and not has_venue:
+        return True
+    # Settings steps (capacity → approval → share, asked after place) — the chip taps
+    # classify as noise, not a host detail.
+    if cap_asked:
+        return True
+    # Otherwise (when / time, between title and the where-step) — a normal answer stays;
+    # only a confident pivot to another lane releases.
+    return not _host_confident_foreign(slots)
+
+
 def _release_host_mode(session_ctx: dict[str, Any]) -> None:
     """Exit the sticky event-host flow and drop the in-progress draft, so a later
     'host an event' starts clean instead of resuming this abandoned one. Keys are set
@@ -3244,20 +3336,45 @@ def _user_nickname(user_id: str | None) -> str | None:
         return None
 
 
+def ensure_home_block_for_verified_user(
+    user_jwt: str, *, session_ctx: dict[str, Any]
+) -> str | None:
+    """Persist a verified user's home block from whatever block/ZIP we know in the session.
+    Called at the top of every turn for a verified user with no home_block_id — so signing
+    up always leaves you with a block, never stranded. Returns the assigned block id, or
+    None when nothing is known yet (e.g. a guest who hasn't given a ZIP)."""
+    return _try_assign_home_block(user_jwt, session_ctx=session_ctx, home_block_id=None)
+
+
 def _try_assign_home_block(
     user_jwt: str,
     *,
     session_ctx: dict[str, Any],
     home_block_id: str | None,
 ) -> str | None:
-    """Persist preview block on user after phone verify (required for vector match)."""
+    """Persist the user's home block after phone verify (required for vector match AND for
+    the activity browse to find events). Resolves the block from, in order: an already-set
+    home_block_id, the session preview block, or a known ZIP (session preview_zip/zip)
+    re-resolved to a block — the last covers the case where the session preview block was
+    lost across the anonymous→registered identity switch but a ZIP is still around."""
     if home_block_id:
         return home_block_id
     bid = resolve_block_id(session_ctx, None)
+    zip5 = (
+        session_ctx.get("preview_zip")
+        or session_ctx.get("zip")
+        or session_ctx.get("zip_code")
+    )
+    if not bid and zip5:
+        try:
+            blocks = fetch_blocks_for_zip(user_jwt, str(zip5))
+        except HTTPException:
+            blocks = []
+        if blocks:
+            bid = str(blocks[0].get("block_id") or "")
     if not bid:
         return None
     payload: dict[str, Any] = {"p_block_id": bid}
-    zip5 = session_ctx.get("preview_zip")
     if zip5:
         payload["p_home_zip"] = str(zip5)
     try:
@@ -3986,14 +4103,34 @@ def handle_discovery_turn(
             PHASE_AWAIT_SIGNUP_PHONE,
             PHASE_AWAIT_SIGNUP_OTP,
         )
-        wants_out = (
-            bool(slots.get("abandon")) or is_signal_cancel(msg) or _pivots_out_of_host(msg)
+        # A pivot is an explicit cross-lane phrase OR the classifier confidently reading the
+        # turn as a different intent (AI-driven, not just keywords) — either falls through to
+        # the new intent's handler. abandon/cancel with no replacement gets an acknowledgement.
+        # The confident-foreign read is suppressed when the message is a valid answer to the
+        # host step we're on (a venue name reads as find_activities, a capacity chip as
+        # off-lane), so a normal answer no longer releases the flow + drops the draft.
+        confident_foreign = _host_confident_foreign(slots) and not _is_host_answer(
+            msg, session_ctx, slots
+        )
+        pivoted_away = _pivots_out_of_host(msg) or confident_foreign
+        # Seed turn: the "A meet to host" button (or the host-entry regex) JUST entered this
+        # flow deterministically, with payload "I want to host a meet" — that 'meet' noun can
+        # read as find_activities, so re-classifying the button's own payload would release the
+        # flow on turn 1 (the look_meet seed bug, mirrored). The entry is an explicit choice;
+        # never release on turn 0 — run the flow. Later turns re-decide intent normally.
+        seed_turn = int(session_ctx.get("event_host_turns") or 0) == 0 and not host_verifying
+        # Back out when the AI reads the turn as an abandon ("I dont wanna host anything" — no
+        # replacement), on a hard cancel word, or on a pivot to another lane. No keyword
+        # matching for the back-out — the AI's `abandon` flag is what decides it.
+        wants_out = not seed_turn and (
+            bool(slots.get("abandon")) or is_signal_cancel(msg) or pivoted_away
         )
         if wants_out:
             _release_host_mode(session_ctx)
+            session_ctx["host_released_this_turn"] = True
             # A pivot ("find people") falls through so its target handler answers; a plain
             # back-out gets an explicit acknowledgement, not a silent topic switch.
-            if not _pivots_out_of_host(msg):
+            if not pivoted_away:
                 return (
                     "No worries — we don't have to set up an event. Want to find neighbors, "
                     "see what's happening on your block, or something else?",
@@ -4017,6 +4154,9 @@ def handle_discovery_turn(
     if phone_verified and session_ctx.get("look_seek_pending"):
         from app.look_meet import save_pending_meet_seek
 
+        # Persist the home block at this verify boundary too (same reason as post-verify).
+        if not home_block_id:
+            _try_assign_home_block(user_jwt, session_ctx=session_ctx, home_block_id=home_block_id)
         zip_code = str(session_ctx.get("zip") or session_ctx.get("zip_code") or "").strip() or None
         pending_reply = save_pending_meet_seek(
             session_ctx=session_ctx,
@@ -4161,6 +4301,56 @@ def handle_discovery_turn(
     # so the next step that needs ZIP can still switch into the phone-gate UI.
     if not phone_verified and _turn_wants_signup_gate(msg, slots, session_ctx):
         session_ctx["pending_signup_gate"] = True
+
+    # ── Mid-signup escape: never silently pin a user at the email/OTP step. A bare answer
+    #    (the code at the OTP step, an email at the email step) is consumed by the step
+    #    handler below. A login pivot is CONFIRMED before we abandon signup; an abandon
+    #    ("forget it") releases gracefully. ──
+    if _signup_verify_in_flight(session_ctx, phase):
+        answering_step = (
+            (phase == PHASE_AWAIT_SIGNUP_OTP and bool(extract_otp_code(msg)))
+            or (phase == PHASE_AWAIT_SIGNUP_PHONE and bool(extract_email(msg)))
+        )
+        pending_switch = str(session_ctx.get("pending_lane_switch") or "")
+        if pending_switch == "login":
+            session_ctx["pending_lane_switch"] = None
+            if not answering_step and _is_affirmative(msg):
+                for _k in ("signup_phone", "pending_signup_gate",
+                           "requires_phone_verification", "pending_post_verify"):
+                    session_ctx[_k] = None
+                login = handle_guest_login(msg, step="early_chat", session_ctx=session_ctx)
+                if login:
+                    reply, ctx = login
+                    ctx["unified_mode"] = True
+                    return reply, ctx, {"outcome": "A", "intent_class": "auth", "confidence": 1.0}, []
+            # Declined the switch (or just answered the step) → resume signup below.
+        elif not answering_step and slots and slots.get("abandon"):
+            for _k in ("signup_phone", "pending_signup_gate",
+                       "requires_phone_verification", "pending_post_verify",
+                       "pending_lane_switch"):
+                session_ctx[_k] = None
+            return (
+                "No problem — we can finish signing up anytime. What would you like to do?",
+                _routing_ctx(session_ctx, phase="listening", active_intent="none"),
+                _discovery_routing_stub("listening"),
+                [],
+            )
+        elif not answering_step and _turn_wants_login(msg, slots, session_ctx):
+            session_ctx["pending_lane_switch"] = "login"
+            keep = (
+                "enter the code to keep signing up"
+                if phase == PHASE_AWAIT_SIGNUP_OTP
+                else "send your email to keep signing up"
+            )
+            return (
+                f"You're in the middle of signing up — switch to signing in instead? "
+                f"Say yes, or {keep}.",
+                _routing_ctx(
+                    session_ctx, phase=phase, signup_phone=session_ctx.get("signup_phone")
+                ),
+                _discovery_routing_stub(phase),
+                [],
+            )
 
     # Continue signup verify sub-flow
     if phase == PHASE_AWAIT_SIGNUP_PHONE:
@@ -4577,6 +4767,41 @@ def handle_discovery_turn(
             [],
         )
 
+    # ── Mid-login escape (mirror of the signup case): if the user is in the login sub-flow
+    #    and asks to CREATE a new account, confirm before abandoning sign-in. A bare email /
+    #    OTP answering the current login step is consumed normally, never treated as a pivot. ──
+    if _login_flow_active(session_ctx):
+        login_answering = bool(extract_email(msg)) or bool(extract_otp_code(msg))
+        pending_switch = str(session_ctx.get("pending_lane_switch") or "")
+        if pending_switch == "signup":
+            session_ctx["pending_lane_switch"] = None
+            if not login_answering and _is_affirmative(msg):
+                ctx = _exit_login_ctx(session_ctx)
+                ctx["routing_phase"] = PHASE_AWAIT_SIGNUP_PHONE
+                ctx["requires_phone_verification"] = True
+                ctx["pending_signup_gate"] = True
+                return (
+                    "Great — let's create your account. What's your email?",
+                    ctx,
+                    _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE),
+                    [],
+                )
+            # Declined the switch (or just answered the login step) → resume login below.
+        elif (
+            not login_answering
+            and not phone_verified
+            and _turn_wants_signup_gate(msg, slots, session_ctx)
+        ):
+            session_ctx["pending_lane_switch"] = "signup"
+            login_phase = str(session_ctx.get("routing_phase") or "await_login_phone")
+            return (
+                "You're signing in right now — switch to creating a NEW account instead? "
+                "Say yes, or enter your login details to keep signing in.",
+                _routing_ctx(session_ctx, phase=login_phase),
+                _discovery_routing_stub(login_phase),
+                [],
+            )
+
     # Login delegated to guest_login (maps guest_step from routing or early)
     login_step = session_ctx.get("guest_step") or (
         "await_login_phone"
@@ -4816,6 +5041,12 @@ def handle_discovery_turn(
 
     # Post-verify funnel before verify gate — JWT may lag one turn after OTP.
     if ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME:
+        # Persist the home block the MOMENT the user is verified — before the name/identity
+        # sub-steps — so someone who pivots away mid-onboarding (e.g. to browse activities)
+        # still has a block, instead of "Nothing on your block" forever. Idempotent + cheap
+        # (no-op once home_block_id exists).
+        if phone_verified and not home_block_id:
+            _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
         if session_ctx.get("awaiting_name_change") or active == "settings.change_name":
             name_turn = _try_awaiting_name_change_turn(
                 msg=msg,

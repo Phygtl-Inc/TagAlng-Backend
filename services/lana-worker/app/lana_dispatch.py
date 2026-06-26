@@ -8,11 +8,7 @@ from app.discovery_route import handle_discovery_turn
 from app.discovery_slots import discovery_ai_enabled
 from app.guest_login import wants_login as wants_login_intent
 
-LANA_UNIFIED_OPENING = (
-    "Hey — I'm Lana, your block concierge. "
-    "Ask me to find neighbors like you, plan something, or tell me about yourself. "
-    "Already have an account? Just say log in."
-)
+LANA_UNIFIED_OPENING = "How can I help you today?"
 
 
 def lana_unified_opening() -> tuple[str, str, dict[str, Any], dict[str, Any]]:

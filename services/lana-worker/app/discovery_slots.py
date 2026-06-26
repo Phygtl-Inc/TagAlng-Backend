@@ -26,10 +26,32 @@ _ZIP_IN_TEXT = re.compile(r"\b(\d{5})\b")
 _SYSTEM = (
     "You are the ONLY router for TagAlng Lana discovery vs chat on each user message. "
     "Output only valid JSON. "
+    "CONTEXT FIRST — always read the LATEST USER MESSAGE in the context of RECENT TURNS, "
+    "routing_phase, session_active_intent and active_capture, and classify by MEANING, never by "
+    "matching a noun in isolation. When active_capture is not 'none', a capture flow is in progress "
+    "and the last assistant turn just asked the user something; decide which of these the latest "
+    "message is: (a) an ANSWER or REFINEMENT of that capture — keep the goal inside that lane (an "
+    "activity topic/date/'any'/'whatever' while activity_browse; a meet kind/day/trait while "
+    "look_meet; an event detail while event_host); (b) a PIVOT to a different intent — classify that "
+    "new intent normally; (c) an ABANDON — set abandon=true; or (d) a QUESTION / meta turn that asks "
+    "about the user's own info or the results rather than continuing the task ('what's my zip', "
+    "'what's my block', 'who's coming', 'why these', 'what's my name') — set goal=chat (it is NOT an "
+    "answer/refinement and must NOT be used as a filter). A short or vague reply ('any', 'whatever', "
+    "'idk', 'sure', 'something else', a bare topic word) DURING an active capture is an ANSWER to what "
+    "was just asked, not a fresh intent — do not force it onto a noun-matched lane. "
     "Discovery funnel = ZIP, giving self-description for matching, preview matches, verify phone, RSVP. "
     "When routing_phase=listening and user wants to meet/find/show/connect with neighbors or people "
     "(any phrasing: 'meet new people', 'make me meet people', 'find me people', 'stop asking questions') "
     "→ goal=peers, in_discovery=true — even if prior turns were casual chat. "
+    "CRITICAL CARVE-OUT — you FIND people but you MEET through an ACTIVITY. The NOUN 'a meet / "
+    "a meetup / a playgroup / a play group / a playdate / a hangout' is an ACTIVITY/EVENT to attend "
+    "or be matched into — it is NEVER goal=peers. 'I'm looking for a meet or playgroup', 'find me a "
+    "playgroup', 'looking for a playdate', 'want a meetup' = the ACTIVITY side: discovery.find_activities "
+    "to browse what exists, or meet_seek (looking.meet) to be matched into one (decide browse-vs-seek by "
+    "the rules below) — but NEVER discovery.find_peers / find_by_attrs. goal=peers is ONLY when the user "
+    "wants to be SHOWN PEOPLE directly ('find/show me moms/dads/neighbors/people', 'who lives near me'); "
+    "'meet PEOPLE/neighbors' (verb meet + a people object) stays goal=peers, but a bare 'a meet/playgroup' "
+    "(the event noun, no people object) is the activity side. "
     "When user is frustrated and demands to see people/users/neighbors → goal=peers, in_discovery=true, NOT chat. "
     "If RECENT TURNS already contain self-description (heritage, family, life stage, short answers like 'toddlers') "
     "and the latest message asks to find/meet people → goal=peers and set identity_snippet synthesized from RECENT TURNS. "
@@ -97,8 +119,10 @@ _SYSTEM = (
     "abandon (separate boolean, any goal) = the user wants to STOP the activity Lana is currently "
     "helping with (hosting an event, a signal capture, the funnel) ENTIRELY, with NO replacement — "
     "classify by MEANING, not keywords. Set abandon=true only for phrasing that means 'stop / not "
-    "now / drop it, and I'm not proposing anything instead': I don't wanna create an event, let's not "
-    "for now, I have mixed feelings, maybe later, actually no, forget it, my plans changed, never mind. "
+    "now / drop it, and I'm not proposing anything instead': I don't wanna create an event, I don't "
+    "wanna host, I don't wanna host anything, I don't wanna host this, I changed my mind about hosting, "
+    "let's not for now, I have mixed feelings, maybe later, actually no, forget it, my plans changed, "
+    "never mind. "
     "CRITICAL — abandon=false when the user rejects the CURRENT plan but proposes a DIFFERENT activity "
     "or detail in the same breath: that is a CHANGE, not a quit. 'I don't wanna host a bbq, what if we "
     "do a movie night?', 'scrap the picnic, let's do brunch', 'not Saturday — make it Sunday', 'make "
@@ -428,6 +452,20 @@ def ai_parse_discovery_turn(
         return _empty_slots()
 
 
+def _active_capture_context(session_ctx: dict[str, Any]) -> str:
+    """A short, human-readable note about which sticky capture (if any) is in progress, so
+    the router judges the latest message in context (answer/refine vs pivot vs abandon)
+    instead of noun-matching it to a lane. 'none' when no capture is active — so this
+    line is inert for every non-capture turn."""
+    if session_ctx.get("look_meet_active"):
+        return "look_meet — helping the user describe a meet/playgroup they are LOOKING FOR"
+    if session_ctx.get("activity_browse_active"):
+        return "activity_browse — showing events on the user's block; replies refine by topic/date"
+    if session_ctx.get("event_host_active"):
+        return "event_host — helping the user CREATE/host an event of their own"
+    return "none"
+
+
 def _discovery_slot_payload(
     text: str,
     *,
@@ -439,14 +477,17 @@ def _discovery_slot_payload(
     has_profile_photo: bool = False,
     session_ctx: dict[str, Any] | None = None,
 ) -> str:
-    active_intent = str((session_ctx or {}).get("active_intent") or "").strip() or "none"
+    sc = session_ctx or {}
+    active_intent = str(sc.get("active_intent") or "").strip() or "none"
+    active_capture = _active_capture_context(sc)
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"
         f"has_identity_in_session: {has_identity}\n"
         f"phone_verified: {phone_verified}\n"
         f"has_profile_photo: {has_profile_photo}\n"
-        f"session_active_intent: {active_intent}\n\n"
+        f"session_active_intent: {active_intent}\n"
+        f"active_capture: {active_capture}\n\n"
         "RECENT TURNS:\n"
         f"{_format_history(history)}\n\n"
         f"LATEST USER MESSAGE:\n{text}\n\n"
