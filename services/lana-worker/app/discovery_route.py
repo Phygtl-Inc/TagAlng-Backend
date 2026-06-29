@@ -3005,6 +3005,13 @@ def _is_host_answer(
     # let normal routing answer it instead of capturing it as an event detail.
     if is_meta_or_chat(slots):
         return False
+    # out_of_scope / unsafe are UNIVERSAL exits — never a host field answer, even at the
+    # place/settings steps where any reply is otherwise taken as the venue/chip. Without this,
+    # "fix my sink" at the where-step is captured as the venue and the user is trapped.
+    _g = str((slots or {}).get("goal") or "")
+    _ln = str((slots or {}).get("linear_intent") or "")
+    if _g in ("out_of_scope", "unsafe") or _ln in ("system.out_of_scope", "system.unsafe"):
+        return False
     draft = session_ctx.get("event_draft")
     draft = draft if isinstance(draft, dict) else {}
     has_title = bool(str(draft.get("title") or "").strip())
