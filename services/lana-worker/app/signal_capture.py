@@ -282,10 +282,16 @@ def needs_confirm(draft: dict[str, Any]) -> tuple[bool, str, str]:
         if not _has_when_hint(str(when_hint)):
             field = "when_hint"
             return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
-    if intent in ("tip_seek", "tip_share"):
+    # tip_seek: the detail IS the searchable thing (e.g. "tax preparer", "plumber"), so don't
+    # force a category — asking "health/food/home?" after the user clearly named what they want
+    # is pure friction, and it was where the subject got overwritten. Infer the category
+    # silently when possible; never block the seek on it. tip_share still asks so a SHARED tip
+    # gets bucketed for others to find.
+    if intent == "tip_share":
         if not category and not _infer_tip_category(detail):
             field = "category"
             return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
+    if intent in ("tip_seek", "tip_share"):
         if intent == "tip_share" and not draft.get("where_hint") and not _has_where_hint(detail):
             field = "where_hint"
             return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)

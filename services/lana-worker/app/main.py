@@ -440,6 +440,33 @@ def _intro_proposal_from_dict(raw: dict[str, Any] | None) -> IntroProposalPayloa
     )
 
 
+def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    """Google Places fallback for an empty tip-seek → tappable cards. maps_url opens the
+    spot in Google Maps (by place_id when available, else a name+address search)."""
+    from urllib.parse import quote_plus
+
+    raw = ctx.get("google_place_suggestions")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for p in raw:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "").strip()
+        if not name:
+            continue
+        addr = str(p.get("address") or "").strip()
+        pid = str(p.get("place_id") or "").strip()
+        if pid:
+            maps_url = f"https://www.google.com/maps/place/?q=place_id:{pid}"
+        else:
+            maps_url = "https://www.google.com/maps/search/?api=1&query=" + quote_plus(
+                f"{name} {addr}".strip()
+            )
+        out.append({"name": name, "address": addr, "place_id": pid or None, "maps_url": maps_url})
+    return out
+
+
 def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRow]:
     out: list[UiActionRow] = []
     for row in derive_ui_actions(ctx, ui_intent):
@@ -831,6 +858,7 @@ def _onboarding_fields(
         "peer_matches": peers,
         "discovery_surface": discovery_surface,
         "activity_previews": activities,
+        "place_suggestions": _place_suggestions_from_ctx(ctx),
         "auth_intent": ctx.get("auth_intent"),
         "login_phone": ctx.get("login_phone"),
         "requires_login_otp": bool(ctx.get("requires_login_otp")),
