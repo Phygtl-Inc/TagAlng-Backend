@@ -170,7 +170,12 @@ from app.layer1_intents import (
     utterance_indicates_tip_seek,
     utterance_indicates_swap_seek,
 )
-from app.layer1_tier import handle_respond_nudge, parse_nudge_response, wants_respond_intro
+from app.layer1_tier import (
+    handle_respond_nudge,
+    is_standalone_affirmation,
+    parse_nudge_response,
+    wants_respond_intro,
+)
 from app.signal_capture import (
     PHASE_SIGNAL_CONFIRM,
     PHASE_SIGNAL_EXTRACT,
@@ -990,9 +995,15 @@ def _try_respond_nudge_turn(
         return None
     if not phone_verified or not wants_respond_intro(msg):
         return None
-    reply, pending, _action = handle_respond_nudge(
+    reply, pending, action = handle_respond_nudge(
         msg, user_jwt=user_jwt, session_ctx=session_ctx
     )
+    # A bare "ok"/"yes" with no pending intro is ambiguous — e.g. the post-verify
+    # handshake the PWA posts after signup/login. Fall through to normal routing
+    # instead of surfacing "I don't see a pending intro waiting on you right now."
+    # Explicit intro references (decline / block / "introduce us") still surface it.
+    if action == "none" and is_standalone_affirmation(msg):
+        return None
     ctx = _routing_ctx(
         dict(session_ctx),
         phase=phase or PHASE_PREVIEW,
@@ -1253,18 +1264,18 @@ def _try_layer1_intent_turn(
         if not block_id:
             zip_from_msg = extract_zip(msg) or slots.get("zip")
             if zip_from_msg:
-                blocks = fetch_blocks_for_zip(user_jwt, zip_from_msg)
-                if blocks:
-                    block_id = str(blocks[0].get("block_id") or "")
+                blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
+                if blk:
+                    block_id = str(blk.get("block_id") or "")
                     ctx_base["preview_block_id"] = block_id
                     ctx_base["preview_zip"] = zip_from_msg
                     ctx_base["preview_block_label"] = str(
-                        blocks[0].get("label") or blocks[0].get("name") or zip_from_msg
+                        blk.get("display_name") or blk.get("label") or blk.get("name") or zip_from_msg
                     )
                 elif not phone_verified:
                     return (
-                        f"I couldn't find blocks for ZIP {zip_from_msg}. Try another ZIP "
-                        "(e.g. 32827 for Lake Nona).",
+                        f"Hmm, {zip_from_msg} doesn't look like a ZIP I can place — mind "
+                        "double-checking the 5 digits?",
                         _routing_ctx(
                             ctx_base,
                             phase=PHASE_NEED_ZIP,
@@ -2039,6 +2050,42 @@ def _try_save_signal_turn(
         stamp_pending_hosting_offer(ctx, ctx["signal_saved"])
     if ctx.get("signal_saved") and isinstance(ctx["signal_saved"], dict):
         ctx["signal_saved"]["matches_created"] = matches_shown
+    # Empty tip-seek → Google Places fallback so the ask isn't a dead end. The seek signal
+    # is already saved above (neighbors can still chime in), so these are clearly labeled as
+    # NOT a neighbor recommendation. Only on the no-match path — populated blocks are
+    # untouched, and a real neighbor rec always wins. Best-effort; never blocks the reply.
+    if intent == "tip_seek" and matches_shown <= 0:
+        try:
+            from app.places import search_places
+
+            # Bias to the user's block: the ZIP lives under several session keys, and an
+            # auto-created block embeds it ('zip-92104'). Without a resolvable centroid the
+            # Places call falls back to an unbiased search near the SERVER (wrong country).
+            zip_for_bias = str(
+                session_ctx.get("zip")
+                or session_ctx.get("preview_zip")
+                or session_ctx.get("zip_code")
+                or ""
+            ).strip()
+            if not zip_for_bias and block_id.startswith("zip-"):
+                zip_for_bias = block_id[len("zip-"):]
+            places = search_places(
+                query=(detail or category or "").strip(),
+                zip_code=zip_for_bias or None,
+                block_id=block_id,
+                limit=3,
+            )
+        except Exception:  # noqa: BLE001 — fallback must never break the saved-signal reply
+            places = []
+        if places:
+            # The list renders as tappable cards (place_suggestions). Keep the reply to
+            # an intro line only so we don't duplicate the names inline.
+            reply = (
+                "No neighbor has recommended one yet, so here's what's nearby (from Google — "
+                "not a neighbor vouch). I've also posted your ask to the block — I'll ping you "
+                "the moment a neighbor recommends one."
+            )
+            ctx["google_place_suggestions"] = places
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
     ctx.pop("activity_previews", None)
     clear_signal_draft(ctx)
@@ -3386,12 +3433,14 @@ def _try_assign_home_block(
         or session_ctx.get("zip_code")
     )
     if not bid and zip5:
+        # resolve-or-create: at verify time a known ZIP must always yield a block (creating
+        # a waitlist block for a new area) so a verified user is never left blockless.
         try:
-            blocks = fetch_blocks_for_zip(user_jwt, str(zip5))
+            blk = resolve_or_create_block_for_zip(user_jwt, str(zip5))
         except HTTPException:
-            blocks = []
-        if blocks:
-            bid = str(blocks[0].get("block_id") or "")
+            blk = None
+        if blk:
+            bid = str(blk.get("block_id") or "")
     if not bid:
         return None
     payload: dict[str, Any] = {"p_block_id": bid}
@@ -3566,6 +3615,36 @@ def fetch_blocks_for_zip(user_jwt: str, zip5: str) -> list[dict[str, Any]]:
     if isinstance(raw, list):
         return [r for r in raw if isinstance(r, dict)]
     return []
+
+
+def resolve_or_create_block_for_zip(user_jwt: str, zip5: str) -> dict[str, Any] | None:
+    """Find a block for the ZIP; if the area isn't covered yet, geocode the ZIP and CREATE a
+    waitlist block so signup is never blocked. Returns a block dict (with block_id +
+    display_name) or None ONLY when the ZIP can't even be geocoded (genuinely invalid)."""
+    blocks = fetch_blocks_for_zip(user_jwt, zip5)
+    if blocks:
+        return blocks[0]
+    # New area: geocode the ZIP and create a waitlist block at that centroid.
+    from app.event_location import geocode_zip
+
+    geo = geocode_zip(zip5)
+    if not geo:
+        return None  # not a placeable ZIP — caller asks the user to re-check it
+    lat, lng, city = geo
+    display = f"{city} ({zip5})" if city else f"ZIP {zip5}"
+    try:
+        raw = call_rpc(
+            user_jwt,
+            "create_block_for_zip",
+            {"p_zip": zip5, "p_lat": lat, "p_lng": lng, "p_city": city, "p_display_name": display},
+        )
+    except HTTPException:
+        return None
+    if isinstance(raw, dict) and raw.get("block_id"):
+        return raw
+    # Unexpected shape — fall back to a re-fetch (the block now exists for this ZIP).
+    blocks = fetch_blocks_for_zip(user_jwt, zip5)
+    return blocks[0] if blocks else None
 
 
 def fetch_preview_peers_on_block(
@@ -5180,17 +5259,17 @@ def handle_discovery_turn(
     block_id = resolve_block_id(session_ctx, home_block_id)
     zip_from_msg = extract_zip(msg) or slots.get("zip")
     if zip_from_msg and not block_id:
-        blocks = fetch_blocks_for_zip(user_jwt, zip_from_msg)
-        if blocks:
-            block_id = str(blocks[0].get("block_id") or "")
+        blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
+        if blk:
+            block_id = str(blk.get("block_id") or "")
             ctx_base["preview_block_id"] = block_id
             ctx_base["preview_zip"] = zip_from_msg
-            ctx_base["preview_block_label"] = str(blocks[0].get("label") or blocks[0].get("name") or zip_from_msg)
+            ctx_base["preview_block_label"] = str(blk.get("display_name") or blk.get("label") or blk.get("name") or zip_from_msg)
 
     if not block_id:
         if zip_from_msg:
             return (
-                f"I couldn't find blocks for ZIP {zip_from_msg}. Try another ZIP (e.g. 32827 for Lake Nona).",
+                f"Hmm, {zip_from_msg} doesn't look like a ZIP I can place — mind double-checking the 5 digits?",
                 _routing_ctx(
                     session_ctx,
                     phase=PHASE_NEED_ZIP,

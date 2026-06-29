@@ -59,12 +59,18 @@ def _places_search_text(
     q = str(query or "").strip()
     if not api_key or len(q) < 2:
         return []
-    body: dict[str, Any] = {"textQuery": q, "maxResultCount": max(1, min(limit, 20))}
     loc = _centroid(zip_code, block_id, user_id)
-    if loc:
-        body["locationBias"] = {
+    if not loc:
+        # No block centroid → do NOT run an unbiased search. Places would return results
+        # near the SERVER's location (e.g. the wrong country), which is worse than nothing.
+        return []
+    body: dict[str, Any] = {
+        "textQuery": q,
+        "maxResultCount": max(1, min(limit, 20)),
+        "locationBias": {
             "circle": {"center": {"latitude": loc[0], "longitude": loc[1]}, "radius": radius}
-        }
+        },
+    }
     try:
         with httpx.Client(timeout=10.0) as client:
             res = client.post(
