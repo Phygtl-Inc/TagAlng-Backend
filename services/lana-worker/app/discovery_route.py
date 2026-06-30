@@ -147,13 +147,16 @@ from app.layer1_handlers import (
     format_peer_detail_reply,
     format_peer_match_explanation,
     format_peer_profile_reply,
-    handle_add_or_edit_claim,
     handle_change_name,
     handle_notification_prefs,
     peers_to_match_rows,
+    persist_identity_from_message,
     summarize_partial_claim_matches,
     stamp_identity_profile_ctx,
 )
+from app.context import load_event_draft_context
+from app.claims_persist import persist_profile_patch, try_upsert_claims_from_message
+from app.profile_intake import format_profile_intake_context, lana_profile_turn
 from app.layer1_intents import (
     LOOKING_SHARING_INTENTS,
     enrich_slots,
@@ -173,6 +176,7 @@ from app.layer1_intents import (
 from app.layer1_tier import (
     handle_respond_nudge,
     is_standalone_affirmation,
+    is_standalone_negation,
     parse_nudge_response,
     wants_respond_intro,
 )
@@ -341,6 +345,7 @@ def _try_identity_slots_turn(
     home_block_id: str | None,
     phase: str,
     user_id: str | None,
+    history: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """AI slots → identity profile / add claim / named neighbor lookup (not regex)."""
     if not discovery_ai_enabled() or not slots_want_identity_profile_handling(slots):
@@ -354,6 +359,7 @@ def _try_identity_slots_turn(
         home_block_id=home_block_id,
         phase=phase,
         user_id=user_id,
+        history=history,
     )
 
 
@@ -366,6 +372,7 @@ def _try_phrase_policy_turn(
     home_block_id: str | None,
     phase: str,
     user_id: str | None,
+    history: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Run phrase overrides before broad regex handlers (respond-nudge, list-intros)."""
     phrase = phrase_linear_intent(msg)
@@ -381,6 +388,7 @@ def _try_phrase_policy_turn(
         home_block_id=home_block_id,
         phase=phase,
         user_id=user_id,
+        history=history,
     )
 
 
@@ -732,6 +740,23 @@ def _try_change_name_turn(
         ctx["nickname"] = nick
         ctx.pop("awaiting_name_change", None)
         ctx.pop("name_change_attempts", None)
+        # The message may carry identity too ("call me Loka, I speak 10 languages").
+        # Capture both, instead of pocketing the name and dropping the rest.
+        if user_id and len(msg.split()) >= 5:
+            try:
+                res = try_upsert_claims_from_message(user_id, msg)
+                ctx["skip_claims_background_extract"] = True
+                if res.saved > 0:
+                    reply = (
+                        reply.rstrip(".")
+                        + f" — and I saved {res.saved} thing"
+                        + ("s" if res.saved != 1 else "")
+                        + " you mentioned."
+                    )
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).exception("change_name_claim_extract_failed")
     else:
         # Couldn't parse a name — await one (the continuation handler caps retries).
         ctx = _routing_ctx(
@@ -998,11 +1023,11 @@ def _try_respond_nudge_turn(
     reply, pending, action = handle_respond_nudge(
         msg, user_jwt=user_jwt, session_ctx=session_ctx
     )
-    # A bare "ok"/"yes" with no pending intro is ambiguous — e.g. the post-verify
-    # handshake the PWA posts after signup/login. Fall through to normal routing
-    # instead of surfacing "I don't see a pending intro waiting on you right now."
+    # A bare "ok"/"yes" or "no"/"that's all" with no pending intro is ambiguous —
+    # e.g. wrapping up profile-building. Fall through to normal routing instead of
+    # the dead-end "I don't see a pending intro waiting on you right now."
     # Explicit intro references (decline / block / "introduce us") still surface it.
-    if action == "none" and is_standalone_affirmation(msg):
+    if action == "none" and (is_standalone_affirmation(msg) or is_standalone_negation(msg)):
         return None
     ctx = _routing_ctx(
         dict(session_ctx),
@@ -1020,6 +1045,57 @@ def _try_respond_nudge_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
+def _identity_conversational_reply(
+    *,
+    user_id: str | None,
+    msg: str,
+    history: list[dict[str, Any]] | None,
+    session_ctx: dict[str, Any],
+    ctx: dict[str, Any],
+) -> str:
+    """Reply for a profile-building turn via the history-aware intake engine.
+
+    One AI brain decides what Lana says: name capture in context, the next curious
+    follow-up, and when to wrap — no regex. Persistence already happened upstream.
+    Falls back to a warm ack if the engine call fails.
+    """
+    import logging
+
+    fallback = "Got it — I've updated your profile. Tell me more about yourself anytime."
+    try:
+        ctx_pack = load_event_draft_context(user_id) if user_id else {}
+        user_block = format_profile_intake_context(ctx_pack)
+        reply, status, turn_ctx, ui = lana_profile_turn(
+            user_block,
+            history or [],
+            msg,
+            ctx_pack=ctx_pack,
+            session_ctx=session_ctx,
+            continuous=True,
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("identity_conversational_reply_failed")
+        return fallback
+
+    # Persist the engine's AI-captured name (e.g. a bare "Drake" read in context).
+    patch = turn_ctx.get("profile_patch") if isinstance(turn_ctx, dict) else None
+    if patch and user_id:
+        try:
+            persist_profile_patch(user_id, patch)
+        except Exception:
+            logging.getLogger(__name__).exception("identity_profile_patch_failed")
+
+    # Carry conversational state for the frontend (threads still come from the dashboard).
+    ctx["profile_turn_status"] = status
+    if ui:
+        ctx["last_ui"] = ui
+    if isinstance(turn_ctx, dict):
+        for key in ("topics_covered", "topics_to_explore"):
+            if key in turn_ctx:
+                ctx[key] = turn_ctx[key]
+    return reply or fallback
+
+
 def _try_layer1_intent_turn(
     *,
     msg: str,
@@ -1030,6 +1106,7 @@ def _try_layer1_intent_turn(
     home_block_id: str | None,
     phase: str,
     user_id: str | None,
+    history: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Layer 1 explicit intents — identity, block summary, settings, help."""
     linear = slots_linear_intent(slots)
@@ -1181,22 +1258,55 @@ def _try_layer1_intent_turn(
     if linear in ("identity.add_claim", "identity.edit_claim"):
         if wants_neighbor_intro(msg) or wants_list_intros_phrase(msg):
             return None
-        reply, saved, pending = handle_add_or_edit_claim(
-            user_id, msg, linear_intent=linear
-        )
+        # Data path: extract + persist claims / kids / nickname (and detect heritage
+        # conflicts). The conversational REPLY is owned by lana_profile_turn — one
+        # AI brain for profile-building, so names, follow-ups, and wrap-up are decided
+        # by meaning in context, not regex.
+        res = persist_identity_from_message(user_id, msg, linear_intent=linear)
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or "listening",
             active_intent=linear,
         )
-        if pending:
-            ctx["pending_heritage_change"] = pending
+        if res.verify_gate:
+            return (
+                "Verify your email first — then I can save identity threads to your profile.",
+                ctx,
+                _discovery_routing_stub(phase or "listening", "identity_need_verify"),
+                [],
+            )
+        # We already persisted inline — don't double-extract in the background.
+        ctx["skip_claims_background_extract"] = True
+        if res.conflict:
+            # Interactive yes/no — must stay synchronous, skip the conversational engine.
+            ctx["pending_heritage_change"] = res.conflict
             ctx["skip_heritage_background_extract"] = True
-            ctx["skip_claims_background_extract"] = True
-        elif saved > 0:
-            ctx.pop("pending_heritage_change", None)
-            ctx.pop("skip_heritage_background_extract", None)
-        if saved > 0 and phone_verified:
+            ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "heritage_conflict")
+            return res.conflict_prompt, ctx, ctx["last_routing"], []
+        ctx.pop("pending_heritage_change", None)
+        ctx.pop("skip_heritage_background_extract", None)
+
+        if res.dismissed > 0:
+            # An explicit removal/edit — confirm deterministically; the conversational
+            # "tell me about yourself" engine would be wrong right after a deletion.
+            parts = [f"removed {res.dismissed}"]
+            if res.saved > 0:
+                parts.append(f"updated {res.saved}")
+            reply = (
+                "Done — I "
+                + " and ".join(parts)
+                + f" identity thread{'s' if res.total != 1 else ''} on your profile."
+            )
+        else:
+            # Conversational reply via the profile-intake engine (history-aware).
+            reply = _identity_conversational_reply(
+                user_id=user_id,
+                msg=msg,
+                history=history,
+                session_ctx=session_ctx,
+                ctx=ctx,
+            )
+        if res.total > 0 and phone_verified:
             try:
                 dashboard = fetch_identity_dashboard(user_jwt)
                 stamp_identity_profile_ctx(ctx, dashboard)
@@ -4826,6 +4936,7 @@ def handle_discovery_turn(
         home_block_id=home_block_id,
         phase=phase,
         user_id=user_id,
+        history=history,
     )
     if identity_slots_turn is not None:
         reply, ctx, routing, peers = identity_slots_turn
@@ -4840,6 +4951,7 @@ def handle_discovery_turn(
         home_block_id=home_block_id,
         phase=phase,
         user_id=user_id,
+        history=history,
     )
     if phrase_turn is not None:
         reply, ctx, routing, peers = phrase_turn
@@ -4984,6 +5096,7 @@ def handle_discovery_turn(
             home_block_id=home_block_id,
             phase=phase,
             user_id=user_id,
+            history=history,
         )
         if layer1_turn is not None:
             reply, ctx, routing, peers = layer1_turn
