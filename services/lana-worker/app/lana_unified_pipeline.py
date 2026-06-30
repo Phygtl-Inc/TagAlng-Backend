@@ -164,15 +164,17 @@ def _parse_event_settings(message: str, settings: dict[str, Any]) -> None:
         settings["allow_attendee_share"] = True
 
 
-def _nearby_host_places(
+def _nearby_host_place_rows(
     zip_code: str | None, block_id: str | None, user_id: str | None
-) -> list[str]:
-    """Real nearby venues to host at (Google Places around the block). [] with no key
-    or no results, so the where-step falls back to the generic chips."""
+) -> list[dict[str, Any]]:
+    """Real nearby venues to host at (Google Places around the block), WITH the exact
+    pin (name/place_id/lat/lng/address) — so a tapped suggestion can be stamped directly
+    instead of bouncing the host into "Which X exactly?". [] with no key or no results,
+    so the where-step falls back to the generic chips."""
     try:
-        from app.places import nearby_place_suggestions
+        from app.places import search_places
 
-        return nearby_place_suggestions(
+        return search_places(
             query="park playground community center",
             zip_code=zip_code,
             block_id=block_id,
@@ -181,6 +183,31 @@ def _nearby_host_places(
         )
     except Exception:  # noqa: BLE001 - best-effort
         return []
+
+
+def _where_step_chips(
+    session_ctx: dict[str, Any], home_block_id: str | None, user_id: str | None,
+    turn_ctx: dict[str, Any],
+) -> list[str]:
+    """Where-step chips: real nearby places (+ "My place") or the generic fallback, plus
+    Search. Stashes the nearby places' pins on turn_ctx keyed by their chip label, so the
+    next turn can stamp the exact spot when the host taps one (see the auto-pin above)."""
+    rows = _nearby_host_place_rows(
+        str(session_ctx.get("zip_code") or "").strip() or None,
+        home_block_id,
+        user_id,
+    )
+    names: list[str] = []
+    candidates: dict[str, Any] = {}
+    for r in rows:
+        nm = str((r or {}).get("name") or "").strip()[:60]
+        if nm and nm not in names and str((r or {}).get("place_id") or "").strip():
+            names.append(nm)
+            candidates[nm.lower()] = {**r, "name": nm}
+    if candidates:
+        turn_ctx["event_place_candidates"] = candidates
+    base = (names + ["My place"]) if names else list(_PLACE_SUGGESTIONS)
+    return base + [_SEARCH_PLACE_OPTION]
 
 # Bare words the extractor mistakes for a title (from "host a meet" etc.) — not real names.
 _GENERIC_TITLES = {
@@ -833,6 +860,39 @@ def run_lana_unified_pipeline(
             # name to *some* matching spot. Block-local answers ("my place", "the park")
             # need no pin; they resolve to the host's block.
             has_pin = bool(str(ed.get("place_id") or "").strip())
+            # Auto-pin a tapped nearby suggestion. Those chips are real Google places we
+            # surfaced WITH a pin (place_id/lat/lng), but the chip only sends its NAME, so
+            # the extractor leaves it unpinned and the host gets bounced into "Which X
+            # exactly?". Match the tapped label to the stashed candidate and stamp it
+            # directly — same shape as the /event-venue Search pick.
+            if place_asked and not has_pin:
+                _cands = session_ctx.get("event_place_candidates")
+                _row = (
+                    _cands.get(str(user_message).strip().lower())
+                    if isinstance(_cands, dict)
+                    else None
+                )
+                if isinstance(_row, dict) and str(_row.get("place_id") or "").strip():
+                    ed["venue_name"] = str(_row.get("name") or user_message).strip()
+                    ed["venue_address"] = _row.get("address")
+                    ed["place_id"] = _row.get("place_id")
+                    ed["venue_lat"] = _row.get("lat")
+                    ed["venue_lng"] = _row.get("lng")
+                    has_venue = True
+                    has_pin = True
+            # Generic-place escape — when the host taps/types a block-local answer
+            # ("My place", "the park", "somewhere on the block") at the where-step, the
+            # LLM extractor leaves venue_name pinned to a previously-named spot
+            # ("Randal Park Community Center"): "My place" isn't a "place name" per the
+            # extractor prompt, so it returns null and the monotonic merge keeps the old
+            # venue — trapping the host in the "Which X exactly?" disambiguation loop.
+            # A generic place needs no Google pin (it resolves to the host's block), so
+            # capture it deterministically from the user's own message here. Gate on
+            # place_asked (don't grab a stray "the park" from an earlier step) and skip
+            # when a precise pin already exists (a Search pick shouldn't be clobbered).
+            if place_asked and not has_pin and _is_generic_place(user_message):
+                ed["venue_name"] = str(user_message).strip()
+                has_venue = True
             venue_resolvable = has_venue and (has_pin or _is_generic_place(ed.get("venue_name")))
             complete = (
                 bool(_title) and bool(wd) and bool(wt) and place_asked and venue_resolvable and settings_done
@@ -870,6 +930,7 @@ def run_lana_unified_pipeline(
                     turn_ctx["event_when_time"] = None
                     turn_ctx["event_place_asked"] = False
                     turn_ctx["event_venue"] = None
+                    turn_ctx["event_place_candidates"] = None
                     turn_ctx["event_settings"] = None
                     turn_ctx["event_cap_asked"] = False
                     turn_ctx["event_approval_asked"] = False
@@ -937,22 +998,14 @@ def run_lana_unified_pipeline(
                         ed.pop("venue_name", None)
                         turn_ctx["event_place_asked"] = True
                         reply = f"Almost there — **{_title}**. Where in the block would you like to host it?"
-                        nearby = _nearby_host_places(
-                            str(session_ctx.get("zip_code") or "").strip() or None,
-                            home_block_id,
-                            user_id,
+                        ed["suggestions"] = _where_step_chips(
+                            session_ctx, home_block_id, user_id, turn_ctx
                         )
-                        base = (nearby + ["My place"]) if nearby else list(_PLACE_SUGGESTIONS)
-                        ed["suggestions"] = base + [_SEARCH_PLACE_OPTION]
                     elif not has_venue:
                         reply = f"Where would you like to host **{_title}**?"
-                        nearby = _nearby_host_places(
-                            str(session_ctx.get("zip_code") or "").strip() or None,
-                            home_block_id,
-                            user_id,
+                        ed["suggestions"] = _where_step_chips(
+                            session_ctx, home_block_id, user_id, turn_ctx
                         )
-                        base = (nearby + ["My place"]) if nearby else list(_PLACE_SUGGESTIONS)
-                        ed["suggestions"] = base + [_SEARCH_PLACE_OPTION]
                     else:
                         # Host named a venue but hasn't pinned the exact spot. Ask them to
                         # pick it from search so we store the precise place (place_id) guests
@@ -962,9 +1015,12 @@ def run_lana_unified_pipeline(
                             f"Which **{_vn}** exactly? Tap to pick it so your guests "
                             "get the right spot to navigate to."
                         )
-                        # Search is the goal; "My place" stays as an escape so a host whose
-                        # spot isn't in search (or with no Places key) is never trapped.
-                        ed["suggestions"] = [_SEARCH_PLACE_OPTION, "My place"]
+                        # The host named a SPECIFIC venue, so the only action that makes
+                        # sense here is pinning it — offering "My place" alongside is
+                        # contradictory. Search is the goal. (A host who actually wants a
+                        # block-local spot can still just type "my place"; the generic-place
+                        # escape above resolves it without a pin, so no one is trapped.)
+                        ed["suggestions"] = [_SEARCH_PLACE_OPTION]
                 elif not cap_asked:
                     reply = f"Great — **{_title}**. How many can come?"
                     ed["suggestions"] = _CAPACITY_SUGGESTIONS

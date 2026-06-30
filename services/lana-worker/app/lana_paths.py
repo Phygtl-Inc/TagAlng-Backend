@@ -30,6 +30,18 @@ def _orchestrator_enabled() -> bool:
     return _llm_ready()
 
 
+def latent_extract_enabled() -> bool:
+    """Layer 3 latent-intent collection (entity extractor + capability match).
+
+    Phase 1 = collect, don't surface. Default OFF: enabling adds an LLM call + embeddings
+    per turn, so it's a deliberate ops switch (set LANA_LATENT_EXTRACT=1). Requires LLM ready.
+    """
+    flag = os.environ.get("LANA_LATENT_EXTRACT", "0").strip().lower()
+    if flag in ("0", "false", "off"):
+        return False
+    return _llm_ready()
+
+
 def unified_rules_first_enabled() -> bool:
     """Run discovery/auth gates before orchestrator on unified lana turns."""
     flag = os.environ.get("LANA_UNIFIED_RULES_FIRST", "1").strip().lower()
