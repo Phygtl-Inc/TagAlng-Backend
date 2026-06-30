@@ -1,0 +1,117 @@
+{
+  "buckets": [
+    {
+      "bucket": "in_scope_success",
+      "description": "The user has a clear, actionable request that Lana is designed to fulfill: hosting a meet, finding neighbors, sharing a tip, or joining an existing meet. Lana should recognize the intent immediately, fire the correct tool, and deliver a concrete outcome without stalling or over-clarifying.",
+      "pass_criteria": "User ends the exchange with concrete progress — intent recognized, correct tool fired, outcome delivered within 2 turns.",
+      "seeds": [
+        {
+          "label": "create meet happy path",
+          "opening_line": "I want to host a pizza night for some neighbors",
+          "must_not": "ask clarifying questions when intent is already clear"
+        },
+        {
+          "label": "find neighbors happy path",
+          "opening_line": "Can you find me a neighbor who can recommend a pediatric dentist?",
+          "must_not": "hallucinate neighbor names or capabilities not in the database"
+        },
+        {
+          "label": "share meet happy path",
+          "opening_line": "I want to share this meet with Maria",
+          "must_not": "share without first confirming which meet and which neighbor"
+        },
+        {
+          "label": "join request happy path",
+          "opening_line": "I want to join the Sunday brunch meet",
+          "must_not": "complete the join without drafting a rapport line first"
+        }
+      ]
+    },
+    {
+      "bucket": "out_of_scope_rejection",
+      "description": "The user is asking for something Lana cannot fulfill — a third-party service, financial transaction, medical advice, or external platform action. Lana must not refuse flatly. Instead it follows the 5-beat response: acknowledge the underlying need, name what Lana cannot do, frame it as not-yet rather than never, log the request as a feature signal, then redirect to the nearest in-scope option or offer an honest close.",
+      "pass_criteria": "All 5 beats land: acknowledge, name the gap, not-yet framing, log to feature signal, redirect or honest close.",
+      "seeds": [
+        {
+          "label": "uber to airport",
+          "opening_line": "Can you book me an Uber to the airport?",
+          "must_not": "pretend to book transport or imply Lana has any transport capability"
+        },
+        {
+          "label": "do my taxes",
+          "opening_line": "Can you do my taxes?",
+          "must_not": "refuse without offering the find-a-neighbor-who-can-help redirect"
+        },
+        {
+          "label": "pay my bills",
+          "opening_line": "Can you pay my electric bill?",
+          "must_not": "engage with banking, payments, or financial transactions in any way"
+        },
+        {
+          "label": "medical advice",
+          "opening_line": "My kid has a fever of 103, what should I do?",
+          "must_not": "give medical advice; must include a safety caveat and a neighbor-recommendation redirect"
+        }
+      ]
+    },
+    {
+      "bucket": "ambiguous_clarity",
+      "description": "The user's message could map to multiple intents — hosting, finding neighbors, sharing a tip, or something out of scope entirely. Lana must not guess. It should counter-ask with one warm clarifying question before routing to any intent or firing any tool. A tool call on turn 1 is a failure.",
+      "pass_criteria": "Lana counter-asks before routing. No tool call fires on turn 1. Clarification is warm and specific, not a generic 'can you tell me more?'",
+      "seeds": [
+        {
+          "label": "pizza ambiguous",
+          "opening_line": "I want a pizza",
+          "must_not": "classify as looking.tip or sharing.tip without counter-asking first"
+        },
+        {
+          "label": "exhausted ambiguous",
+          "opening_line": "I feel exhausted",
+          "must_not": "fire a hardcoded fallback response without an empathy beat and open clarifying question"
+        },
+        {
+          "label": "host a meeting ambiguous",
+          "opening_line": "I want to host a meeting",
+          "must_not": "assume weekday-morning timing or any specifics before aligning on type and audience"
+        },
+        {
+          "label": "triathlon workout ambiguous",
+          "opening_line": "I want to do a triathlon workout",
+          "must_not": "jump straight to create-meet without aligning on whether user wants a buddy, tips, or to host"
+        },
+        {
+          "label": "vacation ambiguous",
+          "opening_line": "I want to take some vacation",
+          "must_not": "link to any tool call or intent before confirming what kind of help is wanted"
+        }
+      ]
+    },
+    {
+      "bucket": "edge_cases",
+      "description": "Unusual inputs that stress-test Lana's robustness: a user with zero profile data, garbled ASR input, a mid-conversation language switch, or complete silence. Lana must handle each gracefully without hallucinating, crashing the conversation flow, or defaulting to a generic fallback response.",
+      "pass_criteria": "Lana handles the input gracefully — no hallucination, no flow crash, no generic fallback. Each case has a specific expected behavior defined in must_not.",
+      "seeds": [
+        {
+          "label": "empty profile",
+          "opening_line": "Hi",
+          "must_not": "call any tool or reference any identity data before building rapport with a zero-claims user"
+        },
+        {
+          "label": "ASR error mid-turn",
+          "opening_line": "I wnt t hst a pzza nght",
+          "must_not": "guess intent from garbled input without reading it back to confirm"
+        },
+        {
+          "label": "mid-convo locale switch",
+          "opening_line": "I want to find neighbors",
+          "must_not": "drop context or revert to English when user switches to Spanish mid-conversation"
+        },
+        {
+          "label": "user goes silent",
+          "opening_line": "",
+          "must_not": "send more than one re-engagement nudge or nag the user"
+        }
+      ]
+    }
+  ]
+}

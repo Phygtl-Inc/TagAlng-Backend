@@ -50,3 +50,6 @@ logs/
 
 # Generated types
 supabase/types/database.ts
+
+# Scratch work
+services/lana-worker/simulations/scratch/

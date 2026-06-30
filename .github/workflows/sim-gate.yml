@@ -1,0 +1,54 @@
+name: Sim gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      # Only run when Lana's brain or the sim pipeline itself changes
+      - 'services/lana-worker/app/**'
+      - 'services/lana-worker/simulations/**'
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch tags so we can compare against the last green baseline
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: services/lana-worker
+        run: pip install -r requirements.txt
+
+      - name: Run simulation matrix against PR branch
+        working-directory: services/lana-worker/simulations
+        env:
+          LANA_BASE_URL:              ${{ secrets.SIM_LANA_BASE_URL }}
+          OPENAI_API_KEY:             ${{ secrets.OPENAI_API_KEY }}
+          SUPABASE_URL:               ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY:          ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SIM_PASSWORD:               ${{ secrets.SIM_PASSWORD }}
+          GIT_SHA:                    ${{ github.sha }}
+        run: python runner.py
+
+      - name: Compare against baseline and gate
+        working-directory: services/lana-worker/simulations
+        env:
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BASELINE_TAG:              ${{ secrets.SIM_BASELINE_TAG }}
+          PR_SHA:                    ${{ github.sha }}
+          GH_TOKEN:                  ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER:                 ${{ github.event.pull_request.number }}
+          REPO:                      ${{ github.repository }}
+        run: python gate_check.py

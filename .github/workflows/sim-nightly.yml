@@ -1,0 +1,35 @@
+name: Sim nightly
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC = 02:00 EDT
+  workflow_dispatch:        # manual trigger from GitHub UI
+
+jobs:
+  run-sims:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: services/lana-worker
+        run: pip install -r requirements.txt
+
+      - name: Run full simulation matrix
+        working-directory: services/lana-worker/simulations
+        env:
+          LANA_BASE_URL:              ${{ secrets.SIM_LANA_BASE_URL }}
+          OPENAI_API_KEY:             ${{ secrets.OPENAI_API_KEY }}
+          SUPABASE_URL:               ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY:          ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SIM_PASSWORD:               ${{ secrets.SIM_PASSWORD }}
+          GIT_SHA:                    ${{ github.sha }}
+        run: python runner.py
