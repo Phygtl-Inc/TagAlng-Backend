@@ -35,6 +35,7 @@ from app.db import (
 from app.local_signals import block_log_take_action, fetch_my_block_log, normalize_block_log_row
 from app.lana_paths import (
     event_fast_path_enabled,
+    latent_extract_enabled,
     profile_fast_path_enabled,
     use_orchestrator_for_purpose,
 )
@@ -1355,6 +1356,18 @@ def send_lana_message(
             auth.user_id,
             body.message.strip(),
             skip_heritage=bool(merged.get("skip_heritage_background_extract")),
+        )
+    # Layer 3b latent-intent collection (Phase 1: collect, don't surface). Off by default.
+    if purpose == "lana" and latent_extract_enabled():
+        from app.latent_extract import run_latent_intent
+
+        background_tasks.add_task(
+            run_latent_intent,
+            auth.user_id,
+            session_id,
+            user_msg_id,
+            auth.home_block_id,
+            body.message.strip(),
         )
 
     with timer.stage("db_list_messages_final"):
