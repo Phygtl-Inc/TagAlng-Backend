@@ -125,7 +125,8 @@ export default function SimsPage() {
     setError(null);
     try {
       const supabase = getSupabase();
-      let q = supabase
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let q = (supabase as any)
         .from('simulations')
         .select('id,run_id,git_sha,persona_id,seed_label,bucket,weighted_score,scores_json,judge_summary,hitl_status,tim_verdict,tim_note,sft_eligible,created_at,transcript_json')
         .order('weighted_score', { ascending: true })
@@ -159,7 +160,8 @@ export default function SimsPage() {
     setSaving(true);
     try {
       const supabase = getSupabase();
-      const { error: err } = await supabase
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { error: err } = await (supabase as any)
         .from('simulations')
         .update({
           tim_verdict: verdict,
@@ -186,7 +188,8 @@ export default function SimsPage() {
 
   async function skipRun(run: SimRun) {
     const supabase = getSupabase();
-    await supabase.from('simulations').update({ hitl_status: 'skipped' }).eq('id', run.id);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (supabase as any).from('simulations').update({ hitl_status: 'skipped' }).eq('id', run.id);
     setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, hitl_status: 'skipped' } : r));
   }
 
