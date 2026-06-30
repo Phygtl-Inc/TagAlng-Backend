@@ -21,6 +21,43 @@ def _normalize_zip5(raw: str | None) -> str | None:
     return digits[:5]
 
 
+def geocode_zip(zip5: str) -> tuple[float, float, str] | None:
+    """Geocode a US ZIP via Google → (lat, lng, city). None when the ZIP can't be placed
+    (no API key, or genuinely not a real ZIP). Used to auto-create a block for a ZIP we
+    don't cover yet, so signup is never blocked."""
+    z = _normalize_zip5(zip5)
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    if not z or not api_key:
+        return None
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            res = client.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                # components filter is far more precise than a free-text address for a ZIP.
+                params={"components": f"postal_code:{z}|country:US", "key": api_key},
+            )
+        data = res.json()
+        results = data.get("results") or []
+        if not results:
+            return None
+        top = results[0]
+        loc = top.get("geometry", {}).get("location", {})
+        lat, lng = loc.get("lat"), loc.get("lng")
+        if lat is None or lng is None:
+            return None
+        city = ""
+        for comp in top.get("address_components", []):
+            types = comp.get("types", [])
+            if "locality" in types or "postal_town" in types:
+                city = str(comp.get("long_name") or "").strip()
+                break
+        if not city:
+            city = str(top.get("formatted_address") or "").split(",")[0].strip()
+        return float(lat), float(lng), city
+    except Exception:
+        return None
+
+
 def _geocode_venue(venue_name: str, city_hint: str) -> tuple[float, float] | None:
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
     if not api_key:

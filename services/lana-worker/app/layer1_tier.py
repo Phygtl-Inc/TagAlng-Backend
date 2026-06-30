@@ -59,6 +59,12 @@ def wants_respond_intro(msg: str) -> bool:
     return False
 
 
+def is_standalone_affirmation(msg: str) -> bool:
+    """A bare "ok"/"yes" with no explicit intro reference — ambiguous on its own."""
+    norm = str(msg or "").strip().lower().rstrip(".!")
+    return norm in _STANDALONE_ACCEPT
+
+
 def parse_nudge_response(msg: str) -> str:
     """Deterministic accept/decline/block read — fallback when AI is unavailable."""
     text = str(msg or "").strip()

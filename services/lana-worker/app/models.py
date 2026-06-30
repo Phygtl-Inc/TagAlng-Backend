@@ -320,6 +320,15 @@ class PlaceResult(BaseModel):
     lng: float | None = None
 
 
+class PlaceSuggestionRow(BaseModel):
+    """A Google Places fallback shown when no neighbor has recommended one yet — rendered as
+    tappable cards (maps_url opens the spot in Google Maps). Clearly NOT a neighbor vouch."""
+    name: str
+    address: str = ""
+    place_id: str | None = None
+    maps_url: str | None = None
+
+
 class PlaceSearchResponse(BaseModel):
     results: list[PlaceResult] = Field(default_factory=list)
 
@@ -353,6 +362,7 @@ class CreateSessionResponse(BaseModel):
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
+    place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
     requires_login_otp: bool = False
@@ -421,6 +431,7 @@ class SendMessageResponse(BaseModel):
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
+    place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
     requires_login_otp: bool = False

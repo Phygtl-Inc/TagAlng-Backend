@@ -181,8 +181,11 @@ class TestDiscoveryRouting(unittest.TestCase):
         reply, _, _, _ = result
         self.assertIn("5-digit", reply)
 
+    @patch("app.event_location.geocode_zip", return_value=None)
     @patch("app.discovery_route.call_rpc")
-    def test_unknown_zip_returns_friendly_reply(self, mock_rpc) -> None:
+    def test_ungeocodable_zip_asks_to_recheck(self, mock_rpc, _mock_geo) -> None:
+        # ZIP not in any block AND not geocodable (no Google match) → we can't create a block,
+        # so ask the user to re-check the digits (the only remaining dead-end).
         mock_rpc.side_effect = HTTPException(
             status_code=502,
             detail='rpc_failed:{"message":"zip_not_found"}',
@@ -198,8 +201,36 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         reply, ctx, _, _ = result
-        self.assertIn("couldn't find blocks", reply.lower())
+        self.assertIn("double-check", reply.lower())
         self.assertEqual(ctx["routing_phase"], PHASE_NEED_ZIP)
+
+    @patch("app.event_location.geocode_zip", return_value=(32.7157, -117.1611, "San Diego"))
+    @patch("app.discovery_route.fetch_blocks_for_zip", return_value=[])
+    @patch("app.discovery_route.call_rpc")
+    def test_new_zip_creates_waitlist_block(self, mock_rpc, _mock_fetch, _mock_geo) -> None:
+        # An uncovered but geocodable ZIP → create a waitlist block and proceed (no dead-end).
+        mock_rpc.return_value = {
+            "block_id": "zip-92104",
+            "display_name": "San Diego (92104)",
+            "block_state": "waitlist",
+        }
+        result = handle_discovery_turn(
+            "92104",
+            session_ctx={"routing_phase": PHASE_NEED_ZIP, "active_intent": "discovery.find_peers"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        # It must NOT dead-end on the re-check message — the block was created and assigned.
+        self.assertNotIn("double-check", reply.lower())
+        self.assertEqual(ctx.get("preview_block_id"), "zip-92104")
+        # create_block_for_zip was the RPC invoked.
+        self.assertTrue(
+            any("create_block_for_zip" in str(c.args) for c in mock_rpc.call_args_list)
+        )
 
     @patch("app.discovery_route.fetch_blocks_for_zip")
     def test_zip_then_identity(self, mock_blocks) -> None:
@@ -954,6 +985,41 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertNotIn("recent intro to Natasha".lower(), reply.lower())
         self.assertEqual(ctx.get("active_intent"), "social.list_intros")
         self.assertEqual(peers, [])
+
+    @patch("app.layer1_tier.fetch_my_intros")
+    def test_bare_ok_with_no_pending_intro_falls_through(self, mock_fetch_intros) -> None:
+        # Post-verify handshake: the PWA posts a literal "ok" after signup/login.
+        # With no pending intro it must NOT surface "I don't see a pending intro" —
+        # it should fall through to normal routing so the greeting is shown.
+        from app.discovery_route import _try_respond_nudge_turn
+
+        mock_fetch_intros.return_value = []
+        result = _try_respond_nudge_turn(
+            msg="ok",
+            session_ctx={},
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+        )
+        self.assertIsNone(result)
+
+    @patch("app.layer1_tier.fetch_my_intros")
+    def test_explicit_intro_response_with_no_pending_still_surfaces(self, mock_fetch_intros) -> None:
+        # An explicit intro reference is unambiguous, so the "no pending intro"
+        # message is the right reply even when nothing is pending.
+        from app.discovery_route import _try_respond_nudge_turn
+
+        mock_fetch_intros.return_value = []
+        result = _try_respond_nudge_turn(
+            msg="yes introduce us",
+            session_ctx={},
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+        )
+        self.assertIsNotNone(result)
+        reply = result[0]
+        self.assertIn("pending intro", reply.lower())
 
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
