@@ -25,7 +25,10 @@ _SUBJECTS = frozenset({"self", "child", "partner", "household", "other", "unknow
 # entity_type stays open (spec §10-Q1, Yunchao); we only sanity-bound it.
 _MAX_ENTITIES = 6
 _MIN_ENTITY_CONFIDENCE = 0.5
-_MIN_MATCH_SCORE = 0.65
+# Calibrated for Vertex text-embedding-005: a short entity vs a longer capability description
+# tops out ~0.55-0.60 for true matches (vs ~0.35-0.40 for unrelated). The spec's 0.65 assumed
+# OpenAI 1536-dim embeddings and never cleared here, leaving suggestion_queue empty.
+_MIN_MATCH_SCORE = 0.45
 _SUGGESTION_TTL_DAYS = 30
 _SKIP_SHORT = frozenset({"ok", "okay", "yes", "no", "yep", "nope", "sure", "thanks", "thank you"})
 
