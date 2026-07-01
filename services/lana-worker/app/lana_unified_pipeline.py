@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.discovery_route import handle_discovery_turn, looks_like_logout
@@ -29,6 +30,7 @@ _EVENT_DRAFT_FIELDS = {
     "max_attendees",
     "auto_approve",
     "allow_attendee_share",
+    "bring_items",
     "cohort_tags",
     "affinity_prompt",
     "affinity_options",
@@ -135,6 +137,98 @@ def _is_generic_place(venue: Any) -> bool:
 _CAPACITY_SUGGESTIONS = ["Up to 6", "Up to 10", "Up to 15", "Open · no limit"]
 _APPROVAL_SUGGESTIONS = ["Anyone can join", "I'll approve each request"]
 _SHARE_SUGGESTIONS = ["Yes, let them share", "My invites only"]
+
+# Default capacity seeded into the quick-setup carousel (host can tweak the slider).
+_SETUP_DEFAULT_MAX = 8
+
+
+def _seed_setup_defaults(ed: dict[str, Any]) -> None:
+    """Pre-fill the quick-setup carousel (capacity / sharing / approval / bring) with
+    sensible defaults so the host can just tap through — see the C-4-EVENT-P2B mockup."""
+    if ed.get("max_attendees") is None:
+        ed["max_attendees"] = _SETUP_DEFAULT_MAX
+    if ed.get("auto_approve") is None:
+        ed["auto_approve"] = False  # require-approval ON by default
+    if ed.get("allow_attendee_share") is None:
+        ed["allow_attendee_share"] = True
+    if ed.get("bring_items") is None:
+        ed["bring_items"] = []
+
+
+def _ensure_setup_config(
+    ed: dict[str, Any],
+    *,
+    history: list[dict[str, Any]],
+    user_message: str,
+    timer: Any,
+) -> None:
+    """Attach the AI-tailored setup-card config to the draft (once), so the FE renders one
+    scrollable carousel of questions fit to THIS event ("How many moms?" vs "How many
+    dads?", bring items that match the activity). Pre-fills bring chips + capacity from the
+    AI's suggestions. Idempotent — recomputing on later setup turns would waste an LLM call
+    and clobber the host's edits."""
+    if ed.get("event_setup"):
+        return
+    from app.event_setup_suggest import setup_suggestions
+
+    with timer.stage("llm_event_setup"):
+        cfg = setup_suggestions(history=history, user_message=user_message, draft=ed)
+    ed["event_setup"] = cfg
+    if not ed.get("bring_items") and cfg.get("bring_suggestions"):
+        ed["bring_items"] = list(cfg["bring_suggestions"])
+    if ed.get("max_attendees") is None and cfg.get("capacity_default"):
+        try:
+            ed["max_attendees"] = int(cfg["capacity_default"])
+        except (TypeError, ValueError):
+            pass
+
+
+def _ensure_review_draft(
+    ed: dict[str, Any],
+    *,
+    history: list[dict[str, Any]],
+    user_message: str,
+    timer: Any,
+) -> None:
+    """Draft a title + one-line description (like the "Drafted by Lana" card) when the
+    opening message gave content but no explicit name/blurb — so the review shows a real
+    title + description instead of a bare draft. Best-effort; skips the LLM if both exist."""
+    have_title = bool(str(ed.get("title") or "").strip()) and not _is_generic_title(ed.get("title"))
+    have_desc = bool(str(ed.get("description") or "").strip())
+    if have_title and have_desc:
+        return
+    from app.event_suggest import event_suggestions
+
+    with timer.stage("llm_event_suggest"):
+        sugg = event_suggestions(history=history, user_message=user_message, draft=ed)
+    if not have_title:
+        titles = sugg.get("title_suggestions") or []
+        if titles:
+            ed["title"] = titles[0]
+    if not have_desc and sugg.get("description"):
+        ed["description"] = sugg["description"]
+
+
+# CTA strings the FE sends from the host review / setup / confirm cards. Matched loosely
+# (substring) so the carousel's "Looks good · next" and the "Drop the meet up" button both
+# land, the same way hosting_cta.py keys off button labels.
+def _norm_cta(msg: str) -> str:
+    return str(msg or "").strip().lower()
+
+
+def _is_host_confirm(msg: str) -> bool:
+    n = _norm_cta(msg)
+    return "looks good" in n or n in {"yes", "perfect", "next", "all set", "sounds good"}
+
+
+def _is_host_drop(msg: str) -> bool:
+    n = _norm_cta(msg)
+    return "drop" in n or "post it" in n or "publish" in n or "go live" in n
+
+
+def _is_host_tweak(msg: str) -> bool:
+    n = _norm_cta(msg)
+    return "tweak" in n or "let me change" in n
 
 
 def _parse_event_settings(message: str, settings: dict[str, Any]) -> None:
@@ -289,6 +383,25 @@ def _resolve_event_time(text: str) -> str | None:
     if "noon" in t:
         return "12:00"
     return None
+
+
+# Cheap gate: does this message plausibly mention a date/time at all? Used to skip the
+# LLM when-resolver on turns that clearly carry none (e.g. tapping a capacity/approval/
+# share chip), which otherwise paid for one LLM round-trip on EVERY host turn.
+_TEMPORAL_TOKEN_RE = re.compile(
+    r"\b(?:mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|"
+    r"today|tonight|tomorrow|weekend|week|month|noon|midnight|morning|afternoon|"
+    r"evening|night|next|this|am|pm)\b"
+    r"|\d{1,2}\s*(?:am|pm)"  # "10am", "9 pm"
+    r"|\d{1,2}:\d{2}"  # "9:30"
+    r"|\b\d{1,2}(?:st|nd|rd|th)\b",  # "28th"
+    re.I,
+)
+
+
+def _has_temporal_tokens(text: str) -> bool:
+    return bool(_TEMPORAL_TOKEN_RE.search(str(text or "")))
 
 
 def _inject_event_quick_replies(
@@ -779,7 +892,16 @@ def run_lana_unified_pipeline(
             # re-matching a stray weekday ("friday" in "not on friday").
             from app.event_when import resolve_event_when
 
-            when = resolve_event_when(history=history, user_message=user_message, draft=ed)
+            # Skip the LLM date resolver when the draft already has a start AND this message
+            # carries no temporal words — otherwise it ran on EVERY host turn (incl. tapping
+            # a capacity/approval/share chip), adding one LLM round-trip each time.
+            if wd and wt and not _has_temporal_tokens(user_message):
+                when = {}
+            else:
+                with timer.stage("llm_event_when"):
+                    when = resolve_event_when(
+                        history=history, user_message=user_message, draft=ed
+                    )
             if when is None:
                 nd = _resolve_event_date(user_message)
                 ntime = _resolve_event_time(user_message)
@@ -850,11 +972,6 @@ def run_lana_unified_pipeline(
                 else:
                     turn_ctx["event_place_asked"] = True
                     place_asked = True
-            # Settings are asked once each (capacity → approval → share), after place.
-            cap_asked = bool(turn_ctx.get("event_cap_asked"))
-            approval_asked = bool(turn_ctx.get("event_approval_asked"))
-            share_asked = bool(turn_ctx.get("event_share_asked"))
-            settings_done = cap_asked and approval_asked and share_asked
             # A named venue ("KFC", "Foxtail Coffee") is only resolvable once the host has
             # picked the exact place (place_id) — otherwise publish would blind-geocode the
             # name to *some* matching spot. Block-local answers ("my place", "the park")
@@ -893,146 +1010,197 @@ def run_lana_unified_pipeline(
             if place_asked and not has_pin and _is_generic_place(user_message):
                 ed["venue_name"] = str(user_message).strip()
                 has_venue = True
-            venue_resolvable = has_venue and (has_pin or _is_generic_place(ed.get("venue_name")))
-            complete = (
-                bool(_title) and bool(wd) and bool(wt) and place_asked and venue_resolvable and settings_done
+            # Auto-resolve a venue the host named inline ("...at Foxtail", "KFC") to the
+            # single nearest Google place (biased to their block), so we pin it immediately
+            # instead of bouncing them into "Which X exactly?". Generic block-local answers
+            # ("my place", "the park") need no pin. Tried at most once per name; the host can
+            # still change it from the review card (the search picker is the tweak path).
+            if (
+                has_venue
+                and not has_pin
+                and not _is_generic_place(ed.get("venue_name"))
+                and str(ed.get("venue_name") or "").strip()
+                != str(session_ctx.get("event_venue_tried") or "").strip()
+            ):
+                _vname = str(ed.get("venue_name") or "").strip()
+                turn_ctx["event_venue_tried"] = _vname
+                from app.places import search_places
+
+                try:
+                    with timer.stage("places_autoresolve"):
+                        _hits = search_places(
+                            query=_vname,
+                            zip_code=str(session_ctx.get("zip_code") or "").strip() or None,
+                            block_id=home_block_id,
+                            user_id=user_id,
+                            limit=1,
+                        )
+                except Exception:  # noqa: BLE001 - best-effort; falls back to the picker
+                    _hits = []
+                _top = _hits[0] if _hits else None
+                if isinstance(_top, dict) and str(_top.get("place_id") or "").strip():
+                    ed["venue_name"] = str(_top.get("name") or _vname).strip()
+                    ed["venue_address"] = _top.get("address")
+                    ed["place_id"] = _top.get("place_id")
+                    ed["venue_lat"] = _top.get("lat")
+                    ed["venue_lng"] = _top.get("lng")
+                    has_pin = True
+                    place_asked = True
+                    turn_ctx["event_place_asked"] = True
+                    turn_ctx["event_venue"] = {
+                        "name": ed["venue_name"],
+                        "address": ed.get("venue_address"),
+                        "place_id": ed.get("place_id"),
+                        "lat": ed.get("venue_lat"),
+                        "lng": ed.get("venue_lng"),
+                    }
+
+            stage = str(session_ctx.get("host_stage") or "")
+
+            # On the entry turn, when the opening message already carried real content
+            # (a time and/or a place), draft a title + one-line description so the review
+            # reads like the "Drafted by Lana" card — instead of dropping into the carousel.
+            if stage not in ("review", "setup", "confirm") and (wd or has_venue):
+                _ensure_review_draft(
+                    ed, history=history, user_message=user_message, timer=timer
+                )
+                _title = str(ed.get("title") or "").strip()
+                if _is_generic_title(_title):
+                    _title = ""
+
+            # A named venue no longer needs a precise Google pin to proceed — publish
+            # geocodes the name near the host's block, and auto-resolve above enriches it
+            # with an exact pin when the Maps key is set. A venue NAME is enough to advance.
+            venue_resolvable = has_venue
+            blockers_done = (
+                bool(_title) and bool(wd) and bool(wt) and place_asked and venue_resolvable
             )
-            # Ask the affinity question once, gated ONLY on whether we've asked — not on
-            # cohort_tags (the extractor auto-fills those, which used to skip the question).
-            affinity_done = bool(session_ctx.get("event_affinity_asked"))
 
-            # Event-aware AI suggestions (tailored titles + "who's it for?") — only on the
-            # turns that need them (naming the event, or the one affinity gate).
-            sugg: dict[str, Any] = {}
-            if not _title or (complete and not affinity_done):
-                from app.event_suggest import event_suggestions
-
-                sugg = event_suggestions(history=history, user_message=user_message, draft=ed)
-
-            if complete and not affinity_done:
-                aff = sugg.get("affinity") if isinstance(sugg.get("affinity"), dict) else {}
-                ed["affinity_prompt"] = aff.get("question") or "Who’s it for?"
-                ed["affinity_options"] = aff.get("options") or [
-                    "Same kid-stage",
-                    "Any toddler mom",
-                    "Open · all moms",
-                ]
+            # Stage machine: review → setup (batched carousel) → confirm → publish. Nothing
+            # is ever asked one field per turn — when the opening message is sparse we jump
+            # straight to the setup carousel, which collects the missing title / when / where
+            # TOGETHER with capacity / sharing / approval / bring in a single card.
+            if stage not in ("review", "setup", "confirm"):
+                # First host turn after extraction. Rich opening (blockers already known) →
+                # show the drafted review (P2); sparse opening → straight to the batched
+                # setup carousel so the host fills everything at once.
                 ed["suggestions"] = []
-                turn_ctx["event_affinity_asked"] = True
-                reply = f"Perfect — **{_title or 'your meetup'}** is all set! One last thing before I post it:"
-            elif complete:
-                event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
-                if event_id:
-                    turn_ctx["event_id"] = event_id
-                    turn_ctx["event_published_now"] = True
-                    turn_ctx["event_affinity_asked"] = False
-                    turn_ctx["event_when_date"] = None
-                    turn_ctx["event_when_time"] = None
-                    turn_ctx["event_place_asked"] = False
-                    turn_ctx["event_venue"] = None
-                    turn_ctx["event_place_candidates"] = None
-                    turn_ctx["event_settings"] = None
-                    turn_ctx["event_cap_asked"] = False
-                    turn_ctx["event_approval_asked"] = False
-                    turn_ctx["event_share_asked"] = False
-                    # Verification (if any) is done — drop the resume markers so a later
-                    # turn doesn't re-enter the verify funnel after a clean publish.
-                    turn_ctx["host_publish_pending"] = None
-                    turn_ctx["pending_post_verify"] = None
-                    reply = _event_published_reply(reply, ed)
-                else:
-                    # Publish was rejected — tell the user why instead of letting the
-                    # orchestrator's "all set!" text fake success. Host mode stays active
-                    # (set below), so once they verify / fix the spot a follow-up retries.
-                    detail = (publish_error or "").lower()
-                    not_verified = (
-                        "phone_not_verified" in detail
-                        or "not_authenticated" in detail
-                        or ":403" in detail
+                if blockers_done:
+                    turn_ctx["host_stage"] = "review"
+                    reply = (
+                        f"Here's your meet — **{_title}**. Take a look: tap **Looks good** "
+                        "to set it up, or **Let me tweak** to change anything."
                     )
-                    if not_verified and not phone_verified:
-                        # Proactive verify: the event is fully built but the guest isn't
-                        # verified yet. Drive verification right here (email → OTP) instead
-                        # of dead-ending on a "can't post" message with nothing to tap.
-                        # Host mode + the complete draft stay set, so the turn after
-                        # verification re-enters this branch and publishes for real.
-                        # The discovery gate's signup/verify handlers own the email/OTP
-                        # turns (see handle_discovery_turn's host-verify escape).
-                        turn_ctx["requires_phone_verification"] = True
-                        turn_ctx["host_publish_pending"] = True
-                        if not session_ctx.get("host_publish_pending"):
-                            turn_ctx["routing_phase"] = "await_signup_phone"
-                            reply = (
-                                f"Perfect — **{_title or 'your event'}** is all set! "
-                                "To post it I just need to verify your email — what's your email?"
-                            )
+                else:
+                    _ensure_setup_config(
+                        ed, history=history, user_message=user_message, timer=timer
+                    )
+                    _seed_setup_defaults(ed)
+                    turn_ctx["host_stage"] = "setup"
+                    reply = (
+                        "Let's set it up — fill in the details below and I'll drop it on "
+                        "your block."
+                    )
+            elif stage == "review":
+                if _is_host_confirm(user_message) or _is_host_drop(user_message):
+                    _ensure_setup_config(
+                        ed, history=history, user_message=user_message, timer=timer
+                    )
+                    _seed_setup_defaults(ed)
+                    turn_ctx["host_stage"] = "setup"
+                    ed["suggestions"] = []
+                    reply = (
+                        "Quick set-up — set capacity, sharing, approval, and what to "
+                        "bring, then drop it on your block."
+                    )
+                else:
+                    # A free-text edit was already merged into the draft above; stay in review.
+                    turn_ctx["host_stage"] = "review"
+                    ed["suggestions"] = []
+                    reply = (
+                        f"Sure — tell me what to change about **{_title}**."
+                        if _is_host_tweak(user_message)
+                        else f"Updated **{_title}** — does this look right?"
+                    )
+            elif stage == "setup":
+                if (_is_host_confirm(user_message) or _is_host_drop(user_message)) and blockers_done:
+                    turn_ctx["host_stage"] = "confirm"
+                    ed["suggestions"] = []
+                    reply = (
+                        f"It's all set — **{_title}**. One last look, then drop it on the block."
+                    )
+                elif _is_host_confirm(user_message) or _is_host_drop(user_message):
+                    # Carousel submitted but a blocker is still missing — hold in setup and
+                    # say exactly what's needed (the FE cards should have collected these).
+                    need: list[str] = []
+                    if not _title:
+                        need.append("a name")
+                    if not (wd and wt):
+                        need.append("a date & time")
+                    if not venue_resolvable:
+                        need.append("a place")
+                    turn_ctx["host_stage"] = "setup"
+                    ed["suggestions"] = []
+                    reply = "I just need " + " · ".join(need) + " to post it."
+                else:
+                    turn_ctx["host_stage"] = "setup"
+                    ed["suggestions"] = []
+                    reply = "Set the details below, then tap **Looks good**."
+            else:  # stage == "confirm" → publish when the host drops it
+                if _is_host_drop(user_message) or _is_host_confirm(user_message):
+                    event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
+                    if event_id:
+                        turn_ctx["event_id"] = event_id
+                        turn_ctx["event_published_now"] = True
+                        turn_ctx["host_stage"] = None
+                        turn_ctx["event_when_date"] = None
+                        turn_ctx["event_when_time"] = None
+                        turn_ctx["event_place_asked"] = False
+                        turn_ctx["event_venue"] = None
+                        turn_ctx["event_venue_tried"] = None
+                        turn_ctx["event_place_candidates"] = None
+                        turn_ctx["event_settings"] = None
+                        # Verification (if any) is done — drop the resume markers so a later
+                        # turn doesn't re-enter the verify funnel after a clean publish.
+                        turn_ctx["host_publish_pending"] = None
+                        turn_ctx["pending_post_verify"] = None
+                        reply = _event_published_reply(reply, ed)
+                    else:
+                        # Publish rejected — surface the reason; hold at confirm so a retry
+                        # (after verify / fixing the spot) republishes.
+                        detail = (publish_error or "").lower()
+                        not_verified = (
+                            "phone_not_verified" in detail
+                            or "not_authenticated" in detail
+                            or ":403" in detail
+                        )
+                        turn_ctx["host_stage"] = "confirm"
+                        if not_verified and not phone_verified:
+                            turn_ctx["requires_phone_verification"] = True
+                            turn_ctx["host_publish_pending"] = True
+                            if not session_ctx.get("host_publish_pending"):
+                                turn_ctx["routing_phase"] = "await_signup_phone"
+                                reply = (
+                                    f"Perfect — **{_title or 'your event'}** is all set! "
+                                    "To post it I just need to verify your email — what's your email?"
+                                )
+                            else:
+                                reply = (
+                                    "Finishing verification — send one more message and I'll "
+                                    f"post **{_title or 'your event'}** right away."
+                                )
                         else:
-                            # Already mid-verify (JWT can lag a turn after OTP) — hold the
-                            # event and nudge, don't re-ask for the email.
-                            reply = (
-                                "Finishing verification — send one more message and I'll "
-                                f"post **{_title or 'your event'}** right away."
-                            )
-                    else:
-                        if "location" in detail or "venue" in detail:
-                            # Re-open the where-step so they can pick a resolvable place.
-                            turn_ctx["event_place_asked"] = False
-                            ed.pop("venue_name", None)
-                        reply = _publish_failure_reply(publish_error, _title)
-            else:
-                # Deterministic question + chips for the next missing field (title → day →
-                # time → place), so the bubble ALWAYS matches the chips.
-                if not _title:
-                    reply = "Love it! What would you like to call it?"
-                    ed["suggestions"] = sugg.get("title_suggestions") or _TITLE_SUGGESTIONS
-                elif not wd:
-                    reply = f"Got it — **{_title}**. When works for you?"
-                    ed["suggestions"] = _when_suggestions()
-                elif not wt:
-                    reply = f"Great — **{_title}**. What time should it start?"
-                    ed["suggestions"] = _START_TIME_SUGGESTIONS
-                elif not place_asked or not venue_resolvable:
-                    # Where-step — asked once. Drop any venue the extractor lifted from
-                    # the title so the user answers explicitly (fixes the skipped "where?").
-                    if not place_asked:
-                        ed.pop("venue_name", None)
-                        turn_ctx["event_place_asked"] = True
-                        reply = f"Almost there — **{_title}**. Where in the block would you like to host it?"
-                        ed["suggestions"] = _where_step_chips(
-                            session_ctx, home_block_id, user_id, turn_ctx
-                        )
-                    elif not has_venue:
-                        reply = f"Where would you like to host **{_title}**?"
-                        ed["suggestions"] = _where_step_chips(
-                            session_ctx, home_block_id, user_id, turn_ctx
-                        )
-                    else:
-                        # Host named a venue but hasn't pinned the exact spot. Ask them to
-                        # pick it from search so we store the precise place (place_id) guests
-                        # can navigate to — instead of a bare name we'd blind-geocode.
-                        _vn = str(ed.get("venue_name") or "").strip()
-                        reply = (
-                            f"Which **{_vn}** exactly? Tap to pick it so your guests "
-                            "get the right spot to navigate to."
-                        )
-                        # The host named a SPECIFIC venue, so the only action that makes
-                        # sense here is pinning it — offering "My place" alongside is
-                        # contradictory. Search is the goal. (A host who actually wants a
-                        # block-local spot can still just type "my place"; the generic-place
-                        # escape above resolves it without a pin, so no one is trapped.)
-                        ed["suggestions"] = [_SEARCH_PLACE_OPTION]
-                elif not cap_asked:
-                    reply = f"Great — **{_title}**. How many can come?"
-                    ed["suggestions"] = _CAPACITY_SUGGESTIONS
-                    turn_ctx["event_cap_asked"] = True
-                elif not approval_asked:
-                    reply = "Who can join — open, or you approve each request?"
-                    ed["suggestions"] = _APPROVAL_SUGGESTIONS
-                    turn_ctx["event_approval_asked"] = True
-                else:  # not share_asked
-                    reply = "Last bit — can attendees invite others?"
-                    ed["suggestions"] = _SHARE_SUGGESTIONS
-                    turn_ctx["event_share_asked"] = True
+                            if "location" in detail or "venue" in detail:
+                                # Re-open the where-step so they can pick a resolvable place.
+                                turn_ctx["event_place_asked"] = False
+                                turn_ctx["event_venue_tried"] = None
+                                turn_ctx["host_stage"] = "review"
+                                ed.pop("venue_name", None)
+                            reply = _publish_failure_reply(publish_error, _title)
+                else:
+                    turn_ctx["host_stage"] = "confirm"
+                    ed["suggestions"] = []
+                    reply = "Tap **Drop the meet up** when you're ready and I'll post it."
             turn_ctx["event_draft"] = ed
             draft = ed  # surface to the FE (5th return → response.event_draft)
 

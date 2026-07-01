@@ -146,5 +146,44 @@ class TestProfileStopRules(unittest.TestCase):
         self.assertTrue(gaps["needs_display_name"])
 
 
+class TestContinuousMode(unittest.TestCase):
+    def _long_history(self) -> list[dict]:
+        # Enough turns that non-continuous mode would force a wrap.
+        return [
+            {"role": "user", "content": "Sicilian, triathlon, tech"},
+            {"role": "assistant", "content": "Nice!"},
+            {"role": "user", "content": "married 10 years"},
+            {"role": "assistant", "content": "Lovely!"},
+            {"role": "user", "content": "two kids"},
+        ]
+
+    def test_continuous_never_wraps(self) -> None:
+        ui = {"highlights": [{"text": "Sicilian", "bucket": "heritage"},
+                             {"text": "triathlon", "bucket": "activity"}]}
+        _, status = apply_profile_stop_rules(
+            "ready_to_complete",
+            "What kind of tech work — engineering, product, design?",
+            history=self._long_history(),
+            ui=ui,
+            topics_covered=["heritage", "activity"],
+            continuous=True,
+        )
+        self.assertEqual(status, "continue")
+
+    def test_continuous_strips_complete_cta(self) -> None:
+        msg, status = apply_profile_stop_rules(
+            "continue",
+            "Wonderful! What name should neighbors use? When you're ready, tap Complete to save your profile.",
+            history=self._long_history(),
+            ui={},
+            topics_covered=["heritage"],
+            continuous=True,
+        )
+        self.assertNotIn("Complete", msg)
+        self.assertNotIn("save your profile", msg)
+        self.assertIn("What name should neighbors use?", msg)
+        self.assertEqual(status, "continue")
+
+
 if __name__ == "__main__":
     unittest.main()

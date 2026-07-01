@@ -2,7 +2,26 @@ import unittest
 from unittest.mock import patch
 
 from app.intro_proposal import wants_neighbor_intro
-from app.layer1_tier import parse_nudge_response, wants_respond_intro
+from app.layer1_tier import (
+    is_standalone_affirmation,
+    is_standalone_negation,
+    parse_nudge_response,
+    wants_respond_intro,
+)
+
+
+class TestStandaloneNegation(unittest.TestCase):
+    def test_bare_negations(self) -> None:
+        for m in ("no", "Nope.", "that's all", "no more", "I'm good", "nothing else"):
+            self.assertTrue(is_standalone_negation(m), m)
+
+    def test_not_negations(self) -> None:
+        for m in ("no, decline the intro from Ada", "I'm Pakistani", "Daniel"):
+            self.assertFalse(is_standalone_negation(m), m)
+
+    def test_affirmation_and_negation_disjoint(self) -> None:
+        self.assertTrue(is_standalone_affirmation("yes"))
+        self.assertFalse(is_standalone_negation("yes"))
 
 
 class TestLayer1Tier(unittest.TestCase):

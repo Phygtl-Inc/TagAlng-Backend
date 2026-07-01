@@ -289,8 +289,8 @@ def lana_profile_guest_turn(
     if step == GUEST_STEP_PHONE:
         if phone_verified:
             reply = (
-                "You're verified! Quick one — how many kids do you have, "
-                "and what are their ages?"
+                "You're verified! Quick one — how many kids do you have? "
+                "(Just the number — I never ask their names or ages.)"
             )
             ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_POST_VERIFY)
             ctx["requires_phone_verification"] = False

@@ -258,14 +258,16 @@ class TestDismissClaimsFromEdit(unittest.TestCase):
 
 class TestParseIncrementalClaims(unittest.TestCase):
     def test_empty_identity(self) -> None:
-        nickname, claims = parse_incremental_claims_data(
+        nickname, claims, kids_count, followup = parse_incremental_claims_data(
             {"nickname": None, "claims": []}
         )
         self.assertIsNone(nickname)
         self.assertEqual(claims, [])
+        self.assertIsNone(kids_count)
+        self.assertIsNone(followup)
 
     def test_italian_mom_split(self) -> None:
-        nickname, claims = parse_incremental_claims_data(
+        nickname, claims, _kids, _followup = parse_incremental_claims_data(
             {
                 "nickname": None,
                 "claims": [
@@ -291,6 +293,50 @@ class TestParseIncrementalClaims(unittest.TestCase):
         self.assertIsNone(nickname)
         self.assertEqual(len(claims), 2)
         self.assertEqual(claims[0].concept, "italian_heritage")
+
+    def test_kids_count_and_followup(self) -> None:
+        nickname, claims, kids_count, followup = parse_incremental_claims_data(
+            {
+                "nickname": None,
+                "kids_count": 2,
+                "claims": [
+                    {
+                        "concept": "triathlon_athlete",
+                        "label": "Triathlon Athlete",
+                        "confidence": 0.9,
+                        "disclosure": "public",
+                        "source_quote": "do triathlon",
+                        "bucket": "activity",
+                    }
+                ],
+                "followup_question": "Love it — road or trail?",
+            }
+        )
+        self.assertIsNone(nickname)
+        self.assertEqual(kids_count, 2)
+        self.assertEqual(followup, "Love it — road or trail?")
+        self.assertEqual(len(claims), 1)
+
+    def test_existing_claims_block_instructs_merge(self) -> None:
+        from app.vertex_extract import _existing_claims_block
+
+        block = _existing_claims_block(["Speaks 10 languages", "Triathlon Athlete"])
+        self.assertIn("ALREADY ON PROFILE", block)
+        self.assertIn("Speaks 10 languages", block)
+        self.assertIn("do NOT", block)
+
+    def test_existing_claims_block_empty(self) -> None:
+        from app.vertex_extract import _existing_claims_block
+
+        self.assertEqual(_existing_claims_block([]), "")
+        self.assertEqual(_existing_claims_block(None), "")
+
+    def test_kids_count_rejects_out_of_range(self) -> None:
+        # An age slipping through ("kids are 7") must not be read as a count.
+        _, _, kids_count, _ = parse_incremental_claims_data(
+            {"kids_count": 47, "claims": []}
+        )
+        self.assertIsNone(kids_count)
 
 
 class TestUpsertClaims(unittest.TestCase):

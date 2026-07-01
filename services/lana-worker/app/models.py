@@ -203,6 +203,11 @@ class EventDraft(BaseModel):
     # Join settings captured in the host flow.
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
     allow_attendee_share: bool | None = None
+    # Items attendees should bring (the 4/4 quick-setup card) → the meet's pinned list.
+    bring_items: list[str] = Field(default_factory=list)
+    # AI-tailored quick-setup card config (capacity/sharing/approval/bring labels + bring
+    # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
+    event_setup: dict[str, Any] | None = None
     cohort_tags: list[str] = Field(default_factory=list)
     affinity_prompt: str | None = None
     affinity_options: list[str] = Field(default_factory=list)
@@ -298,6 +303,27 @@ class EventVenueRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
     place_id: str | None = None
+
+
+class EventSetupRequest(BaseModel):
+    """The host's quick-setup submission from the carousel, stamped onto the session draft
+    in one shot so the next turn advances to the final review. Carries the settings
+    (capacity / sharing / approval / bring) AND any blockers the opening message didn't
+    provide (title / when / where) — so nothing is asked one field per turn."""
+
+    # Blockers the carousel collects when the opening message was sparse.
+    title: str | None = None
+    starts_at: str | None = None  # naive local ISO (e.g. 2026-07-11T09:00:00); TZ-anchored at publish
+    venue_name: str | None = None
+    venue_address: str | None = None
+    venue_lat: float | None = None
+    venue_lng: float | None = None
+    place_id: str | None = None
+    # Settings.
+    max_attendees: int | None = None  # None = no limit
+    auto_approve: bool | None = None  # True = anyone joins; False = host approves each
+    allow_attendee_share: bool | None = None
+    bring_items: list[str] = Field(default_factory=list)
 
 
 class EventJoinHookRequest(BaseModel):

@@ -26,11 +26,13 @@ HOST_CTX_KEYS = (
     "event_when_time",
     "event_place_asked",
     "event_venue",
+    "event_venue_tried",
     "event_settings",
     "event_cap_asked",
     "event_approval_asked",
     "event_share_asked",
     "event_affinity_asked",
+    "host_stage",
 )
 
 

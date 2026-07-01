@@ -180,6 +180,8 @@ class ClaimExtractResult:
     saved: int = 0
     heritage_conflict: dict[str, Any] | None = None
     nickname: str | None = None
+    kids_count: int | None = None
+    followup_question: str | None = None
 
 
 def _heritage_root(concept: str, label: str) -> str | None:
@@ -214,6 +216,32 @@ def message_might_assert_heritage(message: str) -> bool:
         if any(re.search(rf"\b{re.escape(t)}\b", low) for t in terms):
             return True
     return False
+
+
+def fetch_active_claim_labels(user_id: str) -> list[str]:
+    """Active claim labels, so the extractor can MERGE instead of spawning a
+    near-duplicate thread (e.g. 'English Speaker' next to 'Speaks 10 languages')."""
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("label, concept")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(40)
+            .execute()
+        )
+    except Exception:
+        logger.exception("fetch_active_claim_labels_failed")
+        return []
+    out: list[str] = []
+    for row in res.data or []:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or row.get("concept") or "").strip()
+        if label:
+            out.append(label)
+    return out
 
 
 def fetch_active_heritage_claims(user_id: str) -> list[tuple[str, str]]:
@@ -322,7 +350,7 @@ def filter_extracted_claims(
             if re.search(r"\b(?:speaker|heritage)\b", label) and len(label) > 24:
                 continue
         out.append(c)
-    return out[:4]
+    return out[:6]
 
 
 def _dismiss_claims_by_ids(sb: Any, claim_ids: list[str]) -> None:
@@ -444,6 +472,13 @@ def persist_profile_patch(user_id: str, patch: dict[str, str]) -> None:
     if not row:
         return
     service_client().table("users").update(row).eq("id", user_id).execute()
+
+
+def persist_kids_count(user_id: str, kids_count: int | None) -> None:
+    """Store the stated number of children (count only — never name/age/school)."""
+    if kids_count is None or not (1 <= kids_count <= 20):
+        return
+    service_client().table("users").update({"kids_count": kids_count}).eq("id", user_id).execute()
 
 
 def _embed_claim(c: ExtractedClaim) -> list[float] | None:
@@ -594,8 +629,9 @@ def try_upsert_claims_from_message(
     if not should_extract_claims_from_message(message):
         return ClaimExtractResult(nickname=stated_nick)
     try:
-        data = incremental_claims_from_utterance(message)
-        nickname, claims = parse_incremental_claims_data(data)
+        existing_labels = fetch_active_claim_labels(user_id)
+        data = incremental_claims_from_utterance(message, existing_labels)
+        nickname, claims, kids_count, followup = parse_incremental_claims_data(data)
     except Exception:
         logger.exception("incremental_claim_extract_failed")
         return ClaimExtractResult(nickname=stated_nick)
@@ -603,11 +639,17 @@ def try_upsert_claims_from_message(
         nickname = _normalize_nickname(nickname)
         persist_profile_patch(user_id, {"nickname": nickname})
         stated_nick = nickname
+    # Kids count is private (count only) — persist regardless of whether other claims survive.
+    persist_kids_count(user_id, kids_count)
     if not claims:
-        return ClaimExtractResult(nickname=stated_nick)
+        return ClaimExtractResult(
+            nickname=stated_nick, kids_count=kids_count, followup_question=followup
+        )
     claims = filter_extracted_claims(message, claims)
     if not claims:
-        return ClaimExtractResult(nickname=stated_nick)
+        return ClaimExtractResult(
+            nickname=stated_nick, kids_count=kids_count, followup_question=followup
+        )
 
     heritage = [c for c in claims if c.bucket == "heritage"]
     other = [c for c in claims if c.bucket != "heritage"]
@@ -624,10 +666,17 @@ def try_upsert_claims_from_message(
                 saved=saved,
                 heritage_conflict=pending_heritage_from_claim(from_label, new_claim),
                 nickname=stated_nick,
+                kids_count=kids_count,
+                followup_question=followup,
             )
 
     saved = upsert_claims(user_id, claims)
-    return ClaimExtractResult(saved=saved, nickname=stated_nick)
+    return ClaimExtractResult(
+        saved=saved,
+        nickname=stated_nick,
+        kids_count=kids_count,
+        followup_question=followup,
+    )
 
 
 def extract_and_upsert_claims_from_message(

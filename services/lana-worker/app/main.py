@@ -68,6 +68,7 @@ from app.models import (
     EventDecisionHookRequest,
     EventDraft,
     EventJoinHookRequest,
+    EventSetupRequest,
     EventVenueRequest,
     ItemDraft,
     LookDraft,
@@ -1200,10 +1201,13 @@ def send_lana_message(
         session_ctx_in["event_when_time"] = None
         session_ctx_in["event_place_asked"] = False
         session_ctx_in["event_venue"] = None
+        session_ctx_in["event_venue_tried"] = None
         session_ctx_in["event_settings"] = None
         session_ctx_in["event_cap_asked"] = False
         session_ctx_in["event_approval_asked"] = False
         session_ctx_in["event_share_asked"] = False
+        # Batched-setup stage (review → setup → confirm → published); start unset.
+        session_ctx_in["host_stage"] = None
     # Deterministic entry into the in-chat "pass along an item" flow — from the
     # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
     # dependency, so it engages before discovery classifies it as sharing.swap).
@@ -1527,6 +1531,75 @@ def set_event_venue(
         "lng": body.lng,
     }
     ctx["event_place_asked"] = True  # the where-step is satisfied precisely now
+    update_session_context(session_id, ctx)
+    return {"ok": True}
+
+
+@app.post("/lana/sessions/{session_id}/event-setup")
+def set_event_setup(
+    session_id: str,
+    body: EventSetupRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Stamp the host's quick-setup submission onto the session's event draft in one shot —
+    the settings (capacity / sharing / approval / bring) AND any blockers the opening
+    message didn't provide (title / when / where) — so the next message advances the batched
+    host flow to the final review with everything applied, no turn-by-turn questions."""
+    auth = verify_auth(authorization)
+    session = get_session_for_user(session_id, auth.user_id)
+    ctx = dict(session.get("context") or {})
+    draft = dict(ctx.get("event_draft") or {})
+    # Blockers the carousel collected when the opening message was sparse. Stamp them (and
+    # mirror onto the step-gate keys the pipeline reads) so the draft resolves as complete.
+    if body.title and body.title.strip():
+        draft["title"] = body.title.strip()[:80]
+    if body.starts_at and body.starts_at.strip():
+        draft["starts_at"] = body.starts_at.strip()
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+
+            _start = _dt.fromisoformat(body.starts_at.strip())
+            _dur = int(draft.get("duration_minutes") or 90)
+            draft["ends_at"] = (_start + _td(minutes=_dur)).isoformat()
+            ctx["event_when_date"] = _start.date().isoformat()
+            ctx["event_when_time"] = _start.strftime("%H:%M")
+        except (ValueError, TypeError):
+            pass
+    if body.venue_name and body.venue_name.strip():
+        draft["venue_name"] = body.venue_name.strip()
+        draft["venue_address"] = (body.venue_address or "").strip() or None
+        draft["place_id"] = (body.place_id or "").strip() or None
+        draft["venue_lat"] = body.venue_lat
+        draft["venue_lng"] = body.venue_lng
+        ctx["event_venue"] = {
+            "name": draft["venue_name"],
+            "address": draft["venue_address"],
+            "place_id": draft["place_id"],
+            "lat": body.venue_lat,
+            "lng": body.venue_lng,
+        }
+        ctx["event_place_asked"] = True
+    if body.max_attendees is not None:
+        cap = int(body.max_attendees)
+        draft["max_attendees"] = cap if 1 <= cap <= 200 else None
+    else:
+        draft["max_attendees"] = None  # explicit "no limit"
+    if body.auto_approve is not None:
+        draft["auto_approve"] = bool(body.auto_approve)
+    if body.allow_attendee_share is not None:
+        draft["allow_attendee_share"] = bool(body.allow_attendee_share)
+    bring = [str(b).strip()[:60] for b in (body.bring_items or []) if str(b).strip()][:12]
+    draft["bring_items"] = bring
+    ctx["event_draft"] = draft
+    # Keep the scratch settings dict in sync so a same-turn re-parse doesn't clobber these.
+    settings = dict(ctx.get("event_settings") or {})
+    settings["max_attendees"] = draft.get("max_attendees")
+    settings["_cap_set"] = True
+    if "auto_approve" in draft:
+        settings["auto_approve"] = draft["auto_approve"]
+    if "allow_attendee_share" in draft:
+        settings["allow_attendee_share"] = draft["allow_attendee_share"]
+    ctx["event_settings"] = settings
     update_session_context(session_id, ctx)
     return {"ok": True}
 

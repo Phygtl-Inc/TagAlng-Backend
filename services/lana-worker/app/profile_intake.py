@@ -60,12 +60,13 @@ Output ONLY valid JSON (no markdown):
 
 Rules:
 - assistant_message: **max 2 short sentences, under 240 characters** — complete sentences only; never trail off mid-thought.
-- status "continue" — still missing heritage, a second thread, display name (when HOST CONTEXT says so), or a gentle kids follow-up for moms.
+- status "continue" — still missing heritage, a second thread, or display name (when HOST CONTEXT says so).
 - status "ready_to_complete" — story is enough AND display name is on file or in profile_patch; invite tap Complete.
 - profile_patch: set nickname/full_name when the user tells you what to call them; otherwise null fields.
 - highlights: 1-4 short phrases from the USER's words, each with a bucket.
 - Keep JSON compact — short arrays, no commentary outside JSON.
 - Never ask about race, exact age, sex, or street address.
+- PRIVACY — children: NEVER ask for or reference a child's age, name, school, or photo. Parent status (that they have kids) is fine; their kids' details are not. If the user volunteers a child's age, do NOT repeat it back or ask more — gently move to another thread.
 """
 
 PROFILE_OPENING = """
@@ -277,6 +278,22 @@ def collect_profile_buckets(
     return buckets
 
 
+_COMPLETE_CTA_RE = re.compile(
+    r"\b(?:tap\s+complete|complete to save|save your profile)\b", re.I
+)
+
+
+def _strip_complete_cta(message: str) -> str:
+    """Drop any 'tap Complete / save your profile' sentence — used where no Complete
+    button exists (the unified discovery chat)."""
+    text = str(message or "").strip()
+    if not _COMPLETE_CTA_RE.search(text):
+        return text
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    kept = [p for p in parts if not _COMPLETE_CTA_RE.search(p)]
+    return " ".join(kept).strip() or text
+
+
 def apply_profile_stop_rules(
     status: str,
     assistant_message: str,
@@ -288,8 +305,15 @@ def apply_profile_stop_rules(
     display_name_saved: bool = False,
     profile_patch: dict[str, str] | None = None,
     guest_step: str | None = None,
+    continuous: bool = False,
 ) -> tuple[str, str]:
-    """Code enforcement: short intake, with optional name + mom/kids beats."""
+    """Code enforcement: short intake, with optional name + mom/kids beats.
+
+    continuous=True (unified discovery chat): there's no Complete button, so never
+    wrap up or emit a Complete CTA — keep deepening, status stays 'continue'.
+    """
+    if continuous:
+        return _strip_complete_cta(assistant_message), "continue"
     if guest_step and guest_step not in ("post_verify", "intro_declined"):
         if status == "ready_to_complete":
             status = "continue"
@@ -360,6 +384,7 @@ def _parse_profile_turn(
     profile_gaps: dict[str, bool] | None = None,
     display_name_saved: bool = False,
     guest_step: str | None = None,
+    continuous: bool = False,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
     if not isinstance(data, dict):
         raise ValueError("invalid_turn_json")
@@ -395,6 +420,7 @@ def _parse_profile_turn(
         display_name_saved=display_name_saved,
         profile_patch=profile_patch,
         guest_step=guest_step,
+        continuous=continuous,
     )
     ctx: dict[str, Any] = {
         "topics_covered": covered,
@@ -494,6 +520,17 @@ def lana_profile_opening(
     return _parse_profile_turn(data, history=[], profile_gaps=gaps)
 
 
+CONTINUOUS_DEEPEN_DIRECTIVE = (
+    "CONTINUOUS CHAT MODE: There is NO 'Complete' button here. Never tell the user to "
+    "tap Complete or to save their profile. After warmly acknowledging what they shared, "
+    "ALWAYS end with exactly one curious, open follow-up that draws out MORE about a thread "
+    "they mentioned (e.g. triathlon → 'road or trail, and do you train with a crew?'; "
+    "tech worker → 'what kind of tech — engineering, product, design?'). "
+    "NEVER deepen on their kids and NEVER ask a child's age, name, or school — that is private; "
+    "if kids come up, acknowledge warmly and pivot to a different thread. Keep status 'continue'."
+)
+
+
 def lana_profile_turn(
     user_context_block: str,
     history: list[dict[str, Any]],
@@ -502,14 +539,20 @@ def lana_profile_turn(
     ctx_pack: dict[str, Any] | None = None,
     session_ctx: dict[str, Any] | None = None,
     timer: TurnTimer | None = None,
+    continuous: bool = False,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    closing_instruction = (
+        CONTINUOUS_DEEPEN_DIRECTIVE
+        if continuous
+        else "Reply as Lana. One question max. Set ui.highlights from the user's words."
+    )
     payload = "\n\n".join(
         [
             user_context_block,
             "CONVERSATION SO FAR:\n"
             + format_chat_history(history, max_messages=PROFILE_HISTORY_MAX),
             f"USER'S NEW MESSAGE:\n{user_message.strip()}",
-            "Reply as Lana. One question max. Set ui.highlights from the user's words.",
+            closing_instruction,
         ]
     )
     attempts_box: list[int] = []
@@ -529,4 +572,5 @@ def lana_profile_turn(
         profile_gaps=gaps,
         display_name_saved=saved,
         guest_step=guest_step,
+        continuous=continuous,
     )
