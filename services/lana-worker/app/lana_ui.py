@@ -158,6 +158,16 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
                 continue
             if tid not in cohort_tags:
                 cohort_tags.append(tid)
+    bring_raw = raw.get("bring_items") or []
+    bring_items: list[str] = []
+    if isinstance(bring_raw, list):
+        for b in bring_raw[:12]:
+            label = str(b).strip()[:60]
+            if label and label not in bring_items:
+                bring_items.append(label)
+    # AI-tailored quick-setup card config (opaque dict) — passed through untouched.
+    event_setup_raw = raw.get("event_setup")
+    event_setup = event_setup_raw if isinstance(event_setup_raw, dict) else None
     missing_raw = raw.get("missing") or []
     missing: list[str] = []
     if isinstance(missing_raw, list):
@@ -193,6 +203,8 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
         "duration_minutes": duration_minutes,
         "max_attendees": max_attendees,
         "cohort_tags": cohort_tags,
+        "bring_items": bring_items,
+        "event_setup": event_setup,
         "affinity_prompt": affinity_prompt,
         "affinity_options": affinity_options,
         "missing": missing,
@@ -235,6 +247,13 @@ def merge_event_drafts(
             merged[key] = new[key]
     if new.get("cohort_tags"):
         merged["cohort_tags"] = new["cohort_tags"]
+    if new.get("bring_items"):
+        merged["bring_items"] = new["bring_items"]
+    # event_setup is set once (when entering the setup stage) and then persists untouched.
+    if new.get("event_setup"):
+        merged["event_setup"] = new["event_setup"]
+    elif base.get("event_setup"):
+        merged["event_setup"] = base["event_setup"]
     # Honor explicit resets — the host wants to redo a slot they'd already filled
     # ("don't call it X", "change the time"). Slot-filling is otherwise monotonic, so
     # without this a rejected value sticks forever and the flow re-asks the NEXT slot

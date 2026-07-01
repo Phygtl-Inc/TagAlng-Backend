@@ -126,6 +126,9 @@ def build_create_event_fields(
         fields["auto_approve"] = bool(draft.auto_approve)
     if draft.allow_attendee_share is not None:
         fields["allow_attendee_share"] = bool(draft.allow_attendee_share)
+    bring = [str(b).strip()[:60] for b in (draft.bring_items or []) if str(b).strip()][:12]
+    if bring:
+        fields["bring_items"] = bring
     if cohost_id:
         fields["cohost_id"] = cohost_id
     return fields

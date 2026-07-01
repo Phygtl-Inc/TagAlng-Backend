@@ -26,6 +26,10 @@ UI_INTENT_SIGNAL_SAVED = "signal_saved"
 UI_INTENT_SHOW_IDENTITY_PROFILE = "show_identity_profile"
 UI_INTENT_COLLECT_SIGNAL_DETAIL = "collect_signal_detail"
 UI_INTENT_COLLECT_EVENT_DETAIL = "collect_event_detail"
+# Batched host flow: drafted-meet review → quick-setup carousel → final review → live.
+UI_INTENT_EVENT_REVIEW = "event_review"
+UI_INTENT_EVENT_SETUP = "event_setup"
+UI_INTENT_EVENT_CONFIRM = "event_confirm"
 UI_INTENT_EVENT_CREATED = "event_created"
 UI_INTENT_COLLECT_ITEM_DETAIL = "collect_item_detail"
 UI_INTENT_ITEM_LISTED = "item_listed"
@@ -93,10 +97,18 @@ def derive_ui_intent(
     if ctx.get("intro_proposal"):
         return UI_INTENT_PROPOSE_NEIGHBOR_INTRO
 
-    # In-chat event hosting — the draft card while capturing, the created card on publish.
+    # In-chat event hosting — the draft card while capturing, then the batched review →
+    # setup → confirm stages, then the created card on publish.
     if ctx.get("event_published_now"):
         return UI_INTENT_EVENT_CREATED
     if ctx.get("event_host_active"):
+        stage = str(ctx.get("host_stage") or "").strip()
+        if stage == "review":
+            return UI_INTENT_EVENT_REVIEW
+        if stage == "setup":
+            return UI_INTENT_EVENT_SETUP
+        if stage == "confirm":
+            return UI_INTENT_EVENT_CONFIRM
         return UI_INTENT_COLLECT_EVENT_DETAIL
 
     # In-chat "pass along an item" — the item card while capturing, listed card on save.
