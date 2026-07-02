@@ -1147,7 +1147,27 @@ def run_lana_unified_pipeline(
                     ed["suggestions"] = []
                     reply = "Set the details below, then tap **Looks good**."
             else:  # stage == "confirm" → publish when the host drops it
-                if _is_host_drop(user_message) or _is_host_confirm(user_message):
+                if (_is_host_drop(user_message) or _is_host_confirm(user_message)) and not phone_verified:
+                    # Guest dropping the meet: DON'T attempt create_event first — it would
+                    # 403 (auto_publish_event_failed: create_event_failed:403). Gate on auth
+                    # up front: ask to sign up / log in and mark the finished draft
+                    # host_publish_pending so the post-verify path (discovery_route) publishes
+                    # it and shows the event-created screen once the account is verified.
+                    turn_ctx["host_stage"] = "confirm"
+                    turn_ctx["requires_phone_verification"] = True
+                    turn_ctx["host_publish_pending"] = True
+                    if not session_ctx.get("host_publish_pending"):
+                        turn_ctx["routing_phase"] = "await_signup_phone"
+                        reply = (
+                            f"Perfect — **{_title or 'your event'}** is all set! "
+                            "To post it I just need to verify your email — what's your email?"
+                        )
+                    else:
+                        reply = (
+                            "Finishing verification — send one more message and I'll "
+                            f"post **{_title or 'your event'}** right away."
+                        )
+                elif _is_host_drop(user_message) or _is_host_confirm(user_message):
                     event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
                     if event_id:
                         turn_ctx["event_id"] = event_id

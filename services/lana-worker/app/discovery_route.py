@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from typing import Any
@@ -4476,6 +4477,14 @@ def handle_discovery_turn(
     msg = str(user_message or "").strip()
     phase = str(session_ctx.get("routing_phase") or "")
     active = session_ctx.get("active_intent")
+    # Per-turn state snapshot — cheap and invaluable for debugging flow/host/verify issues.
+    logging.getLogger(__name__).info(
+        "discovery_turn_entry: phase=%s active=%s verified=%s pub_pending=%s host_active=%s "
+        "has_draft=%s host_stage=%s msg=%r",
+        phase, active, phone_verified, session_ctx.get("host_publish_pending"),
+        session_ctx.get("event_host_active"), bool(session_ctx.get("event_draft")),
+        session_ctx.get("host_stage"), msg[:60],
+    )
 
     # Classify the turn once (cached for the rest of the turn) BEFORE the host-mode gate,
     # so exiting hosting is semantic — the AI's read that the user is backing out — rather
@@ -4515,6 +4524,55 @@ def handle_discovery_turn(
             msg=msg, kind=_unsafe_kind, session_ctx=session_ctx,
             user_id=user_id, home_block_id=home_block_id, phase=phase,
         )
+
+    # A guest who finished an event, hit the verify gate, and is now verified: publish the
+    # event RIGHT AWAY (mirrors the meet-seek publish-after-verify below) and show the
+    # event-created screen — instead of dropping them into the find-peers name/identity
+    # funnel (the old bug) or re-attempting a create_event that already 403'd. Placed BEFORE
+    # the sticky-host block so a spurious pivot-release can't wipe the finished draft first.
+    if phone_verified and session_ctx.get("host_publish_pending"):
+        from app import lana_unified_pipeline as _pipe
+
+        host_ctx = extract_host_ctx(session_ctx)
+        _ed = host_ctx.get("event_draft")
+        if isinstance(_ed, dict) and _pipe._event_draft_complete(_ed):
+            # Persist the home block at this verify boundary too (same reason as post-verify).
+            if not home_block_id:
+                _try_assign_home_block(
+                    user_jwt, session_ctx=session_ctx, home_block_id=home_block_id
+                )
+            _title = str(_ed.get("title") or "").strip()
+            event_id, publish_error = _pipe._auto_publish_event(user_id, user_jwt, _ed)
+            if event_id:
+                _release_host_mode(session_ctx)
+                ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+                ctx["event_id"] = event_id
+                ctx["event_published_now"] = True
+                ctx["event_host_active"] = False
+                ctx["host_publish_pending"] = None
+                ctx["pending_post_verify"] = None
+                ctx["requires_phone_verification"] = None
+                ctx["event_draft"] = _ed
+                return (
+                    _pipe._event_published_reply("", _ed),
+                    ctx,
+                    _discovery_routing_stub("listening", "create_event"),
+                    [],
+                )
+            # Publish still failed post-verify (e.g. an unresolvable venue) — surface the
+            # reason and hold at confirm for a manual retry; never fall into the funnel.
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+            ctx["event_host_active"] = True
+            ctx["host_stage"] = "confirm"
+            ctx["host_publish_pending"] = None
+            ctx["pending_post_verify"] = None
+            ctx["event_draft"] = _ed
+            return (
+                _pipe._publish_failure_reply(publish_error, _title),
+                ctx,
+                _discovery_routing_stub("listening", "create_event"),
+                [],
+            )
 
     # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
     # conversation so an event line ("weekday playground meet with kids") isn't hijacked
@@ -4558,7 +4616,11 @@ def handle_discovery_turn(
         # Back out when the AI reads the turn as an abandon ("I dont wanna host anything" — no
         # replacement), on a hard cancel word, or on a pivot to another lane. No keyword
         # matching for the back-out — the AI's `abandon` flag is what decides it.
-        wants_out = not seed_turn and (
+        # NEVER back out while the finished event is waiting on email/OTP verification: those
+        # turns (an email address, a 6-digit code) reliably read as a "foreign" intent to the
+        # classifier and would spuriously release host mode — wiping the draft + host_publish_pending
+        # before the signup handler can stash/publish it (the "logged in but no event" bug).
+        wants_out = not seed_turn and not host_verifying and (
             bool(slots.get("abandon")) or is_signal_cancel(msg) or pivoted_away
         )
         if wants_out:
@@ -4874,8 +4936,14 @@ def handle_discovery_turn(
                 _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
                 [],
             )
+        # A guest finishing signup to POST an event they already built stays on the host
+        # track (host_publish_pending survives via {**session_ctx}); the next verified turn
+        # auto-publishes it (see the post-verify host block above). Don't route them into the
+        # find-peers name/identity funnel, and tell them their event is about to go up.
+        host_publishing = bool(session_ctx.get("host_publish_pending"))
         ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=email)
-        ctx["pending_post_verify"] = True
+        if not host_publishing:
+            ctx["pending_post_verify"] = True
         ctx["requires_phone_verification"] = False
         ctx.pop("pending_signup_gate", None)
         ctx["auth_action"] = _auth_action(
@@ -4884,9 +4952,16 @@ def handle_discovery_turn(
             token=otp,
             verify_type="email_change",
         )
+        reply = (
+            "Perfect — verifying you now. One moment and I'll post your event to the block."
+            if host_publishing
+            else (
+                "Perfect — verifying you now. Once you're verified, tell me your first name "
+                "and I'll show neighbors you can connect with."
+            )
+        )
         return (
-            "Perfect — verifying you now. Once you're verified, tell me your first name "
-            "and I'll show neighbors you can connect with.",
+            reply,
             ctx,
             _discovery_routing_stub(PHASE_PREVIEW, "verify_signup_otp"),
             [],

@@ -136,6 +136,19 @@ from app.notifications import email_html, notify_user
 
 _LOG = logging.getLogger(__name__)
 
+# Surface app-level INFO logs (per-turn traces, etc.). uvicorn configures no root handler,
+# so app.* logs otherwise reach stderr only via Python's lastResort handler (WARNING-only) —
+# which is why INFO diagnostics were invisible. Attach a dedicated INFO StreamHandler to the
+# "app" logger and stop propagation so nothing double-prints. Level via LANA_LOG_LEVEL.
+_app_logger = logging.getLogger("app")
+_app_logger.setLevel(os.environ.get("LANA_LOG_LEVEL", "INFO").upper())
+if not any(getattr(h, "_lana_turn_handler", False) for h in _app_logger.handlers):
+    _turn_handler = logging.StreamHandler()
+    _turn_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    _turn_handler._lana_turn_handler = True  # type: ignore[attr-defined]
+    _app_logger.addHandler(_turn_handler)
+    _app_logger.propagate = False
+
 app = FastAPI(title="TagAlng lana-worker", version="0.5.4")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
