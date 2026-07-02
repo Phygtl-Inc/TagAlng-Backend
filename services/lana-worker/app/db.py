@@ -58,6 +58,9 @@ def stash_pending_event_draft(user_id: str, host_ctx: dict[str, Any]) -> None:
             on_conflict="user_id",
         ).execute()
     except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("stash_pending_event_draft_failed: user_id=%s", user_id)
         return
 
 
@@ -82,6 +85,9 @@ def pop_pending_event_draft(user_id: str) -> dict[str, Any] | None:
         host_ctx = row.get("host_ctx")
         return host_ctx if isinstance(host_ctx, dict) and host_ctx.get("event_draft") else None
     except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("pop_pending_event_draft_failed: user_id=%s", user_id)
         return None
 
 
