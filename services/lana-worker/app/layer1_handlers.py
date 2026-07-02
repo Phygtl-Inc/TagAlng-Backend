@@ -551,19 +551,52 @@ def handle_notification_prefs(user_jwt: str, message: str) -> tuple[str, str]:
     return "You're back on normal updates — I'll text when there's a good match.", pref
 
 
-def handle_add_or_edit_claim(
+class IdentityPersistResult:
+    """Outcome of persisting one identity turn — data only; the REPLY is owned by
+    the conversational engine (lana_profile_turn), per ai-authoritative-routing."""
+
+    __slots__ = ("verify_gate", "saved", "dismissed", "conflict", "conflict_prompt", "nickname", "kids_count")
+
+    def __init__(
+        self,
+        *,
+        verify_gate: bool = False,
+        saved: int = 0,
+        dismissed: int = 0,
+        conflict: dict[str, Any] | None = None,
+        conflict_prompt: str | None = None,
+        nickname: str | None = None,
+        kids_count: int | None = None,
+    ) -> None:
+        self.verify_gate = verify_gate
+        self.saved = saved
+        self.dismissed = dismissed
+        self.conflict = conflict
+        self.conflict_prompt = conflict_prompt
+        self.nickname = nickname
+        self.kids_count = kids_count
+
+    @property
+    def total(self) -> int:
+        return self.saved + self.dismissed
+
+
+def persist_identity_from_message(
     user_id: str | None,
     message: str,
     *,
     linear_intent: str,
     force_heritage_replace: bool = False,
-) -> tuple[str, int, dict[str, Any] | None]:
+) -> IdentityPersistResult:
+    """Extract + persist identity claims / kids / nickname for one turn.
+
+    Pure data path: no conversational reply is composed here. Heritage conflicts
+    are surfaced as an interactive prompt (they need a synchronous yes/no), but
+    everything else is left to the conversational engine to talk about.
+    """
     if not user_id:
-        return (
-            "Verify your email first — then I can save identity threads to your profile.",
-            0,
-            None,
-        )
+        return IdentityPersistResult(verify_gate=True)
+
     dismissed = 0
     if linear_intent == "identity.edit_claim" or re.search(
         r"\b(?:remove|delete|drop|clear)\b", message, re.I
@@ -581,38 +614,19 @@ def handle_add_or_edit_claim(
     if result.heritage_conflict:
         from_label = str(result.heritage_conflict.get("from_label") or "your prior heritage")
         pending_claim = claim_from_pending(result.heritage_conflict)
-        return (
-            heritage_conflict_prompt(from_label, pending_claim),
-            result.saved,
-            result.heritage_conflict,
+        return IdentityPersistResult(
+            saved=result.saved,
+            dismissed=dismissed,
+            conflict=result.heritage_conflict,
+            conflict_prompt=heritage_conflict_prompt(from_label, pending_claim),
+            nickname=result.nickname,
+            kids_count=result.kids_count,
         )
-    saved = result.saved
-    total = dismissed + saved
-    if total > 0:
-        parts: list[str] = []
-        if dismissed:
-            parts.append(f"removed {dismissed}")
-        if saved:
-            parts.append(f"updated {saved}")
-        prefix = f"Nice to meet you, {result.nickname} — " if result.nickname else "Got it — "
-        return (
-            f"{prefix}I {' and '.join(parts)} identity thread{'s' if total != 1 else ''} on your profile.",
-            total,
-            None,
-        )
-    if result.nickname:
-        # A name with no other identity content is still a successful capture.
-        return (
-            f"Nice to meet you, {result.nickname}! I'll remember that. "
-            "Tell me about yourself — heritage, life stage, or interests — and I'll map you to neighbors.",
-            1,
-            None,
-        )
-    return (
-        "I heard you, but I couldn't pull a clear identity thread from that — "
-        "try one at a time (heritage, life stage, or interest).",
-        0,
-        None,
+    return IdentityPersistResult(
+        saved=result.saved,
+        dismissed=dismissed,
+        nickname=result.nickname,
+        kids_count=result.kids_count,
     )
 
 

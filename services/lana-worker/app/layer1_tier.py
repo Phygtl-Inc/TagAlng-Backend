@@ -59,10 +59,26 @@ def wants_respond_intro(msg: str) -> bool:
     return False
 
 
+_STANDALONE_NEGATION = frozenset(
+    {
+        "no", "nope", "nah", "no thanks", "no thank you", "not now", "not really",
+        "that's all", "thats all", "that's it", "thats it", "no more", "nothing",
+        "nothing else", "i'm good", "im good", "all good", "that's everything",
+        "thats everything",
+    }
+)
+
+
 def is_standalone_affirmation(msg: str) -> bool:
     """A bare "ok"/"yes" with no explicit intro reference — ambiguous on its own."""
     norm = str(msg or "").strip().lower().rstrip(".!")
     return norm in _STANDALONE_ACCEPT
+
+
+def is_standalone_negation(msg: str) -> bool:
+    """A bare "no"/"that's all" with no explicit intro reference — ambiguous on its own."""
+    norm = str(msg or "").strip().lower().rstrip(".!")
+    return norm in _STANDALONE_NEGATION
 
 
 def parse_nudge_response(msg: str) -> str:
