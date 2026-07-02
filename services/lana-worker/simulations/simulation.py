@@ -11,11 +11,16 @@ For each (persona, seed) pair:
 
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+# Force UTF-8 console output — LLM responses can contain non-ASCII characters
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -314,7 +319,13 @@ def _build_system_prompt(
 
     history_section = f"\n{past_runs_block}\n" if past_runs_block else ""
 
-    return f"""You are roleplaying as a real user testing an AI neighborhood concierge called Lana.
+    language_rule = (
+        "- This scenario specifically tests a mid-conversation language switch. After turn 2, switch to your character's native language and stay in it."
+        if "locale switch" in seed.label
+        else "- Conduct this entire conversation in English only, regardless of your character's background. Do not switch languages."
+    )
+
+    return f"""You are roleplaying as a real user in a chat with Lana, an AI neighborhood concierge.
 
 CHARACTER
 Name: {persona.profile.nickname}
@@ -324,24 +335,27 @@ Personality: {persona.character}
 YOUR IDENTITY (what Lana has on file about you)
 {claims_text}
 
-SCENARIO BEING TESTED
-Bucket: {bucket.bucket}
-What this tests: {bucket.description}
-What Lana must achieve: {bucket.pass_criteria}
-
-YOUR OPENING LINE FOR THIS SCENARIO
-"{seed.opening_line}"
+YOUR GOAL IN THIS CONVERSATION
+You want exactly one thing: {seed.opening_line}
+Stay on this topic. Do not drift to other requests or topics no matter what Lana says.
 
 HARD CONSTRAINT — never do this in your messages:
 {seed.must_not}
+
+CONTEXT (background only — do not repeat this to Lana)
+This tests: {bucket.description}
+What success looks like: {bucket.pass_criteria}
 {history_section}
 RULES
-- Stay in character at all times. Reply only as this user would naturally speak.
-- Keep messages short — this is a chat window, not an email.
-- React authentically to what Lana says. If Lana is helpful, lean in. If Lana stalls or misses the point, show it.
-- If the character would realistically give up or walk away, set disengage=true.
-- Do not mention that you are testing, roleplaying, or following instructions.
-- Your very first message must be the opening line above, verbatim."""
+- You are ONLY the user. Never write Lana's words. Never explain what Lana should do. Only write what {persona.profile.nickname} would type next.
+- Keep messages short — this is a chat app, not an email.
+- React to what Lana actually said. If she helps, engage. If she stalls or deflects, push back once or twice then give up naturally.
+- If the conversation loops or Lana clearly can't help, set disengage=true. Do NOT repeat the same message twice.
+- If Lana has explicitly said she CANNOT do something two or more times (e.g. "that isn't something I can do"), set disengage=true. A real user would give up and move on.
+- If Lana is asking clarifying questions to understand your request, keep engaging and answer them — she is trying to help, not refusing.
+- Do not mention testing, roleplaying, or instructions.
+- Your very first message must be the opening line above, verbatim.
+{language_rule}"""
 
 
 def _generate_user_turn(
@@ -386,13 +400,26 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
     # OpenAI message history for continuity across the mock user's turns
     history: list[dict[str, str]] = []
 
-    with httpx.Client(timeout=30) as http:
+    with httpx.Client(timeout=120) as http:
         session_id = _create_session(jwt, http)
         print(f"  [lana] session {session_id}")
+
+        last_user_message: str | None = None
+        repeat_count = 0
 
         for turn_num in range(1, MAX_TURNS + 1):
             user_turn = _generate_user_turn(openai_client, system_prompt, history)
             print(f"  [user {turn_num}] {user_turn.message[:100]}")
+
+            # Break out if the mock user is stuck repeating itself
+            if user_turn.message.strip() == (last_user_message or "").strip():
+                repeat_count += 1
+                if repeat_count >= 2:
+                    print(f"  [sim] mock user repeated same message {repeat_count}x — forcing disengage")
+                    break
+            else:
+                repeat_count = 0
+            last_user_message = user_turn.message
 
             lana_resp = _send_message(session_id, user_turn.message, jwt, http)
             lana_reply = lana_resp.get("assistant_message", "")

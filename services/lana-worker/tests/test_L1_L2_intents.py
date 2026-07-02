@@ -36,12 +36,35 @@ import httpx
 # ---------------------------------------------------------------------------
 
 LANA_BASE_URL = os.environ.get("LANA_BASE_URL", "http://localhost:8000")
-SIM_BYPASS_TOKEN = os.environ.get("SIM_BYPASS_TOKEN", "STUB_JWT_REPLACE_ME")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+SIM_EMAIL = os.environ.get("SIM_EMAIL", "p1-sim@phygtl.dev")
+SIM_PASSWORD = os.environ.get("SIM_PASSWORD", "")
 
-TEST_SET_PATH = Path(__file__).parent.parent.parent.parent / "intent_test_set.json"
+TEST_SET_PATH = Path(__file__).parent.parent.parent.parent / "scratch" / "intent_test_set.json"
 
 # Timeout per HTTP call — Flash classification can be slow under load
 HTTP_TIMEOUT = 45
+
+# ---------------------------------------------------------------------------
+# Auth — Supabase password-grant JWT
+# ---------------------------------------------------------------------------
+
+def _get_jwt() -> str:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY or not SIM_PASSWORD:
+        raise RuntimeError(
+            "Missing Supabase credentials. Set SUPABASE_URL, SUPABASE_ANON_KEY, and SIM_PASSWORD "
+            "(e.g. load .env.local before running)."
+        )
+    resp = httpx.post(
+        f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+        headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+        json={"email": SIM_EMAIL, "password": SIM_PASSWORD},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
 
 # ---------------------------------------------------------------------------
 # Name overrides: test-set intent_id → codebase linear_intent
@@ -57,8 +80,9 @@ _EXTRA_ACCEPTS: dict[str, set[str]] = {
     "discovery.find_in_block": {"discovery.block_log"},
 }
 
-# fallback.* intents are not linear intents in the codebase — they fall through
-# to system.out_of_scope or a catch-all. Accept either.
+# fallback.* intents in the test taxonomy all route to system.out_of_scope in the codebase.
+# The classifier fires goal=out_of_scope / linear_intent=system.out_of_scope for anything
+# Lana can't handle. None covers cases where _discovery_slots wasn't written (e.g. fast paths).
 _FALLBACK_ACCEPTS: set[str] = {"system.out_of_scope", None}  # type: ignore[arg-type]
 
 
@@ -88,36 +112,32 @@ def _build_accept_map(intents: list[dict[str, Any]]) -> dict[str, set[str]]:
 # Lana API helpers
 # ---------------------------------------------------------------------------
 
-def _jwt() -> str:
-    return SIM_BYPASS_TOKEN
-
-
-def _create_session(client: httpx.Client) -> str:
+def _create_session(jwt: str, client: httpx.Client) -> str:
     resp = client.post(
         f"{LANA_BASE_URL}/lana/sessions",
         json={"purpose": "lana", "force_new": True},
-        headers={"Authorization": f"Bearer {_jwt()}"},
+        headers={"Authorization": f"Bearer {jwt}"},
         timeout=HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()["session_id"]
 
 
-def _send_message(session_id: str, message: str, client: httpx.Client) -> None:
+def _send_message(session_id: str, message: str, jwt: str, client: httpx.Client) -> None:
     resp = client.post(
         f"{LANA_BASE_URL}/lana/sessions/{session_id}/messages",
         json={"message": message},
-        headers={"Authorization": f"Bearer {_jwt()}"},
+        headers={"Authorization": f"Bearer {jwt}"},
         timeout=HTTP_TIMEOUT,
     )
     resp.raise_for_status()
 
 
-def _get_linear_intent(session_id: str, client: httpx.Client) -> tuple[str | None, float]:
+def _get_linear_intent(session_id: str, jwt: str, client: httpx.Client) -> tuple[str | None, float]:
     """Returns (linear_intent, confidence) from session context._discovery_slots."""
     resp = client.get(
         f"{LANA_BASE_URL}/lana/sessions/{session_id}",
-        headers={"Authorization": f"Bearer {_jwt()}"},
+        headers={"Authorization": f"Bearer {jwt}"},
         timeout=HTTP_TIMEOUT,
     )
     resp.raise_for_status()
@@ -132,10 +152,10 @@ def _get_linear_intent(session_id: str, client: httpx.Client) -> tuple[str | Non
 # Single utterance evaluation
 # ---------------------------------------------------------------------------
 
-def _classify_utterance(utterance: str, client: httpx.Client) -> tuple[str | None, float]:
-    session_id = _create_session(client)
-    _send_message(session_id, utterance, client)
-    return _get_linear_intent(session_id, client)
+def _classify_utterance(utterance: str, jwt: str, client: httpx.Client) -> tuple[str | None, float]:
+    session_id = _create_session(jwt, client)
+    _send_message(session_id, utterance, jwt, client)
+    return _get_linear_intent(session_id, jwt, client)
 
 
 def _is_pass(
@@ -163,7 +183,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out",
         default="scratch/eval_intent_{ts}.json",
-        help="Output file path (default: scratch/eval_intent_{ts}.json)",
+        help="Output file path relative to repo root (default: scratch/eval_intent_{ts}.json)",
     )
     return parser.parse_args()
 
@@ -202,9 +222,12 @@ def main() -> None:
     print(f"[eval] {ts} — {len(matrix)} utterances queued across {len({m[0] for m in matrix})} intents")
 
     if args.dry_run:
+        print(f"\n{'INTENT':40s}  {'DIFF':6}  {'EXPECTS':30s}  UTTERANCE")
+        print("-" * 120)
         for intent_id, utterance, diff, _ in matrix:
-            print(f"  {intent_id:40s} [{diff:6s}]  {utterance[:80]}")
-        print("\n[eval] dry-run — exiting without calling any API")
+            expects = ", ".join(sorted(accept_map.get(intent_id, {"system.out_of_scope"}) if not intent_id.startswith("fallback.") else {"system.out_of_scope"}))
+            print(f"  {intent_id:40s}  [{diff:6s}]  {expects:30s}  {utterance[:60]}")
+        print(f"\n[eval] dry-run — {len(matrix)} utterances, no API calls")
         return
 
     # ---------------------------------------------------------------------------
@@ -214,12 +237,36 @@ def main() -> None:
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
+    out_path_str = args.out.replace("{ts}", ts)
+    out_path = Path(out_path_str)
+    if not out_path.is_absolute():
+        out_path = Path(__file__).parent.parent.parent.parent / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _flush() -> None:
+        out_path.write_text(
+            json.dumps({"meta": {"ts": ts, "total": len(matrix), "completed": len(results) + len(errors), "passed": sum(1 for r in results if r["passed"]), "errors": len(errors), "intent_filter": args.intent, "difficulty_filter": args.difficulty}, "results": results, "errors": errors}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    print(f"[eval] logging in as {SIM_EMAIL} ...")
+    jwt = _get_jwt()
+    jwt_fetched_at = datetime.now(timezone.utc)
+    print(f"[eval] authenticated — saving progress to {out_path}")
+
     with httpx.Client() as client:
         for i, (intent_id, utterance, difficulty, notes) in enumerate(matrix, 1):
+            # Refresh JWT every 45 minutes (Supabase tokens expire after 1 hour)
+            age_minutes = (datetime.now(timezone.utc) - jwt_fetched_at).total_seconds() / 60
+            if age_minutes > 45:
+                print(f"  [auth] refreshing JWT (age={age_minutes:.0f}m)")
+                jwt = _get_jwt()
+                jwt_fetched_at = datetime.now(timezone.utc)
+
             run_id = str(uuid.uuid4())[:8]
             print(f"  [{i}/{len(matrix)}] {intent_id} [{difficulty}] — {utterance[:70]}")
             try:
-                predicted, confidence = _classify_utterance(utterance, client)
+                predicted, confidence = _classify_utterance(utterance, jwt, client)
                 passed = _is_pass(intent_id, predicted, accept_map)
                 marker = "PASS" if passed else "FAIL"
                 print(f"    → {marker}  predicted={predicted}  conf={confidence:.2f}")
@@ -242,6 +289,7 @@ def main() -> None:
                     "difficulty": difficulty,
                     "error": str(exc),
                 })
+            _flush()
 
     # ---------------------------------------------------------------------------
     # Report
@@ -285,37 +333,25 @@ def main() -> None:
     # Failures for inspection
     failures = [r for r in results if not r["passed"]]
     if failures:
-        print(f"\n  Failures ({len(failures)}) — see output file for details")
+        print(f"\n  Failures ({len(failures)}):")
+        for r in failures:
+            expects = ", ".join(sorted(accept_map.get(r["intent_id"], {"system.out_of_scope"})))
+            print(f"    [{r['difficulty']:6s}] {r['intent_id']:40s}  expected={expects}  got={r['predicted']}  \"{r['utterance'][:60]}\"")
 
-    # ---------------------------------------------------------------------------
-    # Write output
-    # ---------------------------------------------------------------------------
+    # Confusion matrix — only for failed rows, predicted vs expected intent
+    if failures:
+        print(f"\n  CONFUSION (expected → predicted, failures only):")
+        confusion: dict[str, dict[str, int]] = {}
+        for r in failures:
+            exp = r["intent_id"]
+            pred = r["predicted"] or "None"
+            confusion.setdefault(exp, {}).setdefault(pred, 0)
+            confusion[exp][pred] += 1
+        for exp in sorted(confusion):
+            for pred, count in sorted(confusion[exp].items(), key=lambda x: -x[1]):
+                print(f"    {exp:40s} → {pred:40s}  ×{count}")
 
-    out_path_str = args.out.replace("{ts}", ts)
-    out_path = Path(out_path_str)
-    if not out_path.is_absolute():
-        out_path = Path(__file__).parent / out_path
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(
-            {
-                "meta": {
-                    "ts": ts,
-                    "total": n_total,
-                    "passed": n_pass_total,
-                    "pct": round(pct_total, 1),
-                    "intent_filter": args.intent,
-                    "difficulty_filter": args.difficulty,
-                    "errors": len(errors),
-                },
-                "results": results,
-                "errors": errors,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    _flush()
     print(f"\n[eval] output → {out_path}")
 
 

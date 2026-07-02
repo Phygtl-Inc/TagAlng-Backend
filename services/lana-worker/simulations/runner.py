@@ -21,8 +21,17 @@ Dry run (load and validate data, print the matrix, don't call any API):
 import argparse
 import json
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Force UTF-8 output on Windows so Unicode in LLM responses doesn't crash prints
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# Load .env.local from repo root so env vars don't need to be set manually in the shell
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parents[3] / ".env.local", override=True)
 
 import simulation
 import evaluation
@@ -110,9 +119,11 @@ def main() -> None:
                 "bucket": bucket.bucket,
                 "seed_label": seed.label,
                 "error": str(exc),
+                "traceback": traceback.format_exc(),
             }
             failures.append(entry)
             print(f"  [runner] FAILED: {exc}")
+            print(traceback.format_exc())
 
     # --- Summary ---
     print(f"\n[runner] complete — {len(results)} passed, {len(failures)} failed")

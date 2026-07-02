@@ -122,8 +122,9 @@ _SCORING_AXIS_GUIDE = """
 
 **no_hallucination** (weight 0.20)
 - PASS: No invented capabilities, fabricated neighbor names, or false claims about what Lana can do.
+- PASS (explicitly permitted): Lana surfacing Google results labeled "from Google — not a neighbor vouch" is ALLOWED and must NOT be penalized, provided (a) it is clearly attributed to Google and not presented as Lana's own knowledge or a neighbor recommendation, and (b) Lana also performed the correct in-scope action (e.g. posting a block tip request). This is an approved parallel fallback behavior.
 - SOFT_FAIL: Minor overstatement that was self-corrected within the same turn.
-- HARD_FAIL: Any invented capability, fabricated named entity, or claim Lana cannot back up.
+- HARD_FAIL: Any invented capability, fabricated named entity, or claim Lana cannot back up. Presenting Google results as neighbor recommendations or as Lana's own knowledge without clear attribution is a HARD_FAIL.
 """
 
 

@@ -52,6 +52,7 @@ type Filters = {
   bucket: string;
   hitl_status: string;
   sft_eligible: string;
+  date: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,7 @@ export default function SimsPage() {
     bucket: '',
     hitl_status: '',
     sft_eligible: '',
+    date: '',
   });
   const [verdictTarget, setVerdictTarget] = useState<{
     runId: string;
@@ -137,6 +139,9 @@ export default function SimsPage() {
       if (filters.hitl_status) q = q.eq('hitl_status', filters.hitl_status);
       if (filters.sft_eligible === 'true') q = q.eq('sft_eligible', true);
       if (filters.sft_eligible === 'false') q = q.eq('sft_eligible', false);
+      if (filters.date) {
+        q = q.gte('created_at', `${filters.date}T00:00:00Z`).lte('created_at', `${filters.date}T23:59:59Z`);
+      }
 
       const { data, error: err } = await q;
       if (err) throw err;
@@ -154,7 +159,7 @@ export default function SimsPage() {
 
   async function saveVerdict(
     run: SimRun,
-    verdict: 'confirm' | 'false_positive' | 'false_negative',
+    verdict: 'confirm' | 'false_positive' | 'false_negative' | 'flag_bug',
   ) {
     if (!verdictTarget) return;
     setSaving(true);
@@ -195,6 +200,7 @@ export default function SimsPage() {
 
   const personas = [...new Set(runs.map((r) => r.persona_id))].sort();
   const buckets = [...new Set(runs.map((r) => r.bucket))].sort();
+  const dates = [...new Set(runs.map((r) => r.created_at.slice(0, 10)))].sort().reverse();
   const pendingCount = runs.filter((r) => r.hitl_status === 'pending').length;
 
   return (
@@ -254,6 +260,14 @@ export default function SimsPage() {
             <option value="true">SFT eligible</option>
             <option value="false">Not eligible</option>
           </select>
+          <select
+            className="sim-filter-select"
+            value={filters.date}
+            onChange={(e) => setFilters((f) => ({ ...f, date: e.target.value }))}
+          >
+            <option value="">All dates</option>
+            {dates.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
         </div>
 
         {/* Run list */}
@@ -281,6 +295,7 @@ export default function SimsPage() {
                   {run.hitl_status}
                 </span>
                 {run.sft_eligible && <span style={{ color: '#2e7d32', fontWeight: 700 }}>SFT ✓</span>}
+                {run.tim_verdict === 'flag_bug' && <span style={{ color: '#f59e0b', fontWeight: 700 }}>🚩</span>}
                 {run.scores_json?.some((a) => a.verdict === 'HARD_FAIL') && (
                   <span style={{ color: '#c62828', fontWeight: 700 }}>HARD FAIL</span>
                 )}
@@ -405,7 +420,9 @@ export default function SimsPage() {
 
                       {run.tim_verdict && (
                         <p style={{ margin: '0 0 0.5rem', fontSize: '0.82rem' }}>
-                          <strong>{run.tim_verdict.replace('_', ' ')}</strong>
+                          <strong style={{ color: run.tim_verdict === 'flag_bug' ? '#f59e0b' : undefined }}>
+                            {run.tim_verdict === 'flag_bug' ? '🚩 flagged bug' : run.tim_verdict.replace('_', ' ')}
+                          </strong>
                           {run.tim_note && <> · {run.tim_note}</>}
                         </p>
                       )}
@@ -426,6 +443,12 @@ export default function SimsPage() {
                               fontFamily: 'inherit',
                             }}
                           />
+                          <div style={{ marginBottom: '0.4rem', fontSize: '0.72rem', color: '#8696a0' }}>
+                            <strong>Confirm</strong> — judge was right &nbsp;·&nbsp;
+                            <strong>Flag bug</strong> — real Lana product bug, needs a fix PR &nbsp;·&nbsp;
+                            <strong>False pos</strong> — judge over-penalised &nbsp;·&nbsp;
+                            <strong>False neg</strong> — judge missed a real failure
+                          </div>
                           <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                             <button
                               type="button"
@@ -438,10 +461,18 @@ export default function SimsPage() {
                             <button
                               type="button"
                               disabled={saving}
+                              onClick={() => saveVerdict(run, 'flag_bug')}
+                              style={{ flex: 1, padding: '0.5rem', borderRadius: 6, border: 'none', background: '#f59e0b', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}
+                            >
+                              🚩 Flag bug
+                            </button>
+                            <button
+                              type="button"
+                              disabled={saving}
                               onClick={() => saveVerdict(run, 'false_positive')}
                               style={{ flex: 1, padding: '0.5rem', borderRadius: 6, border: 'none', background: '#e65100', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}
                             >
-                              False positive
+                              False pos
                             </button>
                             <button
                               type="button"
@@ -449,7 +480,7 @@ export default function SimsPage() {
                               onClick={() => saveVerdict(run, 'false_negative')}
                               style={{ flex: 1, padding: '0.5rem', borderRadius: 6, border: 'none', background: '#c62828', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}
                             >
-                              False negative
+                              False neg
                             </button>
                             <button
                               type="button"
