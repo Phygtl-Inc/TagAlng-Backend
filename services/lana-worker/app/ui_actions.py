@@ -263,6 +263,30 @@ def rec_widen_actions(noun: str) -> list[dict[str, Any]]:
     ]
 
 
+def rec_chip_actions(chips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Render the tip personalizer's chips (ask-first angle picks, or post-result refine
+    chips). Each chip is {label, message, style?}; tapping posts `message`, which re-enters
+    the tip_seek fallback with that angle (or a widen). Falls back to the plain saved-signal
+    actions when the list is empty/malformed."""
+    out: list[dict[str, Any]] = []
+    for i, c in enumerate(chips or []):
+        if not isinstance(c, dict):
+            continue
+        label = str(c.get("label") or "").strip()
+        message = str(c.get("message") or "").strip()
+        if not label or not message:
+            continue
+        out.append(
+            _action(
+                action_id=f"rec_chip_{i}",
+                label=label,
+                message=message,
+                style=str(c.get("style") or "secondary"),
+            )
+        )
+    return out or signal_saved_actions()
+
+
 def signal_listen_actions() -> list[dict[str, Any]]:
     """Deprecated alias — use signal_saved_actions."""
     return signal_saved_actions()
@@ -381,7 +405,12 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
             if saved.get("tip_passed"):
                 return []
             return tip_pass_actions()
-        # Claim-personalized tip rec → offer a "See all …" widen chip alongside the block log.
+        # Claim-personalized tip rec chips take priority: ask-first angle picks
+        # ("Vegetarian" / "Kid-friendly" / "Just show all") or post-result refine chips.
+        rec_chips = ctx.get("rec_chips")
+        if isinstance(saved, dict) and str(saved.get("intent") or "") == "tip_seek" and rec_chips:
+            return rec_chip_actions(rec_chips)
+        # Legacy single "See all …" widen chip (kept for the plain personalized path).
         rec_noun = ctx.get("rec_widen_noun")
         if isinstance(saved, dict) and str(saved.get("intent") or "") == "tip_seek" and rec_noun:
             return rec_widen_actions(str(rec_noun))

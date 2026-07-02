@@ -37,11 +37,17 @@ _SYSTEM = (
     "routing_phase, session_active_intent and active_capture, and classify by MEANING, never by "
     "matching a noun in isolation. When active_capture is not 'none', a capture flow is in progress "
     "and the last assistant turn just asked the user something; decide which of these the latest "
-    "message is: (a) an ANSWER or REFINEMENT of that capture — keep the goal inside that lane (an "
-    "activity topic/date/'any'/'whatever' while activity_browse; a meet kind/day/trait while "
-    "look_meet; an event detail while event_host); (b) a PIVOT to a different intent — classify that "
-    "new intent normally — but a BARE ACTIVITY or meet kind while active_capture=look_meet is an ANSWER, "
-    "NOT a pivot. (See the look_meet rule below.) "
+    "message is: (a) an ANSWER or REFINEMENT of that capture — a BARE or vague reply (a lone topic "
+    "word/date/'any'/'whatever' while activity_browse; a meet kind/day/trait while look_meet; an event "
+    "detail while event_host) that only makes sense as a reply to what was just asked → keep the goal "
+    "inside that lane; (b) a PIVOT to a different intent — classify that new intent normally. A "
+    "FULLY-FORMED, self-describing request that names a different intent is a PIVOT even mid-capture — "
+    "do NOT force it into the active lane just because a capture is open. In particular, while "
+    "active_capture=activity_browse a request for a standing PLACE/venue/service recommendation "
+    "('find me restaurants', 'recommend places to eat', 'show me parks', 'good coffee nearby') is "
+    "tip_seek (looking.tip), NOT a browse refinement — the browse reads time-bound EVENTS on the block "
+    "and a standing place is not an event. (Exception — a BARE ACTIVITY or meet kind while "
+    "active_capture=look_meet is an ANSWER, NOT a pivot; see the look_meet rule below.) "
     "WHILE active_capture=look_meet, the user is describing the kind of meet they are LOOKING FOR and the "
     "last assistant turn just asked about it ('what kind of meet?', a day, a trait, who it's for). A bare "
     "ACTIVITY or meet kind in reply ('stroller walk', 'playground meet', 'coffee & kids', 'library "
@@ -589,7 +595,12 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "their reply naming an activity/kind/day/trait stays in looking.meet, NEVER find_peers"
         )
     if session_ctx.get("activity_browse_active"):
-        return "activity_browse — showing events on the user's block; replies refine by topic/date"
+        return (
+            "activity_browse — showing time-bound EVENTS on the user's block; a bare/vague reply "
+            "(a topic word, a date, 'any') refines the browse, but a self-describing request for a "
+            "standing PLACE/venue/service recommendation (restaurant, cafe, park, 'places to eat') is "
+            "a tip_seek PIVOT (a place is not an event) — classify it fresh, do not keep it in browse"
+        )
     if session_ctx.get("event_host_active"):
         return "event_host — helping the user CREATE/host an event of their own"
     return "none"
