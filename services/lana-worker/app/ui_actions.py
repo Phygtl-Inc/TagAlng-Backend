@@ -241,6 +241,28 @@ def signal_saved_actions() -> list[dict[str, Any]]:
     ]
 
 
+def rec_widen_actions(noun: str) -> list[dict[str, Any]]:
+    """After a claim-personalized tip recommendation — let the user act on the "want me to
+    widen?" offer. "See all …" posts a message whose "show me all" phrasing the tip_seek
+    fallback reads as a widen (skips personalization → unfiltered nearby list). Block-log
+    stays as the secondary."""
+    label_noun = str(noun or "").strip() or "options"
+    return [
+        _action(
+            action_id="rec_widen",
+            label=f"See all {label_noun}",
+            message=f"show me all {label_noun}",
+            style="primary",
+        ),
+        _action(
+            action_id="signal_show_block_log",
+            label="Show my block log",
+            message="show my block log",
+            style="secondary",
+        ),
+    ]
+
+
 def signal_listen_actions() -> list[dict[str, Any]]:
     """Deprecated alias — use signal_saved_actions."""
     return signal_saved_actions()
@@ -359,6 +381,10 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
             if saved.get("tip_passed"):
                 return []
             return tip_pass_actions()
+        # Claim-personalized tip rec → offer a "See all …" widen chip alongside the block log.
+        rec_noun = ctx.get("rec_widen_noun")
+        if isinstance(saved, dict) and str(saved.get("intent") or "") == "tip_seek" and rec_noun:
+            return rec_widen_actions(str(rec_noun))
         return signal_saved_actions()
 
     if ui_intent == UI_INTENT_SHOW_PEER_PREVIEW:

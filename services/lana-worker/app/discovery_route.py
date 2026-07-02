@@ -1603,6 +1603,7 @@ def _try_signal_lane_turn(
     phone_verified: bool,
     home_block_id: str | None,
     phase: str,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """LOOKING/SHARING 4-phase cascade → save_local_signal."""
     ctx_base = dict(session_ctx)
@@ -1722,6 +1723,7 @@ def _try_signal_lane_turn(
                 phone_verified=phone_verified,
                 home_block_id=home_block_id,
                 phase=phase,
+                user_id=user_id,
             )
 
     if not slots:
@@ -1772,6 +1774,7 @@ def _try_signal_lane_turn(
             phone_verified=phone_verified,
             home_block_id=home_block_id,
             phase=phase,
+            user_id=user_id,
         )
     return None
 
@@ -2053,6 +2056,7 @@ def _try_save_signal_turn(
     phone_verified: bool,
     home_block_id: str | None,
     phase: str,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     linear = slots_linear_intent(slots)
     goal = str(slots.get("goal") or "none")
@@ -2166,6 +2170,53 @@ def _try_save_signal_turn(
     # NOT a neighbor recommendation. Only on the no-match path — populated blocks are
     # untouched, and a real neighbor rec always wins. Best-effort; never blocks the reply.
     if intent == "tip_seek" and matches_shown <= 0:
+        from app.lana_paths import rec_personalize_enabled
+
+        # Clear any stale widen-chip noun from a prior turn; only re-set below when we
+        # actually surface a personalized rec this turn.
+        ctx.pop("rec_widen_noun", None)
+        query = (detail or category or "").strip()
+        rec_reframe: str | None = None
+        # "See all …" chip (or a typed widen) → drop the claim filter and show the
+        # unfiltered nearby list. The chip posts "show me all <noun>", so match that.
+        widen = bool(
+            re.search(r"\b(show me all|see all|show all|widen|broaden|everything)\b", msg or "", re.I)
+        )
+        logging.getLogger(__name__).info(
+            "tip_seek_fallback.enter user_id=%s block=%s detail=%r category=%r matches=%d widen=%s",
+            user_id, block_id, detail, category, matches_shown, widen,
+        )
+        # Concierge touch: bias the query + framing by the mom's OWN identity claims
+        # (e.g. "vegetarian" → veg-friendly spots) when the flag is on. Best-effort —
+        # any failure leaves `query` as the raw ask and `rec_reframe` None, so the reply
+        # degrades to the generic line below. The LLM shapes the query string + phrasing
+        # only; venue names still come solely from Google (no hallucinated places).
+        # Skipped on a widen tap so "See all" genuinely broadens instead of re-personalizing.
+        _rec_enabled = rec_personalize_enabled()
+        if user_id and _rec_enabled and not widen:
+            try:
+                from app.context import load_user_context
+                from app.rec_personalize import personalize_tip_query
+
+                claims = load_user_context(user_id).get("existing_claims") or []
+                personalized = personalize_tip_query(
+                    request=query, category=category, claims=claims,
+                )
+                if personalized:
+                    query = str(personalized.get("places_query") or query).strip() or query
+                    rec_reframe = personalized.get("reframe")
+                logging.getLogger(__name__).info(
+                    "rec_personalize enabled=1 user=%s claims=%d relevant=%s query=%r",
+                    user_id, len(claims), bool(personalized), query,
+                )
+            except Exception:  # noqa: BLE001 — personalization never blocks the reply
+                rec_reframe = None
+                logging.getLogger(__name__).exception("rec_personalize_failed")
+        else:
+            logging.getLogger(__name__).info(
+                "rec_personalize skipped enabled=%s user_id=%s widen=%s",
+                _rec_enabled, bool(user_id), widen,
+            )
         try:
             from app.places import search_places
 
@@ -2181,21 +2232,43 @@ def _try_save_signal_turn(
             if not zip_for_bias and block_id.startswith("zip-"):
                 zip_for_bias = block_id[len("zip-"):]
             places = search_places(
-                query=(detail or category or "").strip(),
+                query=query,
                 zip_code=zip_for_bias or None,
                 block_id=block_id,
                 limit=3,
             )
         except Exception:  # noqa: BLE001 — fallback must never break the saved-signal reply
             places = []
+        logging.getLogger(__name__).info(
+            "tip_seek_fallback.result query=%r places=%d personalized=%s",
+            query, len(places), bool(rec_reframe),
+        )
         if places:
             # The list renders as tappable cards (place_suggestions). Keep the reply to
             # an intro line only so we don't duplicate the names inline.
-            reply = (
-                "No neighbor has recommended one yet, so here's what's nearby (from Google — "
-                "not a neighbor vouch). I've also posted your ask to the block — I'll ping you "
-                "the moment a neighbor recommends one."
-            )
+            if widen:
+                # User tapped "See all …" — broadened, no claim filter.
+                reply = (
+                    "Okay — widening it. Here's everything nearby (from Google, not a "
+                    "neighbor vouch). Your ask is still posted to the block, so I'll ping "
+                    "you the moment a neighbor recommends one."
+                )
+            elif rec_reframe:
+                # Personalized: name the angle, keep the honest "from Google, not a
+                # neighbor vouch" provenance, and offer to widen (one-shot, no pre-ask).
+                # Stamp the noun so derive_ui_actions renders a "See all <noun>" widen chip.
+                reply = (
+                    f"{rec_reframe} These are from Google (not a neighbor vouch) — and "
+                    "I've posted your ask to the block, so I'll ping you the moment a "
+                    "neighbor recommends one. Want me to widen the search?"
+                )
+                ctx["rec_widen_noun"] = (category or detail or "options").strip() or "options"
+            else:
+                reply = (
+                    "No neighbor has recommended one yet, so here's what's nearby (from Google — "
+                    "not a neighbor vouch). I've also posted your ask to the block — I'll ping you "
+                    "the moment a neighbor recommends one."
+                )
             ctx["google_place_suggestions"] = places
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
     ctx.pop("activity_previews", None)
@@ -2676,6 +2749,7 @@ def _try_signal_seek_early_turn(
     phone_verified: bool,
     home_block_id: str | None,
     phase: str,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Tip/swap seek before heritage traps and sticky peer preview."""
     seek_slots = enrich_slots(dict(slots), msg=msg)
@@ -2705,6 +2779,7 @@ def _try_signal_seek_early_turn(
             home_block_id=home_block_id,
             phase=phase,
             slots=slots,
+            user_id=user_id,
         )
         if turn is not None:
             return turn
@@ -2716,6 +2791,7 @@ def _try_signal_seek_early_turn(
         phone_verified=phone_verified,
         home_block_id=home_block_id,
         phase=phase,
+        user_id=user_id,
     )
 
 
@@ -2758,6 +2834,7 @@ def _try_tip_seek_fast_turn(
     home_block_id: str | None,
     phase: str,
     slots: dict[str, Any] | None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     enriched = enrich_slots(dict(slots or {}), msg=msg)
     if not (
@@ -2777,6 +2854,7 @@ def _try_tip_seek_fast_turn(
         phone_verified=phone_verified,
         home_block_id=home_block_id,
         phase=phase,
+        user_id=user_id,
     )
 
 
@@ -4710,6 +4788,7 @@ def handle_discovery_turn(
                 phone_verified=phone_verified,
                 home_block_id=home_block_id,
                 phase=phase,
+                user_id=user_id,
             )
             if tip_turn is not None:
                 reply, ctx, routing, peers = tip_turn
@@ -4738,6 +4817,7 @@ def handle_discovery_turn(
                 phone_verified=phone_verified,
                 home_block_id=home_block_id,
                 phase=phase,
+                user_id=user_id,
             )
             if hosting_turn is not None:
                 reply, ctx, routing, peers = hosting_turn
@@ -4838,6 +4918,7 @@ def handle_discovery_turn(
             user_jwt=user_jwt,
             phone_verified=phone_verified,
             home_block_id=home_block_id,
+            user_id=user_id,
             phase=phase,
         )
         if seek_turn is not None:
@@ -5128,6 +5209,7 @@ def handle_discovery_turn(
             phone_verified=phone_verified,
             home_block_id=home_block_id,
             phase=phase,
+            user_id=user_id,
         )
         if signal_turn is not None:
             reply, ctx, routing, peers = signal_turn

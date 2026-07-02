@@ -42,6 +42,19 @@ def latent_extract_enabled() -> bool:
     return _llm_ready()
 
 
+def rec_personalize_enabled() -> bool:
+    """Claim-personalized recommendations on the tip_seek no-neighbor-match path.
+
+    When on, Lana biases the Google Places fallback by the mom's own identity claims and
+    names the reasoning ("since you're vegetarian…"). Default OFF: enabling adds one
+    gpt-4o-mini call on that path (set LANA_REC_PERSONALIZE=1). Requires LLM ready.
+    """
+    flag = os.environ.get("LANA_REC_PERSONALIZE", "0").strip().lower()
+    if flag in ("0", "false", "off"):
+        return False
+    return _llm_ready()
+
+
 def unified_rules_first_enabled() -> bool:
     """Run discovery/auth gates before orchestrator on unified lana turns."""
     flag = os.environ.get("LANA_UNIFIED_RULES_FIRST", "1").strip().lower()
