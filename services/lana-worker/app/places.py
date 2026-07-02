@@ -8,10 +8,13 @@ so the flow always degrades gracefully to free-type + AI option chips.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 import httpx
+
+_log = logging.getLogger(__name__)
 
 from app.auth import service_client
 from app.event_location import (
@@ -58,11 +61,19 @@ def _places_search_text(
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
     q = str(query or "").strip()
     if not api_key or len(q) < 2:
+        _log.info(
+            "places_search.skip reason=%s query=%r",
+            "no_api_key" if not api_key else "query_too_short", q,
+        )
         return []
     loc = _centroid(zip_code, block_id, user_id)
     if not loc:
         # No block centroid → do NOT run an unbiased search. Places would return results
         # near the SERVER's location (e.g. the wrong country), which is worse than nothing.
+        _log.info(
+            "places_search.skip reason=no_centroid query=%r zip=%r block=%r",
+            q, zip_code, block_id,
+        )
         return []
     body: dict[str, Any] = {
         "textQuery": q,
@@ -83,8 +94,16 @@ def _places_search_text(
                 json=body,
             )
         data = res.json()
-        return data.get("places") or [] if isinstance(data, dict) else []
+        places = data.get("places") or [] if isinstance(data, dict) else []
+        _log.info(
+            "places_search.ok query=%r status=%s results=%d",
+            q, getattr(res, "status_code", "?"), len(places),
+        )
+        if not places and isinstance(data, dict) and data.get("error"):
+            _log.info("places_search.api_error query=%r error=%r", q, data.get("error"))
+        return places
     except Exception:  # noqa: BLE001 - best-effort
+        _log.exception("places_search.request_failed query=%r", q)
         return []
 
 
