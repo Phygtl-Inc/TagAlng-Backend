@@ -4525,6 +4525,67 @@ def _ask_general_clarify(
     )
 
 
+_GENERIC_VALUE_RECOMMEND_RE = re.compile(
+    r"\b(?:"
+    r"(?:got|have|any)\s+(?:recommendations?|suggestions?|ideas)|"
+    r"recommend(?:\s+me)?\s+(?:something|anything|stuff|things)?|"
+    r"suggest(?:\s+me)?\s+(?:something|anything|stuff|things)?|"
+    r"what(?:'s| is)\s+(?:worth|good|useful)\s+(?:doing|joining|checking out|nearby|around)|"
+    r"what\s+should\s+i\s+(?:do|join|try|check out|find)"
+    r")\b",
+    re.I,
+)
+_SPECIFIC_TIP_RECOMMEND_RE = re.compile(
+    r"\b(?:"
+    r"doctor|pediatrician|dentist|clinic|therapist|plumber|handyman|tutor|teacher|"
+    r"tax|restaurant|pizza|coffee|cafe|park|playground|school|daycare|dog walker|"
+    r"place|spot|service|repair"
+    r")\b",
+    re.I,
+)
+
+
+def _should_defer_value_recommendation_to_orchestrator(
+    msg: str,
+    slots: dict[str, Any] | None,
+) -> bool:
+    """Let generic value asks reach the orchestrator's recommend_value tool.
+
+    Specific local-tip asks ("recommend a pediatrician/restaurant/plumber") stay in
+    the existing tip/place lanes. This only handles broad "what's useful nearby?"
+    asks that should rank neighbors, activities, and local signals together.
+    """
+    if not slots or not _GENERIC_VALUE_RECOMMEND_RE.search(msg):
+        return False
+    if _SPECIFIC_TIP_RECOMMEND_RE.search(msg):
+        return False
+    enriched = enrich_slots(dict(slots), msg=msg)
+    linear = slots_linear_intent(enriched) or ""
+    goal = str(enriched.get("goal") or "")
+    signal_intent = str(enriched.get("signal_intent") or "")
+    if signal_intent or linear in LOOKING_SHARING_INTENTS:
+        return False
+    if linear.startswith("auth.") or linear.startswith("settings.") or linear.startswith("identity."):
+        return False
+    if linear in (
+        "discovery.block_log",
+        "discovery.show_peer_profile",
+        "discovery.explain_peer_match",
+        "social.propose_intro",
+        "social.list_intros",
+        "tier.send_nudge",
+        "tier.respond_nudge",
+        "system.unsafe",
+        "system.out_of_scope",
+    ):
+        return False
+    return (
+        linear in ("", "discovery.find_peers", "discovery.find_by_attrs", "discovery.find_activities")
+        or goal in ("", "none", "chat", "peers", "activities", "both")
+        or str(enriched.get("clarify") or "") in ("intent", "browse_or_meet")
+    )
+
+
 def _decline_out_of_scope(
     *,
     msg: str,
@@ -5043,6 +5104,18 @@ def handle_discovery_turn(
                 msg=msg, slots=slots, session_ctx=session_ctx,
                 user_id=user_id, home_block_id=home_block_id,
             )
+
+    # Generic value recommendation asks should use the orchestrator's heterogeneous
+    # ranking tool (neighbors + events + local signals) instead of being narrowed into
+    # the old peers/activities/tip lanes by the discovery classifier.
+    if (
+        discovery_ai_enabled()
+        and slots
+        and not is_hosting_ui_cta(msg)
+        and _should_defer_value_recommendation_to_orchestrator(msg, slots)
+    ):
+        session_ctx["pending_recommend_value_query"] = msg
+        return None
 
     # General uncertainty gate (ASK-WHEN-UNSURE) — the classifier could not confidently
     # place this turn in a supported lane, so ask the one AI-written question (grounded in

@@ -113,6 +113,16 @@ def enforce_routing(
     if enforced is not None:
         return enforced
 
+    pending_recommend_query = str(session_ctx.pop("pending_recommend_value_query", "") or "").strip()
+    if purpose == "lana" and pending_recommend_query:
+        return _as_tool(
+            base,
+            tool="recommend_value",
+            tool_args={"query": pending_recommend_query, "limit": 5},
+            missing_slots=[],
+            notes=["recommend_value_requested"],
+        )
+
     if purpose == "lana" and "discovery_chat_fast_path" not in (base.get("enforce_notes") or []):
         discovery = _enforce_lana_discovery(
             base,

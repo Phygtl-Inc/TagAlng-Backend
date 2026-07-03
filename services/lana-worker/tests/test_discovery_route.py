@@ -95,6 +95,35 @@ class TestDiscoveryRouting(unittest.TestCase):
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_generic_recommendation_defers_to_orchestrator(
+        self, mock_slots, _mock_ai
+    ) -> None:
+        mock_slots.return_value = {
+            "goal": "activities",
+            "linear_intent": "discovery.find_activities",
+            "clarify": "browse_or_meet",
+            "confidence": 0.72,
+        }
+        session_ctx = {"routing_phase": "listening"}
+
+        result = handle_discovery_turn(
+            "got any recommendations for me?",
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            history=[],
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            session_ctx.get("pending_recommend_value_query"),
+            "got any recommendations for me?",
+        )
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.fetch_blocks_for_zip")
     def test_late_find_uses_chat_history_for_identity(
