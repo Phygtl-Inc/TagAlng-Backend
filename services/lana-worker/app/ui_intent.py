@@ -102,6 +102,11 @@ def derive_ui_intent(
     if ctx.get("event_published_now"):
         return UI_INTENT_EVENT_CREATED
     if ctx.get("event_host_active"):
+        # A conversational aside mid-host (Lana answering a coordination / advice question) —
+        # show her TEXT + a compact draft card, not the setup carousel (which hides the reply).
+        # The full carousel returns on the next turn that carries a value (host_aside clears).
+        if ctx.get("host_aside"):
+            return UI_INTENT_COLLECT_EVENT_DETAIL
         stage = str(ctx.get("host_stage") or "").strip()
         if stage == "review":
             return UI_INTENT_EVENT_REVIEW
