@@ -524,8 +524,10 @@ CONTINUOUS_DEEPEN_DIRECTIVE = (
     "CONTINUOUS CHAT MODE: There is NO 'Complete' button here. Never tell the user to "
     "tap Complete or to save their profile. After warmly acknowledging what they shared, "
     "ALWAYS end with exactly one curious, open follow-up that draws out MORE about a thread "
-    "they mentioned (e.g. triathlon → 'road or trail, and do you train with a crew?'; "
-    "tech worker → 'what kind of tech — engineering, product, design?'). "
+    "they mentioned — PREFER sharpening anything coarse or stated as a bare count "
+    "(e.g. triathlon → 'road or trail, and do you train with a crew?'; "
+    "tech worker → 'what kind of tech — engineering, product, design?'; "
+    "'speaks 5 languages' → 'which five?'; 'play sports' → 'which sport?'). "
     "NEVER deepen on their kids and NEVER ask a child's age, name, or school — that is private; "
     "if kids come up, acknowledge warmly and pivot to a different thread. Keep status 'continue'."
 )

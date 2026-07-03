@@ -6,9 +6,13 @@ from app.claims_persist import (
     dismiss_claims_from_edit_message,
     extract_display_name_reply,
     extract_nickname_from_message,
+    clean_claims_for_persist,
+    dedupe_claims,
     filter_extracted_claims,
     is_explicit_heritage_correction,
     is_negative_claim,
+    is_noise_claim,
+    plan_heritage_write,
     reconcile_heritage_claims,
     should_extract_claims_from_message,
     upsert_claims,
@@ -225,6 +229,45 @@ class TestHeritageConflict(unittest.TestCase):
         )
         self.assertFalse(is_explicit_heritage_correction("I am Brazilian"))
 
+    @patch("app.claims_persist.resolve_heritage_relation", return_value="broaden")
+    @patch("app.claims_persist.fetch_active_heritage_claims")
+    def test_regional_variant_is_not_a_conflict(
+        self, mock_fetch: MagicMock, _mock_rel: MagicMock
+    ) -> None:
+        # Stored "Sicilian", user says "Italian" — a broadening, must NOT prompt a swap.
+        mock_fetch.return_value = [("sicilian_heritage", "Sicilian Heritage")]
+        conflict = detect_heritage_conflict(
+            "user-1",
+            [ExtractedClaim(concept="italian_heritage", label="Italian Heritage", confidence=0.9, bucket="heritage")],
+        )
+        self.assertIsNone(conflict)
+
+    @patch("app.claims_persist.resolve_heritage_relation", return_value="refine")
+    @patch("app.claims_persist.fetch_active_heritage_claims")
+    def test_refinement_replaces_without_prompt(
+        self, mock_fetch: MagicMock, _mock_rel: MagicMock
+    ) -> None:
+        # Stored "Italian", user says "Sicilian" — refine, keep the specific, no prompt.
+        mock_fetch.return_value = [("italian_heritage", "Italian Heritage")]
+        new = ExtractedClaim(concept="sicilian_heritage", label="Sicilian Heritage", confidence=0.9, bucket="heritage")
+        kept, conflict = plan_heritage_write("user-1", [new])
+        self.assertIsNone(conflict)
+        self.assertEqual([c.concept for c in kept], ["sicilian_heritage"])
+
+    @patch("app.claims_persist.resolve_heritage_relation", return_value="conflict")
+    @patch("app.claims_persist.fetch_active_heritage_claims")
+    def test_genuine_conflict_still_prompts(
+        self, mock_fetch: MagicMock, _mock_rel: MagicMock
+    ) -> None:
+        mock_fetch.return_value = [("italian_heritage", "Italian Heritage")]
+        conflict = detect_heritage_conflict(
+            "user-1",
+            [ExtractedClaim(concept="korean_heritage", label="Korean Heritage", confidence=0.9, bucket="heritage")],
+        )
+        self.assertIsNotNone(conflict)
+        assert conflict is not None
+        self.assertEqual(conflict[0], "Italian Heritage")
+
 
 class TestDismissClaimsFromEdit(unittest.TestCase):
     @patch("app.claims_persist._dismiss_claims_by_ids")
@@ -364,6 +407,87 @@ class TestUpsertClaims(unittest.TestCase):
         n = upsert_claims("user-1", [claim])
         self.assertEqual(n, 1)
         table.insert.assert_called_once()
+
+
+def _claim(concept, label, conf=0.9, syns=None, bucket="interest", transient=False):
+    return ExtractedClaim(
+        concept=concept,
+        label=label,
+        confidence=conf,
+        synonyms=syns or [],
+        bucket=bucket,
+        transient=transient,
+    )
+
+
+class TestNoiseClaims(unittest.TestCase):
+    def test_bare_topic_labels_are_noise(self) -> None:
+        for label in ("Health", "Wellness", "Lifestyle", "General"):
+            self.assertTrue(is_noise_claim(_claim("x", label)), label)
+
+    def test_uncertainty_is_noise(self) -> None:
+        self.assertTrue(is_noise_claim(_claim("unsure_what_to_call", "Unsure What to Call")))
+        self.assertTrue(is_noise_claim(_claim("unsure_about_time", "Unsure About Time")))
+        self.assertTrue(is_noise_claim(_claim("x", "Not sure yet")))
+
+    def test_real_claims_are_not_noise(self) -> None:
+        self.assertFalse(is_noise_claim(_claim("brazilian_heritage", "Brazilian Heritage")))
+        self.assertFalse(is_noise_claim(_claim("local_cafe", "Local Cafe Visitor")))
+        self.assertFalse(is_noise_claim(_claim("triathlon", "Interested in Triathlon Workouts")))
+
+
+class TestDedupeClaims(unittest.TestCase):
+    def test_collapses_same_label_different_slug(self) -> None:
+        claims = [
+            _claim("hosting_neighbor_meetings", "Interested in Hosting Informal Neighbor Meetings", 0.95, ["neighbor gathering"]),
+            _claim("neighbor_gatherings", "Interested in Hosting Informal Neighbor Meetings", 0.95, ["community meetups"]),
+            _claim("informal_meetings", "Interested in Hosting Informal Neighbor Meetings", 0.90, ["informal_meetings"]),
+        ]
+        out = dedupe_claims(claims)
+        self.assertEqual(len(out), 1)
+        # Synonyms from all instances are unioned onto the survivor.
+        self.assertEqual(
+            set(out[0].synonyms), {"neighbor gathering", "community meetups", "informal_meetings"}
+        )
+
+    def test_keeps_distinct_threads(self) -> None:
+        out = dedupe_claims(
+            [
+                _claim("a", "Interested in Playground Meetups"),
+                _claim("b", "Interested in Triathlon Workouts"),
+            ]
+        )
+        self.assertEqual(len(out), 2)
+
+    def test_durable_wins_over_transient_on_merge(self) -> None:
+        out = dedupe_claims(
+            [
+                _claim("v1", "Loves Running", 0.9, transient=True),
+                _claim("v2", "Loves Running", 0.8, transient=False),
+            ]
+        )
+        self.assertEqual(len(out), 1)
+        self.assertFalse(out[0].transient)
+
+
+class TestCleanForPersist(unittest.TestCase):
+    def test_drops_noise_and_dedupes_but_keeps_transient(self) -> None:
+        claims = [
+            _claim("hosting_a", "Interested in Hosting Informal Neighbor Meetings", 0.95),
+            _claim("hosting_b", "Interested in Hosting Informal Neighbor Meetings", 0.90),
+            _claim("sprained_ankle", "Sprained Ankle", 0.90, bucket="general", transient=True),
+            _claim("health", "Health", 0.70, ["wellness"], bucket="general"),
+            _claim("brazilian_heritage", "Brazilian Heritage", 0.85, bucket="heritage"),
+        ]
+        out = clean_claims_for_persist(claims)
+        labels = sorted(c.label for c in out)
+        self.assertEqual(
+            labels,
+            ["Brazilian Heritage", "Interested in Hosting Informal Neighbor Meetings", "Sprained Ankle"],
+        )
+        # Transient state survives (persisted) but is flagged for exclusion from the wall.
+        ankle = next(c for c in out if c.label == "Sprained Ankle")
+        self.assertTrue(ankle.transient)
 
 
 if __name__ == "__main__":

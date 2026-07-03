@@ -29,7 +29,8 @@ Output ONLY valid JSON (no markdown):
       "disclosure": "public",
       "synonyms": ["tag1"],
       "source_quote": "exact short quote from user",
-      "bucket": "heritage"
+      "bucket": "heritage",
+      "transient": false
     }
   ],
   "assistant_message": "Short warm closing line"
@@ -40,6 +41,9 @@ Allowed disclosure: public, mutual, private.
 
 Rules:
 - Max 8 claims; only what the user expressed or clearly implied
+- ONE claim per distinct thread — NEVER emit the same thread twice with different wording, bucket, or synonyms (e.g. do NOT list "Interested in Hosting Neighbor Meetings" five times). Merge them into a single claim.
+- NEVER emit a claim that is only a bare topic label ("Health", "Wellness", "Lifestyle", "General") or that expresses uncertainty ("Unsure what to call", "Not sure about time"). Skip these entirely — they are not threads.
+- "transient": true for TEMPORARY states that are NOT durable identity — an injury or illness ("sprained ankle"), an upcoming trip/vacation, a passing mood. Durable identity (heritage, life stage, ongoing interests, occupation, faith) is transient=false. When in doubt, false.
 - Capture languages spoken as one claim (bucket "interest", e.g. "Speaks 7 languages")
 - Every claim MUST have source_quote (verbatim or tight paraphrase from user) and bucket
 - synonyms: 3-6 lowercase tags per claim — include broader/related terms, not just the literal word (e.g. "sicilian" → ["sicilian","italian","mediterranean"])
@@ -69,7 +73,8 @@ Output ONLY valid JSON (no markdown):
       "synonyms": ["tag1", "tag2", "tag3"],
       "source_quote": "exact short quote from this message",
       "bucket": "heritage",
-      "vague": false
+      "vague": false,
+      "transient": false
     }
   ],
   "followup_question": "one warm question that opens a NEW facet of a thread above, or null"
@@ -88,7 +93,10 @@ Rules:
 - Every claim MUST have source_quote from this message and bucket
 - concept must match ^[a-z][a-z0-9_]{1,63}$
 - synonyms: 3-6 lowercase tags per claim — include BROADER and RELATED terms, not just the literal word (e.g. "sicilian" → ["sicilian","italian","mediterranean","sicily"]; "triathlon" → ["triathlon","endurance","running","cycling","swimming"]). These power match discovery.
-- "vague": true when the claim is coarse enough that a follow-up would sharpen it; otherwise false
+- "vague": true when the claim is coarse enough that a follow-up would sharpen it — e.g. "tech worker", "athlete", "in finance", OR a COUNT without specifics ("speaks 5 languages" → vague until they name them, "plays sports" → which). false when already specific.
+- "transient": true for TEMPORARY states that are NOT durable identity — an injury or illness ("sprained ankle", "got the flu"), an upcoming trip/vacation, a one-off plan, a passing mood ("feeling low-key this week"). Durable identity (heritage, life stage, ongoing interests, occupation, faith) is transient=false. When in doubt, false.
+- NEVER emit a claim that is only a bare topic label ("Health", "Wellness", "Lifestyle", "General") or that expresses uncertainty ("Unsure what to call", "Not sure about time", "don't know"). Skip these entirely — they are not threads.
+- Do NOT emit the SAME thread twice with different wording — one claim per distinct thread
 - kids_count: an integer ONLY when the user states HOW MANY children they have ("2 sons" → 2, "three kids" → 3). null otherwise. This is private and never a claim. NEVER capture a child's name, age, gender, school, or photo — only the count.
 - NEVER extract race, exact age, sex/gender demographics, street address
 - NEVER extract negative or exclusion claims ("not Brazilian", "no Italian", "without X")
@@ -96,7 +104,7 @@ Rules:
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 - nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
-- followup_question: ALWAYS try to set one. Pick the single richest thread from this message and ask a short (<120 char), warm, OPEN question that surfaces MORE about it — e.g. triathlon → "Love it — road or trail, and do you train with a local crew?"; vague tech_worker → "Nice — what kind of tech work, engineering, product, design?". Set null only when the message has no thread worth deepening.
+- followup_question: ALWAYS try to set one. PREFER sharpening any claim you marked "vague": true, then otherwise pick the single richest thread. Ask a short (<120 char), warm, OPEN question that surfaces MORE — e.g. triathlon → "Love it — road or trail, and do you train with a local crew?"; vague tech_worker → "Nice — what kind of tech, engineering, product, design?"; "speaks 5 languages" → "Which five? Always curious what people grew up speaking." Set null only when the message has no thread worth deepening.
 
 User message:
 """
@@ -154,6 +162,8 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
         tone = item.get("tone")
         source_quote = str(item.get("source_quote", "")).strip()[:160] or None
         bucket = normalize_bucket(item.get("bucket"))
+        transient = bool(item.get("transient", False))
+        vague = bool(item.get("vague", False))
         out.append(
             ExtractedClaim(
                 concept=concept,
@@ -164,6 +174,8 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
                 synonyms=syns,
                 source_quote=source_quote,
                 bucket=bucket,
+                transient=transient,
+                vague=vague,
             )
         )
     return out[:8]
