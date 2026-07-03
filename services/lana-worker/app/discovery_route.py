@@ -4545,6 +4545,49 @@ def _decline_out_of_scope(
     return reply, ctx, _discovery_routing_stub("listening", "out_of_scope"), []
 
 
+# Safety fallback ONLY — used if the classifier returned no authored line. The real reply is
+# AI-written (Lana's voice, contextual) and carried in clarify_question; this guarantees the
+# three safety beats (no advice / call a professional or 911 / offer a local recommendation)
+# even on an empty model turn. Not a detection template and never regex-matched.
+_MEDICAL_SAFETY_FALLBACK = (
+    "I'm not able to give medical advice, and for something like this it's best to contact a "
+    "doctor or a nurse line right away — if it's severe or an emergency, call 911. What I can "
+    "do is find a doctor or pediatrician recommendation from your block — want me to?"
+)
+
+
+def _is_medical_turn(slots: dict[str, Any], msg: str) -> bool:
+    """AI-driven: the classifier flagged a health/medical concern (goal=medical). Not
+    confidence-gated — a gentle health redirect is safer than a mis-lane, and the classifier
+    already applies its own threshold. No regex on the utterance."""
+    if not slots:
+        return False
+    enriched = enrich_slots(dict(slots), msg=msg)
+    goal = str(enriched.get("goal") or "")
+    linear = slots_linear_intent(enriched) or ""
+    return goal == "medical" or linear == "system.medical"
+
+
+def _redirect_medical(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Health/medical concern: Lana declines to give medical advice, points to professional
+    help (doctor / nurse line / 911 if severe), and offers the one thing she CAN do — a local
+    doctor/pediatrician recommendation. The message is AI-authored (Lana's voice, contextual to
+    the symptom) and travels in clarify_question; the constant is only a safety fallback. No
+    feature is logged and nothing is promised — this is a permanent boundary, not a product gap.
+    The 'Find a doctor nearby' chip re-classifies next turn as a tip_seek and hands off cleanly."""
+    enriched = enrich_slots(dict(slots), msg=msg)
+    reply = str(enriched.get("clarify_question") or "").strip() or _MEDICAL_SAFETY_FALLBACK
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    ctx["suggestions"] = ["Find a doctor nearby", "No thanks"]
+    ctx["clarify_options"] = ctx["suggestions"]
+    return reply, ctx, _discovery_routing_stub("listening", "medical"), []
+
+
 _UNSAFE_HIGH_KINDS = frozenset({"sexual", "hate", "illegal"})
 
 
@@ -4960,6 +5003,14 @@ def handle_discovery_turn(
             reply, ctx, routing, peers = block_log_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
+
+    # Health/medical concern (AI-driven): the user is asking what to DO about an illness,
+    # injury, or symptom. Lana never gives medical advice — she declines, points to a doctor /
+    # nurse line / 911, and offers a local doctor recommendation (the real capability). Checked
+    # before out_of_scope so a medical ask gets the safety redirect, not an errand decline.
+    if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
+        if _is_medical_turn(slots, msg):
+            return _redirect_medical(msg=msg, slots=slots, session_ctx=session_ctx)
 
     # Out-of-scope fresh detection (AI-driven): the user asked Lana to do something TagAlng
     # has no feature for (deliver food, book a taxi). Confidence-gated — a clear ask is

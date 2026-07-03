@@ -231,6 +231,60 @@ def _is_host_tweak(msg: str) -> bool:
     return "tweak" in n or "let me change" in n
 
 
+def _host_blockers_needed(title: str, wd: Any, wt: Any, venue_ok: bool) -> list[str]:
+    """The blocker phrases still missing before a meet can post — title, when, place."""
+    need: list[str] = []
+    if not title:
+        need.append("a name")
+    if not (wd and wt):
+        need.append("a date & time")
+    if not venue_ok:
+        need.append("a place")
+    return need
+
+
+def _host_fallback_nudge(need: list[str]) -> str:
+    """Deterministic safety net ONLY for when the LLM host-turn brain is unavailable — never the
+    primary path. Kept minimal so a degraded turn still moves forward instead of dead-ending."""
+    if not need:
+        return "That's everything — tap **Looks good** and I'll drop it on your block."
+    return f"Just need {' · '.join(need)} — tell me and I'll add it, or fill it in below."
+
+
+def _apply_host_brain(
+    brain: dict[str, Any],
+    ed: dict[str, Any],
+    turn_ctx: dict[str, Any],
+    session_ctx: dict[str, Any],
+    settings: dict[str, Any],
+    existing_title: str,
+) -> None:
+    """Apply the LLM host-turn brain's extraction to the draft — monotonically (never clobber a
+    real value the host already gave). Understanding is the LLM's job; this just records it."""
+    title = str(brain.get("title") or "").strip()
+    have_real_title = bool(existing_title) and not _is_generic_title(existing_title)
+    # Reject a generic name in both raw ("meetup") and article-led ("a meetup") form.
+    title_generic = _is_generic_title(title) or _is_generic_title(
+        re.sub(r"^(?:a|an|the)\s+", "", title, flags=re.I)
+    )
+    if title and not have_real_title and not title_generic:
+        ed["title"] = title[:80]
+    place = str(brain.get("place") or "").strip()
+    if place and not str(ed.get("venue_name") or "").strip():
+        ed["venue_name"] = place[:80]
+        turn_ctx["event_place_asked"] = True
+    cap = brain.get("capacity")
+    if isinstance(cap, int):
+        ed["max_attendees"] = cap
+        settings["max_attendees"] = cap
+        settings["_cap_set"] = True
+        session_ctx["event_settings"] = settings
+    if isinstance(brain.get("auto_approve"), bool):
+        ed["auto_approve"] = brain["auto_approve"]
+    if isinstance(brain.get("allow_share"), bool):
+        ed["allow_attendee_share"] = brain["allow_share"]
+
+
 def _parse_event_settings(message: str, settings: dict[str, Any]) -> None:
     """Read capacity / approval / share signals from the user's tap (or words) into the
     settings dict. Matches the chip labels; harmless on unrelated messages."""
@@ -238,8 +292,14 @@ def _parse_event_settings(message: str, settings: dict[str, Any]) -> None:
 
     m = str(message or "").lower()
     # capacity
+    rng = re.search(r"\b(\d{1,3})\s*(?:-|to|–)\s*(\d{1,3})\b", m)
     if re.search(r"no limit|unlimited|\bopen\b|any number|as many", m):
         settings["max_attendees"] = None  # unlimited
+        settings["_cap_set"] = True
+    elif rng and re.search(r"people|neighbou?r|folks|guest|ppl|of us|group|attendee", m):
+        # A range in a headcount context ("5-7 people") → cap at the upper bound. Guarded to a
+        # people-word so a time range ("3-5pm") can't be misread as capacity.
+        settings["max_attendees"] = int(rng.group(2))
         settings["_cap_set"] = True
     else:
         num = re.search(r"\b(\d{1,3})\b", m)
@@ -821,6 +881,22 @@ def run_lana_unified_pipeline(
             # and any stale peer-preview cards so neither bleeds in beside the host prompt.
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             turn_ctx["peer_matches"] = []
+            # The host flow is driven deterministically by host_stage — not the orchestrator's
+            # intent guess, which flip-flops (activity → identity turn to turn) because the router
+            # enum has no "hosting" value. Stamp a stable hosting label so the transcript / inbox
+            # reflect what's actually happening instead of that noise.
+            turn_ctx["last_routing"] = {
+                "outcome": "R",
+                "intent_class": "hosting",
+                "confidence": 1.0,
+                "tool_to_call": None,
+                "capture_fired": False,
+                "event_fast_path": True,
+            }
+            # Conversational-aside flag: set when Lana answers a question mid-host (coordination
+            # / advice) so the FE shows her TEXT + a compact draft card instead of the setup
+            # carousel that would hide the reply. Default off; the carousel returns next turn.
+            turn_ctx["host_aside"] = False
             # Chips + affinity are transient per-turn UI — never inherit last turn's
             # set, or the early-out keeps showing stale options for the new question.
             ed.pop("suggestions", None)
@@ -1081,9 +1157,8 @@ def run_lana_unified_pipeline(
             # straight to the setup carousel, which collects the missing title / when / where
             # TOGETHER with capacity / sharing / approval / bring in a single card.
             if stage not in ("review", "setup", "confirm"):
-                # First host turn after extraction. Rich opening (blockers already known) →
-                # show the drafted review (P2); sparse opening → straight to the batched
-                # setup carousel so the host fills everything at once.
+                # First host turn after extraction. Rich opening with blockers known → drafted
+                # review (P2); otherwise straight to the batched setup carousel.
                 ed["suggestions"] = []
                 if blockers_done:
                     turn_ctx["host_stage"] = "review"
@@ -1098,8 +1173,8 @@ def run_lana_unified_pipeline(
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
                     reply = (
-                        "Let's set it up — fill in the details below and I'll drop it on "
-                        "your block."
+                        "Let's set it up! Add a name, a date & time, and a place below — or "
+                        "just tell me here and I'll fill them in."
                     )
             elif stage == "review":
                 if _is_host_confirm(user_message) or _is_host_drop(user_message):
@@ -1132,20 +1207,43 @@ def run_lana_unified_pipeline(
                 elif _is_host_confirm(user_message) or _is_host_drop(user_message):
                     # Carousel submitted but a blocker is still missing — hold in setup and
                     # say exactly what's needed (the FE cards should have collected these).
-                    need: list[str] = []
-                    if not _title:
-                        need.append("a name")
-                    if not (wd and wt):
-                        need.append("a date & time")
-                    if not venue_resolvable:
-                        need.append("a place")
+                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
                     reply = "I just need " + " · ".join(need) + " to post it."
-                else:
+                elif _norm_cta(user_message) in ("continue setting up", "continue setup"):
+                    # The FE "Continue setting up" button — a deterministic tap that brings the
+                    # setup carousel back (host_aside stays off so the card shows, not an aside).
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
-                    reply = "Set the details below, then tap **Looks good**."
+                    reply = _host_fallback_nudge(
+                        _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    )
+                else:
+                    # Free-text during setup — the host is TALKING, not tapping. Hand the whole
+                    # turn to the LLM brain: it reads the message in ANY phrasing, extracts what
+                    # it carries (title / place / capacity / prefs), and writes the reply — no
+                    # keyword gates. Apply the extraction monotonically and show the reply as an
+                    # aside (text + compact draft card) so it's visible over the carousel. The
+                    # deterministic nudge is only a fallback for when the LLM is unavailable.
+                    turn_ctx["host_stage"] = "setup"
+                    ed["suggestions"] = []
+                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    from app.host_turn import host_turn_brain
+
+                    with timer.stage("llm_host_turn"):
+                        brain = host_turn_brain(
+                            history=history,
+                            user_message=user_message,
+                            draft=ed,
+                            needed=need,
+                        )
+                    if brain:
+                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings, _title)
+                        reply = brain["reply"]
+                        turn_ctx["host_aside"] = True
+                    else:
+                        reply = _host_fallback_nudge(need)
             else:  # stage == "confirm" → publish when the host drops it
                 if (_is_host_drop(user_message) or _is_host_confirm(user_message)) and not phone_verified:
                     # Guest dropping the meet: DON'T attempt create_event first — it would

@@ -148,6 +148,24 @@ _SYSTEM = (
     "unsafe_kind=sexual|abuse|hate|illegal|other. Do NOT treat unsafe content as a swap/tip/out_of_scope "
     "or a feature request. (Self-harm / domestic-violence / child-safety CRISIS messages are handled "
     "elsewhere — those are goal=chat, NOT unsafe.) "
+    "MEDICAL (goal=medical, linear_intent=system.medical, in_discovery=false) = the user asks what to DO "
+    "about a HEALTH concern — a symptom, illness, injury, fever, pain, medication, or 'is this serious / "
+    "how do I treat / what should I do' for THEMSELVES, their kid, or anyone. Lana is NOT a doctor and must "
+    "NOT give medical advice or triage. Classify by MEANING, infinite phrasing: 'my kid has a fever of 103, "
+    "what should I do', 'I think I sprained my ankle', 'is this rash normal', 'should I go to the ER'. "
+    "This takes priority over chat/companionship — do NOT answer a medical question as chat, and do NOT log "
+    "it as a feature (it is not a product gap). CRITICAL DISTINCTION from tip_seek: asking Lana to FIND / "
+    "RECOMMEND a local doctor, pediatrician, or clinic ('know a good pediatrician', 'recommend a doctor near "
+    "me') is tip_seek (looking.tip), NOT medical — medical is asking for the ADVICE itself, not for a "
+    "referral. (Self-harm / suicide / domestic-violence / a missing child are the CRISIS rail = goal=chat, "
+    "NOT medical; medical is for physical illness/injury/symptoms.) "
+    "WHENEVER goal=medical, WRITE clarify_question yourself (leave clarify=null) — a warm, contextual line in "
+    "Lana's voice that (1) says she can't give medical advice, (2) urges contacting a doctor or nurse line "
+    "right away and calling 911 if it is severe or an emergency, and (3) offers to find a doctor/pediatrician "
+    "recommendation from their block. Ground it in what they described (e.g. 'for a high fever…'). Example: "
+    "'I'm not able to give medical advice, and for a high fever it's best to call your pediatrician or a "
+    "nurse line right away — if it's severe or they're struggling, call 911. What I can do is find a "
+    "pediatrician recommendation from your block — want me to?'. "
     "out_of_scope = the user asks Lana to PERFORM a real-world errand Lana cannot do directly. "
     "WHAT TAGALNG CAN DO — the capability menu; REASON against it, don't memorize the examples: "
     "(1) find/show neighbors (people) on the block; (2) browse local activities/events; "
@@ -179,6 +197,17 @@ _SYSTEM = (
     "DECLINE + LOG ONLY when NO capability plausibly helps — pure personal admin with no neighborhood "
     "angle: 'pay my bill', 'send money', 'cancel my appointment', 'file my form'. Then set "
     "goal=out_of_scope, clarify=null, confidence >= 0.9. "
+    "NON-LOCAL ADVICE / INFORMATION is ALSO out_of_scope (decline + log): the user asks Lana to "
+    "RECOMMEND, PLAN, or give ADVICE about something with NO neighborhood angle — where to go on "
+    "vacation, which national park / city / beach to visit, trip or travel planning, general trivia, "
+    "product research, or any recommendation of a place/thing that is NOT a nearby local spot on the "
+    "block. TagAlng is not a travel agent, a search engine, or a general advisor. Do NOT route this to "
+    "chat/companionship, and NEVER to goal=activities/find_activities — that runs a LOCAL event search "
+    "and would surface unrelated neighborhood events as if they answered the question (a hallucination). "
+    "Set goal=out_of_scope, clarify=null, confidence >= 0.9 (the graceful decline still offers the "
+    "local angle — unwinding with nearby activities/neighbors — as a soft redirect). CONTRAST with "
+    "tip_seek, which is a recommendation of a NEARBY place/person/service ON THE BLOCK (a local "
+    "restaurant, plumber, pediatrician); a faraway destination or a general question is NOT a local tip. "
     "Set signal_detail to a SHORT noun phrase of the thing ('pizza', 'taxes'). in_discovery=false. "
     "A BARE want with NO errand verb ('I want pizza', 'I need coffee', 'I'd love tacos', 'I want a "
     "movie') is the SAME redirect case: goal=out_of_scope, clarify='scope', offering the neighborhood "
@@ -314,7 +343,8 @@ _SYSTEM = (
     "settings.change_name|settings.change_zip|settings.notification_prefs; "
     "help.what_can_you_do|help.who_are_you; "
     "system.out_of_scope (set with goal=out_of_scope for an errand TagAlng cannot do); "
-    "system.unsafe (set with goal=unsafe for inappropriate/abusive content Lana must refuse). "
+    "system.unsafe (set with goal=unsafe for inappropriate/abusive content Lana must refuse); "
+    "system.medical (set with goal=medical for a health/medical concern — see MEDICAL below). "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
@@ -487,6 +517,7 @@ def ai_parse_discovery_turn(
             "continue",
             "out_of_scope",
             "unsafe",
+            "medical",
             "none",
         ):
             goal = "none"
@@ -545,8 +576,13 @@ def ai_parse_discovery_turn(
         clarify_raw = str(raw.get("clarify") or "").strip().lower()
         clarify = clarify_raw if clarify_raw in ("browse_or_meet", "scope", "intent") else None
         # The classifier writes the clarifying question itself (Lana's voice, contextual) so
-        # the route layer never hardcodes it. Only kept when a clarify is actually set.
-        clarify_question = (str(raw.get("clarify_question") or "").strip()[:300] or None) if clarify else None
+        # the route layer never hardcodes it. Kept when a clarify is set OR for goal=medical,
+        # where the same field carries the AI-authored safety-redirect line (no regex/template).
+        clarify_question = (
+            (str(raw.get("clarify_question") or "").strip()[:300] or None)
+            if (clarify or goal == "medical")
+            else None
+        )
         clarify_options = (
             [
                 str(o).strip()
@@ -636,7 +672,7 @@ def _discovery_slot_payload(
         '  "linear_intent": "<Layer 1 intent id or null>",\n'
         '  "in_discovery": true|false,\n'
         '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
-        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"none",\n'
+        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"medical"|"none",\n'
         '  "intro_direction": "sent"|"received"|"all"|null,\n'
         '  "intro_source": "block_log"|"peer_preview"|null,\n'
         '  "intro_list_index": 1-based integer when user picks #N from a shown list, else null,\n'
