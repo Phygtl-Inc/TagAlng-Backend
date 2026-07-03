@@ -1764,6 +1764,82 @@ class TestOutOfScopeRouting(unittest.TestCase):
         mock_log.assert_not_called()
 
 
+class TestMedicalRedirectRouting(unittest.TestCase):
+    """A health/medical concern must get the safety redirect (no advice / call a doctor or
+    911 / offer a local recommendation) — never answered as chat, never funnelled into
+    find_peers, and never logged as a feature request (it's a boundary, not a product gap)."""
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_medical_uses_ai_authored_line_and_offers_doctor(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        authored = (
+            "I'm not able to give medical advice, and for a high fever it's best to call your "
+            "pediatrician or a nurse line right away — if it's severe or they're struggling, call "
+            "911. What I can do is find a pediatrician recommendation from your block — want me to?"
+        )
+        mock_slots.return_value = {
+            "goal": "medical",
+            "linear_intent": "system.medical",
+            "in_discovery": False,
+            "confidence": 0.95,
+            "clarify_question": authored,
+        }
+        result = handle_discovery_turn(
+            "my kid has a fever of 103, what should I do?",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, peers = result
+        # The AI-authored line is used verbatim (no hardcoded template overriding it).
+        self.assertEqual(reply, authored)
+        self.assertEqual(routing.get("tool_to_call"), "medical")
+        self.assertNotEqual(ctx.get("active_intent"), "discovery.find_peers")
+        self.assertNotIn("ZIP", reply)
+        self.assertIn("Find a doctor nearby", ctx.get("suggestions") or [])
+        self.assertEqual(peers, [])
+        # A medical concern is NOT a product gap — nothing is logged, nothing is promised.
+        mock_log.assert_not_called()
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_medical_falls_back_to_safe_message_when_model_silent(
+        self, mock_slots, _mock_ai
+    ) -> None:
+        # Model flagged medical but authored no line → the safety fallback guarantees the
+        # 911/professional beats rather than leaking into chat.
+        mock_slots.return_value = {
+            "goal": "medical",
+            "linear_intent": "system.medical",
+            "in_discovery": False,
+            "confidence": 0.7,
+            "clarify_question": None,
+        }
+        result = handle_discovery_turn(
+            "I think I sprained my ankle, what should I do?",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, _ = result
+        self.assertEqual(routing.get("tool_to_call"), "medical")
+        self.assertIn("911", reply)
+        self.assertIn("medical advice", reply.lower())
+
+
 class TestUnsafeRouting(unittest.TestCase):
     """Inappropriate/abusive content must be refused + moderation-logged, never captured as
     a swap/tip, never logged as a feature request, never funnelled into find_peers."""

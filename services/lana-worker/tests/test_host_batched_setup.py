@@ -6,7 +6,10 @@ import unittest
 
 from app.lana_ui import merge_event_drafts, parse_event_draft
 from app.lana_unified_pipeline import (
+    _apply_host_brain,
     _has_temporal_tokens,
+    _host_blockers_needed,
+    _host_fallback_nudge,
     _is_host_confirm,
     _is_host_drop,
     _is_host_tweak,
@@ -81,6 +84,21 @@ class TestHostStageUiIntent(unittest.TestCase):
             derive_ui_intent({"event_host_active": True}), "collect_event_detail"
         )
 
+    def test_aside_overrides_setup_card(self) -> None:
+        # A conversational aside mid-host shows the text (collect_event_detail), not the
+        # setup carousel that would hide Lana's reply — even while host_stage is 'setup'.
+        self.assertEqual(
+            derive_ui_intent(
+                {"event_host_active": True, "host_stage": "setup", "host_aside": True}
+            ),
+            "collect_event_detail",
+        )
+        # Without the aside flag, the setup card is shown as normal.
+        self.assertEqual(
+            derive_ui_intent({"event_host_active": True, "host_stage": "setup"}),
+            "event_setup",
+        )
+
 
 class TestBringItems(unittest.TestCase):
     def test_model_carries_bring_items(self) -> None:
@@ -97,6 +115,82 @@ class TestBringItems(unittest.TestCase):
     def test_merge_takes_new_bring_items(self) -> None:
         merged = merge_event_drafts({"bring_items": ["Old"]}, {"bring_items": ["New", "Items"]})
         self.assertEqual(merged["bring_items"], ["New", "Items"])
+
+
+class TestBlockersNeeded(unittest.TestCase):
+    def test_lists_only_missing(self) -> None:
+        self.assertEqual(
+            _host_blockers_needed("", None, None, False), ["a name", "a date & time", "a place"]
+        )
+        self.assertEqual(_host_blockers_needed("Book Club", "2026-07-10", "15:00", True), [])
+        self.assertEqual(
+            _host_blockers_needed("Book Club", None, None, True), ["a date & time"]
+        )
+
+
+class TestFallbackNudge(unittest.TestCase):
+    """Deterministic fallback used ONLY when the LLM brain is unavailable — must still move
+    the flow forward (never a dead-end) and prompt for exactly what's missing."""
+
+    def test_lists_missing(self) -> None:
+        self.assertIn("a name", _host_fallback_nudge(["a name", "a place"]))
+
+    def test_all_done(self) -> None:
+        self.assertIn("Looks good", _host_fallback_nudge([]))
+
+
+class TestApplyHostBrain(unittest.TestCase):
+    """The brain OWNS understanding (any phrasing); this applies its extraction to the draft
+    monotonically — never clobbering a real value the host already gave."""
+
+    def _apply(self, brain, ed):
+        settings: dict = {}
+        turn_ctx: dict = {}
+        session_ctx: dict = {}
+        existing = str(ed.get("title") or "")
+        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings, existing)
+        return turn_ctx, settings
+
+    def test_applies_capacity_place_and_prefs(self) -> None:
+        ed: dict = {}
+        turn_ctx, settings = self._apply(
+            {
+                "title": "Neighbor Coffee",
+                "place": "my house",
+                "capacity": 7,
+                "auto_approve": False,
+                "allow_share": True,
+                "reply": "x",
+            },
+            ed,
+        )
+        self.assertEqual(ed["title"], "Neighbor Coffee")
+        self.assertEqual(ed["venue_name"], "my house")
+        self.assertTrue(turn_ctx["event_place_asked"])
+        self.assertEqual(ed["max_attendees"], 7)
+        self.assertTrue(settings["_cap_set"])
+        self.assertIs(ed["auto_approve"], False)
+        self.assertIs(ed["allow_attendee_share"], True)
+
+    def test_monotonic_never_clobbers_real_title_or_venue(self) -> None:
+        ed = {"title": "Book Club", "venue_name": "Foxtail Coffee"}
+        self._apply({"title": "Something Else", "place": "the park", "reply": "x"}, ed)
+        self.assertEqual(ed["title"], "Book Club")
+        self.assertEqual(ed["venue_name"], "Foxtail Coffee")
+
+    def test_ignores_generic_title(self) -> None:
+        ed: dict = {}
+        self._apply({"title": "a meetup", "reply": "x"}, ed)
+        self.assertNotIn("title", ed)
+
+    def test_nulls_are_left_alone(self) -> None:
+        ed = {"title": "Book Club"}
+        self._apply(
+            {"title": None, "place": None, "capacity": None, "auto_approve": None,
+             "allow_share": None, "reply": "x"},
+            ed,
+        )
+        self.assertEqual(ed, {"title": "Book Club"})
 
 
 if __name__ == "__main__":

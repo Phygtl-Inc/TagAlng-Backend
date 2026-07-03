@@ -275,28 +275,101 @@ def fetch_active_heritage_claims(user_id: str) -> list[tuple[str, str]]:
     return out
 
 
-def detect_heritage_conflict(
+_HERITAGE_RELATION_PROMPT = """You compare two heritage/ancestry statements from the SAME person: one already saved, one they just mentioned. Decide how the new one relates to the saved one.
+
+Output ONLY JSON: {"relation": "same" | "refine" | "broaden" | "additional" | "conflict"}
+
+- "same": identical heritage, different wording (e.g. saved "Italian", new "Italy").
+- "refine": the NEW one is a more specific region/subculture WITHIN the saved one (e.g. saved "Italian", new "Sicilian"; saved "German", new "Bavarian").
+- "broaden": the NEW one is a broader region that CONTAINS the saved one (e.g. saved "Sicilian", new "Italian"; saved "Paulista", new "Brazilian").
+- "additional": a second, compatible heritage a person can hold at once (e.g. saved "Italian", new "Brazilian" → dual heritage).
+- "conflict": genuinely incompatible — the new one replaces the saved one with an UNRELATED nationality/culture (e.g. saved "Italian", new "Korean").
+
+Regional or sub-cultural variants (Sicilian/Italian, Bavarian/German, Catalan/Spanish, Paulista/Brazilian) are NEVER "conflict" — they are "refine" or "broaden". Only use "conflict" for a real contradiction between unrelated heritages."""
+
+
+def resolve_heritage_relation(existing_label: str, new_label: str) -> str:
+    """AI verdict on how a newly stated heritage relates to the stored one.
+
+    Regional heritages (Sicilian↔Italian, Bavarian↔German) are NOT contradictions, so
+    we must not prompt the user to 'swap'. Returns one of same/refine/broaden/additional/
+    conflict. Falls back to a regex root-match ('same') or, when unresolved, 'conflict'
+    (the conservative pre-AI behavior) if the model is unavailable.
+    """
+    ex = str(existing_label or "").strip()
+    new = str(new_label or "").strip()
+    if not ex or not new:
+        return "additional"
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if llm_configured():
+            data = llm_json(
+                model=router_model(),
+                system=_HERITAGE_RELATION_PROMPT,
+                user_payload=f'saved: "{ex}"\nnew: "{new}"',
+                max_tokens=200,
+                temperature=0.0,
+            )
+            rel = str((data or {}).get("relation", "")).strip().lower()
+            if rel in ("same", "refine", "broaden", "additional", "conflict"):
+                return rel
+    except Exception:
+        logger.exception("heritage_relation_resolve_failed")
+    if heritage_claim_key("", ex) == heritage_claim_key("", new):
+        return "same"
+    return "conflict"
+
+
+def plan_heritage_write(
     user_id: str,
-    new_claims: list[ExtractedClaim],
-) -> tuple[str, ExtractedClaim] | None:
-    """When user asserts a new heritage that contradicts stored heritage."""
+    heritage_claims: list[ExtractedClaim],
+) -> tuple[list[ExtractedClaim], tuple[str, ExtractedClaim] | None]:
+    """Decide what to persist for a newly stated heritage, given what's stored.
+
+    Returns (heritage_claims_to_persist, pending_conflict). Only a genuine AI-verdict
+    'conflict' surfaces a swap prompt; regional refinements/broadenings resolve silently:
+      - refine   → keep the NEW (more specific) heritage; it replaces the broader one.
+      - same / broaden / additional → keep what's stored; drop the new heritage write
+        (nothing to prompt, existing row is preserved — reconcile has no new positive).
+      - conflict → drop the new positive, return it as a pending swap prompt.
+    Negative heritage claims always pass through (scrubbed downstream).
+    """
+    negatives = [c for c in heritage_claims if is_negative_claim(c)]
+    positives = [c for c in heritage_claims if not is_negative_claim(c)]
     existing = fetch_active_heritage_claims(user_id)
-    if not existing:
-        return None
-    positives = [
-        c for c in new_claims if c.bucket == "heritage" and not is_negative_claim(c)
-    ]
-    if not positives:
-        return None
+    if not existing or not positives:
+        return heritage_claims, None
     if len(positives) > 1:
-        return None
+        # Multiple new heritages at once — let the batch reconcile as before.
+        return heritage_claims, None
     new = positives[0]
     new_key = heritage_claim_key(new.concept, new.label)
     for ex_concept, ex_label in existing:
         if heritage_claim_key(ex_concept, ex_label) == new_key:
-            return None
-        return (ex_label, new)
-    return None
+            return heritage_claims, None  # same root — just refresh the row
+        relation = resolve_heritage_relation(ex_label, new.label)
+        if relation == "conflict":
+            return negatives, (ex_label, new)
+        if relation == "refine":
+            return heritage_claims, None  # more specific replaces the broader
+        # same / broaden / additional → preserve stored heritage, skip the new write
+        return negatives, None
+    return heritage_claims, None
+
+
+def detect_heritage_conflict(
+    user_id: str,
+    new_claims: list[ExtractedClaim],
+) -> tuple[str, ExtractedClaim] | None:
+    """When user asserts a new heritage that genuinely contradicts stored heritage.
+
+    AI-gated: a regional variant (Sicilian vs Italian) is not a conflict, so it never
+    prompts. Thin wrapper over plan_heritage_write for callers that only want the prompt.
+    """
+    heritage = [c for c in new_claims if c.bucket == "heritage"]
+    _, pending = plan_heritage_write(user_id, heritage)
+    return pending
 
 
 def heritage_conflict_prompt(from_label: str, new_claim: ExtractedClaim) -> str:
@@ -334,14 +407,100 @@ def is_negative_claim(claim: ExtractedClaim) -> bool:
     return bool(re.match(r"^(no|not)\b", blob.strip()))
 
 
+_UNCERTAINTY_RE = re.compile(
+    r"\b(?:unsure|uncertain|not\s+sure|dunno|don'?t\s+know|no\s+idea|"
+    r"not\s+certain|what\s+to\s+call|figuring\s+(?:it\s+)?out)\b",
+    re.I,
+)
+
+# Bare topic headings the model sometimes emits instead of a real thread — e.g.
+# "Health" with a lone "wellness" synonym, or "Lifestyle". These are categories,
+# not identity claims.
+_GENERIC_TOPIC_LABELS = frozenset(
+    {
+        "health",
+        "wellness",
+        "wellbeing",
+        "well-being",
+        "lifestyle",
+        "general",
+        "misc",
+        "other",
+        "stuff",
+        "things",
+        "life",
+        "hobbies",
+        "activities",
+        "interests",
+        "interest",
+        "activity",
+        "about you",
+        "about me",
+    }
+)
+
+
+def is_noise_claim(claim: ExtractedClaim) -> bool:
+    """Degenerate 'claims': bare topic headings and reified uncertainty.
+
+    Catches the extractor emitting a category word ("Health") or its own hedging
+    ("Unsure what to call", "Unsure about time") as if it were an identity thread.
+    """
+    label = str(claim.label or "").strip().lower()
+    concept = str(claim.concept or "").strip().lower()
+    if not label:
+        return True
+    if label in _GENERIC_TOPIC_LABELS:
+        return True
+    if _UNCERTAINTY_RE.search(label) or _UNCERTAINTY_RE.search(concept.replace("_", " ")):
+        return True
+    return False
+
+
+def _normalized_label_key(label: str) -> str:
+    """Collapse casing/punctuation/trailing-plural so near-identical labels merge."""
+    text = re.sub(r"[^a-z0-9\s]", " ", str(label or "").lower())
+    tokens = [t[:-1] if len(t) > 3 and t.endswith("s") else t for t in text.split()]
+    return " ".join(tokens).strip()
+
+
+def dedupe_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
+    """Collapse claims describing the same thread (same normalized label).
+
+    The DB unique index is on `concept`, so near-duplicate rows with identical labels
+    but different slugs (e.g. 'hosting_neighbor_meetings' vs 'neighbor_gatherings', both
+    labeled 'Interested in Hosting Informal Neighbor Meetings') would all persist. Merge
+    them: keep the highest-confidence instance and union synonyms.
+    """
+    by_key: dict[str, ExtractedClaim] = {}
+    for c in claims:
+        key = _normalized_label_key(c.label) or str(c.concept or "").lower()
+        winner = by_key.get(key)
+        if winner is None:
+            by_key[key] = c
+            continue
+        keep = winner if winner.confidence >= c.confidence else c
+        keep.synonyms = list(dict.fromkeys([*winner.synonyms, *c.synonyms]))[:6]
+        # A thread is durable if ANY instance of it was durable.
+        keep.transient = winner.transient and c.transient
+        by_key[key] = keep
+    return list(by_key.values())
+
+
+def clean_claims_for_persist(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
+    """Single guard before any write: drop negatives + noise, then dedupe near-repeats."""
+    kept = [c for c in claims if not is_negative_claim(c) and not is_noise_claim(c)]
+    return dedupe_claims(kept)
+
+
 def filter_extracted_claims(
     message: str,
     claims: list[ExtractedClaim],
 ) -> list[ExtractedClaim]:
-    """Drop negative and vague junk before persist."""
+    """Drop negative, noise, and vague junk before persist; collapse near-duplicates."""
     out: list[ExtractedClaim] = []
     for c in claims:
-        if is_negative_claim(c):
+        if is_negative_claim(c) or is_noise_claim(c):
             continue
         label = str(c.label or "").strip().lower()
         if label in {"nearby", "near me", "on my block", "lives on my block"}:
@@ -350,7 +509,7 @@ def filter_extracted_claims(
             if re.search(r"\b(?:speaker|heritage)\b", label) and len(label) > 24:
                 continue
         out.append(c)
-    return out[:6]
+    return dedupe_claims(out)[:6]
 
 
 def _dismiss_claims_by_ids(sb: Any, claim_ids: list[str]) -> None:
@@ -506,6 +665,7 @@ def _claim_row(user_id: str, c: ExtractedClaim) -> dict[str, Any]:
         "synonyms": c.synonyms,
         "source_quote": c.source_quote,
         "bucket": c.bucket,
+        "transient": c.transient,
     }
     embedding = _embed_claim(c)
     if embedding is not None:
@@ -515,6 +675,7 @@ def _claim_row(user_id: str, c: ExtractedClaim) -> dict[str, Any]:
 
 def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
     """Merge claims by concept; reconcile heritage bucket per batch."""
+    claims = clean_claims_for_persist(claims)
     sb = service_client()
     saved = 0
     heritage_batch = [c for c in claims if c.bucket == "heritage"]
@@ -543,6 +704,7 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
 
 def replace_all_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
     """Full session complete: replace active claims for user."""
+    claims = clean_claims_for_persist(claims)
     sb = service_client()
     sb.table("user_identity_claims").delete().eq("user_id", user_id).is_(
         "dismissed_at", "null"

@@ -1,19 +1,25 @@
 """Claim-personalized recommendations for the tip_seek fallback.
 
-When a mom asks Lana for a recommendation and no neighbor has vouched a match, the
-tip_seek path falls back to a generic Google Places search. This module lets that
-fallback lean on what Lana already knows about her (her own identity claims): the LLM
-turns the request + relevant claims into a sharper Places query and a one-line reframe
-that names the reasoning ("since you're vegetarian…").
+When a user asks Lana for a recommendation and no neighbor has vouched a match, the
+tip_seek path falls back to a Google Places search. This module lets that fallback lean on
+what Lana already knows about them (their identity claims) AND on the request itself: the
+LLM turns the request + relevant claims into one or more candidate FILTERS, each a sharper
+Places query plus the structured levers Google supports — a place `included_type`
+(e.g. italian_restaurant), per-place boolean `required_attrs` to VERIFY (e.g.
+servesVegetarianFood), and a one-line reframe naming the angle.
 
-Design notes / guardrails (see docs plan):
-- OpenAI-only via the shared `llm_json` helper — no Gemini, no new dependency, Lana keeps one voice.
-- The LLM shapes the QUERY STRING and PHRASING only. It never invents venues; place names come
-  solely from Google Places (app/places.search_places).
-- Self-only: `claims` are the requesting mom's own, so there is no cross-user disclosure leak.
-- The reframe references the ANGLE ("veg-friendly"), not a private claim's raw text.
-- Best-effort: returns None on empty claims, no LLM, a not-relevant verdict, or any bad output,
-  so the caller always degrades cleanly to today's generic behavior.
+Design notes / guardrails:
+- OpenAI-only via the shared `llm_json` helper — no new dependency, Lana keeps one voice.
+- The LLM shapes QUERY STRINGS, a TYPE, ATTRIBUTES and PHRASING only. It never invents
+  venues; place names come solely from Google Places (app/places.search_places).
+- included_type + required_attrs are validated against app/place_types whitelists here, so a
+  hallucinated enum can't reach (and break) the Places request.
+- VERIFY, don't assert: required_attrs let the caller keep only places Google confirms match
+  ("kid-friendly" ⇐ goodForChildren=true), instead of claiming it blindly.
+- Self-only: `claims` are the requesting user's own — no cross-user disclosure leak. The
+  reframe references the ANGLE ("veg-friendly"), not a private claim's raw text.
+- Best-effort: returns None on empty claims/request, no LLM, a not-relevant verdict, or bad
+  output, so the caller degrades cleanly to a plain nearby search.
 """
 
 from __future__ import annotations
@@ -22,32 +28,48 @@ import json
 import logging
 from typing import Any
 
+from app.place_types import valid_attrs, valid_included_type
+
 _log = logging.getLogger(__name__)
 
-# Cap the claims we hand the model — a mom rarely has more than a handful of active
-# claims, and this keeps the prompt small and the shaping call cheap.
+# Cap the claims we hand the model — keeps the prompt small and the shaping call cheap.
 _MAX_CLAIMS = 20
+# Cap candidate filters — hybrid UX asks the user to choose among at most a few angles.
+_MAX_FILTERS = 4
 
 _SYSTEM = """You help a neighborhood concierge personalize a LOCAL PLACES recommendation using \
-what she already knows about the user (their identity claims: heritage, diet, interests, kids, etc.).
+the user's REQUEST and what she already knows about them (identity claims: diet, kids, \
+interests, heritage, etc.).
 
-You are given the user's recommendation REQUEST (e.g. "a pizza place", "a good dentist") and a list \
-of their CLAIMS. Decide whether any claim genuinely changes what places would fit, then return ONE \
-compact JSON object with exactly these keys:
-{"relevant","places_query","reframe"}
+Decide which claims (and the request itself) genuinely change which places would fit, then \
+return ONE compact JSON object with exactly these keys:
+{"relevant","base_query","filters"}
 
-- relevant: true ONLY if at least one claim meaningfully shapes this specific request
-  (e.g. "vegetarian" for a restaurant, "toddler"/"has kids" for a place to eat or visit,
-  "triathlete"/"into fitness" for food or activities). false for claims that don't affect the pick
-  (e.g. heritage has no bearing on finding a dentist). When false, personalization is skipped.
-- places_query: a short natural-language Google Places search string that folds in the relevant
-  angle, e.g. "vegetarian-friendly pizza restaurant" or "kid-friendly restaurant with high chairs".
-  When relevant is false, echo the plain request as the query.
-- reframe: ONE short, warm first-person line that names the angle and invites widening, e.g.
-  "Since you mentioned you're vegetarian, I leaned toward veg-friendly spots." Reference the ANGLE,
-  never read back sensitive personal details verbatim. null when relevant is false.
+- base_query: a plain Google Places search string for the raw request with NO claim bias
+  (e.g. request "nice restaurants" -> "restaurant"; "good coffee" -> "coffee shop").
+- filters: an array (0-4) of DISTINCT candidate angles, each an object:
+    {"label","query","included_type","required_attrs","reframe"}
+  Include a filter ONLY when a claim (or the request) meaningfully narrows the pick. Return
+  [] when nothing relevant applies (e.g. heritage has no bearing on finding a dentist).
+    - label: 1-3 word chip text, e.g. "Vegetarian", "Kid-friendly", "Italian", "Top-rated".
+    - query: Places text query folding in the angle, e.g. "vegetarian restaurant".
+    - included_type: a valid Google Places (New) place TYPE that captures the angle, or null.
+      Use one ONLY when a real type fits (e.g. "italian_restaurant","vegetarian_restaurant",
+      "vegan_restaurant","mexican_restaurant","pizza_restaurant","cafe","bakery"). null if unsure.
+    - required_attrs: array of Google per-place BOOLEAN fields that must be true for the place
+      to genuinely match, chosen ONLY from: goodForChildren, menuForChildren,
+      servesVegetarianFood, servesBreakfast, servesLunch, servesDinner, servesBrunch,
+      servesCoffee, servesDessert, dineIn, takeout, delivery, outdoorSeating, reservable,
+      goodForGroups, allowsDogs. [] if none apply. (E.g. a dad/kids -> ["goodForChildren"];
+      vegetarian -> ["servesVegetarianFood"]. A cuisine like Italian needs no attr — the type
+      carries it.)
+    - reframe: ONE short warm first-person line naming the angle, e.g. "Since you're
+      vegetarian, I kept these veg-friendly." Reference the ANGLE, never sensitive details.
+- relevant: true if filters is non-empty, else false.
 
-Never invent place names. Return only the JSON object."""
+Prefer ONE filter when a single angle clearly dominates. Offer 2+ ONLY when genuinely distinct \
+angles compete (e.g. a parent who is also vegetarian -> a "Kid-friendly" AND a "Vegetarian" \
+filter). Never invent place names. Return only the JSON object."""
 
 
 def _clean_claims(claims: list[dict[str, Any]] | None) -> list[dict[str, str]]:
@@ -66,16 +88,36 @@ def _clean_claims(claims: list[dict[str, Any]] | None) -> list[dict[str, str]]:
     return out
 
 
+def _clean_filter(f: Any) -> dict[str, Any] | None:
+    """Validate one LLM filter into a safe, ready-to-use shape (or None to drop it).
+    included_type + required_attrs are whitelisted so a bad enum never reaches Places."""
+    if not isinstance(f, dict):
+        return None
+    label = str(f.get("label") or "").strip()
+    query = str(f.get("query") or "").strip()
+    if not label or not query:
+        return None
+    return {
+        "label": label[:24],
+        "query": query,
+        "included_type": valid_included_type(f.get("included_type")),
+        "required_attrs": valid_attrs(f.get("required_attrs")),
+        "reframe": (str(f.get("reframe") or "").strip() or None),
+    }
+
+
 def personalize_tip_query(
     *,
     request: str,
     category: str | None,
     claims: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Return {"relevant","places_query","reframe"} or None.
+    """Return {"relevant","base_query","filters":[{label,query,included_type,required_attrs,
+    reframe}]} or None.
 
-    None means "fall back to the generic behavior": no claims, LLM not configured, the model
-    judged nothing relevant, or the output was malformed. Never raises.
+    None means "fall back to a plain search": no request/claims, LLM not configured, nothing
+    relevant, or malformed output. Never raises. All included_type/required_attrs are already
+    validated against the Places whitelists, so the caller can pass them straight through.
     """
     req = str(request or "").strip()
     trimmed = _clean_claims(claims)
@@ -106,25 +148,32 @@ def personalize_tip_query(
             model=model,
             system=_SYSTEM,
             user_payload=payload,
-            max_tokens=200,
+            max_tokens=400,
             temperature=0.2,
         )
         _log.info("rec_personalize.llm_result data=%r", data)
-    except Exception:  # noqa: BLE001 — best-effort; caller falls back to generic
+    except Exception:  # noqa: BLE001 — best-effort; caller falls back to plain search
         _log.exception("rec_personalize.llm_error")
         return None
 
     if not isinstance(data, dict):
         _log.info("rec_personalize.skip reason=bad_shape type=%s", type(data).__name__)
         return None
-    if not bool(data.get("relevant")):
-        _log.info("rec_personalize.skip reason=not_relevant")
+    raw_filters = data.get("filters")
+    filters: list[dict[str, Any]] = []
+    if isinstance(raw_filters, list):
+        for f in raw_filters:
+            cleaned = _clean_filter(f)
+            if cleaned:
+                filters.append(cleaned)
+            if len(filters) >= _MAX_FILTERS:
+                break
+    base_query = str(data.get("base_query") or req).strip() or req
+    if not filters:
+        _log.info("rec_personalize.skip reason=no_relevant_filters")
         return None
-    places_query = str(data.get("places_query") or "").strip()
-    if not places_query:
-        _log.info("rec_personalize.skip reason=empty_places_query")
-        return None
-    reframe_raw = data.get("reframe")
-    reframe = str(reframe_raw or "").strip() or None
-    _log.info("rec_personalize.ok places_query=%r reframe=%r", places_query, reframe)
-    return {"relevant": True, "places_query": places_query, "reframe": reframe}
+    _log.info(
+        "rec_personalize.ok base_query=%r filters=%s",
+        base_query, [(f["label"], f["included_type"], f["required_attrs"]) for f in filters],
+    )
+    return {"relevant": True, "base_query": base_query, "filters": filters}

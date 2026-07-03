@@ -493,6 +493,13 @@ class ExtractedClaim(BaseModel):
     synonyms: list[str] = Field(default_factory=list)
     source_quote: str | None = None
     bucket: str | None = None
+    # True for temporary states that are NOT durable identity (a sprained ankle, an
+    # illness, an upcoming trip, a passing mood). Persisted for context but kept off
+    # the identity wall — see get_my_identity_claims() and dedupe/clean in claims_persist.
+    transient: bool = False
+    # True when the claim is coarse and a follow-up would sharpen it ("tech worker",
+    # "speaks 5 languages" without naming them). Drives a curiosity follow-up.
+    vague: bool = False
 
 
 class CompleteSessionResponse(BaseModel):

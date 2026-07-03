@@ -85,8 +85,17 @@ def _is_browse_answer(
     "anything outdoors") or a vague reply is — only a confident pivot to another lane, a
     meta/question turn ("what's my zip?"), or an out_of_scope/unsafe turn releases."""
     from app.lane_decision import is_confident_off_lane, is_meta_or_chat
+    from app.layer1_intents import utterance_indicates_tip_seek
 
     if is_meta_or_chat(slots):
+        return False
+    # Deterministic backstop to the AI classifier: an explicit request for a standing
+    # PLACE/venue/service recommendation ("find me restaurants", "know a good pizza place")
+    # is a tip_seek PIVOT, never a browse refinement — the browse reads time-bound EVENTS
+    # and a place is not an event. Release so routing hands it to the tip_seek → Google
+    # Places path. Bare activity/topic refinements never trip this (the regex needs a
+    # service/place noun), so a genuine "cricket"/"outdoors" refine still stays.
+    if utterance_indicates_tip_seek(message):
         return False
     # Awaiting the reply to the "want me to listen for you?" seek offer (shown when a search
     # came up empty) — the reply (yes / widen / a new kind) belongs to THIS flow, the same way

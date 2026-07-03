@@ -2047,6 +2047,217 @@ def _try_list_intros_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
+_WIDEN_TIP_RE = re.compile(
+    r"\b(show me all|see all|show all|widen|broaden|everything)\b", re.I
+)
+# Honest provenance shared across the tip fallback copy.
+_TIP_VOUCH = "not a neighbor vouch"
+
+
+def _join_labels(labels: list[str]) -> str:
+    """'Vegetarian or Kid-friendly' / 'A, B, or C' — for the ask-first prompt."""
+    labels = [l for l in labels if l]
+    if not labels:
+        return "one of these"
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} or {labels[1]}"
+    return ", ".join(labels[:-1]) + f", or {labels[-1]}"
+
+
+def _search_tip_places(
+    *, query: str, block_id: str, zip_for_bias: str, user_id: str | None,
+    included_type: str | None = None, required_attrs: list[str] | None = None,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Google Places search for the tip fallback — best-effort, [] on any failure. When
+    `included_type` is set we hard-restrict (strictTypeFiltering) so the type is a real
+    filter, not a hint; `required_attrs` are pulled back for post-hoc verification."""
+    from app.places import search_places
+
+    try:
+        return search_places(
+            query=query, zip_code=zip_for_bias or None, block_id=block_id, user_id=user_id,
+            limit=limit, included_type=included_type, strict_type=bool(included_type),
+            attr_fields=required_attrs or None,
+        )
+    except Exception:  # noqa: BLE001 — fallback must never break the saved-signal reply
+        logging.getLogger(__name__).exception("tip_places_search_failed")
+        return []
+
+
+def _verify_places(
+    places: list[dict[str, Any]], required_attrs: list[str]
+) -> list[dict[str, Any]]:
+    """Keep only places Google CONFIRMS match every required attribute (bool True). Unknown
+    (null) fails closed — 'only verified' means we never claim what we couldn't check."""
+    if not required_attrs:
+        return places
+    out: list[dict[str, Any]] = []
+    for p in places:
+        attrs = p.get("attrs") or {}
+        if all(attrs.get(a) is True for a in required_attrs):
+            out.append(p)
+    return out
+
+
+def _tip_seek_fallback_reply(
+    *,
+    ctx: dict[str, Any],
+    msg: str,
+    detail: str,
+    category: str | None,
+    block_id: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+) -> str:
+    """Empty tip-seek → Google Places fallback, claim-personalized + verified (hybrid loop).
+
+    Mutates ctx (google_place_suggestions, rec_chips, rec_widen_noun, rec_filter_asked) and
+    returns the reply, or "" to keep the plain saved-signal reply (no places surfaced).
+
+    Hybrid flow: ONE obvious claim-angle → apply it (verified) + refine chips; SEVERAL
+    distinct angles → ask the user to pick first (chips, no search this turn); none relevant,
+    a widen tap, or personalization off → plain nearby list. 'Only verified': a place is only
+    shown under an angle when Google's own attribute/type confirms it, else we say so plainly.
+    """
+    from app.lana_paths import rec_personalize_enabled
+
+    ctx.pop("rec_widen_noun", None)
+    ctx.pop("rec_chips", None)
+    ctx.pop("google_place_suggestions", None)
+    # Consume the "already asked to pick" flag (re-set below only if we ask again this turn).
+    already_asked = bool(session_ctx.get("rec_filter_asked"))
+    ctx.pop("rec_filter_asked", None)
+
+    base_query = (detail or category or "").strip()
+    noun = (category or detail or "options").strip() or "options"
+    zip_for_bias = str(
+        session_ctx.get("zip") or session_ctx.get("preview_zip")
+        or session_ctx.get("zip_code") or ""
+    ).strip()
+    if not zip_for_bias and block_id.startswith("zip-"):
+        zip_for_bias = block_id[len("zip-"):]
+
+    widen = bool(_WIDEN_TIP_RE.search(msg or ""))
+    _enabled = rec_personalize_enabled()
+    logging.getLogger(__name__).info(
+        "tip_seek_fallback.enter user_id=%s block=%s detail=%r category=%r widen=%s "
+        "enabled=%s already_asked=%s",
+        user_id, block_id, detail, category, widen, _enabled, already_asked,
+    )
+
+    def _plain(reason_widen: bool) -> str:
+        places = _search_tip_places(
+            query=base_query, block_id=block_id, zip_for_bias=zip_for_bias, user_id=user_id,
+        )
+        if not places:
+            return ""
+        ctx["google_place_suggestions"] = places[:3]
+        if reason_widen:
+            return (
+                f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}). "
+                "Your ask is still posted to the block, so I'll ping you the moment a neighbor "
+                "recommends one."
+            )
+        return (
+            f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
+            f"{_TIP_VOUCH}). I've also posted your ask to the block — I'll ping you the moment "
+            "a neighbor recommends one."
+        )
+
+    # Plain path: widen tap, personalization off, or an anonymous user (no claims to lean on).
+    if widen or not (user_id and _enabled):
+        return _plain(reason_widen=widen)
+
+    # Ask the personalizer for candidate angles from the user's own claims + the request.
+    filters: list[dict[str, Any]] = []
+    try:
+        from app.context import load_user_context
+        from app.rec_personalize import personalize_tip_query
+
+        claims = load_user_context(user_id).get("existing_claims") or []
+        personalized = personalize_tip_query(
+            request=base_query, category=category, claims=claims,
+        )
+        if personalized:
+            filters = personalized.get("filters") or []
+            base_query = str(personalized.get("base_query") or base_query).strip() or base_query
+    except Exception:  # noqa: BLE001 — personalization never blocks the reply
+        logging.getLogger(__name__).exception("rec_personalize_failed")
+        filters = []
+
+    if not filters:
+        return _plain(reason_widen=False)
+
+    # Hybrid — 2+ genuinely distinct angles and we haven't asked yet → ask the user to pick
+    # (chips post each filter's own query back; "Just show all" widens). No search this turn.
+    if len(filters) >= 2 and not already_asked:
+        ctx["rec_filter_asked"] = True
+        chips = [
+            {"label": f["label"], "message": f["query"], "style": "primary"}
+            for f in filters[:3]
+        ]
+        chips.append(
+            {"label": "Just show all", "message": f"show me all {noun}", "style": "secondary"}
+        )
+        ctx["rec_chips"] = chips
+        angles = _join_labels([f["label"] for f in filters[:3]])
+        return (
+            f"I can tailor this to you — want {angles}? Tap one, or “Just show all” for "
+            "everything nearby."
+        )
+
+    # Apply the top angle (single obvious filter, or we already asked → don't loop again).
+    chosen = filters[0]
+    req_attrs = list(chosen.get("required_attrs") or [])
+    places = _search_tip_places(
+        query=str(chosen.get("query") or base_query), block_id=block_id,
+        zip_for_bias=zip_for_bias, user_id=user_id,
+        included_type=chosen.get("included_type"), required_attrs=req_attrs, limit=10,
+    )
+    verified = _verify_places(places, req_attrs)
+    logging.getLogger(__name__).info(
+        "tip_seek_fallback.applied label=%r type=%r attrs=%s found=%d verified=%d",
+        chosen.get("label"), chosen.get("included_type"), req_attrs, len(places), len(verified),
+    )
+    if verified:
+        ctx["google_place_suggestions"] = verified[:3]
+        ctx["rec_widen_noun"] = noun
+        # Refine chips: the OTHER offered angles + a "See all" widen.
+        chips = [
+            {"label": f["label"], "message": f["query"], "style": "secondary"}
+            for f in filters[1:3]
+        ]
+        chips.append(
+            {"label": f"See all {noun}", "message": f"show me all {noun}", "style": "secondary"}
+        )
+        ctx["rec_chips"] = chips
+        reframe = chosen.get("reframe") or f"Focused on {chosen.get('label', 'a good fit').lower()} spots."
+        return (
+            f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}), "
+            "and I've posted your ask to the block — I'll ping you the moment a neighbor "
+            "recommends one. Want me to widen the search?"
+        )
+
+    # 'Only verified': nothing Google-confirmed for this angle — say so honestly and fall
+    # back to the plain nearby list rather than claiming an unverified match.
+    fallback = _search_tip_places(
+        query=base_query, block_id=block_id, zip_for_bias=zip_for_bias, user_id=user_id,
+    )
+    if not fallback:
+        return ""
+    ctx["google_place_suggestions"] = fallback[:3]
+    ctx["rec_widen_noun"] = noun
+    label = str(chosen.get("label") or "").strip().lower() or "matching"
+    return (
+        f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
+        f"({_TIP_VOUCH}). Your ask is posted to the block — I'll ping you the moment a "
+        "neighbor recommends one."
+    )
+
+
 def _try_save_signal_turn(
     *,
     msg: str,
@@ -2170,106 +2381,17 @@ def _try_save_signal_turn(
     # NOT a neighbor recommendation. Only on the no-match path — populated blocks are
     # untouched, and a real neighbor rec always wins. Best-effort; never blocks the reply.
     if intent == "tip_seek" and matches_shown <= 0:
-        from app.lana_paths import rec_personalize_enabled
-
-        # Clear any stale widen-chip noun from a prior turn; only re-set below when we
-        # actually surface a personalized rec this turn.
-        ctx.pop("rec_widen_noun", None)
-        query = (detail or category or "").strip()
-        rec_reframe: str | None = None
-        # "See all …" chip (or a typed widen) → drop the claim filter and show the
-        # unfiltered nearby list. The chip posts "show me all <noun>", so match that.
-        widen = bool(
-            re.search(r"\b(show me all|see all|show all|widen|broaden|everything)\b", msg or "", re.I)
+        _tip_reply = _tip_seek_fallback_reply(
+            ctx=ctx,
+            msg=msg,
+            detail=detail,
+            category=category,
+            block_id=block_id,
+            session_ctx=session_ctx,
+            user_id=user_id,
         )
-        logging.getLogger(__name__).info(
-            "tip_seek_fallback.enter user_id=%s block=%s detail=%r category=%r matches=%d widen=%s",
-            user_id, block_id, detail, category, matches_shown, widen,
-        )
-        # Concierge touch: bias the query + framing by the mom's OWN identity claims
-        # (e.g. "vegetarian" → veg-friendly spots) when the flag is on. Best-effort —
-        # any failure leaves `query` as the raw ask and `rec_reframe` None, so the reply
-        # degrades to the generic line below. The LLM shapes the query string + phrasing
-        # only; venue names still come solely from Google (no hallucinated places).
-        # Skipped on a widen tap so "See all" genuinely broadens instead of re-personalizing.
-        _rec_enabled = rec_personalize_enabled()
-        if user_id and _rec_enabled and not widen:
-            try:
-                from app.context import load_user_context
-                from app.rec_personalize import personalize_tip_query
-
-                claims = load_user_context(user_id).get("existing_claims") or []
-                personalized = personalize_tip_query(
-                    request=query, category=category, claims=claims,
-                )
-                if personalized:
-                    query = str(personalized.get("places_query") or query).strip() or query
-                    rec_reframe = personalized.get("reframe")
-                logging.getLogger(__name__).info(
-                    "rec_personalize enabled=1 user=%s claims=%d relevant=%s query=%r",
-                    user_id, len(claims), bool(personalized), query,
-                )
-            except Exception:  # noqa: BLE001 — personalization never blocks the reply
-                rec_reframe = None
-                logging.getLogger(__name__).exception("rec_personalize_failed")
-        else:
-            logging.getLogger(__name__).info(
-                "rec_personalize skipped enabled=%s user_id=%s widen=%s",
-                _rec_enabled, bool(user_id), widen,
-            )
-        try:
-            from app.places import search_places
-
-            # Bias to the user's block: the ZIP lives under several session keys, and an
-            # auto-created block embeds it ('zip-92104'). Without a resolvable centroid the
-            # Places call falls back to an unbiased search near the SERVER (wrong country).
-            zip_for_bias = str(
-                session_ctx.get("zip")
-                or session_ctx.get("preview_zip")
-                or session_ctx.get("zip_code")
-                or ""
-            ).strip()
-            if not zip_for_bias and block_id.startswith("zip-"):
-                zip_for_bias = block_id[len("zip-"):]
-            places = search_places(
-                query=query,
-                zip_code=zip_for_bias or None,
-                block_id=block_id,
-                limit=3,
-            )
-        except Exception:  # noqa: BLE001 — fallback must never break the saved-signal reply
-            places = []
-        logging.getLogger(__name__).info(
-            "tip_seek_fallback.result query=%r places=%d personalized=%s",
-            query, len(places), bool(rec_reframe),
-        )
-        if places:
-            # The list renders as tappable cards (place_suggestions). Keep the reply to
-            # an intro line only so we don't duplicate the names inline.
-            if widen:
-                # User tapped "See all …" — broadened, no claim filter.
-                reply = (
-                    "Okay — widening it. Here's everything nearby (from Google, not a "
-                    "neighbor vouch). Your ask is still posted to the block, so I'll ping "
-                    "you the moment a neighbor recommends one."
-                )
-            elif rec_reframe:
-                # Personalized: name the angle, keep the honest "from Google, not a
-                # neighbor vouch" provenance, and offer to widen (one-shot, no pre-ask).
-                # Stamp the noun so derive_ui_actions renders a "See all <noun>" widen chip.
-                reply = (
-                    f"{rec_reframe} These are from Google (not a neighbor vouch) — and "
-                    "I've posted your ask to the block, so I'll ping you the moment a "
-                    "neighbor recommends one. Want me to widen the search?"
-                )
-                ctx["rec_widen_noun"] = (category or detail or "options").strip() or "options"
-            else:
-                reply = (
-                    "No neighbor has recommended one yet, so here's what's nearby (from Google — "
-                    "not a neighbor vouch). I've also posted your ask to the block — I'll ping you "
-                    "the moment a neighbor recommends one."
-                )
-            ctx["google_place_suggestions"] = places
+        if _tip_reply:
+            reply = _tip_reply
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
     ctx.pop("activity_previews", None)
     clear_signal_draft(ctx)
@@ -4423,6 +4545,49 @@ def _decline_out_of_scope(
     return reply, ctx, _discovery_routing_stub("listening", "out_of_scope"), []
 
 
+# Safety fallback ONLY — used if the classifier returned no authored line. The real reply is
+# AI-written (Lana's voice, contextual) and carried in clarify_question; this guarantees the
+# three safety beats (no advice / call a professional or 911 / offer a local recommendation)
+# even on an empty model turn. Not a detection template and never regex-matched.
+_MEDICAL_SAFETY_FALLBACK = (
+    "I'm not able to give medical advice, and for something like this it's best to contact a "
+    "doctor or a nurse line right away — if it's severe or an emergency, call 911. What I can "
+    "do is find a doctor or pediatrician recommendation from your block — want me to?"
+)
+
+
+def _is_medical_turn(slots: dict[str, Any], msg: str) -> bool:
+    """AI-driven: the classifier flagged a health/medical concern (goal=medical). Not
+    confidence-gated — a gentle health redirect is safer than a mis-lane, and the classifier
+    already applies its own threshold. No regex on the utterance."""
+    if not slots:
+        return False
+    enriched = enrich_slots(dict(slots), msg=msg)
+    goal = str(enriched.get("goal") or "")
+    linear = slots_linear_intent(enriched) or ""
+    return goal == "medical" or linear == "system.medical"
+
+
+def _redirect_medical(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Health/medical concern: Lana declines to give medical advice, points to professional
+    help (doctor / nurse line / 911 if severe), and offers the one thing she CAN do — a local
+    doctor/pediatrician recommendation. The message is AI-authored (Lana's voice, contextual to
+    the symptom) and travels in clarify_question; the constant is only a safety fallback. No
+    feature is logged and nothing is promised — this is a permanent boundary, not a product gap.
+    The 'Find a doctor nearby' chip re-classifies next turn as a tip_seek and hands off cleanly."""
+    enriched = enrich_slots(dict(slots), msg=msg)
+    reply = str(enriched.get("clarify_question") or "").strip() or _MEDICAL_SAFETY_FALLBACK
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    ctx["suggestions"] = ["Find a doctor nearby", "No thanks"]
+    ctx["clarify_options"] = ctx["suggestions"]
+    return reply, ctx, _discovery_routing_stub("listening", "medical"), []
+
+
 _UNSAFE_HIGH_KINDS = frozenset({"sexual", "hate", "illegal"})
 
 
@@ -4838,6 +5003,14 @@ def handle_discovery_turn(
             reply, ctx, routing, peers = block_log_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
+
+    # Health/medical concern (AI-driven): the user is asking what to DO about an illness,
+    # injury, or symptom. Lana never gives medical advice — she declines, points to a doctor /
+    # nurse line / 911, and offers a local doctor recommendation (the real capability). Checked
+    # before out_of_scope so a medical ask gets the safety redirect, not an errand decline.
+    if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
+        if _is_medical_turn(slots, msg):
+            return _redirect_medical(msg=msg, slots=slots, session_ctx=session_ctx)
 
     # Out-of-scope fresh detection (AI-driven): the user asked Lana to do something TagAlng
     # has no feature for (deliver food, book a taxi). Confidence-gated — a clear ask is
