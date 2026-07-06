@@ -10,6 +10,7 @@ from typing import Any
 from app.auth import service_client
 from app.claim_embed import claim_embedding_text
 from app.models import ExtractedClaim
+from app.pii import redact_pii
 from app.vertex_extract import (
     parse_incremental_claims_data,
     incremental_claims_from_utterance,
@@ -488,8 +489,15 @@ def dedupe_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
 
 
 def clean_claims_for_persist(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
-    """Single guard before any write: drop negatives + noise, then dedupe near-repeats."""
+    """Single guard before any write: drop negatives + noise, redact PII, dedupe repeats."""
     kept = [c for c in claims if not is_negative_claim(c) and not is_noise_claim(c)]
+    # Deterministic PII backstop on every persisted text field (never `concept` — a slug).
+    for c in kept:
+        c.label = redact_pii(c.label) or c.label
+        if c.source_quote:
+            c.source_quote = redact_pii(c.source_quote)
+        if c.synonyms:
+            c.synonyms = [redact_pii(s) or s for s in c.synonyms]
     return dedupe_claims(kept)
 
 

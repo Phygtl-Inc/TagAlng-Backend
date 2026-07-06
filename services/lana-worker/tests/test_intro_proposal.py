@@ -49,6 +49,22 @@ class TestIntroProposalHelpers(unittest.TestCase):
         self.assertNotIn("I found 5 neighbors", text)
         self.assertIn("Want me to introduce you two?", text)
 
+    def test_format_intro_offer_turn_does_not_double_echo_label(self) -> None:
+        # Regression: the label was appended as its own sentence AND embedded in the
+        # reason, producing "Married 10 years. You both fit married 10 years ...".
+        peer = {"nickname": "Loka", "matching_peer_label": "Married 10 years"}
+        reason = build_match_reason(identity_snippet="married 10 years", peer=peer)
+        text = format_intro_offer_turn(peer, reason)
+        self.assertEqual(text.lower().count("married 10 years"), 1)
+
+    def test_build_match_reason_uses_first_clause_only(self) -> None:
+        reason = build_match_reason(
+            identity_snippet="morning runs; married; two kids",
+            peer={"matching_peer_label": "Morning runners"},
+        )
+        self.assertIn("morning runs", reason.lower())
+        self.assertNotIn("two kids", reason.lower())
+
     def test_requested_peer_name(self) -> None:
         self.assertEqual(requested_peer_name("introduce me to Kashaf"), "kashaf")
         self.assertIsNone(requested_peer_name("introduce me to neighbor 1"))
