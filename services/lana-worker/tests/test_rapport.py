@@ -303,6 +303,25 @@ class TestRanker(unittest.TestCase):
         ask, _s, _t = self._run(rows, tier_rank=0)
         self.assertEqual(ask["gap_id"], "activity_frequency")
 
+    def test_cycle_retires_pending_and_returns_another_bypassing_cap(self):
+        # User tapped refresh: skip the current pending ask, hand over a different one,
+        # even though the 24h cap would normally block a new ask.
+        store = _store(gaps=[self._row("free_windows", parent_bucket="interest")])
+        pending = {"gap_row_id": "row_pending", "gap_id": "kids_ages"}
+        with patch.object(rapport_ranker, "service_client", return_value=_Supabase(store)), \
+             patch.object(rapport_ranker, "_pending_ask", return_value=pending), \
+             patch.object(rapport_ranker, "_recently_asked", return_value=True), \
+             patch.object(rapport_ranker, "_max_tier_rank", return_value=0), \
+             patch.object(rapport_ranker, "track"):
+            ask = rapport_ranker.next_ask("u1", cycle=True)
+        # retired the pending one via the skip RPC
+        self.assertIn(
+            ("increment_skip_and_reopen", {"p_gap_row_id": "row_pending"}), store["rpcs"]
+        )
+        # returned a fresh, different gap despite the cap
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["gap_id"], "free_windows")
+
     def test_marks_gap_asked_and_returns_contract(self):
         ask, store, _t = self._run([self._row("free_windows", parent_bucket="interest")])
         self.assertEqual(ask["chip_color_token"], "--d-interest")

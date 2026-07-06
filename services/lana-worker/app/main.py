@@ -2132,6 +2132,9 @@ class RapportMuteBody(_BaseModel):
 
 class RapportNextAskBody(_BaseModel):
     surface: str = "homescreen"
+    # True when the user taps the tile's refresh (⟳): retire the current ask and return a
+    # different one now, bypassing the 24h cap.
+    cycle: bool = False
 
 
 @app.post("/lana/rapport/next-ask")
@@ -2143,7 +2146,8 @@ def post_rapport_next_ask(
     # lets POSTs through — same reason the chat/places calls are POST.
     auth = verify_auth(authorization)
     surface = (body.surface if body else "homescreen") or "homescreen"
-    return {"ask": rapport_next_ask(auth.user_id, surface)}
+    cycle = bool(body.cycle) if body else False
+    return {"ask": rapport_next_ask(auth.user_id, surface, cycle=cycle)}
 
 
 @app.post("/lana/rapport/record-answer")
