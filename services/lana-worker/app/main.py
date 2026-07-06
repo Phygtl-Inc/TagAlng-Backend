@@ -133,6 +133,14 @@ from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
 from app.notifications import email_html, notify_user
+from app.rapport_gaps import (
+    mark_answered as rapport_mark_answered,
+    mute_gap as rapport_mute_gap,
+    reconcile_gaps as rapport_reconcile_gaps,
+    record_skip as rapport_record_skip,
+)
+from app.rapport_ranker import next_ask as rapport_next_ask
+from pydantic import BaseModel as _BaseModel
 
 _LOG = logging.getLogger(__name__)
 
@@ -1374,6 +1382,9 @@ def send_lana_message(
             body.message.strip(),
             skip_heritage=bool(merged.get("skip_heritage_background_extract")),
         )
+        # Rapport Ring C: reconcile follow-up gaps off the freshly-written claims
+        # (open new ones, suppress/close known ones). Fire-and-forget, never blocks.
+        background_tasks.add_task(rapport_reconcile_gaps, auth.user_id, user_msg_id)
     # Layer 3b latent-intent collection (Phase 1: collect, don't surface). Off by default.
     if purpose == "lana" and latent_extract_enabled():
         from app.latent_extract import run_latent_intent
@@ -1998,3 +2009,87 @@ def post_block_log_action(
     user_jwt = _bearer_token(authorization)
     result = block_log_take_action(user_jwt, entry_id, body.action)
     return result
+
+
+# ── Rapport · Ring C ("By the way…") ──────────────────────────────────────────
+# The home-screen tile asks one well-timed follow-up. next-ask is called on home
+# render; record-answer/-skip/-mute report what the mom did with the tile. user_id is
+# always derived from the auth token — never trusted from the client.
+
+
+class RapportAnswerBody(_BaseModel):
+    gap_row_id: str
+    text: str
+    session_id: str | None = None
+    message_id: str | None = None
+
+
+class RapportSkipBody(_BaseModel):
+    gap_row_id: str
+
+
+class RapportMuteBody(_BaseModel):
+    gap_id: str
+
+
+class RapportNextAskBody(_BaseModel):
+    surface: str = "homescreen"
+
+
+@app.post("/lana/rapport/next-ask")
+def post_rapport_next_ask(
+    body: RapportNextAskBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    # POST (not GET): the PWA service worker breaks cross-origin GETs to the worker but
+    # lets POSTs through — same reason the chat/places calls are POST.
+    auth = verify_auth(authorization)
+    surface = (body.surface if body else "homescreen") or "homescreen"
+    return {"ask": rapport_next_ask(auth.user_id, surface)}
+
+
+@app.post("/lana/rapport/record-answer")
+def post_rapport_record_answer(
+    body: RapportAnswerBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    text = (body.text or "").strip()
+    if text:
+        # Route the answer through the existing claim extractor, then reconcile so any
+        # new claim opens downstream gaps (and closes ones it covers).
+        extract_and_upsert_claims_from_message(auth.user_id, text)
+        rapport_reconcile_gaps(auth.user_id, body.message_id)
+    # Guarantee the asked gap closes even if the answer mapped to a different concept.
+    rapport_mark_answered(body.gap_row_id)
+    amplitude_track(
+        "rapport_gap_answered",
+        user_id=auth.user_id,
+        event_properties={"gap_row_id": body.gap_row_id},
+    )
+    return {"ok": True}
+
+
+@app.post("/lana/rapport/record-skip")
+def post_rapport_record_skip(
+    body: RapportSkipBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    rapport_record_skip(body.gap_row_id)
+    amplitude_track(
+        "rapport_gap_skipped",
+        user_id=auth.user_id,
+        event_properties={"gap_row_id": body.gap_row_id},
+    )
+    return {"ok": True}
+
+
+@app.post("/lana/rapport/mute-fact")
+def post_rapport_mute_fact(
+    body: RapportMuteBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    rapport_mute_gap(auth.user_id, body.gap_id)
+    return {"ok": True}

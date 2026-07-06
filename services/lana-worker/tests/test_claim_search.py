@@ -45,6 +45,20 @@ class TestClaimSearch(unittest.TestCase):
         peer = {"matching_peer_label": "Brazilian mom", "matching_peer_concept": "brazilian"}
         self.assertTrue(peer_matches_identity_snippet(peer, "brazilian mom"))
 
+    def test_bare_name_reply_is_not_a_match(self) -> None:
+        # Regression: user answered "what should I call you?" with their name, which was
+        # captured as the identity snippet. It must NOT auto-match an unrelated peer label.
+        peer = {"matching_peer_label": "Married 10 years"}
+        self.assertFalse(peer_matches_identity_snippet(peer, "tony"))
+
+    def test_unrelated_interest_is_not_a_match(self) -> None:
+        peer = {"matching_peer_label": "Married 10 years"}
+        self.assertFalse(peer_matches_identity_snippet(peer, "running Saturday mornings"))
+
+    def test_overlapping_interest_still_matches(self) -> None:
+        peer = {"matching_peer_label": "Morning runners"}
+        self.assertTrue(peer_matches_identity_snippet(peer, "running Saturday mornings"))
+
     def test_format_attr_partial_summary(self) -> None:
         reply = _format_attr_empty(
             "pakistani mom",
