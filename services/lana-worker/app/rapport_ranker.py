@@ -105,27 +105,45 @@ def _pending_ask(user_id: str) -> dict[str, Any] | None:
         return None
 
 
-def next_ask(user_id: str, surface: str = "homescreen") -> dict[str, Any] | None:
+def next_ask(
+    user_id: str, surface: str = "homescreen", cycle: bool = False
+) -> dict[str, Any] | None:
     """Return the ask to show, or None.
 
-    Idempotent: while an ask is still pending (shown but not yet answered or skipped) it is
-    re-returned as-is, so reloads and React's double-invoked effects keep showing the SAME
-    tile instead of consuming it and then tripping the frequency cap. A brand-new ask is only
-    chosen (and marked 'asked') when nothing is pending and the 24h cap isn't in effect.
+    Idempotent by default: while an ask is still pending (shown but not yet answered or
+    skipped) it is re-returned as-is, so reloads and React's double-invoked effects keep
+    showing the SAME tile instead of consuming it and tripping the frequency cap. A brand-new
+    ask is only chosen (and marked 'asked') when nothing is pending and the 24h cap is clear.
+
+    `cycle=True` is the user tapping the tile's refresh (⟳): retire the current pending ask
+    and hand over a *different* one immediately, **bypassing the 24h cap** — the cap exists to
+    stop automatic nagging, not an explicit request for another question.
     """
     if not user_id:
         return None
 
-    # 1) Re-show a still-pending ask — no re-mark, no duplicate impression event.
-    pending = _pending_ask(user_id)
-    if pending:
-        gap = get_gap(pending["gap_id"])
-        if gap:
-            return _build(pending, gap)
+    exclude_id: str | None = None
+    if cycle:
+        pending = _pending_ask(user_id)
+        if pending:
+            exclude_id = pending.get("gap_row_id")
+            try:
+                service_client().rpc(
+                    "increment_skip_and_reopen", {"p_gap_row_id": exclude_id}
+                ).execute()
+            except Exception:
+                logger.exception("rapport: cycle-skip failed for %s", user_id)
+    else:
+        # 1) Re-show a still-pending ask — no re-mark, no duplicate impression event.
+        pending = _pending_ask(user_id)
+        if pending:
+            gap = get_gap(pending["gap_id"])
+            if gap:
+                return _build(pending, gap)
 
-    # 2) Daily cap — something was asked (and since answered/skipped) within the window.
-    if _recently_asked(user_id):
-        return None
+        # 2) Daily cap — something was asked (and since answered/skipped) within the window.
+        if _recently_asked(user_id):
+            return None
 
     try:
         rows = (
@@ -156,8 +174,10 @@ def next_ask(user_id: str, surface: str = "homescreen") -> dict[str, Any] | None
     if not candidates:
         return None
 
-    candidates.sort(key=lambda t: (-t[0], t[1]))
-    score, _opened, row, gap = candidates[0]
+    # When cycling, prefer any gap other than the one we just retired.
+    pool = [c for c in candidates if c[2].get("gap_row_id") != exclude_id] or candidates
+    pool.sort(key=lambda t: (-t[0], t[1]))
+    score, _opened, row, gap = pool[0]
 
     try:
         service_client().table("rapport_gaps").update(
