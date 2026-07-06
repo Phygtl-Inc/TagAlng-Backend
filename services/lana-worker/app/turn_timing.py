@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 
 class TurnTimer:
@@ -13,6 +13,25 @@ class TurnTimer:
         self._starts: dict[str, float] = {}
         self.ms: dict[str, int] = {}
         self.counts: dict[str, int] = {}
+        # Optional progress emitter (streaming endpoint attaches one). No-op otherwise,
+        # so every non-streaming caller is unaffected. The timer is already threaded
+        # through every pipeline path, so this is the cheapest place to surface progress.
+        self._emit: Callable[[str], None] | None = None
+
+    def set_emitter(self, emit: Callable[[str], None] | None) -> None:
+        self._emit = emit
+
+    def emit(self, label: str) -> None:
+        """Push a human-readable progress label to the client, if streaming.
+
+        Swallows any emitter error: progress is best-effort and must never break a turn.
+        """
+        if self._emit is None:
+            return
+        try:
+            self._emit(label)
+        except Exception:  # noqa: BLE001 — progress is best-effort
+            pass
 
     def set_count(self, name: str, value: int) -> None:
         if value > 0:

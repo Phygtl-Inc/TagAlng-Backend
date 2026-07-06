@@ -12,6 +12,7 @@ from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import unified_rules_first_enabled
 from app.loop_guard import discovery_reply_is_stuck, reset_sticky_discovery_state
 from app.orchestrator.pipeline import run_turn
+from app.orchestrator.progress import READING
 from app.turn_surfaces import clear_turn_surfaces
 from app.turn_timing import TurnTimer
 
@@ -552,6 +553,7 @@ def run_lana_unified_pipeline(
     2. Orchestrator (AI) — companionship, hosting; enforce still applies discovery overrides.
     """
     timer = timer or TurnTimer()
+    timer.emit(READING)
     session_ctx = {
         **session_ctx,
         "phone_verified": phone_verified,

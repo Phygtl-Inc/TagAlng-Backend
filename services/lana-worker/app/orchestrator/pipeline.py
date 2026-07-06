@@ -15,6 +15,7 @@ from app.orchestrator.lana_chat_fast_path import (
     should_skip_lana_router,
     discovery_slots_for_message,
 )
+from app.orchestrator.progress import COMPOSING, READING, label_for_routing
 from app.orchestrator.recall import prefetch_turn_memories
 from app.orchestrator.router import route_turn
 from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
@@ -82,6 +83,7 @@ def run_turn(
     timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     timer = timer or TurnTimer()
+    timer.emit(READING)
     clear_turn_surfaces(session_ctx)
     with timer.stage("load_user_context"):
         ctx_pack = load_user_context(user_id)
@@ -179,6 +181,9 @@ def run_turn(
         if "discovery_chat_fast_path" not in prior:
             routing = {**routing, "enforce_notes": prior + ["discovery_chat_fast_path"]}
 
+    # Routing is decided — the label can now name the real work (find peers / host / …).
+    timer.emit(label_for_routing(routing))
+
     if should_execute_tool(routing):
         with timer.stage("execute_tool"):
             tool_result = execute_tool(
@@ -242,6 +247,7 @@ def run_turn(
                 [r for r in raw_rows if isinstance(r, dict)],
             )
 
+    timer.emit(COMPOSING)
     reply, status, synth_ctx, ui, draft = synthesize_turn(
         purpose=purpose,
         utterance=utterance,
