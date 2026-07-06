@@ -1763,6 +1763,146 @@ class TestOutOfScopeRouting(unittest.TestCase):
         self.assertIn("ZIP", reply)  # reached the find-peers funnel
         mock_log.assert_not_called()
 
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_clarifier_reply_closing_acknowledges_without_repeat_refusal(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        # The reply accepts the 'no' and walks away (AI reads abandon=true) → warm sign-off,
+        # NOT a second 5-beat refusal, and NO duplicate feature-request log.
+        mock_slots.return_value = {
+            "goal": "out_of_scope",
+            "linear_intent": "system.out_of_scope",
+            "in_discovery": False,
+            "confidence": 0.5,
+            "abandon": True,
+            "signal_detail": "electric bill",
+        }
+        result = handle_discovery_turn(
+            "I understand, thanks for explaining. I'll look elsewhere.",
+            session_ctx={"routing_phase": "listening", "out_of_scope_pending": True},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIsNone(ctx.get("out_of_scope_pending"))  # flag cleared, never leaks
+        self.assertNotIn("isn't something I can do yet", reply)  # no repeat refusal
+        mock_log.assert_not_called()  # request already logged on the decline turn, if ever
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_clarifier_reply_capability_question_reoffers_not_declines(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        # A capability question after the clarifier (goal=chat) re-surfaces the SPECIFIC offer
+        # instead of the generic canned refusal — and does NOT log a feature request.
+        mock_slots.return_value = {
+            "goal": "chat",
+            "in_discovery": False,
+            "confidence": 0.9,
+        }
+        offer = "I can't do your taxes, but would you like me to recommend a local tax preparer nearby?"
+        result = handle_discovery_turn(
+            "I just want to know if you can help with my taxes.",
+            session_ctx={
+                "routing_phase": "listening",
+                "out_of_scope_pending": True,
+                "out_of_scope_offer": {
+                    "q": offer,
+                    "opts": ["Recommend a tax preparer", "No thanks"],
+                    "detail": "tax preparer",
+                },
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertEqual(reply, offer)  # the tailored offer, re-surfaced verbatim
+        self.assertTrue(ctx.get("out_of_scope_pending"))  # still open for the user's answer
+        self.assertNotIn("meet some neighbors or see what's happening", reply)  # not generic refusal
+        mock_log.assert_not_called()
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_clarifier_capability_question_declines_after_one_reoffer(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        # Loop guard: once we've already re-offered, a second non-committal turn declines +
+        # logs rather than re-offering forever.
+        mock_slots.return_value = {
+            "goal": "chat",
+            "in_discovery": False,
+            "confidence": 0.9,
+            "signal_detail": "taxes",
+        }
+        result = handle_discovery_turn(
+            "but can you really not help?",
+            session_ctx={
+                "routing_phase": "listening",
+                "out_of_scope_pending": True,
+                "out_of_scope_reclarified": True,
+                "out_of_scope_offer": {"q": "…", "opts": [], "detail": "tax preparer"},
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertIsNone(ctx.get("out_of_scope_pending"))
+        mock_log.assert_called_once()
+
+    @patch("app.discovery_route.author_out_of_scope_reply",
+           return_value="No, I can't file taxes myself — but I can point you to a neighbor-recommended local tax preparer. Want that?")
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_decline_reply_is_llm_authored_when_available(
+        self, mock_slots, _mock_ai, mock_log, mock_author
+    ) -> None:
+        # When the LLM is available, the decline is authored in Lana's voice — not the canned
+        # 5-beat template. Routing/logging are unchanged.
+        mock_slots.return_value = {
+            "goal": "out_of_scope",
+            "linear_intent": "system.out_of_scope",
+            "in_discovery": False,
+            "confidence": 0.95,
+            "signal_detail": "taxes",
+        }
+        result = handle_discovery_turn(
+            "can you do my taxes",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, _ = result
+        self.assertEqual(reply, mock_author.return_value)  # Lana's authored line, not the template
+        self.assertNotIn("isn't something I can do yet", reply)  # not the canned template
+        self.assertEqual(routing.get("tool_to_call"), "out_of_scope")  # routing unchanged
+        mock_log.assert_called_once()  # still logged
+        self.assertEqual(mock_author.call_args.kwargs.get("mode"), "decline")
+
 
 class TestMedicalRedirectRouting(unittest.TestCase):
     """A health/medical concern must get the safety redirect (no advice / call a doctor or

@@ -152,6 +152,9 @@ def peer_matches_identity_snippet(peer: dict[str, Any], identity_snippet: str | 
                 return True
             if t in _STAGE_FLAT and any(s in label for s in _STAGE[_STAGE_FLAT[t]]):
                 return True
-        if user_heritage or peer_h:
-            return False
+        # No lexical, heritage, or life-stage overlap between what the user said and
+        # why this peer surfaced. Refuse the match rather than auto-claim a shared
+        # trait the user never mentioned (e.g. a bare name reply "tony" vs a peer
+        # labelled "married 10 years"). Explicit intro requests bypass this gate.
+        return False
     return True

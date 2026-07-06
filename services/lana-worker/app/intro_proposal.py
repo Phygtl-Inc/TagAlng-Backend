@@ -56,12 +56,19 @@ def build_match_reason(
 ) -> str:
     label = str(peer.get("matching_peer_label") or "a neighbor on your block").strip()
     snippet = str(identity_snippet or "").strip()
+    # The fallback snippet can be several messages joined with "; " — only echo the
+    # first clause so the reason stays a clean sentence, not a merged dump.
+    first_clause = snippet.split(";")[0].strip()
     if snippet and not peer_matches_identity_snippet(peer, snippet):
         return f"Lana matched you with {label} on your block."
-    if snippet and label:
-        return f"You both fit {label.lower()} — you mentioned {snippet[:120]}."
-    if snippet:
-        return f"You mentioned {snippet[:160]} — strong overlap on your block."
+    if first_clause and label:
+        # Skip the "you mentioned …" tail when it just restates the label.
+        low_clause, low_label = first_clause.lower(), label.lower()
+        if low_clause in low_label or low_label in low_clause:
+            return f"You both fit {low_label}."
+        return f"You both fit {low_label} — you mentioned {first_clause[:120]}."
+    if first_clause:
+        return f"You mentioned {first_clause[:160]} — strong overlap on your block."
     return f"Lana matched you with {label} on your block."
 
 
@@ -254,8 +261,8 @@ def format_intro_offer_turn(peer: dict[str, Any], match_reason: str) -> str:
     who = nick or label
     reason = str(match_reason or "").strip().rstrip(".")
     lines = [f"I think I found a fit — {who}."]
-    if nick and label and label.lower() != nick.lower():
-        lines.append(label + ".")
+    # `reason` already names the shared trait (build_match_reason embeds the label),
+    # so don't echo the label a second time as its own sentence.
     if reason:
         lines.append(f"{reason}.")
     lines.append("Want me to introduce you two?")

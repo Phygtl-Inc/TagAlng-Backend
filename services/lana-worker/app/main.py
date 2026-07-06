@@ -1,9 +1,13 @@
+import json
 import logging
 import os
-from typing import Any
+import queue
+import threading
+from typing import Any, Callable
 
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from app.auth import (
     AuthSession,
@@ -133,6 +137,14 @@ from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
 from app.notifications import email_html, notify_user
+from app.rapport_gaps import (
+    mark_answered as rapport_mark_answered,
+    mute_gap as rapport_mute_gap,
+    reconcile_gaps as rapport_reconcile_gaps,
+    record_skip as rapport_record_skip,
+)
+from app.rapport_ranker import next_ask as rapport_next_ask
+from pydantic import BaseModel as _BaseModel
 
 _LOG = logging.getLogger(__name__)
 
@@ -1170,15 +1182,23 @@ def create_lana_session(
     )
 
 
-@app.post("/lana/sessions/{session_id}/messages", response_model=SendMessageResponse)
-def send_lana_message(
+def _run_lana_message(
     session_id: str,
     body: SendMessageRequest,
     background_tasks: BackgroundTasks,
-    authorization: str | None = Header(default=None),
-):
+    authorization: str | None,
+    emit: Callable[[str], None] | None = None,
+) -> SendMessageResponse:
+    """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
+
+    `emit`, when provided, receives human-readable progress labels as the turn
+    advances (attached to the TurnTimer, which is threaded through every path). The
+    blocking endpoint passes None, so it is a no-op there.
+    """
     _vertex_required()
     timer = TurnTimer()
+    if emit is not None:
+        timer.set_emitter(emit)
     auth = verify_auth(authorization)
 
     with timer.stage("db_load_session"):
@@ -1374,6 +1394,9 @@ def send_lana_message(
             body.message.strip(),
             skip_heritage=bool(merged.get("skip_heritage_background_extract")),
         )
+        # Rapport Ring C: reconcile follow-up gaps off the freshly-written claims
+        # (open new ones, suppress/close known ones). Fire-and-forget, never blocks.
+        background_tasks.add_task(rapport_reconcile_gaps, auth.user_id, user_msg_id)
     # Layer 3b latent-intent collection (Phase 1: collect, don't surface). Off by default.
     if purpose == "lana" and latent_extract_enabled():
         from app.latent_extract import run_latent_intent
@@ -1472,6 +1495,92 @@ def send_lana_message(
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
         **ob,
+    )
+
+
+@app.post("/lana/sessions/{session_id}/messages", response_model=SendMessageResponse)
+def send_lana_message(
+    session_id: str,
+    body: SendMessageRequest,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Blocking turn — returns the full SendMessageResponse as one JSON body."""
+    return _run_lana_message(session_id, body, background_tasks, authorization)
+
+
+def _sse_frame(obj: Any) -> str:
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+
+@app.post("/lana/sessions/{session_id}/messages/stream")
+def stream_lana_message(
+    session_id: str,
+    body: SendMessageRequest,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Same turn as the blocking endpoint, streamed as Server-Sent Events.
+
+    Frames: `{"type":"status","label":...}` as the turn advances, then a terminal
+    `{"type":"result","turn":<SendMessageResponse>}` (or `{"type":"error","detail":...}`).
+    The turn logic is identical — only the transport differs.
+
+    The (sync, blocking) turn runs on a worker thread and pushes progress + the final
+    result onto a queue; the SSE generator drains it. Keeps the blocking LLM clients
+    sync — no async rewrite. `background_tasks` is populated by the worker before the
+    result frame is queued, so FastAPI still runs the fire-and-forget jobs after the
+    stream closes.
+    """
+    events: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+
+    def emit(label: str) -> None:
+        events.put(("status", label))
+
+    def worker() -> None:
+        try:
+            resp = _run_lana_message(
+                session_id, body, background_tasks, authorization, emit=emit
+            )
+            events.put(("result", resp))
+        except HTTPException as exc:
+            events.put(("error", exc.detail))
+        except Exception:  # noqa: BLE001
+            _LOG.exception("stream_lana_message worker failed session=%s", session_id)
+            events.put(("error", "lana_message_failed"))
+        finally:
+            events.put(("done", None))
+
+    def gen():
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        while True:
+            try:
+                kind, payload = events.get(timeout=10)
+            except queue.Empty:
+                # Keep-alive: a long synthesis call can idle the connection past a proxy's
+                # timeout. An SSE comment keeps it open without confusing the client.
+                yield ": ping\n\n"
+                continue
+            if kind == "status":
+                yield _sse_frame({"type": "status", "label": payload})
+            elif kind == "result":
+                yield _sse_frame(
+                    {"type": "result", "turn": payload.model_dump(mode="json")}
+                )
+            elif kind == "error":
+                yield _sse_frame({"type": "error", "detail": payload})
+            else:  # done
+                break
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx response buffering for SSE
+            "Connection": "keep-alive",
+        },
     )
 
 
@@ -1998,3 +2107,87 @@ def post_block_log_action(
     user_jwt = _bearer_token(authorization)
     result = block_log_take_action(user_jwt, entry_id, body.action)
     return result
+
+
+# ── Rapport · Ring C ("By the way…") ──────────────────────────────────────────
+# The home-screen tile asks one well-timed follow-up. next-ask is called on home
+# render; record-answer/-skip/-mute report what the mom did with the tile. user_id is
+# always derived from the auth token — never trusted from the client.
+
+
+class RapportAnswerBody(_BaseModel):
+    gap_row_id: str
+    text: str
+    session_id: str | None = None
+    message_id: str | None = None
+
+
+class RapportSkipBody(_BaseModel):
+    gap_row_id: str
+
+
+class RapportMuteBody(_BaseModel):
+    gap_id: str
+
+
+class RapportNextAskBody(_BaseModel):
+    surface: str = "homescreen"
+
+
+@app.post("/lana/rapport/next-ask")
+def post_rapport_next_ask(
+    body: RapportNextAskBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    # POST (not GET): the PWA service worker breaks cross-origin GETs to the worker but
+    # lets POSTs through — same reason the chat/places calls are POST.
+    auth = verify_auth(authorization)
+    surface = (body.surface if body else "homescreen") or "homescreen"
+    return {"ask": rapport_next_ask(auth.user_id, surface)}
+
+
+@app.post("/lana/rapport/record-answer")
+def post_rapport_record_answer(
+    body: RapportAnswerBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    text = (body.text or "").strip()
+    if text:
+        # Route the answer through the existing claim extractor, then reconcile so any
+        # new claim opens downstream gaps (and closes ones it covers).
+        extract_and_upsert_claims_from_message(auth.user_id, text)
+        rapport_reconcile_gaps(auth.user_id, body.message_id)
+    # Guarantee the asked gap closes even if the answer mapped to a different concept.
+    rapport_mark_answered(body.gap_row_id)
+    amplitude_track(
+        "rapport_gap_answered",
+        user_id=auth.user_id,
+        event_properties={"gap_row_id": body.gap_row_id},
+    )
+    return {"ok": True}
+
+
+@app.post("/lana/rapport/record-skip")
+def post_rapport_record_skip(
+    body: RapportSkipBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    rapport_record_skip(body.gap_row_id)
+    amplitude_track(
+        "rapport_gap_skipped",
+        user_id=auth.user_id,
+        event_properties={"gap_row_id": body.gap_row_id},
+    )
+    return {"ok": True}
+
+
+@app.post("/lana/rapport/mute-fact")
+def post_rapport_mute_fact(
+    body: RapportMuteBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    rapport_mute_gap(auth.user_id, body.gap_id)
+    return {"ok": True}
