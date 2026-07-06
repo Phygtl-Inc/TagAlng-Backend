@@ -22,6 +22,7 @@ from app.db import (
     stash_pending_meet_seek,
 )
 from app.orchestrator.guardrails import utterance_is_unsafe
+from app.out_of_scope_reply import author_out_of_scope_reply
 from app.claim_search import (
     heritage_terms_in_text,
     parse_claim_filters,
@@ -4449,21 +4450,66 @@ def _reply_pivots_to_supported(slots: dict[str, Any], msg: str) -> bool:
     return float(enriched.get("confidence", 0.0)) >= 0.5
 
 
+def _reply_closes_out_of_scope(slots: dict[str, Any], msg: str) -> bool:
+    """After Lana asked the scope-clarifier, is the reply a graceful CLOSE — the user
+    accepting the 'no' and disengaging ("thanks, I'll look elsewhere", "no worries, I'll
+    handle it") rather than still pressing the unsupported ask ("no, just do it for me")? A
+    close earns a warm sign-off, NOT a second 5-beat refusal or a duplicate feature log.
+
+    This is the classifier's `abandon` read — the same AI signal that ends a host or signal
+    flow: 'the user is stopping with no replacement'. No keyword matching; the model decides."""
+    if not slots:
+        return False
+    return bool(enrich_slots(dict(slots), msg=msg).get("abandon"))
+
+
+def _acknowledge_out_of_scope_close(
+    session_ctx: dict[str, Any],
+    *,
+    user_msg: str = "",
+    subject: str = "",
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Warm sign-off when the user accepts an unsupported 'no' and disengages. The refusal
+    already landed on the clarifier turn, so we neither repeat it nor re-log the request —
+    just leave the door open without pushing. Lana authors the line; the template is a
+    best-effort fallback if the LLM is unavailable."""
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    ctx["suggestions"] = ["Meet neighbors", "What's happening nearby"]
+    reply = author_out_of_scope_reply(
+        mode="close", user_msg=user_msg, subject=subject,
+    ) or (
+        "Totally understand — no worries at all! I'm right here on your block whenever you "
+        "want to meet neighbors or see what's happening nearby."
+    )
+    return (
+        reply,
+        ctx,
+        _discovery_routing_stub("listening", "out_of_scope"),
+        [],
+    )
+
+
 def _ask_out_of_scope(
     session_ctx: dict[str, Any],
     *,
     question: str = "",
     options: list[str] | None = None,
     detail: str = "",
+    msg: str = "",
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Ask the clarifying question the CLASSIFIER wrote (Lana's voice, grounded in what the
     user actually said) when it can't tell a supported request from an errand Lana can't run
     — a bare want ('I want pizza') might be a neighbor activity (a pizza night) OR an errand
-    (order me one). The template below is only a fallback if the model returned no question."""
+    (order me one). When the classifier wrote no question, Lana authors one; the template is
+    a best-effort fallback if the LLM is unavailable."""
     session_ctx["out_of_scope_pending"] = True
     ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
     q = (question or "").strip()
     opts = [o for o in (options or []) if str(o).strip()]
+    if not q:
+        q = author_out_of_scope_reply(
+            mode="clarify", user_msg=msg, subject=(detail or "").strip(),
+        ) or ""
     if not q:
         thing = (detail or "").strip()
         if thing:
@@ -4478,6 +4524,14 @@ def _ask_out_of_scope(
             )
     ctx["suggestions"] = opts or ["Get neighbors together", "Just handle it for me"]
     ctx["clarify_options"] = ctx["suggestions"]
+    # Remember the SPECIFIC offer so a follow-up capability question ("can you actually help
+    # with my taxes?") can re-surface the tailored recommendation instead of collapsing into
+    # the generic canned refusal. Must live on `ctx` (the persisted turn ctx), NOT session_ctx
+    # — `ctx` was already snapshotted from session_ctx above, so a late session_ctx write is
+    # dropped before persistence.
+    ctx["out_of_scope_offer"] = {
+        "q": q, "opts": list(ctx["suggestions"]), "detail": (detail or "").strip(),
+    }
     return (
         q,
         ctx,
@@ -4534,7 +4588,9 @@ def _decline_out_of_scope(
         category=category or (detail or None),
     )
     what = detail or "that"
-    reply = (
+    reply = author_out_of_scope_reply(
+        mode="decline", user_msg=msg, subject=what,
+    ) or (
         f"Ah, {what} isn't something I can do yet — I'm here to connect you with neighbors "
         "on your block: finding people, local activities, swapping things, and sharing tips. "
         "I've noted your request though, and we'll let you know if we add it! "
@@ -4915,12 +4971,39 @@ def handle_discovery_turn(
     # the pending flag never leaks into a later turn. The reply either confirms the
     # unsupported ask (decline + log) or surfaces a supported intent (fall through).
     if discovery_ai_enabled() and slots and session_ctx.get("out_of_scope_pending"):
+        reclarified = bool(session_ctx.get("out_of_scope_reclarified"))
+        offer = session_ctx.get("out_of_scope_offer") or {}
         session_ctx["out_of_scope_pending"] = None
+        session_ctx["out_of_scope_reclarified"] = None
         if not _reply_pivots_to_supported(slots, msg):
+            # Four ways this reply can go: a supported pivot fell through above; a graceful
+            # close (the user accepted the 'no' and is walking away) gets a warm sign-off, not
+            # a repeat refusal; a capability QUESTION ("can you actually help with X?", goal=chat)
+            # re-surfaces the SPECIFIC offer once instead of dumping the canned refusal and
+            # throwing away the tailored recommendation; anything still pressing the unsupported
+            # ask declines + logs.
+            if _reply_closes_out_of_scope(slots, msg):
+                close_subject = str(offer.get("detail") or "")
+                session_ctx.pop("out_of_scope_offer", None)
+                return _acknowledge_out_of_scope_close(
+                    session_ctx, user_msg=msg, subject=close_subject,
+                )
+            _oos_reply = enrich_slots(dict(slots), msg=msg)
+            if not reclarified and str(_oos_reply.get("goal") or "") == "chat":
+                session_ctx["out_of_scope_reclarified"] = True
+                return _ask_out_of_scope(
+                    session_ctx,
+                    question=str(_oos_reply.get("clarify_question") or offer.get("q") or ""),
+                    options=list(_oos_reply.get("clarify_options") or offer.get("opts") or []),
+                    detail=str(_oos_reply.get("signal_detail") or offer.get("detail") or "").strip(),
+                    msg=msg,
+                )
+            session_ctx.pop("out_of_scope_offer", None)
             return _decline_out_of_scope(
                 msg=msg, slots=slots, session_ctx=session_ctx,
                 user_id=user_id, home_block_id=home_block_id,
             )
+        session_ctx.pop("out_of_scope_offer", None)
         # else: a supported intent surfaced — fall through to its handler below.
 
     # Resolve a pending GENERAL clarify (clarify='intent'). The answer re-classifies and
@@ -5026,6 +5109,7 @@ def handle_discovery_turn(
                 question=str(_oos_enriched.get("clarify_question") or ""),
                 options=list(_oos_enriched.get("clarify_options") or []),
                 detail=str(_oos_enriched.get("signal_detail") or "").strip(),
+                msg=msg,
             )
         if _oos == "decline":
             return _decline_out_of_scope(
