@@ -152,9 +152,23 @@ class TestGapLifecycle(unittest.TestCase):
         self.assertEqual(row["question"], "Nice — online with a squad, or solo career mode?")
         self.assertEqual(row["gap_id"], "deepen:fifa")
         self.assertEqual(row["parent_bucket"], "interest")
-        self.assertIn("fifa", row["why_frame"])
+        # Neutral teaser (the question carries specificity) — must not glue the raw label,
+        # which broke grammar on predicate labels like "FIFA Fan" / "Interested in Books".
+        self.assertEqual(row["why_frame"], "one quick thing…")
         self.assertEqual(row["status"], "open")
         self.assertEqual(row["opened_from_message_id"], "m1")
+
+    def test_open_semantic_gap_uses_ai_teaser(self):
+        store = _store()
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
+            rapport_gaps.open_semantic_gap(
+                "u1", "m1", "Any genres you gravitate to?",
+                label="Interested in Books", bucket="interest",
+                teaser="about your reading…",
+            )
+        row = [r for (_t, r) in store["inserts"]][0]
+        # AI-written teaser is used verbatim — never the broken glued label.
+        self.assertEqual(row["why_frame"], "about your reading…")
 
     def test_open_semantic_gap_ignores_blank_question(self):
         store = _store()
