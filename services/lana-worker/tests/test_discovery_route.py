@@ -13,6 +13,7 @@ from app.discovery_route import (
     _try_block_log_intro_turn,
     _try_neighbor_intro_turn,
     _try_pending_heritage_turn,
+    _try_upfront_display_name_turn,
     extract_zip,
     fetch_blocks_for_zip,
     format_preview_message,
@@ -2071,6 +2072,89 @@ class TestUnsafeRouting(unittest.TestCase):
         self.assertIsNone(
             _unsafe_kind_for_turn(
                 {"goal": "peers", "confidence": 0.9}, "find me moms on my block"
+            )
+        )
+
+
+class TestUpfrontDisplayNameGate(unittest.TestCase):
+    """The name-ask is asked UP FRONT on its own turn, never tacked onto a chat reply."""
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_fires_for_nameless_authed_freechat(self, _needs) -> None:
+        ctx = {"routing_phase": "listening", "active_intent": None}
+        result = _try_upfront_display_name_turn(
+            msg="I want Colombia to win today",
+            session_ctx=ctx,
+            user_id="user-1",
+            phase="listening",
+            is_anonymous=False,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _routing, peers = result
+        self.assertIn("call you", reply.lower())
+        self.assertEqual(out_ctx["routing_phase"], PHASE_NEED_DISPLAY_NAME)
+        self.assertTrue(out_ctx["awaiting_upfront_name"])
+        self.assertEqual(peers, [])
+
+    @patch("app.discovery_route.persist_profile_patch")
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_follow_up_captures_name_and_releases(self, _needs, mock_persist) -> None:
+        ctx = {"routing_phase": PHASE_NEED_DISPLAY_NAME, "awaiting_upfront_name": True}
+        result = _try_upfront_display_name_turn(
+            msg="Maria",
+            session_ctx=ctx,
+            user_id="user-1",
+            phase=PHASE_NEED_DISPLAY_NAME,
+            is_anonymous=False,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _routing, _peers = result
+        mock_persist.assert_called_once_with("user-1", {"nickname": "Maria"})
+        self.assertIn("Maria", reply)
+        self.assertEqual(out_ctx["routing_phase"], "listening")
+        self.assertTrue(out_ctx["display_name_saved"])
+        self.assertNotIn("awaiting_upfront_name", out_ctx)
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_skipped_for_anonymous_guest(self, _needs) -> None:
+        self.assertIsNone(
+            _try_upfront_display_name_turn(
+                msg="hey", session_ctx={"routing_phase": "listening"},
+                user_id="user-1", phase="listening", is_anonymous=True,
+            )
+        )
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_skipped_during_guest_intake(self, _needs) -> None:
+        self.assertIsNone(
+            _try_upfront_display_name_turn(
+                msg="hey", session_ctx={"routing_phase": "listening", "guest_intake": True},
+                user_id="user-1", phase="listening", is_anonymous=False,
+            )
+        )
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_skipped_mid_structured_flow(self, _needs) -> None:
+        # An active intent or a non-listening phase means a structured flow owns the turn.
+        self.assertIsNone(
+            _try_upfront_display_name_turn(
+                msg="hey", session_ctx={"routing_phase": "listening", "event_host_active": True},
+                user_id="user-1", phase="listening", is_anonymous=False,
+            )
+        )
+        self.assertIsNone(
+            _try_upfront_display_name_turn(
+                msg="hey", session_ctx={"routing_phase": PHASE_NEED_IDENTITY},
+                user_id="user-1", phase=PHASE_NEED_IDENTITY, is_anonymous=False,
+            )
+        )
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=False)
+    def test_skipped_when_name_already_known(self, _needs) -> None:
+        self.assertIsNone(
+            _try_upfront_display_name_turn(
+                msg="hey", session_ctx={"routing_phase": "listening"},
+                user_id="user-1", phase="listening", is_anonymous=False,
             )
         )
 

@@ -101,8 +101,6 @@ def synthesize_turn(
     if purpose == "lana":
         phase = str((session_ctx or {}).get("routing_phase") or "listening")
         notes = routing.get("enforce_notes") or []
-        user_nick = str((core_block or {}).get("user", {}).get("nickname") or "").strip()
-        name_saved = bool((session_ctx or {}).get("display_name_saved"))
         fast_chat = "discovery_chat_fast_path" in notes
         payload_parts.append(
             f"LANA UNIFIED · routing_phase={phase} · enforce_notes={notes}\n"
@@ -137,11 +135,10 @@ def synthesize_turn(
         preview_ctx = _format_shown_peer_preview(session_ctx)
         if preview_ctx:
             payload_parts.append(preview_ctx)
-        if not user_nick and not name_saved:
-            payload_parts.append(
-                "- Display name MISSING on file — if they have not said their name yet, "
-                "ask what neighbors should call them (one short question)."
-            )
+        # NOTE: no "display name MISSING → ask" injection here. The name is collected up
+        # front on its own clean turn (discovery's need_display_name gate); tacking it onto
+        # an unrelated companionship reply ("Rooting for Colombia… by the way, what should
+        # neighbors call you") is exactly what we're avoiding.
     if purpose == "event_draft":
         ids = purpose_ids or []
         payload_parts.append(
