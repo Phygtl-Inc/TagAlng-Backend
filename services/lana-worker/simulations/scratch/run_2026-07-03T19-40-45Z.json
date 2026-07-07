@@ -1,0 +1,12 @@
+{
+  "results": [],
+  "failures": [
+    {
+      "persona_id": "P1",
+      "bucket": "in_scope_success",
+      "seed_label": "create meet happy path",
+      "error": "Client error '400 Bad Request' for url 'https://rjlcyvwogmfmngemhbmn.supabase.co/auth/v1/token?grant_type=password'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/dev/Downloads/TagAlng-backend/services/lana-worker/simulations/runner.py\", line 113, in main\n    transcript = simulation.run(persona, bucket, seed)\n  File \"/Users/dev/Downloads/TagAlng-backend/services/lana-worker/simulations/simulation.py\", line 395, in run\n    jwt = _jwt_for_persona(persona)\n  File \"/Users/dev/Downloads/TagAlng-backend/services/lana-worker/simulations/simulation.py\", line 143, in _jwt_for_persona\n    resp.raise_for_status()\n    ~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/Users/dev/Downloads/TagAlng-backend/services/lana-worker/.venv/lib/python3.13/site-packages/httpx/_models.py\", line 829, in raise_for_status\n    raise HTTPStatusError(message, request=request, response=self)\nhttpx.HTTPStatusError: Client error '400 Bad Request' for url 'https://rjlcyvwogmfmngemhbmn.supabase.co/auth/v1/token?grant_type=password'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400\n"
+    }
+  ]
+}
