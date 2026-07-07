@@ -57,6 +57,27 @@ def _existing_gap_rows(user_id: str) -> dict[str, dict[str, Any]]:
         return {}
 
 
+def recent_gap_questions(user_id: str, limit: int = 10) -> list[str]:
+    """Recent rapport questions already opened for this user — so the extractor can avoid
+    generating a near-duplicate (e.g. asking 'watch with neighbors?' for soccer AND Real Madrid)."""
+    if not user_id:
+        return []
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("question")
+            .eq("user_id", user_id)
+            .order("opened_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return [r["question"] for r in (res.data or []) if r.get("question")]
+    except Exception:
+        logger.exception("rapport: recent_gap_questions failed for %s", user_id)
+        return []
+
+
 def _slug(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_")
     return s[:48] or "topic"
@@ -69,6 +90,7 @@ def open_semantic_gap(
     *,
     label: str | None = None,
     bucket: str | None = None,
+    teaser: str | None = None,
 ) -> None:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
 
@@ -82,9 +104,10 @@ def open_semantic_gap(
     topic = label or question
     gap_id = f"deepen:{_slug(topic)}"
     bucket = bucket or "general"
-    why_frame = (
-        f"about your {label.strip().lower()}…" if label and label.strip() else "one quick thing…"
-    )
+    # Teaser is AI-generated (grammatical, contextual) — e.g. "about your reading…". We no
+    # longer glue the raw claim label, which broke on predicate labels ("about your interested
+    # in books…"). Fall back to a neutral eyebrow only if the model gave none.
+    why_frame = teaser.strip() if teaser and teaser.strip() else "one quick thing…"
     try:
         service_client().table("rapport_gaps").insert(
             {

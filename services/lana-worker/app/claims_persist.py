@@ -796,6 +796,7 @@ def _open_rapport_gap(
     followup: str | None,
     label: str | None,
     bucket: str | None,
+    teaser: str | None = None,
 ) -> None:
     """Open one contextual rapport gap from the extractor's follow-up question (best-effort).
 
@@ -807,7 +808,9 @@ def _open_rapport_gap(
     try:
         from app.rapport_gaps import open_semantic_gap
 
-        open_semantic_gap(user_id, message_id, followup, label=label, bucket=bucket)
+        open_semantic_gap(
+            user_id, message_id, followup, label=label, bucket=bucket, teaser=teaser
+        )
     except Exception:
         logger.exception("rapport: semantic gap open failed")
 
@@ -832,8 +835,24 @@ def try_upsert_claims_from_message(
         return ClaimExtractResult(nickname=stated_nick)
     try:
         existing_labels = fetch_active_claim_labels(user_id)
-        data = incremental_claims_from_utterance(message, existing_labels)
+        # Recent rapport questions so the extractor's follow-up isn't a near-duplicate.
+        recent_questions: list[str] = []
+        if allow_rapport_gap:
+            try:
+                from app.rapport_gaps import recent_gap_questions
+
+                recent_questions = recent_gap_questions(user_id)
+            except Exception:
+                logger.debug("rapport: recent_gap_questions unavailable")
+        data = incremental_claims_from_utterance(message, existing_labels, recent_questions)
         nickname, claims, kids_count, followup = parse_incremental_claims_data(data)
+        # AI-written teaser for the tile ("about your reading…") — read straight off the raw
+        # dict so we don't churn parse_incremental_claims_data's tuple arity.
+        followup_topic = (
+            (str(data.get("followup_topic") or "").strip()[:80] or None)
+            if isinstance(data, dict)
+            else None
+        )
     except Exception:
         logger.exception("incremental_claim_extract_failed")
         return ClaimExtractResult(nickname=stated_nick)
@@ -881,6 +900,7 @@ def try_upsert_claims_from_message(
             followup,
             primary.label if primary else None,
             primary.bucket if primary else None,
+            teaser=followup_topic,
         )
     return ClaimExtractResult(
         saved=saved,
