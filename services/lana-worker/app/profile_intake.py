@@ -164,23 +164,29 @@ def format_profile_intake_context(ctx: dict[str, Any]) -> str:
             )
     gaps = profile_intake_gaps(ctx)
     name = host_display_name(ctx)
-    defer_name = ctx.get("guest_intake") and guest_step in (
-        "early_chat",
-        "offered_intro",
-        "awaiting_intro_name",
-        "",
-    )
+    is_guest = bool(ctx.get("guest_intake"))
     if name:
         lines.append(f"- Neighbor name (use in greeting): {name}")
-    elif gaps["needs_display_name"] and not defer_name:
+    elif not gaps["needs_display_name"]:
+        pass
+    elif not is_guest:
+        # Authenticated users have their display name collected UP FRONT on its own turn
+        # (the discovery need_display_name gate). Profile intake must never weave a name-ask
+        # into a reply — that produced "Rooting for Colombia… what should neighbors call you".
         lines.append(
-            "- Display name: MISSING — after heritage/interests, ask indirectly "
-            'what neighbors should call them; save in profile_patch.nickname'
+            "- Display name: do NOT ask what neighbors should call them — it is collected "
+            "up front separately; never append a name request to a reply."
         )
-    elif defer_name:
+    elif guest_step in ("early_chat", "offered_intro", "awaiting_intro_name", ""):
         lines.append(
             "- Display name: defer — joint-moment intro will collect name after they accept; "
             "do NOT ask what neighbors should call them in this phase"
+        )
+    else:
+        # Guest post_verify / intro_declined steps still collect the name inline here.
+        lines.append(
+            "- Display name: MISSING — after heritage/interests, ask indirectly "
+            'what neighbors should call them; save in profile_patch.nickname'
         )
     if ctx.get("block_display_name"):
         lines.append(f"- Block: {ctx['block_display_name']}")
@@ -403,7 +409,11 @@ def _parse_profile_turn(
     assistant_message = _clamp_assistant_message(str(data.get("assistant_message", "")))
     if not assistant_message or assistant_message_looks_truncated(assistant_message):
         gaps = profile_gaps or {}
-        if gaps.get("needs_display_name"):
+        # The name-ask fallback is only appropriate where the name is collected inline
+        # (guest post_verify / intro_declined). For authed / continuous chat the name is
+        # asked up front on its own turn, so fall back to a neutral beat instead.
+        guest_collects_name = guest_step in ("post_verify", "intro_declined")
+        if gaps.get("needs_display_name") and guest_collects_name:
             assistant_message = "Love that — what should neighbors call you on the block?"
         elif needs_kids_followup(history=history, ui=ui, topics_covered=covered):
             assistant_message = "Little ones at home, or mostly grown?"

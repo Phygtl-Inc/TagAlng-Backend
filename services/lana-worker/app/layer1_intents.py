@@ -91,11 +91,15 @@ LAYER1_DEFAULT_CONFIDENCE = 0.85
 
 # Per-intent thresholds — funnel steps stay lower so discovery flow is not blocked.
 INTENT_CONFIDENCE: dict[str, float] = {
-    "discovery.find_peers": 0.45,
+    # Browse-vs-meet is the classic ambiguous pair ("something with other moms this weekend").
+    # Higher bar so a genuinely-uncertain read falls through to the clarify (Pillar 2) instead
+    # of confidently guessing browse or meet. (Doc §5 wants clarify below 0.90; 0.75 is a
+    # middle ground that catches real ambiguity without over-asking.)
+    "discovery.find_peers": 0.75,
     "discovery.find_by_attrs": 0.55,
     "discovery.show_peer_profile": 0.55,
     "discovery.explain_peer_match": 0.55,
-    "discovery.find_activities": 0.45,
+    "discovery.find_activities": 0.75,
     "identity.add_claim": 0.55,
     "identity.edit_claim": 0.55,
     "auth.signup_phone": 0.5,
@@ -123,7 +127,7 @@ INTENT_CONFIDENCE: dict[str, float] = {
 }
 
 for _li in LOOKING_SHARING_INTENTS:
-    INTENT_CONFIDENCE[_li] = 0.55
+    INTENT_CONFIDENCE[_li] = 0.7
 
 # Structural hosting vs neighbor-search — NOT open-ended discovery regex.
 _HOSTING_PLAN_RE = re.compile(

@@ -654,6 +654,35 @@ def _try_neighbor_intro_turn(
         attach_pending_intros_after_propose(
             ctx, user_jwt=user_jwt, intro=intro, peer=peer
         )
+        # Pillar 3 (GIVE): reach the matched neighbor OUTSIDE the app — delivered value + a
+        # one-tap action, never a bare question. Fire-and-forget; never blocks the turn.
+        _cand = intro.get("candidate_user_id")
+        _reason = str(intro.get("match_reason") or "").strip()
+        if _cand:
+            try:
+                from app.notifications import email_html as _email_html
+                from app.notifications import notify_user as _notify_user
+
+                _give = (
+                    f"{_reason} — take a peek when you have a sec."
+                    if _reason
+                    else "A neighbor on your block wants to connect — take a peek."
+                )
+                _notify_user(
+                    _cand,
+                    title="A neighbor wants to connect 🤝",
+                    body=_give,
+                    url="/chat",
+                    email_subject="A neighbor on your block wants to connect",
+                    email_html=_email_html(
+                        "A neighbor wants to connect",
+                        _give,
+                        cta_label="See who",
+                        cta_path="/chat",
+                    ),
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("pillar3_give_notify_failed")
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "lana_propose_neighbor_intro")
     else:
         if str(intro.get("status") or "") == "duplicate":
@@ -967,6 +996,92 @@ def _try_awaiting_name_change_turn(
     ctx["name_change_attempts"] = attempts
     ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
     return reply, ctx, ctx["last_routing"], []
+
+
+def _try_upfront_display_name_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    phase: str,
+    is_anonymous: bool,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Ask a nameless *authenticated* user their display name UP FRONT, as its own clean
+    turn — so the name-ask is never glued onto an unrelated reply ("Rooting for Colombia…
+    by the way, what should neighbors call you"). Fires only when the user is otherwise
+    free-chatting: anonymous guests defer the name to the joint-moment intro, and every
+    structured flow (signup ZIP/identity, hosting, verify, rename) owns name capture
+    itself, so this never disrupts them. Bounded like the rename flow — a non-name reply
+    can't trap the user here.
+    """
+    if session_ctx.get("awaiting_upfront_name"):
+        # Our own follow-up turn: the reply should be their name.
+        nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+        if nick and user_id:
+            persist_profile_patch(user_id, {"nickname": nick})
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+            ctx["display_name_saved"] = True
+            ctx["nickname"] = nick
+            ctx.pop("awaiting_upfront_name", None)
+            ctx.pop("upfront_name_attempts", None)
+            ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+            return (
+                f"Love it — great to meet you, {nick}! Now, how can I help you today?",
+                ctx,
+                ctx["last_routing"],
+                [],
+            )
+        attempts = int(session_ctx.get("upfront_name_attempts") or 0) + 1
+        if attempts >= NAME_CHANGE_MAX_ATTEMPTS:
+            # Give up gracefully and let them get on with it; we won't re-nag this session.
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+            ctx["display_name_saved"] = True
+            ctx.pop("awaiting_upfront_name", None)
+            ctx.pop("upfront_name_attempts", None)
+            ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+            return (
+                "No worries — I'll skip that for now. So, how can I help you today?",
+                ctx,
+                ctx["last_routing"],
+                [],
+            )
+        ctx = _routing_ctx(session_ctx, phase=PHASE_NEED_DISPLAY_NAME, active_intent=None)
+        ctx["awaiting_upfront_name"] = True
+        ctx["upfront_name_attempts"] = attempts
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+        return (
+            "No rush — a first name is all I need. What should neighbors call you?",
+            ctx,
+            ctx["last_routing"],
+            [],
+        )
+
+    # Fresh turn: only ask up front when the user is authenticated, actually missing a
+    # name, and not inside any structured flow.
+    if is_anonymous or not user_id:
+        return None
+    if session_ctx.get("guest_intake"):
+        return None
+    if phase not in ("", "listening"):
+        return None
+    if session_ctx.get("event_host_active") or session_ctx.get("host_publish_pending"):
+        return None
+    active = str(session_ctx.get("active_intent") or "").strip().lower()
+    if active not in ("", "none", "listening"):
+        return None
+    if not user_needs_display_name(user_id, session_ctx):
+        return None
+
+    ctx = _routing_ctx(session_ctx, phase=PHASE_NEED_DISPLAY_NAME, active_intent=None)
+    ctx["awaiting_upfront_name"] = True
+    ctx["upfront_name_attempts"] = 0
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+    return (
+        "Before we dive in — what should neighbors call you? A first name's all I need.",
+        ctx,
+        ctx["last_routing"],
+        [],
+    )
 
 
 def _try_dismiss_intro_pass_turn(
@@ -5347,6 +5462,21 @@ def handle_discovery_turn(
     )
     if change_name_turn is not None:
         reply, ctx, routing, peers = change_name_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
+
+    # Ask a nameless authenticated user their display name UP FRONT, as its own clean turn,
+    # rather than letting the companionship LLM tack "what should neighbors call you" onto an
+    # unrelated reply. Only fires when they're free-chatting (guarded inside).
+    upfront_name_turn = _try_upfront_display_name_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_id=user_id,
+        phase=phase,
+        is_anonymous=is_anonymous,
+    )
+    if upfront_name_turn is not None:
+        reply, ctx, routing, peers = upfront_name_turn
         ctx["unified_mode"] = True
         return reply, ctx, routing, peers
 
