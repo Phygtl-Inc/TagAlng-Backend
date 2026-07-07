@@ -77,7 +77,7 @@ Output ONLY valid JSON (no markdown):
       "transient": false
     }
   ],
-  "followup_question": "one warm question that opens a NEW facet of a thread above, or null"
+  "followup_question": "one warm question that adds a NEW MATCHABLE facet (never backstory), or null"
 }
 
 Allowed bucket values: heritage, stage, vicinity, faith, activity, interest, general.
@@ -104,7 +104,7 @@ Rules:
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 - nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
-- followup_question: ALWAYS try to set one. PREFER sharpening any claim you marked "vague": true, then otherwise pick the single richest thread. Ask a short (<120 char), warm, OPEN question that surfaces MORE — e.g. triathlon → "Love it — road or trail, and do you train with a local crew?"; vague tech_worker → "Nice — what kind of tech, engineering, product, design?"; "speaks 5 languages" → "Which five? Always curious what people grew up speaking." Set null only when the message has no thread worth deepening.
+- followup_question — this becomes a "By the way…" tile on her home screen; her answer is stored as an identity claim used to match her with nearby moms. So keep a warm neighborhood-concierge tone (not an interviewer) and only ask what genuinely helps her connect locally. Propose ONE only if it adds a MATCHABLE facet peer-matching would actually use; reason about what you ALREADY know (the claims above + existing threads) and target a GAP, never a repeat. Two allowed shapes: (1) SHARPEN a claim you marked "vague": true — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know — whether they do it WITH others / would want to nearby, their free-time rhythm, kids' ages or stage, a specific sub-interest, or where they're from / new-to-area — running → "When do you usually get out — mornings, weekends?". NEVER ask an origin-story or opinion question; rewrite it to a matchable one instead: ✗ "What got you into FIFA?" → ✓ "Do you catch matches solo, or want to watch with neighbors?"; ✗ "Why do you love Real Madrid?" → ✓ "Any local spot you like to watch at?"; ✗ "How did you learn Portuguese?" → ✓ "Which of your languages do you use most day-to-day?". Keep it short (<120 char), warm, OPEN, reference what they said. Return null when nothing is vague AND no matchable dimension is missing — filler is worse than silence. HARD RULE: also null for any sensitive or help-seeking topic — divorce / relationship trouble, health or medical, mental health or personal safety, money or debt, legal or immigration (handled elsewhere) — and when the message is a question aimed at you.
 
 User message:
 """

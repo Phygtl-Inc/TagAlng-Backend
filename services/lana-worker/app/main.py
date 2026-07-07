@@ -112,6 +112,7 @@ from app.vertex_event import lana_event_opening, lana_event_turn
 from app.vertex_event_extract import vertex_extract_event_from_transcript
 from app.claims_persist import (
     extract_and_upsert_claims_from_message,
+    latest_claim_id,
     persist_nickname_if_stated,
     replace_all_claims,
     should_extract_claims_from_message,
@@ -356,6 +357,23 @@ def _routing_from_ctx(ctx: dict[str, Any]) -> TurnRouting | None:
         tool_called=raw.get("tool_to_call"),
         capture_fired=bool(raw.get("capture_fired")),
     )
+
+
+# Rapport safety gate — AI-signal, not keywords: defer to the classifier's own verdict and
+# never open a rapport gap on a turn it routed to a safety / out-of-scope rail. These are
+# classifier labels the pipeline already produces (same ones the discovery rails check).
+_RAPPORT_BLOCK_GOALS = frozenset({"out_of_scope", "unsafe", "medical", "crisis"})
+_RAPPORT_BLOCK_LINEAR = frozenset(
+    {"system.out_of_scope", "system.unsafe", "system.medical", "system.crisis"}
+)
+
+
+def _rapport_gap_allowed(ctx: dict[str, Any]) -> bool:
+    slots = ctx.get("_discovery_slots")
+    slots = slots if isinstance(slots, dict) else {}
+    goal = str(slots.get("goal") or "")
+    linear = str(slots.get("linear_intent") or "")
+    return goal not in _RAPPORT_BLOCK_GOALS and linear not in _RAPPORT_BLOCK_LINEAR
 
 
 def _turn_debug_from_ctx(
@@ -1388,14 +1406,18 @@ def _run_lana_message(
     if purpose in ("lana", "profile_intake") and should_extract_claims_from_message(
         body.message
     ) and not merged.get("skip_claims_background_extract"):
+        # Extracts claims AND opens one contextual rapport follow-up gap from the extractor's
+        # own warm question (semantic, not templated). Fire-and-forget, never blocks the turn.
         background_tasks.add_task(
             extract_and_upsert_claims_from_message,
             auth.user_id,
             body.message.strip(),
             skip_heritage=bool(merged.get("skip_heritage_background_extract")),
+            message_id=user_msg_id,
+            # Defer to the classifier: no rapport gap on safety/OOS/medical/crisis turns.
+            allow_rapport_gap=_rapport_gap_allowed(merged),
         )
-        # Rapport Ring C: reconcile follow-up gaps off the freshly-written claims
-        # (open new ones, suppress/close known ones). Fire-and-forget, never blocks.
+        # Close any gaps whose concept the user has since stated.
         background_tasks.add_task(rapport_reconcile_gaps, auth.user_id, user_msg_id)
     # Layer 3b latent-intent collection (Phase 1: collect, don't surface). Off by default.
     if purpose == "lana" and latent_extract_enabled():
@@ -2157,17 +2179,22 @@ def post_rapport_record_answer(
 ):
     auth = verify_auth(authorization)
     text = (body.text or "").strip()
+    claim_id: str | None = None
     if text:
-        # Route the answer through the existing claim extractor, then reconcile so any
-        # new claim opens downstream gaps (and closes ones it covers).
-        extract_and_upsert_claims_from_message(auth.user_id, text)
+        # Route the answer through the existing claim extractor (rich facets), then reconcile.
+        saved = extract_and_upsert_claims_from_message(auth.user_id, text)
         rapport_reconcile_gaps(auth.user_id, body.message_id)
-    # Guarantee the asked gap closes even if the answer mapped to a different concept.
-    rapport_mark_answered(body.gap_row_id)
+        # Link the gap to the claim the extractor made from the answer. If it made NONE, we do
+        # NOT fabricate one — the extractor already declined it (junk like "i dont know", or a
+        # privacy case). Trust that judgment rather than storing a non-answer as a claim.
+        if saved > 0:
+            claim_id = latest_claim_id(auth.user_id)
+    # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
+    rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
     amplitude_track(
         "rapport_gap_answered",
         user_id=auth.user_id,
-        event_properties={"gap_row_id": body.gap_row_id},
+        event_properties={"gap_row_id": body.gap_row_id, "claim_id": claim_id},
     )
     return {"ok": True}
 

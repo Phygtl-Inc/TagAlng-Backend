@@ -177,10 +177,7 @@ from app.layer1_intents import (
 )
 from app.layer1_tier import (
     handle_respond_nudge,
-    is_standalone_affirmation,
-    is_standalone_negation,
     parse_nudge_response,
-    wants_respond_intro,
 )
 from app.signal_capture import (
     PHASE_SIGNAL_CONFIRM,
@@ -1014,22 +1011,35 @@ def _try_respond_nudge_turn(
     phone_verified: bool,
     phase: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    """Accept/decline/block a pending received intro before propose-intro routing."""
+    """Accept/decline/block a pending received intro before propose-intro routing.
+
+    Engages only when an intro is genuinely waiting on the user (session state) —
+    never on a keyword in the message. A stray "no"/"skip"/"pass" inside an
+    unrelated sentence ("no I meant which languages can I speak?") must not be
+    read as declining an intro. Once we know an intro is waiting, the AI reads
+    what the reply means; a question or a different topic ("unknown"/"none")
+    falls through to normal routing instead of the dead-end
+    "I don't see a pending intro waiting on you right now."
+    """
+    if not phone_verified:
+        return None
     if phrase_linear_intent(msg) in (
         "identity.show_my_profile",
         "discovery.show_peer_profile",
     ):
         return None
-    if not phone_verified or not wants_respond_intro(msg):
+    # State gate, not a keyword gate: only an intro actually waiting in the
+    # session engages this handler. With nothing pending we fall straight through
+    # so no message can reach the "I don't see a pending intro" dead-end.
+    if not isinstance(session_ctx.get("pending_intro_respond"), dict):
         return None
     reply, pending, action = handle_respond_nudge(
         msg, user_jwt=user_jwt, session_ctx=session_ctx
     )
-    # A bare "ok"/"yes" or "no"/"that's all" with no pending intro is ambiguous —
-    # e.g. wrapping up profile-building. Fall through to normal routing instead of
-    # the dead-end "I don't see a pending intro waiting on you right now."
-    # Explicit intro references (decline / block / "introduce us") still surface it.
-    if action == "none" and (is_standalone_affirmation(msg) or is_standalone_negation(msg)):
+    # The AI couldn't read a clear accept/decline/block — the reply is a question
+    # or a different topic. Fall through to normal routing rather than nagging
+    # about the intro (it stays in session for a later, clearer answer).
+    if action in ("none", "prompt"):
         return None
     ctx = _routing_ctx(
         dict(session_ctx),

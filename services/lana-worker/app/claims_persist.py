@@ -183,6 +183,9 @@ class ClaimExtractResult:
     nickname: str | None = None
     kids_count: int | None = None
     followup_question: str | None = None
+    # The richest claim this turn — used to frame the rapport follow-up tile.
+    primary_label: str | None = None
+    primary_bucket: str | None = None
 
 
 def _heritage_root(concept: str, label: str) -> str | None:
@@ -787,14 +790,43 @@ def regex_claims_from_message(message: str) -> list[ExtractedClaim]:
     return out[:4]
 
 
+def _open_rapport_gap(
+    user_id: str,
+    message_id: str | None,
+    followup: str | None,
+    label: str | None,
+    bucket: str | None,
+) -> None:
+    """Open one contextual rapport gap from the extractor's follow-up question (best-effort).
+
+    Sensitivity is gated upstream by AI signals, not keywords here: the extractor returns
+    followup=null on sensitive/help-seeking topics, so there's nothing to open.
+    """
+    if not followup:
+        return
+    try:
+        from app.rapport_gaps import open_semantic_gap
+
+        open_semantic_gap(user_id, message_id, followup, label=label, bucket=bucket)
+    except Exception:
+        logger.exception("rapport: semantic gap open failed")
+
+
 def try_upsert_claims_from_message(
     user_id: str,
     message: str,
     *,
     force_heritage_replace: bool = False,
     skip_heritage: bool = False,
+    message_id: str | None = None,
+    allow_rapport_gap: bool = True,
 ) -> ClaimExtractResult:
-    """Flash extract from one user line → upsert claims; confirm heritage conflicts."""
+    """Flash extract from one user line → upsert claims; confirm heritage conflicts.
+
+    Also opens ONE contextual rapport follow-up gap from the extractor's own warm question.
+    This is the SHARED entry point (background task AND the inline discovery/identity path
+    call it), so the gap opens regardless of which path handled the turn.
+    """
     stated_nick = persist_nickname_if_stated(user_id, message)
     if not should_extract_claims_from_message(message):
         return ClaimExtractResult(nickname=stated_nick)
@@ -841,11 +873,22 @@ def try_upsert_claims_from_message(
             )
 
     saved = upsert_claims(user_id, claims)
+    primary = max(claims, key=lambda c: c.confidence, default=None)
+    if allow_rapport_gap:
+        _open_rapport_gap(
+            user_id,
+            message_id,
+            followup,
+            primary.label if primary else None,
+            primary.bucket if primary else None,
+        )
     return ClaimExtractResult(
         saved=saved,
         nickname=stated_nick,
         kids_count=kids_count,
         followup_question=followup,
+        primary_label=primary.label if primary else None,
+        primary_bucket=primary.bucket if primary else None,
     )
 
 
@@ -854,10 +897,39 @@ def extract_and_upsert_claims_from_message(
     message: str,
     *,
     skip_heritage: bool = False,
+    message_id: str | None = None,
+    allow_rapport_gap: bool = True,
 ) -> int:
-    """Background job: Flash extract from one user line → upsert claims + nickname."""
+    """Background job: Flash extract from one user line → upsert claims + nickname, and open
+    ONE contextual rapport follow-up gap from the extractor's own warm question (semantic,
+    not a static template). `allow_rapport_gap` lets the caller defer to the turn's safety
+    verdict (crisis / out-of-scope / medical) and suppress the gap while still capturing claims."""
     return try_upsert_claims_from_message(
         user_id,
         message,
         skip_heritage=skip_heritage,
+        message_id=message_id,
+        allow_rapport_gap=allow_rapport_gap,
     ).saved
+
+
+def latest_claim_id(user_id: str) -> str | None:
+    """The user's most recently created active claim — used to link a rapport answer to the
+    claim the extractor just made from it (best-effort). Returns None if there's none."""
+    if not user_id:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("id")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0]["id"] if res.data else None
+    except Exception:
+        logger.exception("latest_claim_id_failed for %s", user_id)
+        return None
