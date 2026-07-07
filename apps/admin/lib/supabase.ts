@@ -46,6 +46,24 @@ export type ConversationClaim = {
   synonyms: string[];
 };
 
+export type RapportGap = {
+  gap_id: string;
+  question: string | null;
+  why_frame: string | null;
+  parent_bucket: string | null;
+  status: string;
+  unlock_score: number | null;
+  skipped_count: number | null;
+  opened_at: string | null;
+  asked_at: string | null;
+  answered_at: string | null;
+  /** The user message that triggered this gap (the "why"), if recorded. */
+  source_message: string | null;
+  /** What the answer became, once answered. */
+  answer_label: string | null;
+  answer_concept: string | null;
+};
+
 export type Conversation = {
   session: {
     id: string;

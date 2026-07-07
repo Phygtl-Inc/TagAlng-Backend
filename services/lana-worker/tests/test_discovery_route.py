@@ -1003,13 +1003,13 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    @patch("app.layer1_tier.fetch_my_intros")
-    def test_explicit_intro_response_with_no_pending_still_surfaces(self, mock_fetch_intros) -> None:
-        # An explicit intro reference is unambiguous, so the "no pending intro"
-        # message is the right reply even when nothing is pending.
+    def test_intro_response_phrase_with_no_pending_falls_through(self) -> None:
+        # respond_nudge engages only on real pending state (session), never on a
+        # keyword in the message. With nothing waiting, even an explicit
+        # "yes introduce us" falls through to normal routing — it must never
+        # surface the "I don't see a pending intro" dead-end.
         from app.discovery_route import _try_respond_nudge_turn
 
-        mock_fetch_intros.return_value = []
         result = _try_respond_nudge_turn(
             msg="yes introduce us",
             session_ctx={},
@@ -1017,9 +1017,21 @@ class TestDiscoveryRouting(unittest.TestCase):
             phone_verified=True,
             phase="listening",
         )
-        self.assertIsNotNone(result)
-        reply = result[0]
-        self.assertIn("pending intro", reply.lower())
+        self.assertIsNone(result)
+
+    def test_leading_no_in_unrelated_sentence_never_dead_ends(self) -> None:
+        # Regression: "no I am asking you which languages can I speak?" must not be
+        # read as declining an intro. With nothing pending it falls straight through.
+        from app.discovery_route import _try_respond_nudge_turn
+
+        result = _try_respond_nudge_turn(
+            msg="no I am asking you do you know which languages i can speak?",
+            session_ctx={},
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="listening",
+        )
+        self.assertIsNone(result)
 
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)

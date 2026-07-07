@@ -3,10 +3,12 @@
 import { ClaimCards } from '@/components/ClaimCards';
 import { LanaBubble } from '@/components/LanaBubble';
 import { MappedSummary } from '@/components/MappedSummary';
+import { RapportCards } from '@/components/RapportCards';
 import {
   getSupabase,
   type Conversation,
   type InboxSession,
+  type RapportGap,
 } from '@/lib/supabase';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -17,6 +19,7 @@ export default function LanaInboxPage() {
   const [sessions, setSessions] = useState<InboxSession[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [rapport, setRapport] = useState<RapportGap[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingChat, setLoadingChat] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,9 +69,20 @@ export default function LanaInboxPage() {
       });
       if (rpcErr) throw rpcErr;
       setConversation(data as Conversation);
+      // Rapport gaps are keyed on the user, not the session — fetch them for this user.
+      const userId = (data as { session?: { user_id?: string } })?.session?.user_id;
+      if (userId) {
+        const { data: gaps } = await supabase.rpc('admin_get_rapport_gaps', {
+          p_user_id: userId,
+        });
+        setRapport((gaps as RapportGap[]) ?? []);
+      } else {
+        setRapport([]);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load conversation');
       setConversation(null);
+      setRapport([]);
     } finally {
       setLoadingChat(false);
     }
@@ -82,7 +96,10 @@ export default function LanaInboxPage() {
 
   useEffect(() => {
     if (selectedId) loadConversation(selectedId);
-    else setConversation(null);
+    else {
+      setConversation(null);
+      setRapport([]);
+    }
   }, [selectedId, loadConversation]);
 
   async function signOut() {
@@ -220,7 +237,8 @@ export default function LanaInboxPage() {
 
               {(conversation.session.context?.mapped_summary ||
                 (conversation.session.context?.spans?.length ?? 0) > 0 ||
-                conversation.claims.length > 0) && (
+                conversation.claims.length > 0 ||
+                rapport.length > 0) && (
                 <section className="insights-section" aria-label="Profile extraction">
                   <div className="section-head">
                     <h3>Profile extraction</h3>
@@ -234,6 +252,7 @@ export default function LanaInboxPage() {
                       spans={conversation.session.context?.spans}
                     />
                     <ClaimCards claims={conversation.claims} />
+                    <RapportCards gaps={rapport} />
                   </div>
                 </section>
               )}

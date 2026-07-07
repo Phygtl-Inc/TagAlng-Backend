@@ -74,14 +74,15 @@ class TestLayer1Tier(unittest.TestCase):
 
 class TestRespondNudgeRouting(unittest.TestCase):
     @patch("app.discovery_route.handle_respond_nudge")
-    @patch("app.discovery_route.wants_respond_intro", return_value=True)
-    def test_respond_runs_before_propose(self, _wants: object, mock_handle: object) -> None:
+    def test_respond_runs_before_propose(self, mock_handle: object) -> None:
+        # A real intro waiting in session engages the handler; the AI-read accept
+        # is routed as tier.respond_nudge.
         from app.discovery_route import _try_respond_nudge_turn
 
         mock_handle.return_value = ("Done — connected.", None, "accept")
         result = _try_respond_nudge_turn(
             msg="yes introduce us",
-            session_ctx={},
+            session_ctx={"pending_intro_respond": {"intro_id": "i1", "nickname": "Ada"}},
             user_jwt="jwt",
             phone_verified=True,
             phase="preview",
@@ -91,6 +92,39 @@ class TestRespondNudgeRouting(unittest.TestCase):
         self.assertIn("connected", reply)
         self.assertEqual(peers, [])
         mock_handle.assert_called_once()
+
+    @patch("app.discovery_route.handle_respond_nudge")
+    def test_no_pending_intro_never_engages(self, mock_handle: object) -> None:
+        # Nothing waiting in session → fall through without touching the handler,
+        # so no message can reach the "I don't see a pending intro" dead-end.
+        from app.discovery_route import _try_respond_nudge_turn
+
+        result = _try_respond_nudge_turn(
+            msg="no thanks",
+            session_ctx={},
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="preview",
+        )
+        self.assertIsNone(result)
+        mock_handle.assert_not_called()
+
+    @patch("app.discovery_route.handle_respond_nudge")
+    def test_unrelated_question_with_pending_falls_through(self, mock_handle: object) -> None:
+        # An intro is waiting, but the reply is a question — the AI reads it as
+        # unclear ("prompt"), so we fall through to normal routing and leave the
+        # pending intro in session rather than nagging.
+        from app.discovery_route import _try_respond_nudge_turn
+
+        mock_handle.return_value = ("Ada sent an intro — accept, not now, or block?", None, "prompt")
+        result = _try_respond_nudge_turn(
+            msg="which languages can I speak?",
+            session_ctx={"pending_intro_respond": {"intro_id": "i1", "nickname": "Ada"}},
+            user_jwt="jwt",
+            phone_verified=True,
+            phase="preview",
+        )
+        self.assertIsNone(result)
 
 
 class TestDismissIntroPass(unittest.TestCase):

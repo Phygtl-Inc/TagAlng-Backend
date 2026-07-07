@@ -136,81 +136,41 @@ class TestGapTree(unittest.TestCase):
         )
 
 
-# ── reconciliation: open / suppress / close ──────────────────────────────────
-class TestReconcile(unittest.TestCase):
-    def test_opens_gaps_for_a_captured_claim(self):
-        claims = [
-            {"id": "c1", "concept": "running_enthusiast", "label": "Morning Run",
-             "bucket": "activity", "confidence": 0.9},
-        ]
-        store = _store(claims=claims, gaps=[])
+# ── semantic gap open + reconcile close ──────────────────────────────────────
+class TestGapLifecycle(unittest.TestCase):
+    def test_open_semantic_gap_stores_contextual_question(self):
+        store = _store()
         with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
-            rapport_gaps.reconcile_gaps("u1", "m1")
-        opened = [row for (tbl, row) in store["inserts"] if tbl == "rapport_gaps"]
-        gap_ids = {r["gap_id"] for r in opened}
-        # activity bucket unlocks both activity gaps, tile copy sourced from the claim label.
-        self.assertIn("activity_social_pref", gap_ids)
-        self.assertIn("activity_frequency", gap_ids)
-        social = next(r for r in opened if r["gap_id"] == "activity_social_pref")
-        self.assertIn("morning run", social["why_frame"])
-        self.assertEqual(social["status"], "open")
-        self.assertEqual(social["opened_from_message_id"], "m1")
+            rapport_gaps.open_semantic_gap(
+                "u1", "m1",
+                "Nice — online with a squad, or solo career mode?",
+                label="FIFA", bucket="interest",
+            )
+        opened = [r for (t, r) in store["inserts"] if t == "rapport_gaps"]
+        self.assertEqual(len(opened), 1)
+        row = opened[0]
+        self.assertEqual(row["question"], "Nice — online with a squad, or solo career mode?")
+        self.assertEqual(row["gap_id"], "deepen:fifa")
+        self.assertEqual(row["parent_bucket"], "interest")
+        self.assertIn("fifa", row["why_frame"])
+        self.assertEqual(row["status"], "open")
+        self.assertEqual(row["opened_from_message_id"], "m1")
 
-    def test_suppresses_gap_already_known(self):
-        # She already has the 'activity_social_pref' concept → don't ask it again.
-        claims = [
-            {"id": "c1", "concept": "running_enthusiast", "label": "Morning Run",
-             "bucket": "activity", "confidence": 0.9},
-            {"id": "c2", "concept": "activity_social_pref", "label": "Prefers Group",
-             "bucket": "activity", "confidence": 0.8},
-        ]
-        store = _store(claims=claims, gaps=[])
+    def test_open_semantic_gap_ignores_blank_question(self):
+        store = _store()
         with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
-            rapport_gaps.reconcile_gaps("u1")
-        gap_ids = {r["gap_id"] for (_t, r) in store["inserts"]}
-        self.assertNotIn("activity_social_pref", gap_ids)
-        self.assertIn("activity_frequency", gap_ids)  # the other one still opens
+            rapport_gaps.open_semantic_gap("u1", "m1", "   ", label="FIFA")
+        self.assertEqual(store["inserts"], [])
 
-    def test_does_not_reopen_existing_gap(self):
-        claims = [
-            {"id": "c1", "concept": "running_enthusiast", "label": "Morning Run",
-             "bucket": "activity", "confidence": 0.9},
-        ]
-        gaps = [
-            {"gap_row_id": "g1", "gap_id": "activity_social_pref", "status": "skipped",
-             "covers_concept": "activity_social_pref"},
-        ]
-        store = _store(claims=claims, gaps=gaps)
+    def test_open_semantic_gap_generic_frame_without_label(self):
+        store = _store()
         with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
-            rapport_gaps.reconcile_gaps("u1")
-        opened = {r["gap_id"] for (_t, r) in store["inserts"]}
-        self.assertNotIn("activity_social_pref", opened)  # already has a row
+            rapport_gaps.open_semantic_gap("u1", None, "What do you enjoy most about it?")
+        row = [r for (_t, r) in store["inserts"]][0]
+        self.assertEqual(row["parent_bucket"], "general")
+        self.assertEqual(row["why_frame"], "one quick thing…")
 
-    def test_kids_gap_gated_off_bare_stage_claim(self):
-        # "Married 10 years" (stage) alone must NOT open kids_ages — no kids mentioned.
-        claims = [
-            {"id": "c1", "concept": "married_ten_years", "label": "Married 10 years",
-             "bucket": "stage", "confidence": 0.9},
-        ]
-        store = _store(claims=claims, gaps=[])
-        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
-            rapport_gaps.reconcile_gaps("u1")
-        opened = {r["gap_id"] for (_t, r) in store["inserts"]}
-        self.assertNotIn("kids_ages", opened)
-        self.assertIn("daily_rhythm", opened)  # ungated stage gap still opens
-
-    def test_kids_gap_opens_when_kids_mentioned(self):
-        claims = [
-            {"id": "c1", "concept": "mom_of_two", "label": "Mom of 2 kids",
-             "bucket": "stage", "confidence": 0.9},
-        ]
-        store = _store(claims=claims, gaps=[])
-        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
-            rapport_gaps.reconcile_gaps("u1")
-        opened = {r["gap_id"] for (_t, r) in store["inserts"]}
-        self.assertIn("kids_ages", opened)
-
-    def test_closes_gap_when_covered_concept_appears(self):
+    def test_reconcile_closes_gap_when_concept_stated(self):
         claims = [
             {"id": "c9", "concept": "kids_ages", "label": "2 and 5",
              "bucket": "stage", "confidence": 0.95},
@@ -225,6 +185,21 @@ class TestReconcile(unittest.TestCase):
         closed = [row for (_t, row) in store["updates"] if row.get("status") == "answered"]
         self.assertTrue(closed)
         self.assertEqual(closed[0]["answer_claim_id"], "c9")
+
+    def test_reconcile_leaves_semantic_gap_open(self):
+        # Semantic gaps use a synthetic covers_concept that never matches a real claim.
+        claims = [
+            {"id": "c1", "concept": "running_enthusiast", "label": "Run",
+             "bucket": "activity", "confidence": 0.9},
+        ]
+        gaps = [
+            {"gap_row_id": "g1", "gap_id": "deepen:run", "status": "open",
+             "covers_concept": "deepen_run"},
+        ]
+        store = _store(claims=claims, gaps=gaps)
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
+            rapport_gaps.reconcile_gaps("u1")
+        self.assertEqual(store["updates"], [])  # nothing closed
 
 
 # ── skip / mute ───────────────────────────────────────────────────────────────
@@ -321,6 +296,17 @@ class TestRanker(unittest.TestCase):
         # returned a fresh, different gap despite the cap
         self.assertIsNotNone(ask)
         self.assertEqual(ask["gap_id"], "free_windows")
+
+    def test_dynamic_semantic_gap_served_with_stored_question(self):
+        # A gap not in the static tree (gap_id "deepen:…") is served with its stored
+        # question and treated as LOW sensitivity — the whole point of the redesign.
+        row = self._row("deepen:fifa", parent_bucket="interest")
+        row["question"] = "Online with a squad, or solo career mode?"
+        ask, _s, _t = self._run([row], tier_rank=0)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["gap_id"], "deepen:fifa")
+        self.assertEqual(ask["question"], "Online with a squad, or solo career mode?")
+        self.assertEqual(ask["sensitivity_tier"], "LOW")
 
     def test_marks_gap_asked_and_returns_contract(self):
         ask, store, _t = self._run([self._row("free_windows", parent_bucket="interest")])
