@@ -41,16 +41,31 @@ _SYSTEM = """You help a neighborhood concierge personalize a LOCAL PLACES recomm
 the user's REQUEST and what she already knows about them (identity claims: diet, kids, \
 interests, heritage, etc.).
 
+THE REQUEST IS AUTHORITATIVE. If the request already names an angle (e.g. "kids friendly \
+restaurant", "vegetarian lunch", "italian food", "dog park"), that angle is a REQUEST \
+constraint the user stated out loud. It MUST be honored, and an identity claim must NEVER \
+override, replace, or outrank it. A claim may only ADD a compatible refinement on top of the \
+request constraint (e.g. request "kids friendly restaurant" + vegetarian claim -> a \
+"Kid-friendly" filter, optionally also a "Kid-friendly + veg" one — never a plain "Italian" \
+filter that drops the kid-friendly ask). When the request states NO angle (e.g. "recommend \
+some restaurants", "good places nearby"), THEN claims may personalize freely.
+
 Decide which claims (and the request itself) genuinely change which places would fit, then \
 return ONE compact JSON object with exactly these keys:
 {"relevant","base_query","filters"}
 
-- base_query: a plain Google Places search string for the raw request with NO claim bias
-  (e.g. request "nice restaurants" -> "restaurant"; "good coffee" -> "coffee shop").
+- base_query: a plain Google Places search string that PRESERVES every explicit constraint in
+  the request; only strip subjective fluff ("nice", "good", "best"). E.g. "nice restaurants"
+  -> "restaurant"; "good coffee" -> "coffee shop"; but "kids friendly restaurant" ->
+  "kids friendly restaurant" (keep it — that is the user's own constraint, not a claim bias).
 - filters: an array (0-4) of DISTINCT candidate angles, each an object:
-    {"label","query","included_type","required_attrs","reframe"}
+    {"label","query","included_type","required_attrs","reframe","source"}
   Include a filter ONLY when a claim (or the request) meaningfully narrows the pick. Return
   [] when nothing relevant applies (e.g. heritage has no bearing on finding a dentist).
+    - source: "request" if the angle comes from the user's own words in the request, "claim"
+      if it comes purely from an identity claim. Every angle the request states explicitly
+      MUST appear as a filter with source "request". A claim angle that would contradict a
+      request constraint must NOT be returned.
     - label: 1-3 word chip text, e.g. "Vegetarian", "Kid-friendly", "Italian", "Top-rated".
     - query: Places text query folding in the angle, e.g. "vegetarian restaurant".
     - included_type: a valid Google Places (New) place TYPE that captures the angle, or null.
@@ -67,9 +82,11 @@ return ONE compact JSON object with exactly these keys:
       vegetarian, I kept these veg-friendly." Reference the ANGLE, never sensitive details.
 - relevant: true if filters is non-empty, else false.
 
-Prefer ONE filter when a single angle clearly dominates. Offer 2+ ONLY when genuinely distinct \
-angles compete (e.g. a parent who is also vegetarian -> a "Kid-friendly" AND a "Vegetarian" \
-filter). Never invent place names. Return only the JSON object."""
+Prefer ONE filter when a single angle clearly dominates. When the request states a constraint, \
+that request filter is the dominant one; any claim filters are optional refinements on top of \
+it, never replacements. Offer 2+ ONLY when genuinely distinct compatible angles compete (e.g. \
+a parent who is also vegetarian -> a "Kid-friendly" AND a "Kid-friendly + veg" filter). Never \
+invent place names. Return only the JSON object."""
 
 
 def _clean_claims(claims: list[dict[str, Any]] | None) -> list[dict[str, str]]:
@@ -97,12 +114,16 @@ def _clean_filter(f: Any) -> dict[str, Any] | None:
     query = str(f.get("query") or "").strip()
     if not label or not query:
         return None
+    source = str(f.get("source") or "").strip().lower()
+    if source not in ("request", "claim"):
+        source = "claim"
     return {
         "label": label[:24],
         "query": query,
         "included_type": valid_included_type(f.get("included_type")),
         "required_attrs": valid_attrs(f.get("required_attrs")),
         "reframe": (str(f.get("reframe") or "").strip() or None),
+        "source": source,
     }
 
 
