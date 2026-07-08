@@ -2317,26 +2317,38 @@ def _tip_seek_fallback_reply(
     if not filters:
         return _plain(reason_widen=False)
 
-    # Hybrid — 2+ genuinely distinct angles and we haven't asked yet → ask the user to pick
-    # (chips post each filter's own query back; "Just show all" widens). No search this turn.
-    if len(filters) >= 2 and not already_asked:
-        ctx["rec_filter_asked"] = True
-        chips = [
-            {"label": f["label"], "message": f["query"], "style": "primary"}
-            for f in filters[:3]
-        ]
-        chips.append(
-            {"label": "Just show all", "message": f"show me all {noun}", "style": "secondary"}
-        )
-        ctx["rec_chips"] = chips
-        angles = _join_labels([f["label"] for f in filters[:3]])
-        return (
-            f"I can tailor this to you — want {angles}? Tap one, or “Just show all” for "
-            "everything nearby."
-        )
+    # The REQUEST is authoritative. If the user stated a constraint ("kids friendly
+    # restaurant"), the personalizer marks that angle source="request"; honor it directly and
+    # never let a claim angle (e.g. Sicilian heritage) jump ahead of it. Claim angles are
+    # offered only as optional refinements on top. Only when the request states NO angle do we
+    # surface claim angles for the user to pick.
+    request_filters = [f for f in filters if f.get("source") == "request"]
+    claim_filters = [f for f in filters if f.get("source") != "request"]
 
-    # Apply the top angle (single obvious filter, or we already asked → don't loop again).
-    chosen = filters[0]
+    if request_filters:
+        chosen = request_filters[0]
+        refinements = request_filters[1:] + claim_filters
+    else:
+        # Open request — 2+ genuinely distinct claim angles and we haven't asked yet → ask the
+        # user to pick (chips post each angle's own query back; "Just show all" widens).
+        if len(claim_filters) >= 2 and not already_asked:
+            ctx["rec_filter_asked"] = True
+            chips = [
+                {"label": f["label"], "message": f["query"], "style": "primary"}
+                for f in claim_filters[:3]
+            ]
+            chips.append(
+                {"label": "Just show all", "message": f"show me all {noun}", "style": "secondary"}
+            )
+            ctx["rec_chips"] = chips
+            angles = _join_labels([f["label"] for f in claim_filters[:3]])
+            return (
+                f"I can tailor this to you — want {angles}? Tap one, or “Just show all” for "
+                "everything nearby."
+            )
+        # Single obvious claim angle, or we already asked → apply the top one.
+        chosen = claim_filters[0]
+        refinements = claim_filters[1:]
     req_attrs = list(chosen.get("required_attrs") or [])
     places = _search_tip_places(
         query=str(chosen.get("query") or base_query), block_id=block_id,
@@ -2354,7 +2366,7 @@ def _tip_seek_fallback_reply(
         # Refine chips: the OTHER offered angles + a "See all" widen.
         chips = [
             {"label": f["label"], "message": f["query"], "style": "secondary"}
-            for f in filters[1:3]
+            for f in refinements[:2]
         ]
         chips.append(
             {"label": f"See all {noun}", "message": f"show me all {noun}", "style": "secondary"}
