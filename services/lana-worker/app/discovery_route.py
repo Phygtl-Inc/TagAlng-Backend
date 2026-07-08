@@ -1192,6 +1192,21 @@ def _identity_conversational_reply(
     try:
         ctx_pack = load_event_draft_context(user_id) if user_id else {}
         user_block = format_profile_intake_context(ctx_pack)
+        # Tell the engine what it ALREADY knows so it stops re-asking covered threads
+        # (heritage, reading, …) as if the conversation were fresh — deepen or move on instead.
+        if user_id:
+            try:
+                from app.claims_persist import fetch_active_claim_labels
+
+                known = fetch_active_claim_labels(user_id)
+            except Exception:
+                known = []
+            if known:
+                user_block += (
+                    "\n\nALREADY KNOWN about this neighbor — do NOT ask about these again; "
+                    "acknowledge briefly if relevant, then deepen a DIFFERENT angle or ask "
+                    "about a NEW thread: " + ", ".join(known[:20])
+                )
         reply, status, turn_ctx, ui = lana_profile_turn(
             user_block,
             history or [],

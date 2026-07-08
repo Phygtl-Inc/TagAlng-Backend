@@ -9,14 +9,49 @@ has since stated. Every write is idempotent, so this is safe to run fire-and-for
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
 
 from app.auth import service_client
 from app.rapport_gap_tree import get_gap, render_why_frame
+from app.vec_util import to_pgvector
 
 logger = logging.getLogger(__name__)
+
+# A candidate question this close (cosine) to one we've already asked is treated as the same
+# question and dropped — this is what stops "which trails do you run?" from reappearing as
+# "any local spots you like for running?". Env-tunable.
+_DUP_SIMILARITY = float(os.environ.get("LANA_RAPPORT_DUP_SIMILARITY", "0.9"))
+
+
+def _question_embedding(question: str) -> list[float] | None:
+    """Embed a gap question for dedup/coverage. None on any failure (caller fails open)."""
+    try:
+        from app.vertex_extract import vertex_embed
+
+        return vertex_embed(question)
+    except Exception:
+        logger.debug("rapport: question embed failed (dedup will fail open)")
+        return None
+
+
+def _is_semantic_duplicate(user_id: str, embedding: list[float] | None) -> bool:
+    """True when an existing (non-skipped) gap question means the same thing as this one."""
+    literal = to_pgvector(embedding)
+    if not literal:
+        return False  # no embedding → can't judge → fail open (let it through)
+    try:
+        res = service_client().rpc(
+            "rapport_question_max_similarity",
+            {"p_user_id": user_id, "p_embedding": literal},
+        ).execute()
+        max_sim = float(res.data or 0.0)
+        return max_sim >= _DUP_SIMILARITY
+    except Exception:
+        logger.exception("rapport: dup-similarity check failed for %s", user_id)
+        return False  # fail open — never block a gap on a transient RPC error
 
 
 def _now() -> str:
@@ -91,16 +126,23 @@ def open_semantic_gap(
     label: str | None = None,
     bucket: str | None = None,
     teaser: str | None = None,
-) -> None:
+    deepens_concept: str | None = None,
+) -> bool:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
+
+    `deepens_concept` records WHICH identity claim this question is about, so coverage is an
+    exact fact (not a fuzzy similarity guess) — see rapport_uncovered_claims.
 
     The question is generated from what the user actually said (e.g. "I play FIFA" →
     "online with a squad, or solo career mode?"), so it always makes sense — unlike the
     retired static templates. Keyed by topic slug so the same thread doesn't reopen twice.
     Semantic gaps close when the user answers/skips (not via concept-match).
+
+    Returns True when a NEW row was inserted, False when it already existed (unique-key
+    collision) or the input was empty — so callers can count real openings.
     """
     if not user_id or not question or not str(question).strip():
-        return
+        return False
     topic = label or question
     gap_id = f"deepen:{_slug(topic)}"
     bucket = bucket or "general"
@@ -108,24 +150,37 @@ def open_semantic_gap(
     # longer glue the raw claim label, which broke on predicate labels ("about your interested
     # in books…"). Fall back to a neutral eyebrow only if the model gave none.
     why_frame = teaser.strip() if teaser and teaser.strip() else "one quick thing…"
+    q_text = str(question).strip()
+    # Semantic dedup: don't reopen a question that means the same as one we already asked, even
+    # when the wording (and thus the slug) differs. Embedding also stored to power coverage steering.
+    embedding = _question_embedding(q_text)
+    if _is_semantic_duplicate(user_id, embedding):
+        logger.info("rapport: skipped near-duplicate question for %s: %s", user_id, q_text)
+        return False
+    row: dict[str, Any] = {
+        "user_id": user_id,
+        "gap_id": gap_id,
+        "parent_bucket": bucket,
+        # synthetic — semantic gaps close on answer/skip, not on concept-match
+        "covers_concept": f"deepen_{_slug(topic)}",
+        "why_frame": why_frame,
+        "question": q_text,
+        "unlock_score": 0.8,
+        "opened_from_message_id": message_id,
+        "status": "open",
+    }
+    if deepens_concept:
+        row["deepens_concept"] = str(deepens_concept).strip()[:64] or None
+    literal = to_pgvector(embedding)
+    if literal:
+        row["question_embedding"] = literal
     try:
-        service_client().table("rapport_gaps").insert(
-            {
-                "user_id": user_id,
-                "gap_id": gap_id,
-                "parent_bucket": bucket,
-                # synthetic — semantic gaps close on answer/skip, not on concept-match
-                "covers_concept": f"deepen_{_slug(topic)}",
-                "why_frame": why_frame,
-                "question": str(question).strip(),
-                "unlock_score": 0.8,
-                "opened_from_message_id": message_id,
-                "status": "open",
-            }
-        ).execute()
+        service_client().table("rapport_gaps").insert(row).execute()
+        return True
     except Exception:
         # unique(user_id, gap_id) violation = already open for this topic — fine
         logger.debug("rapport: semantic gap %s exists/race", gap_id)
+        return False
 
 
 def reconcile_gaps(user_id: str, message_id: str | None = None) -> None:

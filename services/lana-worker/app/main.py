@@ -116,7 +116,10 @@ from app.claims_persist import (
     persist_nickname_if_stated,
     replace_all_claims,
     should_extract_claims_from_message,
+    try_upsert_claims_from_message,
+    user_needs_display_name,
 )
+from app.rapport_synth import ensure_gap_buffer as rapport_ensure_gap_buffer
 from app.profile_photo import upload_profile_photo_bytes
 from app.signal_photo import upload_signal_photo_bytes
 from app.ui_actions import derive_ui_actions
@@ -1125,8 +1128,13 @@ def create_lana_session(
                 draft_raw = None
                 use_orch = False
             else:
+                # Signed-in mom with no name yet → greet with the name-ask up front (it's
+                # needed anyway, and asking first avoids interrupting a topic mid-chat).
+                _needs_name = (not auth.is_anonymous) and user_needs_display_name(
+                    auth.user_id, {}
+                )
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
-                    is_anonymous=auth.is_anonymous
+                    is_anonymous=auth.is_anonymous, needs_name=_needs_name
                 )
                 draft_raw = None
                 use_orch = False
@@ -1303,6 +1311,14 @@ def _run_lana_message(
         # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
         # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
         session_ctx_in["browse_skip_seed"] = True
+    # A "By the way…" tile answer — route it deterministically to the profile path (save the
+    # claim + reply in-thread) rather than the classifier, which would misread a bare answer
+    # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
+    if purpose == "lana" and body.intent_hint == "rapport_answer":
+        session_ctx_in["rapport_answer"] = {
+            "gap_row_id": (body.rapport_gap_row_id or "").strip() or None,
+            "question": (body.rapport_question or "").strip() or None,
+        }
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -2142,6 +2158,8 @@ class RapportAnswerBody(_BaseModel):
     text: str
     session_id: str | None = None
     message_id: str | None = None
+    # The tile's question, echoed back so Lana's concierge reply can reference it.
+    question: str | None = None
 
 
 class RapportSkipBody(_BaseModel):
@@ -2175,14 +2193,20 @@ def post_rapport_next_ask(
 @app.post("/lana/rapport/record-answer")
 def post_rapport_record_answer(
     body: RapportAnswerBody,
+    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
     auth = verify_auth(authorization)
     text = (body.text or "").strip()
     claim_id: str | None = None
+    saved = 0
     if text:
-        # Route the answer through the existing claim extractor (rich facets), then reconcile.
-        saved = extract_and_upsert_claims_from_message(auth.user_id, text)
+        # Extract claims from the answer (no per-message rapport gap — the coverage synth owns
+        # tile questions), then reconcile any now-covered gaps.
+        res = try_upsert_claims_from_message(
+            auth.user_id, text, message_id=body.message_id, allow_rapport_gap=False
+        )
+        saved = res.saved
         rapport_reconcile_gaps(auth.user_id, body.message_id)
         # Link the gap to the claim the extractor made from the answer. If it made NONE, we do
         # NOT fabricate one — the extractor already declined it (junk like "i dont know", or a
@@ -2191,6 +2215,9 @@ def post_rapport_record_answer(
             claim_id = latest_claim_id(auth.user_id)
     # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
     rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
+    # Refill the reserve so the "By the way…" tile always has a fresh, non-repeat question queued
+    # ahead. Background so it never delays the reply; synthesizes only the shortfall from claims.
+    background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
     amplitude_track(
         "rapport_gap_answered",
         user_id=auth.user_id,

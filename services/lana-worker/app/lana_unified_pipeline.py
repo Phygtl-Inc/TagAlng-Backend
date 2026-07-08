@@ -599,6 +599,58 @@ def run_lana_unified_pipeline(
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception("verified_block_assign_failed")
 
+    # A "By the way…" tile answer owns the turn: save the claim, close the gap, and reply via
+    # the profile engine — with the tile question injected as context so the answer can't be
+    # misread as a fresh chat intent. This converges rapport answers onto the normal chat path
+    # (they appear in the transcript) instead of a separate record-answer round-trip.
+    rapport = session_ctx.get("rapport_answer")
+    if isinstance(rapport, dict):
+        from app.claims_persist import (
+            latest_claim_id,
+            try_upsert_claims_from_message,
+        )
+        from app.discovery_route import _identity_conversational_reply
+        from app.rapport_gaps import mark_answered
+
+        gap_row_id = str(rapport.get("gap_row_id") or "").strip()
+        question = str(rapport.get("question") or "").strip()
+        claim_id: str | None = None
+        try:
+            res = try_upsert_claims_from_message(user_id, user_message, allow_rapport_gap=False)
+            if res.saved > 0:
+                claim_id = latest_claim_id(user_id)
+        except Exception:  # noqa: BLE001 — never fail the turn on a persist hiccup
+            logging.getLogger(__name__).exception("rapport_answer_persist_failed")
+        if gap_row_id:
+            try:
+                mark_answered(gap_row_id, answer_claim_id=claim_id)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("rapport_answer_close_gap_failed")
+        # Give the profile engine the tile question as the prior assistant turn for context.
+        aug_history = list(history or [])
+        if question:
+            aug_history = aug_history + [{"role": "assistant", "content": question}]
+        ctx = dict(session_ctx)
+        ctx.pop("rapport_answer", None)
+        reply = sanitize_assistant_message(
+            _identity_conversational_reply(
+                user_id=user_id,
+                msg=user_message,
+                history=aug_history,
+                session_ctx=session_ctx,
+                ctx=ctx,
+            )
+        )
+        ctx["_orchestrator_turn"] = False
+        ctx["timing_ms"] = timer.to_dict()
+        ctx["last_routing"] = {
+            "outcome": "rapport_answer",
+            "intent_class": "identity",
+            "tool_called": "extract_identity_claims",
+        }
+        ui = ctx.get("last_ui") or {"bucket": None, "focus_phrase": None, "highlights": []}
+        return reply, "continue", ctx, ui, None
+
     # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
     # structured extraction), the same way event_host_active does. It releases on
     # save, cancel, or a turn cap, so other flows are never affected.
