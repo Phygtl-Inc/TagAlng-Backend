@@ -405,6 +405,10 @@ class SendMessageRequest(BaseModel):
     # Deterministic intent from a tapped CTA (e.g. "host_event" from "A meet to host").
     # Lets the server enter a flow without depending on fuzzy classification.
     intent_hint: str | None = None
+    # A "By the way…" tile answer (intent_hint="rapport_answer"): the gap being answered and
+    # the tile's question, so the worker closes the gap and gives the profile engine context.
+    rapport_gap_row_id: str | None = None
+    rapport_question: str | None = None
 
 
 class TurnRouting(BaseModel):

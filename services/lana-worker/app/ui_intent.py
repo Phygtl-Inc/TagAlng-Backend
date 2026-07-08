@@ -200,10 +200,14 @@ def derive_ui_intent(
             return UI_INTENT_SHOW_PEER_PREVIEW
         if activity_count > 0 and active == "discovery.find_activities":
             return UI_INTENT_SHOW_ACTIVITY_PREVIEW
-        if peer_count > 0:
-            return UI_INTENT_SHOW_PEER_PREVIEW
-        if activity_count > 0:
-            return UI_INTENT_SHOW_ACTIVITY_PREVIEW
+        # Fall back to the preview cards ONLY when no specific intent claimed this turn (stale
+        # peers/activities linger in ctx). A non-peer intent in preview — "what can you do?"
+        # (help), settings, etc. — must render as chat, not silently re-show the neighbor cards.
+        if not active:
+            if peer_count > 0:
+                return UI_INTENT_SHOW_PEER_PREVIEW
+            if activity_count > 0:
+                return UI_INTENT_SHOW_ACTIVITY_PREVIEW
         return UI_INTENT_CHAT
 
     if ctx.get("requires_phone_verification"):

@@ -123,6 +123,47 @@ def _build(row: dict[str, Any], gap: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _load_open_rows(user_id: str) -> list[dict[str, Any]]:
+    try:
+        return (
+            service_client()
+            .table("rapport_gaps")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("status", "open")
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("rapport: candidate load failed for %s", user_id)
+        return []
+
+
+def _build_candidates(
+    rows: list[dict[str, Any]], tier_rank: int
+) -> list[tuple[float, str, dict[str, Any], dict[str, Any]]]:
+    out: list[tuple[float, str, dict[str, Any], dict[str, Any]]] = []
+    for row in rows:
+        gap = get_gap(row["gap_id"])  # None for dynamic (semantic) gaps — that's fine
+        tier = (gap or {}).get("sensitivity_tier", "LOW")
+        if tier == "HIGH" and tier_rank < _HIGH_MIN_RANK:
+            continue
+        # opened_at ascending as tie-breaker → oldest topic asked first.
+        out.append((_score(row), row.get("opened_at") or "", row, gap))
+    return out
+
+
+def _backfill_from_claims(user_id: str) -> bool:
+    """Synthesize fresh gaps from the user's claims so the tile is never empty. Best-effort;
+    the LLM call is deferred-imported so it only loads when the plate is actually empty."""
+    try:
+        from app.rapport_synth import synthesize_gaps_from_claims
+
+        return synthesize_gaps_from_claims(user_id) > 0
+    except Exception:
+        logger.exception("rapport: claim backfill failed for %s", user_id)
+        return False
+
+
 def _pending_ask(user_id: str) -> dict[str, Any] | None:
     """A gap already shown and awaiting the user's action — re-show it verbatim."""
     try:
@@ -181,36 +222,25 @@ def next_ask(
         if _recently_asked(user_id):
             return None
 
-    try:
-        rows = (
-            service_client()
-            .table("rapport_gaps")
-            .select("*")
-            .eq("user_id", user_id)
-            .eq("status", "open")
-            .execute()
-        ).data or []
-    except Exception:
-        logger.exception("rapport: candidate load failed for %s", user_id)
-        return None
-    if not rows:
-        return None
-
     tier_rank = _max_tier_rank(user_id)
-
-    candidates: list[tuple[float, str, dict[str, Any], dict[str, Any]]] = []
-    for row in rows:
-        gap = get_gap(row["gap_id"])  # None for dynamic (semantic) gaps — that's fine
-        tier = (gap or {}).get("sensitivity_tier", "LOW")
-        if tier == "HIGH" and tier_rank < _HIGH_MIN_RANK:
-            continue
-        # opened_at ascending as tie-breaker → oldest topic asked first.
-        candidates.append((_score(row), row.get("opened_at") or "", row, gap))
+    rows = _load_open_rows(user_id)
+    candidates = _build_candidates(rows, tier_rank)
+    if not candidates:
+        # Plate is empty (no open gaps, or all gated) and the cadence cap is clear — synthesize
+        # fresh follow-ups from what we already know, so there's always something to build on.
+        if _backfill_from_claims(user_id):
+            rows = _load_open_rows(user_id)
+            candidates = _build_candidates(rows, tier_rank)
     if not candidates:
         return None
 
-    # When cycling, prefer any gap other than the one we just retired.
-    pool = [c for c in candidates if c[2].get("gap_row_id") != exclude_id] or candidates
+    # When cycling, prefer any gap other than the one we just retired. If that leaves nothing
+    # (the retired ask was the only one), synthesize a fresh alternative rather than re-showing it.
+    fresh = [c for c in candidates if c[2].get("gap_row_id") != exclude_id]
+    if exclude_id and not fresh and _backfill_from_claims(user_id):
+        candidates = _build_candidates(_load_open_rows(user_id), tier_rank)
+        fresh = [c for c in candidates if c[2].get("gap_row_id") != exclude_id]
+    pool = fresh or candidates
     pool.sort(key=lambda t: (-t[0], t[1]))
     score, _opened, row, gap = pool[0]
 
