@@ -1,0 +1,22 @@
+[
+  {
+    "title": "Toddler Storytime",
+    "description": "Weekly storytime for ages 1-3. Drop in, no signup.",
+    "starts_at": "2026-07-15T10:00:00",
+    "ends_at": "2026-07-15T10:45:00",
+    "source_name": "Lake Nona Library",
+    "venue_name": "Lake Nona Library",
+    "cohort_tags": "parents|family",
+    "block_id": "8a2a1072b59ffff"
+  },
+  {
+    "title": "Family Swim Morning",
+    "description": "Open family swim, shallow lanes reserved for little ones.",
+    "starts_at": "2026-07-18T09:00:00",
+    "ends_at": "2026-07-18T11:00:00",
+    "source_name": "Lake Nona YMCA",
+    "venue_name": "YMCA Aquatic Center",
+    "cohort_tags": "parents|swimming",
+    "block_id": "8a2a1072b59ffff"
+  }
+]

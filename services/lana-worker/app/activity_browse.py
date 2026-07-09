@@ -315,6 +315,7 @@ def _format_browse_message(
             "try another kind, or set up your own?"
         )
     from app.discovery_route import _format_event_when
+    from app.partner_events import with_attribution
 
     head = f"Here's what's coming up{(' for ' + label) if label else ''}:"
     lines = [head]
@@ -327,7 +328,7 @@ def _format_browse_message(
             line += f" at {venue}"
         if when:
             line += f" ({when})"
-        lines.append(line)
+        lines.append(with_attribution(line, ev))
     tail = (
         "Tap one to RSVP, or tell me to narrow it (e.g. 'just cricket')."
         if phone_verified
