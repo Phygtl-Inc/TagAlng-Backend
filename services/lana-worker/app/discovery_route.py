@@ -234,7 +234,9 @@ _PEER_TRAIT_QUESTION_RE = re.compile(
     re.I,
 )
 _ATTR_REFINE_RE = re.compile(
-    r"\b(?:no|nope|not that)[,.\s!]*(?:(?:i\s+)?want|show\s+me|find|looking\s+for)\s+(.+)",
+    r"\b(?:no|nope|nah|not\s+(?:that|these|those|them)|none\s+of\s+(?:these|those)|"
+    r"instead|actually)\b[,.\s!:-]*"
+    r"(?:(?:i\s+)?(?:want|need|prefer)|show\s+me|find(?:\s+me)?|look(?:ing)?\s+for)\s+(.+)",
     re.I,
 )
 _VERIFY_HELP_RE = re.compile(
@@ -394,6 +396,13 @@ def _try_phrase_policy_turn(
 def _clear_peer_surface(ctx: dict[str, Any]) -> None:
     """Drop stale peer cards when this turn is not a peer-match response."""
     ctx["peer_matches"] = []
+
+
+def _clear_peer_selection_state(ctx: dict[str, Any]) -> None:
+    """A new search invalidates any offer tied to the previous result set."""
+    ctx.pop("pending_intro_offer", None)
+    ctx.pop("intro_offer_shown", None)
+    ctx.pop("recent_intro_duplicate", None)
 
 
 def _wants_block_log(msg: str, slots: dict[str, Any]) -> bool:
@@ -1647,6 +1656,7 @@ def _try_layer1_intent_turn(
             active_intent="discovery.find_by_attrs",
             identity_snippet=filter_text,
         )
+        _clear_peer_selection_state(ctx)
         ctx["peer_matches"] = peer_rows
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
         ctx["skip_claims_background_extract"] = True
@@ -2051,6 +2061,7 @@ def _try_attr_refine_turn(
         identity_snippet=filter_text,
         preview_block_id=block_id,
     )
+    _clear_peer_selection_state(ctx)
     ctx["peer_matches"] = peer_rows
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
     ctx.pop("activity_previews", None)
@@ -4720,6 +4731,67 @@ def _ask_general_clarify(
     )
 
 
+_GENERIC_VALUE_RECOMMEND_RE = re.compile(
+    r"\b(?:"
+    r"(?:got|have|any)\s+(?:recommendations?|suggestions?|ideas)|"
+    r"recommend(?:\s+me)?\s+(?:something|anything|stuff|things)?|"
+    r"suggest(?:\s+me)?\s+(?:something|anything|stuff|things)?|"
+    r"what(?:'s| is)\s+(?:worth|good|useful)\s+(?:doing|joining|checking out|nearby|around)|"
+    r"what\s+should\s+i\s+(?:do|join|try|check out|find)"
+    r")\b",
+    re.I,
+)
+_SPECIFIC_TIP_RECOMMEND_RE = re.compile(
+    r"\b(?:"
+    r"doctor|pediatrician|dentist|clinic|therapist|plumber|handyman|tutor|teacher|"
+    r"tax|restaurant|pizza|coffee|cafe|park|playground|school|daycare|dog walker|"
+    r"place|spot|service|repair"
+    r")\b",
+    re.I,
+)
+
+
+def _should_defer_value_recommendation_to_orchestrator(
+    msg: str,
+    slots: dict[str, Any] | None,
+) -> bool:
+    """Let generic value asks reach the orchestrator's recommend_value tool.
+
+    Specific local-tip asks ("recommend a pediatrician/restaurant/plumber") stay in
+    the existing tip/place lanes. This only handles broad "what's useful nearby?"
+    asks that should rank neighbors, activities, and local signals together.
+    """
+    if not slots or not _GENERIC_VALUE_RECOMMEND_RE.search(msg):
+        return False
+    if _SPECIFIC_TIP_RECOMMEND_RE.search(msg):
+        return False
+    enriched = enrich_slots(dict(slots), msg=msg)
+    linear = slots_linear_intent(enriched) or ""
+    goal = str(enriched.get("goal") or "")
+    signal_intent = str(enriched.get("signal_intent") or "")
+    if signal_intent or linear in LOOKING_SHARING_INTENTS:
+        return False
+    if linear.startswith("auth.") or linear.startswith("settings.") or linear.startswith("identity."):
+        return False
+    if linear in (
+        "discovery.block_log",
+        "discovery.show_peer_profile",
+        "discovery.explain_peer_match",
+        "social.propose_intro",
+        "social.list_intros",
+        "tier.send_nudge",
+        "tier.respond_nudge",
+        "system.unsafe",
+        "system.out_of_scope",
+    ):
+        return False
+    return (
+        linear in ("", "discovery.find_peers", "discovery.find_by_attrs", "discovery.find_activities")
+        or goal in ("", "none", "chat", "peers", "activities", "both")
+        or str(enriched.get("clarify") or "") in ("intent", "browse_or_meet")
+    )
+
+
 def _decline_out_of_scope(
     *,
     msg: str,
@@ -5268,6 +5340,18 @@ def handle_discovery_turn(
                 msg=msg, slots=slots, session_ctx=session_ctx,
                 user_id=user_id, home_block_id=home_block_id,
             )
+
+    # Generic value recommendation asks should use the orchestrator's heterogeneous
+    # ranking tool (neighbors + events + local signals) instead of being narrowed into
+    # the old peers/activities/tip lanes by the discovery classifier.
+    if (
+        discovery_ai_enabled()
+        and slots
+        and not is_hosting_ui_cta(msg)
+        and _should_defer_value_recommendation_to_orchestrator(msg, slots)
+    ):
+        session_ctx["pending_recommend_value_query"] = msg
+        return None
 
     # General uncertainty gate (ASK-WHEN-UNSURE) — the classifier could not confidently
     # place this turn in a supported lane, so ask the one AI-written question (grounded in
@@ -6256,6 +6340,44 @@ def handle_discovery_turn(
         if refined:
             ctx_base["identity_snippet"] = refined
         if phone_verified:
+            if refined:
+                try:
+                    peers = fetch_peers_by_attr_filter(
+                        user_jwt,
+                        refined,
+                        limit=5,
+                        slots=slots,
+                    )
+                except HTTPException:
+                    peers = []
+                partial_summary = None
+                if not peers:
+                    partial_summary = summarize_partial_claim_matches(
+                        user_jwt,
+                        parse_claim_filters(refined, slots),
+                    )
+                reply = format_attr_peers_reply(
+                    peers,
+                    filter_text=refined,
+                    partial_summary=partial_summary,
+                )
+                peer_rows = peers_to_match_rows(peers, phone_verified=True)
+                ctx = _routing_ctx(
+                    ctx_base,
+                    phase=PHASE_PREVIEW,
+                    active_intent="discovery.find_by_attrs",
+                    identity_snippet=refined,
+                    preview_block_id=block_id,
+                )
+                _clear_peer_selection_state(ctx)
+                ctx["peer_matches"] = peer_rows
+                ctx["last_routing"] = _discovery_routing_stub(
+                    PHASE_PREVIEW,
+                    "find_peers_by_attr_filter",
+                )
+                ctx["skip_claims_background_extract"] = True
+                ctx.pop("activity_previews", None)
+                return reply, ctx, ctx["last_routing"], peer_rows
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
             try:
                 peers = fetch_peer_matches(user_jwt, limit=5)

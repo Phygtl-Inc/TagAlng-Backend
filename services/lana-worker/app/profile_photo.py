@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import HTTPException
 
-from app.auth import SUPABASE_URL, service_client
+from app.auth import service_client
 from app.discovery_slots import slots_want_profile_photo
 
 PHASE_AWAIT_PROFILE_PHOTO = "await_profile_photo"
@@ -41,7 +42,7 @@ def user_profile_photo_url(user_id: str | None) -> str | None:
 
 
 def public_avatar_url(user_id: str, ext: str) -> str:
-    base = (SUPABASE_URL or "").rstrip("/")
+    base = os.environ.get("SUPABASE_URL", "").rstrip("/")
     return f"{base}/storage/v1/object/public/avatars/{user_id}/avatar.{ext}"
 
 

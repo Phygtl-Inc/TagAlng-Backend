@@ -83,6 +83,14 @@ def execute_tool(
             user_jwt=user_jwt,
             block_id=block_id,
         )
+    if tool_name == "recommend_value":
+        return _recommend_value(
+            user_id=user_id,
+            session_id=session_id,
+            block_id=block_id,
+            session_ctx=session_ctx,
+            args=args,
+        )
     return {"status": "error", "tool": tool_name, "reason": "unknown_tool"}
 
 
@@ -527,4 +535,46 @@ def _find_peers(
         "summary": format_peer_matches(peers),
         "block_id": bid,
         "routing_phase": "preview",
+    }
+
+
+def _recommend_value(
+    *,
+    user_id: str,
+    session_id: str,
+    block_id: str | None,
+    session_ctx: dict[str, Any],
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    from app.recommendations import log_recommendation_impressions, recommend_value_for_user
+
+    query = str(args.get("query") or args.get("need") or args.get("free_text") or "").strip()
+    limit = int(args.get("limit") or 5)
+    bid = block_id or str(session_ctx.get("preview_block_id") or "").strip() or None
+    if not bid:
+        return {
+            "status": "blocked",
+            "tool": "recommend_value",
+            "reason": "home_block_required",
+        }
+    recommendations = recommend_value_for_user(
+        user_id=user_id,
+        block_id=bid,
+        query=query or None,
+        limit=limit,
+    )
+    log_recommendation_impressions(
+        user_id=user_id,
+        session_id=session_id,
+        block_id=bid,
+        recommendations=recommendations,
+        query=query or None,
+    )
+    session_ctx["recommendations"] = recommendations
+    return {
+        "status": "ok" if recommendations else "empty",
+        "tool": "recommend_value",
+        "recommendations": recommendations,
+        "count": len(recommendations),
+        "query": query or None,
     }

@@ -61,6 +61,27 @@ class ActivityPreviewRow(BaseModel):
     preview: bool = True
 
 
+class RecommendationRow(BaseModel):
+    type: Literal["neighbor", "event", "local_signal"]
+    score: float
+    reason_codes: list[str] = Field(default_factory=list)
+    suggested_action: str
+    safe_reason: str
+    candidate_user_id: str | None = None
+    event_id: str | None = None
+    signal_id: str | None = None
+    signal_kind: str | None = None
+    title: str | None = None
+    starts_at: str | None = None
+    venue_name: str | None = None
+    nickname: str | None = None
+    avatar_url: str | None = None
+    matching_peer_label: str | None = None
+    matching_peer_concept: str | None = None
+    category: str | None = None
+    excerpt: str | None = None
+
+
 class AuthActionPayload(BaseModel):
     type: str
     phone: str | None = None
@@ -389,6 +410,7 @@ class CreateSessionResponse(BaseModel):
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
+    recommendations: list[RecommendationRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
     requires_login_otp: bool = False
@@ -462,6 +484,7 @@ class SendMessageResponse(BaseModel):
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
+    recommendations: list[RecommendationRow] = Field(default_factory=list)
     auth_intent: str | None = None
     login_phone: str | None = None
     requires_login_otp: bool = False

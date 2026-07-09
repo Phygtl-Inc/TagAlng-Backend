@@ -96,6 +96,35 @@ class TestDiscoveryRouting(unittest.TestCase):
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_generic_recommendation_defers_to_orchestrator(
+        self, mock_slots, _mock_ai
+    ) -> None:
+        mock_slots.return_value = {
+            "goal": "activities",
+            "linear_intent": "discovery.find_activities",
+            "clarify": "browse_or_meet",
+            "confidence": 0.72,
+        }
+        session_ctx = {"routing_phase": "listening"}
+
+        result = handle_discovery_turn(
+            "got any recommendations for me?",
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            history=[],
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            session_ctx.get("pending_recommend_value_query"),
+            "got any recommendations for me?",
+        )
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.fetch_blocks_for_zip")
     def test_late_find_uses_chat_history_for_identity(
@@ -1067,6 +1096,61 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertIn("dad", (ctx.get("identity_snippet") or "").lower())
         self.assertEqual(len(peers), 1)
 
+    @patch("app.discovery_route.fetch_peer_matches")
+    @patch("app.discovery_route.fetch_peers_by_attr_filter")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_slots.ai_parse_discovery_turn")
+    def test_verified_preview_refetch_uses_new_attribute_filter(
+        self,
+        mock_slots,
+        _mock_ai,
+        _mock_ai2,
+        mock_attr_search,
+        mock_generic_search,
+    ) -> None:
+        mock_slots.return_value = {
+            "in_discovery": True,
+            "goal": "peers",
+            "identity_snippet": "dads who like soccer",
+            "confidence": 0.9,
+        }
+        mock_attr_search.return_value = [
+            {
+                "peer_user_id": "new-peer",
+                "nickname": "Sam",
+                "matching_peer_label": "Dad · Soccer",
+            }
+        ]
+        result = handle_discovery_turn(
+            "Now show me dads who like soccer",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_PREVIEW,
+                "preview_block_id": "block-1",
+                "identity_snippet": "italian moms",
+                "peer_matches": [
+                    {
+                        "peer_user_id": "old-peer",
+                        "matching_peer_label": "Italian · Mom",
+                    }
+                ],
+                "pending_intro_offer": {"candidate_user_id": "old-peer"},
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+        )
+        self.assertIsNotNone(result)
+        _, ctx, routing, peers = result
+        mock_attr_search.assert_called_once()
+        mock_generic_search.assert_not_called()
+        self.assertEqual(routing.get("tool_to_call"), "find_peers_by_attr_filter")
+        self.assertEqual(ctx.get("identity_snippet"), "dads who like soccer")
+        self.assertEqual(peers[0].get("peer_user_id"), "new-peer")
+        self.assertNotIn("pending_intro_offer", ctx)
+
     def test_need_identity_still_collects_when_in_funnel(self) -> None:
         result = handle_discovery_turn(
             "hello",
@@ -1287,6 +1371,52 @@ class TestPeerTraitAndRefine(unittest.TestCase):
         self.assertIn("brazilian", reply.lower())
         self.assertEqual(ctx.get("active_intent"), "discovery.find_by_attrs")
         self.assertEqual(len(peers), 1)
+
+    @patch("app.discovery_route.fetch_peers_by_attr_filter")
+    @patch("app.discovery_route._resolve_block_id_for_turn", return_value="block-1")
+    def test_attr_refine_accepts_not_these_and_clears_old_offer(
+        self, _mock_block, mock_fetch
+    ) -> None:
+        from app.discovery_route import _try_attr_refine_turn
+
+        mock_fetch.return_value = [
+            {
+                "peer_user_id": "new-peer",
+                "nickname": "Alex",
+                "matching_peer_label": "Brazilian · Dad",
+            }
+        ]
+        result = _try_attr_refine_turn(
+            msg="ok, not these. find me Brazilian dads",
+            slots={
+                "goal": "peers",
+                "in_discovery": True,
+                "confidence": 0.9,
+                "identity_snippet": "Brazilian dads",
+            },
+            session_ctx={
+                "peer_matches": [
+                    {
+                        "peer_user_id": "old-peer",
+                        "matching_peer_label": "Mom",
+                    }
+                ],
+                "pending_intro_offer": {"candidate_user_id": "old-peer"},
+                "intro_offer_shown": True,
+                "routing_phase": PHASE_PREVIEW,
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            phase=PHASE_PREVIEW,
+        )
+        self.assertIsNotNone(result)
+        _, ctx, _, peers = result
+        mock_fetch.assert_called_once()
+        self.assertEqual(ctx.get("identity_snippet"), "Brazilian dads")
+        self.assertEqual(peers[0].get("peer_user_id"), "new-peer")
+        self.assertNotIn("pending_intro_offer", ctx)
+        self.assertNotIn("intro_offer_shown", ctx)
 
     def test_attr_refine_ignores_casual_i_want_pizza(self) -> None:
         from app.discovery_route import _try_attr_refine_turn

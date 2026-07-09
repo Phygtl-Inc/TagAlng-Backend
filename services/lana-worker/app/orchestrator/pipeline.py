@@ -211,6 +211,8 @@ def run_turn(
             session_ctx["peer_matches"] = tool_result["peer_matches"]
         if tool_result and tool_result.get("requires_phone_verification"):
             session_ctx["requires_phone_verification"] = True
+        if tool_result and tool_result.get("recommendations"):
+            session_ctx["recommendations"] = tool_result["recommendations"]
         if tool_result and tool_result.get("routing_phase"):
             session_ctx["routing_phase"] = tool_result["routing_phase"]
         if tool_result and tool_result.get("block_id"):
@@ -409,6 +411,9 @@ def _stamp_lana_unified_fields(
         ctx["routing_phase"] = "preview"
         if tool_result.get("requires_phone_verification"):
             ctx["requires_phone_verification"] = True
+    elif tool_result and tool_result.get("tool") == "recommend_value":
+        ctx["active_intent"] = "discovery.recommend_value"
+        ctx.setdefault("unified_mode", True)
 
     outcome = str(routing.get("outcome") or "")
     intent = str(routing.get("intent_class") or "")

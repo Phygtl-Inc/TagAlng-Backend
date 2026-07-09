@@ -96,6 +96,7 @@ from app.models import (
     UiActionRow,
     LanaTurnUi,
     PeerMatchRow,
+    RecommendationRow,
     SendMessageRequest,
     SendMessageResponse,
     SessionDetailResponse,
@@ -675,7 +676,6 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
         )
     return out
 
-
 def _block_log_from_ctx(ctx: dict[str, Any]) -> list[BlockLogEntryRow]:
     raw = ctx.get("block_log_entries")
     if not isinstance(raw, list):
@@ -829,6 +829,21 @@ def _signup_routing_phase_for_fe(ctx: dict[str, Any], auth: AuthSession) -> str 
     return phase or None
 
 
+def _recommendations_from_ctx(ctx: dict[str, Any]) -> list[RecommendationRow]:
+    raw = ctx.get("recommendations")
+    if not isinstance(raw, list):
+        return []
+    out: list[RecommendationRow] = []
+    for row in raw[:8]:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out.append(RecommendationRow(**row))
+        except Exception:
+            continue
+    return out
+
+
 def _onboarding_fields(
     ctx: dict[str, Any],
     auth: AuthSession,
@@ -870,6 +885,7 @@ def _onboarding_fields(
     )
     peers_raw = _peer_matches_from_ctx(ctx)
     activities = _activity_previews_from_ctx(ctx)
+    recommendations = _recommendations_from_ctx(ctx)
     routing_phase = _signup_routing_phase_for_fe(ctx, auth)
     active = str(ctx.get("active_intent") or "").strip()
     show_peers = ui_intent in PEER_SURFACE_UI_INTENTS or (
@@ -907,6 +923,7 @@ def _onboarding_fields(
         "discovery_surface": discovery_surface,
         "activity_previews": activities,
         "place_suggestions": _place_suggestions_from_ctx(ctx),
+        "recommendations": recommendations,
         "auth_intent": ctx.get("auth_intent"),
         "login_phone": ctx.get("login_phone"),
         "requires_login_otp": bool(ctx.get("requires_login_otp")),
