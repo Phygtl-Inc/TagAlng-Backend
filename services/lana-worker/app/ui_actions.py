@@ -310,6 +310,15 @@ def activity_browse_actions(ctx: dict[str, Any] | None = None) -> list[dict[str,
     search came up empty we instead offer the seek fallback (listen for me / widen) — tapping
     posts the label back, which run_activity_browse_turn reads as accept/widen."""
     draft = (ctx or {}).get("browse_draft")
+    if isinstance(draft, dict) and draft.get("_coverage_offer"):
+        # Out-of-coverage waitlist offer — tapping posts the label back, which
+        # run_activity_browse_turn reads as join / keep-looking.
+        return [
+            _action(action_id="coverage_waitlist_join", label="Join the waitlist",
+                    message="Join the waitlist", style="primary"),
+            _action(action_id="coverage_keep_looking", label="Keep looking around",
+                    message="Keep looking around", style="secondary"),
+        ]
     if isinstance(draft, dict) and draft.get("_seek_offer"):
         return [
             _action(action_id="browse_seek_yes", label="Yes, listen for me",
