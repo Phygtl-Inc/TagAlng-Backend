@@ -3,6 +3,8 @@ from unittest.mock import patch
 
 from app.activity_browse import (
     activity_browse_should_release,
+    enter_activity_browse_from_cta,
+    looks_like_bare_look_meet_entry,
     reset_activity_browse_state,
     run_activity_browse_turn,
 )
@@ -142,6 +144,62 @@ class TestRunBrowseTurn(unittest.TestCase):
         reset_activity_browse_state(ctx)
         self.assertFalse(ctx.get("activity_browse_active"))
         self.assertIsNone(ctx.get("browse_draft"))
+
+
+class TestLookMeetCtaEntry(unittest.TestCase):
+    """The "A meet or playgroup" CTA (intent_hint=look_meet) must only take the canned
+    fast path on a BARE chip tap — free text with real content has to reach the AI
+    classifier, never the canned "what kind of thing are you up for?" opener."""
+
+    def test_free_text_with_hint_is_not_captured_by_canned_funnel(self) -> None:
+        # QA 2026-07-08: this message got the literal canned opener in production.
+        ctx: dict = {}
+        entered = enter_activity_browse_from_cta(ctx, "I need a babysitter for tonight")
+        self.assertFalse(entered)
+        # Session untouched → the pipeline's browse gate never fires and the turn falls
+        # through to handle_discovery_turn (layer-1 classification).
+        self.assertFalse(ctx.get("activity_browse_active"))
+        self.assertFalse(ctx.get("browse_skip_seed"))
+
+    def test_semantic_edge_messages_are_not_bare(self) -> None:
+        # The QA edge set: safety worry, emotional relocation, capability question —
+        # all must classify, none may take the canned entry.
+        for msg in (
+            "how do I know the moms on here are real and not creeps?",
+            "I'm a stay at home dad, is this app for me too?",
+            "We just moved here after my husband's job fell through and honestly "
+            "I don't know a single person on this street and it's been really hard",
+            "can you help me find someone to watch my kids",
+        ):
+            self.assertFalse(looks_like_bare_look_meet_entry(msg), msg)
+
+    def test_bare_chip_tap_keeps_canned_behavior(self) -> None:
+        ctx: dict = {}
+        self.assertTrue(enter_activity_browse_from_cta(ctx, "Family & kids"))
+        self.assertTrue(ctx.get("activity_browse_active"))
+        self.assertTrue(ctx.get("browse_skip_seed"))
+        # The seed turn still asks P1 canned (fast, no classification dependency).
+        reply = run_activity_browse_turn(
+            user_message="Family & kids",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+        )
+        self.assertIn("what kind of thing are you up for", reply.lower())
+        self.assertFalse(ctx.get("browse_skip_seed"))  # consumed — later turns re-decide
+
+    def test_cta_seed_payload_zip_and_labels_are_bare(self) -> None:
+        for msg in (
+            "",
+            "I'm looking for a meet or playgroup",  # the button's generic payload
+            "A meet or playgroup",
+            "Sports",
+            "Outdoors",
+            "Stroller walk",
+            "32827",
+        ):
+            self.assertTrue(looks_like_bare_look_meet_entry(msg), repr(msg))
 
 
 class TestClarifierRouting(unittest.TestCase):
