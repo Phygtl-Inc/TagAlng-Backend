@@ -43,20 +43,31 @@ def extract_host_ctx(session_ctx: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def stash_pending_event_draft(user_id: str, host_ctx: dict[str, Any]) -> None:
+def stash_pending_event_draft(
+    user_id: str,
+    host_ctx: dict[str, Any],
+    session_id: str | None = None,
+) -> None:
     """Persist a guest's in-progress event for `user_id` to recover after they log in.
-    Best-effort: a stash failure must not break the verification turn."""
+
+    Keyed by the SOURCE session (`session_id`): restashing from the same session replaces
+    that session's slot only, so concurrent sessions of one account never clobber each
+    other's drafts. Best-effort: a stash failure must not break the verification turn."""
     if not user_id or not isinstance(host_ctx, dict) or not host_ctx.get("event_draft"):
         return
     try:
-        service_client().table("pending_event_drafts").upsert(
-            {
-                "user_id": user_id,
-                "host_ctx": host_ctx,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
-            on_conflict="user_id",
-        ).execute()
+        row: dict[str, Any] = {
+            "user_id": user_id,
+            "host_ctx": host_ctx,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        sb = service_client()
+        if session_id:
+            row["session_id"] = session_id
+            sb.table("pending_event_drafts").upsert(row, on_conflict="session_id").execute()
+        else:
+            # No session attribution available — append; the newest-first pop still wins.
+            sb.table("pending_event_drafts").insert(row).execute()
     except Exception:
         import logging
 
@@ -65,23 +76,25 @@ def stash_pending_event_draft(user_id: str, host_ctx: dict[str, Any]) -> None:
 
 
 def pop_pending_event_draft(user_id: str) -> dict[str, Any] | None:
-    """Read and delete the pending event for `user_id` (one-shot recovery). Returns the
-    stashed host context, or None if there's nothing waiting / on any error."""
+    """Read and delete the newest pending event for `user_id` (one-shot recovery). Deletes
+    only the popped row — another session's stash for the same account stays intact.
+    Returns the stashed host context, or None if there's nothing waiting / on any error."""
     if not user_id:
         return None
     try:
         sb = service_client()
         res = (
             sb.table("pending_event_drafts")
-            .select("host_ctx")
+            .select("id, host_ctx")
             .eq("user_id", user_id)
+            .order("created_at", desc=True)
             .limit(1)
             .execute()
         )
         row = (res.data or [None])[0]
         if not isinstance(row, dict):
             return None
-        sb.table("pending_event_drafts").delete().eq("user_id", user_id).execute()
+        sb.table("pending_event_drafts").delete().eq("id", row.get("id")).execute()
         host_ctx = row.get("host_ctx")
         return host_ctx if isinstance(host_ctx, dict) and host_ctx.get("event_draft") else None
     except Exception:

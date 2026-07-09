@@ -701,6 +701,10 @@ def run_lana_unified_pipeline(
         **session_ctx,
         "phone_verified": phone_verified,
         "unified_mode": True,
+        # Source-session attribution for anything a turn persists outside this session's
+        # own row (e.g. the pending_event_drafts stash) — drafts are keyed per session,
+        # never per user, so concurrent sessions of one account can't bleed.
+        "_session_id": session_id,
     }
     # Set when a rapport concierge turn hands off (zero-tap dispatch) so we can log where the
     # re-driven request actually routed — diagnostic for "yes → wrong lane" mis-routes.
