@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from app.discovery_route import handle_discovery_turn, looks_like_logout
+from app.gates import gate_copy, gate_shown
 from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import unified_rules_first_enabled
@@ -219,10 +220,9 @@ def _publish_failure_reply(error: str | None, title: str) -> str:
     name = f"**{title}**" if title else "your event"
     detail = (error or "").lower()
     if "phone_not_verified" in detail or ":403" in detail or "not_authenticated" in detail:
-        return (
-            f"{name} is all set, but I can't post it until your account is verified. "
-            "Verify your email and I'll publish it right away."
-        )
+        # Backend-enforced write gate (publish_event) — benefit-framed copy.
+        gate_shown("publish_event")
+        return f"{name} is all set. " + gate_copy("publish_event")
     if "location" in detail or "venue" in detail:
         return (
             f"I have everything for {name} except a spot I can place on the map. "

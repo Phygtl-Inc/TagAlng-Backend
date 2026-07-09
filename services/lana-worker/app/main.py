@@ -141,6 +141,7 @@ from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
+from app.gates import gate_copy, gate_shown
 from app.notifications import email_html, notify_user
 from app.rapport_gaps import (
     mark_answered as rapport_mark_answered,
@@ -2097,10 +2098,9 @@ def _complete_event_draft(
             published = True
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":
-                closing = (
-                    "Your event draft is ready — verify your email in settings, "
-                    "then publish from the form or call complete again."
-                )
+                # Backend-enforced write gate (publish_event) — benefit-framed copy.
+                gate_shown("publish_event", user_id)
+                closing = "Your event draft is ready. " + gate_copy("publish_event")
             else:
                 raise
 
