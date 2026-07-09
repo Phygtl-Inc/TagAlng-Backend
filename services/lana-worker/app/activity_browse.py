@@ -19,6 +19,8 @@ import logging
 import re
 from typing import Any
 
+from app.i18n import session_lang, t
+
 _INTEREST_SUGGESTIONS = ["Sports", "Family & kids", "Outdoors", "Social"]
 _BROWSE_TURN_CAP = 12
 
@@ -305,18 +307,24 @@ def _filter_events_by_query(
 
 
 def _format_browse_message(
-    events: list[dict[str, Any]], label: str | None, *, phone_verified: bool
+    events: list[dict[str, Any]],
+    label: str | None,
+    *,
+    phone_verified: bool,
+    lang: str | None = None,
 ) -> str:
     label = (label or "").strip() or None
     if not events:
-        lead = f"No {label} ones" if label else "Nothing"
-        return (
-            f"{lead} on your block in the next couple weeks. Want me to widen it, "
-            "try another kind, or set up your own?"
-        )
+        if label:
+            return t("browse.events_empty_label", lang, label=label)
+        return t("browse.events_empty", lang)
     from app.discovery_route import _format_event_when
 
-    head = f"Here's what's coming up{(' for ' + label) if label else ''}:"
+    head = (
+        t("browse.events_header_label", lang, label=label)
+        if label
+        else t("browse.events_header", lang)
+    )
     lines = [head]
     for ev in events[:5]:
         title = str(ev.get("title") or "Activity")
@@ -329,9 +337,9 @@ def _format_browse_message(
             line += f" ({when})"
         lines.append(line)
     tail = (
-        "Tap one to RSVP, or tell me to narrow it (e.g. 'just cricket')."
+        t("browse.events_tail_verified", lang)
         if phone_verified
-        else "Verify your email to RSVP, or tell me to narrow it (e.g. 'just cricket')."
+        else t("browse.events_tail_guest", lang)
     )
     lines.append(tail)
     return "\n".join(lines)
@@ -350,6 +358,7 @@ def run_activity_browse_turn(
     msg = str(user_message or "").strip()
     draft: dict[str, Any] = dict(session_ctx.get("browse_draft") or {})
     phone_verified = bool(session_ctx.get("phone_verified"))
+    lang = session_lang(session_ctx)
 
     turns = int(session_ctx.get("browse_turns") or 0) + 1
     session_ctx["browse_turns"] = turns
@@ -401,7 +410,7 @@ def run_activity_browse_turn(
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
         session_ctx["routing_phase"] = "listening"
-        return "Love it — what kind of thing are you up for?"
+        return t("browse.ask_interest", lang)
 
     from app.discovery_route import (
         extract_zip,
@@ -440,12 +449,10 @@ def run_activity_browse_turn(
     if draft.get("_need_zip"):
         zip5 = extract_zip(msg)
         if not zip5:
-            return _ask_zip("What's your ZIP so I can see what's on your block?")
+            return _ask_zip(t("browse.ask_zip_retry", lang))
         blocks = fetch_blocks_for_zip(user_jwt, zip5)
         if not blocks:
-            return _ask_zip(
-                f"I couldn't find a block for ZIP {zip5}. Try another (e.g. 32827 for Lake Nona)."
-            )
+            return _ask_zip(t("browse.zip_no_block", lang, zip=zip5))
         _set_preview_block(zip5, blocks)
         draft["_need_zip"] = None
     elif msg:
@@ -463,9 +470,7 @@ def run_activity_browse_turn(
             if blocks:
                 block_id = _set_preview_block(str(zip5), blocks)
         if not block_id:
-            return _ask_zip(
-                "What's your ZIP code? Once I know your block I can show what's happening nearby."
-            )
+            return _ask_zip(t("browse.ask_zip", lang))
 
     # "weekend" is handled by the LLM date matcher too, but keep the SQL-side weekend
     # filter as a cheap pre-narrow when the word appears verbatim.
@@ -485,11 +490,7 @@ def run_activity_browse_turn(
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
         session_ctx["routing_phase"] = "listening"
-        return (
-            f"Nothing like **{interest}** on your block in the next couple weeks. "
-            "Want me to listen and text you the moment a neighbor wants the same — "
-            "or widen the search?"
-        )
+        return t("browse.empty_interest_offer", lang, interest=interest)
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _INTEREST_SUGGESTIONS
@@ -497,4 +498,4 @@ def run_activity_browse_turn(
     session_ctx["activity_browse_active"] = True
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     session_ctx["routing_phase"] = "listening"
-    return _format_browse_message(matched, label, phone_verified=phone_verified)
+    return _format_browse_message(matched, label, phone_verified=phone_verified, lang=lang)
