@@ -314,9 +314,20 @@ _SYSTEM = (
     "say show-me-what's-on (browse) or match-me-with-someone (meet) — set clarify='browse_or_meet'. Use "
     "clarify='browse_or_meet' for the genuine browse-vs-seek tie, and clarify='scope' when you cannot tell "
     "whether an ask is a supported TagAlng action or an out-of-scope errand. "
+    "*** HARD RULE — the single most-missed clarify: a vague 'do something / hang out / meet up with "
+    "(other) moms|people|parents|neighbors' that names NO concrete activity AND gives NO show-vs-match "
+    "verb is ALWAYS clarify='browse_or_meet'. This is NOT a confident looking.meet. Setting looking.meet "
+    "(or any lane) at high confidence with clarify=null here is a MISTAKE: it silently saves a passive "
+    "'I'll ping you when a neighbor matches' post the user never asked for. A concrete pairing target "
+    "('tennis partner', 'stroller-walk buddy', 'someone to jog with') is a real looking.meet; a bare "
+    "'something with other moms' is the TIE — clarify. WORKED EXAMPLE: 'i am thinking of doing something "
+    "with other moms this weekend' → clarify='browse_or_meet', linear_intent='looking.meet' (best guess), "
+    "confidence 0.55, clarify_question offering show-what's-happening vs match-me-with-moms. *** "
     "CONFIDENCE HONESTY: reserve confidence >= 0.85 for genuinely unambiguous asks. When you picked one lane "
     "over another reasonable reading (especially browse vs meet), report honest mid-confidence (0.5-0.7) — do "
-    "NOT inflate to 0.9 or 1.0. Over-claiming certainty hides real ambiguity and skips the clarify. "
+    "NOT inflate to 0.9 or 1.0. Over-claiming certainty hides real ambiguity and skips the clarify. A generic "
+    "social want reported at confidence >= 0.85 with clarify=null is self-contradictory — if you're that "
+    "sure it's a meet, the user must have named a concrete partner/activity; otherwise lower it and clarify. "
     "GENERAL CLARIFY (clarify='intent') — ASK-WHEN-UNSURE is the default: if you are NOT clearly confident "
     "which SUPPORTED TagAlng action the user wants — the message is vague, blurry, rambling, mixed, or you "
     "would just be guessing a lane (confidence under ~0.65) — set clarify='intent' instead of guessing. "
@@ -639,6 +650,14 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
     the router judges the latest message in context (answer/refine vs pivot vs abandon)
     instead of noun-matching it to a lane. 'none' when no capture is active — so this
     line is inert for every non-capture turn."""
+    if session_ctx.get("rapport_active"):
+        return (
+            "rapport — Lana asked a warm, getting-to-know-you question and the user is ANSWERING it. "
+            "A personal/preference reply ('I usually run alone', 'parks & trails', 'idk', 'both', "
+            "'yes please') is an ANSWER → goal=chat, NEVER a fresh intent like meet_seek / "
+            "find_activities / find_peers. Only a clear request to FIND/SHOW/HOST/GET something "
+            "(a place, an event, people, host an event) is a PIVOT — classify it fresh so it leaves rapport"
+        )
     if session_ctx.get("look_meet_active"):
         return (
             "look_meet — helping the user describe a meet/playgroup they are LOOKING FOR; "

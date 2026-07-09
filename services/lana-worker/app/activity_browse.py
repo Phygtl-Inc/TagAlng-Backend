@@ -87,23 +87,31 @@ def _is_browse_answer(
     from app.lane_decision import is_confident_off_lane, is_meta_or_chat
     from app.layer1_intents import utterance_indicates_tip_seek
 
-    if is_meta_or_chat(slots):
-        return False
     # Deterministic backstop to the AI classifier: an explicit request for a standing
     # PLACE/venue/service recommendation ("find me restaurants", "know a good pizza place")
     # is a tip_seek PIVOT, never a browse refinement — the browse reads time-bound EVENTS
     # and a place is not an event. Release so routing hands it to the tip_seek → Google
     # Places path. Bare activity/topic refinements never trip this (the regex needs a
-    # service/place noun), so a genuine "cricket"/"outdoors" refine still stays.
+    # service/place noun), so a genuine "cricket"/"outdoors" refine still stays. Checked FIRST
+    # so an explicit place request still escapes even while we're awaiting the interest.
     if utterance_indicates_tip_seek(message):
         return False
-    # Awaiting the reply to the "want me to listen for you?" seek offer (shown when a search
-    # came up empty) — the reply (yes / widen / a new kind) belongs to THIS flow, the same way
-    # look_meet keeps a turn while a follow-up is pending. Stay and let the turn interpret it;
-    # a genuine pivot/abandon already released upstream via cancel / abandon / pivot_re.
+    # A reply we EXPLICITLY asked for belongs to THIS flow — never release on it (that was the
+    # "Social" loop: the P1 answer read as a foreign meet_seek and released, so the browse-vs-meet
+    # clarifier re-asked forever). Two pending prompts:
+    #   • P1 "what kind of thing are you up for?" (offered chips like "Social"/"Outdoors"): the
+    #     next reply IS the interest — stay and capture it, even if a bare topic reads off-lane.
+    #   • the "want me to listen for you?" seek offer (shown when a search came up empty): its
+    #     reply (yes / widen / a new kind) is interpreted by the turn.
+    # A genuine pivot/abandon/cancel already released upstream (lane_should_continue) before us.
     draft = session_ctx.get("browse_draft")
-    if isinstance(draft, dict) and draft.get("_seek_offer"):
+    if isinstance(draft, dict) and (
+        draft.get("_seek_offer")
+        or (draft.get("_asked") and not str(draft.get("interest") or "").strip())
+    ):
         return True
+    if is_meta_or_chat(slots):
+        return False
     return not is_confident_off_lane(
         slots,
         native_goals=_NATIVE_GOALS,

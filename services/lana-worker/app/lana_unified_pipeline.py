@@ -39,6 +39,149 @@ _EVENT_DRAFT_FIELDS = {
 }
 
 
+# The concierge's action `kind` IS a semantic intent decision — she already read whether the
+# neighbor wants a place, an event, people, to host, or to share. Map each kind to the discovery
+# intent so we route the hand-off by that decision instead of re-classifying the query text (which
+# mis-reads a place like "nature trails" as a meet/browse). See _forced_slots_for_kind.
+_KIND_TO_INTENT: dict[str, dict[str, Any]] = {
+    "seek_tip": {"goal": "save_signal", "linear_intent": "looking.tip", "signal_intent": "tip_seek"},
+    "find_activities": {
+        "goal": "activities", "linear_intent": "discovery.find_activities",
+        "signal_intent": None, "in_discovery": True,
+    },
+    "find_neighbors": {
+        "goal": "peers", "linear_intent": "discovery.find_by_attrs",
+        "signal_intent": None, "in_discovery": True,
+    },
+    "host_meet": {"goal": "save_signal", "linear_intent": "sharing.host", "signal_intent": "host_meet"},
+    "share_tip": {"goal": "save_signal", "linear_intent": "sharing.tip", "signal_intent": "tip_share"},
+}
+
+
+def _forced_slots_for_kind(
+    kind: str,
+    query: str,
+    action: Any,
+    session_ctx: dict[str, Any],
+    *,
+    home_block_id: str | None,
+    phone_verified: bool,
+    history: list[dict[str, Any]],
+    timer: "TurnTimer | None",
+) -> dict[str, Any] | None:
+    """Route a rapport hand-off by the concierge's semantic `kind`, not by re-guessing the noun.
+
+    Parses the query once for its detail fields (what/where), then FORCES the intent to match the
+    chosen kind and primes the per-message slot cache handle_discovery_turn reuses. Returns the
+    forced slots, or None when the kind isn't routable (so the caller leaves routing to the AI).
+    The parse is the same call handle_discovery_turn would make, so this adds no extra model call.
+    """
+    intent = _KIND_TO_INTENT.get(str(kind or "").strip())
+    if intent is None:
+        return None
+    from app.discovery_slots import discovery_slots_for_turn
+
+    base = discovery_slots_for_turn(
+        session_ctx,
+        query,
+        routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+        history=history,
+        has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+        has_identity=bool(session_ctx.get("identity_snippet")),
+        phone_verified=phone_verified,
+        timer=timer,
+    )
+    slots = dict(base) if isinstance(base, dict) else {}
+    slots.update(intent)
+    # This is a committed decision, not a guess — clear any browse-vs-meet clarify tie and float
+    # confidence so downstream lane gates fire instead of re-asking "what kind of thing?".
+    slots["confidence"] = max(float(slots.get("confidence") or 0.0), 0.9)
+    slots["abandon"] = False
+    slots["clarify"] = None
+    slots["clarify_question"] = None
+    slots["clarify_options"] = []
+    if not str(slots.get("signal_detail") or "").strip():
+        topic = str(action.get("topic") or "").strip() if isinstance(action, dict) else ""
+        slots["signal_detail"] = topic or None
+    return slots
+
+
+def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
+    """Drop the concierge follow-up capture so the turn falls through to normal routing. Set to
+    None (not popped) so the {**old, **new} session merge clears them instead of keeping a stale
+    value across the round-trip."""
+    for k in (
+        "rapport_active", "rapport_answer",
+        "rapport_followup_question", "rapport_followup_count", "rapport_reply",
+        "rapport_offer_pending", "rapport_pending_action",
+    ):
+        session_ctx[k] = None
+
+
+# Coarse "family" of an app-move so we can tell a genuine PIVOT (offer running moms → she asks for a
+# playground) from an ACCEPTANCE of the offer. A bare "sure"/"yes" reads as a confident looking.meet
+# in context, which is the SAME family as a find_neighbors offer → accept, dispatch the stored action.
+_KIND_FAMILY: dict[str, str] = {
+    "find_neighbors": "people", "find_activities": "activities",
+    "host_meet": "host", "seek_tip": "tip", "share_tip": "tip",
+}
+
+
+def _slots_family(slots: dict[str, Any] | None) -> str | None:
+    if not isinstance(slots, dict):
+        return None
+    from app.layer1_intents import normalize_linear_intent
+
+    linear = normalize_linear_intent(slots.get("linear_intent")) or ""
+    signal = str(slots.get("signal_intent") or "")
+    goal = str(slots.get("goal") or "")
+    if signal == "meet_seek" or goal == "peers" or "find_peers" in linear or "find_by_attrs" in linear or "meet" in linear:
+        return "people"
+    if goal == "activities" or "find_activities" in linear:
+        return "activities"
+    if signal == "host_meet" or "sharing.host" in linear:
+        return "host"
+    if signal in ("tip_seek", "tip_share") or "looking.tip" in linear or "sharing.tip" in linear:
+        return "tip"
+    return None
+
+
+def _offer_is_pivot(slots: dict[str, Any] | None, pending_kind: str) -> bool:
+    """True when a typed reply to a pending offer is a confident request for something in a DIFFERENT
+    family than the offer (a real pivot to release), rather than an acceptance of it. When the family
+    can't be told, default to False (accept) — dispatching the offered search beats trapping her."""
+    from app.lane_decision import is_confident_off_lane
+
+    if not is_confident_off_lane(slots, native_goals=frozenset({"chat"})):
+        return False  # not a confident actionable turn (e.g. "sure"/"idk") → accept the offer
+    fam = _slots_family(slots)
+    pending_fam = _KIND_FAMILY.get(pending_kind)
+    if fam is None or pending_fam is None:
+        return False
+    return fam != pending_fam
+
+
+def _rapport_should_release(
+    message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None
+) -> bool:
+    """Whether the concierge follow-up capture should hand back to normal routing this turn.
+
+    Reuses the SAME universal-exit machinery every sticky lane uses (lane_should_continue) so we
+    do NOT rebuild logout/pivot/safety inside the concierge: abandon, unsafe/out_of_scope, and any
+    confident PIVOT to a real find/host/tip intent all release. A warm getting-to-know-you answer
+    ('I usually run alone', 'idk', 'both', 'yes') is goal=chat while active_capture=rapport, so it
+    stays; a clear 'show me parks' reads as tip_seek and releases to the real search."""
+    from app.lane_decision import is_confident_off_lane, lane_should_continue
+
+    def _is_rapport_answer(_msg: str, _ctx: dict[str, Any], s: dict[str, Any] | None) -> bool:
+        # Rapport owns chatty getting-to-know-you turns; anything confidently actionable is a pivot.
+        return not is_confident_off_lane(s, native_goals=frozenset({"chat"}))
+
+    return not lane_should_continue(
+        message, session_ctx, slots, is_valid_answer=_is_rapport_answer, pivot_re=None
+    )
+
+
 def _event_draft_complete(draft: Any) -> bool:
     """A host draft is publishable once it has a title, a place, and a start time."""
     if not isinstance(draft, dict):
@@ -559,6 +702,9 @@ def run_lana_unified_pipeline(
         "phone_verified": phone_verified,
         "unified_mode": True,
     }
+    # Set when a rapport concierge turn hands off (zero-tap dispatch) so we can log where the
+    # re-driven request actually routed — diagnostic for "yes → wrong lane" mis-routes.
+    rapport_handoff_send: str | None = None
 
     # Wipe per-turn surfaces (…_listed_now, …_published_now, saved cards) up front, so
     # a one-shot card from a prior turn never leaks into this one — the early host /
@@ -581,6 +727,10 @@ def run_lana_unified_pipeline(
             "event_when_date", "event_when_time", "event_place_asked", "event_venue",
             "event_settings", "event_cap_asked", "event_approval_asked",
             "event_share_asked", "event_affinity_asked",
+            # Rapport concierge capture releases on logout too — same universal exit, one path.
+            "rapport_active", "rapport_answer", "rapport_followup_question",
+            "rapport_followup_count", "rapport_reply", "rapport_offer_pending",
+            "rapport_pending_action",
         ):
             session_ctx[_k] = None
 
@@ -600,25 +750,123 @@ def run_lana_unified_pipeline(
             logging.getLogger(__name__).exception("verified_block_assign_failed")
 
     # A "By the way…" tile answer owns the turn: save the claim, close the gap, and reply via
-    # the profile engine — with the tile question injected as context so the answer can't be
-    # misread as a fresh chat intent. This converges rapport answers onto the normal chat path
-    # (they appear in the transcript) instead of a separate record-answer round-trip.
+    # the concierge engine (acknowledge her answer + one grounded follow-up), NOT the classifier
+    # — a bare answer ("I love trying new restaurants") would be misread as a fresh chat intent.
     rapport = session_ctx.get("rapport_answer")
+    # A reply to the concierge's own follow-up is a rapport ANSWER — but it must NOT be a separate
+    # sticky path that re-implements logout / pivots / safety. So it's a capture the SAME classifier
+    # owns (active_capture=rapport): re-classify the turn and RELEASE to normal routing on any pivot,
+    # abandon, or unsafe (logout is caught above). Only a genuine getting-to-know-you answer
+    # ("I usually run alone", "idk", "yes") stays and gets a concierge reply. The seed turn (first
+    # tile answer, rapport_answer set) never re-classifies — it always seeds the flow.
+    if not isinstance(rapport, dict) and session_ctx.get("rapport_active"):
+        from app.discovery_slots import discovery_slots_for_turn
+
+        if session_ctx.get("rapport_offer_pending"):
+            # She's responding to a pending app-move offer ("Want to meet other park moms?"). Decide
+            # accept / decline / pivot, then DISPATCH the concierge's stored action ourselves on accept
+            # — deterministically, whether she TAPPED the chip or typed "sure"/"yes". We never re-hand
+            # the acceptance to the classifier (a bare "sure" reads as a topic-less looking.meet →
+            # "when works for you?" timing loop) or to the concierge (a reply writer — it narrates
+            # "you're already connected" instead of running the search). The stored action already
+            # carries the right kind + topic.
+            pending_action = session_ctx.get("rapport_pending_action")
+            pending_send = (
+                str(pending_action.get("send") or "").strip()
+                if isinstance(pending_action, dict) else ""
+            )
+            pending_kind = (
+                str(pending_action.get("kind") or "").strip()
+                if isinstance(pending_action, dict) else ""
+            )
+            tapped = bool(pending_send) and user_message.strip() == pending_send
+            decision = "accept" if tapped else "close"
+            if pending_send and not tapped:
+                rap_slots = discovery_slots_for_turn(
+                    session_ctx,
+                    user_message,
+                    routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+                    history=history,
+                    has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+                    has_identity=bool(session_ctx.get("identity_snippet")),
+                    phone_verified=phone_verified,
+                    timer=timer,
+                )
+                if isinstance(rap_slots, dict) and rap_slots.get("abandon"):
+                    decision = "close"  # "no thanks" / bailed → warm close
+                elif _offer_is_pivot(rap_slots, pending_kind):
+                    decision = "pivot"  # a different real request → normal routing
+                else:
+                    decision = "accept"  # "sure" / "yes" / "ok" → run the offered search
+            if decision == "accept" and pending_send:
+                logging.getLogger(__name__).info(
+                    "rapport_offer_accept dispatch kind=%s send=%r tapped=%s",
+                    pending_kind, pending_send, tapped,
+                )
+                rapport_handoff_send = pending_send
+                user_message = pending_send
+                forced_slots = _forced_slots_for_kind(
+                    pending_kind, pending_send, pending_action, session_ctx,
+                    home_block_id=home_block_id, phone_verified=phone_verified,
+                    history=history, timer=timer,
+                )
+                if forced_slots is not None:
+                    session_ctx["_discovery_slots"] = forced_slots
+                    session_ctx["_discovery_slots_for"] = pending_send
+                    logging.getLogger(__name__).info(
+                        "rapport_offer_accept forced_intent kind=%s -> goal=%s linear=%s signal=%s",
+                        pending_kind, forced_slots.get("goal"),
+                        forced_slots.get("linear_intent"), forced_slots.get("signal_intent"),
+                    )
+                _reset_rapport_state(session_ctx)
+                rapport = None  # skip the concierge block; fall through to the discovery gates below
+            elif decision == "pivot":
+                _reset_rapport_state(session_ctx)  # her real request drives normal routing
+                rapport = None
+            else:
+                # Decline (or a stored offer we can't dispatch) → let the concierge close warmly.
+                # Clear the offer so it isn't re-dispatched, but keep the capture for the reply.
+                session_ctx["rapport_offer_pending"] = None
+                session_ctx["rapport_pending_action"] = None
+                followup_q = str(session_ctx.get("rapport_followup_question") or "").strip()
+                rapport = {"gap_row_id": None, "question": followup_q or None}
+        else:
+            rap_slots = discovery_slots_for_turn(
+                session_ctx,
+                user_message,
+                routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+                history=history,
+                has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+                has_identity=bool(session_ctx.get("identity_snippet")),
+                phone_verified=phone_verified,
+                timer=timer,
+            )
+            if _rapport_should_release(user_message, session_ctx, rap_slots):
+                _reset_rapport_state(session_ctx)  # fall through to normal routing (slots cached)
+            else:
+                followup_q = str(session_ctx.get("rapport_followup_question") or "").strip()
+                rapport = {"gap_row_id": None, "question": followup_q or None}
     if isinstance(rapport, dict):
         from app.claims_persist import (
             latest_claim_id,
             try_upsert_claims_from_message,
         )
-        from app.discovery_route import _identity_conversational_reply
         from app.rapport_gaps import mark_answered
+        from app.rapport_reply import rapport_concierge_reply
 
         gap_row_id = str(rapport.get("gap_row_id") or "").strip()
         question = str(rapport.get("question") or "").strip()
         claim_id: str | None = None
+        saved_any = False
+        saved_label: str | None = None
+        saved_bucket: str | None = None
         try:
             res = try_upsert_claims_from_message(user_id, user_message, allow_rapport_gap=False)
-            if res.saved > 0:
+            saved_any = res.saved > 0
+            if saved_any:
                 claim_id = latest_claim_id(user_id)
+                saved_label = res.primary_label
+                saved_bucket = res.primary_bucket
         except Exception:  # noqa: BLE001 — never fail the turn on a persist hiccup
             logging.getLogger(__name__).exception("rapport_answer_persist_failed")
         if gap_row_id:
@@ -626,30 +874,109 @@ def run_lana_unified_pipeline(
                 mark_answered(gap_row_id, answer_claim_id=claim_id)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("rapport_answer_close_gap_failed")
-        # Give the profile engine the tile question as the prior assistant turn for context.
-        aug_history = list(history or [])
-        if question:
-            aug_history = aug_history + [{"role": "assistant", "content": question}]
-        ctx = dict(session_ctx)
-        ctx.pop("rapport_answer", None)
-        reply = sanitize_assistant_message(
-            _identity_conversational_reply(
-                user_id=user_id,
-                msg=user_message,
-                history=aug_history,
-                session_ctx=session_ctx,
-                ctx=ctx,
-            )
+        # A tile answer is NOT fresh onboarding — reply via the concierge engine, which
+        # acknowledges HER actual answer and asks one grounded follow-up (with tappable
+        # chips). Never the heritage-first profile-intake engine, which re-asks covered
+        # threads like heritage regardless of what's already known. See rapport_reply.py.
+        prior_followups = int(session_ctx.get("rapport_followup_count") or 0)
+        concierge = rapport_concierge_reply(
+            answer_text=user_message,
+            question=question or None,
+            saved_label=saved_label,
+            saved_bucket=saved_bucket,
+            saved=saved_any,
+            prior_followups=prior_followups,
         )
-        ctx["_orchestrator_turn"] = False
-        ctx["timing_ms"] = timer.to_dict()
-        ctx["last_routing"] = {
-            "outcome": "rapport_answer",
-            "intent_class": "identity",
-            "tool_called": "extract_identity_claims",
-        }
-        ui = ctx.get("last_ui") or {"bucket": None, "focus_phrase": None, "highlights": []}
-        return reply, "continue", ctx, ui, None
+        # ZERO-TAP HAND-OFF: only when she is ACCEPTING an app-move we put in front of her LAST turn
+        # (rapport_offer_pending). Then the concierge returns an ACTION carrying a concrete first-person
+        # query, and we re-drive THIS turn with it through the REAL pipeline so actual places / events /
+        # neighbors appear NOW. A proactive app-move — on the seed turn, or any turn where no offer was
+        # pending — is an OFFER, not a command: it renders as a tap-to-go chip (the `else` branch)
+        # instead of surprise-running a search she never asked for. (A typed "find me X" never reaches
+        # here — it releases via _rapport_should_release above and routes normally.)
+        action = concierge.get("action")
+        action_send = str(action.get("send") or "").strip() if isinstance(action, dict) else ""
+        offer_was_pending = bool(session_ctx.get("rapport_offer_pending"))
+        if action_send and offer_was_pending:
+            action_kind = str(action.get("kind") or "").strip() if isinstance(action, dict) else ""
+            logging.getLogger(__name__).info(
+                "rapport_handoff dispatch kind=%s send=%r (accepted_msg=%r)",
+                action_kind, action_send, user_message,
+            )
+            rapport_handoff_send = action_send
+            user_message = action_send
+            for _k in (
+                "rapport_active", "rapport_answer", "rapport_followup_question",
+                "rapport_followup_count", "rapport_reply", "rapport_offer_pending",
+                "rapport_pending_action",
+            ):
+                session_ctx.pop(_k, None)
+            # Route by the concierge's SEMANTIC decision (kind), not by re-classifying the noun:
+            # force the intent to match the chosen kind and prime the slot cache the discovery
+            # gates below reuse. This is what keeps "find me a playground" in the places lane
+            # instead of the meet/browse lane. Falls back to AI routing if the kind isn't mapped.
+            forced_slots = _forced_slots_for_kind(
+                action_kind, action_send, action, session_ctx,
+                home_block_id=home_block_id, phone_verified=phone_verified,
+                history=history, timer=timer,
+            )
+            if forced_slots is not None:
+                session_ctx["_discovery_slots"] = forced_slots
+                session_ctx["_discovery_slots_for"] = action_send
+                logging.getLogger(__name__).info(
+                    "rapport_handoff forced_intent kind=%s -> goal=%s linear=%s signal=%s",
+                    action_kind, forced_slots.get("goal"),
+                    forced_slots.get("linear_intent"), forced_slots.get("signal_intent"),
+                )
+            # fall through to the normal pipeline with user_message = her concrete request
+        else:
+            # She is NOT accepting a pending offer, so nothing auto-runs. Reply in-thread and, when
+            # the concierge proposed a next move, render it as a TAP-TO-GO chip she chooses:
+            #  - a proactive app-move OFFER (action set) → one action chip; arm rapport_offer_pending
+            #    so her acceptance next turn (a soft "yes" that stays) dispatches for real.
+            #  - a personal follow-up QUESTION (options) → suggested one-tap answers.
+            #  - a warm close (neither) → clear the capture.
+            # Arming the one-turn continuation keeps her next reply routing back here, not to the
+            # classifier (which would misread a bare answer as a fresh intent). A typed find/host/get
+            # request still releases via _rapport_should_release above; tapping an offer chip posts a
+            # topic-named request that routes for real. The count backstops runaway qualifying.
+            ctx = dict(session_ctx)
+            ctx.pop("rapport_answer", None)
+            reply = sanitize_assistant_message(str(concierge.get("reply") or ""))
+            options = concierge.get("options")
+            if action_send:
+                ctx["rapport_reply"] = {"options": [], "action": action}
+                ctx["rapport_active"] = True
+                ctx["rapport_followup_question"] = reply
+                ctx["rapport_followup_count"] = prior_followups + 1
+                ctx["rapport_offer_pending"] = True
+                # Remember the exact action so tapping the chip dispatches it deterministically next
+                # turn — no re-classify (mis-lands the lane) and no second concierge call (which can
+                # hallucinate "you're already connected" instead of running the search).
+                ctx["rapport_pending_action"] = action
+            elif isinstance(options, list) and options:
+                ctx["rapport_reply"] = {"options": options, "action": None}
+                ctx["rapport_active"] = True
+                ctx["rapport_followup_question"] = reply
+                ctx["rapport_followup_count"] = prior_followups + 1
+                ctx["rapport_offer_pending"] = False
+            else:
+                ctx.pop("rapport_reply", None)
+                ctx.pop("rapport_active", None)
+                ctx.pop("rapport_followup_question", None)
+                ctx.pop("rapport_followup_count", None)
+                ctx.pop("rapport_offer_pending", None)
+                ctx.pop("rapport_pending_action", None)
+            ctx["_orchestrator_turn"] = False
+            ctx["timing_ms"] = timer.to_dict()
+            ctx["last_routing"] = {
+                "outcome": "rapport_answer",
+                "intent_class": "identity",
+                "tool_called": "extract_identity_claims",
+            }
+            # No heritage bucket / focus-phrase eyebrow — that was the profile engine's artifact.
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", ctx, ui, None
 
     # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
     # structured extraction), the same way event_host_active does. It releases on
@@ -844,6 +1171,12 @@ def run_lana_unified_pipeline(
         if discovery is not None:
             reply, ctx, routing, peers = discovery
             reply = sanitize_assistant_message(reply)
+            if rapport_handoff_send is not None:
+                logging.getLogger(__name__).info(
+                    "rapport_handoff routed send=%r -> routing=%s previews=%s peers=%s",
+                    rapport_handoff_send, routing,
+                    bool(ctx.get("activity_previews")), len(peers or []),
+                )
             # Loop breaker: if the rule layer is about to repeat the same reply for
             # the Nth turn, hand off to the orchestrator (LLM) instead of looping.
             if use_orchestrator and discovery_reply_is_stuck(history, reply, ctx):

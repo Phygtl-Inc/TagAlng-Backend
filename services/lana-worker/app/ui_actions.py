@@ -335,6 +335,55 @@ def event_created_actions() -> list[dict[str, Any]]:
     return []
 
 
+def _rapport_action_chip(action: dict[str, Any]) -> dict[str, Any] | None:
+    """One action chip for a concierge reply. Both the label and the message posted on tap
+    are authored by the model (action.label / action.send) — routing stays AI-owned; we
+    only pass the strings through, no kind→message mapping here."""
+    label = str(action.get("label") or "").strip()
+    message = str(action.get("send") or "").strip()
+    if not label or not message:
+        return None
+    return _action(action_id="rapport_action", label=label, message=message, style="primary")
+
+
+def rapport_reply_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Tap-able chips for a concierge reply to a "By the way…" tile answer — either the
+    suggested first-person answers to a follow-up question, or a single action chip.
+    Tapping posts the message back to Lana as a normal turn."""
+    options = payload.get("options")
+    if isinstance(options, list) and options:
+        rows: list[dict[str, Any]] = []
+        for i, opt in enumerate(options):
+            if not isinstance(opt, dict):
+                continue
+            label = str(opt.get("label") or "").strip()
+            if not label:
+                continue
+            # Post the SHORT value she tapped (the pill label), NOT the model's full
+            # first-person sentence — the sentence puts words in her mouth and its extra
+            # context can skew the read of her answer. The concierge still gets the tile
+            # question for context, so a terse answer ("solo") reads fine.
+            message = label
+            rows.append(
+                _action(
+                    action_id=f"rapport_opt_{i}",
+                    label=label,
+                    message=message,
+                    style="primary" if i == 0 else "secondary",
+                )
+            )
+            if len(rows) >= 4:
+                break
+        if rows:
+            return rows
+    action = payload.get("action")
+    if isinstance(action, dict):
+        chip = _rapport_action_chip(action)
+        if chip:
+            return [chip]
+    return []
+
+
 def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any]]:
     """Top-level bubble CTAs (outside chat composer) for the current turn."""
     from app.ui_intent import (
@@ -354,6 +403,14 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
     clarify_opts = ctx.get("clarify_options")
     if isinstance(clarify_opts, list) and clarify_opts:
         chips = clarify_chip_actions([str(o) for o in clarify_opts])
+        if chips:
+            return chips
+
+    # Concierge reply to a rapport tile answer — suggested answers or one action chip.
+    # Also render regardless of ui_intent (the turn is a plain "chat" reply).
+    rapport_reply = ctx.get("rapport_reply")
+    if isinstance(rapport_reply, dict):
+        chips = rapport_reply_actions(rapport_reply)
         if chips:
             return chips
 

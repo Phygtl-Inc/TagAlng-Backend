@@ -1772,7 +1772,14 @@ def _try_signal_lane_turn(
         confirm_verdict = interpret_signal_confirm_reply(draft, msg)
         verdict = str((confirm_verdict or {}).get("verdict") or "")
         cancel = verdict == "cancel" or (confirm_verdict is None and is_signal_cancel(msg))
-        reroute = verdict == "reroute" or should_abort_signal_draft(msg, draft, slots)
+        # The confirm-AI reads the reply WITH the pending question in hand ("When works for
+        # you?"), so when it's available its verdict is authoritative — don't let the main
+        # classifier (blind to what Lana just asked) reroute a hesitant, in-context answer
+        # like "not sure" out of the cascade and into find-peers. should_abort_signal_draft
+        # is only the fallback when the AI is unavailable, mirroring is_signal_cancel above.
+        reroute = verdict == "reroute" or (
+            confirm_verdict is None and should_abort_signal_draft(msg, draft, slots)
+        )
         if cancel or reroute:
             clear_signal_draft(ctx_base)
             # Persist the clear even if a different handler wins this re-routed turn.
