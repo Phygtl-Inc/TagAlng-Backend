@@ -1806,6 +1806,53 @@ def _try_signal_lane_turn(
 
     if active_linear or isinstance(draft, dict):
         if not phone_verified:
+            # Swap/tip asks must never dead-end on the bare verify wall (QA: a dentist
+            # tip ask got "Verify your email first" and nothing else) — those surfaces
+            # aren't live yet, so acknowledge the ask, explain it's almost here, and
+            # queue it honestly (notify=false until they verify a contact). Live
+            # families (meets) keep the existing gate below.
+            from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR
+            from app.queued_contributions import unverified_queue_reply
+
+            draft_dict = draft if isinstance(draft, dict) else {}
+            signal_intent = (
+                str(draft_dict.get("intent") or "").strip()
+                or SIGNAL_INTENT_BY_LINEAR.get(str(active_linear or ""), "")
+            )
+            queued_reply = unverified_queue_reply(
+                signal_intent=signal_intent,
+                detail=str(
+                    (slots or {}).get("signal_detail")
+                    or draft_dict.get("detail")
+                    or msg
+                    or ""
+                ).strip()[:500],
+                user_id=user_id,
+                block_id=home_block_id
+                or str(session_ctx.get("preview_block_id") or "").strip()
+                or None,
+                zip_code=str(session_ctx.get("zip") or "").strip() or None,
+                category=str(
+                    (slots or {}).get("signal_category")
+                    or draft_dict.get("category")
+                    or ""
+                ).strip()
+                or None,
+            )
+            if queued_reply:
+                clear_signal_draft(ctx_base)
+                return (
+                    queued_reply,
+                    _routing_ctx(
+                        ctx_base,
+                        phase=phase or "listening",
+                        active_intent=active_linear or INTENT_SAVE_SIGNAL,
+                    ),
+                    _discovery_routing_stub(
+                        phase or "listening", "save_signal_queued_unverified"
+                    ),
+                    [],
+                )
             return (
                 "Verify your email first — then I can post that to your block.",
                 _routing_ctx(
@@ -2459,6 +2506,32 @@ def _try_save_signal_turn(
         )
 
     if not phone_verified:
+        # Swap/tip asks never get the bare verify wall (QA: the dentist tip dead-ended
+        # there) — those surfaces aren't live yet, so acknowledge, explain they're
+        # almost here, and queue the ask honestly. Live families keep the gate.
+        from app.queued_contributions import unverified_queue_reply
+
+        queued_reply = unverified_queue_reply(
+            signal_intent=intent,
+            detail=detail,
+            user_id=user_id,
+            block_id=home_block_id
+            or str(session_ctx.get("preview_block_id") or "").strip()
+            or None,
+            zip_code=str(session_ctx.get("zip") or "").strip() or None,
+            category=category,
+        )
+        if queued_reply:
+            return (
+                queued_reply,
+                _routing_ctx(
+                    ctx_base, phase=phase or "listening", active_intent=active_intent
+                ),
+                _discovery_routing_stub(
+                    phase or "listening", "save_signal_queued_unverified"
+                ),
+                [],
+            )
         return (
             "Verify your email first — then I can post that to your block.",
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),

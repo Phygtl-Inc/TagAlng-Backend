@@ -14,6 +14,10 @@ TURN_SCOPED_SURFACES = frozenset({
     "event_published_now",
     "item_listed_now",
     "tip_listed_now",
+    # Queued-for-launch variants: the capture completed but the swap/tip surface isn't
+    # live on the block yet, so the contribution was parked in queued_contributions.
+    "item_queued_now",
+    "tip_queued_now",
     "look_meet_saved_now",
     # Tip-seek Google fallback cards + their refine chips. Ephemeral per-turn UI: without
     # this a tip turn's "From Google" restaurant cards (google_place_suggestions) and refine
