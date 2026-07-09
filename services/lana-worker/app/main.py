@@ -55,6 +55,7 @@ from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lana_unified_pipeline import run_lana_unified_pipeline
+from app.activity_browse import enter_activity_browse_from_cta
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
 from app.tip_share import looks_like_tip_share_entry
@@ -1311,17 +1312,14 @@ def _run_lana_message(
     # (intent_hint). Meet ≡ activity: looking for a meet means SEARCHING the block's real
     # activities first, so the CTA enters the activity-browse (search) flow. The seek to be
     # MATCHED is offered only as a fallback when the search comes up empty (see
-    # activity_browse's _seek_offer). Natural language is left to the AI classifier downstream.
+    # activity_browse's _seek_offer). Only a BARE chip tap enters deterministically — a
+    # message with real semantic content ("I need a babysitter for tonight", a safety
+    # question, an emotional message) is left to the AI classifier downstream, so it reaches
+    # the right handler instead of the canned "what kind of thing?" opener.
     if purpose == "lana" and not session_ctx_in.get("pass_along_active") and not session_ctx_in.get(
         "tip_share_active"
     ) and body.intent_hint == "look_meet":
-        session_ctx_in["activity_browse_active"] = True
-        session_ctx_in["browse_turns"] = 0
-        session_ctx_in["browse_draft"] = None
-        # Button entry carries a generic seed phrase with no real interest — skip mining it so
-        # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
-        # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
-        session_ctx_in["browse_skip_seed"] = True
+        enter_activity_browse_from_cta(session_ctx_in, body.message)
     # A "By the way…" tile answer — route it deterministically to the profile path (save the
     # claim + reply in-thread) rather than the classifier, which would misread a bare answer
     # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
