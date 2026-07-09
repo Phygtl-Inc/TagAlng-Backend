@@ -166,5 +166,54 @@ class TestClarifierRouting(unittest.TestCase):
         self.assertIn("happening", reply.lower())
 
 
+class TestBrowseWhenText(unittest.TestCase):
+    """Chat text, preview-card label, and the LLM filter's date lines must all say the
+    same LOCAL date for the same event (QA 2026-07-08: one event, three datetimes)."""
+
+    # Stored UTC instant = Mon Jul 13, 8:30 PM America/New_York.
+    QA_EVENT = {
+        "id": "ev-1",
+        "title": "Playdate at the park",
+        "venue_name": "New York",
+        "starts_at": "2026-07-14T00:30:00+00:00",
+    }
+
+    def setUp(self) -> None:
+        patcher = patch.dict("os.environ", {"EVENT_DEFAULT_TZ": "America/New_York"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_chat_text_uses_local_date_not_utc(self) -> None:
+        from app.activity_browse import _format_browse_message
+
+        msg = _format_browse_message([self.QA_EVENT], None, phone_verified=True)
+        self.assertIn("(Mon Jul 13, 8:30 PM)", msg)
+        self.assertNotIn("Jul 14", msg)  # the leaked UTC date QA saw
+
+    def test_chat_text_date_equals_card_label_date(self) -> None:
+        from app.activity_browse import _format_browse_message
+        from app.discovery_route import activity_previews_from_events
+
+        preview = activity_previews_from_events([self.QA_EVENT])[0]
+        self.assertEqual(preview["starts_label"], "Mon, Jul 13 · 8:30 PM")
+        # Raw ISO stays for clients — payload contract unchanged.
+        self.assertEqual(preview["starts_at"], "2026-07-14T00:30:00+00:00")
+        msg = _format_browse_message([self.QA_EVENT], None, phone_verified=True)
+        self.assertIn("Mon Jul 13", msg)  # same local date as the card
+
+    def test_llm_filter_sees_local_date(self) -> None:
+        from app.activity_browse import _event_when_parts
+
+        # The date line the filter LLM matches "on July 13" against must be local too.
+        self.assertEqual(_event_when_parts(self.QA_EVENT["starts_at"]), "2026-07-13 Mon")
+
+    def test_core_block_events_carry_when_text_not_raw_utc(self) -> None:
+        from app.orchestrator.memory import _event_for_llm
+
+        out = _event_for_llm(dict(self.QA_EVENT))
+        self.assertNotIn("starts_at", out)
+        self.assertEqual(out["when_text"], "Mon Jul 13, 8:30 PM")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -243,10 +243,12 @@ _START_TIME_SUGGESTIONS = ["9 AM", "12 PM", "3 PM", "6 PM"]
 def _when_suggestions() -> list[str]:
     """Concrete upcoming weekend dates ("Sat Jun 20", "Sun Jun 21", + next weekend)
     so a "when?" answer lands on a REAL date instead of a vague "this weekend" the
-    extractor can't pin to a calendar day. Computed from the worker's live clock."""
-    from datetime import datetime, timedelta
+    extractor can't pin to a calendar day. Event-local today, not the UTC worker's."""
+    from datetime import timedelta
 
-    today = datetime.now().date()
+    from app.event_when import event_now
+
+    today = event_now().date()
     sat = today + timedelta(days=(5 - today.weekday()) % 7)  # this week's Sat (today if Sat)
     sun = today + timedelta(days=(6 - today.weekday()) % 7)
 
