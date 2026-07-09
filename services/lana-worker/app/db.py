@@ -13,8 +13,18 @@ _INTRO_STATE_NULL_DELETES = frozenset({
     "pending_intro_offer",
     "intro_offer_shown",
 })
+# Side-quest state (upfront name capture) + the interrupted-goal stack. These MUST be
+# null-deletable: the name-capture success turn used to `pop()` awaiting_upfront_name from
+# its turn ctx, but the {**old, **new} merge resurrected the old True — so the very next
+# turn re-entered the name quest and re-asked a user Lana had just greeted by name (QA
+# 2026-07-08). Handlers now stamp these None to clear them.
+_SIDE_QUEST_NULL_DELETES = frozenset({
+    "awaiting_upfront_name",
+    "upfront_name_attempts",
+    "goal_stack",
+})
 _CTX_NULL_DELETES = frozenset(
-    {"signal_draft", *_INTRO_STATE_NULL_DELETES, *TURN_SCOPED_SURFACES}
+    {"signal_draft", *_INTRO_STATE_NULL_DELETES, *_SIDE_QUEST_NULL_DELETES, *TURN_SCOPED_SURFACES}
 )
 
 # Session keys that together describe a complete, ready-to-publish event the host flow
