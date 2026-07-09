@@ -1,13 +1,13 @@
 import os
 from datetime import datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import HTTPException
 
 from app.auth import service_client
 from app.event_location import resolve_event_location
+from app.event_when import event_tz as _event_tz
 from app.models import EventDraft
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -51,17 +51,8 @@ def _filter_cohort_tags(tags: list[str]) -> list[str]:
     return out[:6]
 
 
-_DEFAULT_EVENT_TZ = "America/New_York"
-
-
-def _event_tz() -> ZoneInfo:
-    """The timezone a host's wall-clock time ("6 PM") is anchored to. Single-region
-    today (Orlando / Eastern); override with EVENT_DEFAULT_TZ when that changes."""
-    name = (os.environ.get("EVENT_DEFAULT_TZ") or _DEFAULT_EVENT_TZ).strip() or _DEFAULT_EVENT_TZ
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo(_DEFAULT_EVENT_TZ)
+# The tz anchor moved to app.event_when.event_tz so parsing (here) and every
+# human-facing render share ONE definition of the event's wall clock.
 
 
 def _parse_iso_ts(raw: str | None) -> str | None:

@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from app.auth import service_client
+from app.event_when import format_event_when
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -242,7 +243,9 @@ def format_user_context(ctx: dict[str, Any], purpose: str) -> str:
         lines.append(f"- Block network ({name}): {mc} other member(s) on this block")
         for ev in (net.get("upcoming_events") or [])[:3]:
             title = ev.get("title") or "Event"
-            when = ev.get("starts_at") or ""
+            # Pre-formatted LOCAL text, never the raw UTC ISO — fed a raw instant, the
+            # model re-derives the wrong date and calls an 8:30 PM event "morning".
+            when = format_event_when(ev.get("starts_at"), style="inline") or ""
             lines.append(f"  · Upcoming activity: {title} ({when})")
         hints = net.get("neighbor_hints") or []
         if hints:
