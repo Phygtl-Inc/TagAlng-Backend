@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 
 import httpx
 from fastapi import HTTPException
@@ -79,10 +80,18 @@ def require_verified_neighbor_comms(auth: AuthSession) -> None:
         raise HTTPException(status_code=403, detail="phone_not_verified")
 
 
+@lru_cache(maxsize=1)
+def _cached_service_client():
+    # Built once and reused so the underlying httpx session keeps the connection
+    # alive (HTTP keepalive) — otherwise every DB call pays a fresh TCP + TLS
+    # handshake to Supabase, which dominates per-call latency.
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
 def service_client():
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return _cached_service_client()
 
 
 def email_has_registered_account(email: str) -> bool:

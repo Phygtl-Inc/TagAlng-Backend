@@ -3,6 +3,7 @@ import logging
 import os
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
@@ -1187,6 +1188,9 @@ def create_lana_session(
     except HTTPException:
         raise
     except Exception as exc:
+        # Log the full traceback to the console — otherwise the caller only sees a
+        # truncated 502 string and the real stack (where it actually broke) is lost.
+        _LOG.exception("lana_session_failed (purpose=%s)", purpose)
         raise HTTPException(
             status_code=502,
             detail=_vertex_error_detail("lana_session_failed", exc),
@@ -1233,6 +1237,13 @@ def _run_lana_message(
         raise HTTPException(status_code=400, detail="session_not_active")
 
     purpose = str(session.get("purpose", "profile_intake"))
+    _LOG.info(
+        "──▶ turn start | purpose=%s session=%s user=%s msg=%r",
+        purpose,
+        session_id,
+        auth.user_id,
+        body.message.strip()[:200],
+    )
     require_home_block_for_purpose(auth, purpose)
     with timer.stage("db_save_user_message"):
         user_msg_id = insert_message(session_id, "user", body.message.strip(), {}, embed=False)
@@ -1389,27 +1400,46 @@ def _run_lana_message(
             timing_ms = timer.to_dict()
             orch_used = False
 
-        with timer.stage("db_save_assistant_message"):
-            assistant_msg_id = insert_message(
+        # These two writes hit different tables (lana_messages insert vs
+        # lana_sessions update) and don't depend on each other, so run them
+        # concurrently — one round-trip of wall-clock instead of two. Safe to
+        # share the cached Supabase client across threads: its underlying httpx
+        # session handles concurrent requests.
+        merged = merge_session_context(session.get("context"), session_ctx)
+
+        def _save_assistant_message() -> str | None:
+            return insert_message(
                 session_id,
                 "assistant",
                 reply,
                 {"status": status, "ui": ui_raw, "orchestrator": orch_used},
                 embed=False,
             )
-        with timer.stage("db_update_session"):
-            merged = merge_session_context(session.get("context"), session_ctx)
+
+        def _persist_session() -> None:
             update_session_context(
                 session_id,
                 merged,
                 core_block=session_ctx.get("core_block"),
             )
+
+        with timer.stage("db_write_assistant_and_session"):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                msg_future = pool.submit(_save_assistant_message)
+                session_future = pool.submit(_persist_session)
+                assistant_msg_id = msg_future.result()
+                session_future.result()
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
         item_draft = _item_draft_from_dict(merged.get("item_draft"))
         tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
         look_draft = _look_draft_from_dict(merged.get("look_draft"))
     except Exception as exc:
+        # Log the full traceback to the console — otherwise the caller only sees a
+        # truncated 502 string and the real stack (where it actually broke) is lost.
+        _LOG.exception(
+            "lana_message_failed (purpose=%s session=%s)", purpose, session_id
+        )
         raise HTTPException(
             status_code=502,
             detail=_vertex_error_detail("lana_message_failed", exc),
@@ -1448,8 +1478,11 @@ def _run_lana_message(
             body.message.strip(),
         )
 
-    with timer.stage("db_list_messages_final"):
-        all_msgs = list_messages(session_id)
+    # Message count for the debug log below — computed in memory instead of
+    # re-fetching the whole thread from Supabase. `history` already holds every
+    # message through the user turn (it was listed after the user insert); the
+    # only new row this turn is the assistant message we just inserted.
+    final_msg_count = len(history) + (1 if assistant_msg_id else 0)
     if timing_ms is not None:
         merged_timing = dict(timing_ms)
         for key, ms in timer.ms.items():
@@ -1466,10 +1499,18 @@ def _run_lana_message(
     debug = _turn_debug_from_ctx(
         merged, ui_intent=ob.get("ui_intent"), orchestrator=orch_used
     )
+    _LOG.info(
+        "◀── turn done | session=%s total=%sms intent=%s handler=%s ui=%s",
+        session_id,
+        timing_ms.get("total_ms"),
+        getattr(debug, "intent", None),
+        getattr(debug, "handler", None),
+        ob.get("ui_intent"),
+    )
     _LOG.debug(
         "lana_turn session=%s msgs=%s timing=%s debug=%s",
         session_id,
-        len(all_msgs),
+        final_msg_count,
         timing_ms,
         debug.model_dump() if debug is not None else None,
     )
