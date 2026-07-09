@@ -139,6 +139,44 @@ def log_feature_request(
         return
 
 
+def save_coverage_waitlist(
+    *,
+    user_id: str | None,
+    zip_code: str,
+    looking_for: str | None = None,
+    notify: bool = True,
+    founding_interest: bool = False,
+) -> bool:
+    """Put the user on the coverage waitlist for a ZIP we have no block for (see
+    migration). Upsert on (user_id, zip) so tapping "Join the waitlist" twice never
+    double-books. Anonymous guests are stored under their guest user_id — contact info
+    lands later when they verify. Returns False on any failure so the caller can soften
+    the reply; a save failure must never break the turn."""
+    zip5 = str(zip_code or "").strip()
+    if not zip5:
+        return False
+    try:
+        service_client().table("coverage_waitlist").upsert(
+            {
+                "user_id": user_id or None,
+                "zip": zip5,
+                "looking_for": (str(looking_for).strip()[:200] or None) if looking_for else None,
+                "notify": bool(notify),
+                "founding_interest": bool(founding_interest),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="user_id,zip",
+        ).execute()
+        return True
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "save_coverage_waitlist_failed: zip=%s user_id=%s", zip5, user_id
+        )
+        return False
+
+
 def log_moderation_flag(
     *,
     user_id: str | None,

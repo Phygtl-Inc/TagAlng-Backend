@@ -65,6 +65,20 @@ _WIDEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Replies to the out-of-coverage waitlist offer ("want me to text you the day we
+# arrive?"). Decline is checked FIRST — "no thanks, keep looking" must not read as an
+# accept via its stray "ok"-ish words.
+_WAITLIST_ACCEPT_RE = re.compile(
+    r"\b(yes|yeah|yep|yup|sure|ok(?:ay)?|please|join|sign me up|wait\s?list|"
+    r"text me|notify me|let me know|count me in)\b",
+    re.IGNORECASE,
+)
+_KEEP_LOOKING_RE = re.compile(
+    r"\b(keep look(?:ing)?|look(?:ing)? around|no thanks|no thank you|nah|not now|"
+    r"maybe later|later)\b",
+    re.IGNORECASE,
+)
+
 
 # Lanes this browse does NOT own — a confident classification into any of these is a
 # pivot, never a browse refinement. Note meet_seek/looking.meet ARE foreign here so the
@@ -104,9 +118,12 @@ def _is_browse_answer(
     #   • the "want me to listen for you?" seek offer (shown when a search came up empty): its
     #     reply (yes / widen / a new kind) is interpreted by the turn.
     # A genuine pivot/abandon/cancel already released upstream (lane_should_continue) before us.
+    #   • the out-of-coverage waitlist offer: its reply (join / keep looking / another ZIP)
+    #     is interpreted by the turn, same as the seek offer.
     draft = session_ctx.get("browse_draft")
     if isinstance(draft, dict) and (
         draft.get("_seek_offer")
+        or draft.get("_coverage_offer")
         or (draft.get("_asked") and not str(draft.get("interest") or "").strip())
     ):
         return True
@@ -344,6 +361,7 @@ def run_activity_browse_turn(
     history: list[dict[str, Any]],
     user_jwt: str,
     home_block_id: str | None,
+    user_id: str | None = None,
 ) -> str:
     """Drive one browse turn. Mutates session_ctx (browse_draft, activity_browse_active,
     activity_previews, routing_phase). Returns Lana's reply."""
@@ -363,6 +381,67 @@ def run_activity_browse_turn(
     if session_ctx.get("browse_skip_seed"):
         session_ctx["browse_skip_seed"] = False
         msg = ""
+
+    # ── Reply to the out-of-coverage waitlist offer ("text you the day we arrive?"). The
+    #    ZIP she gave is already persisted on the session (coverage_zip) — it is NEVER
+    #    re-asked. Join → store the waitlist row; a new ZIP → try that one; keep looking /
+    #    anything else → release gracefully with the door left open. ──
+    if draft.get("_coverage_offer"):
+        from app.discovery_route import extract_zip
+
+        zip_pending = str(session_ctx.get("coverage_zip") or "").strip()
+        new_zip = extract_zip(msg)
+        if new_zip and new_zip != zip_pending:
+            # Trying another ZIP — route it through the ZIP branch below (which validates
+            # and resolves it) so the ZIP message is never mined as an interest.
+            draft["_coverage_offer"] = None
+            draft["_need_zip"] = True
+        elif _KEEP_LOOKING_RE.search(msg):
+            reset_activity_browse_state(session_ctx)
+            session_ctx["routing_phase"] = "listening"
+            return (
+                "Of course — I'm still here for questions and planning in the meantime. "
+                "What are you in the mood for?"
+            )
+        elif _WAITLIST_ACCEPT_RE.search(msg):
+            from app.db import save_coverage_waitlist
+
+            looking_for = str(draft.get("interest") or "").strip() or None
+            saved = save_coverage_waitlist(
+                user_id=user_id,
+                zip_code=zip_pending,
+                looking_for=looking_for,
+            )
+            reset_activity_browse_state(session_ctx)
+            session_ctx["routing_phase"] = "listening"
+            if not saved:
+                return (
+                    "I couldn't save that just now — say 'join the waitlist' in a bit and "
+                    "I'll try again."
+                )
+            session_ctx["coverage_waitlisted"] = True
+            bits = [f"You're on the list for {zip_pending}!"]
+            if looking_for:
+                bits.append(
+                    f"The day Lana lands on your block, a {looking_for} search is the "
+                    "first thing I'll run for you."
+                )
+            if phone_verified:
+                bits.append("I'll text you the day we arrive.")
+            else:
+                bits.append(
+                    "Verify your email whenever you're ready so I can actually reach you "
+                    "the day we arrive."
+                )
+            return " ".join(bits)
+        else:
+            # Not a tap, not a new ZIP — don't trap her in the offer.
+            reset_activity_browse_state(session_ctx)
+            session_ctx["routing_phase"] = "listening"
+            return (
+                "No worries — say 'join the waitlist' anytime and I'll text you the day "
+                "Lana lands on your block. What else can I help with?"
+            )
 
     # ── Reply to the "want me to listen for you?" seek offer (search came up empty). The
     #    reply is a tap on a known pill, so read it by label; the lane release already went
@@ -406,6 +485,7 @@ def run_activity_browse_turn(
     from app.discovery_route import (
         extract_zip,
         fetch_blocks_for_zip,
+        is_placeholder_zip,
         resolve_block_id,
     )
 
@@ -435,17 +515,43 @@ def run_activity_browse_turn(
         session_ctx["routing_phase"] = "listening"
         return prompt
 
+    def _out_of_coverage(zip5: str) -> str:
+        """Honest out-of-coverage state for a valid ZIP with no block (QA 2026-07-08:
+        12/12 metro moms dead-ended). The ZIP she gave is persisted on the session so it
+        is NEVER re-asked, and she's never pointed at someone else's ZIP (the old "try
+        32827" told a Manhattan mom to try Orlando). Offers the waitlist instead."""
+        session_ctx["coverage_zip"] = zip5
+        draft["_need_zip"] = None
+        if session_ctx.get("coverage_waitlisted"):
+            reset_activity_browse_state(session_ctx)
+            session_ctx["routing_phase"] = "listening"
+            return (
+                f"You're already on the waitlist for {zip5} — I'll text you the day Lana "
+                "lands on your block. Anything else in the meantime?"
+            )
+        draft["_coverage_offer"] = True
+        draft["suggestions"] = ["Join the waitlist", "Keep looking around"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["routing_phase"] = "listening"
+        return (
+            "We're not on your block yet — Lana's starting in Lake Nona, Orlando. "
+            "Want me to text you the day we arrive?"
+        )
+
     # ── If we asked for a ZIP last turn, this message is the ZIP (don't treat it as the
     #    interest). Otherwise the message is the interest (first answer) or a refinement. ──
     if draft.get("_need_zip"):
         zip5 = extract_zip(msg)
         if not zip5:
             return _ask_zip("What's your ZIP so I can see what's on your block?")
+        if is_placeholder_zip(zip5):
+            return _ask_zip(
+                f"Hmm, {zip5} doesn't look like a US ZIP — typo? What's your ZIP code?"
+            )
         blocks = fetch_blocks_for_zip(user_jwt, zip5)
         if not blocks:
-            return _ask_zip(
-                f"I couldn't find a block for ZIP {zip5}. Try another (e.g. 32827 for Lake Nona)."
-            )
+            return _out_of_coverage(zip5)
         _set_preview_block(zip5, blocks)
         draft["_need_zip"] = None
     elif msg:
@@ -453,15 +559,28 @@ def run_activity_browse_turn(
     interest = str(draft.get("interest") or "")
 
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
-    # (session preview_block_id) counts, not just the persisted profile block. Ask for the
-    # ZIP in-flow rather than dead-ending on "Nothing on your block" when none is known.
+    # (session preview_block_id, or an unresolved coverage_zip) counts, not just the
+    # persisted profile block. Ask for the ZIP in-flow ONLY when none was ever given; a
+    # known-but-uncovered ZIP goes to the out-of-coverage state, never a re-ask.
     block_id = resolve_block_id(session_ctx, home_block_id)
     if not block_id:
-        zip5 = extract_zip(msg) or session_ctx.get("preview_zip")
+        zip5 = str(
+            extract_zip(msg)
+            or session_ctx.get("preview_zip")
+            or session_ctx.get("coverage_zip")
+            or ""
+        ).strip()
+        if zip5 and is_placeholder_zip(zip5):
+            session_ctx["coverage_zip"] = None
+            return _ask_zip(
+                f"Hmm, {zip5} doesn't look like a US ZIP — typo? What's your ZIP code?"
+            )
         if zip5:
-            blocks = fetch_blocks_for_zip(user_jwt, str(zip5))
+            blocks = fetch_blocks_for_zip(user_jwt, zip5)
             if blocks:
-                block_id = _set_preview_block(str(zip5), blocks)
+                block_id = _set_preview_block(zip5, blocks)
+            else:
+                return _out_of_coverage(zip5)
         if not block_id:
             return _ask_zip(
                 "What's your ZIP code? Once I know your block I can show what's happening nearby."
