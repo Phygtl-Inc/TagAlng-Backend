@@ -243,10 +243,13 @@ _START_TIME_SUGGESTIONS = ["9 AM", "12 PM", "3 PM", "6 PM"]
 def _when_suggestions() -> list[str]:
     """Concrete upcoming weekend dates ("Sat Jun 20", "Sun Jun 21", + next weekend)
     so a "when?" answer lands on a REAL date instead of a vague "this weekend" the
-    extractor can't pin to a calendar day. Computed from the worker's live clock."""
-    from datetime import datetime, timedelta
+    extractor can't pin to a calendar day. Computed from the host's LOCAL clock
+    (event tz), not the server's UTC day."""
+    from datetime import timedelta
 
-    today = datetime.now().date()
+    from app.event_when import event_local_now
+
+    today = event_local_now().date()
     sat = today + timedelta(days=(5 - today.weekday()) % 7)  # this week's Sat (today if Sat)
     sun = today + timedelta(days=(6 - today.weekday()) % 7)
 
@@ -367,12 +370,137 @@ def _is_host_confirm(msg: str) -> bool:
 
 def _is_host_drop(msg: str) -> bool:
     n = _norm_cta(msg)
-    return "drop" in n or "post it" in n or "publish" in n or "go live" in n
+    # Word-bounded "drop" — a bare substring match read "MWF 7am before preschool
+    # dropoff" as the publish CTA and swallowed the schedule it carried.
+    return bool(re.search(r"\bdrop\b", n)) or "post it" in n or "publish" in n or "go live" in n
 
 
 def _is_host_tweak(msg: str) -> bool:
     n = _norm_cta(msg)
     return "tweak" in n or "let me change" in n
+
+
+# Conversational affirmations ("yes that works", "looks good", "perfect"). The review /
+# confirm cards ask "does this look right?" — a plain yes MUST be read as a state
+# transition BEFORE any field extraction, never consumed as an "edit" (the production
+# "Updated **X** — does this look right?" forever-loop: 0/16 conversational hosts ever
+# posted). Deterministic and fast: the WHOLE message must be affirmation words (so
+# "yes, at 4pm" still carries info and flows through extraction) and contain at least
+# one unambiguous affirm anchor (so a bare "that" or "sounds" never matches).
+_AFFIRM_VOCAB = frozenset({
+    "yes", "yep", "yeah", "yup", "ya", "sure", "ok", "okay", "k", "kk", "perfect",
+    "great", "awesome", "lovely", "nice", "cool", "fine", "good", "right", "correct",
+    "exactly", "sounds", "looks", "that", "thats", "that's", "this", "it", "its",
+    "it's", "is", "works", "work", "worked", "for", "to", "me", "us", "all", "set",
+    "done", "deal", "then", "lets", "let's", "do", "go", "ahead", "please", "thanks",
+    "thank", "you", "lgtm", "love",
+})
+_AFFIRM_ANCHORS = frozenset({
+    "yes", "yep", "yeah", "yup", "ya", "sure", "ok", "okay", "perfect", "great",
+    "awesome", "lovely", "nice", "good", "works", "work", "right", "correct",
+    "exactly", "fine", "cool", "lgtm", "love", "set", "done", "deal",
+})
+
+
+def _is_host_affirm(msg: str) -> bool:
+    words = re.sub(r"[^a-z']+", " ", _norm_cta(msg)).split()
+    if not words or len(words) > 6:
+        return False
+    return all(w in _AFFIRM_VOCAB for w in words) and any(w in _AFFIRM_ANCHORS for w in words)
+
+
+def _classify_host_reply(msg: str) -> str:
+    """Deterministic read of the host's reply to a review / setup / confirm card —
+    BEFORE field extraction: 'drop' (publish CTA), 'tweak', 'affirm' (button label or
+    conversational yes), or 'other' (an edit / question that flows through extraction)."""
+    if _is_host_drop(msg):
+        return "drop"
+    if _is_host_tweak(msg):
+        return "tweak"
+    if _is_host_confirm(msg) or _is_host_affirm(msg):
+        return "affirm"
+    return "other"
+
+
+def _ask_one_missing(need: list[str]) -> str:
+    """The host said yes but a blocker is still missing — ask for exactly ONE field
+    (the first missing), never the whole list and never the unchanged card again."""
+    first = need[0] if need else "a detail"
+    if first == "a name":
+        return "Love it — one thing before I post: what should we call it?"
+    if first == "a date & time":
+        return "Great — one thing before I post: when should it be? Give me a day and a time."
+    return "Great — one thing before I post: where should we meet? Name a spot and I'll pin it."
+
+
+# A bare ZIP (5 digits, optional +4) is an AREA, never a venue — "I'll use 34786 as the
+# meeting spot" must keep the venue empty and re-ask for a real place.
+_ZIP_TOKEN_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
+
+
+def _is_zip_token(venue: Any) -> bool:
+    return bool(_ZIP_TOKEN_RE.match(str(venue or "").strip()))
+
+
+def _detect_recurrence(text: str) -> list[int] | None:
+    """Weekday numbers (Mon=0) for a RECURRING cadence the host expressed ("MWF 7am",
+    "wednesdays 4pm", "every tuesday", "weekly") — or None when the message carries no
+    recurrence. Recurring meets aren't supported yet, so the flow grounds the draft on
+    the FIRST occurrence instead of letting the extractor null the whole draft or emit
+    a non-ISO starts_at ("next Wednesday 16:00:00")."""
+    t = str(text or "").lower()
+    days: set[int] = set()
+    for name, wd in _WEEKDAYS.items():
+        if re.search(rf"\b{name}s\b", t):  # plural: "wednesdays", "mondays", "sats"
+            days.add(wd)
+        if re.search(rf"\bevery\s+(?:other\s+)?{name}\b", t):
+            days.add(wd)
+    if re.search(r"\bmwf\b", t):
+        days.update({0, 2, 4})
+    if re.search(r"\btths?\b|\bt/th\b", t):
+        days.update({1, 3})
+    # Slash-joined weekday runs: "mon/wed/fri", "tue/thu"
+    run = re.search(
+        r"\b(?:mon|tues?|wed|thur?s?|fri|sat|sun)(?:\s*/\s*(?:mon|tues?|wed|thur?s?|fri|sat|sun))+\b",
+        t,
+    )
+    if run:
+        for part in re.split(r"\s*/\s*", run.group(0)):
+            wd = _WEEKDAYS.get(part.strip()[:3])
+            if wd is not None:
+                days.add(wd)
+    if days:
+        return sorted(days)
+    if re.search(r"\bweekly\b|\bevery week\b|\beach week\b", t):
+        return []  # recurrence with no named day — note it, no first date to compute
+    return None
+
+
+def _first_recurrence_date(days: list[int], today: Any) -> str | None:
+    """The first occurrence of a recurring cadence — the nearest named weekday strictly
+    AFTER today (a "wednesdays 4pm" typed on Wednesday means starting next week, not a
+    meet posted for the past hour)."""
+    from datetime import timedelta
+
+    if not days:
+        return None
+    delta = min(((d - today.weekday() - 1) % 7) + 1 for d in days)
+    return (today + timedelta(days=delta)).isoformat()
+
+
+def _friendly_when(wd: str, wt: str | None) -> str:
+    """"Fri Jul 10, 7 AM" — a human phrase for the recurrence first-occurrence ask."""
+    from datetime import datetime as _dt
+
+    try:
+        d = _dt.fromisoformat(f"{wd}T{wt or '00:00'}:00")
+    except (ValueError, TypeError):
+        return wd
+    day = f"{d.strftime('%a %b')} {d.day}"
+    if not wt:
+        return day
+    clock = d.strftime("%I:%M %p").lstrip("0").replace(":00 ", " ")
+    return f"{day}, {clock}"
 
 
 def _host_blockers_needed(title: str, wd: Any, wt: Any, venue_ok: bool) -> list[str]:
@@ -414,6 +542,8 @@ def _apply_host_brain(
     if title and not have_real_title and not title_generic:
         ed["title"] = title[:80]
     place = str(brain.get("place") or "").strip()
+    if _is_zip_token(place):
+        place = ""  # a bare ZIP is never a venue — keep asking for a real place
     if place and not str(ed.get("venue_name") or "").strip():
         ed["venue_name"] = place[:80]
         turn_ctx["event_place_asked"] = True
@@ -530,14 +660,18 @@ _MONTHS = {
 }
 
 
-def _resolve_event_date(text: str) -> str | None:
+def _resolve_event_date(text: str, *, today: Any = None) -> str | None:
     """Deterministically resolve a date phrase → ISO 'YYYY-MM-DD' for the NEXT occurrence
-    (correct year), since the LLM extractor mis-guesses the year. None if no date found."""
+    (correct year), since the LLM extractor mis-guesses the year. None if no date found.
+    Grounded on the host's LOCAL day (event tz) — the server's UTC day is tomorrow every
+    evening, which shifted "tomorrow"/"thursday" one day forward."""
     import re
     from datetime import datetime, timedelta
 
+    from app.event_when import event_local_now
+
     t = str(text or "").lower()
-    today = datetime.now().date()
+    today = today or event_local_now().date()
 
     # "jun 20" / "june 20" / "20 jun"
     m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", t)
@@ -1293,6 +1427,18 @@ def run_lana_unified_pipeline(
             # meet" → "Meet"). Drop bare generic words so we still ask for a real name.
             if _is_generic_title(ed.get("title")):
                 ed.pop("title", None)
+            # A bare ZIP that slipped in as the venue ("I'll use 34786 as the meeting
+            # spot") is an area, not a meetable place — drop it so the where-step keeps
+            # asking for a real spot instead of pinning a 5-digit code to the map.
+            if _is_zip_token(ed.get("venue_name")):
+                ed.pop("venue_name", None)
+
+            # Classify the host's reply BEFORE any extraction: a clear affirmation
+            # ("yes that works", "looks good", "perfect") is a STATE TRANSITION on the
+            # card Lana just showed — it must never be consumed by the when-resolver or
+            # the host brain as an "edit" that re-renders the same card (the production
+            # confirm loop: 0/16 conversational hosts ever reached a posted event).
+            reply_cls = _classify_host_reply(user_message)
 
             # Host asked to redo a slot they'd already filled ("don't call it X", "change
             # the time"). The merge already blanked the field on the draft; here we also
@@ -1355,10 +1501,11 @@ def run_lana_unified_pipeline(
             # re-matching a stray weekday ("friday" in "not on friday").
             from app.event_when import resolve_event_when
 
-            # Skip the LLM date resolver when the draft already has a start AND this message
-            # carries no temporal words — otherwise it ran on EVERY host turn (incl. tapping
+            # Skip the LLM date resolver on a pure card reply (affirm/tweak/drop carries
+            # no date), and when the draft already has a start AND this message carries
+            # no temporal words — otherwise it ran on EVERY host turn (incl. tapping
             # a capacity/approval/share chip), adding one LLM round-trip each time.
-            if wd and wt and not _has_temporal_tokens(user_message):
+            if reply_cls != "other" or (wd and wt and not _has_temporal_tokens(user_message)):
                 when = {}
             else:
                 with timer.stage("llm_event_when"):
@@ -1371,6 +1518,18 @@ def run_lana_unified_pipeline(
             else:
                 nd = when.get("date")
                 ntime = when.get("time")
+            # Recurring cadence ("MWF 7am", "wednesdays 4pm", "every tuesday") — weekly
+            # meets aren't supported yet, and the extractor used to null the whole draft
+            # (or emit prose starts_at) on these. Keep everything else the message gave
+            # and ground the draft on the FIRST occurrence; the reply says so below.
+            recur_days = _detect_recurrence(user_message) if reply_cls == "other" else None
+            if recur_days is not None:
+                from app.event_when import event_local_now
+
+                if not nd:
+                    nd = _first_recurrence_date(recur_days, event_local_now().date())
+                if not ntime:
+                    ntime = _resolve_event_time(user_message)
             if nd:
                 wd = nd
             if ntime:
@@ -1564,7 +1723,16 @@ def run_lana_unified_pipeline(
                         "just tell me here and I'll fill them in."
                     )
             elif stage == "review":
-                if _is_host_confirm(user_message) or _is_host_drop(user_message):
+                if reply_cls in ("affirm", "drop") and not blockers_done:
+                    # The host said yes but a blocker regressed (a cleared field) — ask
+                    # for exactly ONE missing thing, never the unchanged review card.
+                    turn_ctx["host_stage"] = "review"
+                    turn_ctx["host_aside"] = True
+                    ed["suggestions"] = []
+                    reply = _ask_one_missing(
+                        _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    )
+                elif reply_cls in ("affirm", "drop"):
                     _ensure_setup_config(
                         ed, history=history, user_message=user_message, timer=timer
                     )
@@ -1581,23 +1749,24 @@ def run_lana_unified_pipeline(
                     ed["suggestions"] = []
                     reply = (
                         f"Sure — tell me what to change about **{_title}**."
-                        if _is_host_tweak(user_message)
+                        if reply_cls == "tweak"
                         else f"Updated **{_title}** — does this look right?"
                     )
             elif stage == "setup":
-                if (_is_host_confirm(user_message) or _is_host_drop(user_message)) and blockers_done:
+                if reply_cls in ("affirm", "drop") and blockers_done:
                     turn_ctx["host_stage"] = "confirm"
                     ed["suggestions"] = []
                     reply = (
                         f"It's all set — **{_title}**. One last look, then drop it on the block."
                     )
-                elif _is_host_confirm(user_message) or _is_host_drop(user_message):
-                    # Carousel submitted but a blocker is still missing — hold in setup and
-                    # say exactly what's needed (the FE cards should have collected these).
+                elif reply_cls in ("affirm", "drop"):
+                    # Affirmed but a blocker is still missing — hold in setup and ask for
+                    # exactly ONE missing field (never the whole list, never a re-loop).
                     need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
                     turn_ctx["host_stage"] = "setup"
+                    turn_ctx["host_aside"] = True
                     ed["suggestions"] = []
-                    reply = "I just need " + " · ".join(need) + " to post it."
+                    reply = _ask_one_missing(need)
                 elif _norm_cta(user_message) in ("continue setting up", "continue setup"):
                     # The FE "Continue setting up" button — a deterministic tap that brings the
                     # setup carousel back (host_aside stays off so the card shows, not an aside).
@@ -1631,8 +1800,17 @@ def run_lana_unified_pipeline(
                         turn_ctx["host_aside"] = True
                     else:
                         reply = _host_fallback_nudge(need)
-            else:  # stage == "confirm" → publish when the host drops it
-                if (_is_host_drop(user_message) or _is_host_confirm(user_message)) and not phone_verified:
+            else:  # stage == "confirm" → publish when the host drops it (or plainly says yes)
+                if reply_cls in ("affirm", "drop") and not blockers_done:
+                    # Yes, but a blocker regressed — ask for exactly the ONE missing
+                    # field instead of attempting a publish that would be rejected.
+                    turn_ctx["host_stage"] = "confirm"
+                    turn_ctx["host_aside"] = True
+                    ed["suggestions"] = []
+                    reply = _ask_one_missing(
+                        _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    )
+                elif reply_cls in ("affirm", "drop") and not phone_verified:
                     # Guest dropping the meet: DON'T attempt create_event first — it would
                     # 403 (auto_publish_event_failed: create_event_failed:403). Gate on auth
                     # up front: ask to sign up / log in and mark the finished draft
@@ -1652,7 +1830,7 @@ def run_lana_unified_pipeline(
                             "Finishing verification — send one more message and I'll "
                             f"post **{_title or 'your event'}** right away."
                         )
-                elif _is_host_drop(user_message) or _is_host_confirm(user_message):
+                elif reply_cls in ("affirm", "drop"):
                     event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
                     if event_id:
                         turn_ctx["event_id"] = event_id
@@ -1706,6 +1884,14 @@ def run_lana_unified_pipeline(
                     turn_ctx["host_stage"] = "confirm"
                     ed["suggestions"] = []
                     reply = "Tap **Drop the meet up** when you're ready and I'll post it."
+            # Recurrence acknowledged in Lana's own words: weekly meets aren't a thing
+            # yet, so the draft holds the FIRST occurrence — say so instead of silently
+            # dropping the cadence (or worse, blanking the draft).
+            if recur_days is not None and wd and not turn_ctx.get("event_published_now"):
+                reply = (
+                    "Weekly meets are coming — for now let's pick the first one: "
+                    f"**{_friendly_when(wd, wt)}**. " + reply
+                )
             turn_ctx["event_draft"] = ed
             draft = ed  # surface to the FE (5th return → response.event_draft)
 

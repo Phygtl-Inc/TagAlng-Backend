@@ -21,7 +21,8 @@ event in chat. Read their latest message — however they phrased it — and do 
 1) EXTRACT any event details they clearly stated (never guess; use null when unsure):
    - title: a name for the event if they gave or proposed one
    - place: ONE clear location (their home, a named venue, a park). null if none — or if they're
-     weighing options ("my place or a café"), leave it null; don't pick for them.
+     weighing options ("my place or a café"), leave it null; don't pick for them. A bare ZIP
+     code ("34786") is an AREA, never a place — leave place null and ask for a real spot.
    - capacity: an integer max headcount if they signalled one ("5-7 people" -> 7, "just a few" or
      "small group" -> a sensible small number like 6)
    - auto_approve: true if anyone can join freely, false if they want to approve joiners

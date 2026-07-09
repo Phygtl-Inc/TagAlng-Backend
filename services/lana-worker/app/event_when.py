@@ -19,8 +19,22 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date as _date, datetime
+from datetime import date as _date, datetime, timezone
 from typing import Any
+
+
+def event_local_now(utc_now: datetime | None = None) -> datetime:
+    """The host's wall-clock "now", anchored to the EVENT timezone — never the server's
+    clock (UTC on Cloud Run). Grounding "tomorrow"/"thursday" on the server's UTC day
+    shifted every evening turn one day forward (QA Wed 2026-07-08: "tomorrow" drafted
+    Friday, "thursday" skipped a week). Returns a naive local datetime, matching the
+    draft's naive-local starts_at convention. `utc_now` is a test seam."""
+    from app.event_publish import _event_tz  # lazy — avoids import-time env coupling
+
+    base = utc_now or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return base.astimezone(_event_tz()).replace(tzinfo=None)
 
 _SYSTEM = """You resolve the DATE and TIME a neighbor wants for an event they are \
 hosting, from their words and the conversation. You are given TODAY's date (with its \
@@ -31,10 +45,13 @@ weekday). Return ONE compact JSON object and nothing else:
 "next Friday", "tomorrow", "tonight", "this weekend", "next month".
 - Always pick the NEXT FUTURE occurrence — never a past date. If a bare month/day has \
 already passed this year, use next year.
+- A bare weekday names the SOONEST such day: if TODAY is Wednesday, "thursday" is \
+TOMORROW — never the week after. "tomorrow" is exactly TODAY + 1 day.
 - Honor negation and corrections: "not on friday", "actually make it the 28th", \
 "change it to Sunday".
 - time is 24-hour "HH:MM": "9pm" -> "21:00", "9 in the night" -> "21:00", \
-"noon" -> "12:00", "morning" -> "10:00", "evening"/"night" -> "18:00".
+"noon" -> "12:00", "morning" -> "10:00", "evening"/"night" -> "18:00", \
+"sunrise" -> "06:30".
 - Return a value ONLY when THIS message states or changes it. Use null to leave the \
 existing draft value untouched — never echo the draft back as if it were new.
 
@@ -77,7 +94,9 @@ def resolve_event_when(
 
         if not llm_configured():
             return None
-        today = now or datetime.now()
+        # Anchor on the HOST's local day, not the server's UTC day — a Wednesday-evening
+        # turn is Thursday in UTC, which mis-grounded every relative date by one day.
+        today = now or event_local_now()
         convo = "\n".join(
             f"{m.get('role', '?')}: {str(m.get('content') or '').strip()}"
             for m in (history or [])[-8:]
