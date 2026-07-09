@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from app.auth import SUPABASE_URL, service_client
 from app.discovery_slots import slots_want_profile_photo
+from app.gates import gate_reply
 
 PHASE_AWAIT_PROFILE_PHOTO = "await_profile_photo"
 
@@ -126,11 +127,14 @@ def handle_profile_photo_turn(
             ctx,
         )
 
-    if is_anonymous and not phone_verified:
-        return (
-            "Verify your email first — then I can save a profile photo for you.",
-            {**session_ctx, "routing_phase": "listening"},
-        )
+    gate = gate_reply(
+        "profile_photo_save",
+        session_ctx,
+        verified=bool(phone_verified) or not is_anonymous,
+        user_id=user_id,
+    )
+    if gate:
+        return (gate, {**session_ctx, "routing_phase": "listening"})
 
     ctx = {
         **session_ctx,

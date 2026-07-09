@@ -44,6 +44,7 @@ from app.discovery_slots import (
     slots_want_propose_intro,
     slots_want_signup_gate,
 )
+from app.gates import gate_reply, gate_shown
 from app.turn_timing import TurnTimer
 from app.turn_surfaces import clear_turn_surfaces
 from app.guest_capabilities import (
@@ -1258,20 +1259,13 @@ def _try_layer1_intent_turn(
     ctx_base = dict(session_ctx)
 
     if linear == "identity.show_my_profile":
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can show your full profile and claims.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent="identity.show_my_profile",
-                ),
-                _discovery_routing_stub(phase or "listening", "show_profile_need_verify"),
-                [],
-            )
+        # Read action — never gates on verification (gates are write-only, see app/gates.py).
         if user_id:
             scrub_negative_heritage_claims(user_id)
-        dashboard = fetch_identity_dashboard(user_jwt)
+        try:
+            dashboard = fetch_identity_dashboard(user_jwt)
+        except HTTPException:
+            dashboard = {}
         reply = format_identity_profile_reply(dashboard)
         ctx = _routing_ctx(
             ctx_base,
@@ -1283,17 +1277,7 @@ def _try_layer1_intent_turn(
         return reply, ctx, ctx["last_routing"], []
 
     if linear in ("discovery.show_peer_profile", "discovery.explain_peer_match"):
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can show neighbor profiles and explain matches.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent=linear,
-                ),
-                _discovery_routing_stub(phase or "listening", "peer_profile_need_verify"),
-                [],
-            )
+        # Read/explain actions — never gate; previews redact names for unverified users.
         block_id = _resolve_block_id_for_turn(
             session_ctx=session_ctx,
             home_block_id=home_block_id,
@@ -1410,13 +1394,10 @@ def _try_layer1_intent_turn(
             phase=phase or "listening",
             active_intent=linear,
         )
-        if res.verify_gate:
-            return (
-                "Verify your email first — then I can save identity threads to your profile.",
-                ctx,
-                _discovery_routing_stub(phase or "listening", "identity_need_verify"),
-                [],
-            )
+        # res.verify_gate (no user on the session) is NOT a reason to stop the
+        # conversation — profile chatter is a read/refine surface, and gating it was
+        # a top QA complaint. The claims simply don't persist until signup completes;
+        # the conversational reply below carries the turn either way.
         # We already persisted inline — don't double-extract in the background.
         ctx["skip_claims_background_extract"] = True
         if res.conflict:
@@ -1458,22 +1439,14 @@ def _try_layer1_intent_turn(
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "discovery.block_log":
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can show your block log.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent=INTENT_SHOW_BLOCK_LOG,
-                ),
-                _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
-                [],
-            )
+        # Read action — never gates; an unverified guest simply has an empty log.
         try:
             entries = fetch_my_block_log(user_jwt)
         except HTTPException as exc:
             detail = str(exc.detail or "").lower()
-            if (
+            if "phone_not_verified" in detail or "not_authenticated" in detail:
+                entries = []
+            elif (
                 "pgrst202" in detail
                 or "get_my_block_log" in detail
                 or "read-only transaction" in detail
@@ -1489,7 +1462,8 @@ def _try_layer1_intent_turn(
                     _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
                     [],
                 )
-            raise
+            else:
+                raise
         reply = format_block_log_reply(entries)
         ctx = _routing_ctx(
             ctx_base,
@@ -1602,17 +1576,7 @@ def _try_layer1_intent_turn(
         # instead of a literal neighbor search that bounces "no matching neighbors".
         if (phase or "") == PHASE_NEED_IDENTITY:
             return None
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can search neighbors by those traits.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent="discovery.find_by_attrs",
-                ),
-                _discovery_routing_stub(phase or "listening", "find_by_attrs_need_verify"),
-                [],
-            )
+        # Search/refine action — never gates; unverified users get redacted previews.
         filter_text = normalize_attr_filter_text(msg, slots)
         if len(filter_text) < 2:
             return (
@@ -1631,10 +1595,13 @@ def _try_layer1_intent_turn(
             peers = []
         partial_summary = None
         if not peers:
-            partial_summary = summarize_partial_claim_matches(
-                user_jwt,
-                parse_claim_filters(filter_text, slots),
-            )
+            try:
+                partial_summary = summarize_partial_claim_matches(
+                    user_jwt,
+                    parse_claim_filters(filter_text, slots),
+                )
+            except HTTPException:
+                partial_summary = None
         reply = format_attr_peers_reply(
             peers,
             filter_text=filter_text,
@@ -1805,17 +1772,8 @@ def _try_signal_lane_turn(
         active_linear = str(linear)
 
     if active_linear or isinstance(draft, dict):
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can post that to your block.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent=active_linear or INTENT_SAVE_SIGNAL,
-                ),
-                _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
-                [],
-            )
+        # Guard ordering: resolve a block FIRST. A session with no block must take the
+        # ask-ZIP path — never a verify gate whose copy references "your block".
         if not resolve_block_id(session_ctx, home_block_id):
             block_id = _resolve_block_id_for_turn(
                 session_ctx=session_ctx,
@@ -1834,6 +1792,24 @@ def _try_signal_lane_turn(
                     active_intent=active_linear or INTENT_SAVE_SIGNAL,
                 ),
                 _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
+                [],
+            )
+        gate = gate_reply(
+            "save_signal",
+            ctx_base,
+            verified=phone_verified,
+            home_block_id=home_block_id,
+            user_id=user_id,
+        )
+        if gate:
+            return (
+                gate,
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent=active_linear or INTENT_SAVE_SIGNAL,
+                ),
+                _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
                 [],
             )
 
@@ -2159,14 +2135,7 @@ def _try_list_intros_turn(
         return None
 
     ctx_base = dict(session_ctx)
-    if not phone_verified:
-        return (
-            "Verify your email first — then I can show your pending intros.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
-            _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
-            [],
-        )
-
+    # Read action — never gates; an unverified guest simply has no pending intros yet.
     direction = infer_intro_direction(msg, slots)
     try:
         intros = fetch_my_intros(user_jwt, direction=direction)
@@ -2174,13 +2143,9 @@ def _try_list_intros_turn(
             intros = fetch_my_intros(user_jwt, direction="all")
     except HTTPException as exc:
         if exc.detail == "phone_not_verified":
-            return (
-                "Verify your email first — then I can show your pending intros.",
-                _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
-                _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
-                [],
-            )
-        raise
+            intros = []
+        else:
+            raise
 
     reply = format_intros_list_reply(intros)
     ctx = _routing_ctx(
@@ -2458,20 +2423,28 @@ def _try_save_signal_turn(
             [],
         )
 
-    if not phone_verified:
-        return (
-            "Verify your email first — then I can post that to your block.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
-            _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
-            [],
-        )
-
+    # Guard ordering: no resolved block → ask-ZIP path, never a "your block" gate.
     block_id = resolve_block_id(session_ctx, home_block_id)
     if not block_id:
         return (
             "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
             _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
             _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
+            [],
+        )
+
+    gate = gate_reply(
+        "save_signal",
+        session_ctx,
+        verified=phone_verified,
+        home_block_id=home_block_id,
+        user_id=user_id,
+    )
+    if gate:
+        return (
+            gate,
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
+            _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
             [],
         )
 
@@ -3153,19 +3126,14 @@ def _try_show_block_log_turn(
         return None
 
     ctx_base = dict(session_ctx)
-    if not phone_verified:
-        return (
-            "Verify your email first — then I can show your block log.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
-            _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
-            [],
-        )
-
+    # Read action — never gates; an unverified guest simply has an empty log.
     try:
         entries = fetch_my_block_log(user_jwt)
     except HTTPException as exc:
         detail = str(exc.detail or "").lower()
-        if (
+        if "phone_not_verified" in detail or "not_authenticated" in detail:
+            entries = []
+        elif (
             "pgrst202" in detail
             or "get_my_block_log" in detail
             or "read-only transaction" in detail
@@ -3177,7 +3145,8 @@ def _try_show_block_log_turn(
                 _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
                 [],
             )
-        raise
+        else:
+            raise
     reply = format_block_log_reply(entries)
     ctx = _routing_ctx(
         ctx_base,
@@ -4319,7 +4288,11 @@ def _verify_gate_reply(
     ctx_base: dict[str, Any],
     block_id: str,
     event_label: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    # Always at a resolved block (block_id is required) and a commitment moment:
+    # RSVP (event_label) or an explicit ask to connect / sign up.
+    gate_shown("rsvp" if event_label else "connect", user_id)
     if event_label:
         lead = f"To join {event_label}, verify your email first — I'll send you a code."
     else:
@@ -6026,6 +5999,7 @@ def handle_discovery_turn(
             session_ctx=session_ctx,
             ctx_base=ctx_base,
             block_id=block_id,
+            user_id=user_id,
         )
 
     # Slot: identity snippet (Flash — not chat history heuristics)
@@ -6088,6 +6062,7 @@ def handle_discovery_turn(
             ctx_base=ctx_base,
             block_id=block_id,
             event_label=f'"{event_title}"' if event_title else "that activity",
+            user_id=user_id,
         )
 
     if phase == PHASE_PREVIEW:
@@ -6255,6 +6230,7 @@ def handle_discovery_turn(
             session_ctx=session_ctx,
             ctx_base=ctx_base,
             block_id=block_id,
+            user_id=user_id,
         )
 
     # Preview re-search: AI must supply new identity_snippet + goal=peers (not questions).

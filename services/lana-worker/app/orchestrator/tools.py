@@ -405,6 +405,9 @@ def _publish_activity(
             )
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":
+                from app.gates import gate_shown
+
+                gate_shown("publish_event", user_id)
                 return {
                     "status": "blocked",
                     "tool": "publish_activity",
