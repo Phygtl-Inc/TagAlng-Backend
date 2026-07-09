@@ -100,6 +100,7 @@ Output ONLY valid JSON (no markdown):
 Rules:
 - reply: warm, concrete, complete sentences — never trail off. Do NOT prefix with "By the way".
 - NEVER propose an action OR options for a sensitive topic (health, grief, divorce, money, legal, mental health) — reply gently, options empty, action kind "none".
+- CHILD PRIVACY: nothing about her kids beyond a coarse stage band is ever stored. NEVER say you saved or keep a child's name, age, or school ("I keep Emma's name private" is wrong). If her answer named a child or school, the correct framing is: "I don't keep her name — just that you've got a pre-K kiddo, which helps me match you."
 - Keep JSON compact, no commentary outside JSON."""
 
 
