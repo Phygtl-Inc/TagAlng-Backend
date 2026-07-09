@@ -37,6 +37,7 @@ from app.db import (
     update_session_context,
     merge_session_context,
 )
+from app.constraints import capture_constraints_for_turn, finalize_constraint_turn
 from app.local_signals import block_log_take_action, fetch_my_block_log, normalize_block_log_row
 from app.lana_paths import (
     event_fast_path_enabled,
@@ -1254,6 +1255,18 @@ def _run_lana_message(
     if purpose in ("lana", "profile_intake"):
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
+    # Availability/need constraint memory (QA 2026-07-08): deterministically capture
+    # constraints ("evenings after 6 or weekends", kid age bands) and multi-need
+    # enumerations from ANY turn BEFORE routing, so every handler this turn — and every
+    # later turn via the session merge — sees them. Durable for verified users; the
+    # acknowledgment line is prepended to the reply after the turn (see below).
+    if purpose == "lana":
+        capture_constraints_for_turn(
+            session_ctx_in,
+            body.message,
+            user_id=auth.user_id,
+            persist_durably=auth.phone_verified and not auth.is_anonymous,
+        )
     # Deterministic entry into the in-chat event-host flow — from the "A meet to host"
     # CTA hint OR an explicit "host/plan a <event>" message (no classifier dependency).
     if purpose == "lana" and (
@@ -1358,6 +1371,11 @@ def _run_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
             orch_used = bool(session_ctx.pop("_orchestrator_turn", False))
+            # Constraint memory: prepend this turn's capture acknowledgment
+            # ("Evenings after 6pm or weekends — noted.") to whatever reply the turn
+            # produced, and carry the constraints into the persisted context no matter
+            # which handler built it (some return a fresh dict).
+            reply = finalize_constraint_turn(reply, session_ctx_in, session_ctx)
         elif use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(
                 user_id=auth.user_id,
