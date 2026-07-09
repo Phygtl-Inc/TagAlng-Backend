@@ -44,10 +44,22 @@ LINEAR_INTENTS: frozenset[str] = frozenset({
     "settings.notification_prefs",
     "help.what_can_you_do",
     "help.who_are_you",
+    # Product FAQ — QA 2026-07-08: four direct questions got funnel lines instead of answers.
+    "help.faq_safety",
+    "help.faq_who_for",
+    "help.faq_childcare",
+    "help.faq_zip_privacy",
     # System
     "system.out_of_scope",
     "system.unsafe",
     "system.medical",
+})
+
+FAQ_LINEAR_INTENTS: frozenset[str] = frozenset({
+    "help.faq_safety",
+    "help.faq_who_for",
+    "help.faq_childcare",
+    "help.faq_zip_privacy",
 })
 
 LOOKING_SHARING_INTENTS: frozenset[str] = frozenset({
@@ -116,6 +128,10 @@ INTENT_CONFIDENCE: dict[str, float] = {
     "settings.notification_prefs": 0.55,
     "help.what_can_you_do": 0.5,
     "help.who_are_you": 0.5,
+    "help.faq_safety": 0.5,
+    "help.faq_who_for": 0.5,
+    "help.faq_childcare": 0.5,
+    "help.faq_zip_privacy": 0.5,
     # The decline-vs-clarify gate: a confident out-of-scope read is declined outright;
     # below this the router asks one clarifying question instead of guessing.
     "system.out_of_scope": 0.6,
@@ -423,6 +439,72 @@ def utterance_indicates_swap_seek(msg: str) -> bool:
     return bool(_SWAP_SEEK_ITEM_RE.search(text))
 
 
+# Product FAQ detection — QA (2026-07-08) found four direct questions that each got a canned
+# funnel line or an event dump instead of an answer. These are high-precision STRUCTURAL
+# patterns (like the unsafe backstop, not open-ended routing): a direct question about the
+# product outranks any funnel step or chip-primed capture, because leaving it unanswered
+# kills trust faster than a delayed flow step.
+_FAQ_SAFETY_RE = re.compile(
+    r"(?:\bhow (?:do|can|would|will) (?:i|you|we)\b.{0,60}"
+    r"\b(?:real|legit|safe|trust(?:ed)?|verif\w+|vet(?:ted)?|screen(?:ed)?|creeps?|catfish\w*)\b)"
+    r"|(?:\b(?:are|is)\b.{0,50}\b(?:moms?|dads?|parents?|people|users?|neighbors?|neighbours?|"
+    r"profiles?|members?)\b.{0,50}\b(?:real|legit|verified|vetted|screened|safe|fake|creeps?)\b)"
+    r"|(?:\b(?:is (?:this|it)(?: app)? safe|is the app safe|how safe is)\b)",
+    re.I,
+)
+_FAQ_WHO_FOR_RE = re.compile(
+    r"\bis (?:this|the|it)(?: app)?\s+(?:also\s+)?for\s+(?:me|us|dads?|men|fathers?|guys|"
+    r"grandparents?|caregivers?)\b"
+    r"|\b(?:only|just)\s+for\s+(?:moms?|mothers?|mums?|women)\b"
+    r"|\bdo i (?:have|need) to be a (?:mom|mother|mum)\b"
+    r"|\b(?:can|do)\s+(?:dads?|fathers?|men|guys|grandparents?|grandmas?|grandpas?|nannies|"
+    r"caregivers?)\s+(?:use|join|sign up|be on)\b"
+    r"|\btoo (?:early|soon)\b.{0,30}\b(?:app|to join|to sign up)\b"
+    r"|\b(?:i'?m|i am)\s+(?:pregnant|expecting)\b.{0,80}\b(?:too early|too soon|for me|this app|join)\b",
+    re.I,
+)
+# Whether LANA/the app PROVIDES childcare — a sitter/daycare RECOMMENDATION ask is an
+# in-scope tip seek and must stay looking.tip (see faq_linear_intent's guard). "babysit"
+# deliberately excludes "babysitter" (the noun signals a recommendation, not provision).
+_FAQ_CHILDCARE_RE = re.compile(
+    r"\b(?:do you|does (?:this|the) app|does (?:tagalng|lana)|can you|can lana|is there|"
+    r"do you guys)\b.{0,40}\b(?:childcare|child care|day\s?care|babysitting|babysit|"
+    r"watch (?:my|the) kids?|look after (?:my|the) kids?)\b"
+    r"|\b(?:offer|provide|arrange)\s+(?:childcare|child care|babysitting|day\s?care)\b",
+    re.I,
+)
+_FAQ_ZIP_PRIVACY_RE = re.compile(
+    r"\b(?:rather not|don'?t (?:want|wanna|like)(?: to)?|why do you (?:need|want|ask)(?: for)?|"
+    r"do (?:i|you) (?:really )?(?:have to|need)|what (?:do|will) you (?:do|use)|"
+    r"who (?:can )?sees?|is it (?:ok|okay|safe)(?: to)?(?: not)?)\b"
+    r".{0,50}\b(?:zip ?code|zip|postal code)\b"
+    r"|\b(?:zip ?code|zip|postal code)\b.{0,50}\b(?:private|privacy|safe|who sees|shared with)\b",
+    re.I,
+)
+
+
+def faq_linear_intent(msg: str) -> str | None:
+    """Deterministic detector for the four product-FAQ intents; None when no match.
+
+    Checked BEFORE funnel/capture gates (a direct question outranks the funnel) — so these
+    patterns are kept narrow; open-ended phrasings are the classifier's job via the
+    help.faq_* labels in the Layer 1 catalog.
+    """
+    text = str(msg or "").strip()
+    if not text:
+        return None
+    if _FAQ_SAFETY_RE.search(text):
+        return "help.faq_safety"
+    if _FAQ_WHO_FOR_RE.search(text):
+        return "help.faq_who_for"
+    if _FAQ_ZIP_PRIVACY_RE.search(text):
+        return "help.faq_zip_privacy"
+    # "recommend a daycare / know a good babysitter" is a tip SEEK, not the childcare FAQ.
+    if _FAQ_CHILDCARE_RE.search(text) and not utterance_indicates_tip_seek(text):
+        return "help.faq_childcare"
+    return None
+
+
 def slots_indicate_tip_share_signal(slots: dict[str, Any]) -> bool:
     signal_intent = str(slots.get("signal_intent") or "").strip().lower()
     if signal_intent == "tip_share":
@@ -709,6 +791,10 @@ def slots_want_layer1_handling(
         "identity.complete_profile",
         "help.what_can_you_do",
         "help.who_are_you",
+        "help.faq_safety",
+        "help.faq_who_for",
+        "help.faq_childcare",
+        "help.faq_zip_privacy",
         "settings.change_name",
         "settings.change_zip",
         "settings.notification_prefs",
