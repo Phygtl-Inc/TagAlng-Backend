@@ -411,6 +411,15 @@ def _publish_activity(
                     "reason": "phone_not_verified",
                     "event_draft": draft,
                 }
+            if exc.detail == "duplicate_event":
+                # Dedupe guard fired: this host already posted the same title + start.
+                return {
+                    "status": "blocked",
+                    "tool": "publish_activity",
+                    "reason": "duplicate_event",
+                    "message": "You already have that meet — want to edit it instead?",
+                    "event_draft": draft,
+                }
             return {
                 "status": "error",
                 "tool": "publish_activity",
