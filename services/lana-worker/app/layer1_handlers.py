@@ -33,8 +33,10 @@ from app.supabase_rpc import call_rpc
 
 HELP_WHAT_CAN_YOU_DO = (
     "I'm Lana — your block concierge. I can help you find neighbors like you, "
-    "swap or borrow items, meet for playgroups, share local tips, host small gatherings, "
-    "and make warm introductions when you're ready. What would you like to start with?"
+    "meet for playgroups, host small gatherings, and make warm introductions when "
+    "you're ready. Item swaps and local tips are opening soon on your block — "
+    "tell me yours now and I'll hold it first in line. "
+    "What would you like to start with?"
 )
 
 HELP_WHO_ARE_YOU = (

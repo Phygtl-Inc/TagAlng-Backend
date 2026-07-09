@@ -8,7 +8,10 @@ Flow (matches the C-4-reco mock):
   P2  "Heard you." + colored chips (★ Recommendation / category / trait)
   P3  "Who or where? A name helps me find them" (Places options when place-based)
   P4  assembled card → "Pass the tip along" / "Send to a mom you know"
-  →   saved to local_signals (tip_share); matcher pings neighbors asking for that category.
+  →   queued to queued_contributions (tip). Tips aren't live on the block yet, so Lana
+      closes with an honest promise ("I'll hold your tip — tips open on your block soon
+      and yours will be first up") instead of a dead-end "posted!" claim; the row is
+      promoted into local_signals at launch.
 """
 
 from __future__ import annotations
@@ -196,25 +199,35 @@ def _name_suggestions(draft: dict[str, Any], *, zip_code: str | None, block_id: 
         return []
 
 
-def _save_tip(
-    *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
-) -> dict[str, Any] | None:
-    try:
-        from app.local_signals import save_local_signal
+def _queue_tip(
+    *,
+    draft: dict[str, Any],
+    user_id: str | None,
+    block_id: str | None,
+    zip_code: str | None,
+    notify: bool,
+) -> bool:
+    """Park the finished tip in queued_contributions — tips aren't live on the block
+    yet, so Lana holds it and promises it first-up at launch. Returns False on failure
+    (caller exits gracefully)."""
+    from app.queued_contributions import QUEUED_KIND_TIP, queue_contribution
 
-        return save_local_signal(
-            user_jwt,
-            intent="tip_share",
-            detail_text=_detail_text(draft),
-            category=str(draft.get("category") or "").strip() or None,
-            block_id=block_id,
-            zip_code=zip_code,
-        )
-    except Exception:  # noqa: BLE001
-        import logging
-
-        logging.getLogger(__name__).exception("tip_share_save_failed")
-        return None
+    return queue_contribution(
+        user_id=user_id,
+        block_id=block_id,
+        kind=QUEUED_KIND_TIP,
+        payload={
+            "intent": "tip_share",
+            "title": str(draft.get("name") or "").strip() or None,
+            "detail_text": _detail_text(draft),
+            "category": str(draft.get("category") or "").strip() or None,
+            "trait": str(draft.get("trait") or "").strip() or None,
+            "locality": str(draft.get("locality") or "").strip() or None,
+            "details": [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()],
+            "zip": zip_code,
+        },
+        notify=notify,
+    )
 
 
 # What this capture OWNS: the user sharing a local tip/recommendation (tip_share). Anything
@@ -275,6 +288,8 @@ def run_tip_share_turn(
     history: list[dict[str, Any]],
     user_jwt: str,
     home_block_id: str | None,
+    user_id: str | None = None,
+    phone_verified: bool = False,
 ) -> str:
     """Drive one tip-share capture turn. Mutates session_ctx (tip_draft,
     tip_share_active, tip_listed_now, routing_phase). Returns Lana's reply."""
@@ -293,29 +308,39 @@ def run_tip_share_turn(
         session_ctx["routing_phase"] = "listening"
         return "No problem — we can do that another time. What else can I help with?"
 
-    # ── The "Pass the tip along" CTA on the ready card → save it ──
+    # ── The "Pass the tip along" CTA on the ready card → queue it honestly. Tips
+    # aren't live on the block yet ("Coming soon" in the UI), so a "posted!" claim
+    # would dead-end — Lana holds the tip in queued_contributions and promises it
+    # first-up at launch. notify only with a verified contact to text. ──
     if session_ctx.get("tip_ready") and _PASS_RE.search(msg):
-        saved = _save_tip(draft=draft, user_jwt=user_jwt, block_id=home_block_id, zip_code=zip_code)
+        from app.queued_contributions import QUEUED_KIND_TIP, queued_close_line
+
+        queued_ok = _queue_tip(
+            draft=draft,
+            user_id=user_id,
+            block_id=home_block_id
+            or str(session_ctx.get("preview_block_id") or "").strip()
+            or None,
+            zip_code=zip_code,
+            notify=phone_verified,
+        )
         for k in ("tip_share_active", "tip_ready", "tip_pending_ask"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["tip_enrich_count"] = 0
         session_ctx["routing_phase"] = "listening"
-        if not saved:
+        if not queued_ok:
             session_ctx["tip_draft"] = None
-            return "I couldn't post that just now — let's try again in a moment."
-        matches = int(saved.get("matches_created") or 0)
-        draft["signal_id"] = saved.get("signal_id")
+            return "I couldn't save that just now — let's try again in a moment."
         draft["listed"] = True
+        draft["queued"] = True
         draft["chips"] = _build_chips(draft)
         session_ctx["tip_draft"] = draft
         session_ctx["tip_listed_now"] = True
-        tail = (
-            f" {matches} neighbor{'s' if matches != 1 else ''} asking for this just got it."
-            if matches
-            else " I'll pass it on when a neighbor asks for one."
+        session_ctx["tip_queued_now"] = True
+        return queued_close_line(
+            kind=QUEUED_KIND_TIP, summary=_summary(draft), notify=phone_verified
         )
-        return f"🎉 Done — **{_summary(draft)}** is on your block.{tail}"
 
     # ── Correction: chip tap "fix:<field>" → clear + re-ask that field ──
     fix = re.match(r"\s*fix:(\w+)\s*$", msg)
@@ -409,6 +434,7 @@ def run_tip_share_turn(
     session_ctx["tip_ready"] = True
     session_ctx["routing_phase"] = "listening"
     return (
-        f"Got it — **{_summary(draft)}**. I'll pass it on when a neighbor asks. "
-        "**Pass the tip along** to post it to your block, or send it to a mom you know."
+        f"Got it — **{_summary(draft)}**. Tips open on your block soon — "
+        "**Pass the tip along** and I'll hold yours first in line, "
+        "or send it to a mom you know."
     )
