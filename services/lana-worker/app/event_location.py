@@ -12,13 +12,27 @@ _BLOCK_FALLBACK: dict[str, tuple[float, float]] = {
 }
 
 
+# Placeholder ZIPs that pass a bare 5-digit format check but aren't real — QA saw
+# 99999 accepted in a production flow. Rejected everywhere a ZIP enters.
+_BOGUS_ZIP5 = {"00000", "99999"}
+
+
 def _normalize_zip5(raw: str | None) -> str | None:
     if not raw:
         return None
-    digits = "".join(c for c in raw if c.isdigit())
+    digits = "".join(c for c in str(raw) if c.isdigit())
     if len(digits) < 5:
         return None
-    return digits[:5]
+    zip5 = digits[:5]  # keep the ZIP5 of a ZIP+4
+    if zip5 in _BOGUS_ZIP5:
+        return None
+    return zip5
+
+
+def is_valid_zip5(raw: str | None) -> bool:
+    """Plausible 5-digit US ZIP — False for non-5-digit strings and the obviously
+    invalid placeholders (00000/99999)."""
+    return _normalize_zip5(raw) is not None
 
 
 def geocode_zip(zip5: str) -> tuple[float, float, str] | None:

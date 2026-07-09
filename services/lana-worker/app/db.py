@@ -32,6 +32,8 @@ HOST_CTX_KEYS = (
     "event_approval_asked",
     "event_share_asked",
     "event_affinity_asked",
+    "event_guard_pending",
+    "event_guards_confirmed",
     "host_stage",
 )
 
