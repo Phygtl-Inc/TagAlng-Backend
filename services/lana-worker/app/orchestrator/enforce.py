@@ -247,7 +247,10 @@ def _enforce_lana_discovery(
     if zip_from:
         tool_args["zip"] = zip_from
     if identity:
-        session_ctx["identity_snippet"] = identity
+        from app.pii import redact_pii
+
+        # identity_snippet persists in session context — child PII never lands there.
+        session_ctx["identity_snippet"] = redact_pii(identity) or identity
     return _as_tool(
         out,
         tool="find_peers",

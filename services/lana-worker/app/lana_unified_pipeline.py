@@ -942,7 +942,9 @@ def run_lana_unified_pipeline(
             # topic-named request that routes for real. The count backstops runaway qualifying.
             ctx = dict(session_ctx)
             ctx.pop("rapport_answer", None)
-            reply = sanitize_assistant_message(str(concierge.get("reply") or ""))
+            reply = sanitize_assistant_message(
+                str(concierge.get("reply") or ""), user_message=user_message
+            )
             options = concierge.get("options")
             if action_send:
                 ctx["rapport_reply"] = {"options": [], "action": action}
@@ -1012,7 +1014,8 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
-                )
+                ),
+                user_message=user_message,
             )
             session_ctx["_orchestrator_turn"] = False
             session_ctx["timing_ms"] = timer.to_dict()
@@ -1053,7 +1056,8 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
-                )
+                ),
+                user_message=user_message,
             )
             session_ctx["_orchestrator_turn"] = False
             session_ctx["timing_ms"] = timer.to_dict()
@@ -1101,7 +1105,8 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
-                )
+                ),
+                user_message=user_message,
             )
             session_ctx["_orchestrator_turn"] = False
             session_ctx["timing_ms"] = timer.to_dict()
@@ -1144,7 +1149,8 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
-                )
+                ),
+                user_message=user_message,
             )
             session_ctx["_orchestrator_turn"] = False
             session_ctx["timing_ms"] = timer.to_dict()
@@ -1170,7 +1176,7 @@ def run_lana_unified_pipeline(
         )
         if discovery is not None:
             reply, ctx, routing, peers = discovery
-            reply = sanitize_assistant_message(reply)
+            reply = sanitize_assistant_message(reply, user_message=user_message)
             if rapport_handoff_send is not None:
                 logging.getLogger(__name__).info(
                     "rapport_handoff routed send=%r -> routing=%s previews=%s peers=%s",
