@@ -18,6 +18,21 @@ ALLOWED_CORE_PATCH_KEYS = frozenset(
 )
 
 
+def _event_for_llm(ev: Any) -> Any:
+    """Swap an event's raw UTC timestamps for pre-formatted LOCAL ``when_text`` before
+    the core block reaches a prompt. Fed a raw instant, the synthesizer re-derives the
+    wrong date and calls an 8:30 PM event "your kind of morning" (QA 2026-07-08)."""
+    if not isinstance(ev, dict):
+        return ev
+    from app.event_when import format_event_when
+
+    out = {k: v for k, v in ev.items() if k not in ("starts_at", "ends_at")}
+    when_text = format_event_when(ev.get("starts_at"), style="inline")
+    if when_text:
+        out["when_text"] = when_text
+    return out
+
+
 def build_core_block(
     *,
     user_id: str,
@@ -63,7 +78,9 @@ def build_core_block(
             "pattern_hints": _load_pattern_hints(user_id),
         },
         "active_signals": {
-            "upcoming_events": (net.get("upcoming_events") or [])[:3],
+            "upcoming_events": [
+                _event_for_llm(ev) for ev in (net.get("upcoming_events") or [])[:3]
+            ],
             "neighbor_hint_count": len(net.get("neighbor_hints") or []),
             "open_marketplace_inquiry": session_ctx.get("open_marketplace_inquiry"),
             "pending_joint_moment": session_ctx.get("pending_joint_moment"),

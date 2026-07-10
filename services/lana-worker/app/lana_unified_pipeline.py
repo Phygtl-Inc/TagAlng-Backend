@@ -346,9 +346,9 @@ def _when_suggestions() -> list[str]:
     (event tz), not the server's UTC day."""
     from datetime import timedelta
 
-    from app.event_when import event_local_now
+    from app.event_when import event_now
 
-    today = event_local_now().date()
+    today = event_now().date()
     sat = today + timedelta(days=(5 - today.weekday()) % 7)  # this week's Sat (today if Sat)
     sun = today + timedelta(days=(6 - today.weekday()) % 7)
 

@@ -4439,15 +4439,12 @@ def redact_peers_for_preview(peers: list[dict[str, Any]]) -> list[dict[str, Any]
     return out
 
 
-def _format_event_when(raw: Any) -> str | None:
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt.strftime("%a %b %d").replace(" 0", " ")
-    except ValueError:
-        return s[:10] if len(s) >= 10 else s
+def _format_event_when(raw: Any, style: str = "inline") -> str | None:
+    """Delegates to THE tz-aware formatter (app.event_when). The old local strftime
+    printed the UTC date, so a Mon 8:30 PM ET event read as "(Tue Jul 14)" in chat."""
+    from app.event_when import format_event_when
+
+    return format_event_when(raw, style=style)
 
 
 def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4461,8 +4458,10 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
             {
                 "activity_id": str(ev.get("id") or "") or None,
                 "title": str(ev.get("title") or "Activity"),
+                # Raw ISO stays for clients (payload contract unchanged); the LABEL is
+                # worker-rendered local text and must agree with the chat sentence.
                 "starts_at": str(ev.get("starts_at") or "") or None,
-                "starts_label": _format_event_when(ev.get("starts_at")),
+                "starts_label": _format_event_when(ev.get("starts_at"), style="card"),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
                 # Honest attribution for partner-sourced events ("via Lake Nona Library");
                 # None for member events so the FE renders nothing extra.
@@ -4505,15 +4504,14 @@ def fetch_preview_events_on_block(
         )
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
         if weekend_only:
+            from app.event_when import event_local_dt
+
             filtered: list[dict[str, Any]] = []
             for row in rows:
-                when = str(row.get("starts_at") or "")
-                try:
-                    dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
-                    if dt.weekday() in (5, 6):
-                        filtered.append(row)
-                except ValueError:
-                    continue
+                # Weekend on the EVENT's wall clock — a Sat-night ET event is Sun in UTC.
+                dt = event_local_dt(row.get("starts_at"))
+                if dt is not None and dt.weekday() in (5, 6):
+                    filtered.append(row)
             rows = filtered
         return rows[:limit]
     except Exception:

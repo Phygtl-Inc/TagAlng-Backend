@@ -1,4 +1,11 @@
-"""AI date/time resolution for the in-chat event-host flow.
+"""Event date/time — AI resolution (host flow) + THE one tz-aware formatter.
+
+Everything user-facing that turns a ``starts_at`` into words lives here:
+``format_event_when`` renders a stored UTC instant (or a naive event-local draft
+value) in the EVENT's timezone, in one of two styles — so the chat sentence, the
+preview card label, and anything fed to an LLM all say the same local date. Never
+strftime a raw ``starts_at`` elsewhere: QA saw one event render as three different
+datetimes because each surface formatted the UTC instant its own way.
 
 The host flow needs the event's start as an absolute (calendar date + clock time). A
 regex resolver used to do this, but it choked on the things people actually type —
@@ -18,9 +25,99 @@ phrase like "not on friday" is never re-matched by the fallback regex.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import date as _date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# ── Timezone anchor ──────────────────────────────────────────────────────────────
+#
+# Single-region today (Orlando / Eastern); override with EVENT_DEFAULT_TZ when that
+# changes. Block/user-level timezones can be threaded through the `tz` parameter of
+# format_event_when once they exist in the data.
+
+DEFAULT_EVENT_TZ = "America/New_York"
+
+
+def event_tz(name: str | None = None) -> ZoneInfo:
+    """The timezone a host's wall-clock time ("6 PM") — and every human-facing render
+    of a stored UTC instant — is anchored to. Falls back to Eastern on a bad name."""
+    tz_name = (name or os.environ.get("EVENT_DEFAULT_TZ") or "").strip() or DEFAULT_EVENT_TZ
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return ZoneInfo(DEFAULT_EVENT_TZ)
+
+
+def _coerce_tz(tz: str | ZoneInfo | None) -> ZoneInfo:
+    if isinstance(tz, ZoneInfo):
+        return tz
+    return event_tz(tz)
+
+
+def event_now(tz: str | ZoneInfo | None = None) -> datetime:
+    """Now on the EVENT's wall clock — use instead of datetime.now(): the worker runs
+    in UTC, so the server's "today" flips hours before/after the block's does."""
+    return datetime.now(_coerce_tz(tz))
+
+
+def event_local_dt(raw: Any, tz: str | ZoneInfo | None = None) -> datetime | None:
+    """Parse a ``starts_at`` into an aware datetime on the event's wall clock.
+
+    Aware inputs (stored rows: ``...+00:00`` / ``...Z``) are converted to the event tz;
+    naive inputs (in-flight drafts, e.g. ``2026-07-11T18:00:00``) already MEAN event-local
+    wall-clock time (see event_publish._parse_iso_ts) and are anchored as-is, not shifted.
+    None when unparseable.
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    zone = _coerce_tz(tz)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=zone)
+    return dt.astimezone(zone)
+
+
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def format_event_when(
+    raw: Any,
+    tz: str | ZoneInfo | None = None,
+    style: str = "card",
+) -> str | None:
+    """THE tz-aware human render of a ``starts_at``. Two styles:
+
+    - ``card``:   ``Mon, Jul 13 · 8:30 PM``  (preview-card label)
+    - ``inline``: ``Mon Jul 13, 8:30 PM``    (mid-sentence chat text)
+
+    A bare date (``2026-07-13``) renders without a clock. Unparseable input degrades
+    to its first 10 chars (old behavior) rather than erroring; empty input is None.
+    """
+    if style not in ("card", "inline"):
+        raise ValueError(f"unknown format_event_when style: {style!r}")
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    dt = event_local_dt(s, tz)
+    if dt is None:
+        return s[:10] if len(s) >= 10 else s
+    day = (
+        f"{dt.strftime('%a')}, {dt.strftime('%b')} {dt.day}"
+        if style == "card"
+        else f"{dt.strftime('%a %b')} {dt.day}"
+    )
+    if _DATE_ONLY_RE.match(s):
+        return day
+    hour12 = dt.hour % 12 or 12
+    clock = f"{hour12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+    return f"{day} · {clock}" if style == "card" else f"{day}, {clock}"
+
 
 
 def event_local_now(utc_now: datetime | None = None) -> datetime:
@@ -96,7 +193,7 @@ def resolve_event_when(
             return None
         # Anchor on the HOST's local day, not the server's UTC day — a Wednesday-evening
         # turn is Thursday in UTC, which mis-grounded every relative date by one day.
-        today = now or event_local_now()
+        today = now or event_now()
         convo = "\n".join(
             f"{m.get('role', '?')}: {str(m.get('content') or '').strip()}"
             for m in (history or [])[-8:]

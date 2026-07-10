@@ -459,8 +459,12 @@ def _publish_activity(
 
 
 def _confirmation_echo(draft: dict[str, Any]) -> str:
+    from app.event_when import format_event_when
+
     title = draft.get("title") or "your event"
-    when = draft.get("starts_at") or "TBD"
+    # Human render, not the draft's raw ISO (naive draft values are event-local wall
+    # clock, so the formatter anchors — never shifts — them).
+    when = format_event_when(draft.get("starts_at"), style="inline") or "TBD"
     where = draft.get("venue_name") or "your place"
     return f"Got it: {title} · {when} · {where}. *Publish?*"
 

@@ -484,23 +484,24 @@ def _fetch_block_events(
 
 
 def _today_str() -> str:
-    from datetime import datetime
+    from app.event_when import event_now
 
-    return datetime.now().strftime("%Y-%m-%d (%A)")
+    # Event-local today (the worker's clock is UTC — its date flips at ~8 PM Eastern).
+    return event_now().strftime("%Y-%m-%d (%A)")
 
 
 def _event_when_parts(raw: Any) -> str:
-    """'2026-07-05 Sat' for the LLM — so it can match a date/timeframe query."""
-    from datetime import datetime
+    """'2026-07-05 Sat' for the LLM — LOCAL (event-tz) date, so a "July 13" query matches
+    the date the neighbor will actually attend, not the UTC date of the stored instant."""
+    from app.event_when import event_local_dt
 
     s = str(raw or "").strip()
     if not s:
         return ""
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %a")
-    except ValueError:
+    dt = event_local_dt(s)
+    if dt is None:
         return s[:10]
+    return dt.strftime("%Y-%m-%d %a")
 
 
 def _filter_events_by_query(
@@ -586,14 +587,14 @@ def _filter_events_by_query(
 
 
 def _event_lines(events: list[dict[str, Any]]) -> list[str]:
-    from app.discovery_route import _format_event_when
+    from app.event_when import format_event_when
     from app.partner_events import with_attribution
 
     lines: list[str] = []
     for ev in events[:5]:
         title = str(ev.get("title") or "Activity")
         venue = str(ev.get("venue_name") or "").strip()
-        when = _format_event_when(ev.get("starts_at"))
+        when = format_event_when(ev.get("starts_at"), style="inline")
         line = f"• {title}"
         if venue:
             line += f" at {venue}"
