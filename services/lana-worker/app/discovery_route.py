@@ -1735,6 +1735,88 @@ def _try_layer1_intent_turn(
     return None
 
 
+def save_pending_signal_ask(
+    *,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    block_id: str | None,
+    zip_code: str | None,
+) -> str | None:
+    """Save a signal ask stashed across verification/login (one-shot; mirrors
+    look_meet.save_pending_meet_seek). Reads session_ctx["signal_pending"]. Returns Lana's
+    greeting reply, or None when nothing usable is pending (caller keeps the plain
+    opening). No block yet → keep the stash and ask the ZIP; the in-turn post-verify pop
+    reads the ZIP answer and finishes the save."""
+    pending = session_ctx.get("signal_pending")
+    if not isinstance(pending, dict) or not pending:
+        return None
+    intent = normalize_signal_intent(pending.get("intent"))
+    detail = str(pending.get("detail") or "").strip()
+    if not (intent and detail):
+        session_ctx["signal_pending"] = None
+        return None
+    if not block_id:
+        return (
+            f"Welcome back! I still have your ask — {detail[:120]}. "
+            "What ZIP are you in so I can post it to your block?"
+        )
+    session_ctx["signal_pending"] = None
+    try:
+        save_local_signal(
+            user_jwt,
+            intent=intent,
+            detail_text=detail,
+            category=str(pending.get("category") or "") or None,
+            block_id=block_id,
+            zip_code=zip_code,
+        )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("save_pending_signal_ask_failed")
+        return None
+    return (
+        f"Welcome back! ✅ I've posted your ask to your block — {detail[:120]} — "
+        "and I'll ping you the moment a neighbor responds."
+    )
+
+
+def _compose_verify_gate_ask(user_msg: str) -> str:
+    """AI-authored verify gate (Lana's voice) — acknowledge WHAT the user asked for and say
+    it'll be set up, THEN explain the one thing needed (email verification) and ask for it.
+    The old canned "Verify your email first" opener read as a cold wall that ignored the
+    request ("can you recommend me a babysitter" → demand for email with zero empathy).
+    Static friendly fallback when no LLM is configured."""
+    fallback = (
+        "Happy to help with that! To save your ask and share it with your block I just "
+        "need to verify you first — what's your email?"
+    )
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return fallback
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "You are Lana, a warm neighborhood concierge. The user asked for something "
+                "you CAN do — you'll save their ask to their neighborhood block and ping "
+                "them when a neighbor responds — but they aren't verified yet, and you need "
+                "their email before you can post anything. Write ONE short chat message "
+                "(max 2 sentences): first acknowledge specifically what they asked for and "
+                "say you'll set it up, then explain you just need to verify them and ask "
+                "for their email. Never promise results you don't have. "
+                'Return JSON {"message": "..."}.'
+            ),
+            user_payload=f"The user's request: {str(user_msg or '').strip()[:300]}",
+            max_tokens=120,
+            temperature=0.4,
+        )
+        msg = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        return msg or fallback
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("verify_gate_ask_failed")
+        return fallback
+
+
 def _try_signal_lane_turn(
     *,
     msg: str,
@@ -1806,14 +1888,35 @@ def _try_signal_lane_turn(
 
     if active_linear or isinstance(draft, dict):
         if not phone_verified:
-            return (
-                "Verify your email first — then I can post that to your block.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent=active_linear or INTENT_SAVE_SIGNAL,
+            # Enter the REAL verify sub-flow, not just words: await_signup_phone +
+            # requires_phone_verification make the FE show the email UI and route the
+            # next turn (the email) to the signup handler — without them the email fell
+            # through to the ZIP funnel ("That looks like 1 digits"). Stash the ask so it
+            # auto-saves the moment they verify (mirrors look_seek_pending).
+            from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR
+
+            d = draft if isinstance(draft, dict) else {}
+            ctx_base["signal_pending"] = {
+                "intent": (
+                    str(d.get("intent") or "")
+                    or normalize_signal_intent(slots.get("signal_intent"))
+                    or SIGNAL_INTENT_BY_LINEAR.get(active_linear or "")
                 ),
-                _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
+                "detail": str(
+                    d.get("detail") or slots.get("signal_detail") or msg or ""
+                ).strip()[:500],
+                "category": str(d.get("category") or slots.get("signal_category") or "") or None,
+            }
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=PHASE_AWAIT_SIGNUP_PHONE,
+                active_intent=active_linear or INTENT_SAVE_SIGNAL,
+            )
+            ctx["requires_phone_verification"] = True
+            return (
+                _compose_verify_gate_ask(msg),
+                ctx,
+                _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE, "save_signal_need_verify"),
                 [],
             )
         if not resolve_block_id(session_ctx, home_block_id):
@@ -2459,10 +2562,14 @@ def _try_save_signal_turn(
         )
 
     if not phone_verified:
+        # Same real verify sub-flow + stash as _try_signal_lane_turn's gate (see there).
+        ctx_base["signal_pending"] = {"intent": intent, "detail": detail, "category": category}
+        ctx = _routing_ctx(ctx_base, phase=PHASE_AWAIT_SIGNUP_PHONE, active_intent=active_intent)
+        ctx["requires_phone_verification"] = True
         return (
-            "Verify your email first — then I can post that to your block.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
-            _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
+            _compose_verify_gate_ask(msg),
+            ctx,
+            _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE, "save_signal_need_verify"),
             [],
         )
 
@@ -4274,22 +4381,15 @@ def format_activities_message(
             f"I don't see open activities on {where} in the next couple weeks yet. "
             "You can host something, or tell me what you're looking for."
         )
-    lines = [f"Here's what's coming up near {where}:"]
-    for ev in events[:5]:
-        title = str(ev.get("title") or "Activity")
-        venue = str(ev.get("venue_name") or "").strip()
-        when = _format_event_when(ev.get("starts_at"))
-        line = f"• {title}"
-        if venue:
-            line += f" at {venue}"
-        if when:
-            line += f" ({when})"
-        lines.append(line)
-    if phone_verified:
-        lines.append("Want to RSVP to one of these, or should I find neighbors like you?")
-    else:
-        lines.append("Verify your email to RSVP — or ask me to find neighbors like you.")
-    return "\n".join(lines)
+    # The FE renders these same events as a card list (activity_previews) right under this
+    # message — a short lead-in is enough; enumerating them in text too reads as a bug.
+    head = f"Here's what's coming up near {where}."
+    tail = (
+        "Want to RSVP to one of these, or should I find neighbors like you?"
+        if phone_verified
+        else "Verify your email to RSVP — or ask me to find neighbors like you."
+    )
+    return f"{head} {tail}"
 
 
 def _match_event_title(events: list[dict[str, Any]], msg: str) -> str | None:
@@ -4457,6 +4557,13 @@ def _handle_signup_phone_message(
             dest_uid = registered_user_id_for_email(email)
             if dest_uid:
                 stash_pending_meet_seek(dest_uid, pending_seek)
+        pending_signal = session_ctx.get("signal_pending")
+        if isinstance(pending_signal, dict) and pending_signal:
+            from app.db import stash_pending_signal_ask
+
+            dest_uid = registered_user_id_for_email(email)
+            if dest_uid:
+                stash_pending_signal_ask(dest_uid, pending_signal)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
@@ -4498,12 +4605,22 @@ def _handle_signup_phone_message(
 def _browse_or_seek_decision(slots: dict[str, Any], msg: str) -> str | None:
     """AI-first router for the find-something-to-do space.
 
-    Returns 'browse' (show the block's real events), 'seek' (look_meet capture + match),
-    'clarify' (genuinely ambiguous — ask one question), or None (not this space). The AI
-    owns the call: it sets clarify='browse_or_meet' when torn, and a low-confidence read in
-    this space also clarifies rather than guesses. Hosting is its own lane.
+    Returns 'browse' (search the block's real events — the entry for browse AND meet_seek
+    reads, per the search-first meet ≡ activity model), 'clarify' (genuinely ambiguous —
+    ask one question), or None (not this space). The AI owns the call: it sets
+    clarify='browse_or_meet' when torn, and a low-confidence read in this space also
+    clarifies rather than guesses. Hosting is its own lane.
     """
     if not slots:
+        return None
+    # Deterministic backstop, same as _is_browse_answer's: an explicit request for a
+    # PLACE/venue/service recommendation ("recommend babysitting service") is a tip_seek,
+    # never the events browse — return None so routing falls through to the tip path
+    # (_try_signal_seek_early_turn / _try_tip_seek_fast_turn) instead of running an events
+    # search on a service ask and answering with unrelated activities.
+    from app.layer1_intents import utterance_indicates_tip_seek
+
+    if utterance_indicates_tip_seek(msg):
         return None
     enriched = enrich_slots(dict(slots), msg=msg)
     if slots_indicate_hosting_signal(enriched):
@@ -4517,13 +4634,13 @@ def _browse_or_seek_decision(slots: dict[str, Any], msg: str) -> str | None:
         return None
     if str(slots.get("clarify") or "") == "browse_or_meet":
         return "clarify"
-    if is_browse and is_seek:
-        return "clarify"  # both signals, model didn't disambiguate → ask
-    if is_browse:
-        # A browse intent → the events browse; ask if the model isn't confident.
-        return "browse" if float(enriched.get("confidence", 0.0)) >= 0.55 else "clarify"
-    # A clear meet_seek is owned by the existing signal-capture flow — don't divert here.
-    return None
+    # Meet ≡ activity (search-first): browse AND meet_seek both enter the events browse —
+    # show what actually exists first. The seek to be matched is offered only when the
+    # search comes up empty (activity_browse's _seek_offer → verify-gated save for guests).
+    # This also stops a guest's "are there any X activities?" from hitting the signal
+    # lane's verify wall before any search has happened. An explicit "Set up a meet"
+    # clarifier answer still reaches the capture directly (_resolve_browse_or_meet_answer).
+    return "browse" if float(enriched.get("confidence", 0.0)) >= 0.55 else "clarify"
 
 
 def _resolve_browse_or_meet_answer(msg: str, slots: dict[str, Any] | None) -> str:
@@ -4538,7 +4655,7 @@ def _resolve_browse_or_meet_answer(msg: str, slots: dict[str, Any] | None) -> st
         return "seek"
     if re.search(r"\b(see|show|what'?s|happening|going on|browse|events?|activit|list|nearby)\b", low):
         return "browse"
-    return "seek" if _browse_or_seek_decision(slots or {}, msg) == "seek" else "browse"
+    return "browse"
 
 
 def _ask_browse_or_meet(
@@ -5125,6 +5242,65 @@ def handle_discovery_turn(
             ctx["look_meet_saved_now"] = session_ctx.get("look_meet_saved_now") or None
             return pending_reply, ctx, _discovery_routing_stub("listening", "look_meet"), []
 
+    # A guest's looking/sharing ask (babysitter rec, swap, …) that hit the verify gate was
+    # stashed (signal_pending) — the moment they come back verified, save it so they never
+    # have to repeat themselves (mirrors look_seek_pending above). Missing block → ask the
+    # ZIP while keeping the stash; this turn's message may itself be that ZIP.
+    if phone_verified and isinstance(session_ctx.get("signal_pending"), dict):
+        pending = dict(session_ctx.get("signal_pending") or {})
+        p_intent = normalize_signal_intent(pending.get("intent"))
+        p_detail = str(pending.get("detail") or "").strip()
+        if not (p_intent and p_detail):
+            session_ctx["signal_pending"] = None
+        else:
+            if not home_block_id:
+                _try_assign_home_block(user_jwt, session_ctx=session_ctx, home_block_id=home_block_id)
+            block_id = resolve_block_id(session_ctx, home_block_id)
+            if not block_id:
+                zip5 = extract_zip(msg)
+                blocks = fetch_blocks_for_zip(user_jwt, zip5) if zip5 else []
+                if blocks:
+                    block_id = str(blocks[0].get("block_id") or "") or None
+                    session_ctx["preview_block_id"] = block_id
+                    session_ctx["preview_zip"] = zip5
+            if block_id:
+                session_ctx["signal_pending"] = None
+                try:
+                    save_local_signal(
+                        user_jwt,
+                        intent=p_intent,
+                        detail_text=p_detail,
+                        category=str(pending.get("category") or "") or None,
+                        block_id=block_id,
+                        zip_code=str(session_ctx.get("zip") or "") or None,
+                    )
+                    reply = (
+                        "✅ You're verified! I've posted your ask to your block — "
+                        f"{p_detail[:120]} — and I'll ping you the moment a neighbor responds."
+                    )
+                    ctx = _routing_ctx(
+                        session_ctx, phase="listening", active_intent=INTENT_SAVE_SIGNAL
+                    )
+                    return (
+                        reply,
+                        ctx,
+                        _discovery_routing_stub("listening", "signal_saved_post_verify"),
+                        [],
+                    )
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception("signal_pending_save_failed")
+            else:
+                ctx = _routing_ctx(
+                    session_ctx, phase=PHASE_NEED_ZIP, active_intent=INTENT_SAVE_SIGNAL
+                )
+                return (
+                    "You're verified! What ZIP are you in? Once I know your block "
+                    "I'll post your ask to neighbors nearby.",
+                    ctx,
+                    _discovery_routing_stub(PHASE_NEED_ZIP, "signal_pending_need_zip"),
+                    [],
+                )
+
     # Resolve a pending out-of-scope clarifier BEFORE the lane handlers below, so a reply
     # that pivots to a real intent ("organize it with neighbors") reaches its handler and
     # the pending flag never leaks into a later turn. The reply either confirms the
@@ -5295,10 +5471,17 @@ def handle_discovery_turn(
         )
 
     # Browse-vs-seek router (AI-driven), before the ZIP funnel:
-    #   browse  → agentic "what's happening" events browse (show real events, refine)
-    #   seek    → look_meet capture ("what kind of meet?" → match to a host)
+    #   browse  → agentic "what's happening" events browse (show real events, refine);
+    #             clear meet_seek reads enter here too (search-first, seek on empty)
     #   clarify → one-tap question when the AI genuinely can't tell
-    if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
+    # An in-flight signal_draft owns its answer turns — the cascade below reads them
+    # (answer/cancel/reroute); don't hijack a mid-capture reply into a fresh browse.
+    if (
+        discovery_ai_enabled()
+        and slots
+        and not is_hosting_ui_cta(msg)
+        and not session_ctx.get("signal_draft")
+    ):
         # Resolve a pending clarifier answer first (always lands on browse or seek).
         if session_ctx.get("browse_or_meet_pending"):
             session_ctx["browse_or_meet_pending"] = None

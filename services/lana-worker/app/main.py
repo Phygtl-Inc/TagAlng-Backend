@@ -33,6 +33,7 @@ from app.db import (
     list_messages,
     pop_pending_event_draft,
     pop_pending_meet_seek,
+    pop_pending_signal_ask,
     transcript_text,
     update_session_context,
     merge_session_context,
@@ -1091,6 +1092,14 @@ def create_lana_session(
                 if not auth.is_anonymous and not recovered
                 else None
             )
+            # A signal ask (babysitter rec, swap, …) the guest made just before logging
+            # into this existing account — stashed at email entry, same one-at-a-time
+            # priority as the meet seek above.
+            recovered_signal = (
+                pop_pending_signal_ask(auth.user_id)
+                if not auth.is_anonymous and not recovered and not recovered_seek
+                else None
+            )
             if recovered and isinstance(recovered.get("event_draft"), dict):
                 session_ctx = {
                     **recovered,
@@ -1119,6 +1128,27 @@ def create_lana_session(
                 )
                 session_ctx["look_seek_pending"] = recovered_seek
                 saved_reply = save_pending_meet_seek(
+                    session_ctx=session_ctx,
+                    user_jwt=_bearer_token(authorization),
+                    block_id=auth.home_block_id,
+                    zip_code=None,
+                )
+                if saved_reply:
+                    opening = saved_reply
+                draft_raw = None
+                use_orch = False
+            elif recovered_signal:
+                # Same rescue for a signal ask (babysitter rec, swap, …): save it now and
+                # greet with the confirmation; when the account has no block yet, the
+                # stash stays in session and the reply asks for the ZIP (the post-verify
+                # pop finishes the save on the next message).
+                from app.discovery_route import save_pending_signal_ask
+
+                opening, status, session_ctx, ui_raw = lana_unified_opening(
+                    is_anonymous=auth.is_anonymous
+                )
+                session_ctx["signal_pending"] = recovered_signal
+                saved_reply = save_pending_signal_ask(
                     session_ctx=session_ctx,
                     user_jwt=_bearer_token(authorization),
                     block_id=auth.home_block_id,
