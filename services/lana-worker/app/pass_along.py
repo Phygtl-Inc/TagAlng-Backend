@@ -5,8 +5,11 @@ and chips are driven in code so it stays on-script and never loops.
 Flow (matches the C-4-swap mock):
   P1  "Tell me about your item."            (no item yet)
   P2  "Heard you." + colored entity chips + ask the ONE missing thing w/ options
-  P3  photo prompt → list it
-  →   saved to local_signals (swap_offer) with photo_url; matcher pings seekers.
+  P3  photo prompt → hold it
+  →   queued to queued_contributions (swap_item) with the full capture. Swaps aren't
+      live on the block yet, so Lana closes with an honest promise ("I'll hold your
+      listing — swaps open on your block soon and yours will be first up") instead of
+      a dead-end "listed!" claim; the row is promoted into local_signals at launch.
 
 Entry is deterministic via intent_hint="pass_along" (see main.py) → session flag
 `pass_along_active`, same pattern as `event_host_active`.
@@ -228,28 +231,36 @@ def _detail_text(draft: dict[str, Any]) -> str:
     return " · ".join([p for p in parts if p]) or str(draft.get("title") or "item")
 
 
-def _save_item(
-    *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
-) -> dict[str, Any] | None:
-    """Persist as a swap_offer in local_signals (so the seek↔offer matcher fires).
-    Returns the saved payload, or None on failure (caller exits gracefully)."""
-    try:
-        from app.local_signals import save_local_signal
+def _queue_item(
+    *,
+    draft: dict[str, Any],
+    user_id: str | None,
+    block_id: str | None,
+    zip_code: str | None,
+    notify: bool,
+) -> bool:
+    """Park the finished capture in queued_contributions — swaps aren't live on the
+    block yet, so instead of a dead-end "listed" claim Lana holds the item and promises
+    it first-up at launch. Returns False on failure (caller exits gracefully)."""
+    from app.queued_contributions import QUEUED_KIND_SWAP, queue_contribution
 
-        return save_local_signal(
-            user_jwt,
-            intent="swap_offer",
-            detail_text=_detail_text(draft),
-            category=str(draft.get("category") or "").strip() or None,
-            block_id=block_id,
-            zip_code=zip_code,
-            photo_url=str(draft.get("photo_url") or "").strip() or None,
-        )
-    except Exception:  # noqa: BLE001
-        import logging
-
-        logging.getLogger(__name__).exception("pass_along_save_failed")
-        return None
+    return queue_contribution(
+        user_id=user_id,
+        block_id=block_id,
+        kind=QUEUED_KIND_SWAP,
+        payload={
+            "intent": "swap_offer",
+            "title": str(draft.get("title") or "").strip() or None,
+            "detail_text": _detail_text(draft),
+            "category": str(draft.get("category") or "").strip() or None,
+            "condition": str(draft.get("condition") or "").strip() or None,
+            "intent_type": str(draft.get("intent_type") or "").strip() or None,
+            "details": [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()],
+            "photo_url": str(draft.get("photo_url") or "").strip() or None,
+            "zip": zip_code,
+        },
+        notify=notify,
+    )
 
 
 # What this capture OWNS: the user offering/giving away an item (swap_offer). Anything the
@@ -311,6 +322,8 @@ def run_pass_along_turn(
     history: list[dict[str, Any]],
     user_jwt: str,
     home_block_id: str | None,
+    user_id: str | None = None,
+    phone_verified: bool = False,
 ) -> str:
     """Drive one pass-along capture turn. Mutates session_ctx in place — sets
     `item_draft`, `pass_along_active`, `item_listed_now`, `routing_phase` — and
@@ -434,12 +447,18 @@ def run_pass_along_turn(
             "tap **Add photo** below, or say *list it* to post without one."
         )
 
-    # ── Save → listed ──
-    saved = _save_item(
+    # ── Queue → honest close. Swaps aren't live on the block yet ("Coming soon" in the
+    # UI), so a "listed!" claim would dead-end — instead Lana holds the finished capture
+    # in queued_contributions and promises it first-up at launch. notify only when the
+    # user has a verified contact to text; anonymous/unverified queue without notify. ──
+    from app.queued_contributions import QUEUED_KIND_SWAP, queued_close_line
+
+    queued_ok = _queue_item(
         draft=draft,
-        user_jwt=user_jwt,
-        block_id=home_block_id,
+        user_id=user_id,
+        block_id=home_block_id or str(session_ctx.get("preview_block_id") or "").strip() or None,
         zip_code=str(session_ctx.get("zip_code") or "").strip() or None,
+        notify=phone_verified,
     )
     session_ctx["pass_along_active"] = False
     session_ctx["pass_along_turns"] = 0
@@ -447,36 +466,31 @@ def run_pass_along_turn(
     session_ctx["pass_along_pending_ask"] = None
     session_ctx["pass_along_enrich_count"] = 0
     session_ctx["routing_phase"] = "listening"
-    if not saved:
+    if not queued_ok:
         session_ctx["item_draft"] = None
-        return (
-            "I couldn't post that just now — let's try again in a moment. "
-            "Is your neighborhood set up?"
-        )
-    matches = int(saved.get("matches_created") or 0)
-    draft["signal_id"] = saved.get("signal_id")
+        return "I couldn't save that just now — let's try again in a moment."
     draft["listed"] = True
+    draft["queued"] = True
     draft["chips"] = chips
     draft["suggestions"] = []
     session_ctx["item_draft"] = draft
     session_ctx["item_listed_now"] = True
-    tail = (
-        f" {matches} neighbor{'s' if matches != 1 else ''} looking for this just got pinged."
-        if matches
-        else " I'll ping anyone on your block who's looking for it."
+    session_ctx["item_queued_now"] = True
+    close = queued_close_line(
+        kind=QUEUED_KIND_SWAP, summary=_summary(draft), notify=phone_verified
     )
     # If they bundled several items in one message, offer the next instead of dropping it.
-    queued = list(session_ctx.get("pass_along_other_items") or [])
+    others = list(session_ctx.get("pass_along_other_items") or [])
     session_ctx["pass_along_other_items"] = []
     extra = ""
-    if queued:
+    if others:
         names = (
-            queued[0] if len(queued) == 1
-            else ", ".join(queued[:-1]) + f" and {queued[-1]}"
+            others[0] if len(others) == 1
+            else ", ".join(others[:-1]) + f" and {others[-1]}"
         )
-        that = "that" if len(queued) == 1 else "those"
+        that = "that" if len(others) == 1 else "those"
         extra = (
-            f" You also mentioned {names} — want to pass {that} along too? "
+            f" You also mentioned {names} — want me to hold {that} too? "
             "Just tell me about the next one."
         )
-    return f"🎉 Done — **{_summary(draft)}** is listed on your block.{tail}{extra}"
+    return f"{close}{extra}"

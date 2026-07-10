@@ -256,6 +256,8 @@ class ItemDraft(BaseModel):
     chips: list[ItemChip] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     listed: bool = False
+    # Held in queued_contributions for the swaps launch (surface not live yet).
+    queued: bool = False
     signal_id: str | None = None
     missing: list[str] = Field(default_factory=list)
 
@@ -271,6 +273,8 @@ class TipDraft(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
     ready: bool = False
     listed: bool = False
+    # Held in queued_contributions for the tips launch (surface not live yet).
+    queued: bool = False
     signal_id: str | None = None
     missing: list[str] = Field(default_factory=list)
 

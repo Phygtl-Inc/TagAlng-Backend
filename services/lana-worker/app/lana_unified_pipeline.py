@@ -1314,6 +1314,8 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
+                    user_id=user_id,
+                    phone_verified=phone_verified,
                 ),
                 user_message=user_message,
             )
@@ -1322,7 +1324,7 @@ def run_lana_unified_pipeline(
             session_ctx["last_routing"] = {
                 "outcome": "pass_along",
                 "intent_class": "swap",
-                "tool_called": "save_local_signal" if session_ctx.get("item_listed_now") else None,
+                "tool_called": "queue_contribution" if session_ctx.get("item_listed_now") else None,
             }
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
@@ -1356,6 +1358,8 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
+                    user_id=user_id,
+                    phone_verified=phone_verified,
                 ),
                 user_message=user_message,
             )
@@ -1364,7 +1368,7 @@ def run_lana_unified_pipeline(
             session_ctx["last_routing"] = {
                 "outcome": "tip_share",
                 "intent_class": "discovery",
-                "tool_called": "save_local_signal" if session_ctx.get("tip_listed_now") else None,
+                "tool_called": "queue_contribution" if session_ctx.get("tip_listed_now") else None,
             }
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
