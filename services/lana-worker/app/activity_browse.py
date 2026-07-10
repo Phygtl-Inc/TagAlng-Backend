@@ -51,6 +51,66 @@ def reset_activity_browse_state(session_ctx: dict[str, Any]) -> None:
     session_ctx["browse_turns"] = 0
 
 
+# The "A meet or playgroup" CTA's generic seed payloads — a tap, not typed content.
+_BARE_ENTRY_PHRASES = frozenset({
+    "a meet or playgroup",
+    "a meet or a playgroup",
+    "looking for a meet or playgroup",
+    "i'm looking for a meet or playgroup",
+    "im looking for a meet or playgroup",
+})
+
+# Signals that a short message SAYS something (a want, a question, a feeling) rather than
+# naming a category — any of these means "classify it, don't can it".
+_CONTENT_TOKEN_RE = re.compile(
+    r"\b(?:i|me|my|we|our|you|need|want|find|show|help|know|have|get|do|does|is|are|"
+    r"can|how|what|why|who|where|when|please)\b|\?",
+    re.IGNORECASE,
+)
+
+_ZIP_ONLY_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
+
+
+def looks_like_bare_look_meet_entry(message: str) -> bool:
+    """Is the "A meet or playgroup" CTA turn a BARE chip tap (the chip's seed payload, a
+    category label, or a ZIP) with no semantic content of its own?
+
+    Only those keep the fast canned entry (enter_activity_browse_from_cta). Free text that
+    says anything real — "I need a babysitter for tonight", a safety worry, a long
+    emotional message — must instead reach the AI intent classifier, never the canned
+    "what kind of thing are you up for?" opener. Deterministic on purpose: no LLM cost on
+    a chip tap."""
+    msg = str(message or "").strip().lower().rstrip(".!")
+    if not msg:
+        return True
+    if msg in _BARE_ENTRY_PHRASES:
+        return True
+    if _ZIP_ONLY_RE.match(msg):
+        return True
+    # Short label-like taps ("Family & kids", "Stroller walk") with no sentence signals.
+    return len(msg.split()) <= 3 and not _CONTENT_TOKEN_RE.search(msg)
+
+
+def enter_activity_browse_from_cta(session_ctx: dict[str, Any], message: str) -> bool:
+    """Deterministic entry for the "A meet or playgroup" CTA (intent_hint="look_meet").
+
+    A bare tap arms the sticky browse flow exactly as before (skip the generic seed so P1
+    asks fresh) and returns True. A message carrying real semantic content is NOT captured:
+    returns False and leaves session_ctx untouched, so the turn falls through to normal
+    routing (handle_discovery_turn → layer-1 classification) and out-of-scope / unsafe /
+    emotional turns reach their real handlers instead of the canned opener. See main.py."""
+    if not looks_like_bare_look_meet_entry(message):
+        return False
+    session_ctx["activity_browse_active"] = True
+    session_ctx["browse_turns"] = 0
+    session_ctx["browse_draft"] = None
+    # Button entry carries a generic seed phrase with no real interest — skip mining it so
+    # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
+    # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
+    session_ctx["browse_skip_seed"] = True
+    return True
+
+
 # The "yes, listen for me" acceptance of the seek fallback offered when a search comes up
 # empty (search-first model: looking for a meet ≡ searching activities; the seek to be
 # matched is the fallback). "widen" broadens the search instead.
