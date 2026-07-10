@@ -396,6 +396,7 @@ def _format_browse_message(
             return t("browse.events_empty_label", lang, label=label)
         return t("browse.events_empty", lang)
     from app.discovery_route import _format_event_when
+    from app.partner_events import with_attribution
 
     head = (
         t("browse.events_header_label", lang, label=label)
@@ -412,7 +413,7 @@ def _format_browse_message(
             line += f" at {venue}"
         if when:
             line += f" ({when})"
-        lines.append(line)
+        lines.append(with_attribution(line, ev))
     tail = (
         t("browse.events_tail_verified", lang)
         if phone_verified

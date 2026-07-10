@@ -4378,6 +4378,8 @@ def _format_event_when(raw: Any) -> str | None:
 
 
 def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from app.partner_events import attribution_label
+
     out: list[dict[str, Any]] = []
     for ev in events[:5]:
         if not isinstance(ev, dict):
@@ -4389,6 +4391,10 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 "starts_at": str(ev.get("starts_at") or "") or None,
                 "starts_label": _format_event_when(ev.get("starts_at")),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
+                # Honest attribution for partner-sourced events ("via Lake Nona Library");
+                # None for member events so the FE renders nothing extra.
+                "source": str(ev.get("source") or "").strip() or None,
+                "attribution": attribution_label(ev),
                 "preview": True,
             }
         )
@@ -4415,7 +4421,7 @@ def fetch_preview_events_on_block(
         fetch_n = pool if pool and pool > 0 else limit * 3
         res = (
             sb.table("events")
-            .select("id, title, starts_at, venue_name, cohort_tags, host_id")
+            .select("id, title, starts_at, venue_name, cohort_tags, host_id, source, source_name")
             .eq("block_id", block_id)
             .eq("status", "open")
             .eq("is_test", False)  # QA fixtures never reach member-facing previews
@@ -4453,6 +4459,8 @@ def format_activities_message(
     where = block_label or "your block"
     if not events:
         return t("discovery.activities_empty", lang, where=where)
+    from app.partner_events import with_attribution
+
     lines = [t("discovery.activities_header", lang, where=where)]
     for ev in events[:5]:
         title = str(ev.get("title") or "Activity")
@@ -4463,7 +4471,7 @@ def format_activities_message(
             line += f" at {venue}"
         if when:
             line += f" ({when})"
-        lines.append(line)
+        lines.append(with_attribution(line, ev))
     if phone_verified:
         lines.append(t("discovery.activities_tail_verified", lang))
     else:
