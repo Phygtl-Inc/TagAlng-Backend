@@ -331,7 +331,10 @@ def run_turn(
         **session_ctx,
         **synth_ctx,
         "core_block": strip_ephemeral(core),
-        "last_routing": routing,
+        # Stamp capture_fired onto the persisted routing — before this only the log
+        # line carried it, so the API payload reported capture_fired=false even on
+        # turns where capture_inquiry actually ran.
+        "last_routing": {**routing, "capture_fired": capture_fired},
         "timing_ms": timer.to_dict(),
     }
     if draft:
