@@ -2119,6 +2119,8 @@ def _complete_event_draft(
                     "Your event draft is ready — verify your email in settings, "
                     "then publish from the form or call complete again."
                 )
+            elif exc.detail == "duplicate_event":
+                closing = "Looks like you already have that meet — want to edit it instead?"
             else:
                 raise
 
