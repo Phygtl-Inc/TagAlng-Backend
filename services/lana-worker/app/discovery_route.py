@@ -160,9 +160,13 @@ from app.layer1_handlers import (
 from app.context import load_event_draft_context
 from app.claims_persist import persist_profile_patch, try_upsert_claims_from_message
 from app.profile_intake import format_profile_intake_context, lana_profile_turn
+from app.analytics import track
+from app.faq_replies import faq_reply, faq_topic
 from app.layer1_intents import (
+    FAQ_LINEAR_INTENTS,
     LOOKING_SHARING_INTENTS,
     enrich_slots,
+    faq_linear_intent,
     intent_confidence_met,
     is_block_activity_browse,
     is_profile_acknowledgment,
@@ -1239,6 +1243,32 @@ def _identity_conversational_reply(
     return reply or fallback
 
 
+def _answer_faq_turn(
+    linear: str,
+    *,
+    session_ctx: dict[str, Any],
+    phase: str,
+    user_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """One of the four product FAQs (help.faq_*) — answer with the static template.
+
+    The routing phase is deliberately KEPT (need_zip stays need_zip): the answer ends with a
+    gentle re-offer, so the funnel step the question interrupted resumes on the next turn.
+    """
+    ctx = _routing_ctx(
+        dict(session_ctx),
+        phase=phase or "listening",
+        active_intent=linear,
+    )
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "faq_answer")
+    track(
+        "faq_answered",
+        user_id=user_id,
+        event_properties={"topic": faq_topic(linear)},
+    )
+    return faq_reply(linear) or "", ctx, ctx["last_routing"], []
+
+
 def _try_layer1_intent_turn(
     *,
     msg: str,
@@ -1714,6 +1744,11 @@ def _try_layer1_intent_turn(
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
         return HELP_WHO_ARE_YOU, ctx, ctx["last_routing"], []
+
+    if linear in FAQ_LINEAR_INTENTS:
+        return _answer_faq_turn(
+            linear, session_ctx=ctx_base, phase=phase, user_id=user_id
+        )
 
     if linear == "tier.respond_nudge":
         reply, pending, _action = handle_respond_nudge(
@@ -5024,6 +5059,16 @@ def handle_discovery_turn(
             msg=msg, kind=_unsafe_kind, session_ctx=session_ctx,
             user_id=user_id, home_block_id=home_block_id, phase=phase,
         )
+
+    # Product FAQ second — QA 2026-07-08: four direct questions (safety, who-is-this-for,
+    # childcare, ZIP privacy) each got a canned funnel line or an event dump. A direct
+    # question outranks every funnel step and lane handler below: answer it NOW from the
+    # static template and leave the phase untouched so the interrupted flow resumes next
+    # turn. Deterministic regex first; the classifier's help.faq_* label (paraphrases the
+    # regex can't see) is honored via the same handler in _try_layer1_intent_turn.
+    _faq = faq_linear_intent(msg)
+    if _faq is not None:
+        return _answer_faq_turn(_faq, session_ctx=session_ctx, phase=phase, user_id=user_id)
 
     # A guest who finished an event, hit the verify gate, and is now verified: publish the
     # event RIGHT AWAY (mirrors the meet-seek publish-after-verify below) and show the

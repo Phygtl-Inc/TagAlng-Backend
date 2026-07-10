@@ -6,8 +6,11 @@ import logging
 import re
 from typing import Any
 
+from app.analytics import track
 from app.discovery_route import handle_discovery_turn, looks_like_logout
+from app.faq_replies import faq_reply, faq_topic
 from app.lana_dispatch import lana_unified_turn
+from app.layer1_intents import faq_linear_intent
 from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import unified_rules_first_enabled
 from app.loop_guard import discovery_reply_is_stuck, reset_sticky_discovery_state
@@ -829,6 +832,38 @@ def run_lana_unified_pipeline(
             "rapport_pending_action",
         ):
             session_ctx[_k] = None
+
+    # Product FAQ gate — QA 2026-07-08: 4/4 direct questions (safety, who-is-this-for,
+    # childcare, ZIP privacy) went unanswered, each swallowed by a funnel line or an event
+    # dump. A direct question outranks a chip-primed capture (intent_hint just set
+    # activity_browse/pass_along/tip flags on the ctx) and every sticky flow below, so it
+    # is answered HERE — before any gate can consume the turn. Flow state is deliberately
+    # left untouched: each answer ends by re-offering the ongoing goal, so the interrupted
+    # flow resumes next turn. Same deterministic detector the discovery route uses.
+    _faq = faq_linear_intent(user_message)
+    if _faq is not None:
+        track(
+            "faq_answered",
+            user_id=user_id,
+            event_properties={"topic": faq_topic(_faq)},
+        )
+        ctx = dict(session_ctx)
+        ctx["active_intent"] = _faq
+        ctx["_orchestrator_turn"] = False
+        ctx["timing_ms"] = timer.to_dict()
+        ctx["last_routing"] = {
+            "outcome": "faq_answer",
+            "intent_class": "help",
+            "tool_called": None,
+        }
+        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+        return (
+            sanitize_assistant_message(faq_reply(_faq) or ""),
+            "continue",
+            ctx,
+            ui,
+            ctx.get("event_draft"),
+        )
 
     # Guarantee the home block is persisted the moment a user is verified — independent of
     # what they do this turn (browse, host, ask a question). Signing up always collects a
