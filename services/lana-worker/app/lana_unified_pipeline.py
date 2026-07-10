@@ -9,6 +9,7 @@ from typing import Any
 from app.analytics import track
 from app.discovery_route import handle_discovery_turn, looks_like_logout
 from app.faq_replies import faq_reply, faq_topic
+from app.gates import gate_copy, gate_shown
 from app.lana_dispatch import lana_unified_turn
 from app.layer1_intents import faq_linear_intent
 from app.lana_ui import sanitize_assistant_message
@@ -222,10 +223,9 @@ def _publish_failure_reply(error: str | None, title: str) -> str:
     name = f"**{title}**" if title else "your event"
     detail = (error or "").lower()
     if "phone_not_verified" in detail or ":403" in detail or "not_authenticated" in detail:
-        return (
-            f"{name} is all set, but I can't post it until your account is verified. "
-            "Verify your email and I'll publish it right away."
-        )
+        # Backend-enforced write gate (publish_event) — benefit-framed copy.
+        gate_shown("publish_event")
+        return f"{name} is all set. " + gate_copy("publish_event")
     if "duplicate_event" in detail or "duplicate key" in detail:
         # The dedupe guard fired — same title + start already posted by this host.
         return f"Looks like you already have that meet — want to edit {name} instead?"
