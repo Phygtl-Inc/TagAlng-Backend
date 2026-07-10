@@ -5,7 +5,7 @@ from typing import Any
 
 from app.models import EventDraft, ExtractedClaim, MappedSpan
 from app.orchestrator.llm import llm_json
-from app.vertex_event_extract import EVENT_EXTRACT_PROMPT, parse_event_extract_data
+from app.vertex_event_extract import event_extract_prompt, parse_event_extract_data
 from app.vertex_extract import EXTRACT_PROMPT, parse_profile_extract_data
 
 
@@ -36,7 +36,7 @@ def claude_extract_event_from_transcript(
     purpose_ids: list[str],
     previous_draft: dict[str, Any] | None = None,
 ) -> tuple[EventDraft, str, str | None, list[MappedSpan]]:
-    prompt = EVENT_EXTRACT_PROMPT.replace("{purpose_ids}", ", ".join(purpose_ids) or "see get_event_purposes")
+    prompt = event_extract_prompt(purpose_ids)
     data = llm_json(
         model=_extract_model(),
         system=(
