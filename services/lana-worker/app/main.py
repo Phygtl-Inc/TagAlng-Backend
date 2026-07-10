@@ -640,6 +640,15 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
         tags = row.get("trait_tags")
         if not isinstance(tags, list):
             tags = []
+        shared = row.get("shared")
+        if not isinstance(shared, list):
+            shared = []
+        stage_band = str(row.get("stage_band") or "") or None
+        if stage_band not in ("expecting", "baby", "toddler", "prek", "school"):
+            stage_band = None
+        tier = str(row.get("tier") or "") or None
+        if tier not in ("great", "good"):
+            tier = None
         out.append(
             PeerMatchRow(
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
@@ -654,6 +663,11 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 match_band=str(row.get("match_band") or "") or None,
                 match_badge=str(row.get("match_badge") or "") or None,
                 trait_tags=[str(t) for t in tags[:6]],
+                stage_band=stage_band,
+                distance_label=str(row.get("distance_label") or "") or None,
+                shared=[str(s) for s in shared[:3]],
+                tier=tier,
+                display_score=bool(row.get("display_score", False)),
                 actions=_ui_action_rows_from_raw(row.get("actions")),
             )
         )
@@ -842,10 +856,13 @@ def _onboarding_fields(
     auth: AuthSession,
     *,
     ready_to_complete: bool = False,
+    ask_text: str | None = None,
 ) -> dict[str, Any]:
     from app.peer_discovery_surface import stamp_peer_discovery_ctx
 
-    stamp_peer_discovery_ctx(ctx, phone_verified=auth.phone_verified)
+    stamp_peer_discovery_ctx(
+        ctx, phone_verified=auth.phone_verified, ask_text=ask_text
+    )
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
     intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
     ui_intent = derive_ui_intent(
@@ -1523,7 +1540,9 @@ def _run_lana_message(
     timing_ms["total_ms"] = _timing_total_ms(timing_ms)
 
     ready = status == "ready_to_complete"
-    ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
+    ob = _onboarding_fields(
+        merged, auth, ready_to_complete=ready, ask_text=body.message
+    )
     # Debug stays backend-only (logged); timing_ms IS returned on the payload so
     # analytics/QA can measure per-turn latency server-side (it was null before).
     debug = _turn_debug_from_ctx(
