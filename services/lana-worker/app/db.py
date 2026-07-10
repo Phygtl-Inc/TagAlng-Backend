@@ -193,6 +193,49 @@ def pop_pending_meet_seek(user_id: str) -> dict[str, Any] | None:
         return None
 
 
+def stash_pending_signal_ask(user_id: str, ask: dict[str, Any]) -> None:
+    """Persist a guest's pending signal ask (tip/swap/help) for `user_id` to save after
+    they log into an existing account (mirrors stash_pending_meet_seek). Best-effort: a
+    stash failure must not break the verification turn."""
+    if not user_id or not isinstance(ask, dict) or not ask:
+        return
+    try:
+        service_client().table("pending_signal_asks").upsert(
+            {
+                "user_id": user_id,
+                "ask": ask,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="user_id",
+        ).execute()
+    except Exception:
+        return
+
+
+def pop_pending_signal_ask(user_id: str) -> dict[str, Any] | None:
+    """Read and delete the pending signal ask for `user_id` (one-shot recovery). Returns
+    the stashed ask, or None if there's nothing waiting / on any error."""
+    if not user_id:
+        return None
+    try:
+        sb = service_client()
+        res = (
+            sb.table("pending_signal_asks")
+            .select("ask")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+        if not isinstance(row, dict):
+            return None
+        sb.table("pending_signal_asks").delete().eq("user_id", user_id).execute()
+        ask = row.get("ask")
+        return ask if isinstance(ask, dict) and ask else None
+    except Exception:
+        return None
+
+
 def merge_session_context(
     old: dict[str, Any] | None,
     new: dict[str, Any] | None,

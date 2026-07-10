@@ -356,7 +356,7 @@ _TIP_SEEK_UTTERANCE_RE = re.compile(
 )
 _TIP_SEEK_SERVICE_RE = re.compile(
     r"\b(?:doctor|pediatrician|dentist|plumber|tutor|teacher|lawyer|vet|"
-    r"restaurant|pizza|contractor|handyman|physician|nanny|babysitter|"
+    r"restaurant|pizza|contractor|handyman|physician|nanny|baby\s?sit(?:ter|ting)?|"
     r"daycare|electrician|mechanic|barber|hairdresser|salon)s?\b",
     re.I,
 )

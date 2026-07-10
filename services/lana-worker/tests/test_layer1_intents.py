@@ -390,6 +390,8 @@ class TestTipSeekVsShare(unittest.TestCase):
             "suggest me a dentist",
             "do you know a good pediatrician",
             "find me a tutor",
+            "Recommend babysitting service",
+            "I need a babysitter tonight",
         ):
             self.assertTrue(utterance_indicates_tip_seek(msg), msg)
             self.assertFalse(utterance_indicates_tip_share(msg), msg)
@@ -563,7 +565,10 @@ class TestLayer1DiscoveryRouting(unittest.TestCase):
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
-    def test_looking_meet_linear_intent_asks_when(self, mock_slots, _mock_ai) -> None:
+    def test_looking_meet_searches_first_offers_seek(self, mock_slots, _mock_ai) -> None:
+        # Meet ≡ activity (search-first): a clear meet_seek enters the events browse;
+        # with nothing on the block, the seek is OFFERED (accept saves / verify-gates)
+        # instead of jumping straight into the signal capture.
         mock_slots.return_value = {
             "linear_intent": "looking.meet",
             "goal": "save_signal",
@@ -572,17 +577,19 @@ class TestLayer1DiscoveryRouting(unittest.TestCase):
             "signal_intent": "meet_seek",
             "signal_detail": "stroller walk buddies",
         }
-        reply, ctx, _, _ = handle_discovery_turn(
-            "looking for stroller walk buddies",
-            session_ctx={"routing_phase": PHASE_PREVIEW, "preview_block_id": "block-1"},
-            user_jwt="jwt",
-            phone_verified=True,
-            home_block_id="block-1",
-            is_anonymous=False,
-        )
-        self.assertEqual(ctx.get("active_intent"), "looking.meet")
-        self.assertIn("when", reply.lower())
-        self.assertIn("signal_draft", ctx)
+        with patch("app.discovery_route.fetch_preview_events_on_block", return_value=[]):
+            reply, ctx, _, _ = handle_discovery_turn(
+                "looking for stroller walk buddies",
+                session_ctx={"routing_phase": PHASE_PREVIEW, "preview_block_id": "block-1"},
+                user_jwt="jwt",
+                phone_verified=True,
+                home_block_id="block-1",
+                is_anonymous=False,
+            )
+        self.assertEqual(ctx.get("active_intent"), "discovery.find_activities")
+        self.assertTrue(ctx.get("activity_browse_active"))
+        self.assertIn("keep an ear out", reply.lower())
+        self.assertTrue((ctx.get("browse_draft") or {}).get("_seek_offer"))
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.save_local_signal")
@@ -622,6 +629,96 @@ class TestLayer1DiscoveryRouting(unittest.TestCase):
         self.assertEqual(ctx.get("active_intent"), "looking.meet")
         mock_save.assert_called_once()
         self.assertIn("stroller", reply.lower())
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_guest_signal_ask_enters_verify_flow_with_stash(self, mock_slots, _mock_ai) -> None:
+        # A guest's ask gates into the REAL verify sub-flow (await_signup_phone → the FE's
+        # collect_email UI; the email turn routes to signup, not the ZIP funnel) and the
+        # ask is stashed so it survives verification.
+        mock_slots.return_value = {
+            "linear_intent": "looking.tip",
+            "goal": "save_signal",
+            "in_discovery": True,
+            "confidence": 0.9,
+            "signal_intent": "tip_seek",
+            "signal_detail": "babysitting service",
+        }
+        reply, ctx, _, _ = handle_discovery_turn(
+            "can you recommend me a babysitter",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertEqual(ctx.get("routing_phase"), "await_signup_phone")
+        self.assertTrue(ctx.get("requires_phone_verification"))
+        pending = ctx.get("signal_pending") or {}
+        self.assertEqual(pending.get("intent"), "tip_seek")
+        self.assertIn("babysit", str(pending.get("detail")).lower())
+        self.assertIn("email", reply.lower())
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.save_local_signal")
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_pending_signal_saves_after_verify(self, mock_slots, mock_save, _mock_ai) -> None:
+        mock_slots.return_value = {"goal": "chat", "in_discovery": False, "confidence": 0.9}
+        mock_save.return_value = {"signal_id": "sig-1"}
+        reply, ctx, _, _ = handle_discovery_turn(
+            "hi",
+            session_ctx={
+                "routing_phase": "listening",
+                "preview_block_id": "block-1",
+                "signal_pending": {
+                    "intent": "tip_seek",
+                    "detail": "babysitting service",
+                    "category": None,
+                },
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+        )
+        mock_save.assert_called_once()
+        self.assertIn("posted your ask", reply.lower())
+        self.assertFalse(ctx.get("signal_pending"))
+
+    @patch("app.discovery_route.save_local_signal")
+    def test_recovered_signal_saves_at_login_session_open(self, mock_save) -> None:
+        # Existing-account login orphans the guest session; the stashed ask is recovered
+        # at the account's next session open and saved straight away.
+        from app.discovery_route import save_pending_signal_ask
+
+        mock_save.return_value = {"signal_id": "sig-1"}
+        session_ctx: dict = {
+            "signal_pending": {"intent": "tip_seek", "detail": "babysitting service"}
+        }
+        reply = save_pending_signal_ask(
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            block_id="block-1",
+            zip_code=None,
+        )
+        mock_save.assert_called_once()
+        self.assertIn("posted your ask", str(reply).lower())
+        self.assertIsNone(session_ctx.get("signal_pending"))
+
+    def test_recovered_signal_without_block_keeps_stash_and_asks_zip(self) -> None:
+        from app.discovery_route import save_pending_signal_ask
+
+        session_ctx: dict = {
+            "signal_pending": {"intent": "tip_seek", "detail": "babysitting service"}
+        }
+        reply = save_pending_signal_ask(
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            block_id=None,
+            zip_code=None,
+        )
+        self.assertIn("zip", str(reply).lower())
+        self.assertTrue(session_ctx.get("signal_pending"))
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
