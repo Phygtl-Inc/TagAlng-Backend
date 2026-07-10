@@ -4713,7 +4713,13 @@ def _handle_signup_phone_message(
             if host_ctx.get("event_draft"):
                 dest_uid = registered_user_id_for_email(email)
                 if dest_uid:
-                    stash_pending_event_draft(dest_uid, host_ctx)
+                    stash_pending_event_draft(
+                        dest_uid,
+                        host_ctx,
+                        # Key the stash to THIS (source) session so a concurrent
+                        # session's stash for the same account isn't clobbered.
+                        session_id=str(session_ctx.get("_session_id") or "") or None,
+                    )
         pending_seek = session_ctx.get("look_seek_pending")
         if isinstance(pending_seek, dict) and pending_seek:
             dest_uid = registered_user_id_for_email(email)
