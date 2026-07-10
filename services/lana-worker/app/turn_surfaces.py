@@ -26,6 +26,10 @@ TURN_SCOPED_SURFACES = frozenset({
     "rec_widen_noun",
     # Tap-able answers for a clarify question — only valid on the turn that asked it.
     "clarify_options",
+    # Structured goal payload from a tapped suggestion chip (kind + topic) — authoritative
+    # for the turn it arrives on, meaningless afterwards. Stamped by main.py from the
+    # request body; consumed by the pipeline / goal stack the same turn.
+    "tapped_goal",
     # Per-turn signal to main.py's background claim extractor. Must NOT persist: a
     # prior peer-discovery turn (e.g. ZIP entry) set it True, and {**old, **new} merge
     # leaked that True into the identity turn — suppressing the claim-save so the user's

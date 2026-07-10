@@ -808,7 +808,13 @@ def run_lana_unified_pipeline(
     # Wipe per-turn surfaces (…_listed_now, …_published_now, saved cards) up front, so
     # a one-shot card from a prior turn never leaks into this one — the early host /
     # pass-along / tip gates return before the discovery-path clear would run.
+    # tapped_goal arrives ON this turn's request (stamped by main.py from the chip's
+    # structured payload) and is itself turn-scoped — hold it across the wipe and
+    # re-stamp so this turn can consume it.
+    tapped_goal = session_ctx.get("tapped_goal")
     clear_turn_surfaces(session_ctx)
+    if isinstance(tapped_goal, dict):
+        session_ctx["tapped_goal"] = tapped_goal
 
     # A logout request must escape any sticky capture mode — otherwise "log me out" gets
     # swallowed as an item/tip/meet answer and does nothing. Clear the flags so the turn
@@ -879,6 +885,27 @@ def run_lana_unified_pipeline(
                 home_block_id = assigned  # use it for the rest of THIS turn too
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception("verified_block_assign_failed")
+
+    # A STRUCTURED chip tap (goal payload with kind + topic, stamped by main.py) is a committed
+    # app-move: force the intent to the chip's semantic kind so the goal can never be lost to
+    # re-parsing the display text, and release any rapport capture — the tap IS the acceptance.
+    # Plain text messages (no payload) keep the legacy string-match path below untouched.
+    if isinstance(tapped_goal, dict) and str(tapped_goal.get("kind") or "").strip() in _KIND_TO_INTENT:
+        _tap_kind = str(tapped_goal.get("kind") or "").strip()
+        forced_slots = _forced_slots_for_kind(
+            _tap_kind, user_message, tapped_goal, session_ctx,
+            home_block_id=home_block_id, phone_verified=phone_verified,
+            history=history, timer=timer,
+        )
+        if forced_slots is not None:
+            session_ctx["_discovery_slots"] = forced_slots
+            session_ctx["_discovery_slots_for"] = user_message.strip()
+            logging.getLogger(__name__).info(
+                "tapped_goal forced_intent kind=%s topic=%r -> goal=%s linear=%s signal=%s",
+                _tap_kind, tapped_goal.get("topic"), forced_slots.get("goal"),
+                forced_slots.get("linear_intent"), forced_slots.get("signal_intent"),
+            )
+        _reset_rapport_state(session_ctx)
 
     # A "By the way…" tile answer owns the turn: save the claim, close the gap, and reply via
     # the concierge engine (acknowledge her answer + one grounded follow-up), NOT the classifier

@@ -1341,6 +1341,15 @@ def _run_lana_message(
             "gap_row_id": (body.rapport_gap_row_id or "").strip() or None,
             "question": (body.rapport_question or "").strip() or None,
         }
+    # Structured goal echoed from a tapped suggestion chip (UiActionRow.goal) — stamp it as
+    # this turn's authoritative goal so routing (and the goal stack, if a side-quest
+    # interrupts) never has to re-parse the chip's display text. Turn-scoped (see
+    # TURN_SCOPED_SURFACES), so it never leaks past this turn. Plain messages omit it.
+    if purpose == "lana" and body.goal is not None and body.goal.kind.strip():
+        session_ctx_in["tapped_goal"] = {
+            "kind": body.goal.kind.strip(),
+            "topic": (body.goal.topic or "").strip() or None,
+        }
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
