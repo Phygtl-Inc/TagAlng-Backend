@@ -185,15 +185,21 @@ def synthesize_turn(
         )
 
     if purpose == "event_draft":
-        return _parse_event_synth(
+        result = _parse_event_synth(
             raw,
             prev_draft=prev_draft,
             tool_result=tool_result,
             valid_purpose_ids=set(purpose_ids or []),
         )
-    if purpose == "lana":
-        return _parse_lana_synth(raw, routing=routing, tool_result=tool_result)
-    return _parse_profile_synth(raw, history=history)
+    elif purpose == "lana":
+        result = _parse_lana_synth(raw, routing=routing, tool_result=tool_result)
+    else:
+        result = _parse_profile_synth(raw, history=history)
+    # Trust guard on every purpose: a reply must never claim to keep a child's
+    # name/school/age — rewrite to the non-storage acknowledgment deterministically.
+    assistant_message, *rest = result
+    assistant_message = sanitize_assistant_message(assistant_message, user_message=utterance)
+    return (assistant_message, *rest)  # type: ignore[return-value]
 
 
 def synthesize_opening(

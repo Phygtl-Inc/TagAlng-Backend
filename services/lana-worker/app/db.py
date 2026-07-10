@@ -134,7 +134,9 @@ def log_feature_request(
     Lana declines these to the user, but we log them so the team sees real demand and can
     notify the user later — that's why user_id is captured. Best-effort: a logging failure
     must never break the decline turn the user is seeing."""
-    text = str(request_text or "").strip()[:1000]
+    from app.pii import redact_pii
+
+    text = (redact_pii(str(request_text or "").strip()) or "")[:1000]
     if not text:
         return
     try:
@@ -200,8 +202,11 @@ def log_moderation_flag(
     """Append an inappropriate/abusive message Lana refused to moderation_flags (see
     migration). DISTINCT from log_feature_request — this is NOT product demand and carries
     no 'we'll add it' promise; it exists so trust & safety can review patterns / repeat
-    offenders. Best-effort: a logging failure must never break the refusal turn."""
-    text = str(message or "").strip()[:2000]
+    offenders. Best-effort: a logging failure must never break the refusal turn. Child
+    PII is stripped even here — T&S needs the pattern, never a kid's name or school."""
+    from app.pii import redact_pii
+
+    text = (redact_pii(str(message or "").strip()) or "")[:2000]
     if not text:
         return
     try:

@@ -493,14 +493,26 @@ def dedupe_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
 
 def clean_claims_for_persist(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
     """Single guard before any write: drop negatives + noise, redact PII, dedupe repeats."""
+    from app.pii import extract_child_names
+
     kept = [c for c in claims if not is_negative_claim(c) and not is_noise_claim(c)]
+    # Child names are identified by kinship context, which usually lives in the
+    # source_quote ("my daughter Emma…") while the label carries the bare name
+    # ("Mom of Emma"). Gather names across ALL fields of the batch first so the name
+    # is scrubbed from every field, not only the one with the kinship phrase.
+    child_names: set[str] = set()
+    for c in kept:
+        for t in (c.label, c.source_quote, *(c.synonyms or [])):
+            child_names |= extract_child_names(t)
     # Deterministic PII backstop on every persisted text field (never `concept` — a slug).
     for c in kept:
-        c.label = redact_pii(c.label) or c.label
+        c.label = redact_pii(c.label, known_child_names=child_names) or c.label
         if c.source_quote:
-            c.source_quote = redact_pii(c.source_quote)
+            c.source_quote = redact_pii(c.source_quote, known_child_names=child_names)
         if c.synonyms:
-            c.synonyms = [redact_pii(s) or s for s in c.synonyms]
+            c.synonyms = [
+                redact_pii(s, known_child_names=child_names) or s for s in c.synonyms
+            ]
     return dedupe_claims(kept)
 
 

@@ -272,6 +272,11 @@ def _capture_inquiry(
     raw = str(args.get("raw_query") or args.get("free_text") or "").strip()
     if not raw:
         return {"status": "error", "tool": "capture_inquiry", "reason": "raw_query_required"}
+    # Persistence boundary: inquiry_signals rows (and their embeddings) are durable —
+    # strip child PII (names/schools; ages become stage bands) before anything else.
+    from app.pii import redact_pii
+
+    raw = redact_pii(raw) or raw
     category = str(args.get("extracted_category") or args.get("category") or "other")[:120]
     sentiment = str(args.get("sentiment") or "neutral")[:32]
     urgency = str(args.get("urgency") or "low")[:16]

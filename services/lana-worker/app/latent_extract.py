@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.auth import service_client
+from app.pii import redact_child_attributes, redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ Output ONLY valid JSON (no markdown):
       "type": "activity",
       "subject": "child",
       "confidence": 0.9,
-      "attributes": {"child_age": 5, "frequency": "weekly"}
+      "attributes": {"child_stage": "prek", "frequency": "weekly"}
     }
   ]
 }
@@ -55,7 +56,11 @@ Rules:
   service, interest, life_event, need. One or two words.
 - "subject": WHO it is about. MUST be one of: self, child, partner, household, other, unknown.
   "my kid does karate" -> child;  "I do yoga" -> self;  "my husband travels" -> partner.
-- "attributes": optional object with extra structured detail (age, frequency, place name). {} if none.
+- "attributes": optional object with extra structured detail (frequency, place name). {} if none.
+- CHILD PRIVACY (hard rule): NEVER capture a child's name, exact age, school, daycare, or
+  photo — not in "text", not in "attributes". For a child's age use ONLY the coarse band
+  "child_stage": "baby" (0-1) | "toddler" (1-3) | "prek" (3-5) | "school" (5+). A school or
+  daycare mention may only appear generalized (e.g. "a local preschool"), never by name.
 - "confidence": 0.0-1.0.
 - If the message contains no latent signal (pure chit-chat, a question, an explicit request
   already handled elsewhere), return {"entities": []}.
@@ -168,6 +173,23 @@ def extract_entities_from_message(message: str) -> list[ExtractedEntity]:
     except Exception:
         logger.exception("latent_entity_extract_vertex_failed")
         return []
+
+
+def _sanitize_entity_for_persistence(entity: ExtractedEntity) -> ExtractedEntity:
+    """PII backstop before ANY durable write of an extracted entity.
+
+    The extractor prompt already forbids child names/ages/schools, but the persistence
+    path must be provably clean: entity text goes through redact_pii and structured
+    attributes through redact_child_attributes (child ages → stage bands, name/school
+    keys dropped). The embedding is computed AFTER this, so the vector is clean too.
+    """
+    return ExtractedEntity(
+        text=(redact_pii(entity.text) or entity.text)[:120],
+        type=entity.type,
+        subject=entity.subject,
+        confidence=entity.confidence,
+        attributes=redact_child_attributes(entity.attributes, subject=entity.subject),
+    )
 
 
 def _embed_entity(entity: ExtractedEntity) -> list[float] | None:
@@ -284,16 +306,21 @@ def run_latent_intent(
         entities = extract_entities_from_message(text)
         result["entities"] = len(entities)
 
+        # Persistence boundary: everything written below (latent_signals rows, their
+        # embeddings, suggestion_queue trigger_context) must carry no child PII.
+        persist_excerpt = redact_pii(text) or ""
+
         for entity in entities:
             if entity.confidence < _MIN_ENTITY_CONFIDENCE:
                 continue
+            entity = _sanitize_entity_for_persistence(entity)
             embedding = _embed_entity(entity)
             _insert_latent_signal(
                 user_id=user_id,
                 session_id=session_id,
                 turn_id=turn_id,
                 block_id=block_id,
-                utterance_excerpt=text,
+                utterance_excerpt=persist_excerpt,
                 entity=entity,
                 embedding=embedding,
             )
@@ -303,7 +330,7 @@ def run_latent_intent(
                     user_id=user_id,
                     entity=entity,
                     embedding=embedding,
-                    utterance_excerpt=text,
+                    utterance_excerpt=persist_excerpt,
                 )
     except Exception:
         logger.exception("run_latent_intent_failed")

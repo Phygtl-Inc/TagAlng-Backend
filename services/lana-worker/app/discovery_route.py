@@ -135,6 +135,7 @@ from app.claims_persist import (
     user_needs_display_name,
 )
 from app.profile_photo import handle_profile_photo_turn, user_profile_photo_url
+from app.pii import redact_pii
 from app.supabase_rpc import call_rpc
 from app.layer1_handlers import (
     HELP_WHAT_CAN_YOU_DO,
@@ -6245,7 +6246,8 @@ def handle_discovery_turn(
         slots=slots,
     )
     if snippet:
-        ctx_base["identity_snippet"] = snippet
+        # identity_snippet persists in session context — child PII never lands there.
+        ctx_base["identity_snippet"] = redact_pii(snippet) or snippet
 
     effective_snippet = str(ctx_base.get("identity_snippet") or "").strip() or None
 
@@ -6468,7 +6470,7 @@ def handle_discovery_turn(
     if phase == PHASE_PREVIEW and slots_want_preview_refetch(slots, session_ctx, msg=msg):
         refined = _identity_refinement(slots, session_ctx)
         if refined:
-            ctx_base["identity_snippet"] = refined
+            ctx_base["identity_snippet"] = redact_pii(refined) or refined
         if phone_verified:
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
             try:

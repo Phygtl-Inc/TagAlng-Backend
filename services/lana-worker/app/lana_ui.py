@@ -20,13 +20,24 @@ _UI_METADATA_LINE_RE = re.compile(
 )
 
 
-def sanitize_assistant_message(text: str) -> str:
-    """Drop orchestrator UI metadata lines leaked into assistant_message."""
+def sanitize_assistant_message(text: str, *, user_message: str | None = None) -> str:
+    """Drop orchestrator UI metadata lines leaked into assistant_message, and enforce
+    the child-PII non-storage acknowledgment.
+
+    Lana must never claim to keep/save a child's name, school, or age (the Profile
+    promise). Any sentence asserting that is deterministically rewritten to the
+    non-storage line ("I don't keep her name — just that you've got a pre-K kiddo…").
+    Passing `user_message` lets the rewrite pick the right pronoun and stage band;
+    the guard itself runs regardless.
+    """
+    from app.pii import enforce_child_pii_nonstorage
+
     raw = str(text or "").strip()
     if not raw:
         return raw
     lines = [ln for ln in raw.splitlines() if not _UI_METADATA_LINE_RE.match(ln.strip())]
     cleaned = "\n".join(lines).strip()
+    cleaned = enforce_child_pii_nonstorage(cleaned or raw, user_message) or ""
     return cleaned or raw
 
 
