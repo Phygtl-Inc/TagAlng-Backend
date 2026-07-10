@@ -77,7 +77,8 @@ Output ONLY valid JSON (no markdown):
       "transient": false
     }
   ],
-  "followup_question": "one warm question that opens a NEW facet of a thread above, or null"
+  "followup_question": "one warm question that adds a NEW MATCHABLE facet (never backstory), or null",
+  "followup_topic": "a short grammatical teaser for the question, 2-5 words, e.g. 'about your reading…', 'about the World Cup…', 'about your running…' — or null when followup_question is null"
 }
 
 Allowed bucket values: heritage, stage, vicinity, faith, activity, interest, general.
@@ -95,6 +96,8 @@ Rules:
 - synonyms: 3-6 lowercase tags per claim — include BROADER and RELATED terms, not just the literal word (e.g. "sicilian" → ["sicilian","italian","mediterranean","sicily"]; "triathlon" → ["triathlon","endurance","running","cycling","swimming"]). These power match discovery.
 - "vague": true when the claim is coarse enough that a follow-up would sharpen it — e.g. "tech worker", "athlete", "in finance", OR a COUNT without specifics ("speaks 5 languages" → vague until they name them, "plays sports" → which). false when already specific.
 - "transient": true for TEMPORARY states that are NOT durable identity — an injury or illness ("sprained ankle", "got the flu"), an upcoming trip/vacation, a one-off plan, a passing mood ("feeling low-key this week"). Durable identity (heritage, life stage, ongoing interests, occupation, faith) is transient=false. When in doubt, false.
+- READ THROUGH EMOTION TO THE INTEREST. Enthusiasm, disappointment, or loyalty about a NAMED thing (a team, player, game, artist, show, hobby, place) reveals a durable interest — capture THAT, not the feeling. E.g. "sad Ronaldo lost, wanted him to win the World Cup" → soccer_fan + ronaldo_fan (NOT "sad"); "gutted Real Madrid lost" → real_madrid_fan; "so hyped for the new Zelda" → gamer / zelda_fan; "loved the Taylor Swift concert" → taylor_swift_fan. The emotion is transient; the named interest is identity. Only when a concrete thing is named — a vague mood with no entity ("rough day", "feeling off") is nothing, skip it.
+- NEVER make a claim from grief, loss, crisis, health, or relationship trouble, even when phrased emotionally — bereavement ("my friend passed away"), divorce/separation, mental-health ("I'm depressed", "anxious"), illness/diagnosis, money/legal distress. These are sensitive and are NOT identity; capture nothing and set followup_question null. "Sad my team lost" (an interest) and "sad someone passed" (grief) are different — one names a hobby, the other a loss.
 - NEVER emit a claim that is only a bare topic label ("Health", "Wellness", "Lifestyle", "General") or that expresses uncertainty ("Unsure what to call", "Not sure about time", "don't know"). Skip these entirely — they are not threads.
 - Do NOT emit the SAME thread twice with different wording — one claim per distinct thread
 - kids_count: an integer ONLY when the user states HOW MANY children they have ("2 sons" → 2, "three kids" → 3). null otherwise. This is private and never a claim. NEVER capture a child's name, age, gender, school, or photo — only the count.
@@ -104,7 +107,8 @@ Rules:
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 - nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
-- followup_question: ALWAYS try to set one. PREFER sharpening any claim you marked "vague": true, then otherwise pick the single richest thread. Ask a short (<120 char), warm, OPEN question that surfaces MORE — e.g. triathlon → "Love it — road or trail, and do you train with a local crew?"; vague tech_worker → "Nice — what kind of tech, engineering, product, design?"; "speaks 5 languages" → "Which five? Always curious what people grew up speaking." Set null only when the message has no thread worth deepening.
+- followup_question — becomes a "By the way…" tile on her home screen; her answer is stored as an identity claim used to match her with nearby moms. Warm neighborhood-concierge tone, not an interviewer; ask only what genuinely helps her connect locally. Propose ONE only if it adds a CONNECTION-MATCHABLE facet — something that would help her MEET or RELATE to nearby moms: shared activities/hobbies, kids or family stage, local spots she goes, cultural or community ties, her weekly rhythm. Generic consumer/brand/device/product preferences are NOT connection facets — which phone, which apps, gadgets, streaming services, operating system → return null (no neighbor connects over that). Reason about what you ALREADY know to hit a real GAP. Two shapes: (1) SHARPEN a "vague": true claim — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know. VARY the dimension to fit the topic — do NOT default to "solo or with others" for everything (that has become repetitive). Choose the ONE most natural from a range: sub-type/genre (books → "Any genres you gravitate to?"), frequency/rhythm (running → "Mornings or weekends?"), setting or local spot ("A local place you like for it?"), skill/level, doing-it-with-others, kids' involvement, teach-vs-learn. FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you started, what you enjoy/love most, or what "caught your interest"); those add NO matchable facet — replace with a concrete one or return null. Do NOT repeat a question shape listed in ALREADY ASKED above; if the only fitting angle was already asked, return null or pick a different dimension. Write ONLY the question itself — NO "By the way", no greeting or lead-in phrase (the tile shows its own "By the way…" framing; a prefix just doubles it). Short (<120 char), warm, OPEN, reference what she said. Return null when nothing is vague AND no fresh matchable dimension fits — silence beats filler. HARD RULE: null for any sensitive / help-seeking topic — divorce or relationship trouble, health/medical, mental health/safety, money/debt, legal/immigration — and when the message is a question aimed at you.
+- followup_topic: a 2-5 word grammatical lead-in that names the thread for the tile, ending with "…" — e.g. "about your reading…", "about the World Cup…", "about your Portuguese…". Write natural English; NEVER glue a raw label ("about your interested in books…" is wrong). null whenever followup_question is null.
 
 User message:
 """
@@ -249,14 +253,34 @@ def _existing_claims_block(existing_labels: list[str] | None) -> str:
     )
 
 
+def _recent_questions_block(recent_questions: list[str] | None) -> str:
+    """Tell the extractor what it has recently asked, so its follow-up isn't a near-duplicate."""
+    qs = [str(q).strip() for q in (recent_questions or []) if str(q).strip()]
+    if not qs:
+        return ""
+    return (
+        "ALREADY ASKED (your followup_question must NOT repeat or be a near-duplicate of these "
+        "— same dimension or same shape counts as a duplicate; pick a DIFFERENT angle, or null): "
+        + " | ".join(qs[:10])
+        + "\n\n"
+    )
+
+
 def vertex_extract_claims_from_utterance(
-    message: str, existing_labels: list[str] | None = None
+    message: str,
+    existing_labels: list[str] | None = None,
+    recent_questions: list[str] | None = None,
 ) -> Any:
     client = _vertex_client()
     model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
     from google.genai import types
 
-    prompt = INCREMENTAL_EXTRACT_PROMPT + _existing_claims_block(existing_labels) + message.strip()
+    prompt = (
+        INCREMENTAL_EXTRACT_PROMPT
+        + _existing_claims_block(existing_labels)
+        + _recent_questions_block(recent_questions)
+        + message.strip()
+    )
     response = client.models.generate_content(
         model=model,
         contents=prompt,
@@ -269,14 +293,20 @@ def vertex_extract_claims_from_utterance(
 
 
 def incremental_claims_from_utterance(
-    message: str, existing_labels: list[str] | None = None
+    message: str,
+    existing_labels: list[str] | None = None,
+    recent_questions: list[str] | None = None,
 ) -> Any:
     """Extract claims via orchestrator LLM when configured; else Vertex."""
     import logging
 
     log = logging.getLogger(__name__)
     text = str(message or "").strip()
-    system = INCREMENTAL_EXTRACT_PROMPT + _existing_claims_block(existing_labels)
+    system = (
+        INCREMENTAL_EXTRACT_PROMPT
+        + _existing_claims_block(existing_labels)
+        + _recent_questions_block(recent_questions)
+    )
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
@@ -290,7 +320,7 @@ def incremental_claims_from_utterance(
             )
     except Exception:
         log.exception("llm_incremental_claim_extract_failed")
-    return vertex_extract_claims_from_utterance(text, existing_labels)
+    return vertex_extract_claims_from_utterance(text, existing_labels, recent_questions)
 
 
 def vertex_extract_from_transcript(

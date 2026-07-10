@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import time
 from typing import Any, Callable
+
+# Step-by-step turn trace. On by default so a local `run-lana-worker-local.sh` prints
+# a line as each stage of a turn starts/finishes — set LANA_TRACE=0 to silence it.
+# Logs on the "app" logger, which main.py wires to stderr at INFO.
+_TRACE_LOG = logging.getLogger("app.turn.trace")
+_TRACE_ON = os.environ.get("LANA_TRACE", "1").strip().lower() not in ("0", "false", "no", "")
 
 
 class TurnTimer:
@@ -54,9 +62,17 @@ class TurnTimer:
 
         def __enter__(self) -> None:
             self._timer.start(self._stage)
+            if _TRACE_ON:
+                _TRACE_LOG.info("→ %s", self._stage)
 
-        def __exit__(self, *args: object) -> None:
+        def __exit__(self, exc_type: object, *args: object) -> None:
             self._timer.stop(self._stage)
+            if _TRACE_ON:
+                ms = self._timer.ms.get(self._stage, 0)
+                if exc_type is not None:
+                    _TRACE_LOG.info("✗ %s (%dms) — raised %s", self._stage, ms, getattr(exc_type, "__name__", exc_type))
+                else:
+                    _TRACE_LOG.info("✓ %s (%dms)", self._stage, ms)
 
     def stage(self, name: str) -> _Stage:
         return self._Stage(self, name)

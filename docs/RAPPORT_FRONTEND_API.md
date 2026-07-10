@@ -54,11 +54,12 @@ User answers/dismisses ─► YOU call  record-answer / record-skip / mute-fact
 
 ### 3.1 `POST /lana/rapport/next-ask`
 
-**Request body** (optional):
+**Request body** (all optional):
 ```json
-{ "surface": "homescreen" }
+{ "surface": "homescreen", "cycle": false }
 ```
-`surface` is a free-form label for analytics (default `"homescreen"`). Omit it if you like.
+- `surface` — free-form analytics label (default `"homescreen"`).
+- `cycle` — set `true` when the user taps the tile's **refresh (⟳)** to get a *different* question. This retires the current ask and returns the next-best one **immediately, bypassing the 24h cap**. Default `false`.
 
 **Response:**
 ```json
@@ -94,6 +95,7 @@ User answers/dismisses ─► YOU call  record-answer / record-skip / mute-fact
 **Behavior you can rely on:**
 - **Idempotent while pending.** If a mom has been shown an ask but hasn't answered/skipped it yet, `next-ask` keeps returning the **same** ask. So it's safe to call on every render / remount — it won't "burn" the ask or flip to `null`. (Still, guard React Strict Mode double-fetch with a ref so you don't fire duplicate calls.)
 - Once she answers or skips, the 24h cap applies → subsequent calls return `null` until tomorrow.
+- **Refresh (⟳) → `{ "cycle": true }`.** Call next-ask again with `cycle: true` to swap the current question for a different one on demand. It skips the current ask and returns the next-best gap right away (cap bypassed). If there's genuinely only one gap left, it may return the same one; if nothing's left, `null`.
 
 ---
 

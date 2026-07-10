@@ -3,6 +3,7 @@ import logging
 import os
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
@@ -112,10 +113,14 @@ from app.vertex_event import lana_event_opening, lana_event_turn
 from app.vertex_event_extract import vertex_extract_event_from_transcript
 from app.claims_persist import (
     extract_and_upsert_claims_from_message,
+    latest_claim_id,
     persist_nickname_if_stated,
     replace_all_claims,
     should_extract_claims_from_message,
+    try_upsert_claims_from_message,
+    user_needs_display_name,
 )
+from app.rapport_synth import ensure_gap_buffer as rapport_ensure_gap_buffer
 from app.profile_photo import upload_profile_photo_bytes
 from app.signal_photo import upload_signal_photo_bytes
 from app.ui_actions import derive_ui_actions
@@ -356,6 +361,23 @@ def _routing_from_ctx(ctx: dict[str, Any]) -> TurnRouting | None:
         tool_called=raw.get("tool_to_call"),
         capture_fired=bool(raw.get("capture_fired")),
     )
+
+
+# Rapport safety gate — AI-signal, not keywords: defer to the classifier's own verdict and
+# never open a rapport gap on a turn it routed to a safety / out-of-scope rail. These are
+# classifier labels the pipeline already produces (same ones the discovery rails check).
+_RAPPORT_BLOCK_GOALS = frozenset({"out_of_scope", "unsafe", "medical", "crisis"})
+_RAPPORT_BLOCK_LINEAR = frozenset(
+    {"system.out_of_scope", "system.unsafe", "system.medical", "system.crisis"}
+)
+
+
+def _rapport_gap_allowed(ctx: dict[str, Any]) -> bool:
+    slots = ctx.get("_discovery_slots")
+    slots = slots if isinstance(slots, dict) else {}
+    goal = str(slots.get("goal") or "")
+    linear = str(slots.get("linear_intent") or "")
+    return goal not in _RAPPORT_BLOCK_GOALS and linear not in _RAPPORT_BLOCK_LINEAR
 
 
 def _turn_debug_from_ctx(
@@ -1107,8 +1129,13 @@ def create_lana_session(
                 draft_raw = None
                 use_orch = False
             else:
+                # Signed-in mom with no name yet → greet with the name-ask up front (it's
+                # needed anyway, and asking first avoids interrupting a topic mid-chat).
+                _needs_name = (not auth.is_anonymous) and user_needs_display_name(
+                    auth.user_id, {}
+                )
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
-                    is_anonymous=auth.is_anonymous
+                    is_anonymous=auth.is_anonymous, needs_name=_needs_name
                 )
                 draft_raw = None
                 use_orch = False
@@ -1161,6 +1188,9 @@ def create_lana_session(
     except HTTPException:
         raise
     except Exception as exc:
+        # Log the full traceback to the console — otherwise the caller only sees a
+        # truncated 502 string and the real stack (where it actually broke) is lost.
+        _LOG.exception("lana_session_failed (purpose=%s)", purpose)
         raise HTTPException(
             status_code=502,
             detail=_vertex_error_detail("lana_session_failed", exc),
@@ -1207,6 +1237,13 @@ def _run_lana_message(
         raise HTTPException(status_code=400, detail="session_not_active")
 
     purpose = str(session.get("purpose", "profile_intake"))
+    _LOG.info(
+        "──▶ turn start | purpose=%s session=%s user=%s msg=%r",
+        purpose,
+        session_id,
+        auth.user_id,
+        body.message.strip()[:200],
+    )
     require_home_block_for_purpose(auth, purpose)
     with timer.stage("db_save_user_message"):
         user_msg_id = insert_message(session_id, "user", body.message.strip(), {}, embed=False)
@@ -1285,6 +1322,14 @@ def _run_lana_message(
         # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
         # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
         session_ctx_in["browse_skip_seed"] = True
+    # A "By the way…" tile answer — route it deterministically to the profile path (save the
+    # claim + reply in-thread) rather than the classifier, which would misread a bare answer
+    # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
+    if purpose == "lana" and body.intent_hint == "rapport_answer":
+        session_ctx_in["rapport_answer"] = {
+            "gap_row_id": (body.rapport_gap_row_id or "").strip() or None,
+            "question": (body.rapport_question or "").strip() or None,
+        }
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -1355,27 +1400,46 @@ def _run_lana_message(
             timing_ms = timer.to_dict()
             orch_used = False
 
-        with timer.stage("db_save_assistant_message"):
-            assistant_msg_id = insert_message(
+        # These two writes hit different tables (lana_messages insert vs
+        # lana_sessions update) and don't depend on each other, so run them
+        # concurrently — one round-trip of wall-clock instead of two. Safe to
+        # share the cached Supabase client across threads: its underlying httpx
+        # session handles concurrent requests.
+        merged = merge_session_context(session.get("context"), session_ctx)
+
+        def _save_assistant_message() -> str | None:
+            return insert_message(
                 session_id,
                 "assistant",
                 reply,
                 {"status": status, "ui": ui_raw, "orchestrator": orch_used},
                 embed=False,
             )
-        with timer.stage("db_update_session"):
-            merged = merge_session_context(session.get("context"), session_ctx)
+
+        def _persist_session() -> None:
             update_session_context(
                 session_id,
                 merged,
                 core_block=session_ctx.get("core_block"),
             )
+
+        with timer.stage("db_write_assistant_and_session"):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                msg_future = pool.submit(_save_assistant_message)
+                session_future = pool.submit(_persist_session)
+                assistant_msg_id = msg_future.result()
+                session_future.result()
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
         item_draft = _item_draft_from_dict(merged.get("item_draft"))
         tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
         look_draft = _look_draft_from_dict(merged.get("look_draft"))
     except Exception as exc:
+        # Log the full traceback to the console — otherwise the caller only sees a
+        # truncated 502 string and the real stack (where it actually broke) is lost.
+        _LOG.exception(
+            "lana_message_failed (purpose=%s session=%s)", purpose, session_id
+        )
         raise HTTPException(
             status_code=502,
             detail=_vertex_error_detail("lana_message_failed", exc),
@@ -1388,14 +1452,18 @@ def _run_lana_message(
     if purpose in ("lana", "profile_intake") and should_extract_claims_from_message(
         body.message
     ) and not merged.get("skip_claims_background_extract"):
+        # Extracts claims AND opens one contextual rapport follow-up gap from the extractor's
+        # own warm question (semantic, not templated). Fire-and-forget, never blocks the turn.
         background_tasks.add_task(
             extract_and_upsert_claims_from_message,
             auth.user_id,
             body.message.strip(),
             skip_heritage=bool(merged.get("skip_heritage_background_extract")),
+            message_id=user_msg_id,
+            # Defer to the classifier: no rapport gap on safety/OOS/medical/crisis turns.
+            allow_rapport_gap=_rapport_gap_allowed(merged),
         )
-        # Rapport Ring C: reconcile follow-up gaps off the freshly-written claims
-        # (open new ones, suppress/close known ones). Fire-and-forget, never blocks.
+        # Close any gaps whose concept the user has since stated.
         background_tasks.add_task(rapport_reconcile_gaps, auth.user_id, user_msg_id)
     # Layer 3b latent-intent collection (Phase 1: collect, don't surface). Off by default.
     if purpose == "lana" and latent_extract_enabled():
@@ -1410,8 +1478,11 @@ def _run_lana_message(
             body.message.strip(),
         )
 
-    with timer.stage("db_list_messages_final"):
-        all_msgs = list_messages(session_id)
+    # Message count for the debug log below — computed in memory instead of
+    # re-fetching the whole thread from Supabase. `history` already holds every
+    # message through the user turn (it was listed after the user insert); the
+    # only new row this turn is the assistant message we just inserted.
+    final_msg_count = len(history) + (1 if assistant_msg_id else 0)
     if timing_ms is not None:
         merged_timing = dict(timing_ms)
         for key, ms in timer.ms.items():
@@ -1428,10 +1499,18 @@ def _run_lana_message(
     debug = _turn_debug_from_ctx(
         merged, ui_intent=ob.get("ui_intent"), orchestrator=orch_used
     )
+    _LOG.info(
+        "◀── turn done | session=%s total=%sms intent=%s handler=%s ui=%s",
+        session_id,
+        timing_ms.get("total_ms"),
+        getattr(debug, "intent", None),
+        getattr(debug, "handler", None),
+        ob.get("ui_intent"),
+    )
     _LOG.debug(
         "lana_turn session=%s msgs=%s timing=%s debug=%s",
         session_id,
-        len(all_msgs),
+        final_msg_count,
         timing_ms,
         debug.model_dump() if debug is not None else None,
     )
@@ -2120,6 +2199,8 @@ class RapportAnswerBody(_BaseModel):
     text: str
     session_id: str | None = None
     message_id: str | None = None
+    # The tile's question, echoed back so Lana's concierge reply can reference it.
+    question: str | None = None
 
 
 class RapportSkipBody(_BaseModel):
@@ -2132,6 +2213,9 @@ class RapportMuteBody(_BaseModel):
 
 class RapportNextAskBody(_BaseModel):
     surface: str = "homescreen"
+    # True when the user taps the tile's refresh (⟳): retire the current ask and return a
+    # different one now, bypassing the 24h cap.
+    cycle: bool = False
 
 
 @app.post("/lana/rapport/next-ask")
@@ -2143,27 +2227,42 @@ def post_rapport_next_ask(
     # lets POSTs through — same reason the chat/places calls are POST.
     auth = verify_auth(authorization)
     surface = (body.surface if body else "homescreen") or "homescreen"
-    return {"ask": rapport_next_ask(auth.user_id, surface)}
+    cycle = bool(body.cycle) if body else False
+    return {"ask": rapport_next_ask(auth.user_id, surface, cycle=cycle)}
 
 
 @app.post("/lana/rapport/record-answer")
 def post_rapport_record_answer(
     body: RapportAnswerBody,
+    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
     auth = verify_auth(authorization)
     text = (body.text or "").strip()
+    claim_id: str | None = None
+    saved = 0
     if text:
-        # Route the answer through the existing claim extractor, then reconcile so any
-        # new claim opens downstream gaps (and closes ones it covers).
-        extract_and_upsert_claims_from_message(auth.user_id, text)
+        # Extract claims from the answer (no per-message rapport gap — the coverage synth owns
+        # tile questions), then reconcile any now-covered gaps.
+        res = try_upsert_claims_from_message(
+            auth.user_id, text, message_id=body.message_id, allow_rapport_gap=False
+        )
+        saved = res.saved
         rapport_reconcile_gaps(auth.user_id, body.message_id)
-    # Guarantee the asked gap closes even if the answer mapped to a different concept.
-    rapport_mark_answered(body.gap_row_id)
+        # Link the gap to the claim the extractor made from the answer. If it made NONE, we do
+        # NOT fabricate one — the extractor already declined it (junk like "i dont know", or a
+        # privacy case). Trust that judgment rather than storing a non-answer as a claim.
+        if saved > 0:
+            claim_id = latest_claim_id(auth.user_id)
+    # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
+    rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
+    # Refill the reserve so the "By the way…" tile always has a fresh, non-repeat question queued
+    # ahead. Background so it never delays the reply; synthesizes only the shortfall from claims.
+    background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
     amplitude_track(
         "rapport_gap_answered",
         user_id=auth.user_id,
-        event_properties={"gap_row_id": body.gap_row_id},
+        event_properties={"gap_row_id": body.gap_row_id, "claim_id": claim_id},
     )
     return {"ok": True}
 

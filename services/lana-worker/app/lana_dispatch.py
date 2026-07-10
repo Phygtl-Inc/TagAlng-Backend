@@ -15,10 +15,16 @@ LANA_UNIFIED_OPENING_GUEST = (
     "I help you do two things · find something nearby · "
     "or share something with nearby moms."
 )
+# A signed-in mom who hasn't told us her name yet is greeted with the name-ask up front —
+# it's needed anyway, and asking first avoids interrupting a topic mid-chat.
+LANA_UNIFIED_OPENING_NEEDS_NAME = (
+    "Before we dive in — what should neighbors call you? A first name's all I need."
+)
 
 
 def lana_unified_opening(
     is_anonymous: bool = False,
+    needs_name: bool = False,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
     ui: dict[str, Any] = {
         "bucket": None,
@@ -36,6 +42,13 @@ def lana_unified_opening(
             "tool_to_call": None,
         },
     }
+    # Signed-in + nameless → ask the name first. Arm the up-front-name gate so her reply
+    # next turn is captured (app/discovery_route.py::_try_upfront_display_name_turn).
+    if not is_anonymous and needs_name:
+        ctx["awaiting_upfront_name"] = True
+        ctx["upfront_name_attempts"] = 0
+        ctx["routing_phase"] = "need_display_name"
+        return LANA_UNIFIED_OPENING_NEEDS_NAME, "continue", ctx, ui
     opening = LANA_UNIFIED_OPENING_GUEST if is_anonymous else LANA_UNIFIED_OPENING
     return opening, "continue", ctx, ui
 

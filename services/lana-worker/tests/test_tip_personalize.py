@@ -161,6 +161,43 @@ class TestTipFallbackHybrid(unittest.TestCase):
         self.assertEqual([p["name"] for p in ctx["google_place_suggestions"]], ["Playland Diner"])
         self.assertNotIn("rec_filter_asked", ctx)  # cleared after applying
 
+    def test_request_constraint_wins_over_claim(self) -> None:
+        """Demo bug: 'kids friendly restaurant' must not be overridden by a Sicilian-heritage
+        claim. The request-source filter is applied and searched; the claim angle is at most an
+        optional refinement chip — never the primary pick, and we never ask-to-pick first."""
+        filters = [
+            {"label": "Kid-friendly", "query": "kids friendly restaurant",
+             "included_type": None, "required_attrs": ["goodForChildren"],
+             "reframe": "Kept these kid-friendly.", "source": "request"},
+            {"label": "Italian", "query": "italian restaurant",
+             "included_type": "italian_restaurant", "required_attrs": [],
+             "reframe": "Since you have Sicilian heritage, some Italian spots.",
+             "source": "claim"},
+        ]
+        seen_queries: list[str] = []
+
+        def fake_search(*, query, block_id, zip_for_bias, user_id,
+                        included_type=None, required_attrs=None, limit=3):
+            seen_queries.append(query)
+            return [{"name": "Playland Diner", "attrs": {"goodForChildren": True}}]
+
+        ctx = _ctx()
+        with self._patch_personalize(filters), self._patch_search(fake_search):
+            reply = dr._tip_seek_fallback_reply(
+                ctx=ctx, msg="kids friendly restaurant", detail="kids friendly restaurant",
+                category="Food", block_id="zip-32827",
+                session_ctx={"zip": "32827"}, user_id="u1",
+            )
+        # Applied the request angle immediately (no ask-to-pick), searched kid-friendly.
+        self.assertNotIn("rec_filter_asked", ctx)
+        self.assertIn("kids friendly restaurant", seen_queries)
+        self.assertNotIn("Sicilian", reply)
+        self.assertIn("kid-friendly", reply.lower())
+        self.assertEqual([p["name"] for p in ctx["google_place_suggestions"]], ["Playland Diner"])
+        # The claim angle survives only as an optional refinement chip.
+        chip_labels = [c["label"] for c in ctx["rec_chips"]]
+        self.assertEqual(chip_labels, ["Italian", "See all Food"])
+
     def test_unverified_is_honest_not_claimed(self) -> None:
         filters = [{
             "label": "Kid-friendly", "query": "kid friendly restaurant",

@@ -177,10 +177,7 @@ from app.layer1_intents import (
 )
 from app.layer1_tier import (
     handle_respond_nudge,
-    is_standalone_affirmation,
-    is_standalone_negation,
     parse_nudge_response,
-    wants_respond_intro,
 )
 from app.signal_capture import (
     PHASE_SIGNAL_CONFIRM,
@@ -657,6 +654,35 @@ def _try_neighbor_intro_turn(
         attach_pending_intros_after_propose(
             ctx, user_jwt=user_jwt, intro=intro, peer=peer
         )
+        # Pillar 3 (GIVE): reach the matched neighbor OUTSIDE the app — delivered value + a
+        # one-tap action, never a bare question. Fire-and-forget; never blocks the turn.
+        _cand = intro.get("candidate_user_id")
+        _reason = str(intro.get("match_reason") or "").strip()
+        if _cand:
+            try:
+                from app.notifications import email_html as _email_html
+                from app.notifications import notify_user as _notify_user
+
+                _give = (
+                    f"{_reason} — take a peek when you have a sec."
+                    if _reason
+                    else "A neighbor on your block wants to connect — take a peek."
+                )
+                _notify_user(
+                    _cand,
+                    title="A neighbor wants to connect 🤝",
+                    body=_give,
+                    url="/chat",
+                    email_subject="A neighbor on your block wants to connect",
+                    email_html=_email_html(
+                        "A neighbor wants to connect",
+                        _give,
+                        cta_label="See who",
+                        cta_path="/chat",
+                    ),
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("pillar3_give_notify_failed")
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "lana_propose_neighbor_intro")
     else:
         if str(intro.get("status") or "") == "duplicate":
@@ -972,6 +998,92 @@ def _try_awaiting_name_change_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
+def _try_upfront_display_name_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    phase: str,
+    is_anonymous: bool,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Ask a nameless *authenticated* user their display name UP FRONT, as its own clean
+    turn — so the name-ask is never glued onto an unrelated reply ("Rooting for Colombia…
+    by the way, what should neighbors call you"). Fires only when the user is otherwise
+    free-chatting: anonymous guests defer the name to the joint-moment intro, and every
+    structured flow (signup ZIP/identity, hosting, verify, rename) owns name capture
+    itself, so this never disrupts them. Bounded like the rename flow — a non-name reply
+    can't trap the user here.
+    """
+    if session_ctx.get("awaiting_upfront_name"):
+        # Our own follow-up turn: the reply should be their name.
+        nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+        if nick and user_id:
+            persist_profile_patch(user_id, {"nickname": nick})
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+            ctx["display_name_saved"] = True
+            ctx["nickname"] = nick
+            ctx.pop("awaiting_upfront_name", None)
+            ctx.pop("upfront_name_attempts", None)
+            ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+            return (
+                f"Love it — great to meet you, {nick}! Now, how can I help you today?",
+                ctx,
+                ctx["last_routing"],
+                [],
+            )
+        attempts = int(session_ctx.get("upfront_name_attempts") or 0) + 1
+        if attempts >= NAME_CHANGE_MAX_ATTEMPTS:
+            # Give up gracefully and let them get on with it; we won't re-nag this session.
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+            ctx["display_name_saved"] = True
+            ctx.pop("awaiting_upfront_name", None)
+            ctx.pop("upfront_name_attempts", None)
+            ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+            return (
+                "No worries — I'll skip that for now. So, how can I help you today?",
+                ctx,
+                ctx["last_routing"],
+                [],
+            )
+        ctx = _routing_ctx(session_ctx, phase=PHASE_NEED_DISPLAY_NAME, active_intent=None)
+        ctx["awaiting_upfront_name"] = True
+        ctx["upfront_name_attempts"] = attempts
+        ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+        return (
+            "No rush — a first name is all I need. What should neighbors call you?",
+            ctx,
+            ctx["last_routing"],
+            [],
+        )
+
+    # Fresh turn: only ask up front when the user is authenticated, actually missing a
+    # name, and not inside any structured flow.
+    if is_anonymous or not user_id:
+        return None
+    if session_ctx.get("guest_intake"):
+        return None
+    if phase not in ("", "listening"):
+        return None
+    if session_ctx.get("event_host_active") or session_ctx.get("host_publish_pending"):
+        return None
+    active = str(session_ctx.get("active_intent") or "").strip().lower()
+    if active not in ("", "none", "listening"):
+        return None
+    if not user_needs_display_name(user_id, session_ctx):
+        return None
+
+    ctx = _routing_ctx(session_ctx, phase=PHASE_NEED_DISPLAY_NAME, active_intent=None)
+    ctx["awaiting_upfront_name"] = True
+    ctx["upfront_name_attempts"] = 0
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+    return (
+        "Before we dive in — what should neighbors call you? A first name's all I need.",
+        ctx,
+        ctx["last_routing"],
+        [],
+    )
+
+
 def _try_dismiss_intro_pass_turn(
     *,
     msg: str,
@@ -1014,22 +1126,35 @@ def _try_respond_nudge_turn(
     phone_verified: bool,
     phase: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    """Accept/decline/block a pending received intro before propose-intro routing."""
+    """Accept/decline/block a pending received intro before propose-intro routing.
+
+    Engages only when an intro is genuinely waiting on the user (session state) —
+    never on a keyword in the message. A stray "no"/"skip"/"pass" inside an
+    unrelated sentence ("no I meant which languages can I speak?") must not be
+    read as declining an intro. Once we know an intro is waiting, the AI reads
+    what the reply means; a question or a different topic ("unknown"/"none")
+    falls through to normal routing instead of the dead-end
+    "I don't see a pending intro waiting on you right now."
+    """
+    if not phone_verified:
+        return None
     if phrase_linear_intent(msg) in (
         "identity.show_my_profile",
         "discovery.show_peer_profile",
     ):
         return None
-    if not phone_verified or not wants_respond_intro(msg):
+    # State gate, not a keyword gate: only an intro actually waiting in the
+    # session engages this handler. With nothing pending we fall straight through
+    # so no message can reach the "I don't see a pending intro" dead-end.
+    if not isinstance(session_ctx.get("pending_intro_respond"), dict):
         return None
     reply, pending, action = handle_respond_nudge(
         msg, user_jwt=user_jwt, session_ctx=session_ctx
     )
-    # A bare "ok"/"yes" or "no"/"that's all" with no pending intro is ambiguous —
-    # e.g. wrapping up profile-building. Fall through to normal routing instead of
-    # the dead-end "I don't see a pending intro waiting on you right now."
-    # Explicit intro references (decline / block / "introduce us") still surface it.
-    if action == "none" and (is_standalone_affirmation(msg) or is_standalone_negation(msg)):
+    # The AI couldn't read a clear accept/decline/block — the reply is a question
+    # or a different topic. Fall through to normal routing rather than nagging
+    # about the intro (it stays in session for a later, clearer answer).
+    if action in ("none", "prompt"):
         return None
     ctx = _routing_ctx(
         dict(session_ctx),
@@ -1067,6 +1192,21 @@ def _identity_conversational_reply(
     try:
         ctx_pack = load_event_draft_context(user_id) if user_id else {}
         user_block = format_profile_intake_context(ctx_pack)
+        # Tell the engine what it ALREADY knows so it stops re-asking covered threads
+        # (heritage, reading, …) as if the conversation were fresh — deepen or move on instead.
+        if user_id:
+            try:
+                from app.claims_persist import fetch_active_claim_labels
+
+                known = fetch_active_claim_labels(user_id)
+            except Exception:
+                known = []
+            if known:
+                user_block += (
+                    "\n\nALREADY KNOWN about this neighbor — do NOT ask about these again; "
+                    "acknowledge briefly if relevant, then deepen a DIFFERENT angle or ask "
+                    "about a NEW thread: " + ", ".join(known[:20])
+                )
         reply, status, turn_ctx, ui = lana_profile_turn(
             user_block,
             history or [],
@@ -1632,7 +1772,14 @@ def _try_signal_lane_turn(
         confirm_verdict = interpret_signal_confirm_reply(draft, msg)
         verdict = str((confirm_verdict or {}).get("verdict") or "")
         cancel = verdict == "cancel" or (confirm_verdict is None and is_signal_cancel(msg))
-        reroute = verdict == "reroute" or should_abort_signal_draft(msg, draft, slots)
+        # The confirm-AI reads the reply WITH the pending question in hand ("When works for
+        # you?"), so when it's available its verdict is authoritative — don't let the main
+        # classifier (blind to what Lana just asked) reroute a hesitant, in-context answer
+        # like "not sure" out of the cascade and into find-peers. should_abort_signal_draft
+        # is only the fallback when the AI is unavailable, mirroring is_signal_cancel above.
+        reroute = verdict == "reroute" or (
+            confirm_verdict is None and should_abort_signal_draft(msg, draft, slots)
+        )
         if cancel or reroute:
             clear_signal_draft(ctx_base)
             # Persist the clear even if a different handler wins this re-routed turn.
@@ -2192,26 +2339,38 @@ def _tip_seek_fallback_reply(
     if not filters:
         return _plain(reason_widen=False)
 
-    # Hybrid — 2+ genuinely distinct angles and we haven't asked yet → ask the user to pick
-    # (chips post each filter's own query back; "Just show all" widens). No search this turn.
-    if len(filters) >= 2 and not already_asked:
-        ctx["rec_filter_asked"] = True
-        chips = [
-            {"label": f["label"], "message": f["query"], "style": "primary"}
-            for f in filters[:3]
-        ]
-        chips.append(
-            {"label": "Just show all", "message": f"show me all {noun}", "style": "secondary"}
-        )
-        ctx["rec_chips"] = chips
-        angles = _join_labels([f["label"] for f in filters[:3]])
-        return (
-            f"I can tailor this to you — want {angles}? Tap one, or “Just show all” for "
-            "everything nearby."
-        )
+    # The REQUEST is authoritative. If the user stated a constraint ("kids friendly
+    # restaurant"), the personalizer marks that angle source="request"; honor it directly and
+    # never let a claim angle (e.g. Sicilian heritage) jump ahead of it. Claim angles are
+    # offered only as optional refinements on top. Only when the request states NO angle do we
+    # surface claim angles for the user to pick.
+    request_filters = [f for f in filters if f.get("source") == "request"]
+    claim_filters = [f for f in filters if f.get("source") != "request"]
 
-    # Apply the top angle (single obvious filter, or we already asked → don't loop again).
-    chosen = filters[0]
+    if request_filters:
+        chosen = request_filters[0]
+        refinements = request_filters[1:] + claim_filters
+    else:
+        # Open request — 2+ genuinely distinct claim angles and we haven't asked yet → ask the
+        # user to pick (chips post each angle's own query back; "Just show all" widens).
+        if len(claim_filters) >= 2 and not already_asked:
+            ctx["rec_filter_asked"] = True
+            chips = [
+                {"label": f["label"], "message": f["query"], "style": "primary"}
+                for f in claim_filters[:3]
+            ]
+            chips.append(
+                {"label": "Just show all", "message": f"show me all {noun}", "style": "secondary"}
+            )
+            ctx["rec_chips"] = chips
+            angles = _join_labels([f["label"] for f in claim_filters[:3]])
+            return (
+                f"I can tailor this to you — want {angles}? Tap one, or “Just show all” for "
+                "everything nearby."
+            )
+        # Single obvious claim angle, or we already asked → apply the top one.
+        chosen = claim_filters[0]
+        refinements = claim_filters[1:]
     req_attrs = list(chosen.get("required_attrs") or [])
     places = _search_tip_places(
         query=str(chosen.get("query") or base_query), block_id=block_id,
@@ -2229,7 +2388,7 @@ def _tip_seek_fallback_reply(
         # Refine chips: the OTHER offered angles + a "See all" widen.
         chips = [
             {"label": f["label"], "message": f["query"], "style": "secondary"}
-            for f in filters[1:3]
+            for f in refinements[:2]
         ]
         chips.append(
             {"label": f"See all {noun}", "message": f"show me all {noun}", "style": "secondary"}
@@ -5337,6 +5496,21 @@ def handle_discovery_turn(
     )
     if change_name_turn is not None:
         reply, ctx, routing, peers = change_name_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
+
+    # Ask a nameless authenticated user their display name UP FRONT, as its own clean turn,
+    # rather than letting the companionship LLM tack "what should neighbors call you" onto an
+    # unrelated reply. Only fires when they're free-chatting (guarded inside).
+    upfront_name_turn = _try_upfront_display_name_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_id=user_id,
+        phase=phase,
+        is_anonymous=is_anonymous,
+    )
+    if upfront_name_turn is not None:
+        reply, ctx, routing, peers = upfront_name_turn
         ctx["unified_mode"] = True
         return reply, ctx, routing, peers
 
