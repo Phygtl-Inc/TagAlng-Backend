@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from app.supabase_rpc import call_rpc
 
+from app.pii import redact_pii
 from app.signal_capture import clear_signal_draft
 
 INTENT_SAVE_SIGNAL = "signal.capture"
@@ -57,6 +58,9 @@ def save_local_signal(
     stage: str | None = None,
     photo_url: str | None = None,
 ) -> dict[str, Any]:
+    # Persistence boundary (block-visible signal row): child PII never lands in the DB.
+    # The caller may keep using its raw copy for the in-session reply.
+    detail_text = redact_pii(detail_text) or detail_text
     payload: dict[str, Any] = {
         "p_intent": intent,
         "p_detail_text": detail_text,

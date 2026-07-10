@@ -63,7 +63,11 @@ class TestProfilePhotoSlots(unittest.TestCase):
         self.assertIsNotNone(result)
         reply, _ = result
         assert reply is not None
-        self.assertIn("verify your email", reply.lower())
+        # Benefit-framed write gate — the email ask, never the bare imperative.
+        from app.gates import GATE_COPY
+
+        self.assertEqual(reply, GATE_COPY["profile_photo_save"])
+        self.assertNotIn("Verify your email first", reply)
 
     def test_accept_after_suggestion(self) -> None:
         slots = {

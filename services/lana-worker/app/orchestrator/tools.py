@@ -272,6 +272,11 @@ def _capture_inquiry(
     raw = str(args.get("raw_query") or args.get("free_text") or "").strip()
     if not raw:
         return {"status": "error", "tool": "capture_inquiry", "reason": "raw_query_required"}
+    # Persistence boundary: inquiry_signals rows (and their embeddings) are durable —
+    # strip child PII (names/schools; ages become stage bands) before anything else.
+    from app.pii import redact_pii
+
+    raw = redact_pii(raw) or raw
     category = str(args.get("extracted_category") or args.get("category") or "other")[:120]
     sentiment = str(args.get("sentiment") or "neutral")[:32]
     urgency = str(args.get("urgency") or "low")[:16]
@@ -405,10 +410,22 @@ def _publish_activity(
             )
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":
+                from app.gates import gate_shown
+
+                gate_shown("publish_event", user_id)
                 return {
                     "status": "blocked",
                     "tool": "publish_activity",
                     "reason": "phone_not_verified",
+                    "event_draft": draft,
+                }
+            if exc.detail == "duplicate_event":
+                # Dedupe guard fired: this host already posted the same title + start.
+                return {
+                    "status": "blocked",
+                    "tool": "publish_activity",
+                    "reason": "duplicate_event",
+                    "message": "You already have that meet — want to edit it instead?",
                     "event_draft": draft,
                 }
             return {
@@ -445,8 +462,12 @@ def _publish_activity(
 
 
 def _confirmation_echo(draft: dict[str, Any]) -> str:
+    from app.event_when import format_event_when
+
     title = draft.get("title") or "your event"
-    when = draft.get("starts_at") or "TBD"
+    # Human render, not the draft's raw ISO (naive draft values are event-local wall
+    # clock, so the formatter anchors — never shifts — them).
+    when = format_event_when(draft.get("starts_at"), style="inline") or "TBD"
     where = draft.get("venue_name") or "your place"
     return f"Got it: {title} · {when} · {where}. *Publish?*"
 

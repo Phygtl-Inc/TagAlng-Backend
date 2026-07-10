@@ -1,13 +1,14 @@
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import HTTPException
 
 from app.auth import service_client
 from app.event_location import resolve_event_location
+from app.event_when import event_tz as _event_tz
 from app.models import EventDraft
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -51,17 +52,40 @@ def _filter_cohort_tags(tags: list[str]) -> list[str]:
     return out[:6]
 
 
-_DEFAULT_EVENT_TZ = "America/New_York"
+# QA accounts sign up with a plus-tag containing "qa" (t+lanaqa1@phygtl.com,
+# t+qa2@phygtl.com, …). Events they create are stamped is_test=true so QA runs never
+# dirty the member-facing feed again (the 2026-07-08 findings: junk rows in ~20/24
+# QA result lists). Matched on the authed host's stored email — no header/env plumbing.
+_QA_EMAIL_RE = re.compile(r"^[^@+]*\+[^@]*qa[^@]*@")
 
 
-def _event_tz() -> ZoneInfo:
-    """The timezone a host's wall-clock time ("6 PM") is anchored to. Single-region
-    today (Orlando / Eastern); override with EVENT_DEFAULT_TZ when that changes."""
-    name = (os.environ.get("EVENT_DEFAULT_TZ") or _DEFAULT_EVENT_TZ).strip() or _DEFAULT_EVENT_TZ
+def is_qa_email(email: Any) -> bool:
+    """True when `email` carries a '+…qa…' plus-tag (e.g. t+lanaqa1@phygtl.com)."""
+    return bool(_QA_EMAIL_RE.match(str(email or "").strip().lower()))
+
+
+def _host_is_qa_account(user_id: str) -> bool:
+    """Whether the host's account email flags them as QA. Best-effort: any lookup
+    failure means NOT QA — a real member's event must never be silently hidden."""
+    if not user_id:
+        return False
     try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo(_DEFAULT_EVENT_TZ)
+        res = (
+            service_client()
+            .table("users")
+            .select("email")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+        return is_qa_email(row.get("email")) if isinstance(row, dict) else False
+    except Exception:  # noqa: BLE001 - fence is best-effort, never breaks publish
+        return False
+
+
+# The tz anchor moved to app.event_when.event_tz so parsing (here) and every
+# human-facing render share ONE definition of the event's wall clock.
 
 
 def _parse_iso_ts(raw: str | None) -> str | None:
@@ -131,7 +155,22 @@ def build_create_event_fields(
         fields["bring_items"] = bring
     if cohost_id:
         fields["cohost_id"] = cohost_id
+    # QA fence: test-account events are stamped is_test so they never reach the feed.
+    if _host_is_qa_account(user_id):
+        fields["is_test"] = True
     return fields
+
+
+def _is_duplicate_event_error(detail: str) -> bool:
+    """Whether a create_event failure is the dedupe-guard unique violation — either the
+    RPC's mapped 'duplicate_event' or a raw 23505 that slipped through unmapped."""
+    lower = str(detail or "").lower()
+    return (
+        "duplicate_event" in lower
+        or "23505" in lower
+        or "duplicate key value" in lower
+        or "events_host_title_starts_live_uniq" in lower
+    )
 
 
 def publish_event(
@@ -160,6 +199,9 @@ def publish_event(
         detail = res.text[:300]
         if "phone_not_verified" in detail.lower() or "phone_verified" in detail.lower():
             raise HTTPException(status_code=400, detail="phone_not_verified")
+        if _is_duplicate_event_error(detail):
+            # The dedupe guard (partial unique index) fired: same host, title, start.
+            raise HTTPException(status_code=409, detail="duplicate_event")
         raise HTTPException(status_code=502, detail=f"create_event_failed:{res.status_code}")
 
     event_id = res.json()

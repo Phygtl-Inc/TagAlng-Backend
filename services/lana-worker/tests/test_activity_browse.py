@@ -3,6 +3,8 @@ from unittest.mock import patch
 
 from app.activity_browse import (
     activity_browse_should_release,
+    enter_activity_browse_from_cta,
+    looks_like_bare_look_meet_entry,
     reset_activity_browse_state,
     run_activity_browse_turn,
 )
@@ -144,6 +146,216 @@ class TestRunBrowseTurn(unittest.TestCase):
         self.assertIsNone(ctx.get("browse_draft"))
 
 
+class TestLookMeetCtaEntry(unittest.TestCase):
+    """The "A meet or playgroup" CTA (intent_hint=look_meet) must only take the canned
+    fast path on a BARE chip tap — free text with real content has to reach the AI
+    classifier, never the canned "what kind of thing are you up for?" opener."""
+
+    def test_free_text_with_hint_is_not_captured_by_canned_funnel(self) -> None:
+        # QA 2026-07-08: this message got the literal canned opener in production.
+        ctx: dict = {}
+        entered = enter_activity_browse_from_cta(ctx, "I need a babysitter for tonight")
+        self.assertFalse(entered)
+        # Session untouched → the pipeline's browse gate never fires and the turn falls
+        # through to handle_discovery_turn (layer-1 classification).
+        self.assertFalse(ctx.get("activity_browse_active"))
+        self.assertFalse(ctx.get("browse_skip_seed"))
+
+    def test_semantic_edge_messages_are_not_bare(self) -> None:
+        # The QA edge set: safety worry, emotional relocation, capability question —
+        # all must classify, none may take the canned entry.
+        for msg in (
+            "how do I know the moms on here are real and not creeps?",
+            "I'm a stay at home dad, is this app for me too?",
+            "We just moved here after my husband's job fell through and honestly "
+            "I don't know a single person on this street and it's been really hard",
+            "can you help me find someone to watch my kids",
+        ):
+            self.assertFalse(looks_like_bare_look_meet_entry(msg), msg)
+
+    def test_bare_chip_tap_keeps_canned_behavior(self) -> None:
+        ctx: dict = {}
+        self.assertTrue(enter_activity_browse_from_cta(ctx, "Family & kids"))
+        self.assertTrue(ctx.get("activity_browse_active"))
+        self.assertTrue(ctx.get("browse_skip_seed"))
+        # The seed turn still asks P1 canned (fast, no classification dependency).
+        reply = run_activity_browse_turn(
+            user_message="Family & kids",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+        )
+        self.assertIn("what kind of thing are you up for", reply.lower())
+        self.assertFalse(ctx.get("browse_skip_seed"))  # consumed — later turns re-decide
+
+    def test_cta_seed_payload_zip_and_labels_are_bare(self) -> None:
+        for msg in (
+            "",
+            "I'm looking for a meet or playgroup",  # the button's generic payload
+            "A meet or playgroup",
+            "Sports",
+            "Outdoors",
+            "Stroller walk",
+            "32827",
+        ):
+            self.assertTrue(looks_like_bare_look_meet_entry(msg), repr(msg))
+
+
+# Fixture pool for the refinement tests. Dates are relative to a 2026-07 QA window:
+# 2026-07-14 is a Tuesday (weekday), 2026-07-18 a Saturday (weekend).
+_KID_TUE_MORNING = {
+    "title": "Kids storytime",
+    "starts_at": "2026-07-14T09:30:00",
+    "venue_name": "The Library",
+    "cohort_tags": ["kids_led_activity"],
+}
+_KID_TUE_EVENING = {
+    "title": "Kids pizza night",
+    "starts_at": "2026-07-14T18:00:00",
+    "venue_name": "The Hall",
+    "cohort_tags": ["kids_led_activity"],
+}
+_ADULT_SAT_MORNING = {
+    "title": "FIFA watch party",
+    "starts_at": "2026-07-18T09:00:00",
+    "venue_name": "The Pub",
+    "cohort_tags": [],
+}
+_KID_SAT_MORNING = {
+    "title": "Family park playdate",
+    "starts_at": "2026-07-18T10:00:00",
+    "venue_name": "Laureate Park",
+    "cohort_tags": [],
+}
+_REFINE_POOL = [_KID_TUE_MORNING, _KID_TUE_EVENING, _ADULT_SAT_MORNING, _KID_SAT_MORNING]
+
+
+def _shown_ctx() -> dict:
+    """Session mid-browse: results already shown for an open ('anything') interest."""
+    return {
+        "activity_browse_active": True,
+        "browse_draft": {"interest": "anything", "_asked": True, "_results_shown": True},
+        "phone_verified": False,
+    }
+
+
+class TestRefinementRelease(unittest.TestCase):
+    """QA 2026-07-08: refinements after results must never leave the browse lane."""
+
+    def test_refinement_after_results_stays_despite_meet_seek_read(self) -> None:
+        # In production this exact shape was routed to save_signal_need_verify (6/20 sims).
+        self.assertFalse(
+            activity_browse_should_release(
+                "Something for my 4 year old, we're free weekday mornings",
+                _shown_ctx(),
+                {"goal": "save_signal", "signal_intent": "meet_seek", "confidence": 0.9},
+            )
+        )
+
+    def test_zip_correction_stays_despite_off_lane_read(self) -> None:
+        # "oops I mean 32827" was parsed as an activity name; a 5-digit token in browse
+        # is always a ZIP, whatever the classifier says.
+        self.assertFalse(
+            activity_browse_should_release(
+                "oops I mean 32827",
+                _shown_ctx(),
+                {"goal": "save_signal", "signal_intent": "meet_seek", "confidence": 0.9},
+            )
+        )
+
+
+class TestRefinementFilters(unittest.TestCase):
+    @patch("app.activity_browse._fetch_block_events", return_value=list(_REFINE_POOL))
+    def test_refinement_filters_by_time_and_age(self, _fetch) -> None:
+        ctx = _shown_ctx()
+        reply = run_activity_browse_turn(
+            user_message="Something for my 4 year old, we're free weekday mornings",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+        )
+        # Acknowledges the applied filters and shows only what fits.
+        self.assertIn("Weekday mornings for a 4-year-old", reply)
+        self.assertIn("1 fit", reply)
+        self.assertIn("Kids storytime", reply)
+        self.assertNotIn("FIFA", reply)
+        # The raw user sentence is never echoed back as a category.
+        self.assertNotIn("Something for my 4 year old", reply)
+        self.assertEqual(len(ctx.get("activity_previews") or []), 1)
+
+    @patch("app.activity_browse._fetch_block_events", return_value=list(_REFINE_POOL))
+    def test_refinements_compose_across_turns(self, _fetch) -> None:
+        ctx = _shown_ctx()
+        first = run_activity_browse_turn(
+            user_message="mornings please",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+        )
+        self.assertIn("3 fit", first)
+        second = run_activity_browse_turn(
+            user_message="just the weekend ones",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+        )
+        # morning (turn 1) composes with weekend (turn 2).
+        self.assertIn("Weekend mornings", second)
+        self.assertIn("2 fit", second)
+        self.assertIn("FIFA watch party", second)
+        self.assertIn("Family park playdate", second)
+        self.assertNotIn("storytime", second)
+
+    @patch("app.activity_browse._fetch_block_events", return_value=[_KID_TUE_EVENING])
+    def test_empty_refined_result_offers_listen_never_demands_verify(self, _fetch) -> None:
+        ctx = _shown_ctx()
+        reply = run_activity_browse_turn(
+            user_message="weekday mornings for my 4 year old",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+        )
+        # Honest empty state that OFFERS the seek as a question…
+        self.assertIn("Want me to listen", reply)
+        self.assertIn("?", reply)
+        # …and never auto-routes to the verify gate or demands email.
+        self.assertNotIn("verify", reply.lower())
+        self.assertNotIn("email", reply.lower())
+        self.assertEqual(ctx.get("routing_phase"), "listening")
+        self.assertFalse(ctx.get("requires_phone_verification"))
+        self.assertTrue((ctx.get("browse_draft") or {}).get("_seek_offer"))
+        self.assertEqual(ctx.get("activity_previews"), [])
+        # No verbatim echo of the refinement text either.
+        self.assertNotIn("weekday mornings for my 4 year old", reply)
+
+    @patch("app.activity_browse._fetch_block_events", return_value=[_ADULT_SAT_MORNING])
+    @patch(
+        "app.discovery_route.fetch_blocks_for_zip",
+        return_value=[{"block_id": "b-new", "label": "Lake Nona"}],
+    )
+    def test_zip_correction_reroutes_to_new_block(self, _blocks, mock_fetch) -> None:
+        ctx = _shown_ctx()
+        reply = run_activity_browse_turn(
+            user_message="oops I mean 32827",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+        )
+        # The 5-digit token is a new ZIP, not an activity name.
+        self.assertEqual(ctx.get("preview_zip"), "32827")
+        self.assertEqual(ctx.get("preview_block_id"), "b-new")
+        self.assertEqual(mock_fetch.call_args.args[1], "b-new")
+        self.assertNotIn("oops", reply.lower())
+        self.assertNotIn("Nothing like", reply)
+        self.assertIn("FIFA watch party", reply)
+
+
 class TestClarifierRouting(unittest.TestCase):
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
@@ -164,6 +376,55 @@ class TestClarifierRouting(unittest.TestCase):
         )
         self.assertTrue(ctx.get("browse_or_meet_pending"))
         self.assertIn("happening", reply.lower())
+
+
+class TestBrowseWhenText(unittest.TestCase):
+    """Chat text, preview-card label, and the LLM filter's date lines must all say the
+    same LOCAL date for the same event (QA 2026-07-08: one event, three datetimes)."""
+
+    # Stored UTC instant = Mon Jul 13, 8:30 PM America/New_York.
+    QA_EVENT = {
+        "id": "ev-1",
+        "title": "Playdate at the park",
+        "venue_name": "New York",
+        "starts_at": "2026-07-14T00:30:00+00:00",
+    }
+
+    def setUp(self) -> None:
+        patcher = patch.dict("os.environ", {"EVENT_DEFAULT_TZ": "America/New_York"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_chat_text_uses_local_date_not_utc(self) -> None:
+        from app.activity_browse import _format_browse_message
+
+        msg = _format_browse_message([self.QA_EVENT], None, phone_verified=True)
+        self.assertIn("(Mon Jul 13, 8:30 PM)", msg)
+        self.assertNotIn("Jul 14", msg)  # the leaked UTC date QA saw
+
+    def test_chat_text_date_equals_card_label_date(self) -> None:
+        from app.activity_browse import _format_browse_message
+        from app.discovery_route import activity_previews_from_events
+
+        preview = activity_previews_from_events([self.QA_EVENT])[0]
+        self.assertEqual(preview["starts_label"], "Mon, Jul 13 · 8:30 PM")
+        # Raw ISO stays for clients — payload contract unchanged.
+        self.assertEqual(preview["starts_at"], "2026-07-14T00:30:00+00:00")
+        msg = _format_browse_message([self.QA_EVENT], None, phone_verified=True)
+        self.assertIn("Mon Jul 13", msg)  # same local date as the card
+
+    def test_llm_filter_sees_local_date(self) -> None:
+        from app.activity_browse import _event_when_parts
+
+        # The date line the filter LLM matches "on July 13" against must be local too.
+        self.assertEqual(_event_when_parts(self.QA_EVENT["starts_at"]), "2026-07-13 Mon")
+
+    def test_core_block_events_carry_when_text_not_raw_utc(self) -> None:
+        from app.orchestrator.memory import _event_for_llm
+
+        out = _event_for_llm(dict(self.QA_EVENT))
+        self.assertNotIn("starts_at", out)
+        self.assertEqual(out["when_text"], "Mon Jul 13, 8:30 PM")
 
 
 if __name__ == "__main__":

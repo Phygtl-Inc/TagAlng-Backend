@@ -21,6 +21,7 @@ from app.db import (
     stash_pending_event_draft,
     stash_pending_meet_seek,
 )
+from app.event_location import is_valid_zip5
 from app.orchestrator.guardrails import utterance_is_unsafe
 from app.out_of_scope_reply import author_out_of_scope_reply
 from app.claim_search import (
@@ -44,6 +45,7 @@ from app.discovery_slots import (
     slots_want_propose_intro,
     slots_want_signup_gate,
 )
+from app.gates import gate_reply, gate_shown
 from app.turn_timing import TurnTimer
 from app.turn_surfaces import clear_turn_surfaces
 from app.guest_capabilities import (
@@ -134,6 +136,7 @@ from app.claims_persist import (
     user_needs_display_name,
 )
 from app.profile_photo import handle_profile_photo_turn, user_profile_photo_url
+from app.pii import redact_pii
 from app.supabase_rpc import call_rpc
 from app.layer1_handlers import (
     HELP_WHAT_CAN_YOU_DO,
@@ -159,9 +162,13 @@ from app.layer1_handlers import (
 from app.context import load_event_draft_context
 from app.claims_persist import persist_profile_patch, try_upsert_claims_from_message
 from app.profile_intake import format_profile_intake_context, lana_profile_turn
+from app.analytics import track
+from app.faq_replies import faq_reply, faq_topic
 from app.layer1_intents import (
+    FAQ_LINEAR_INTENTS,
     LOOKING_SHARING_INTENTS,
     enrich_slots,
+    faq_linear_intent,
     intent_confidence_met,
     is_block_activity_browse,
     is_profile_acknowledgment,
@@ -998,6 +1005,15 @@ def _try_awaiting_name_change_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
+def _clear_upfront_name_state(ctx: dict[str, Any]) -> None:
+    """Release the upfront-name side-quest. None-stamped (never popped): these keys are
+    in db._CTX_NULL_DELETES, so the session merge DELETES them. A pop() left the old
+    `awaiting_upfront_name: True` alive in the persisted session, which re-entered the
+    name quest one turn after Lana greeted the user by name (QA 2026-07-08)."""
+    ctx["awaiting_upfront_name"] = None
+    ctx["upfront_name_attempts"] = None
+
+
 def _try_upfront_display_name_turn(
     *,
     msg: str,
@@ -1005,6 +1021,7 @@ def _try_upfront_display_name_turn(
     user_id: str | None,
     phase: str,
     is_anonymous: bool,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Ask a nameless *authenticated* user their display name UP FRONT, as its own clean
     turn — so the name-ask is never glued onto an unrelated reply ("Rooting for Colombia…
@@ -1013,8 +1030,22 @@ def _try_upfront_display_name_turn(
     structured flow (signup ZIP/identity, hosting, verify, rename) owns name capture
     itself, so this never disrupts them. Bounded like the rename flow — a non-name reply
     can't trap the user here.
+
+    This is a SIDE-QUEST: when the message it interrupts carries a real goal (e.g. peer
+    matching with a topic, from a tapped suggestion chip), the goal is pushed onto the
+    session goal stack and resumed the moment the quest completes — see
+    ``_resume_interrupted_goal`` and app/goal_stack.py.
     """
+    from app.goal_stack import pending_goal_from_turn, pop_pending_goal, push_pending_goal
+
     if session_ctx.get("awaiting_upfront_name"):
+        # Single-source guard: capture eligibility must read the SAME persisted state the
+        # save wrote (display_name_saved / users.nickname, via user_needs_display_name).
+        # If the name is already on file this awaiting flag is stale — clear it and fall
+        # through to normal routing so the user's actual request is handled, not re-asked.
+        if not user_needs_display_name(user_id, session_ctx):
+            _clear_upfront_name_state(session_ctx)
+            return None
         # Our own follow-up turn: the reply should be their name.
         nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
         if nick and user_id:
@@ -1022,33 +1053,40 @@ def _try_upfront_display_name_turn(
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
             ctx["nickname"] = nick
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            _clear_upfront_name_state(ctx)
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
-            return (
-                f"Love it — great to meet you, {nick}! Now, how can I help you today?",
-                ctx,
-                ctx["last_routing"],
-                [],
-            )
+            pending = pop_pending_goal(ctx)
+            if pending:
+                # Short greeting only — the caller resumes the interrupted goal and
+                # appends its real reply ("… Now, back to playground-loving neighbors —").
+                ctx["_resume_goal"] = pending
+                reply = f"Love it — great to meet you, {nick}!"
+            else:
+                reply = f"Love it — great to meet you, {nick}! Now, how can I help you today?"
+            return reply, ctx, ctx["last_routing"], []
         attempts = int(session_ctx.get("upfront_name_attempts") or 0) + 1
         if attempts >= NAME_CHANGE_MAX_ATTEMPTS:
             # Give up gracefully and let them get on with it; we won't re-nag this session.
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            _clear_upfront_name_state(ctx)
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
-            return (
-                "No worries — I'll skip that for now. So, how can I help you today?",
-                ctx,
-                ctx["last_routing"],
-                [],
-            )
+            pending = pop_pending_goal(ctx)
+            if pending:
+                ctx["_resume_goal"] = pending
+                reply = "No worries — I'll skip that for now."
+            else:
+                reply = "No worries — I'll skip that for now. So, how can I help you today?"
+            return reply, ctx, ctx["last_routing"], []
         ctx = _routing_ctx(session_ctx, phase=PHASE_NEED_DISPLAY_NAME, active_intent=None)
         ctx["awaiting_upfront_name"] = True
         ctx["upfront_name_attempts"] = attempts
         ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+        # A non-name reply mid-quest may itself be (a restatement of) the goal — keep the
+        # freshest version so completion resumes what she actually wants.
+        pending = pending_goal_from_turn(msg, session_ctx, slots)
+        if pending:
+            push_pending_goal(ctx, pending)
         return (
             "No rush — a first name is all I need. What should neighbors call you?",
             ctx,
@@ -1061,6 +1099,8 @@ def _try_upfront_display_name_turn(
     if is_anonymous or not user_id:
         return None
     if session_ctx.get("guest_intake"):
+        return None
+    if session_ctx.get("_resuming_goal"):
         return None
     if phase not in ("", "listening"):
         return None
@@ -1076,12 +1116,80 @@ def _try_upfront_display_name_turn(
     ctx["awaiting_upfront_name"] = True
     ctx["upfront_name_attempts"] = 0
     ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+    # The message we're interrupting may BE the goal ("Meet playground-loving neighbors")
+    # — stash it so completing the name quest resumes it instead of "how can I help?".
+    pending = pending_goal_from_turn(msg, session_ctx, slots)
+    if pending:
+        push_pending_goal(ctx, pending)
     return (
         "Before we dive in — what should neighbors call you? A first name's all I need.",
         ctx,
         ctx["last_routing"],
         [],
     )
+
+
+def _resume_interrupted_goal(
+    goal: dict[str, Any],
+    *,
+    lead_reply: str,
+    ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    is_anonymous: bool,
+    history: list[dict[str, Any]] | None,
+    user_id: str | None,
+    timer: TurnTimer | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Re-drive an interrupted goal now that its side-quest finished.
+
+    ``lead_reply`` is the side-quest's short closer ("Love it — great to meet you,
+    Jess!"). We bridge with an ack that names the stored topic, then run the goal's
+    stored message through normal discovery routing — with the goal's classified slots
+    re-primed into the slot cache so the intent can't be lost to re-parsing.
+    """
+    from app.goal_stack import resume_ack
+
+    goal_msg = str(goal.get("message") or "").strip()
+    topic = str(goal.get("topic") or "").strip() or None
+    ack = resume_ack(topic or goal_msg)
+    if not goal_msg:
+        return lead_reply, ctx, ctx.get("last_routing") or {}, []
+    resume_ctx = dict(ctx)
+    resume_ctx["_resuming_goal"] = True  # belt-and-braces: never a second interrupt
+    stored_slots = goal.get("slots")
+    if isinstance(stored_slots, dict) and stored_slots:
+        resume_ctx["_discovery_slots"] = dict(stored_slots)
+        resume_ctx["_discovery_slots_for"] = goal_msg
+    logging.getLogger(__name__).info(
+        "goal_stack resume kind=%s topic=%r msg=%r",
+        goal.get("kind"), topic, goal_msg[:60],
+    )
+    resumed = handle_discovery_turn(
+        goal_msg,
+        session_ctx=resume_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        is_anonymous=is_anonymous,
+        history=history,
+        user_id=user_id,
+        timer=timer,
+    )
+    if resumed is None:
+        # The goal handler declined the turn — keep the thread alive by naming the topic
+        # so the user isn't dropped into a cold "how can I help you today?" again.
+        return (
+            f"{lead_reply} {ack} tell me a bit more and I'm on it.",
+            ctx,
+            ctx.get("last_routing") or {},
+            [],
+        )
+    r_reply, r_ctx, r_routing, r_peers = resumed
+    r_ctx.pop("_resuming_goal", None)
+    r_ctx["unified_mode"] = True
+    return f"{lead_reply} {ack} {r_reply}", r_ctx, r_routing, r_peers
 
 
 def _try_dismiss_intro_pass_turn(
@@ -1238,6 +1346,32 @@ def _identity_conversational_reply(
     return reply or fallback
 
 
+def _answer_faq_turn(
+    linear: str,
+    *,
+    session_ctx: dict[str, Any],
+    phase: str,
+    user_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """One of the four product FAQs (help.faq_*) — answer with the static template.
+
+    The routing phase is deliberately KEPT (need_zip stays need_zip): the answer ends with a
+    gentle re-offer, so the funnel step the question interrupted resumes on the next turn.
+    """
+    ctx = _routing_ctx(
+        dict(session_ctx),
+        phase=phase or "listening",
+        active_intent=linear,
+    )
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "faq_answer")
+    track(
+        "faq_answered",
+        user_id=user_id,
+        event_properties={"topic": faq_topic(linear)},
+    )
+    return faq_reply(linear) or "", ctx, ctx["last_routing"], []
+
+
 def _try_layer1_intent_turn(
     *,
     msg: str,
@@ -1258,20 +1392,13 @@ def _try_layer1_intent_turn(
     ctx_base = dict(session_ctx)
 
     if linear == "identity.show_my_profile":
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can show your full profile and claims.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent="identity.show_my_profile",
-                ),
-                _discovery_routing_stub(phase or "listening", "show_profile_need_verify"),
-                [],
-            )
+        # Read action — never gates on verification (gates are write-only, see app/gates.py).
         if user_id:
             scrub_negative_heritage_claims(user_id)
-        dashboard = fetch_identity_dashboard(user_jwt)
+        try:
+            dashboard = fetch_identity_dashboard(user_jwt)
+        except HTTPException:
+            dashboard = {}
         reply = format_identity_profile_reply(dashboard)
         ctx = _routing_ctx(
             ctx_base,
@@ -1283,17 +1410,7 @@ def _try_layer1_intent_turn(
         return reply, ctx, ctx["last_routing"], []
 
     if linear in ("discovery.show_peer_profile", "discovery.explain_peer_match"):
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can show neighbor profiles and explain matches.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent=linear,
-                ),
-                _discovery_routing_stub(phase or "listening", "peer_profile_need_verify"),
-                [],
-            )
+        # Read/explain actions — never gate; previews redact names for unverified users.
         block_id = _resolve_block_id_for_turn(
             session_ctx=session_ctx,
             home_block_id=home_block_id,
@@ -1410,13 +1527,10 @@ def _try_layer1_intent_turn(
             phase=phase or "listening",
             active_intent=linear,
         )
-        if res.verify_gate:
-            return (
-                "Verify your email first — then I can save identity threads to your profile.",
-                ctx,
-                _discovery_routing_stub(phase or "listening", "identity_need_verify"),
-                [],
-            )
+        # res.verify_gate (no user on the session) is NOT a reason to stop the
+        # conversation — profile chatter is a read/refine surface, and gating it was
+        # a top QA complaint. The claims simply don't persist until signup completes;
+        # the conversational reply below carries the turn either way.
         # We already persisted inline — don't double-extract in the background.
         ctx["skip_claims_background_extract"] = True
         if res.conflict:
@@ -1458,22 +1572,14 @@ def _try_layer1_intent_turn(
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "discovery.block_log":
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can show your block log.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent=INTENT_SHOW_BLOCK_LOG,
-                ),
-                _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
-                [],
-            )
+        # Read action — never gates; an unverified guest simply has an empty log.
         try:
             entries = fetch_my_block_log(user_jwt)
         except HTTPException as exc:
             detail = str(exc.detail or "").lower()
-            if (
+            if "phone_not_verified" in detail or "not_authenticated" in detail:
+                entries = []
+            elif (
                 "pgrst202" in detail
                 or "get_my_block_log" in detail
                 or "read-only transaction" in detail
@@ -1489,7 +1595,8 @@ def _try_layer1_intent_turn(
                     _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
                     [],
                 )
-            raise
+            else:
+                raise
         reply = format_block_log_reply(entries)
         ctx = _routing_ctx(
             ctx_base,
@@ -1514,7 +1621,8 @@ def _try_layer1_intent_turn(
         # who answers "what's on my block?" with their ZIP just gets re-asked "what ZIP?"
         # every turn (the message ZIP is never read).
         if not block_id:
-            zip_from_msg = extract_zip(msg) or slots.get("zip")
+            _slot_zip = str(slots.get("zip") or "").strip()
+            zip_from_msg = extract_zip(msg) or (_slot_zip if is_valid_zip5(_slot_zip) else None)
             if zip_from_msg:
                 blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
                 if blk:
@@ -1602,17 +1710,7 @@ def _try_layer1_intent_turn(
         # instead of a literal neighbor search that bounces "no matching neighbors".
         if (phase or "") == PHASE_NEED_IDENTITY:
             return None
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can search neighbors by those traits.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent="discovery.find_by_attrs",
-                ),
-                _discovery_routing_stub(phase or "listening", "find_by_attrs_need_verify"),
-                [],
-            )
+        # Search/refine action — never gates; unverified users get redacted previews.
         filter_text = normalize_attr_filter_text(msg, slots)
         if len(filter_text) < 2:
             return (
@@ -1631,10 +1729,13 @@ def _try_layer1_intent_turn(
             peers = []
         partial_summary = None
         if not peers:
-            partial_summary = summarize_partial_claim_matches(
-                user_jwt,
-                parse_claim_filters(filter_text, slots),
-            )
+            try:
+                partial_summary = summarize_partial_claim_matches(
+                    user_jwt,
+                    parse_claim_filters(filter_text, slots),
+                )
+            except HTTPException:
+                partial_summary = None
         reply = format_attr_peers_reply(
             peers,
             filter_text=filter_text,
@@ -1712,6 +1813,11 @@ def _try_layer1_intent_turn(
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
         return HELP_WHO_ARE_YOU, ctx, ctx["last_routing"], []
+
+    if linear in FAQ_LINEAR_INTENTS:
+        return _answer_faq_turn(
+            linear, session_ctx=ctx_base, phase=phase, user_id=user_id
+        )
 
     if linear == "tier.respond_nudge":
         reply, pending, _action = handle_respond_nudge(
@@ -1805,17 +1911,8 @@ def _try_signal_lane_turn(
         active_linear = str(linear)
 
     if active_linear or isinstance(draft, dict):
-        if not phone_verified:
-            return (
-                "Verify your email first — then I can post that to your block.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent=active_linear or INTENT_SAVE_SIGNAL,
-                ),
-                _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
-                [],
-            )
+        # Guard ordering: resolve a block FIRST. A session with no block must take the
+        # ask-ZIP path — never a verify gate whose copy references "your block".
         if not resolve_block_id(session_ctx, home_block_id):
             block_id = _resolve_block_id_for_turn(
                 session_ctx=session_ctx,
@@ -1834,6 +1931,72 @@ def _try_signal_lane_turn(
                     active_intent=active_linear or INTENT_SAVE_SIGNAL,
                 ),
                 _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
+                [],
+            )
+        if not phone_verified:
+            # Swap/tip asks must never dead-end on the bare verify wall (QA: a dentist
+            # tip ask got "Verify your email first" and nothing else) — those surfaces
+            # aren't live yet, so acknowledge the ask, explain it's almost here, and
+            # queue it honestly (notify=false until they verify a contact). Live
+            # families (meets) keep the gate below.
+            from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR
+            from app.queued_contributions import unverified_queue_reply
+
+            draft_dict = draft if isinstance(draft, dict) else {}
+            signal_intent = (
+                str(draft_dict.get("intent") or "").strip()
+                or SIGNAL_INTENT_BY_LINEAR.get(str(active_linear or ""), "")
+            )
+            queued_reply = unverified_queue_reply(
+                signal_intent=signal_intent,
+                detail=str(
+                    (slots or {}).get("signal_detail")
+                    or draft_dict.get("detail")
+                    or msg
+                    or ""
+                ).strip()[:500],
+                user_id=user_id,
+                block_id=home_block_id
+                or str(session_ctx.get("preview_block_id") or "").strip()
+                or None,
+                zip_code=str(session_ctx.get("zip") or "").strip() or None,
+                category=str(
+                    (slots or {}).get("signal_category")
+                    or draft_dict.get("category")
+                    or ""
+                ).strip()
+                or None,
+            )
+            if queued_reply:
+                clear_signal_draft(ctx_base)
+                return (
+                    queued_reply,
+                    _routing_ctx(
+                        ctx_base,
+                        phase=phase or "listening",
+                        active_intent=active_linear or INTENT_SAVE_SIGNAL,
+                    ),
+                    _discovery_routing_stub(
+                        phase or "listening", "save_signal_queued_unverified"
+                    ),
+                    [],
+                )
+        gate = gate_reply(
+            "save_signal",
+            ctx_base,
+            verified=phone_verified,
+            home_block_id=home_block_id,
+            user_id=user_id,
+        )
+        if gate:
+            return (
+                gate,
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent=active_linear or INTENT_SAVE_SIGNAL,
+                ),
+                _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
                 [],
             )
 
@@ -2159,14 +2322,7 @@ def _try_list_intros_turn(
         return None
 
     ctx_base = dict(session_ctx)
-    if not phone_verified:
-        return (
-            "Verify your email first — then I can show your pending intros.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
-            _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
-            [],
-        )
-
+    # Read action — never gates; an unverified guest simply has no pending intros yet.
     direction = infer_intro_direction(msg, slots)
     try:
         intros = fetch_my_intros(user_jwt, direction=direction)
@@ -2174,13 +2330,9 @@ def _try_list_intros_turn(
             intros = fetch_my_intros(user_jwt, direction="all")
     except HTTPException as exc:
         if exc.detail == "phone_not_verified":
-            return (
-                "Verify your email first — then I can show your pending intros.",
-                _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_LIST_INTROS),
-                _discovery_routing_stub(phase or "listening", "list_intros_need_verify"),
-                [],
-            )
-        raise
+            intros = []
+        else:
+            raise
 
     reply = format_intros_list_reply(intros)
     ctx = _routing_ctx(
@@ -2458,20 +2610,56 @@ def _try_save_signal_turn(
             [],
         )
 
-    if not phone_verified:
-        return (
-            "Verify your email first — then I can post that to your block.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
-            _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
-            [],
-        )
-
+    # Guard ordering: no resolved block → ask-ZIP path, never a "your block" gate.
     block_id = resolve_block_id(session_ctx, home_block_id)
     if not block_id:
         return (
             "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
             _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
             _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
+            [],
+        )
+
+    if not phone_verified:
+        # Swap/tip asks never get the bare verify wall (QA: the dentist tip dead-ended
+        # there) — those surfaces aren't live yet, so acknowledge, explain they're
+        # almost here, and queue the ask honestly. Live families keep the gate.
+        from app.queued_contributions import unverified_queue_reply
+
+        queued_reply = unverified_queue_reply(
+            signal_intent=intent,
+            detail=detail,
+            user_id=user_id,
+            block_id=home_block_id
+            or str(session_ctx.get("preview_block_id") or "").strip()
+            or None,
+            zip_code=str(session_ctx.get("zip") or "").strip() or None,
+            category=category,
+        )
+        if queued_reply:
+            return (
+                queued_reply,
+                _routing_ctx(
+                    ctx_base, phase=phase or "listening", active_intent=active_intent
+                ),
+                _discovery_routing_stub(
+                    phase or "listening", "save_signal_queued_unverified"
+                ),
+                [],
+            )
+
+    gate = gate_reply(
+        "save_signal",
+        session_ctx,
+        verified=phone_verified,
+        home_block_id=home_block_id,
+        user_id=user_id,
+    )
+    if gate:
+        return (
+            gate,
+            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
+            _discovery_routing_stub(phase or "listening", "save_signal_need_verify"),
             [],
         )
 
@@ -3153,19 +3341,14 @@ def _try_show_block_log_turn(
         return None
 
     ctx_base = dict(session_ctx)
-    if not phone_verified:
-        return (
-            "Verify your email first — then I can show your block log.",
-            _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
-            _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
-            [],
-        )
-
+    # Read action — never gates; an unverified guest simply has an empty log.
     try:
         entries = fetch_my_block_log(user_jwt)
     except HTTPException as exc:
         detail = str(exc.detail or "").lower()
-        if (
+        if "phone_not_verified" in detail or "not_authenticated" in detail:
+            entries = []
+        elif (
             "pgrst202" in detail
             or "get_my_block_log" in detail
             or "read-only transaction" in detail
@@ -3177,7 +3360,8 @@ def _try_show_block_log_turn(
                 _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
                 [],
             )
-        raise
+        else:
+            raise
     reply = format_block_log_reply(entries)
     ctx = _routing_ctx(
         ctx_base,
@@ -3410,16 +3594,14 @@ def _effective_discovery_goal(
     return stored if stored in _DISCOVERY_GOALS else slot_goal
 
 
-def _zip_prompt(discovery_goal: str) -> str:
+def _zip_prompt(discovery_goal: str, lang: str | None = None) -> str:
+    from app.i18n import t
+
     if discovery_goal == "activities":
-        return (
-            "What ZIP code is your block? That helps me find activities near you."
-        )
+        return t("discovery.ask_zip_activities", lang)
     if discovery_goal == "both":
-        return (
-            "What ZIP code is your block? That helps me find neighbors and activities near you."
-        )
-    return "What ZIP code is your block? That helps me find neighbors near you."
+        return t("discovery.ask_zip_both", lang)
+    return t("discovery.ask_zip_peers", lang)
 
 
 _DECLINE_INPUT_RE = re.compile(
@@ -3576,6 +3758,8 @@ def _release_host_mode(session_ctx: dict[str, Any]) -> None:
         "event_approval_asked",
         "event_share_asked",
         "event_affinity_asked",
+        "event_guard_pending",
+        "event_guards_confirmed",
         "requires_phone_verification",
     ):
         session_ctx[key] = None
@@ -3607,9 +3791,27 @@ def _show_activities_preview(
     msg: str = "",
     phone_verified: bool = False,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    from app.i18n import session_lang as _session_lang
+
     weekend_only = bool(re.search(r"\bweekend\b", str(msg or ""), re.I))
     events = fetch_preview_events_on_block(block_id, weekend_only=weekend_only)
-    reply = format_activities_message(events, block_label, phone_verified=phone_verified)
+    # Availability constraints ("evenings after 6 or weekends") are hard filters on
+    # every event result set (QA 2026-07-08) — excluded events never render, and when
+    # the filter removes everything the reply says WHY instead of "nothing on the block".
+    from app.constraints import (
+        constraints_all_filtered_note,
+        filter_events_by_constraints,
+    )
+
+    events, _constraint_dropped = filter_events_by_constraints(
+        events, (ctx_base or {}).get("user_constraints")
+    )
+    if not events and _constraint_dropped:
+        reply = constraints_all_filtered_note((ctx_base or {}).get("user_constraints"))
+    else:
+        reply = format_activities_message(
+            events, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+        )
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_PREVIEW,
@@ -3628,7 +3830,23 @@ def _looks_like_meta_chat(msg: str) -> bool:
 
 def extract_zip(text: str) -> str | None:
     m = _ZIP_RE.search(str(text or ""))
-    return m.group(1) if m else None
+    if not m:
+        return None
+    # Obviously-fake placeholders (00000/99999) are not a ZIP — QA saw 99999 accepted
+    # in a production flow. Returning None routes the turn to invalid_zip_hint's
+    # friendly explanation instead of geocoding a ZIP that doesn't exist.
+    return m.group(1) if is_valid_zip5(m.group(1)) else None
+
+
+# 5-digit codes that are never a deliverable US ZIP — catch the obvious typo/placeholder
+# before a coverage lookup treats it as a real out-of-coverage area (QA: 99999 sailed
+# through silently). A full USPS validity table is intentionally out of scope; the block
+# lookup decides real coverage for everything else.
+_PLACEHOLDER_ZIPS = frozenset({"00000", "99999"})
+
+
+def is_placeholder_zip(zip5: str | None) -> bool:
+    return str(zip5 or "").strip() in _PLACEHOLDER_ZIPS
 
 
 def invalid_zip_hint(text: str) -> str | None:
@@ -3639,6 +3857,11 @@ def invalid_zip_hint(text: str) -> str | None:
     digits = "".join(c for c in s if c.isdigit())
     if not digits:
         return None
+    if len(digits) == 5 and not is_valid_zip5(digits):
+        return (
+            f"Hmm, {digits} isn't a real US ZIP — mind double-checking? I need the "
+            "5-digit ZIP for your block (e.g. 32827 for Lake Nona)."
+        )
     if len(digits) < 5:
         return (
             f"That looks like {len(digits)} digits — I need a 5-digit US ZIP code "
@@ -4188,18 +4411,17 @@ def redact_peers_for_preview(peers: list[dict[str, Any]]) -> list[dict[str, Any]
     return out
 
 
-def _format_event_when(raw: Any) -> str | None:
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt.strftime("%a %b %d").replace(" 0", " ")
-    except ValueError:
-        return s[:10] if len(s) >= 10 else s
+def _format_event_when(raw: Any, style: str = "inline") -> str | None:
+    """Delegates to THE tz-aware formatter (app.event_when). The old local strftime
+    printed the UTC date, so a Mon 8:30 PM ET event read as "(Tue Jul 14)" in chat."""
+    from app.event_when import format_event_when
+
+    return format_event_when(raw, style=style)
 
 
 def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from app.partner_events import attribution_label
+
     out: list[dict[str, Any]] = []
     for ev in events[:5]:
         if not isinstance(ev, dict):
@@ -4208,9 +4430,15 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
             {
                 "activity_id": str(ev.get("id") or "") or None,
                 "title": str(ev.get("title") or "Activity"),
+                # Raw ISO stays for clients (payload contract unchanged); the LABEL is
+                # worker-rendered local text and must agree with the chat sentence.
                 "starts_at": str(ev.get("starts_at") or "") or None,
-                "starts_label": _format_event_when(ev.get("starts_at")),
+                "starts_label": _format_event_when(ev.get("starts_at"), style="card"),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
+                # Honest attribution for partner-sourced events ("via Lake Nona Library");
+                # None for member events so the FE renders nothing extra.
+                "source": str(ev.get("source") or "").strip() or None,
+                "attribution": attribution_label(ev),
                 "preview": True,
             }
         )
@@ -4237,9 +4465,10 @@ def fetch_preview_events_on_block(
         fetch_n = pool if pool and pool > 0 else limit * 3
         res = (
             sb.table("events")
-            .select("id, title, starts_at, venue_name, cohort_tags, host_id")
+            .select("id, title, starts_at, venue_name, cohort_tags, host_id, source, source_name")
             .eq("block_id", block_id)
             .eq("status", "open")
+            .eq("is_test", False)  # QA fixtures never reach member-facing previews
             .gte("starts_at", now_iso)
             .order("starts_at")
             .limit(fetch_n)
@@ -4247,15 +4476,14 @@ def fetch_preview_events_on_block(
         )
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
         if weekend_only:
+            from app.event_when import event_local_dt
+
             filtered: list[dict[str, Any]] = []
             for row in rows:
-                when = str(row.get("starts_at") or "")
-                try:
-                    dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
-                    if dt.weekday() in (5, 6):
-                        filtered.append(row)
-                except ValueError:
-                    continue
+                # Weekend on the EVENT's wall clock — a Sat-night ET event is Sun in UTC.
+                dt = event_local_dt(row.get("starts_at"))
+                if dt is not None and dt.weekday() in (5, 6):
+                    filtered.append(row)
             rows = filtered
         return rows[:limit]
     except Exception:
@@ -4267,14 +4495,16 @@ def format_activities_message(
     block_label: str | None,
     *,
     phone_verified: bool = False,
+    lang: str | None = None,
 ) -> str:
+    from app.i18n import t
+
     where = block_label or "your block"
     if not events:
-        return (
-            f"I don't see open activities on {where} in the next couple weeks yet. "
-            "You can host something, or tell me what you're looking for."
-        )
-    lines = [f"Here's what's coming up near {where}:"]
+        return t("discovery.activities_empty", lang, where=where)
+    from app.partner_events import with_attribution
+
+    lines = [t("discovery.activities_header", lang, where=where)]
     for ev in events[:5]:
         title = str(ev.get("title") or "Activity")
         venue = str(ev.get("venue_name") or "").strip()
@@ -4284,11 +4514,11 @@ def format_activities_message(
             line += f" at {venue}"
         if when:
             line += f" ({when})"
-        lines.append(line)
+        lines.append(with_attribution(line, ev))
     if phone_verified:
-        lines.append("Want to RSVP to one of these, or should I find neighbors like you?")
+        lines.append(t("discovery.activities_tail_verified", lang))
     else:
-        lines.append("Verify your email to RSVP — or ask me to find neighbors like you.")
+        lines.append(t("discovery.activities_tail_guest", lang))
     return "\n".join(lines)
 
 
@@ -4319,11 +4549,18 @@ def _verify_gate_reply(
     ctx_base: dict[str, Any],
     block_id: str,
     event_label: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    from app.i18n import session_lang as _session_lang, t as _t
+
+    _lang = _session_lang(session_ctx)
+    # Always at a resolved block (block_id is required) and a commitment moment:
+    # RSVP (event_label) or an explicit ask to connect / sign up.
+    gate_shown("rsvp" if event_label else "connect", user_id)
     if event_label:
-        lead = f"To join {event_label}, verify your email first — I'll send you a code."
+        reply = _t("discovery.verify_gate_event", _lang, event=event_label)
     else:
-        lead = "I can see neighbors nearby — to show names and connect you, verify your email first."
+        reply = _t("discovery.verify_gate_neighbors", _lang)
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_AWAIT_SIGNUP_PHONE,
@@ -4332,7 +4569,7 @@ def _verify_gate_reply(
     ctx["requires_phone_verification"] = True
     ctx["peer_matches"] = []
     return (
-        f"{lead} What's your email?",
+        reply,
         ctx,
         _discovery_routing_stub(PHASE_GATE_VERIFY),
         [],
@@ -4344,25 +4581,24 @@ def format_preview_message(
     block_label: str | None,
     *,
     phone_verified: bool = False,
+    lang: str | None = None,
 ) -> str:
+    from app.i18n import t
+
     where = block_label or "your block"
     if not peers:
-        return (
-            f"I looked around {where} — no strong matches yet. "
-            "Tell me a bit more about yourself, or try a nearby ZIP."
-        )
-    lines = [f"I found {len(peers)} neighbor{'s' if len(peers) != 1 else ''} near {where}:"]
+        return t("discovery.peers_empty", lang, where=where)
+    if len(peers) == 1:
+        lines = [t("discovery.peers_header_one", lang, where=where)]
+    else:
+        lines = [t("discovery.peers_header_many", lang, n=len(peers), where=where)]
     for i, p in enumerate(peers[:3], 1):
         label = str(p.get("matching_peer_label") or "shared interests")
         lines.append(f"• Neighbor {i} — {label}")
     if phone_verified:
-        lines.append(
-            "Tell me more about you for sharper matches — or ask me to introduce you to someone."
-        )
+        lines.append(t("discovery.peers_tail_verified", lang))
     else:
-        lines.append(
-            "Verify your email to see names and connect — or tell me more about you for sharper matches."
-        )
+        lines.append(t("discovery.peers_tail_guest", lang))
     return "\n".join(lines)
 
 
@@ -4451,7 +4687,13 @@ def _handle_signup_phone_message(
             if host_ctx.get("event_draft"):
                 dest_uid = registered_user_id_for_email(email)
                 if dest_uid:
-                    stash_pending_event_draft(dest_uid, host_ctx)
+                    stash_pending_event_draft(
+                        dest_uid,
+                        host_ctx,
+                        # Key the stash to THIS (source) session so a concurrent
+                        # session's stash for the same account isn't clobbered.
+                        session_id=str(session_ctx.get("_session_id") or "") or None,
+                    )
         pending_seek = session_ctx.get("look_seek_pending")
         if isinstance(pending_seek, dict) and pending_seek:
             dest_uid = registered_user_id_for_email(email)
@@ -4860,6 +5102,7 @@ def _start_activity_browse_from_discovery(
     history: list[dict[str, Any]] | None,
     user_jwt: str,
     home_block_id: str | None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Begin the agentic events-browse and return its first turn (asks the interest). The
     sticky flow continues on later turns via the pipeline's activity_browse_active gate."""
@@ -4874,6 +5117,7 @@ def _start_activity_browse_from_discovery(
         history=history or [],
         user_jwt=user_jwt,
         home_block_id=home_block_id,
+        user_id=user_id,
     )
     phase = str(session_ctx.get("routing_phase") or "listening")
     ctx = _routing_ctx(session_ctx, phase=phase, active_intent="discovery.find_activities")
@@ -4982,6 +5226,16 @@ def handle_discovery_turn(
             msg=msg, kind=_unsafe_kind, session_ctx=session_ctx,
             user_id=user_id, home_block_id=home_block_id, phase=phase,
         )
+
+    # Product FAQ second — QA 2026-07-08: four direct questions (safety, who-is-this-for,
+    # childcare, ZIP privacy) each got a canned funnel line or an event dump. A direct
+    # question outranks every funnel step and lane handler below: answer it NOW from the
+    # static template and leave the phase untouched so the interrupted flow resumes next
+    # turn. Deterministic regex first; the classifier's help.faq_* label (paraphrases the
+    # regex can't see) is honored via the same handler in _try_layer1_intent_turn.
+    _faq = faq_linear_intent(msg)
+    if _faq is not None:
+        return _answer_faq_turn(_faq, session_ctx=session_ctx, phase=phase, user_id=user_id)
 
     # A guest who finished an event, hit the verify gate, and is now verified: publish the
     # event RIGHT AWAY (mirrors the meet-seek publish-after-verify below) and show the
@@ -5309,13 +5563,13 @@ def handle_discovery_turn(
                 )
             return _start_activity_browse_from_discovery(
                 msg=msg, session_ctx=session_ctx, history=history,
-                user_jwt=user_jwt, home_block_id=home_block_id,
+                user_jwt=user_jwt, home_block_id=home_block_id, user_id=user_id,
             )
         _decision = _browse_or_seek_decision(slots, msg)
         if _decision == "browse":
             return _start_activity_browse_from_discovery(
                 msg=msg, session_ctx=session_ctx, history=history,
-                user_jwt=user_jwt, home_block_id=home_block_id,
+                user_jwt=user_jwt, home_block_id=home_block_id, user_id=user_id,
             )
         if _decision == "clarify":
             _bm = enrich_slots(dict(slots), msg=msg)
@@ -5508,10 +5762,27 @@ def handle_discovery_turn(
         user_id=user_id,
         phase=phase,
         is_anonymous=is_anonymous,
+        slots=slots,
     )
     if upfront_name_turn is not None:
         reply, ctx, routing, peers = upfront_name_turn
         ctx["unified_mode"] = True
+        # The side-quest just completed and an interrupted goal is waiting — resume it
+        # now (ack references the stored topic, then the goal's handler runs for real).
+        resume = ctx.pop("_resume_goal", None)
+        if isinstance(resume, dict):
+            return _resume_interrupted_goal(
+                resume,
+                lead_reply=reply,
+                ctx=ctx,
+                user_jwt=user_jwt,
+                phone_verified=phone_verified,
+                home_block_id=home_block_id,
+                is_anonymous=is_anonymous,
+                history=history,
+                user_id=user_id,
+                timer=timer,
+            )
         return reply, ctx, routing, peers
 
     identity_slots_turn = _try_identity_slots_turn(
@@ -5956,9 +6227,11 @@ def handle_discovery_turn(
     if effective_goal in _DISCOVERY_GOALS:
         ctx_base["discovery_goal"] = effective_goal
 
-    # Slot: ZIP / block
+    # Slot: ZIP / block. The classifier's slot ZIP gets the same validity check as a
+    # typed one — a bogus 99999 must never reach block creation from either source.
     block_id = resolve_block_id(session_ctx, home_block_id)
-    zip_from_msg = extract_zip(msg) or slots.get("zip")
+    _slot_zip = str(slots.get("zip") or "").strip()
+    zip_from_msg = extract_zip(msg) or (_slot_zip if is_valid_zip5(_slot_zip) else None)
     if zip_from_msg and not block_id:
         blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
         if blk:
@@ -5968,9 +6241,12 @@ def handle_discovery_turn(
             ctx_base["preview_block_label"] = str(blk.get("display_name") or blk.get("label") or blk.get("name") or zip_from_msg)
 
     if not block_id:
+        from app.i18n import session_lang as _session_lang, t as _t
+
+        _lang = _session_lang(session_ctx)
         if zip_from_msg:
             return (
-                f"Hmm, {zip_from_msg} doesn't look like a ZIP I can place — mind double-checking the 5 digits?",
+                _t("discovery.zip_unplaceable", _lang, zip=zip_from_msg),
                 _routing_ctx(
                     session_ctx,
                     phase=PHASE_NEED_ZIP,
@@ -6004,7 +6280,7 @@ def handle_discovery_turn(
         zip_hint = invalid_zip_hint(msg)
         zip_goal = str(ctx_base.get("discovery_goal") or effective_goal or "peers")
         return (
-            zip_hint or _zip_prompt(zip_goal),
+            zip_hint or _zip_prompt(zip_goal, _lang),
             _routing_ctx(
                 session_ctx,
                 phase=PHASE_NEED_ZIP,
@@ -6026,6 +6302,7 @@ def handle_discovery_turn(
             session_ctx=session_ctx,
             ctx_base=ctx_base,
             block_id=block_id,
+            user_id=user_id,
         )
 
     # Slot: identity snippet (Flash — not chat history heuristics)
@@ -6038,7 +6315,8 @@ def handle_discovery_turn(
         slots=slots,
     )
     if snippet:
-        ctx_base["identity_snippet"] = snippet
+        # identity_snippet persists in session context — child PII never lands there.
+        ctx_base["identity_snippet"] = redact_pii(snippet) or snippet
 
     effective_snippet = str(ctx_base.get("identity_snippet") or "").strip() or None
 
@@ -6088,6 +6366,7 @@ def handle_discovery_turn(
             ctx_base=ctx_base,
             block_id=block_id,
             event_label=f'"{event_title}"' if event_title else "that activity",
+            user_id=user_id,
         )
 
     if phase == PHASE_PREVIEW:
@@ -6227,7 +6506,11 @@ def handle_discovery_turn(
                 limit=3,
                 include_peer_ids=phone_verified,
             )
-            reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
+            from app.i18n import session_lang as _session_lang
+
+            reply = format_preview_message(
+                peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+            )
         else:
             reply = format_peer_matches(peers)
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
@@ -6255,13 +6538,14 @@ def handle_discovery_turn(
             session_ctx=session_ctx,
             ctx_base=ctx_base,
             block_id=block_id,
+            user_id=user_id,
         )
 
     # Preview re-search: AI must supply new identity_snippet + goal=peers (not questions).
     if phase == PHASE_PREVIEW and slots_want_preview_refetch(slots, session_ctx, msg=msg):
         refined = _identity_refinement(slots, session_ctx)
         if refined:
-            ctx_base["identity_snippet"] = refined
+            ctx_base["identity_snippet"] = redact_pii(refined) or refined
         if phone_verified:
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
             try:
@@ -6287,7 +6571,11 @@ def handle_discovery_turn(
                 )
                 return reply, ctx, ctx["last_routing"], peers
         peers = fetch_preview_peers_on_block(block_id, limit=3)
-        reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
+        from app.i18n import session_lang as _session_lang
+
+        reply = format_preview_message(
+            peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+        )
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
         ctx.pop("activity_previews", None)
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "preview_peers_on_block")
@@ -6340,7 +6628,11 @@ def handle_discovery_turn(
 
         if wants_peers or phase != PHASE_PREVIEW:
             peers = fetch_preview_peers_on_block(block_id, limit=3)
-            reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
+            from app.i18n import session_lang as _session_lang
+
+            reply = format_preview_message(
+                peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+            )
             ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
             ctx.pop("activity_previews", None)
             ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "preview_peers_on_block")

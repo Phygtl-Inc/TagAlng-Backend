@@ -2113,7 +2113,16 @@ class TestUpfrontDisplayNameGate(unittest.TestCase):
         self.assertIn("Maria", reply)
         self.assertEqual(out_ctx["routing_phase"], "listening")
         self.assertTrue(out_ctx["display_name_saved"])
-        self.assertNotIn("awaiting_upfront_name", out_ctx)
+        # None-stamped (not popped) so the {**old, **new} session merge DELETES the flag —
+        # a pop() left the persisted True alive and re-entered the name quest next turn.
+        self.assertIsNone(out_ctx["awaiting_upfront_name"])
+        from app.db import merge_session_context
+
+        merged = merge_session_context(
+            {"awaiting_upfront_name": True, "upfront_name_attempts": 1}, out_ctx
+        )
+        self.assertNotIn("awaiting_upfront_name", merged)
+        self.assertNotIn("upfront_name_attempts", merged)
 
     @patch("app.discovery_route.user_needs_display_name", return_value=True)
     def test_skipped_for_anonymous_guest(self, _needs) -> None:

@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any
 
 from app.orchestrator.audit import log_turn
@@ -85,6 +86,11 @@ def run_turn(
     timer = timer or TurnTimer()
     timer.emit(READING)
     clear_turn_surfaces(session_ctx)
+    # Session-sticky language (idempotent when the unified pipeline already resolved it
+    # this turn; this covers the profile_intake / event_draft purposes called directly).
+    from app.i18n import resolve_session_lang
+
+    resolve_session_lang(session_ctx, user_message)
     with timer.stage("load_user_context"):
         ctx_pack = load_user_context(user_id)
     block_id = ctx_pack.get("home_block_id")
@@ -325,7 +331,10 @@ def run_turn(
         **session_ctx,
         **synth_ctx,
         "core_block": strip_ephemeral(core),
-        "last_routing": routing,
+        # Stamp capture_fired onto the persisted routing — before this only the log
+        # line carried it, so the API payload reported capture_fired=false even on
+        # turns where capture_inquiry actually ran.
+        "last_routing": {**routing, "capture_fired": capture_fired},
         "timing_ms": timer.to_dict(),
     }
     if draft:
@@ -370,15 +379,27 @@ def _should_reconcile_event_turn(
     # when the utterance has no host keyword and the router calls no tool.
     if session_ctx.get("event_host_active"):
         return True
-    if wants_host_activity(utterance):
-        return True
     if session_ctx.get("pending_confirmation"):
-        return True
-    if tool_result and tool_result.get("tool") in ("publish_activity", "update_event_draft"):
         return True
     if has_partial_event_args(None, session_ctx):
         return True
     if isinstance(prev_draft, dict) and has_partial_event_args(prev_draft, session_ctx):
+        return True
+    # Below this line every trigger can SPAWN a brand-new draft from heuristics tuned on
+    # English (the host regex, the router's intent guess). QA 2026-07-08: "oi Lana, sou
+    # brasileira… quero conhecer outras mães" spawned a spurious empty event_draft — the
+    # PT text confused classification. With no prior host state, a confidently non-English
+    # message must carry an EXPLICIT hosting phrase in its own language to start a draft;
+    # otherwise never extract. (English messages are unaffected.)
+    from app.i18n import detect_language
+
+    if detect_language(utterance) in ("es", "pt") and not _non_english_hosting_phrase(
+        utterance
+    ):
+        return False
+    if wants_host_activity(utterance):
+        return True
+    if tool_result and tool_result.get("tool") in ("publish_activity", "update_event_draft"):
         return True
     if routing.get("intent_class") == "activity" and routing.get("tool_to_call") in (
         "publish_activity",
@@ -387,6 +408,21 @@ def _should_reconcile_event_turn(
     ):
         return True
     return False
+
+
+# Explicit es/pt hosting verbs + event nouns — the deterministic opt-in that lets a
+# Spanish/Portuguese speaker still START a host draft ("quero organizar um café",
+# "quiero organizar una reunión") while a greeting can't spawn one.
+_NON_EN_HOSTING_RE = re.compile(
+    r"\b(?:organizar|organizo|hospedar|criar|crear|armar|montar|planear|planejar|hacer|fazer)\b"
+    r".{0,60}\b(?:evento|reuni[oó]n|encontro|encuentro|caf[eé]|festa|fiesta|picnic|piquenique|"
+    r"churrasco|asado|brunch|meetup|playdate|encontrinho)\b",
+    re.IGNORECASE,
+)
+
+
+def _non_english_hosting_phrase(utterance: str) -> bool:
+    return bool(_NON_EN_HOSTING_RE.search(str(utterance or "")))
 
 
 def _stamp_lana_unified_fields(

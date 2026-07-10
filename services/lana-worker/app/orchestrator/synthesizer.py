@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from app.context import build_system_prompt, load_prompt
+from app.i18n import session_lang, synth_language_directive, t
 from app.profile_intake import apply_profile_stop_rules
 from app.lana_ui import merge_event_drafts, parse_event_draft, parse_event_turn_ui, parse_turn_ui, finalize_event_draft, sanitize_assistant_message
 from app.orchestrator.llm import llm_json, router_model, synthesizer_model
@@ -93,6 +94,13 @@ def synthesize_turn(
         f"ROUTING: {json.dumps(routing)}",
         f"TOOL RESULT: {json.dumps(tool_result or {})}",
     ]
+    # Session-sticky language mirroring: one directive, applied to every purpose, so a
+    # Brazilian/Spanish-speaking mom gets Lana in her own words (event titles stay as
+    # authored). Set by app.i18n.resolve_session_lang at pipeline entry.
+    lang = session_lang(session_ctx)
+    lang_directive = synth_language_directive(lang) if lang else None
+    if lang_directive:
+        payload_parts.append(lang_directive)
     if purpose == "profile_intake" and utterance.strip().startswith("(session start"):
         payload_parts.append(
             'OPENING TURN: First chat line after "Meet Lana". '
@@ -162,6 +170,20 @@ def synthesize_turn(
     payload = "\n\n".join(payload_parts)
 
     model = _synth_model(outcome, tool_result, purpose=purpose)
+    # Token streaming (SSE {"type":"delta"} frames) — only on the plain conversational
+    # Lana path: purpose == "lana" with NO tool result. There the final reply IS the
+    # synth's assistant_message (modulo the rare metadata-line strip in
+    # sanitize_assistant_message), so streamed tokens match the terminal result. Paths
+    # that must NOT stream, because the shown text can differ from the synth's raw
+    # message: tool turns (peer previews replace the message with the backend summary),
+    # event_draft / profile_intake turns (heavy post-processing + stop rules), and every
+    # canned/template reply (no LLM call at all — those turns simply emit no deltas).
+    # The terminal result frame stays authoritative either way.
+    on_delta = (
+        timer.emit_delta
+        if purpose == "lana" and tool_result is None and timer is not None and timer.streams_deltas
+        else None
+    )
     attempts_box: list[int] = []
     if timer:
         with timer.stage("llm_synth"):
@@ -172,6 +194,7 @@ def synthesize_turn(
                 max_tokens=2048,
                 temperature=0.55,
                 llm_attempts=attempts_box,
+                on_delta=on_delta,
             )
         if attempts_box:
             timer.set_count("llm_synth_attempts", attempts_box[0])
@@ -185,15 +208,21 @@ def synthesize_turn(
         )
 
     if purpose == "event_draft":
-        return _parse_event_synth(
+        result = _parse_event_synth(
             raw,
             prev_draft=prev_draft,
             tool_result=tool_result,
             valid_purpose_ids=set(purpose_ids or []),
         )
-    if purpose == "lana":
-        return _parse_lana_synth(raw, routing=routing, tool_result=tool_result)
-    return _parse_profile_synth(raw, history=history)
+    elif purpose == "lana":
+        result = _parse_lana_synth(raw, routing=routing, tool_result=tool_result, lang=lang)
+    else:
+        result = _parse_profile_synth(raw, history=history)
+    # Trust guard on every purpose: a reply must never claim to keep a child's
+    # name/school/age — rewrite to the non-storage acknowledgment deterministically.
+    assistant_message, *rest = result
+    assistant_message = sanitize_assistant_message(assistant_message, user_message=utterance)
+    return (assistant_message, *rest)  # type: ignore[return-value]
 
 
 def synthesize_opening(
@@ -233,6 +262,7 @@ def _parse_lana_synth(
     *,
     routing: dict[str, Any],
     tool_result: dict[str, Any] | None,
+    lang: str | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
     assistant_message = str(raw.get("assistant_message", "")).strip()[:1200]
     notes = list(routing.get("enforce_notes") or [])
@@ -243,13 +273,11 @@ def _parse_lana_synth(
         assistant_message = sanitize_assistant_message(assistant_message)
     if not assistant_message:
         if "discovery_need_zip" in notes or (tool_result and tool_result.get("reason") == "need_zip"):
-            assistant_message = "What ZIP code is your block? (e.g. 32827)"
+            assistant_message = t("discovery.ask_zip_short", lang)
         elif "discovery_need_identity" in notes or (
             tool_result and tool_result.get("reason") == "need_identity"
         ):
-            assistant_message = (
-                "Tell me one thing about you — life stage, heritage, or what you're looking for."
-            )
+            assistant_message = t("discovery.ask_identity_short", lang)
         elif tool_result and tool_result.get("summary"):
             assistant_message = str(tool_result["summary"])[:1200]
         else:

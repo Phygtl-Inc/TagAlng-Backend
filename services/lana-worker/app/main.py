@@ -37,6 +37,7 @@ from app.db import (
     update_session_context,
     merge_session_context,
 )
+from app.constraints import capture_constraints_for_turn, finalize_constraint_turn
 from app.local_signals import block_log_take_action, fetch_my_block_log, normalize_block_log_row
 from app.lana_paths import (
     event_fast_path_enabled,
@@ -50,11 +51,13 @@ from app.profile_intake import (
     lana_profile_opening,
     lana_profile_turn,
 )
+from app.turn_telemetry import build_lana_turn_props, full_outcome
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lana_unified_pipeline import run_lana_unified_pipeline
+from app.activity_browse import enter_activity_browse_from_cta
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
 from app.tip_share import looks_like_tip_share_entry
@@ -141,6 +144,7 @@ from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
+from app.gates import gate_copy, gate_shown
 from app.notifications import email_html, notify_user
 from app.rapport_gaps import (
     mark_answered as rapport_mark_answered,
@@ -355,10 +359,14 @@ def _routing_from_ctx(ctx: dict[str, Any]) -> TurnRouting | None:
     if not isinstance(raw, dict):
         return None
     return TurnRouting(
-        outcome=raw.get("outcome"),
+        # The orchestrator's internal single-letter codes (R/A/T/C) never leave the
+        # server: they normalize to full names here; already-full values pass through.
+        outcome=full_outcome(raw.get("outcome")),
         intent_class=raw.get("intent_class"),
         confidence=raw.get("confidence"),
-        tool_called=raw.get("tool_to_call"),
+        # The unified-pipeline flows stamp "tool_called"; the orchestrator stamps
+        # "tool_to_call" — read both so neither path reports null.
+        tool_called=raw.get("tool_to_call") or raw.get("tool_called"),
         capture_fired=bool(raw.get("capture_fired")),
     )
 
@@ -633,6 +641,15 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
         tags = row.get("trait_tags")
         if not isinstance(tags, list):
             tags = []
+        shared = row.get("shared")
+        if not isinstance(shared, list):
+            shared = []
+        stage_band = str(row.get("stage_band") or "") or None
+        if stage_band not in ("expecting", "baby", "toddler", "prek", "school"):
+            stage_band = None
+        tier = str(row.get("tier") or "") or None
+        if tier not in ("great", "good"):
+            tier = None
         out.append(
             PeerMatchRow(
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
@@ -647,6 +664,11 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 match_band=str(row.get("match_band") or "") or None,
                 match_badge=str(row.get("match_badge") or "") or None,
                 trait_tags=[str(t) for t in tags[:6]],
+                stage_band=stage_band,
+                distance_label=str(row.get("distance_label") or "") or None,
+                shared=[str(s) for s in shared[:3]],
+                tier=tier,
+                display_score=bool(row.get("display_score", False)),
                 actions=_ui_action_rows_from_raw(row.get("actions")),
             )
         )
@@ -835,10 +857,13 @@ def _onboarding_fields(
     auth: AuthSession,
     *,
     ready_to_complete: bool = False,
+    ask_text: str | None = None,
 ) -> dict[str, Any]:
     from app.peer_discovery_surface import stamp_peer_discovery_ctx
 
-    stamp_peer_discovery_ctx(ctx, phone_verified=auth.phone_verified)
+    stamp_peer_discovery_ctx(
+        ctx, phone_verified=auth.phone_verified, ask_text=ask_text
+    )
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
     intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
     ui_intent = derive_ui_intent(
@@ -1016,17 +1041,18 @@ def _profile_context_pack(
 
 @app.post("/lana/sessions", response_model=CreateSessionResponse)
 def create_lana_session(
-    body: CreateSessionRequest,
+    body: CreateSessionRequest | None = None,
     authorization: str | None = Header(default=None),
 ):
     _vertex_required()
+    body = body or CreateSessionRequest()
     auth = verify_auth(authorization)
     require_home_block_for_purpose(auth, body.purpose)
 
     purpose = body.purpose
     try:
         session, resumed = create_session(
-            auth.user_id, purpose, force_new=body.force_new
+            auth.user_id, purpose, force_new=body.fresh or body.force_new
         )
         session_id = str(session["id"])
         if resumed:
@@ -1218,17 +1244,25 @@ def _run_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None,
     emit: Callable[[str], None] | None = None,
+    emit_delta: Callable[[str], None] | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
     `emit`, when provided, receives human-readable progress labels as the turn
     advances (attached to the TurnTimer, which is threaded through every path). The
     blocking endpoint passes None, so it is a no-op there.
+
+    `emit_delta`, when provided, receives incremental assistant_message text while a
+    streaming-capable synthesizer LLM call generates the reply (see
+    orchestrator/synthesizer.py for exactly which paths stream). Also attached to the
+    TurnTimer; a no-op for the blocking endpoint and for every non-streaming reply path.
     """
     _vertex_required()
     timer = TurnTimer()
     if emit is not None:
         timer.set_emitter(emit)
+    if emit_delta is not None:
+        timer.set_delta_emitter(emit_delta)
     auth = verify_auth(authorization)
 
     with timer.stage("db_load_session"):
@@ -1254,6 +1288,18 @@ def _run_lana_message(
     if purpose in ("lana", "profile_intake"):
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
+    # Availability/need constraint memory (QA 2026-07-08): deterministically capture
+    # constraints ("evenings after 6 or weekends", kid age bands) and multi-need
+    # enumerations from ANY turn BEFORE routing, so every handler this turn — and every
+    # later turn via the session merge — sees them. Durable for verified users; the
+    # acknowledgment line is prepended to the reply after the turn (see below).
+    if purpose == "lana":
+        capture_constraints_for_turn(
+            session_ctx_in,
+            body.message,
+            user_id=auth.user_id,
+            persist_durably=auth.phone_verified and not auth.is_anonymous,
+        )
     # Deterministic entry into the in-chat event-host flow — from the "A meet to host"
     # CTA hint OR an explicit "host/plan a <event>" message (no classifier dependency).
     if purpose == "lana" and (
@@ -1311,17 +1357,14 @@ def _run_lana_message(
     # (intent_hint). Meet ≡ activity: looking for a meet means SEARCHING the block's real
     # activities first, so the CTA enters the activity-browse (search) flow. The seek to be
     # MATCHED is offered only as a fallback when the search comes up empty (see
-    # activity_browse's _seek_offer). Natural language is left to the AI classifier downstream.
+    # activity_browse's _seek_offer). Only a BARE chip tap enters deterministically — a
+    # message with real semantic content ("I need a babysitter for tonight", a safety
+    # question, an emotional message) is left to the AI classifier downstream, so it reaches
+    # the right handler instead of the canned "what kind of thing?" opener.
     if purpose == "lana" and not session_ctx_in.get("pass_along_active") and not session_ctx_in.get(
         "tip_share_active"
     ) and body.intent_hint == "look_meet":
-        session_ctx_in["activity_browse_active"] = True
-        session_ctx_in["browse_turns"] = 0
-        session_ctx_in["browse_draft"] = None
-        # Button entry carries a generic seed phrase with no real interest — skip mining it so
-        # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
-        # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
-        session_ctx_in["browse_skip_seed"] = True
+        enter_activity_browse_from_cta(session_ctx_in, body.message)
     # A "By the way…" tile answer — route it deterministically to the profile path (save the
     # claim + reply in-thread) rather than the classifier, which would misread a bare answer
     # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
@@ -1329,6 +1372,15 @@ def _run_lana_message(
         session_ctx_in["rapport_answer"] = {
             "gap_row_id": (body.rapport_gap_row_id or "").strip() or None,
             "question": (body.rapport_question or "").strip() or None,
+        }
+    # Structured goal echoed from a tapped suggestion chip (UiActionRow.goal) — stamp it as
+    # this turn's authoritative goal so routing (and the goal stack, if a side-quest
+    # interrupts) never has to re-parse the chip's display text. Turn-scoped (see
+    # TURN_SCOPED_SURFACES), so it never leaks past this turn. Plain messages omit it.
+    if purpose == "lana" and body.goal is not None and body.goal.kind.strip():
+        session_ctx_in["tapped_goal"] = {
+            "kind": body.goal.kind.strip(),
+            "topic": (body.goal.topic or "").strip() or None,
         }
 
     timing_ms: dict[str, int] | None = None
@@ -1358,6 +1410,11 @@ def _run_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
             orch_used = bool(session_ctx.pop("_orchestrator_turn", False))
+            # Constraint memory: prepend this turn's capture acknowledgment
+            # ("Evenings after 6pm or weekends — noted.") to whatever reply the turn
+            # produced, and carry the constraints into the persisted context no matter
+            # which handler built it (some return a fresh dict).
+            reply = finalize_constraint_turn(reply, session_ctx_in, session_ctx)
         elif use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(
                 user_id=auth.user_id,
@@ -1493,9 +1550,11 @@ def _run_lana_message(
     timing_ms["total_ms"] = _timing_total_ms(timing_ms)
 
     ready = status == "ready_to_complete"
-    ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
-    # Debug + timing stay on the backend (logged) but are no longer sent to the FE —
-    # they were noise on the wire and nothing in the client reads them.
+    ob = _onboarding_fields(
+        merged, auth, ready_to_complete=ready, ask_text=body.message
+    )
+    # Debug stays backend-only (logged); timing_ms IS returned on the payload so
+    # analytics/QA can measure per-turn latency server-side (it was null before).
     debug = _turn_debug_from_ctx(
         merged, ui_intent=ob.get("ui_intent"), orchestrator=orch_used
     )
@@ -1517,10 +1576,24 @@ def _run_lana_message(
     ob.pop("onboarding_step", None)  # not read by the FE
 
     # Server-truth product analytics (Amplitude) — fire-and-forget, same user_id as the
-    # browser so events stitch. Tracks the turn + the conversions the client can't be
-    # trusted to report (publish / save actually happened server-side).
+    # browser so events stitch. One `lana_turn` event per turn carries the north-star
+    # (secured_step: did this ask end in a secured next step?) plus full-name routing,
+    # gate, and latency — the fields QA found unmeasurable server-side.
     _ui = ob.get("ui_intent")
-    amplitude_track("lana_turn", user_id=auth.user_id, event_properties={"ui_intent": _ui})
+    amplitude_track(
+        "lana_turn",
+        user_id=auth.user_id,
+        event_properties=build_lana_turn_props(
+            session_id=session_id,
+            # history already includes this turn's user message (listed after insert),
+            # so the count of user rows is this turn's 1-based index.
+            turn_index=sum(1 for m in history if str(m.get("role") or "") == "user"),
+            merged_ctx=merged,
+            ui_intent=_ui,
+            latency_ms=timing_ms.get("total_ms"),
+            block_resolved=bool(ob.get("home_block_assigned")),
+        ),
+    )
     _conversions = {
         "event_created": "event_hosted",
         "item_listed": "item_listed",
@@ -1572,6 +1645,7 @@ def _run_lana_message(
         look_draft=look_draft,
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
+        timing_ms=timing_ms,
         orchestrator=orch_used,
         **ob,
     )
@@ -1601,25 +1675,44 @@ def stream_lana_message(
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
-    Frames: `{"type":"status","label":...}` as the turn advances, then a terminal
+    Frames: `{"type":"status","label":...}` as the turn advances, optional
+    `{"type":"delta","text":...}` chunks of the assistant reply while a
+    streaming-capable synthesizer LLM generates it, then a terminal
     `{"type":"result","turn":<SendMessageResponse>}` (or `{"type":"error","detail":...}`).
     The turn logic is identical — only the transport differs.
 
+    Deltas are additive and best-effort: canned/template replies and tool-result turns
+    emit none (they were never LLM-streamed text — see orchestrator/synthesizer.py for
+    the exact gating), and clients that ignore them keep working unchanged. The
+    terminal result frame carries the authoritative full turn — on the rare repair
+    paths (invalid-JSON retry, refusal repair) its text can differ from the streamed
+    prefix, so clients must replace accumulated deltas with `turn.assistant_message`.
+
     The (sync, blocking) turn runs on a worker thread and pushes progress + the final
-    result onto a queue; the SSE generator drains it. Keeps the blocking LLM clients
-    sync — no async rewrite. `background_tasks` is populated by the worker before the
-    result frame is queued, so FastAPI still runs the fire-and-forget jobs after the
-    stream closes.
+    result onto a queue; the SSE generator drains it and flushes one frame per queue
+    item (each delta chunk is its own frame). Keeps the blocking LLM clients sync — no
+    async rewrite. `background_tasks` is populated by the worker before the result
+    frame is queued, so FastAPI still runs the fire-and-forget jobs after the stream
+    closes.
     """
     events: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
     def emit(label: str) -> None:
         events.put(("status", label))
 
+    def emit_delta(text: str) -> None:
+        if text:
+            events.put(("delta", text))
+
     def worker() -> None:
         try:
             resp = _run_lana_message(
-                session_id, body, background_tasks, authorization, emit=emit
+                session_id,
+                body,
+                background_tasks,
+                authorization,
+                emit=emit,
+                emit_delta=emit_delta,
             )
             events.put(("result", resp))
         except HTTPException as exc:
@@ -1643,6 +1736,8 @@ def stream_lana_message(
                 continue
             if kind == "status":
                 yield _sse_frame({"type": "status", "label": payload})
+            elif kind == "delta":
+                yield _sse_frame({"type": "delta", "text": payload})
             elif kind == "result":
                 yield _sse_frame(
                     {"type": "result", "turn": payload.model_dump(mode="json")}
@@ -2097,10 +2192,11 @@ def _complete_event_draft(
             published = True
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":
-                closing = (
-                    "Your event draft is ready — verify your email in settings, "
-                    "then publish from the form or call complete again."
-                )
+                # Backend-enforced write gate (publish_event) — benefit-framed copy.
+                gate_shown("publish_event", user_id)
+                closing = "Your event draft is ready. " + gate_copy("publish_event")
+            elif exc.detail == "duplicate_event":
+                closing = "Looks like you already have that meet — want to edit it instead?"
             else:
                 raise
 

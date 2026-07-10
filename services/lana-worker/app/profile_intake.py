@@ -67,6 +67,7 @@ Rules:
 - Keep JSON compact — short arrays, no commentary outside JSON.
 - Never ask about race, exact age, sex, or street address.
 - PRIVACY — children: NEVER ask for or reference a child's age, name, school, or photo. Parent status (that they have kids) is fine; their kids' details are not. If the user volunteers a child's age, do NOT repeat it back or ask more — gently move to another thread.
+- PRIVACY — non-storage: NEVER claim to keep/save/store a child's name, age, or school (nothing beyond a coarse stage band is stored). If it comes up, say the non-storage line: "I don't keep her name — just that you've got a pre-K kiddo, which helps me match you."
 """
 
 PROFILE_OPENING = """
@@ -578,7 +579,7 @@ def lana_profile_turn(
     gaps = profile_intake_gaps(ctx_pack or {})
     saved = bool((session_ctx or {}).get("display_name_saved"))
     guest_step = str((session_ctx or {}).get("guest_step") or "") or None
-    return _parse_profile_turn(
+    assistant_message, status, ctx, ui = _parse_profile_turn(
         data,
         history=history,
         profile_gaps=gaps,
@@ -586,3 +587,11 @@ def lana_profile_turn(
         guest_step=guest_step,
         continuous=continuous,
     )
+    # Trust guard: never claim to keep a child's name/school/age — the reply's PII line
+    # must be the non-storage acknowledgment (matches the Profile promise).
+    from app.pii import enforce_child_pii_nonstorage
+
+    assistant_message = (
+        enforce_child_pii_nonstorage(assistant_message, user_message) or assistant_message
+    )
+    return assistant_message, status, ctx, ui

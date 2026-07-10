@@ -2,12 +2,128 @@
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 from app.ui_actions import peer_card_nudge_action, weak_match_prompt_actions
 
 _STRONG_MIN = 0.80
 _PARTIAL_MIN = 0.65
+
+# ── decision context (QA 2026-07-08: cards showed one generic label + a percent) ──
+#
+# Kid-stage BANDS only — derived from the wording of the peer's own public claim
+# label, never from a stored age (child ages/names are never persisted; see
+# app/pii.py and the vertex_extract "never capture a child's age" rules).
+_STAGE_BAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("expecting", re.compile(r"\b(expecting|pregnan\w*|due\s+(?:in|this|next)|mo[mu]-to-be)\b", re.I)),
+    ("baby", re.compile(r"\b(newborns?|infants?|bab(?:y|ies))\b", re.I)),
+    ("toddler", re.compile(r"\btoddlers?\b", re.I)),
+    ("prek", re.compile(r"\b(pre-?k\b|preschool\w*)\b", re.I)),
+    ("school", re.compile(r"\b(school-?age\w*|kindergart\w*|elementary|grade-?school\w*)\b", re.I)),
+)
+
+# Backstop: a reason fragment that looks like a raw age never reaches a card.
+# (Claims are already age-scrubbed at write time — this keeps the surface safe
+# even if a legacy/unscrubbed label slips through.)
+_AGE_FRAGMENT_RE = re.compile(
+    r"\b(?:aged?\s*\d{1,2}|\d{1,2}\s*(?:yo|y/o|yrs?\s*old|years?\s*old|mos?\s*old|months?\s*old))\b",
+    re.I,
+)
+
+# Words kept lowercase inside Title Case reasons ("Mom of Toddlers").
+_TITLE_SMALL_WORDS = frozenset(
+    {"a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with"}
+)
+
+
+def stage_band_from_text(text: str | None) -> str | None:
+    """Band only (expecting|baby|toddler|prek|school) from claim-label wording."""
+    hay = str(text or "")
+    if not hay:
+        return None
+    for band, pattern in _STAGE_BAND_PATTERNS:
+        if pattern.search(hay):
+            return band
+    return None
+
+
+def titleize_reason(text: str) -> str:
+    """Consistent Title Case for card reasons ("Enjoys playgrounds" → "Enjoys Playgrounds")."""
+    words = str(text or "").split()
+    out: list[str] = []
+    for i, word in enumerate(words):
+        low = word.lower()
+        if i > 0 and low in _TITLE_SMALL_WORDS:
+            out.append(low)
+        elif word.isupper() and len(word) > 1:
+            out.append(word)  # keep acronyms (PTA, ESL)
+        else:
+            out.append(word[:1].upper() + word[1:])
+    return " ".join(out)
+
+
+def shared_reasons_from_label(label: str, *, max_reasons: int = 3) -> list[str]:
+    """Up to 3 human-readable shared reasons, title-cased, age-fragment-free."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in trait_tags_from_label(label, max_tags=max_reasons * 2):
+        if _AGE_FRAGMENT_RE.search(tag):
+            continue
+        reason = titleize_reason(tag)
+        key = reason.lower()
+        if not reason or key in seen:
+            continue
+        seen.add(key)
+        out.append(reason)
+        if len(out) >= max_reasons:
+            break
+    return out
+
+
+def match_tier(shared_count: int, band: str) -> str:
+    """"great" needs >= 2 shared dimensions (a one-trait match can't support it)."""
+    return "great" if shared_count >= 2 and band != "weak" else "good"
+
+
+# ── moms-first ranking (QA: a man ranked #1 in a moms-first product) ─────────
+
+
+def moms_first_ranking_enabled() -> bool:
+    """LANA_MOMS_FIRST_RANKING — default ON; "0"/"false"/"off"/"no" disables."""
+    flag = os.environ.get("LANA_MOMS_FIRST_RANKING", "1").strip().lower()
+    return flag not in {"0", "false", "off", "no"}
+
+
+_FAMILY_ASK_RE = re.compile(
+    r"\b(dads?|fathers?|famil(?:y|ies)|couples?|partners?|husbands?|parents?|whole\s+famil\w*)\b",
+    re.I,
+)
+
+
+def ask_includes_family_context(text: str | None) -> bool:
+    """True when the ask explicitly widens beyond moms (dads/family/parents/couples)."""
+    return bool(_FAMILY_ASK_RE.search(str(text or "")))
+
+
+_FEMALE_MARKERS = frozenset({"female", "woman", "f", "mom", "mother", "mum", "mama"})
+
+
+def moms_first_rank_multiplier(row: dict[str, Any]) -> float:
+    """Damp (not exclude) non-female candidates in mom-seeking-moms ranking.
+
+    TODO(moms-first data): gender is NOT stored today — the extractor is forbidden
+    from capturing sex/gender (see app/vertex_extract.py) and public.users has no
+    gender column, so match_peers_by_claim_vectors rows never carry one. Until an
+    explicit self-declared mom/dad profile field is surfaced through the peer RPCs,
+    rows have no "gender" key and this multiplier is a production no-op (1.0).
+    The mechanism below activates automatically once the RPC exposes the field.
+    """
+    gender = str(row.get("gender") or "").strip().lower()
+    if not gender or gender in _FEMALE_MARKERS:
+        return 1.0
+    return 0.5
 
 
 def _score_value(row: dict[str, Any]) -> float:
@@ -72,10 +188,23 @@ def enrich_peer_match_row(row: dict[str, Any]) -> dict[str, Any]:
     has_exact = bool(out.get("has_exact_concept_match"))
     stars = score_to_stars(score, has_exact=has_exact)
     band = match_band(score, has_exact=has_exact)
+    label = str(out.get("matching_peer_label") or "")
+    shared = shared_reasons_from_label(label)
     out["match_stars"] = stars
     out["match_band"] = band
     out["match_badge"] = match_badge(band, stars)
-    out["trait_tags"] = trait_tags_from_label(str(out.get("matching_peer_label") or ""))
+    # Casing cleanup at the source: display reasons are consistently Title Case.
+    out["trait_tags"] = shared_reasons_from_label(label, max_reasons=5)
+    # Decision context a mom actually weighs on a card:
+    out["shared"] = shared
+    out["stage_band"] = stage_band_from_text(label)
+    # Peer matching is home-block-scoped by construction (match_peers_by_claim_vectors
+    # filters on users.home_block_id) and no finer geo exists per user, so the honest
+    # distance is block-level. blocks_away is not derivable today.
+    out["distance_label"] = "On your block"
+    out["tier"] = match_tier(len(shared), band)
+    # similarity_score stays in the payload for telemetry only — never render it.
+    out["display_score"] = False
     return out
 
 
@@ -83,14 +212,22 @@ def enrich_peer_match_rows(
     rows: list[dict[str, Any]],
     *,
     phone_verified: bool,
+    ask_text: str | None = None,
 ) -> list[dict[str, Any]]:
     enriched = [enrich_peer_match_row(r) for r in rows if isinstance(r, dict)]
-    enriched.sort(
-        key=lambda r: (
-            -int(r.get("match_stars") or 0),
-            -_score_value(r),
-        )
-    )
+    # Moms-first ranking (default ON): in a mom-seeking-moms discovery, non-female
+    # candidates are damped in the RANKING key only (never excluded); an ask that
+    # explicitly includes dads/family context opts out. See moms_first_rank_multiplier
+    # for the production data caveat (gender not stored yet → no-op).
+    moms_first = moms_first_ranking_enabled() and not ask_includes_family_context(ask_text)
+
+    def _rank_key(r: dict[str, Any]) -> tuple[int, float]:
+        mult = moms_first_rank_multiplier(r) if moms_first else 1.0
+        rank_score = _score_value(r) * mult
+        has_exact = bool(r.get("has_exact_concept_match"))
+        return (-score_to_stars(rank_score, has_exact=has_exact), -rank_score)
+
+    enriched.sort(key=_rank_key)
     if not phone_verified:
         for row in enriched:
             row.pop("actions", None)
@@ -160,12 +297,17 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
     }
 
 
-def stamp_peer_discovery_ctx(ctx: dict[str, Any], *, phone_verified: bool) -> None:
+def stamp_peer_discovery_ctx(
+    ctx: dict[str, Any],
+    *,
+    phone_verified: bool,
+    ask_text: str | None = None,
+) -> None:
     """Enrich peer_matches + discovery_surface on ctx (additive, safe for legacy FE)."""
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list) or not raw:
         return
-    enriched = enrich_peer_match_rows(raw, phone_verified=phone_verified)
+    enriched = enrich_peer_match_rows(raw, phone_verified=phone_verified, ask_text=ask_text)
     enriched = attach_peer_card_actions(enriched, phone_verified=phone_verified)
     ctx["peer_matches"] = enriched
     surface = build_discovery_surface(enriched)

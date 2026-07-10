@@ -34,13 +34,33 @@ Output ONLY valid JSON (no markdown):
 
 Rules:
 - title required; infer from story if needed
-- venue_name: named place or area, never street address
+- venue_name: named place or area, never street address — and NEVER a bare ZIP code
+  (a ZIP like "34786" is an area, not a meeting spot; leave venue_name null)
+- TODAY is {today}. Resolve relative dates against it: "tomorrow" is exactly TODAY + 1
+  day; a bare weekday is the SOONEST such future day (if TODAY is Wednesday,
+  "thursday" is tomorrow, never next week)
+- starts_at / ends_at: strict ISO 8601 ("2026-07-09T07:00:00") or null — NEVER prose
+  like "next Wednesday 16:00:00"
+- a recurring cadence ("MWF", "wednesdays", "every tuesday") is NOT a reason to blank
+  the draft: still extract title/venue/time from the host's words, and set starts_at to
+  the first future occurrence (ISO) or null
 - cohort_tags: 0-3 ids from allowed list only
 - spans: 3-10 highlight phrases for UI coloring
 - NEVER invent events the host did not describe
 
 Transcript:
 """
+
+
+def event_extract_prompt(purpose_ids: list[str]) -> str:
+    """The extract prompt with its placeholders filled — purpose ids and TODAY anchored
+    to the host's local day (see event_when.event_local_now), so relative dates in the
+    transcript ground on the day the host actually typed them."""
+    from app.event_when import event_local_now
+
+    return EVENT_EXTRACT_PROMPT.replace(
+        "{purpose_ids}", ", ".join(purpose_ids) or "see get_event_purposes"
+    ).replace("{today}", event_local_now().strftime("%A, %Y-%m-%d"))
 
 
 def _vertex_client():
@@ -63,7 +83,7 @@ def vertex_extract_event_from_transcript(
     model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
     from google.genai import types
 
-    prompt = EVENT_EXTRACT_PROMPT.replace("{purpose_ids}", ", ".join(purpose_ids) or "see get_event_purposes")
+    prompt = event_extract_prompt(purpose_ids)
     response = client.models.generate_content(
         model=model,
         contents=prompt + transcript.strip(),

@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.claim_search import peer_matches_identity_snippet
+from app.gates import gate_copy, gate_shown
 from app.intro_list import format_duplicate_intro_reply
 from app.layer1_tier import wants_respond_intro
 from app.supabase_rpc import call_rpc
@@ -363,8 +364,10 @@ def try_propose_intro_from_preview(
                 {"status": "duplicate", "candidate_user_id": peer.get("peer_user_id")},
             )
         if detail == "phone_not_verified":
+            # Backend-enforced write gate (send_intro) — benefit-framed copy.
+            gate_shown("send_intro", str(session_ctx.get("user_id") or "") or None)
             return (
-                "Verify your email first — then I can introduce you to neighbors.",
+                gate_copy("send_intro"),
                 {"status": "need_verify"},
             )
         raise

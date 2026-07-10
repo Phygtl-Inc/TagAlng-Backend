@@ -143,6 +143,19 @@ def open_semantic_gap(
     """
     if not user_id or not question or not str(question).strip():
         return False
+    # Persistence boundary: rapport_gaps rows are durable and their question/teaser are
+    # LLM-written from the user's own words — strip child PII (names/schools/ages) so a
+    # tile never resurfaces "how is Emma liking Sunshine Preschool?" from storage.
+    # Child names are gathered across all three fields (the kinship context may live in
+    # only one of them) so the bare name can't survive in the others or in the slug.
+    from app.pii import extract_child_names, redact_pii
+
+    child_names = (
+        extract_child_names(question) | extract_child_names(label) | extract_child_names(teaser)
+    )
+    question = redact_pii(str(question), known_child_names=child_names) or str(question)
+    label = redact_pii(label, known_child_names=child_names) if label else label
+    teaser = redact_pii(teaser, known_child_names=child_names) if teaser else teaser
     topic = label or question
     gap_id = f"deepen:{_slug(topic)}"
     bucket = bucket or "general"

@@ -13,8 +13,18 @@ _INTRO_STATE_NULL_DELETES = frozenset({
     "pending_intro_offer",
     "intro_offer_shown",
 })
+# Side-quest state (upfront name capture) + the interrupted-goal stack. These MUST be
+# null-deletable: the name-capture success turn used to `pop()` awaiting_upfront_name from
+# its turn ctx, but the {**old, **new} merge resurrected the old True — so the very next
+# turn re-entered the name quest and re-asked a user Lana had just greeted by name (QA
+# 2026-07-08). Handlers now stamp these None to clear them.
+_SIDE_QUEST_NULL_DELETES = frozenset({
+    "awaiting_upfront_name",
+    "upfront_name_attempts",
+    "goal_stack",
+})
 _CTX_NULL_DELETES = frozenset(
-    {"signal_draft", *_INTRO_STATE_NULL_DELETES, *TURN_SCOPED_SURFACES}
+    {"signal_draft", *_INTRO_STATE_NULL_DELETES, *_SIDE_QUEST_NULL_DELETES, *TURN_SCOPED_SURFACES}
 )
 
 # Session keys that together describe a complete, ready-to-publish event the host flow
@@ -32,6 +42,8 @@ HOST_CTX_KEYS = (
     "event_approval_asked",
     "event_share_asked",
     "event_affinity_asked",
+    "event_guard_pending",
+    "event_guards_confirmed",
     "host_stage",
 )
 
@@ -43,20 +55,31 @@ def extract_host_ctx(session_ctx: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def stash_pending_event_draft(user_id: str, host_ctx: dict[str, Any]) -> None:
+def stash_pending_event_draft(
+    user_id: str,
+    host_ctx: dict[str, Any],
+    session_id: str | None = None,
+) -> None:
     """Persist a guest's in-progress event for `user_id` to recover after they log in.
-    Best-effort: a stash failure must not break the verification turn."""
+
+    Keyed by the SOURCE session (`session_id`): restashing from the same session replaces
+    that session's slot only, so concurrent sessions of one account never clobber each
+    other's drafts. Best-effort: a stash failure must not break the verification turn."""
     if not user_id or not isinstance(host_ctx, dict) or not host_ctx.get("event_draft"):
         return
     try:
-        service_client().table("pending_event_drafts").upsert(
-            {
-                "user_id": user_id,
-                "host_ctx": host_ctx,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
-            on_conflict="user_id",
-        ).execute()
+        row: dict[str, Any] = {
+            "user_id": user_id,
+            "host_ctx": host_ctx,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        sb = service_client()
+        if session_id:
+            row["session_id"] = session_id
+            sb.table("pending_event_drafts").upsert(row, on_conflict="session_id").execute()
+        else:
+            # No session attribution available — append; the newest-first pop still wins.
+            sb.table("pending_event_drafts").insert(row).execute()
     except Exception:
         import logging
 
@@ -65,23 +88,25 @@ def stash_pending_event_draft(user_id: str, host_ctx: dict[str, Any]) -> None:
 
 
 def pop_pending_event_draft(user_id: str) -> dict[str, Any] | None:
-    """Read and delete the pending event for `user_id` (one-shot recovery). Returns the
-    stashed host context, or None if there's nothing waiting / on any error."""
+    """Read and delete the newest pending event for `user_id` (one-shot recovery). Deletes
+    only the popped row — another session's stash for the same account stays intact.
+    Returns the stashed host context, or None if there's nothing waiting / on any error."""
     if not user_id:
         return None
     try:
         sb = service_client()
         res = (
             sb.table("pending_event_drafts")
-            .select("host_ctx")
+            .select("id, host_ctx")
             .eq("user_id", user_id)
+            .order("created_at", desc=True)
             .limit(1)
             .execute()
         )
         row = (res.data or [None])[0]
         if not isinstance(row, dict):
             return None
-        sb.table("pending_event_drafts").delete().eq("user_id", user_id).execute()
+        sb.table("pending_event_drafts").delete().eq("id", row.get("id")).execute()
         host_ctx = row.get("host_ctx")
         return host_ctx if isinstance(host_ctx, dict) and host_ctx.get("event_draft") else None
     except Exception:
@@ -122,7 +147,9 @@ def log_feature_request(
     Lana declines these to the user, but we log them so the team sees real demand and can
     notify the user later — that's why user_id is captured. Best-effort: a logging failure
     must never break the decline turn the user is seeing."""
-    text = str(request_text or "").strip()[:1000]
+    from app.pii import redact_pii
+
+    text = (redact_pii(str(request_text or "").strip()) or "")[:1000]
     if not text:
         return
     try:
@@ -139,6 +166,44 @@ def log_feature_request(
         return
 
 
+def save_coverage_waitlist(
+    *,
+    user_id: str | None,
+    zip_code: str,
+    looking_for: str | None = None,
+    notify: bool = True,
+    founding_interest: bool = False,
+) -> bool:
+    """Put the user on the coverage waitlist for a ZIP we have no block for (see
+    migration). Upsert on (user_id, zip) so tapping "Join the waitlist" twice never
+    double-books. Anonymous guests are stored under their guest user_id — contact info
+    lands later when they verify. Returns False on any failure so the caller can soften
+    the reply; a save failure must never break the turn."""
+    zip5 = str(zip_code or "").strip()
+    if not zip5:
+        return False
+    try:
+        service_client().table("coverage_waitlist").upsert(
+            {
+                "user_id": user_id or None,
+                "zip": zip5,
+                "looking_for": (str(looking_for).strip()[:200] or None) if looking_for else None,
+                "notify": bool(notify),
+                "founding_interest": bool(founding_interest),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="user_id,zip",
+        ).execute()
+        return True
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "save_coverage_waitlist_failed: zip=%s user_id=%s", zip5, user_id
+        )
+        return False
+
+
 def log_moderation_flag(
     *,
     user_id: str | None,
@@ -150,8 +215,11 @@ def log_moderation_flag(
     """Append an inappropriate/abusive message Lana refused to moderation_flags (see
     migration). DISTINCT from log_feature_request — this is NOT product demand and carries
     no 'we'll add it' promise; it exists so trust & safety can review patterns / repeat
-    offenders. Best-effort: a logging failure must never break the refusal turn."""
-    text = str(message or "").strip()[:2000]
+    offenders. Best-effort: a logging failure must never break the refusal turn. Child
+    PII is stripped even here — T&S needs the pattern, never a kid's name or school."""
+    from app.pii import redact_pii
+
+    text = (redact_pii(str(message or "").strip()) or "")[:2000]
     if not text:
         return
     try:
