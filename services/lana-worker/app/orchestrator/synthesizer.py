@@ -170,6 +170,20 @@ def synthesize_turn(
     payload = "\n\n".join(payload_parts)
 
     model = _synth_model(outcome, tool_result, purpose=purpose)
+    # Token streaming (SSE {"type":"delta"} frames) — only on the plain conversational
+    # Lana path: purpose == "lana" with NO tool result. There the final reply IS the
+    # synth's assistant_message (modulo the rare metadata-line strip in
+    # sanitize_assistant_message), so streamed tokens match the terminal result. Paths
+    # that must NOT stream, because the shown text can differ from the synth's raw
+    # message: tool turns (peer previews replace the message with the backend summary),
+    # event_draft / profile_intake turns (heavy post-processing + stop rules), and every
+    # canned/template reply (no LLM call at all — those turns simply emit no deltas).
+    # The terminal result frame stays authoritative either way.
+    on_delta = (
+        timer.emit_delta
+        if purpose == "lana" and tool_result is None and timer is not None and timer.streams_deltas
+        else None
+    )
     attempts_box: list[int] = []
     if timer:
         with timer.stage("llm_synth"):
@@ -180,6 +194,7 @@ def synthesize_turn(
                 max_tokens=2048,
                 temperature=0.55,
                 llm_attempts=attempts_box,
+                on_delta=on_delta,
             )
         if attempts_box:
             timer.set_count("llm_synth_attempts", attempts_box[0])

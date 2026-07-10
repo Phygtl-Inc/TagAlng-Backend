@@ -25,9 +25,32 @@ class TurnTimer:
         # so every non-streaming caller is unaffected. The timer is already threaded
         # through every pipeline path, so this is the cheapest place to surface progress.
         self._emit: Callable[[str], None] | None = None
+        # Optional token-delta emitter (streaming endpoint attaches one). Receives
+        # incremental assistant_message text while the synthesizer LLM generates —
+        # the SSE layer forwards each fragment as a {"type":"delta"} frame.
+        self._emit_delta: Callable[[str], None] | None = None
 
     def set_emitter(self, emit: Callable[[str], None] | None) -> None:
         self._emit = emit
+
+    def set_delta_emitter(self, emit: Callable[[str], None] | None) -> None:
+        self._emit_delta = emit
+
+    @property
+    def streams_deltas(self) -> bool:
+        return self._emit_delta is not None
+
+    def emit_delta(self, text: str) -> None:
+        """Push an incremental chunk of assistant text to the client, if streaming.
+
+        Best-effort, like `emit`: swallows emitter errors, no-op when not streaming.
+        """
+        if self._emit_delta is None or not text:
+            return
+        try:
+            self._emit_delta(text)
+        except Exception:  # noqa: BLE001 — deltas are best-effort
+            pass
 
     def emit(self, label: str) -> None:
         """Push a human-readable progress label to the client, if streaming.
