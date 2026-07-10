@@ -3645,6 +3645,17 @@ def extract_zip(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+# 5-digit codes that are never a deliverable US ZIP — catch the obvious typo/placeholder
+# before a coverage lookup treats it as a real out-of-coverage area (QA: 99999 sailed
+# through silently). A full USPS validity table is intentionally out of scope; the block
+# lookup decides real coverage for everything else.
+_PLACEHOLDER_ZIPS = frozenset({"00000", "99999"})
+
+
+def is_placeholder_zip(zip5: str | None) -> bool:
+    return str(zip5 or "").strip() in _PLACEHOLDER_ZIPS
+
+
 def invalid_zip_hint(text: str) -> str | None:
     """Explain bad ZIP attempts instead of repeating the same prompt."""
     s = str(text or "").strip()
@@ -4874,6 +4885,7 @@ def _start_activity_browse_from_discovery(
     history: list[dict[str, Any]] | None,
     user_jwt: str,
     home_block_id: str | None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Begin the agentic events-browse and return its first turn (asks the interest). The
     sticky flow continues on later turns via the pipeline's activity_browse_active gate."""
@@ -4888,6 +4900,7 @@ def _start_activity_browse_from_discovery(
         history=history or [],
         user_jwt=user_jwt,
         home_block_id=home_block_id,
+        user_id=user_id,
     )
     phase = str(session_ctx.get("routing_phase") or "listening")
     ctx = _routing_ctx(session_ctx, phase=phase, active_intent="discovery.find_activities")
@@ -5323,13 +5336,13 @@ def handle_discovery_turn(
                 )
             return _start_activity_browse_from_discovery(
                 msg=msg, session_ctx=session_ctx, history=history,
-                user_jwt=user_jwt, home_block_id=home_block_id,
+                user_jwt=user_jwt, home_block_id=home_block_id, user_id=user_id,
             )
         _decision = _browse_or_seek_decision(slots, msg)
         if _decision == "browse":
             return _start_activity_browse_from_discovery(
                 msg=msg, session_ctx=session_ctx, history=history,
-                user_jwt=user_jwt, home_block_id=home_block_id,
+                user_jwt=user_jwt, home_block_id=home_block_id, user_id=user_id,
             )
         if _decision == "clarify":
             _bm = enrich_slots(dict(slots), msg=msg)
