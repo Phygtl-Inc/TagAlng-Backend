@@ -473,7 +473,31 @@ def run_activity_browse_turn(
     events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
     matched, label = _filter_events_by_query(events, interest)
 
+    # Hard availability constraints ("evenings after 6 or weekends") always apply —
+    # a 10 AM coffee morning must never be offered to an evenings-only mom
+    # (QA 2026-07-08). Captured per-turn in main.py; read from session context here.
+    from app.constraints import (
+        constraints_all_filtered_note,
+        filter_events_by_constraints,
+    )
+
+    matched, constraint_dropped = filter_events_by_constraints(
+        matched, session_ctx.get("user_constraints")
+    )
+
     from app.discovery_route import activity_previews_from_events
+
+    # Everything on the block was OUTSIDE her windows — say so gracefully (never show
+    # the excluded events) and offer the seek fallback, instead of the generic
+    # "nothing like X" message that ignores WHY nothing fits.
+    if not matched and constraint_dropped:
+        draft["_seek_offer"] = True
+        draft["suggestions"] = ["Yes, listen for me", "Widen the search"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["activity_previews"] = []
+        session_ctx["routing_phase"] = "listening"
+        return constraints_all_filtered_note(session_ctx.get("user_constraints"))
 
     # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
     # text them when a matching meet appears) rather than dead-ending. The accept/widen reply

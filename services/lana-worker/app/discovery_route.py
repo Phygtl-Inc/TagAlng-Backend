@@ -3609,7 +3609,21 @@ def _show_activities_preview(
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     weekend_only = bool(re.search(r"\bweekend\b", str(msg or ""), re.I))
     events = fetch_preview_events_on_block(block_id, weekend_only=weekend_only)
-    reply = format_activities_message(events, block_label, phone_verified=phone_verified)
+    # Availability constraints ("evenings after 6 or weekends") are hard filters on
+    # every event result set (QA 2026-07-08) — excluded events never render, and when
+    # the filter removes everything the reply says WHY instead of "nothing on the block".
+    from app.constraints import (
+        constraints_all_filtered_note,
+        filter_events_by_constraints,
+    )
+
+    events, _constraint_dropped = filter_events_by_constraints(
+        events, (ctx_base or {}).get("user_constraints")
+    )
+    if not events and _constraint_dropped:
+        reply = constraints_all_filtered_note((ctx_base or {}).get("user_constraints"))
+    else:
+        reply = format_activities_message(events, block_label, phone_verified=phone_verified)
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_PREVIEW,
