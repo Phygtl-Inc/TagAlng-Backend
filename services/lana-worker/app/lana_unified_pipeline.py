@@ -234,6 +234,99 @@ def _publish_failure_reply(error: str | None, title: str) -> str:
     )
 
 
+def _host_publish_gate(
+    *,
+    user_message: str,
+    ed: dict[str, Any],
+    wd: Any,
+    user_id: str,
+    session_ctx: dict[str, Any],
+    turn_ctx: dict[str, Any],
+    title: str,
+    wants_drop: bool,
+) -> tuple[str | None, bool]:
+    """Pre-publish sanity gate at the confirm stage (see app.event_guards) — warm
+    clarifying questions for a venue implausibly far from the block or a kids event in
+    quiet hours, never hard rejections. Returns ``(reply, proceed)``:
+
+    - ``(question/ack, False)`` — show this reply, don't publish this turn;
+    - ``(None, True)`` — clear (or confirmed once): the drop may proceed;
+    - ``(None, False)`` — not a drop turn; the caller's normal handling applies.
+
+    Confirmation is remembered in session ctx (``event_guards_confirmed``), so one
+    confirmation proceeds and a confirmed guard is never re-asked (no loop).
+    """
+    from app.event_guards import (
+        GUARD_KID_HOURS,
+        classify_guard_answer,
+        pending_event_guard,
+    )
+
+    guards_ok: dict[str, Any] = dict(session_ctx.get("event_guards_confirmed") or {})
+    turn_ctx["event_guards_confirmed"] = guards_ok
+    pending = str(session_ctx.get("event_guard_pending") or "")
+    if pending:
+        # Last turn asked a clarifying question — read the host's answer.
+        turn_ctx["event_guard_pending"] = None
+        answer = classify_guard_answer(user_message)
+        if answer == "confirm" or (answer is None and wants_drop):
+            # The host means it — remember so we never re-ask, and proceed to publish.
+            guards_ok[pending] = True
+            wants_drop = True
+        elif answer == "change":
+            turn_ctx["host_stage"] = "confirm"
+            turn_ctx["host_aside"] = True  # show Lana's TEXT, not just the card
+            if pending == GUARD_KID_HOURS:
+                # "Did you mean noon?" → yes: move the start to 12:00 local.
+                turn_ctx["event_when_time"] = "12:00"
+                if wd:
+                    ed["starts_at"] = f"{wd}T12:00:00"
+                    from datetime import datetime as _dt, timedelta as _td
+
+                    try:
+                        _start = _dt.fromisoformat(ed["starts_at"])
+                        _dur = int(ed.get("duration_minutes") or 90)
+                        ed["ends_at"] = (_start + _td(minutes=_dur)).isoformat()
+                    except (ValueError, TypeError):
+                        ed.pop("ends_at", None)
+                ed["suggestions"] = ["Drop the meet up"]
+                return (
+                    f"Done — **{title or 'your meet'}** now starts at noon. "
+                    "Tap **Drop the meet up** and I'll post it.",
+                    False,
+                )
+            # Far venue → re-open the where-step for a nearby pick.
+            for _k in ("venue_name", "venue_address", "place_id", "venue_lat", "venue_lng"):
+                ed.pop(_k, None)
+            turn_ctx["event_place_asked"] = False
+            turn_ctx["event_venue"] = None
+            turn_ctx["event_venue_tried"] = None
+            session_ctx["event_venue"] = None
+            turn_ctx["host_stage"] = "review"
+            ed["suggestions"] = list(_PLACE_SUGGESTIONS) + [_SEARCH_PLACE_OPTION]
+            return (
+                "No problem — where should it be? Pick a spot below or search a "
+                "place and I'll pin the exact one.",
+                False,
+            )
+        # Unclear answer: any free-text edit already merged into the draft above; the
+        # guard stays unconfirmed, so the next drop re-checks against the new values.
+
+    if not wants_drop:
+        return None, False
+
+    guard = pending_event_guard(ed, user_id, confirmed=guards_ok)
+    if guard is not None:
+        # Something looks off — ask instead of publishing (or hard-rejecting). The
+        # host may genuinely mean it; their confirmation next turn proceeds.
+        turn_ctx["event_guard_pending"] = guard["id"]
+        turn_ctx["host_stage"] = "confirm"
+        turn_ctx["host_aside"] = True  # the question must be visible over the card
+        ed["suggestions"] = list(guard["options"])
+        return guard["question"], False
+    return None, True
+
+
 _TITLE_SUGGESTIONS = ["Playdate at the park", "Weekend playgroup", "Morning meetup"]
 # A "what time to start?" question (the day is already chosen) → a concrete clock
 # spread, so one tap resolves the time instead of re-offering days.
@@ -1632,8 +1725,24 @@ def run_lana_unified_pipeline(
                         turn_ctx["host_aside"] = True
                     else:
                         reply = _host_fallback_nudge(need)
-            else:  # stage == "confirm" → publish when the host drops it
-                if (_is_host_drop(user_message) or _is_host_confirm(user_message)) and not phone_verified:
+            else:  # stage == "confirm" → sanity guards, then publish when the host drops it
+                # Pre-publish guards (far venue / kid quiet-hours) run BEFORE the verify
+                # gate, so the clarifying question is asked up front and the post-verify
+                # auto-publish (discovery_route) only ever posts a guard-cleared draft.
+                _wants_drop = _is_host_drop(user_message) or _is_host_confirm(user_message)
+                guard_reply, proceed_drop = _host_publish_gate(
+                    user_message=user_message,
+                    ed=ed,
+                    wd=wd,
+                    user_id=user_id,
+                    session_ctx=session_ctx,
+                    turn_ctx=turn_ctx,
+                    title=_title,
+                    wants_drop=_wants_drop,
+                )
+                if guard_reply is not None:
+                    reply = guard_reply
+                elif proceed_drop and not phone_verified:
                     # Guest dropping the meet: DON'T attempt create_event first — it would
                     # 403 (auto_publish_event_failed: create_event_failed:403). Gate on auth
                     # up front: ask to sign up / log in and mark the finished draft
@@ -1653,7 +1762,7 @@ def run_lana_unified_pipeline(
                             "Finishing verification — send one more message and I'll "
                             f"post **{_title or 'your event'}** right away."
                         )
-                elif _is_host_drop(user_message) or _is_host_confirm(user_message):
+                elif proceed_drop:
                     event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
                     if event_id:
                         turn_ctx["event_id"] = event_id
@@ -1666,6 +1775,8 @@ def run_lana_unified_pipeline(
                         turn_ctx["event_venue_tried"] = None
                         turn_ctx["event_place_candidates"] = None
                         turn_ctx["event_settings"] = None
+                        turn_ctx["event_guard_pending"] = None
+                        turn_ctx["event_guards_confirmed"] = None
                         # Verification (if any) is done — drop the resume markers so a later
                         # turn doesn't re-enter the verify funnel after a clean publish.
                         turn_ctx["host_publish_pending"] = None

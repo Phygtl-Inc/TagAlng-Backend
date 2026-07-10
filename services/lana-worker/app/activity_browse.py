@@ -485,6 +485,7 @@ def run_activity_browse_turn(
     from app.discovery_route import (
         extract_zip,
         fetch_blocks_for_zip,
+        invalid_zip_hint,
         is_placeholder_zip,
         resolve_block_id,
     )
@@ -544,7 +545,12 @@ def run_activity_browse_turn(
     if draft.get("_need_zip"):
         zip5 = extract_zip(msg)
         if not zip5:
-            return _ask_zip("What's your ZIP so I can see what's on your block?")
+            # A bogus/short ZIP gets the explanatory hint (e.g. "99999 isn't a real
+            # US ZIP") instead of the same bare re-prompt.
+            return _ask_zip(
+                invalid_zip_hint(msg)
+                or "What's your ZIP so I can see what's on your block?"
+            )
         if is_placeholder_zip(zip5):
             return _ask_zip(
                 f"Hmm, {zip5} doesn't look like a US ZIP — typo? What's your ZIP code?"

@@ -21,6 +21,7 @@ from app.db import (
     stash_pending_event_draft,
     stash_pending_meet_seek,
 )
+from app.event_location import is_valid_zip5
 from app.orchestrator.guardrails import utterance_is_unsafe
 from app.out_of_scope_reply import author_out_of_scope_reply
 from app.claim_search import (
@@ -1514,7 +1515,8 @@ def _try_layer1_intent_turn(
         # who answers "what's on my block?" with their ZIP just gets re-asked "what ZIP?"
         # every turn (the message ZIP is never read).
         if not block_id:
-            zip_from_msg = extract_zip(msg) or slots.get("zip")
+            _slot_zip = str(slots.get("zip") or "").strip()
+            zip_from_msg = extract_zip(msg) or (_slot_zip if is_valid_zip5(_slot_zip) else None)
             if zip_from_msg:
                 blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
                 if blk:
@@ -3576,6 +3578,8 @@ def _release_host_mode(session_ctx: dict[str, Any]) -> None:
         "event_approval_asked",
         "event_share_asked",
         "event_affinity_asked",
+        "event_guard_pending",
+        "event_guards_confirmed",
         "requires_phone_verification",
     ):
         session_ctx[key] = None
@@ -3642,7 +3646,12 @@ def _looks_like_meta_chat(msg: str) -> bool:
 
 def extract_zip(text: str) -> str | None:
     m = _ZIP_RE.search(str(text or ""))
-    return m.group(1) if m else None
+    if not m:
+        return None
+    # Obviously-fake placeholders (00000/99999) are not a ZIP — QA saw 99999 accepted
+    # in a production flow. Returning None routes the turn to invalid_zip_hint's
+    # friendly explanation instead of geocoding a ZIP that doesn't exist.
+    return m.group(1) if is_valid_zip5(m.group(1)) else None
 
 
 # 5-digit codes that are never a deliverable US ZIP — catch the obvious typo/placeholder
@@ -3664,6 +3673,11 @@ def invalid_zip_hint(text: str) -> str | None:
     digits = "".join(c for c in s if c.isdigit())
     if not digits:
         return None
+    if len(digits) == 5 and not is_valid_zip5(digits):
+        return (
+            f"Hmm, {digits} isn't a real US ZIP — mind double-checking? I need the "
+            "5-digit ZIP for your block (e.g. 32827 for Lake Nona)."
+        )
     if len(digits) < 5:
         return (
             f"That looks like {len(digits)} digits — I need a 5-digit US ZIP code "
@@ -5983,9 +5997,11 @@ def handle_discovery_turn(
     if effective_goal in _DISCOVERY_GOALS:
         ctx_base["discovery_goal"] = effective_goal
 
-    # Slot: ZIP / block
+    # Slot: ZIP / block. The classifier's slot ZIP gets the same validity check as a
+    # typed one — a bogus 99999 must never reach block creation from either source.
     block_id = resolve_block_id(session_ctx, home_block_id)
-    zip_from_msg = extract_zip(msg) or slots.get("zip")
+    _slot_zip = str(slots.get("zip") or "").strip()
+    zip_from_msg = extract_zip(msg) or (_slot_zip if is_valid_zip5(_slot_zip) else None)
     if zip_from_msg and not block_id:
         blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
         if blk:
