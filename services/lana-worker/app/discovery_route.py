@@ -3549,16 +3549,14 @@ def _effective_discovery_goal(
     return stored if stored in _DISCOVERY_GOALS else slot_goal
 
 
-def _zip_prompt(discovery_goal: str) -> str:
+def _zip_prompt(discovery_goal: str, lang: str | None = None) -> str:
+    from app.i18n import t
+
     if discovery_goal == "activities":
-        return (
-            "What ZIP code is your block? That helps me find activities near you."
-        )
+        return t("discovery.ask_zip_activities", lang)
     if discovery_goal == "both":
-        return (
-            "What ZIP code is your block? That helps me find neighbors and activities near you."
-        )
-    return "What ZIP code is your block? That helps me find neighbors near you."
+        return t("discovery.ask_zip_both", lang)
+    return t("discovery.ask_zip_peers", lang)
 
 
 _DECLINE_INPUT_RE = re.compile(
@@ -3748,6 +3746,8 @@ def _show_activities_preview(
     msg: str = "",
     phone_verified: bool = False,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    from app.i18n import session_lang as _session_lang
+
     weekend_only = bool(re.search(r"\bweekend\b", str(msg or ""), re.I))
     events = fetch_preview_events_on_block(block_id, weekend_only=weekend_only)
     # Availability constraints ("evenings after 6 or weekends") are hard filters on
@@ -3764,7 +3764,9 @@ def _show_activities_preview(
     if not events and _constraint_dropped:
         reply = constraints_all_filtered_note((ctx_base or {}).get("user_constraints"))
     else:
-        reply = format_activities_message(events, block_label, phone_verified=phone_verified)
+        reply = format_activities_message(
+            events, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+        )
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_PREVIEW,
@@ -4444,14 +4446,14 @@ def format_activities_message(
     block_label: str | None,
     *,
     phone_verified: bool = False,
+    lang: str | None = None,
 ) -> str:
+    from app.i18n import t
+
     where = block_label or "your block"
     if not events:
-        return (
-            f"I don't see open activities on {where} in the next couple weeks yet. "
-            "You can host something, or tell me what you're looking for."
-        )
-    lines = [f"Here's what's coming up near {where}:"]
+        return t("discovery.activities_empty", lang, where=where)
+    lines = [t("discovery.activities_header", lang, where=where)]
     for ev in events[:5]:
         title = str(ev.get("title") or "Activity")
         venue = str(ev.get("venue_name") or "").strip()
@@ -4463,9 +4465,9 @@ def format_activities_message(
             line += f" ({when})"
         lines.append(line)
     if phone_verified:
-        lines.append("Want to RSVP to one of these, or should I find neighbors like you?")
+        lines.append(t("discovery.activities_tail_verified", lang))
     else:
-        lines.append("Verify your email to RSVP — or ask me to find neighbors like you.")
+        lines.append(t("discovery.activities_tail_guest", lang))
     return "\n".join(lines)
 
 
@@ -4497,10 +4499,13 @@ def _verify_gate_reply(
     block_id: str,
     event_label: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    from app.i18n import session_lang as _session_lang, t as _t
+
+    _lang = _session_lang(session_ctx)
     if event_label:
-        lead = f"To join {event_label}, verify your email first — I'll send you a code."
+        reply = _t("discovery.verify_gate_event", _lang, event=event_label)
     else:
-        lead = "I can see neighbors nearby — to show names and connect you, verify your email first."
+        reply = _t("discovery.verify_gate_neighbors", _lang)
     ctx = _routing_ctx(
         ctx_base,
         phase=PHASE_AWAIT_SIGNUP_PHONE,
@@ -4509,7 +4514,7 @@ def _verify_gate_reply(
     ctx["requires_phone_verification"] = True
     ctx["peer_matches"] = []
     return (
-        f"{lead} What's your email?",
+        reply,
         ctx,
         _discovery_routing_stub(PHASE_GATE_VERIFY),
         [],
@@ -4521,25 +4526,24 @@ def format_preview_message(
     block_label: str | None,
     *,
     phone_verified: bool = False,
+    lang: str | None = None,
 ) -> str:
+    from app.i18n import t
+
     where = block_label or "your block"
     if not peers:
-        return (
-            f"I looked around {where} — no strong matches yet. "
-            "Tell me a bit more about yourself, or try a nearby ZIP."
-        )
-    lines = [f"I found {len(peers)} neighbor{'s' if len(peers) != 1 else ''} near {where}:"]
+        return t("discovery.peers_empty", lang, where=where)
+    if len(peers) == 1:
+        lines = [t("discovery.peers_header_one", lang, where=where)]
+    else:
+        lines = [t("discovery.peers_header_many", lang, n=len(peers), where=where)]
     for i, p in enumerate(peers[:3], 1):
         label = str(p.get("matching_peer_label") or "shared interests")
         lines.append(f"• Neighbor {i} — {label}")
     if phone_verified:
-        lines.append(
-            "Tell me more about you for sharper matches — or ask me to introduce you to someone."
-        )
+        lines.append(t("discovery.peers_tail_verified", lang))
     else:
-        lines.append(
-            "Verify your email to see names and connect — or tell me more about you for sharper matches."
-        )
+        lines.append(t("discovery.peers_tail_guest", lang))
     return "\n".join(lines)
 
 
@@ -6176,9 +6180,12 @@ def handle_discovery_turn(
             ctx_base["preview_block_label"] = str(blk.get("display_name") or blk.get("label") or blk.get("name") or zip_from_msg)
 
     if not block_id:
+        from app.i18n import session_lang as _session_lang, t as _t
+
+        _lang = _session_lang(session_ctx)
         if zip_from_msg:
             return (
-                f"Hmm, {zip_from_msg} doesn't look like a ZIP I can place — mind double-checking the 5 digits?",
+                _t("discovery.zip_unplaceable", _lang, zip=zip_from_msg),
                 _routing_ctx(
                     session_ctx,
                     phase=PHASE_NEED_ZIP,
@@ -6212,7 +6219,7 @@ def handle_discovery_turn(
         zip_hint = invalid_zip_hint(msg)
         zip_goal = str(ctx_base.get("discovery_goal") or effective_goal or "peers")
         return (
-            zip_hint or _zip_prompt(zip_goal),
+            zip_hint or _zip_prompt(zip_goal, _lang),
             _routing_ctx(
                 session_ctx,
                 phase=PHASE_NEED_ZIP,
@@ -6436,7 +6443,11 @@ def handle_discovery_turn(
                 limit=3,
                 include_peer_ids=phone_verified,
             )
-            reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
+            from app.i18n import session_lang as _session_lang
+
+            reply = format_preview_message(
+                peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+            )
         else:
             reply = format_peer_matches(peers)
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
@@ -6496,7 +6507,11 @@ def handle_discovery_turn(
                 )
                 return reply, ctx, ctx["last_routing"], peers
         peers = fetch_preview_peers_on_block(block_id, limit=3)
-        reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
+        from app.i18n import session_lang as _session_lang
+
+        reply = format_preview_message(
+            peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+        )
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
         ctx.pop("activity_previews", None)
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "preview_peers_on_block")
@@ -6549,7 +6564,11 @@ def handle_discovery_turn(
 
         if wants_peers or phase != PHASE_PREVIEW:
             peers = fetch_preview_peers_on_block(block_id, limit=3)
-            reply = format_preview_message(peers, block_label, phone_verified=phone_verified)
+            from app.i18n import session_lang as _session_lang
+
+            reply = format_preview_message(
+                peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
+            )
             ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
             ctx.pop("activity_previews", None)
             ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "preview_peers_on_block")
