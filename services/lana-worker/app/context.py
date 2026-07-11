@@ -70,7 +70,7 @@ def load_user_context(user_id: str) -> dict[str, Any]:
     sb = service_client()
     user_row = (
         sb.table("users")
-        .select("id, nickname, home_block_id, home_zip")
+        .select("id, nickname, home_block_id, home_zip, locale")
         .eq("id", user_id)
         .limit(1)
         .execute()
@@ -106,6 +106,7 @@ def load_user_context(user_id: str) -> dict[str, Any]:
         "nickname": user.get("nickname"),
         "home_block_id": block_id,
         "home_zip": user.get("home_zip"),
+        "preferred_language": user.get("locale"),
         "block_display_name": block.get("display_name"),
         "block_cluster_id": block.get("cluster_id"),
         "block_state": block.get("state"),

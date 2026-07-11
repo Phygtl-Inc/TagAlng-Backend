@@ -17,6 +17,8 @@ import json
 import re
 from typing import Any
 
+from app.i18n import session_lang, t
+
 _KIND_SUGGESTIONS = ["Playground meet", "Stroller walk", "Coffee & kids", "Library storytime"]
 _AFFINITY_QUESTION = "Anyone with a similar kid-stage matter?"
 _AFFINITY_OPTIONS = ["Same kid-stage", "Any toddler mom", "Open · all moms"]
@@ -180,10 +182,7 @@ def _gate_guest_before_save(session_ctx: dict[str, Any], draft: dict[str, Any]) 
     session_ctx["look_turns"] = 0
     session_ctx["requires_phone_verification"] = True
     session_ctx["routing_phase"] = "await_signup_phone"
-    return (
-        "Love it — to start listening and text you when a mom wants the same, I just need "
-        "to verify you. What's your email? (Already have an account? I'll log you right in.)"
-    )
+    return t("meet.verify_gate", session_lang(session_ctx))
 
 
 def save_pending_meet_seek(
@@ -590,7 +589,7 @@ def run_look_meet_turn(
             session_ctx["look_draft"] = draft
             session_ctx["look_meet_active"] = True
             session_ctx["routing_phase"] = "listening"
-            return "Love it — what kind of meet would help?"
+            return t("meet.ask_kind", session_lang(session_ctx))
 
     chips = _build_chips(draft)
 
