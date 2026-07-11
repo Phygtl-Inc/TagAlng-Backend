@@ -41,6 +41,7 @@ LINEAR_INTENTS: frozenset[str] = frozenset({
     # Settings + help
     "settings.change_name",
     "settings.change_zip",
+    "settings.change_language",
     "settings.notification_prefs",
     "help.what_can_you_do",
     "help.who_are_you",
@@ -113,6 +114,7 @@ INTENT_CONFIDENCE: dict[str, float] = {
     "tier.respond_nudge": 0.5,
     "settings.change_name": 0.55,
     "settings.change_zip": 0.55,
+    "settings.change_language": 0.55,
     "settings.notification_prefs": 0.55,
     "help.what_can_you_do": 0.5,
     "help.who_are_you": 0.5,

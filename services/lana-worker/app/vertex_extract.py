@@ -85,6 +85,11 @@ Allowed bucket values: heritage, stage, vicinity, faith, activity, interest, gen
 Allowed disclosure: public, mutual, private.
 
 Rules:
+- The user may write in ANY language (Spanish, Portuguese, Urdu, ...). Understand it, but ALWAYS \
+output concept/label/synonyms/followup_topic in ENGLISH — the DB is English-canonical so every \
+neighbor matches on the same terms ("me gusta jugar al cricket" → concept "cricket_player", label \
+"Plays cricket"). source_quote stays the exact original-language quote. followup_question is the \
+one field written in the USER'S language (she reads it on her home screen).
 - Max 6 claims from this message only
 - If no identity content (greetings, "ok", ZIP, phone), return {"nickname": null, "kids_count": null, "claims": [], "followup_question": null}
 - Split distinct threads — capture EACH one, do not collapse (e.g. "pakistani dad, married 10 years, speak 5 languages, do triathlon" → pakistani_heritage + multilingual + married_ten_years + triathlon; "dad" and kid count go to kids_count, never a claim)

@@ -415,6 +415,19 @@ _SYSTEM = (
     "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes "
     "(change my name, call me X, my name is X). "
     "Use help.what_can_you_do for help/what can you do; help.who_are_you for who are you. "
+    "LANGUAGE — set lang to the ISO 639-1 code of the language the LATEST USER MESSAGE is written "
+    "in ('en', 'es', 'pt', 'ur', 'hi', ...), whatever language that is. Report what you SEE: a full "
+    "sentence in English after non-English turns IS lang='en' (users code-switch; Lana follows). "
+    "When the message is too short or language-ambiguous to tell (a ZIP code, a name, a number, "
+    "'ok', an emoji, a chip label), set lang=null — never guess from history. "
+    "Use settings.change_language (goal=chat) when the user wants a language as their DEFAULT / "
+    "preferred app language — any phrasing meaning 'from now on' ('make Urdu my default', 'always "
+    "talk to me in Spanish', 'change my language to English'), or an ACCEPT when lang_pref_offer "
+    "below is set. Then ALSO set set_preferred_lang to that ISO code. Merely writing in a language, "
+    "or a one-off 'in english please', changes only this conversation — set_preferred_lang=null. "
+    "When lang_pref_offer is not 'none', Lana just asked whether to make that language the user's "
+    "default: yes/accept → linear_intent=settings.change_language, set_preferred_lang=<that code>; "
+    "a decline keeps set_preferred_lang=null (goal=chat either way, unless the message pivots). "
     "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.)."
 )
 
@@ -473,6 +486,8 @@ def _empty_slots() -> dict[str, Any]:
         "clarify_options": [],
         "unsafe_kind": None,
         "abandon": False,
+        "lang": None,
+        "set_preferred_lang": None,
         "confidence": 0.0,
     }
 
@@ -628,10 +643,21 @@ def ai_parse_discovery_turn(
             if clarify
             else []
         )
+        from app.i18n import apply_ai_lang, normalize_lang_code
+
+        lang_s = normalize_lang_code(raw.get("lang"))
+        set_pref_s = normalize_lang_code(raw.get("set_preferred_lang"))
+        if session_ctx is not None:
+            # AI-authoritative language mirroring — the verdict (including a
+            # confident flip back to 'en') lands on the session right here, so
+            # every lane composing a reply this turn already speaks it.
+            apply_ai_lang(session_ctx, lang_s)
         return enrich_slots({
             "in_discovery": bool(raw.get("in_discovery")),
             "linear_intent": linear_intent,
             "goal": goal,
+            "lang": lang_s,
+            "set_preferred_lang": set_pref_s,
             "intro_direction": intro_direction_s,
             "intro_source": intro_source_s,
             "intro_list_index": intro_list_index_s,
@@ -700,6 +726,7 @@ def _discovery_slot_payload(
     sc = session_ctx or {}
     active_intent = str(sc.get("active_intent") or "").strip() or "none"
     active_capture = _active_capture_context(sc)
+    lang_pref_offer = str(sc.get("lang_nudge_pending") or "").strip() or "none"
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"
@@ -707,7 +734,8 @@ def _discovery_slot_payload(
         f"phone_verified: {phone_verified}\n"
         f"has_profile_photo: {has_profile_photo}\n"
         f"session_active_intent: {active_intent}\n"
-        f"active_capture: {active_capture}\n\n"
+        f"active_capture: {active_capture}\n"
+        f"lang_pref_offer: {lang_pref_offer}\n\n"
         "RECENT TURNS:\n"
         f"{_format_history(history)}\n\n"
         f"LATEST USER MESSAGE:\n{text}\n\n"
@@ -736,6 +764,8 @@ def _discovery_slot_payload(
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "abandon": true|false,\n'
+        '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous",\n'
+        '  "set_preferred_lang": "ISO code ONLY when the user wants that language as their default (settings.change_language), else null",\n'
         '  "confidence": 0.0-1.0\n'
         "}"
     )

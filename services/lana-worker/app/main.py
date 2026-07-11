@@ -54,7 +54,13 @@ from app.profile_intake import (
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
+from app.i18n import localize_text, session_lang
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
+from app.lang_pref import (
+    get_user_preferred_language,
+    language_preference_post_turn,
+    seed_session_language,
+)
 from app.lana_unified_pipeline import run_lana_unified_pipeline
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
@@ -1201,6 +1207,16 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
+        if purpose == "lana" and not auth.is_anonymous:
+            # The saved preference decides how the conversation STARTS — the
+            # opening greets in it. Live detection owns every turn after.
+            pref = get_user_preferred_language(auth.user_id)
+            if pref:
+                seed_session_language(session_ctx, pref)
+                effective_lang = session_lang(session_ctx)
+                if effective_lang:
+                    opening = localize_text(opening, effective_lang)
+
         insert_message(
             session_id,
             "assistant",
@@ -1388,6 +1404,16 @@ def _run_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
             orch_used = bool(session_ctx.pop("_orchestrator_turn", False))
+            # Language preference: persist an accepted/requested default-language
+            # change, and offer the switch once when the observed language keeps
+            # diverging from the saved preference.
+            reply = language_preference_post_turn(
+                user_id=auth.user_id,
+                user_message=body.message,
+                session_ctx=session_ctx,
+                reply=reply,
+                is_anonymous=auth.is_anonymous,
+            )
         elif use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(
                 user_id=auth.user_id,

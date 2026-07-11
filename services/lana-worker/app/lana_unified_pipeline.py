@@ -702,6 +702,14 @@ def run_lana_unified_pipeline(
         "phone_verified": phone_verified,
         "unified_mode": True,
     }
+    # Language mirroring (QA 2026-07-08: Brazilian moms got English). Detect once per
+    # turn BEFORE any gate can answer — the sticky lanes and discovery return early, so
+    # this is the single choke point where session_ctx["lang"] gets set. Sticky: a
+    # confident es/pt message persists the language; only an explicit "in english
+    # please" (or "en español"/"em português") flips it; ambiguous turns keep it.
+    from app.i18n import resolve_session_lang
+
+    resolve_session_lang(session_ctx, user_message)
     # Set when a rapport concierge turn hands off (zero-tap dispatch) so we can log where the
     # re-driven request actually routed — diagnostic for "yes → wrong lane" mis-routes.
     rapport_handoff_send: str | None = None

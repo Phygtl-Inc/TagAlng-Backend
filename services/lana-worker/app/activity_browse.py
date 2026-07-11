@@ -19,6 +19,8 @@ import logging
 import re
 from typing import Any
 
+from app.i18n import session_lang, t
+
 _INTEREST_SUGGESTIONS = ["Sports", "Family & kids", "Outdoors", "Social"]
 _BROWSE_TURN_CAP = 12
 
@@ -232,7 +234,7 @@ def _count_upcoming_events_anywhere() -> int | None:
         return None
 
 
-def _compose_zip_ask(interest: str, *, user_reply: str = "") -> str:
+def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = None) -> str:
     """AI-authored ask for the user's ZIP (Lana's voice), not a canned template.
 
     Grounded ONLY in what's true: the user's own ask (interest) and the real count of
@@ -240,12 +242,9 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "") -> str:
     'nearby' is yet, and events are block-scoped, so listing other blocks' activities
     would show things the user can't attend). When the user replied without a ZIP (maybe
     hesitant), their reply is acknowledged instead of robotically repeating the ask.
-    Falls back to a plain friendly ask when no LLM is configured."""
+    Falls back to a plain friendly ask (localized) when no LLM is configured."""
     interest = str(interest or "").strip()
-    fallback = (
-        "What's your ZIP code? Activities are grouped by block — 5 digits is all I "
-        "need to show what's happening around you."
-    )
+    fallback = t("browse.ask_zip", lang)
     try:
         from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
 
@@ -268,6 +267,9 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "") -> str:
                 "(not a ZIP — maybe hesitant). Acknowledge their reply and gently explain "
                 "why you need the ZIP; do not repeat your previous ask verbatim."
             )
+        from app.i18n import synth_language_directive
+
+        lang_line = synth_language_directive(lang) if lang else None
         data = llm_json(
             model=synthesizer_model(),
             system=(
@@ -275,7 +277,8 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "") -> str:
                 "(max 2 sentences) asking for the user's ZIP code so you can show the "
                 "activities on their block. Ground it ONLY in the facts given — never "
                 "invent events or claim something is near them. "
-                'Return JSON {"message": "..."}.'
+                + (f"{lang_line} " if lang_line else "")
+                + 'Return JSON {"message": "..."}.'
             ),
             user_payload="\n".join(f"- {f}" for f in facts),
             max_tokens=120,
@@ -404,22 +407,28 @@ def _refine_suggestions(events: list[dict[str, Any]]) -> list[str]:
 
 
 def _format_browse_message(
-    events: list[dict[str, Any]], label: str | None, *, phone_verified: bool
+    events: list[dict[str, Any]],
+    label: str | None,
+    *,
+    phone_verified: bool,
+    lang: str | None = None,
 ) -> str:
     label = (label or "").strip() or None
     if not events:
-        lead = f"No {label} ones" if label else "Nothing"
-        return (
-            f"{lead} on your block in the next couple weeks. Want me to widen it, "
-            "try another kind, or set up your own?"
-        )
+        if label:
+            return t("browse.events_empty_label", lang, label=label)
+        return t("browse.events_empty", lang)
     # The FE renders these same events as a card list (activity_previews) right under this
     # message — a short lead-in is enough; enumerating them in text too reads as a bug.
-    head = f"Here's what's coming up{(' for ' + label) if label else ''} on your block."
+    head = (
+        t("browse.events_header_label", lang, label=label)
+        if label
+        else t("browse.events_header", lang)
+    )
     tail = (
-        "Tap one to RSVP, or tell me to narrow it."
+        t("browse.events_tail_verified", lang)
         if phone_verified
-        else "Verify your email to RSVP, or tell me to narrow it."
+        else t("browse.events_tail_guest", lang)
     )
     return f"{head} {tail}"
 
@@ -437,6 +446,7 @@ def run_activity_browse_turn(
     msg = str(user_message or "").strip()
     draft: dict[str, Any] = dict(session_ctx.get("browse_draft") or {})
     phone_verified = bool(session_ctx.get("phone_verified"))
+    lang = session_lang(session_ctx)
 
     turns = int(session_ctx.get("browse_turns") or 0) + 1
     session_ctx["browse_turns"] = turns
@@ -492,7 +502,7 @@ def run_activity_browse_turn(
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
         session_ctx["routing_phase"] = "listening"
-        return "Love it — what kind of thing are you up for?"
+        return t("browse.ask_interest", lang)
 
     from app.discovery_route import (
         extract_zip,
@@ -536,13 +546,13 @@ def run_activity_browse_turn(
             # No ZIP in the reply — maybe a question or a decline. Let the AI answer it
             # in context instead of repeating the same canned line.
             return _ask_zip(
-                _compose_zip_ask(str(draft.get("interest") or ""), user_reply=msg)
+                _compose_zip_ask(
+                    str(draft.get("interest") or ""), user_reply=msg, lang=lang
+                )
             )
         blocks = fetch_blocks_for_zip(user_jwt, zip5)
         if not blocks:
-            return _ask_zip(
-                f"I couldn't find a block for ZIP {zip5}. Try another (e.g. 32827 for Lake Nona)."
-            )
+            return _ask_zip(t("browse.zip_no_block", lang, zip=zip5))
         _set_preview_block(zip5, blocks)
         draft["_need_zip"] = None
     elif msg:
@@ -560,7 +570,7 @@ def run_activity_browse_turn(
             if blocks:
                 block_id = _set_preview_block(str(zip5), blocks)
         if not block_id:
-            return _ask_zip(_compose_zip_ask(interest))
+            return _ask_zip(_compose_zip_ask(interest, lang=lang))
 
     # "weekend" is handled by the LLM date matcher too, but keep the SQL-side weekend
     # filter as a cheap pre-narrow when the word appears verbatim.
@@ -586,11 +596,9 @@ def run_activity_browse_turn(
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
         session_ctx["routing_phase"] = "listening"
-        subject = f"**{short}** activities" if short else "matching activities"
-        return (
-            f"No {subject} on your block right now. Want me to keep an ear out "
-            "and text you the moment one pops up — or widen the search?"
-        )
+        if short:
+            return t("browse.empty_interest_offer", lang, interest=short)
+        return t("browse.empty_generic_offer", lang)
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)
@@ -598,4 +606,4 @@ def run_activity_browse_turn(
     session_ctx["activity_browse_active"] = True
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     session_ctx["routing_phase"] = "listening"
-    return _format_browse_message(matched, label, phone_verified=phone_verified)
+    return _format_browse_message(matched, label, phone_verified=phone_verified, lang=lang)
