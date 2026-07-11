@@ -50,3 +50,5 @@ logs/
 
 # Generated types
 supabase/types/database.ts
+supabase-go
+supabase.tar.gz

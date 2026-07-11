@@ -37,6 +37,42 @@ def orchestrator_enabled() -> bool:
     return llm_configured()
 
 
+def _apply_question_streak_guard(
+    routing: dict[str, Any],
+    session_ctx: dict[str, Any],
+    purpose: str,
+) -> None:
+    if purpose != "lana":
+        return
+    # Structured flows (host setup, tip-share, pass-along, activity browse) ask
+    # several questions in sequence by design; skip the streak guard for them.
+    if (
+        session_ctx.get("event_host_active")
+        or session_ctx.get("pass_along_active")
+        or session_ctx.get("tip_share_active")
+        or session_ctx.get("activity_browse_active")
+    ):
+        return
+    try:
+        prior = int(session_ctx.get("question_streak", 0) or 0)
+    except (TypeError, ValueError):
+        prior = 0
+    outcome = routing.get("outcome")
+    if outcome == "A":
+        if prior >= 2:
+            # Contract: the 3rd consecutive A is downgraded to R.
+            routing["outcome"] = "R"
+            notes = list(routing.get("enforce_notes") or [])
+            if "question_streak_downgrade" not in notes:
+                notes.append("question_streak_downgrade")
+            routing["enforce_notes"] = notes
+            session_ctx["question_streak"] = 0
+        else:
+            session_ctx["question_streak"] = prior + 1
+    else:
+        session_ctx["question_streak"] = 0
+
+
 def run_opening(
     *,
     user_id: str,
@@ -180,7 +216,7 @@ def run_turn(
         prior = list(routing.get("enforce_notes") or [])
         if "discovery_chat_fast_path" not in prior:
             routing = {**routing, "enforce_notes": prior + ["discovery_chat_fast_path"]}
-
+    _apply_question_streak_guard(routing, session_ctx, purpose)
     # Routing is decided — the label can now name the real work (find peers / host / …).
     timer.emit(label_for_routing(routing))
 
