@@ -294,5 +294,102 @@ class TestClarifierRouting(unittest.TestCase):
         self.assertIn("happening", reply.lower())
 
 
+class TestClarifierAnswerCarriesContext(unittest.TestCase):
+    """A chip tap answers browse-vs-seek but carries none of the original constraints —
+    the chosen lane must be seeded with the utterance that triggered the clarifier
+    ('fun with my 4 year old this week'), not the chip label."""
+
+    _ORIGINAL = "looking for something fun to do with my 4 year old this week"
+    _CHIPS = ["Show activities nearby", "Find neighbors to do something with"]
+
+    def _ask_clarifier(self, mock_slots) -> dict:
+        mock_slots.return_value = {
+            "goal": "activities",
+            "confidence": 0.9,
+            "clarify": "browse_or_meet",
+            "clarify_options": list(self._CHIPS),
+            "in_discovery": True,
+        }
+        session_ctx = {"routing_phase": "listening"}
+        handle_discovery_turn(
+            self._ORIGINAL,
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        return session_ctx
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_chip_tap_seeds_browse_with_original_ask(self, mock_slots, _ai) -> None:
+        session_ctx = self._ask_clarifier(mock_slots)
+        self.assertEqual(session_ctx.get("browse_or_meet_origin"), self._ORIGINAL)
+        mock_slots.return_value = {"goal": "activities", "confidence": 0.9, "in_discovery": True}
+        with patch(
+            "app.discovery_route._start_activity_browse_from_discovery",
+            return_value=("ok", {}, {}, []),
+        ) as mock_start:
+            handle_discovery_turn(
+                "Show activities nearby",
+                session_ctx=session_ctx,
+                user_jwt="jwt",
+                phone_verified=False,
+                home_block_id=None,
+                is_anonymous=True,
+            )
+        self.assertEqual(mock_start.call_args.kwargs.get("msg"), self._ORIGINAL)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_neighbors_chip_seeds_seek_with_original_ask(self, mock_slots, _ai) -> None:
+        session_ctx = self._ask_clarifier(mock_slots)
+        mock_slots.return_value = {
+            "goal": "peers", "signal_intent": "meet_seek", "confidence": 0.9,
+            "in_discovery": True,
+        }
+        with patch(
+            "app.discovery_route._start_look_meet_from_discovery",
+            return_value=("ok", {}, {}, []),
+        ) as mock_start:
+            handle_discovery_turn(
+                "Find neighbors to do something with",
+                session_ctx=session_ctx,
+                user_jwt="jwt",
+                phone_verified=False,
+                home_block_id=None,
+                is_anonymous=True,
+            )
+        self.assertEqual(mock_start.call_args.kwargs.get("msg"), self._ORIGINAL)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_free_text_answer_wins_over_stash(self, mock_slots, _ai) -> None:
+        session_ctx = self._ask_clarifier(mock_slots)
+        mock_slots.return_value = {"goal": "activities", "confidence": 0.9, "in_discovery": True}
+        with patch(
+            "app.discovery_route._start_activity_browse_from_discovery",
+            return_value=("ok", {}, {}, []),
+        ) as mock_start:
+            handle_discovery_turn(
+                "actually just show me sports stuff",
+                session_ctx=session_ctx,
+                user_jwt="jwt",
+                phone_verified=False,
+                home_block_id=None,
+                is_anonymous=True,
+            )
+        self.assertEqual(
+            mock_start.call_args.kwargs.get("msg"), "actually just show me sports stuff"
+        )
+
+    def test_neighbors_chip_resolves_to_seek_without_slots(self) -> None:
+        self.assertEqual(
+            _resolve_browse_or_meet_answer("Find neighbors to do something with", None),
+            "seek",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

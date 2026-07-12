@@ -4649,11 +4649,22 @@ def _browse_or_seek_decision(slots: dict[str, Any], msg: str) -> str | None:
 
 def _resolve_browse_or_meet_answer(msg: str, slots: dict[str, Any] | None) -> str:
     """Interpret the user's reply to the browse-or-meet clarifier. Always resolves to
-    'browse' or 'seek' (never re-asks) — defaults to 'browse' (show what exists)."""
+    'browse' or 'seek' (never re-asks) — defaults to 'browse' (show what exists).
+    The classifier's read of the reply is authoritative (it sees the chip text in
+    context); the regexes are a fallback for when it abstained."""
+    if slots:
+        enriched = enrich_slots(dict(slots), msg=msg)
+        linear = slots_linear_intent(enriched) or ""
+        goal = str(enriched.get("goal") or "")
+        signal_intent = str(enriched.get("signal_intent") or "")
+        if linear == "looking.meet" or signal_intent == "meet_seek" or goal == "peers":
+            return "seek"
+        if linear == "discovery.find_activities" or goal == "activities":
+            return "browse"
     low = str(msg or "").lower()
     if re.search(
-        r"\b(meet|set ?up|match(?:ed)?|buddy|partner|together|with (?:other )?"
-        r"(?:people|moms?|dads?|neighbou?rs?))\b",
+        r"\b(meet|set ?up|match(?:ed)?|buddy|partner|together|neighbou?rs?|"
+        r"with (?:other )?(?:people|moms?|dads?))\b",
         low,
     ):
         return "seek"
@@ -4667,14 +4678,22 @@ def _ask_browse_or_meet(
     *,
     question: str = "",
     options: list[str] | None = None,
+    origin_msg: str = "",
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """One-tap clarifier when the AI can't tell browse from seek. Uses the classifier's
     own contextual question/options (Lana's voice, grounded in what the user said) when
     present — consistent with the scope/intent clarifiers — and falls back to the template
-    only when the model returned nothing."""
+    only when the model returned nothing.
+
+    The utterance that TRIGGERED the clarifier is stashed alongside the options: a tap on
+    one of the offered chips answers browse-vs-seek but carries none of the original
+    constraints ("fun with my 4 year old this week"), so the resolver seeds the chosen lane
+    with the stashed ask rather than the chip label."""
     session_ctx["browse_or_meet_pending"] = True
     ctx = _routing_ctx(session_ctx, phase="listening", active_intent="discovery.find_activities")
     opts = [o for o in (options or []) if str(o).strip()] or ["See what's happening", "Set up a meet"]
+    session_ctx["browse_or_meet_origin"] = str(origin_msg or "").strip()
+    session_ctx["browse_or_meet_options"] = opts
     ctx["suggestions"] = opts
     ctx["clarify_options"] = opts
     q = (question or "").strip() or (
@@ -5489,13 +5508,23 @@ def handle_discovery_turn(
         # Resolve a pending clarifier answer first (always lands on browse or seek).
         if session_ctx.get("browse_or_meet_pending"):
             session_ctx["browse_or_meet_pending"] = None
+            origin = str(session_ctx.pop("browse_or_meet_origin", "") or "")
+            offered = {
+                str(o).strip().lower()
+                for o in (session_ctx.pop("browse_or_meet_options", None) or [])
+            }
+            # A tap on one of the chips we offered only answers browse-vs-seek — the
+            # constraints live in the utterance that triggered the clarifier, so seed the
+            # chosen lane with that. Free text is the user restating (possibly refining)
+            # what they want and wins over the stash.
+            seed = origin if origin and str(msg or "").strip().lower() in offered else msg
             if _resolve_browse_or_meet_answer(msg, slots) == "seek":
                 return _start_look_meet_from_discovery(
-                    msg=msg, session_ctx=session_ctx, history=history,
+                    msg=seed, session_ctx=session_ctx, history=history,
                     user_jwt=user_jwt, home_block_id=home_block_id,
                 )
             return _start_activity_browse_from_discovery(
-                msg=msg, session_ctx=session_ctx, history=history,
+                msg=seed, session_ctx=session_ctx, history=history,
                 user_jwt=user_jwt, home_block_id=home_block_id,
             )
         _decision = _browse_or_seek_decision(slots, msg)
@@ -5510,6 +5539,7 @@ def handle_discovery_turn(
                 session_ctx,
                 question=str(_bm.get("clarify_question") or ""),
                 options=list(_bm.get("clarify_options") or []),
+                origin_msg=msg,
             )
         # A clear meet_seek falls through to the existing signal-capture flow below.
 

@@ -339,17 +339,20 @@ def _filter_events_by_query(
                 model=router_model(),
                 system=(
                     "You filter a neighborhood's upcoming events by a resident's request. "
-                    f"Today is {_today_str()}. The request may mention a TOPIC "
-                    "('cricket'/'sports' fits a 'FIFA watch party'; 'family' fits a "
-                    "'park playdate'), a DATE or TIMEFRAME ('on July 5', 'this weekend', "
-                    "'tomorrow' — resolve relative to today), and/or a HOST name ('hosted "
-                    "by Asjid' → match the host field, case-insensitive). Return JSON "
-                    '{"match_indices":[ints], "label":"short phrase"}: indices of events '
-                    "satisfying EVERY constraint the request expresses (a date query must "
-                    "match the event's date; a host query must match the host). label is a "
-                    "short human phrase for the filter (e.g. 'July 5', 'hosted by Asjid', "
-                    "'cricket') or \"\" if the request is open/unfiltered. If open, return "
-                    "all indices. Empty match_indices if nothing fits."
+                    f"Today is {_today_str()}. The request may mention a TOPIC — match it "
+                    "semantically: 'soccer' or 'sports' fits a 'FIFA watch party'; 'family' "
+                    "fits a 'park playdate' — a DATE or TIMEFRAME ('on July 5', 'this "
+                    "weekend', 'tomorrow' — resolve relative to today), and/or a HOST name "
+                    "('hosted by Asjid' → match the host field, case-insensitive). Return "
+                    'JSON {"match_indices":[ints], "label":"short phrase"}: indices of '
+                    "events satisfying EVERY constraint the request expresses (a date query "
+                    "must match the event's date; a host query must match the host). label "
+                    "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
+                    "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
+                    "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "
+                    "label with a topic word the request itself doesn't use — not from "
+                    "these instructions, not from the event list. If open, return all "
+                    "indices. Empty match_indices if nothing fits."
                 ),
                 user_payload=(
                     f"Request: {query}\nEvents:\n" + "\n".join(lines)
