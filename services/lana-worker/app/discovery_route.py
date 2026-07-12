@@ -1514,9 +1514,9 @@ def _try_layer1_intent_turn(
         # who answers "what's on my block?" with their ZIP just gets re-asked "what ZIP?"
         # every turn (the message ZIP is never read).
         if not block_id:
-            zip_from_msg = extract_zip(msg) or slots.get("zip")
+            zip_from_msg = extract_zip(msg) or slots.get("zip") or session_ctx.get("pending_zip")
             if zip_from_msg:
-                blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
+                blk, zip_status = resolve_zip_coverage(user_jwt, zip_from_msg)
                 if blk:
                     block_id = str(blk.get("block_id") or "")
                     ctx_base["preview_block_id"] = block_id
@@ -1524,7 +1524,7 @@ def _try_layer1_intent_turn(
                     ctx_base["preview_block_label"] = str(
                         blk.get("display_name") or blk.get("label") or blk.get("name") or zip_from_msg
                     )
-                elif not phone_verified:
+                elif zip_status == ZIP_INVALID and not phone_verified:
                     return (
                         f"Hmm, {zip_from_msg} doesn't look like a ZIP I can place — mind "
                         "double-checking the 5 digits?",
@@ -1534,6 +1534,27 @@ def _try_layer1_intent_turn(
                             active_intent="discovery.find_in_block",
                         ),
                         _discovery_routing_stub(PHASE_NEED_ZIP, "block_summary_zip_not_found"),
+                        [],
+                    )
+                elif not phone_verified:
+                    # Real-looking ZIP Lana can't serve yet — out-of-coverage state, not
+                    # a "bad ZIP" rejection: capture the demand and remember the ZIP.
+                    from app.i18n import session_lang as _session_lang, t as _t
+
+                    note_zip_out_of_coverage(
+                        zip5=str(zip_from_msg),
+                        session_ctx=session_ctx,
+                        user_id=user_id,
+                        user_message=msg,
+                    )
+                    return (
+                        _t("zip.out_of_coverage", _session_lang(session_ctx), zip=zip_from_msg),
+                        _routing_ctx(
+                            ctx_base,
+                            phase="listening",
+                            active_intent="discovery.find_in_block",
+                        ),
+                        _discovery_routing_stub("listening", "zip_out_of_coverage"),
                         [],
                     )
         if not block_id and not phone_verified:
@@ -3766,6 +3787,18 @@ def _is_affirmative(msg: str) -> bool:
     return lower in _AFFIRMATIVE_REPLIES or any(lower.startswith(f"{a} ") for a in _AFFIRMATIVE_REPLIES)
 
 
+def _is_bare_accept(msg: str) -> bool:
+    """A short pure-confirmation message — a bare yes or a re-tap of an accept chip Lana
+    offered ('Yes, listen for me', 'Yes, text me at launch'). Longer messages carry real
+    content and must route normally (reuses the seek-offer chip reader's pattern)."""
+    s = str(msg or "").strip()
+    if not s or len(s.split()) > 5:
+        return False
+    from app.activity_browse import _ACCEPT_SEEK_RE
+
+    return bool(_ACCEPT_SEEK_RE.search(s))
+
+
 def _is_negative(msg: str) -> bool:
     lower = str(msg or "").strip().lower().rstrip(".!")
     if lower in {"no", "nope", "nah", "cancel"}:
@@ -4197,19 +4230,33 @@ def fetch_blocks_for_zip(user_jwt: str, zip5: str) -> list[dict[str, Any]]:
     return []
 
 
-def resolve_or_create_block_for_zip(user_jwt: str, zip5: str) -> dict[str, Any] | None:
-    """Find a block for the ZIP; if the area isn't covered yet, geocode the ZIP and CREATE a
-    waitlist block so signup is never blocked. Returns a block dict (with block_id +
-    display_name) or None ONLY when the ZIP can't even be geocoded (genuinely invalid)."""
+# resolve_zip_coverage statuses — why a ZIP did or didn't resolve to a block.
+ZIP_COVERED = "covered"  # an existing block serves this ZIP
+ZIP_CREATED = "created"  # new area: a waitlist block was geocoded + created just now
+ZIP_INVALID = "invalid"  # not a real US ZIP — safe to ask the user to re-check digits
+ZIP_UNCOVERED = "uncovered"  # looks real, but can't be placed right now — capture, don't reject
+
+
+def resolve_zip_coverage(user_jwt: str, zip5: str) -> tuple[dict[str, Any] | None, str]:
+    """Resolve a ZIP to a block, with a verdict on WHY when it can't be.
+
+    Returns (block, status). "covered"/"created" carry a block dict (block_id +
+    display_name); "created" means the area was new and a waitlist block now exists (fully
+    usable — there are just no neighbors on it yet). "invalid" means the geocoder answered
+    and the ZIP isn't real. "uncovered" means the ZIP may well be real but we couldn't
+    place it (geocoder unavailable, or the block create failed) — callers must NOT tell
+    the user their ZIP is wrong, and should capture it as expansion demand instead."""
     blocks = fetch_blocks_for_zip(user_jwt, zip5)
     if blocks:
-        return blocks[0]
+        return blocks[0], ZIP_COVERED
     # New area: geocode the ZIP and create a waitlist block at that centroid.
-    from app.event_location import geocode_zip
+    from app.event_location import geocode_zip_detailed
 
-    geo = geocode_zip(zip5)
-    if not geo:
-        return None  # not a placeable ZIP — caller asks the user to re-check it
+    geo_status, geo = geocode_zip_detailed(zip5)
+    if geo_status == "invalid":
+        return None, ZIP_INVALID
+    if geo_status != "ok" or not geo:
+        return None, ZIP_UNCOVERED
     lat, lng, city = geo
     display = f"{city} ({zip5})" if city else f"ZIP {zip5}"
     try:
@@ -4219,12 +4266,51 @@ def resolve_or_create_block_for_zip(user_jwt: str, zip5: str) -> dict[str, Any] 
             {"p_zip": zip5, "p_lat": lat, "p_lng": lng, "p_city": city, "p_display_name": display},
         )
     except HTTPException:
-        return None
+        raw = None
     if isinstance(raw, dict) and raw.get("block_id"):
-        return raw
-    # Unexpected shape — fall back to a re-fetch (the block now exists for this ZIP).
+        return raw, ZIP_CREATED
+    # Unexpected shape — fall back to a re-fetch (the block may now exist for this ZIP).
     blocks = fetch_blocks_for_zip(user_jwt, zip5)
-    return blocks[0] if blocks else None
+    if blocks:
+        return blocks[0], ZIP_CREATED
+    return None, ZIP_UNCOVERED
+
+
+def resolve_or_create_block_for_zip(user_jwt: str, zip5: str) -> dict[str, Any] | None:
+    """Find or create a block for the ZIP (see resolve_zip_coverage). Returns the block
+    dict or None; callers that need invalid-vs-uncovered use resolve_zip_coverage."""
+    block, _status = resolve_zip_coverage(user_jwt, zip5)
+    return block
+
+
+def note_zip_out_of_coverage(
+    *,
+    zip5: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    user_message: str = "",
+) -> None:
+    """Remember + record a real-looking ZIP Lana can't serve yet — never drop it.
+
+    pending_zip cures the session amnesia (lanes read it instead of re-asking); the
+    feature_requests row (category expansion_zip) is the expansion-marketing capture.
+    Guests are anonymous auth users, so when one later verifies, the same user_id on the
+    row becomes reachable — logging is once per ZIP per session."""
+    zip5 = str(zip5 or "").strip()
+    if not zip5:
+        return
+    session_ctx["pending_zip"] = zip5
+    if session_ctx.get("expansion_zip_logged") == zip5:
+        return
+    session_ctx["expansion_zip_logged"] = zip5
+    ask = str(user_message or "").strip()[:200]
+    log_feature_request(
+        user_id=user_id,
+        block_id=None,
+        request_text=f"Expansion demand: ZIP {zip5} not covered yet"
+        + (f' — user asked: "{ask}"' if ask else ""),
+        category="expansion_zip",
+    )
 
 
 def fetch_preview_peers_on_block(
@@ -5000,6 +5086,8 @@ def _start_activity_browse_from_discovery(
     history: list[dict[str, Any]] | None,
     user_jwt: str,
     home_block_id: str | None,
+    slots: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Begin the agentic events-browse and return its first turn (asks the interest). The
     sticky flow continues on later turns via the pipeline's activity_browse_active gate."""
@@ -5014,6 +5102,8 @@ def _start_activity_browse_from_discovery(
         history=history or [],
         user_jwt=user_jwt,
         home_block_id=home_block_id,
+        slots=slots,
+        user_id=user_id,
     )
     phase = str(session_ctx.get("routing_phase") or "listening")
     ctx = _routing_ctx(session_ctx, phase=phase, active_intent="discovery.find_activities")
@@ -5475,6 +5565,31 @@ def handle_discovery_turn(
                 user_id=user_id, home_block_id=home_block_id,
             )
 
+    # ── Mid-verify chip re-tap: while we're waiting for the signup email/OTP, a bare
+    #    affirmative or a re-tap of a still-visible offer chip ("Yes, listen for me",
+    #    "Yes, text me at launch") is the user re-confirming — its wording reads as a
+    #    fresh browse/seek ask to the classifier and would hijack the verify turn into a
+    #    new search ("No **Yes, listen for me** activities…"). Re-anchor to the step
+    #    question instead. A pending login switch keeps its own yes/no reading. ──
+    if (
+        phase in (PHASE_AWAIT_SIGNUP_PHONE, PHASE_AWAIT_SIGNUP_OTP)
+        and not session_ctx.get("pending_lane_switch")
+        and not extract_email(msg)
+        and not extract_otp_code(msg)
+        and _is_bare_accept(msg)
+    ):
+        if phase == PHASE_AWAIT_SIGNUP_PHONE:
+            return _handle_signup_phone_message(msg, session_ctx, is_anonymous=is_anonymous)
+        _otp_email = str(session_ctx.get("signup_phone") or "")
+        return (
+            f"Enter the 6-digit code we sent to {_otp_email or 'your email'}.",
+            _routing_ctx(
+                session_ctx, phase=PHASE_AWAIT_SIGNUP_OTP, signup_phone=_otp_email or None
+            ),
+            _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
+            [],
+        )
+
     # General uncertainty gate (ASK-WHEN-UNSURE) — the classifier could not confidently
     # place this turn in a supported lane, so ask the one AI-written question (grounded in
     # what TagAlng can do) instead of guessing or silently funnelling into find_peers. Never
@@ -5525,13 +5640,15 @@ def handle_discovery_turn(
                 )
             return _start_activity_browse_from_discovery(
                 msg=seed, session_ctx=session_ctx, history=history,
-                user_jwt=user_jwt, home_block_id=home_block_id,
+                user_jwt=user_jwt, home_block_id=home_block_id, slots=slots,
+                user_id=user_id,
             )
         _decision = _browse_or_seek_decision(slots, msg)
         if _decision == "browse":
             return _start_activity_browse_from_discovery(
                 msg=msg, session_ctx=session_ctx, history=history,
-                user_jwt=user_jwt, home_block_id=home_block_id,
+                user_jwt=user_jwt, home_block_id=home_block_id, slots=slots,
+                user_id=user_id,
             )
         if _decision == "clarify":
             _bm = enrich_slots(dict(slots), msg=msg)
@@ -6173,11 +6290,13 @@ def handle_discovery_turn(
     if effective_goal in _DISCOVERY_GOALS:
         ctx_base["discovery_goal"] = effective_goal
 
-    # Slot: ZIP / block
+    # Slot: ZIP / block — a ZIP said earlier this session (even one Lana can't serve yet,
+    # pending_zip) is remembered; never re-ask for what the user already said.
     block_id = resolve_block_id(session_ctx, home_block_id)
-    zip_from_msg = extract_zip(msg) or slots.get("zip")
+    zip_from_msg = extract_zip(msg) or slots.get("zip") or session_ctx.get("pending_zip")
+    zip_status: str | None = None
     if zip_from_msg and not block_id:
-        blk = resolve_or_create_block_for_zip(user_jwt, zip_from_msg)
+        blk, zip_status = resolve_zip_coverage(user_jwt, zip_from_msg)
         if blk:
             block_id = str(blk.get("block_id") or "")
             ctx_base["preview_block_id"] = block_id
@@ -6189,15 +6308,35 @@ def handle_discovery_turn(
 
         _lang = _session_lang(session_ctx)
         if zip_from_msg:
+            if zip_status == ZIP_INVALID:
+                return (
+                    _t("discovery.zip_unplaceable", _lang, zip=zip_from_msg),
+                    _routing_ctx(
+                        session_ctx,
+                        phase=PHASE_NEED_ZIP,
+                        active_intent=active,
+                        discovery_goal=ctx_base.get("discovery_goal"),
+                    ),
+                    _discovery_routing_stub(PHASE_NEED_ZIP),
+                    [],
+                )
+            # Real-looking ZIP Lana can't serve yet — out-of-coverage, not a bad ZIP:
+            # capture the demand + remember the ZIP, and stop asking for another one.
+            note_zip_out_of_coverage(
+                zip5=str(zip_from_msg),
+                session_ctx=session_ctx,
+                user_id=user_id,
+                user_message=msg,
+            )
             return (
-                _t("discovery.zip_unplaceable", _lang, zip=zip_from_msg),
+                _t("zip.out_of_coverage", _lang, zip=zip_from_msg),
                 _routing_ctx(
                     session_ctx,
-                    phase=PHASE_NEED_ZIP,
+                    phase="listening",
                     active_intent=active,
                     discovery_goal=ctx_base.get("discovery_goal"),
                 ),
-                _discovery_routing_stub(PHASE_NEED_ZIP),
+                _discovery_routing_stub("listening", "zip_out_of_coverage"),
                 [],
             )
         # Off-ramp: user is declining the ZIP — don't re-prompt the same question forever.

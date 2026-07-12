@@ -21,14 +21,22 @@ def _normalize_zip5(raw: str | None) -> str | None:
     return digits[:5]
 
 
-def geocode_zip(zip5: str) -> tuple[float, float, str] | None:
-    """Geocode a US ZIP via Google → (lat, lng, city). None when the ZIP can't be placed
-    (no API key, or genuinely not a real ZIP). Used to auto-create a block for a ZIP we
-    don't cover yet, so signup is never blocked."""
+def geocode_zip_detailed(zip5: str) -> tuple[str, tuple[float, float, str] | None]:
+    """Geocode a US ZIP via Google → (status, (lat, lng, city) | None).
+
+    status distinguishes WHY there is no result — callers must treat these differently:
+      "ok"          — placed.
+      "invalid"     — Google answered and knows no such US ZIP (safe to ask the user to
+                      double-check the digits).
+      "unavailable" — we couldn't ask (no API key, network/API error). The ZIP may well
+                      be real; never tell the user it's wrong.
+    Used to auto-create a block for a ZIP we don't cover yet, so signup is never blocked."""
     z = _normalize_zip5(zip5)
+    if not z:
+        return "invalid", None
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
-    if not z or not api_key:
-        return None
+    if not api_key:
+        return "unavailable", None
     try:
         with httpx.Client(timeout=10.0) as client:
             res = client.get(
@@ -39,12 +47,12 @@ def geocode_zip(zip5: str) -> tuple[float, float, str] | None:
         data = res.json()
         results = data.get("results") or []
         if not results:
-            return None
+            return "invalid", None
         top = results[0]
         loc = top.get("geometry", {}).get("location", {})
         lat, lng = loc.get("lat"), loc.get("lng")
         if lat is None or lng is None:
-            return None
+            return "invalid", None
         city = ""
         for comp in top.get("address_components", []):
             types = comp.get("types", [])
@@ -53,9 +61,17 @@ def geocode_zip(zip5: str) -> tuple[float, float, str] | None:
                 break
         if not city:
             city = str(top.get("formatted_address") or "").split(",")[0].strip()
-        return float(lat), float(lng), city
+        return "ok", (float(lat), float(lng), city)
     except Exception:
-        return None
+        return "unavailable", None
+
+
+def geocode_zip(zip5: str) -> tuple[float, float, str] | None:
+    """Geocode a US ZIP via Google → (lat, lng, city), or None when it can't be placed
+    for any reason. Prefer geocode_zip_detailed when the caller needs to distinguish a
+    fake ZIP from a geocoder outage."""
+    _status, geo = geocode_zip_detailed(zip5)
+    return geo
 
 
 def _geocode_venue(venue_name: str, city_hint: str) -> tuple[float, float] | None:

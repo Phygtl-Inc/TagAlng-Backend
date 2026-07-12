@@ -390,6 +390,43 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "No encontré una cuadra para el ZIP {zip}. Prueba con otro (p. ej. 32827 para Lake Nona).",
         "pt": "Não encontrei um quarteirão para o ZIP {zip}. Tente outro (ex.: 32827 para Lake Nona).",
     },
+    # out-of-coverage: the ZIP is real (or can't be disproven) — Lana just isn't there yet.
+    # Never "try another ZIP": remember it, record the demand, offer the launch text.
+    "zip.out_of_coverage": {
+        "en": "I'm not live around {zip} just yet — you're one of the first from your "
+              "area! I've saved your spot so I know where to open next. Want me to text "
+              "you the moment I arrive?",
+        "es": "Todavía no estoy activa en la zona de {zip} — ¡eres de las primeras de tu "
+              "área! Guardé tu lugar para saber dónde abrir próximamente. ¿Quieres que te "
+              "escriba en cuanto llegue?",
+        "pt": "Ainda não estou ativa na região do {zip} — você é uma das primeiras da sua "
+              "área! Guardei seu lugar para eu saber onde abrir em seguida. Quer que eu te "
+              "avise assim que eu chegar?",
+    },
+    "zip.expansion_verify_gate": {
+        "en": "Perfect — I just need a way to reach you. What's your email? (Already have "
+              "an account? I'll log you right in.)",
+        "es": "Perfecto — solo necesito cómo contactarte. ¿Cuál es tu email? (¿Ya tienes "
+              "cuenta? Te conecto enseguida.)",
+        "pt": "Perfeito — só preciso de um jeito de te encontrar. Qual é o seu e-mail? (Já "
+              "tem conta? Eu te conecto na hora.)",
+    },
+    "zip.expansion_saved": {
+        "en": "Done — you're on my launch list for {zip}. I'll text you the moment I'm "
+              "live there! Anything else in the meantime?",
+        "es": "Listo — estás en mi lista de lanzamiento para {zip}. ¡Te escribo en cuanto "
+              "esté activa ahí! ¿Algo más mientras tanto?",
+        "pt": "Pronto — você está na minha lista de lançamento para o {zip}. Te aviso "
+              "assim que eu estiver ativa aí! Algo mais enquanto isso?",
+    },
+    "zip.expansion_close": {
+        "en": "No problem — I'll be here when I reach your area. Anything else I can help "
+              "with?",
+        "es": "No hay problema — aquí estaré cuando llegue a tu zona. ¿Te ayudo con algo "
+              "más?",
+        "pt": "Sem problema — estarei aqui quando eu chegar na sua área. Posso ajudar com "
+              "mais alguma coisa?",
+    },
     "browse.empty_interest_offer": {
         "en": "No **{interest}** activities on your block right now. Want me to keep an "
               "ear out and text you the moment one pops up — or widen the search?",

@@ -68,6 +68,107 @@ class TestDiscoveryHelpers(unittest.TestCase):
         self.assertNotIn("discovery_goal", session)
 
 
+class TestMidVerifyChipRetap(unittest.TestCase):
+    """A stale offer chip re-tapped while Lana waits for the signup email/OTP re-anchors
+    to the verify step — it must never start a fresh browse ('No **Yes, listen for me**
+    activities…')."""
+
+    def test_seek_chip_retap_at_email_step_reasks_email(self) -> None:
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "requires_phone_verification": True,
+            "look_seek_pending": {"kind": "anything this week"},
+        }
+        result = handle_discovery_turn(
+            "Yes, listen for me",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _, _ = result
+        self.assertIn("email", reply.lower())
+        self.assertNotIn("activities", reply.lower())
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_phone")
+        # The stashed seek survives for the post-verify save.
+        self.assertTrue(ctx.get("look_seek_pending"))
+
+    def test_launch_chip_retap_at_email_step_reasks_email(self) -> None:
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "requires_phone_verification": True,
+        }
+        result = handle_discovery_turn(
+            "Yes, text me at launch",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _, _ = result
+        self.assertIn("email", reply.lower())
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_phone")
+
+    def test_bare_yes_at_otp_step_reasks_code(self) -> None:
+        ctx = {
+            "routing_phase": "await_signup_otp",
+            "signup_phone": "mom@example.com",
+        }
+        result = handle_discovery_turn(
+            "yes",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _, _ = result
+        self.assertIn("code", reply.lower())
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_otp")
+
+    @patch("app.discovery_route.email_has_registered_account", return_value=False)
+    def test_email_at_email_step_still_advances(self, _mock_registered) -> None:
+        # The guard must not swallow an actual answer that contains accept-y words.
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "requires_phone_verification": True,
+        }
+        result = handle_discovery_turn(
+            "sure — mom@example.com",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        _, out_ctx, _, _ = result
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_otp")
+
+    @patch("app.discovery_route.handle_guest_login", return_value=None)
+    def test_yes_confirming_login_switch_not_intercepted(self, mock_login) -> None:
+        # A pending signup→login switch owns the yes/no reading — the re-anchor guard
+        # must stand aside.
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "pending_lane_switch": "login",
+        }
+        handle_discovery_turn(
+            "yes",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        mock_login.assert_called_once()
+
+
 class TestDiscoveryRouting(unittest.TestCase):
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
@@ -182,11 +283,11 @@ class TestDiscoveryRouting(unittest.TestCase):
         reply, _, _, _ = result
         self.assertIn("5-digit", reply)
 
-    @patch("app.event_location.geocode_zip", return_value=None)
+    @patch("app.event_location.geocode_zip_detailed", return_value=("invalid", None))
     @patch("app.discovery_route.call_rpc")
-    def test_ungeocodable_zip_asks_to_recheck(self, mock_rpc, _mock_geo) -> None:
-        # ZIP not in any block AND not geocodable (no Google match) → we can't create a block,
-        # so ask the user to re-check the digits (the only remaining dead-end).
+    def test_fake_zip_asks_to_recheck(self, mock_rpc, _mock_geo) -> None:
+        # ZIP not in any block AND the geocoder confirms it isn't a real US ZIP → ask the
+        # user to re-check the digits (the only case where "your ZIP is wrong" is true).
         mock_rpc.side_effect = HTTPException(
             status_code=502,
             detail='rpc_failed:{"message":"zip_not_found"}',
@@ -205,7 +306,41 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertIn("double-check", reply.lower())
         self.assertEqual(ctx["routing_phase"], PHASE_NEED_ZIP)
 
-    @patch("app.event_location.geocode_zip", return_value=(32.7157, -117.1611, "San Diego"))
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.event_location.geocode_zip_detailed", return_value=("unavailable", None))
+    @patch("app.discovery_route.call_rpc")
+    def test_unplaceable_real_zip_is_out_of_coverage_not_rejected(
+        self, mock_rpc, _mock_geo, mock_log
+    ) -> None:
+        # ZIP not in any block and the geocoder couldn't be asked (no key / outage) → the
+        # ZIP may well be real: out-of-coverage state (capture + remember), NEVER "your
+        # ZIP is wrong" and never a re-ask for a different ZIP.
+        mock_rpc.side_effect = HTTPException(
+            status_code=502,
+            detail='rpc_failed:{"message":"zip_not_found"}',
+        )
+        ctx_in = {"routing_phase": PHASE_NEED_ZIP, "active_intent": "discovery.find_peers"}
+        result = handle_discovery_turn(
+            "10025",
+            session_ctx=ctx_in,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            user_id="u-guest",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertNotIn("double-check", reply.lower())
+        self.assertNotIn("try another", reply.lower())
+        self.assertIn("10025", reply)
+        # Demand captured for expansion marketing + ZIP remembered for the session.
+        mock_log.assert_called_once()
+        self.assertEqual(mock_log.call_args.kwargs.get("category"), "expansion_zip")
+        self.assertEqual(mock_log.call_args.kwargs.get("user_id"), "u-guest")
+        self.assertEqual(ctx_in.get("pending_zip"), "10025")
+
+    @patch("app.event_location.geocode_zip_detailed", return_value=("ok", (32.7157, -117.1611, "San Diego")))
     @patch("app.discovery_route.fetch_blocks_for_zip", return_value=[])
     @patch("app.discovery_route.call_rpc")
     def test_new_zip_creates_waitlist_block(self, mock_rpc, _mock_fetch, _mock_geo) -> None:

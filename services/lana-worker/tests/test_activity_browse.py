@@ -216,6 +216,204 @@ class TestRunBrowseTurn(unittest.TestCase):
         self.assertIsNone(ctx.get("browse_draft"))
 
 
+class TestBrowseInlineZip(unittest.TestCase):
+    """A ZIP the user already said (AI slot) is used — never re-asked. Bare digits alone
+    are NOT assumed to be a ZIP unless we explicitly asked for one."""
+
+    @patch(
+        "app.activity_browse._fetch_block_events",
+        return_value=[
+            {
+                "title": "Rooftop hang",
+                "starts_at": "2026-07-14T18:00:00",
+                "venue_name": "The Roof",
+                "cohort_tags": [],
+            }
+        ],
+    )
+    @patch(
+        "app.discovery_route.resolve_zip_coverage",
+        return_value=({"block_id": "b-nyc", "display_name": "Upper West Side (10025)"}, "created"),
+    )
+    def test_entry_with_inline_zip_never_reasks(self, mock_resolve, _fetch) -> None:
+        # "I'm in NYC, zip 10025. anything at all this week?" — the AI slot carries the
+        # ZIP; the block is resolved (created if uncovered) and events show immediately.
+        ctx: dict = {"activity_browse_active": True, "browse_draft": None}
+        reply = run_activity_browse_turn(
+            user_message="hi! just checking this out. I'm in NYC, zip 10025. anything at all this week?",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+            slots={"zip": "10025"},
+        )
+        mock_resolve.assert_called_once_with("jwt", "10025")
+        self.assertNotIn("zip", reply.lower())
+        self.assertEqual(ctx.get("preview_block_id"), "b-nyc")
+        self.assertEqual(ctx.get("preview_zip"), "10025")
+
+    @patch("app.discovery_route.resolve_zip_coverage")
+    def test_free_text_number_is_not_a_zip(self, mock_resolve) -> None:
+        # A 5-digit number the AI did NOT flag as a ZIP (a price) is never resolved as one.
+        ctx: dict = {"activity_browse_active": True, "browse_draft": None}
+        reply = run_activity_browse_turn(
+            user_message="looking for anything fun, my budget is 10000 for the month",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+            slots={"zip": None},
+        )
+        mock_resolve.assert_not_called()
+        self.assertTrue((ctx.get("browse_draft") or {}).get("_need_zip"))
+        self.assertIn("zip", reply.lower())
+
+    @patch("app.activity_browse._fetch_block_events", return_value=[])
+    @patch(
+        "app.discovery_route.resolve_zip_coverage",
+        return_value=({"block_id": "b-nyc", "display_name": "Upper West Side (10025)"}, "covered"),
+    )
+    def test_bare_digits_accepted_when_zip_was_asked(self, mock_resolve, _fetch) -> None:
+        # After Lana explicitly asked for the ZIP, a plain "10025" reply is the answer —
+        # no AI slot needed.
+        ctx: dict = {
+            "activity_browse_active": True,
+            "browse_draft": {"interest": "fifa", "_need_zip": True, "_asked": True},
+        }
+        run_activity_browse_turn(
+            user_message="10025",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+        )
+        mock_resolve.assert_called_once_with("jwt", "10025")
+        self.assertEqual(ctx.get("preview_block_id"), "b-nyc")
+
+    @patch("app.discovery_route.resolve_zip_coverage", return_value=(None, "invalid"))
+    def test_fake_zip_asks_recheck(self, _mock_resolve) -> None:
+        # The geocoder confirmed the ZIP isn't real → ask to double-check the digits
+        # (distinct from out-of-coverage; never "try another ZIP").
+        ctx: dict = {"activity_browse_active": True, "browse_draft": None}
+        reply = run_activity_browse_turn(
+            user_message="anything this week? zip 99999",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+            slots={"zip": "99999"},
+        )
+        self.assertIn("double-checking", reply.lower())
+        self.assertNotIn("try another", reply.lower())
+
+
+class TestBrowseOutOfCoverage(unittest.TestCase):
+    """A real ZIP Lana doesn't serve yet: honest copy, demand captured, ZIP remembered,
+    and a launch-text opt-in that routes guests into the existing verify gate."""
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.resolve_zip_coverage", return_value=(None, "uncovered"))
+    def test_uncovered_zip_offers_launch_text(self, _mock_resolve, mock_log) -> None:
+        ctx: dict = {"activity_browse_active": True, "browse_draft": None}
+        reply = run_activity_browse_turn(
+            user_message="hi! just checking this out. I'm in NYC, zip 10025. anything at all this week?",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+            slots={"zip": "10025"},
+            user_id="u-guest",
+        )
+        # Honest out-of-coverage copy, never a rejection or a re-ask.
+        self.assertIn("10025", reply)
+        self.assertNotIn("try another", reply.lower())
+        self.assertNotIn("what's your zip", reply.lower())
+        # Demand captured + ZIP remembered + opt-in offered.
+        mock_log.assert_called_once()
+        self.assertEqual(mock_log.call_args.kwargs.get("category"), "expansion_zip")
+        self.assertEqual(mock_log.call_args.kwargs.get("user_id"), "u-guest")
+        self.assertEqual(ctx.get("pending_zip"), "10025")
+        draft = ctx.get("browse_draft") or {}
+        self.assertEqual(draft.get("_expansion_offer"), "10025")
+        self.assertIn("Yes, text me at launch", draft.get("suggestions") or [])
+
+    def test_expansion_accept_gates_guest_into_verify(self) -> None:
+        ctx: dict = {
+            "activity_browse_active": True,
+            "browse_draft": {"_expansion_offer": "10025", "_asked": True},
+        }
+        reply = run_activity_browse_turn(
+            user_message="Yes, text me at launch",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+            user_id="u-guest",
+        )
+        # The same verify gate guests already use — verifying attaches contact info to
+        # the logged demand (anonymous auth user keeps its id on signup).
+        self.assertTrue(ctx.get("requires_phone_verification"))
+        self.assertEqual(ctx.get("routing_phase"), "await_signup_phone")
+        self.assertFalse(ctx.get("activity_browse_active"))
+        self.assertIn("email", reply.lower())
+
+    def test_expansion_accept_verified_user_is_done(self) -> None:
+        ctx: dict = {
+            "activity_browse_active": True,
+            "phone_verified": True,
+            "browse_draft": {"_expansion_offer": "10025", "_asked": True},
+        }
+        reply = run_activity_browse_turn(
+            user_message="yes please",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+            user_id="u-verified",
+        )
+        # Already reachable — confirm and release, no verify gate.
+        self.assertFalse(ctx.get("requires_phone_verification"))
+        self.assertFalse(ctx.get("activity_browse_active"))
+        self.assertIn("10025", reply)
+
+    def test_expansion_decline_closes_warmly(self) -> None:
+        ctx: dict = {
+            "activity_browse_active": True,
+            "browse_draft": {"_expansion_offer": "10025", "_asked": True},
+        }
+        reply = run_activity_browse_turn(
+            user_message="No thanks",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+        )
+        self.assertFalse(ctx.get("activity_browse_active"))
+        self.assertNotIn("zip", reply.lower())
+
+    @patch("app.activity_browse._fetch_block_events", return_value=[])
+    @patch(
+        "app.discovery_route.resolve_zip_coverage",
+        return_value=({"block_id": "b1", "display_name": "Lake Nona"}, "covered"),
+    )
+    def test_fresh_zip_in_offer_reply_reresolves(self, mock_resolve, _fetch) -> None:
+        # "oh — my sister's block is 32827" while the launch offer is up: the new ZIP is
+        # consumed as a ZIP answer, not as an accept/decline.
+        ctx: dict = {
+            "activity_browse_active": True,
+            "browse_draft": {"_expansion_offer": "10025", "_asked": True, "interest": "fifa"},
+        }
+        run_activity_browse_turn(
+            user_message="32827",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id=None,
+        )
+        mock_resolve.assert_called_once_with("jwt", "32827")
+        self.assertEqual(ctx.get("preview_block_id"), "b1")
+
+
 class TestBrowseChips(unittest.TestCase):
     def test_no_chips_on_zip_ask(self) -> None:
         # Asking for a ZIP → no interest-category pills (the answer is a ZIP).

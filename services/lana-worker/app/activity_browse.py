@@ -291,6 +291,50 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
         return fallback
 
 
+def _compose_out_of_coverage(zip5: str, *, user_msg: str = "", lang: str | None = None) -> str:
+    """AI-authored out-of-coverage reply (Lana's voice) — the honest state for a real ZIP
+    Lana doesn't serve yet. Grounded ONLY in what's true: the area was just saved as
+    expansion demand and the user can opt into a launch text. NEVER 'try another ZIP'
+    (they don't have one) and never invented nearby events. Localized static fallback."""
+    zip5 = str(zip5 or "").strip()
+    fallback = t("zip.out_of_coverage", lang, zip=zip5)
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return fallback
+        facts = [
+            f"You (Lana) are not live around ZIP {zip5} yet — no blocks or activities exist there",
+            "The user is one of the first from that area; their ZIP was just saved so the team knows where to open next",
+            "You can text them the moment you go live there IF they opt in (they can tap 'Yes, text me at launch')",
+            "Never tell them to try a different ZIP, and never invent events near them",
+        ]
+        if user_msg:
+            facts.append(f'What the user said: "{str(user_msg)[:200]}"')
+        from app.i18n import synth_language_directive
+
+        lang_line = synth_language_directive(lang) if lang else None
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
+                "(max 2 sentences) telling the user you're not in their area yet, that "
+                "their spot is saved, and offering to text them the moment you launch "
+                "there. Ground it ONLY in the facts given. "
+                + (f"{lang_line} " if lang_line else "")
+                + 'Return JSON {"message": "..."}.'
+            ),
+            user_payload="\n".join(f"- {f}" for f in facts),
+            max_tokens=120,
+            temperature=0.4,
+        )
+        msg_out = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        return msg_out or fallback
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("activity_browse_out_of_coverage_failed")
+        return fallback
+
+
 def _event_when_parts(raw: Any) -> str:
     """'2026-07-05 Sat' for the LLM — so it can match a date/timeframe query."""
     from datetime import datetime
@@ -443,6 +487,8 @@ def run_activity_browse_turn(
     history: list[dict[str, Any]],
     user_jwt: str,
     home_block_id: str | None,
+    slots: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Drive one browse turn. Mutates session_ctx (browse_draft, activity_browse_active,
     activity_previews, routing_phase). Returns Lana's reply."""
@@ -508,17 +554,30 @@ def run_activity_browse_turn(
         return t("browse.ask_interest", lang)
 
     from app.discovery_route import (
+        ZIP_INVALID,
         extract_zip,
-        fetch_blocks_for_zip,
+        note_zip_out_of_coverage,
         resolve_block_id,
+        resolve_zip_coverage,
     )
 
-    def _set_preview_block(zip5: str, blocks: list[dict[str, Any]]) -> str:
-        bid = str(blocks[0].get("block_id") or "")
+    def _zip_from_turn(*, asked: bool = False) -> str | None:
+        # A ZIP mentioned anywhere in the message ("I'm in NYC, zip 10025 — anything this
+        # week?") counts as the answer — never re-ask for what the user already said. The
+        # AI slot is the authority on whether a number IS a ZIP (a price, a count, a house
+        # number are not); bare digits are only trusted when we explicitly asked for the
+        # ZIP, where a 5-digit reply is unambiguous.
+        zip5 = extract_zip(str((slots or {}).get("zip") or ""))
+        if not zip5 and asked:
+            zip5 = extract_zip(msg)
+        return zip5
+
+    def _set_preview_block(zip5: str, block: dict[str, Any]) -> str:
+        bid = str(block.get("block_id") or "")
         session_ctx["preview_block_id"] = bid
         session_ctx["preview_zip"] = zip5
         session_ctx["preview_block_label"] = str(
-            blocks[0].get("label") or blocks[0].get("name") or zip5
+            block.get("display_name") or block.get("label") or block.get("name") or zip5
         )
         # A verified user who gives their ZIP here should have it stick to their profile, so
         # they aren't re-asked next session (best-effort; no-op if already assigned).
@@ -541,10 +600,48 @@ def run_activity_browse_turn(
         session_ctx["routing_phase"] = "listening"
         return prompt
 
+    def _offer_expansion(zip5: str) -> str:
+        # Out-of-coverage state: the ZIP is real (or can't be disproven) — capture it for
+        # expansion (pending_zip + feature_requests) and offer the launch text instead of
+        # rejecting. The accept/decline reply is read next turn (_expansion_offer).
+        note_zip_out_of_coverage(
+            zip5=zip5, session_ctx=session_ctx, user_id=user_id, user_message=msg
+        )
+        draft["_expansion_offer"] = zip5
+        draft["_need_zip"] = None
+        draft["suggestions"] = ["Yes, text me at launch", "No thanks"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["routing_phase"] = "listening"
+        return _compose_out_of_coverage(zip5, user_msg=msg, lang=lang)
+
+    # ── Reply to the "text me when I arrive?" launch offer (out-of-coverage ZIP). A fresh
+    #    ZIP in the reply re-resolves ("oh — my sister's block is 32827"); yes → the same
+    #    verify gate guests already use (verifying attaches a phone to the logged demand);
+    #    anything else → warm close, never a re-ask. ──
+    if draft.get("_expansion_offer"):
+        offered_zip = str(draft.get("_expansion_offer") or "")
+        zip_new = _zip_from_turn(asked=True)
+        if zip_new and zip_new != offered_zip:
+            draft["_expansion_offer"] = None
+            draft["_need_zip"] = True  # consume the fresh ZIP below as a ZIP answer
+        elif _ACCEPT_SEEK_RE.search(msg):
+            reset_activity_browse_state(session_ctx)
+            if not phone_verified:
+                session_ctx["requires_phone_verification"] = True
+                session_ctx["routing_phase"] = "await_signup_phone"
+                return t("zip.expansion_verify_gate", lang)
+            session_ctx["routing_phase"] = "listening"
+            return t("zip.expansion_saved", lang, zip=offered_zip)
+        else:
+            reset_activity_browse_state(session_ctx)
+            session_ctx["routing_phase"] = "listening"
+            return t("zip.expansion_close", lang)
+
     # ── If we asked for a ZIP last turn, this message is the ZIP (don't treat it as the
     #    interest). Otherwise the message is the interest (first answer) or a refinement. ──
     if draft.get("_need_zip"):
-        zip5 = extract_zip(msg)
+        zip5 = _zip_from_turn(asked=True)
         if not zip5:
             # No ZIP in the reply — maybe a question or a decline. Let the AI answer it
             # in context instead of repeating the same canned line.
@@ -553,25 +650,39 @@ def run_activity_browse_turn(
                     str(draft.get("interest") or ""), user_reply=msg, lang=lang
                 )
             )
-        blocks = fetch_blocks_for_zip(user_jwt, zip5)
-        if not blocks:
-            return _ask_zip(t("browse.zip_no_block", lang, zip=zip5))
-        _set_preview_block(zip5, blocks)
+        # Create-on-miss (same as the discovery funnel): an uncovered-but-real ZIP gets a
+        # waitlist block; only a geocoder-confirmed fake ZIP earns a re-check ask.
+        block, status = resolve_zip_coverage(user_jwt, zip5)
+        if status == ZIP_INVALID:
+            return _ask_zip(t("discovery.zip_unplaceable", lang, zip=zip5))
+        if not block:
+            return _offer_expansion(zip5)
+        _set_preview_block(zip5, block)
         draft["_need_zip"] = None
     elif msg:
         draft["interest"] = msg[:80]
     interest = str(draft.get("interest") or "")
 
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
-    # (session preview_block_id) counts, not just the persisted profile block. Ask for the
-    # ZIP in-flow rather than dead-ending on "Nothing on your block" when none is known.
+    # (session preview_block_id, or a pending out-of-coverage ZIP) counts, not just the
+    # persisted profile block. Ask in-flow rather than dead-ending when none is known.
     block_id = resolve_block_id(session_ctx, home_block_id)
     if not block_id:
-        zip5 = extract_zip(msg) or session_ctx.get("preview_zip")
+        zip5 = (
+            _zip_from_turn()
+            or session_ctx.get("preview_zip")
+            or session_ctx.get("pending_zip")
+        )
         if zip5:
-            blocks = fetch_blocks_for_zip(user_jwt, str(zip5))
-            if blocks:
-                block_id = _set_preview_block(str(zip5), blocks)
+            block, status = resolve_zip_coverage(user_jwt, str(zip5))
+            if block:
+                block_id = _set_preview_block(str(zip5), block)
+            elif status == ZIP_INVALID:
+                # The user DID give a ZIP — it just isn't real. Say that, never re-ask
+                # as if none was given.
+                return _ask_zip(t("discovery.zip_unplaceable", lang, zip=zip5))
+            else:
+                return _offer_expansion(str(zip5))
         if not block_id:
             return _ask_zip(_compose_zip_ask(interest, lang=lang))
 

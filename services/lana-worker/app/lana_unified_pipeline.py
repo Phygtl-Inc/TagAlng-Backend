@@ -1152,6 +1152,8 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
+                    slots=browse_slots,
+                    user_id=user_id,
                 )
             )
             session_ctx["_orchestrator_turn"] = False
