@@ -448,6 +448,8 @@ class SendMessageResponse(BaseModel):
     tip_draft: TipDraft | None = None
     look_draft: LookDraft | None = None
     routing: TurnRouting | None = None
+    # Per-stage latency breakdown (ms) from TurnTimer — includes "total_ms".
+    timing_ms: dict[str, int] | None = None
     orchestrator: bool = False
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None

@@ -51,6 +51,7 @@ from app.profile_intake import (
     lana_profile_opening,
     lana_profile_turn,
 )
+from app.turn_telemetry import build_lana_turn_props, full_outcome
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
@@ -362,10 +363,14 @@ def _routing_from_ctx(ctx: dict[str, Any]) -> TurnRouting | None:
     if not isinstance(raw, dict):
         return None
     return TurnRouting(
-        outcome=raw.get("outcome"),
+        # The orchestrator's internal single-letter codes (R/A/T/C) never leave the
+        # server: they normalize to full names here; already-full values pass through.
+        outcome=full_outcome(raw.get("outcome")),
         intent_class=raw.get("intent_class"),
         confidence=raw.get("confidence"),
-        tool_called=raw.get("tool_to_call"),
+        # The unified-pipeline flows stamp "tool_called"; the orchestrator stamps
+        # "tool_to_call" — read both so neither path reports null.
+        tool_called=raw.get("tool_to_call") or raw.get("tool_called"),
         capture_fired=bool(raw.get("capture_fired")),
     )
 
@@ -1550,8 +1555,8 @@ def _run_lana_message(
 
     ready = status == "ready_to_complete"
     ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
-    # Debug + timing stay on the backend (logged) but are no longer sent to the FE —
-    # they were noise on the wire and nothing in the client reads them.
+    # Debug stays backend-only (logged); timing_ms IS returned on the payload so
+    # analytics/QA can measure per-turn latency server-side (it was null before).
     debug = _turn_debug_from_ctx(
         merged, ui_intent=ob.get("ui_intent"), orchestrator=orch_used
     )
@@ -1573,10 +1578,24 @@ def _run_lana_message(
     ob.pop("onboarding_step", None)  # not read by the FE
 
     # Server-truth product analytics (Amplitude) — fire-and-forget, same user_id as the
-    # browser so events stitch. Tracks the turn + the conversions the client can't be
-    # trusted to report (publish / save actually happened server-side).
+    # browser so events stitch. One `lana_turn` event per turn carries the north-star
+    # (secured_step: did this ask end in a secured next step?) plus full-name routing,
+    # gate, and latency — the fields QA found unmeasurable server-side.
     _ui = ob.get("ui_intent")
-    amplitude_track("lana_turn", user_id=auth.user_id, event_properties={"ui_intent": _ui})
+    amplitude_track(
+        "lana_turn",
+        user_id=auth.user_id,
+        event_properties=build_lana_turn_props(
+            session_id=session_id,
+            # history already includes this turn's user message (listed after insert),
+            # so the count of user rows is this turn's 1-based index.
+            turn_index=sum(1 for m in history if str(m.get("role") or "") == "user"),
+            merged_ctx=merged,
+            ui_intent=_ui,
+            latency_ms=timing_ms.get("total_ms"),
+            block_resolved=bool(ob.get("home_block_assigned")),
+        ),
+    )
     _conversions = {
         "event_created": "event_hosted",
         "item_listed": "item_listed",
@@ -1628,6 +1647,7 @@ def _run_lana_message(
         look_draft=look_draft,
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
+        timing_ms=timing_ms,
         orchestrator=orch_used,
         **ob,
     )
