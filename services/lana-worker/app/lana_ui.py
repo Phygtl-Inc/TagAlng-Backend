@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from typing import Any
 
 VALID_BUCKETS = frozenset(
@@ -117,6 +118,25 @@ def parse_event_turn_ui(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# A bare ZIP (5 digits, optional +4) is an AREA, not a meetable venue. The extractor
+# must never let "I'll use 34786 as the meeting spot" pin a ZIP code to the map.
+_ZIP_TOKEN_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
+
+
+def _iso_ts_or_none(val: str | None) -> str | None:
+    """starts_at / ends_at must be strict ISO-8601 or None. The extractor sometimes
+    emits prose ("next Wednesday 16:00:00") which would poison the draft card, the
+    step-gate's date recovery, and publish — drop anything fromisoformat can't parse."""
+    if not val:
+        return None
+    text = val[:-1] + "+00:00" if val.endswith("Z") else val
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return val
+
+
 def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
@@ -130,8 +150,10 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
     title = field("title", 80)
     description = field("description", 500)
     venue_name = field("venue_name", 120)
-    starts_at = field("starts_at", 64)
-    ends_at = field("ends_at", 64)
+    if venue_name and _ZIP_TOKEN_RE.match(venue_name):
+        venue_name = None  # a ZIP is never a venue — keep asking for a real place
+    starts_at = _iso_ts_or_none(field("starts_at", 64))
+    ends_at = _iso_ts_or_none(field("ends_at", 64))
     duration = raw.get("duration_minutes")
     duration_minutes: int | None = None
     if duration is not None:
