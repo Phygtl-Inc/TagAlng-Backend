@@ -15,6 +15,7 @@ def _action(
     style: UiActionStyle = "primary",
     intro_id: str | None = None,
     peer_user_id: str | None = None,
+    goal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "id": action_id,
@@ -26,6 +27,11 @@ def _action(
         row["intro_id"] = intro_id
     if peer_user_id:
         row["peer_user_id"] = peer_user_id
+    if goal:
+        # Structured payload ({kind, topic}) the FE echoes back on tap (SendMessageRequest.goal)
+        # alongside `message`, so the goal survives without re-parsing the display text. Optional
+        # and additive: older FEs ignore it and post just `message` — same contract as typing.
+        row["goal"] = goal
     return row
 
 
@@ -343,12 +349,19 @@ def event_created_actions() -> list[dict[str, Any]]:
 def _rapport_action_chip(action: dict[str, Any]) -> dict[str, Any] | None:
     """One action chip for a concierge reply. Both the label and the message posted on tap
     are authored by the model (action.label / action.send) — routing stays AI-owned; we
-    only pass the strings through, no kind→message mapping here."""
+    only pass the strings through, no kind→message mapping here. The chip also carries the
+    concierge's structured goal (kind + topic) so a tap can't lose the intent to text
+    re-parsing (QA 2026-07-08: 'Meet playground-loving neighbors' → name quest ate the goal)."""
     label = str(action.get("label") or "").strip()
     message = str(action.get("send") or "").strip()
     if not label or not message:
         return None
-    return _action(action_id="rapport_action", label=label, message=message, style="primary")
+    kind = str(action.get("kind") or "").strip()
+    topic = str(action.get("topic") or "").strip()
+    goal = {"kind": kind, "topic": topic or None} if kind and kind != "none" else None
+    return _action(
+        action_id="rapport_action", label=label, message=message, style="primary", goal=goal
+    )
 
 
 def rapport_reply_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:

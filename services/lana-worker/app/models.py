@@ -103,14 +103,27 @@ class PendingIntroRow(BaseModel):
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
+class UiActionGoal(BaseModel):
+    """Structured goal a suggestion chip carries — the semantic kind + topic of the
+    app-move it triggers (e.g. kind="find_neighbors", topic="playground time"). The FE
+    echoes it back on tap (SendMessageRequest.goal) next to the display text, so the
+    goal can't be lost to re-parsing that text. Optional end-to-end: plain typed
+    messages and older FEs simply omit it."""
+
+    kind: str
+    topic: str | None = None
+
+
 class UiActionRow(BaseModel):
-    """Tap → POST `message` to Lana (same contract as typing in chat)."""
+    """Tap → POST `message` to Lana (same contract as typing in chat). When `goal` is
+    present the FE should also send it back as SendMessageRequest.goal."""
     id: str
     label: str
     message: str
     style: Literal["primary", "secondary", "ghost"] = "primary"
     intro_id: str | None = None
     peer_user_id: str | None = None
+    goal: UiActionGoal | None = None
 
 
 class BlockLogEntryRow(BaseModel):
@@ -409,6 +422,10 @@ class SendMessageRequest(BaseModel):
     # the tile's question, so the worker closes the gap and gives the profile engine context.
     rapport_gap_row_id: str | None = None
     rapport_question: str | None = None
+    # Structured goal echoed from a tapped suggestion chip (UiActionRow.goal). Optional —
+    # plain text messages omit it; when present it routes the tap deterministically (the
+    # goal's kind + topic survive side-quests instead of being re-parsed from `message`).
+    goal: UiActionGoal | None = None
 
 
 class TurnRouting(BaseModel):

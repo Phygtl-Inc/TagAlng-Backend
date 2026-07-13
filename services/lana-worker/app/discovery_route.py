@@ -998,6 +998,15 @@ def _try_awaiting_name_change_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
+def _clear_upfront_name_state(ctx: dict[str, Any]) -> None:
+    """Release the upfront-name side-quest. None-stamped (never popped): these keys are
+    in db._CTX_NULL_DELETES, so the session merge DELETES them. A pop() left the old
+    `awaiting_upfront_name: True` alive in the persisted session, which re-entered the
+    name quest one turn after Lana greeted the user by name (QA 2026-07-08)."""
+    ctx["awaiting_upfront_name"] = None
+    ctx["upfront_name_attempts"] = None
+
+
 def _try_upfront_display_name_turn(
     *,
     msg: str,
@@ -1005,6 +1014,7 @@ def _try_upfront_display_name_turn(
     user_id: str | None,
     phase: str,
     is_anonymous: bool,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Ask a nameless *authenticated* user their display name UP FRONT, as its own clean
     turn — so the name-ask is never glued onto an unrelated reply ("Rooting for Colombia…
@@ -1013,8 +1023,22 @@ def _try_upfront_display_name_turn(
     structured flow (signup ZIP/identity, hosting, verify, rename) owns name capture
     itself, so this never disrupts them. Bounded like the rename flow — a non-name reply
     can't trap the user here.
+
+    This is a SIDE-QUEST: when the message it interrupts carries a real goal (e.g. peer
+    matching with a topic, from a tapped suggestion chip), the goal is pushed onto the
+    session goal stack and resumed the moment the quest completes — see
+    ``_resume_interrupted_goal`` and app/goal_stack.py.
     """
+    from app.goal_stack import pending_goal_from_turn, pop_pending_goal, push_pending_goal
+
     if session_ctx.get("awaiting_upfront_name"):
+        # Single-source guard: capture eligibility must read the SAME persisted state the
+        # save wrote (display_name_saved / users.nickname, via user_needs_display_name).
+        # If the name is already on file this awaiting flag is stale — clear it and fall
+        # through to normal routing so the user's actual request is handled, not re-asked.
+        if not user_needs_display_name(user_id, session_ctx):
+            _clear_upfront_name_state(session_ctx)
+            return None
         # Our own follow-up turn: the reply should be their name.
         nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
         if nick and user_id:
@@ -1022,33 +1046,40 @@ def _try_upfront_display_name_turn(
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
             ctx["nickname"] = nick
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            _clear_upfront_name_state(ctx)
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
-            return (
-                f"Love it — great to meet you, {nick}! Now, how can I help you today?",
-                ctx,
-                ctx["last_routing"],
-                [],
-            )
+            pending = pop_pending_goal(ctx)
+            if pending:
+                # Short greeting only — the caller resumes the interrupted goal and
+                # appends its real reply ("… Now, back to playground-loving neighbors —").
+                ctx["_resume_goal"] = pending
+                reply = f"Love it — great to meet you, {nick}!"
+            else:
+                reply = f"Love it — great to meet you, {nick}! Now, how can I help you today?"
+            return reply, ctx, ctx["last_routing"], []
         attempts = int(session_ctx.get("upfront_name_attempts") or 0) + 1
         if attempts >= NAME_CHANGE_MAX_ATTEMPTS:
             # Give up gracefully and let them get on with it; we won't re-nag this session.
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            _clear_upfront_name_state(ctx)
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
-            return (
-                "No worries — I'll skip that for now. So, how can I help you today?",
-                ctx,
-                ctx["last_routing"],
-                [],
-            )
+            pending = pop_pending_goal(ctx)
+            if pending:
+                ctx["_resume_goal"] = pending
+                reply = "No worries — I'll skip that for now."
+            else:
+                reply = "No worries — I'll skip that for now. So, how can I help you today?"
+            return reply, ctx, ctx["last_routing"], []
         ctx = _routing_ctx(session_ctx, phase=PHASE_NEED_DISPLAY_NAME, active_intent=None)
         ctx["awaiting_upfront_name"] = True
         ctx["upfront_name_attempts"] = attempts
         ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+        # A non-name reply mid-quest may itself be (a restatement of) the goal — keep the
+        # freshest version so completion resumes what she actually wants.
+        pending = pending_goal_from_turn(msg, session_ctx, slots)
+        if pending:
+            push_pending_goal(ctx, pending)
         return (
             "No rush — a first name is all I need. What should neighbors call you?",
             ctx,
@@ -1061,6 +1092,8 @@ def _try_upfront_display_name_turn(
     if is_anonymous or not user_id:
         return None
     if session_ctx.get("guest_intake"):
+        return None
+    if session_ctx.get("_resuming_goal"):
         return None
     if phase not in ("", "listening"):
         return None
@@ -1076,12 +1109,80 @@ def _try_upfront_display_name_turn(
     ctx["awaiting_upfront_name"] = True
     ctx["upfront_name_attempts"] = 0
     ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
+    # The message we're interrupting may BE the goal ("Meet playground-loving neighbors")
+    # — stash it so completing the name quest resumes it instead of "how can I help?".
+    pending = pending_goal_from_turn(msg, session_ctx, slots)
+    if pending:
+        push_pending_goal(ctx, pending)
     return (
         "Before we dive in — what should neighbors call you? A first name's all I need.",
         ctx,
         ctx["last_routing"],
         [],
     )
+
+
+def _resume_interrupted_goal(
+    goal: dict[str, Any],
+    *,
+    lead_reply: str,
+    ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    is_anonymous: bool,
+    history: list[dict[str, Any]] | None,
+    user_id: str | None,
+    timer: TurnTimer | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Re-drive an interrupted goal now that its side-quest finished.
+
+    ``lead_reply`` is the side-quest's short closer ("Love it — great to meet you,
+    Jess!"). We bridge with an ack that names the stored topic, then run the goal's
+    stored message through normal discovery routing — with the goal's classified slots
+    re-primed into the slot cache so the intent can't be lost to re-parsing.
+    """
+    from app.goal_stack import resume_ack
+
+    goal_msg = str(goal.get("message") or "").strip()
+    topic = str(goal.get("topic") or "").strip() or None
+    ack = resume_ack(topic or goal_msg)
+    if not goal_msg:
+        return lead_reply, ctx, ctx.get("last_routing") or {}, []
+    resume_ctx = dict(ctx)
+    resume_ctx["_resuming_goal"] = True  # belt-and-braces: never a second interrupt
+    stored_slots = goal.get("slots")
+    if isinstance(stored_slots, dict) and stored_slots:
+        resume_ctx["_discovery_slots"] = dict(stored_slots)
+        resume_ctx["_discovery_slots_for"] = goal_msg
+    logging.getLogger(__name__).info(
+        "goal_stack resume kind=%s topic=%r msg=%r",
+        goal.get("kind"), topic, goal_msg[:60],
+    )
+    resumed = handle_discovery_turn(
+        goal_msg,
+        session_ctx=resume_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        is_anonymous=is_anonymous,
+        history=history,
+        user_id=user_id,
+        timer=timer,
+    )
+    if resumed is None:
+        # The goal handler declined the turn — keep the thread alive by naming the topic
+        # so the user isn't dropped into a cold "how can I help you today?" again.
+        return (
+            f"{lead_reply} {ack} tell me a bit more and I'm on it.",
+            ctx,
+            ctx.get("last_routing") or {},
+            [],
+        )
+    r_reply, r_ctx, r_routing, r_peers = resumed
+    r_ctx.pop("_resuming_goal", None)
+    r_ctx["unified_mode"] = True
+    return f"{lead_reply} {ack} {r_reply}", r_ctx, r_routing, r_peers
 
 
 def _try_dismiss_intro_pass_turn(
@@ -5850,10 +5951,27 @@ def handle_discovery_turn(
         user_id=user_id,
         phase=phase,
         is_anonymous=is_anonymous,
+        slots=slots,
     )
     if upfront_name_turn is not None:
         reply, ctx, routing, peers = upfront_name_turn
         ctx["unified_mode"] = True
+        # The side-quest just completed and an interrupted goal is waiting — resume it
+        # now (ack references the stored topic, then the goal's handler runs for real).
+        resume = ctx.pop("_resume_goal", None)
+        if isinstance(resume, dict):
+            return _resume_interrupted_goal(
+                resume,
+                lead_reply=reply,
+                ctx=ctx,
+                user_jwt=user_jwt,
+                phone_verified=phone_verified,
+                home_block_id=home_block_id,
+                is_anonymous=is_anonymous,
+                history=history,
+                user_id=user_id,
+                timer=timer,
+            )
         return reply, ctx, routing, peers
 
     identity_slots_turn = _try_identity_slots_turn(
