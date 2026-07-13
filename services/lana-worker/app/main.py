@@ -1264,17 +1264,25 @@ def _run_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None,
     emit: Callable[[str], None] | None = None,
+    emit_delta: Callable[[str], None] | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
     `emit`, when provided, receives human-readable progress labels as the turn
     advances (attached to the TurnTimer, which is threaded through every path). The
     blocking endpoint passes None, so it is a no-op there.
+
+    `emit_delta`, when provided, receives incremental assistant_message text while a
+    streaming-capable synthesizer LLM call generates the reply (see
+    orchestrator/synthesizer.py for exactly which paths stream). Also attached to the
+    TurnTimer; a no-op for the blocking endpoint and for every non-streaming reply path.
     """
     _vertex_required()
     timer = TurnTimer()
     if emit is not None:
         timer.set_emitter(emit)
+    if emit_delta is not None:
+        timer.set_delta_emitter(emit_delta)
     auth = verify_auth(authorization)
 
     with timer.stage("db_load_session"):
@@ -1657,25 +1665,44 @@ def stream_lana_message(
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
-    Frames: `{"type":"status","label":...}` as the turn advances, then a terminal
+    Frames: `{"type":"status","label":...}` as the turn advances, optional
+    `{"type":"delta","text":...}` chunks of the assistant reply while a
+    streaming-capable synthesizer LLM generates it, then a terminal
     `{"type":"result","turn":<SendMessageResponse>}` (or `{"type":"error","detail":...}`).
     The turn logic is identical — only the transport differs.
 
+    Deltas are additive and best-effort: canned/template replies and tool-result turns
+    emit none (they were never LLM-streamed text — see orchestrator/synthesizer.py for
+    the exact gating), and clients that ignore them keep working unchanged. The
+    terminal result frame carries the authoritative full turn — on the rare repair
+    paths (invalid-JSON retry, refusal repair) its text can differ from the streamed
+    prefix, so clients must replace accumulated deltas with `turn.assistant_message`.
+
     The (sync, blocking) turn runs on a worker thread and pushes progress + the final
-    result onto a queue; the SSE generator drains it. Keeps the blocking LLM clients
-    sync — no async rewrite. `background_tasks` is populated by the worker before the
-    result frame is queued, so FastAPI still runs the fire-and-forget jobs after the
-    stream closes.
+    result onto a queue; the SSE generator drains it and flushes one frame per queue
+    item (each delta chunk is its own frame). Keeps the blocking LLM clients sync — no
+    async rewrite. `background_tasks` is populated by the worker before the result
+    frame is queued, so FastAPI still runs the fire-and-forget jobs after the stream
+    closes.
     """
     events: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
     def emit(label: str) -> None:
         events.put(("status", label))
 
+    def emit_delta(text: str) -> None:
+        if text:
+            events.put(("delta", text))
+
     def worker() -> None:
         try:
             resp = _run_lana_message(
-                session_id, body, background_tasks, authorization, emit=emit
+                session_id,
+                body,
+                background_tasks,
+                authorization,
+                emit=emit,
+                emit_delta=emit_delta,
             )
             events.put(("result", resp))
         except HTTPException as exc:
@@ -1699,6 +1726,8 @@ def stream_lana_message(
                 continue
             if kind == "status":
                 yield _sse_frame({"type": "status", "label": payload})
+            elif kind == "delta":
+                yield _sse_frame({"type": "delta", "text": payload})
             elif kind == "result":
                 yield _sse_frame(
                     {"type": "result", "turn": payload.model_dump(mode="json")}

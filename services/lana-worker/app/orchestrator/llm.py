@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 from app.orchestrator.json_util import parse_json_object
+from app.orchestrator.stream_extract import AssistantMessageStreamExtractor
 
 _log = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ def _openai_generate(
     user_payload: str,
     max_tokens: int,
     temperature: float,
+    on_delta: Callable[[str], None] | None = None,
 ) -> str:
     client = _openai_client()
     params: dict[str, Any] = {
@@ -168,9 +170,52 @@ def _openai_generate(
     else:
         params["max_tokens"] = max_tokens
         params["temperature"] = temperature
-    response = client.chat.completions.create(**params)
-    choice = response.choices[0].message.content if response.choices else None
-    return choice or ""
+    if on_delta is None:
+        response = client.chat.completions.create(**params)
+        choice = response.choices[0].message.content if response.choices else None
+        return choice or ""
+    return _openai_generate_streaming(client, params, on_delta)
+
+
+def _openai_generate_streaming(
+    client: Any,
+    params: dict[str, Any],
+    on_delta: Callable[[str], None],
+) -> str:
+    """Stream the completion, forwarding assistant_message text to `on_delta`.
+
+    The raw stream is JSON tokens; the extractor peels out only the
+    `assistant_message` string content as it arrives. The full raw text is
+    accumulated and returned so the caller parses/validates it exactly like the
+    non-streaming path — the parsed result stays authoritative.
+
+    An aborted stream is NOT fatal here: we return whatever accumulated, and the
+    caller's JSON-retry ladder re-asks without streaming, so the turn still
+    resolves with a valid terminal result.
+    """
+    extractor = AssistantMessageStreamExtractor()
+    parts: list[str] = []
+    try:
+        stream = client.chat.completions.create(**params, stream=True)
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            piece = getattr(choices[0].delta, "content", None) if choices else None
+            if not piece:
+                continue
+            parts.append(piece)
+            frag = extractor.feed(piece)
+            if frag:
+                try:
+                    on_delta(frag)
+                except Exception:  # noqa: BLE001 — deltas are best-effort, never break a turn
+                    _log.exception("on_delta callback failed; continuing without deltas")
+                    on_delta = lambda _t: None  # noqa: E731
+    except Exception:  # noqa: BLE001
+        _log.exception(
+            "openai streaming aborted after %d chunks; falling back to accumulated text",
+            len(parts),
+        )
+    return "".join(parts)
 
 
 def _openai_json(
@@ -180,14 +225,19 @@ def _openai_json(
     user_payload: str,
     max_tokens: int,
     temperature: float,
+    on_delta: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], int]:
     attempts = 1
+    # Only the FIRST attempt streams: a retry after invalid JSON would re-emit a
+    # second (possibly different) message on top of already-sent deltas. The client
+    # treats the terminal result as authoritative either way.
     text = _openai_generate(
         model=model,
         system=system,
         user_payload=user_payload,
         max_tokens=max_tokens,
         temperature=temperature,
+        on_delta=on_delta,
     )
     try:
         return parse_json_object(text), attempts
@@ -315,7 +365,15 @@ def llm_json(
     max_tokens: int = 1024,
     temperature: float = 0.2,
     llm_attempts: list[int] | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
+    """One JSON-mode LLM call.
+
+    `on_delta`, when provided, receives incremental `assistant_message` text while
+    the model generates (used by the SSE streaming endpoint). Streaming is wired for
+    the OpenAI provider only — Gemini/Claude calls ignore the callback and return
+    exactly as before (the caller then simply emits no delta frames).
+    """
     p = provider()
     if p == "openai":
         data, attempts = _openai_json(
@@ -324,6 +382,7 @@ def llm_json(
             user_payload=user_payload,
             max_tokens=max_tokens,
             temperature=temperature,
+            on_delta=on_delta,
         )
         if llm_attempts is not None:
             llm_attempts[:] = [attempts]
