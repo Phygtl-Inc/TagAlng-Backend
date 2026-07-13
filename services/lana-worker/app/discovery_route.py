@@ -4442,12 +4442,20 @@ def fetch_preview_events_on_block(
         )
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
         if weekend_only:
+            from datetime import timezone
+
+            from app.event_publish import event_tz
+
             filtered: list[dict[str, Any]] = []
             for row in rows:
                 when = str(row.get("starts_at") or "")
                 try:
                     dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
-                    if dt.weekday() in (5, 6):
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    # Weekday in the event's LOCAL timezone — starts_at is UTC, so a
+                    # Friday 8:30 PM ET event is Saturday in UTC and vice versa.
+                    if dt.astimezone(event_tz()).weekday() in (5, 6):
                         filtered.append(row)
                 except ValueError:
                     continue

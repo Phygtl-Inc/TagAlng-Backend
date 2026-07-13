@@ -207,7 +207,11 @@ def _fetch_block_events(
 def _today_str() -> str:
     from datetime import datetime
 
-    return datetime.now().strftime("%Y-%m-%d (%A)")
+    from app.event_publish import event_tz
+
+    # Event-local "today", not the server clock — late-evening ET the server (UTC) is
+    # already on tomorrow, which shifts every relative-date match by a day.
+    return datetime.now(event_tz()).strftime("%Y-%m-%d (%A)")
 
 
 def _count_upcoming_events_anywhere() -> int | None:
@@ -336,15 +340,24 @@ def _compose_out_of_coverage(zip5: str, *, user_msg: str = "", lang: str | None 
 
 
 def _event_when_parts(raw: Any) -> str:
-    """'2026-07-05 Sat' for the LLM — so it can match a date/timeframe query."""
-    from datetime import datetime
+    """'2026-07-05 Sat 7:00 PM' for the LLM — in the EVENT's local timezone, so it can
+    match date/timeframe AND time-of-day queries. starts_at is stored UTC; rendering it
+    raw would put an 8:30 PM ET event on the wrong day (00:30 UTC next-day) and hide
+    the clock time the user's 'evenings after 6pm' must be checked against."""
+    from datetime import datetime, timezone
+
+    from app.event_publish import event_tz
 
     s = str(raw or "").strip()
     if not s:
         return ""
     try:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %a")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(event_tz())
+        clock = local.strftime("%I:%M %p").lstrip("0")
+        return f"{local.strftime('%Y-%m-%d %a')} {clock}"
     except ValueError:
         return s[:10]
 
@@ -355,10 +368,11 @@ def _filter_events_by_query(
     """Parse + match the user's request against the block's events with ONE LLM call.
 
     The request can name a topic ('cricket', 'family'), a date/timeframe ('on July 5',
-    'this weekend', 'tomorrow'), and/or a host ('hosted by Asjid') — in any phrasing. The
-    model gets each event's title, tags, date, weekday and host, plus today's date, and
-    returns the events matching ALL constraints the request expresses, with a short label
-    for the header. Open/vague requests return everything. Returns (matched, label).
+    'this weekend', 'tomorrow'), a time of day ('mornings', 'after 6pm'), and/or a host
+    ('hosted by Asjid') — in any phrasing. The model gets each event's title, tags, date,
+    weekday, local start time and host, plus today's date, and returns the events
+    matching ALL constraints the request expresses, with a short label for the header.
+    Open/vague requests return everything. Returns (matched, label).
     """
     if not events:
         return [], ""
@@ -383,14 +397,19 @@ def _filter_events_by_query(
                 model=router_model(),
                 system=(
                     "You filter a neighborhood's upcoming events by a resident's request. "
-                    f"Today is {_today_str()}. The request may mention a TOPIC — match it "
-                    "semantically: 'soccer' or 'sports' fits a 'FIFA watch party'; 'family' "
-                    "fits a 'park playdate' — a DATE or TIMEFRAME ('on July 5', 'this "
-                    "weekend', 'tomorrow' — resolve relative to today), and/or a HOST name "
-                    "('hosted by Asjid' → match the host field, case-insensitive). Return "
+                    f"Today is {_today_str()}. Each event's date and start time are already "
+                    "in the neighborhood's local timezone. The request may mention a TOPIC "
+                    "— match it semantically: 'soccer' or 'sports' fits a 'FIFA watch "
+                    "party'; 'family' fits a 'park playdate' — a DATE or TIMEFRAME ('on "
+                    "July 5', 'this weekend', 'tomorrow' — resolve relative to today), a "
+                    "TIME OF DAY ('mornings', 'evenings', 'after 6pm' — check the event's "
+                    "start time: morning is before 12 PM, afternoon 12–5 PM, evening/night "
+                    "5 PM onward), and/or a HOST name ('hosted by Asjid' → match the host "
+                    "field, case-insensitive). Return "
                     'JSON {"match_indices":[ints], "label":"short phrase"}: indices of '
                     "events satisfying EVERY constraint the request expresses (a date query "
-                    "must match the event's date; a host query must match the host). label "
+                    "must match the event's date; a time-of-day query the start time; a "
+                    "host query the host). label "
                     "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
                     "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
                     "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "

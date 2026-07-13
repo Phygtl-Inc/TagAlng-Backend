@@ -54,8 +54,9 @@ def _filter_cohort_tags(tags: list[str]) -> list[str]:
 _DEFAULT_EVENT_TZ = "America/New_York"
 
 
-def _event_tz() -> ZoneInfo:
-    """The timezone a host's wall-clock time ("6 PM") is anchored to. Single-region
+def event_tz() -> ZoneInfo:
+    """The timezone a host's wall-clock time ("6 PM") is anchored to — and the one
+    event times are rendered back in (browse filter, date matching). Single-region
     today (Orlando / Eastern); override with EVENT_DEFAULT_TZ when that changes."""
     name = (os.environ.get("EVENT_DEFAULT_TZ") or _DEFAULT_EVENT_TZ).strip() or _DEFAULT_EVENT_TZ
     try:
@@ -78,7 +79,7 @@ def _parse_iso_ts(raw: str | None) -> str | None:
             # The host typed a wall-clock time with no zone (e.g. "6 PM"). It means 6 PM
             # in the EVENT's local timezone, not UTC — anchor it there before converting
             # to the stored UTC instant, so the saved time is the time they intended.
-            dt = dt.replace(tzinfo=_event_tz())
+            dt = dt.replace(tzinfo=event_tz())
         return dt.astimezone(timezone.utc).isoformat()
     except ValueError:
         return None
