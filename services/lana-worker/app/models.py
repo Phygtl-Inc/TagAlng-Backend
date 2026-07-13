@@ -33,6 +33,13 @@ class PeerMatchRow(BaseModel):
     match_band: str | None = None
     match_badge: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
+    # Decision context (QA 2026-07-08): band only — never a raw kid age.
+    stage_band: Literal["expecting", "baby", "toddler", "prek", "school"] | None = None
+    distance_label: str | None = None
+    shared: list[str] = Field(default_factory=list)
+    tier: Literal["great", "good"] | None = None
+    # similarity_score is kept for telemetry; FE must not render it as a percent.
+    display_score: bool = False
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 

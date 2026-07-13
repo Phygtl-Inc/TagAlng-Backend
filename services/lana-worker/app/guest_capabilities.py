@@ -51,13 +51,16 @@ def format_peer_matches(peers: list[dict[str, Any]]) -> str:
             "I don't see strong matches on your block yet. "
             "Tap Complete to save your profile — that helps me find neighbors like you."
         )
+    from app.peer_discovery_surface import shared_reasons_from_label
+
     lines = [f"I found {len(peers)} neighbor{'s' if len(peers) != 1 else ''} on your block:"]
     for p in peers[:5]:
         nick = str(p.get("nickname") or "A neighbor")
         label = str(p.get("matching_peer_label") or "shared interests")
-        score = p.get("similarity_score")
-        pct = f" ({int(float(score) * 100)}%)" if score is not None else ""
-        lines.append(f"• {nick} — {label}{pct}")
+        # Title-cased shared reasons; no percent — a one-trait similarity score
+        # implies precision it can't support (QA 2026-07-08).
+        reasons = shared_reasons_from_label(label) or ["Shared Interests"]
+        lines.append(f"• {nick} — {' · '.join(reasons)}")
     lines.append("Want me to introduce you to any of them?")
     return "\n".join(lines)
 
