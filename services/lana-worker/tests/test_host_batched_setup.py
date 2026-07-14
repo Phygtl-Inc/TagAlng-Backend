@@ -116,6 +116,37 @@ class TestBringItems(unittest.TestCase):
         merged = merge_event_drafts({"bring_items": ["Old"]}, {"bring_items": ["New", "Items"]})
         self.assertEqual(merged["bring_items"], ["New", "Items"])
 
+    def test_none_answers_never_become_chips(self) -> None:
+        # "Anything to bring?" → "nothing" is an empty list, not a literal chip — at the
+        # parse layer (LLM draft), and via is_none_bring_item at the FE-POST/publish layers.
+        from app.lana_ui import is_none_bring_item
+
+        parsed = parse_event_draft(
+            {"bring_items": ["nothing", "None", "no need!", "N/A", "Stroller"]}
+        )
+        self.assertEqual(parsed["bring_items"], ["Stroller"])
+        for none_word in ("nothing", "Nothing.", "NONE", "no need", "nada", "n/a"):
+            self.assertTrue(is_none_bring_item(none_word), none_word)
+        # Real items survive — including ones that merely contain a none-word.
+        for item in ("Stroller", "Nothing-brand cooler", "Snacks"):
+            self.assertFalse(is_none_bring_item(item), item)
+
+    def test_publish_fields_drop_none_answers(self) -> None:
+        from unittest.mock import patch
+
+        from app.event_publish import build_create_event_fields
+
+        draft = EventDraft(
+            title="Birthday Party with Kids",
+            bring_items=["nothing", "Balloons"],
+        )
+        with patch(
+            "app.event_publish.resolve_event_location",
+            return_value=(None, None, "blk-1"),
+        ), patch("app.event_publish._valid_purpose_ids", return_value=set()):
+            fields = build_create_event_fields("u-1", draft)
+        self.assertEqual(fields.get("bring_items"), ["Balloons"])
+
 
 class TestBlockersNeeded(unittest.TestCase):
     def test_lists_only_missing(self) -> None:

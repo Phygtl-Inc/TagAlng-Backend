@@ -159,8 +159,26 @@ _SYSTEM = (
     "another person, hate speech or slurs, or requests for help with something illegal or dangerous "
     "(weapons, drugs, violence, harming someone). Set goal=unsafe, in_discovery=false, and "
     "unsafe_kind=sexual|abuse|hate|illegal|other. Do NOT treat unsafe content as a swap/tip/out_of_scope "
-    "or a feature request. (Self-harm / domestic-violence / child-safety CRISIS messages are handled "
-    "elsewhere — those are goal=chat, NOT unsafe.) "
+    "or a feature request. (Self-harm / domestic-violence / child-safety messages from someone who is "
+    "SUFFERING are CRISIS, not unsafe — see CRISIS below; unsafe is content Lana must refuse.) "
+    "CRISIS (goal=crisis, linear_intent=system.crisis, in_discovery=false) = the user is in emotional "
+    "distress or danger. Classify by MEANING, infinite phrasing: overwhelm with despair ('I'm so "
+    "overwhelmed, I cry every night', 'I can't do this anymore'), isolation expressed as suffering "
+    "('I haven't talked to another adult in days'), postpartum struggle, grief, self-harm or suicidal "
+    "thoughts, domestic violence or fear of someone at home, a child in danger. This takes PRIORITY over "
+    "EVERY other goal including medical — a distress message is NEVER a find/browse/meet ask even when "
+    "it mentions loneliness or wanting company. Distinguish by tone: 'I'd love to meet other moms' is "
+    "discovery; 'I cry every night after the kids sleep' is crisis. "
+    "WHENEVER goal=crisis, WRITE clarify_question yourself (leave clarify=null) — a warm, grounded "
+    "response in Lana's voice that (1) acknowledges what they actually said in their own terms (never "
+    "clinical, never chirpy), (2) gives the ONE resource that fits WHEN the distress is acute or there "
+    "is danger: 988 (24/7 crisis line) for despair or self-harm, Postpartum Support International "
+    "1-800-944-4773 for postpartum struggle, the National Domestic Violence Hotline 1-800-799-7233 "
+    "(or text START to 88788) for violence or fear at home, 911 for immediate danger — never dump a "
+    "list, and for plain overwhelm/loneliness with no danger a resource is optional, (3) makes clear "
+    "you're staying with them, and (4) only after the acknowledgment, may close with ONE gentle "
+    "no-pressure offer ('when you're ready, I can help you find other moms nearby — no rush'). "
+    "NEVER lead with a ZIP ask, a funnel question, or activities on a crisis turn. "
     "MEDICAL (goal=medical, linear_intent=system.medical, in_discovery=false) = the user asks what to DO "
     "about a HEALTH concern — a symptom, illness, injury, fever, pain, medication, or 'is this serious / "
     "how do I treat / what should I do' for THEMSELVES, their kid, or anyone. Lana is NOT a doctor and must "
@@ -170,8 +188,8 @@ _SYSTEM = (
     "it as a feature (it is not a product gap). CRITICAL DISTINCTION from tip_seek: asking Lana to FIND / "
     "RECOMMEND a local doctor, pediatrician, or clinic ('know a good pediatrician', 'recommend a doctor near "
     "me') is tip_seek (looking.tip), NOT medical — medical is asking for the ADVICE itself, not for a "
-    "referral. (Self-harm / suicide / domestic-violence / a missing child are the CRISIS rail = goal=chat, "
-    "NOT medical; medical is for physical illness/injury/symptoms.) "
+    "referral. (Self-harm / suicide / domestic-violence / a missing child / emotional despair are "
+    "goal=crisis — see CRISIS above; medical is for physical illness/injury/symptoms.) "
     "WHENEVER goal=medical, WRITE clarify_question yourself (leave clarify=null) — a warm, contextual line in "
     "Lana's voice that (1) says she can't give medical advice, (2) urges contacting a doctor or nurse line "
     "right away and calling 911 if it is severe or an emergency, and (3) offers to find a doctor/pediatrician "
@@ -389,7 +407,8 @@ _SYSTEM = (
     "help.what_can_you_do|help.who_are_you; "
     "system.out_of_scope (set with goal=out_of_scope for an errand TagAlng cannot do); "
     "system.unsafe (set with goal=unsafe for inappropriate/abusive content Lana must refuse); "
-    "system.medical (set with goal=medical for a health/medical concern — see MEDICAL below). "
+    "system.medical (set with goal=medical for a health/medical concern — see MEDICAL below); "
+    "system.crisis (set with goal=crisis for emotional distress or danger — see CRISIS below). "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
@@ -578,6 +597,7 @@ def ai_parse_discovery_turn(
             "out_of_scope",
             "unsafe",
             "medical",
+            "crisis",
             "none",
         ):
             goal = "none"
@@ -636,11 +656,11 @@ def ai_parse_discovery_turn(
         clarify_raw = str(raw.get("clarify") or "").strip().lower()
         clarify = clarify_raw if clarify_raw in ("browse_or_meet", "scope", "intent") else None
         # The classifier writes the clarifying question itself (Lana's voice, contextual) so
-        # the route layer never hardcodes it. Kept when a clarify is set OR for goal=medical,
-        # where the same field carries the AI-authored safety-redirect line (no regex/template).
+        # the route layer never hardcodes it. Kept when a clarify is set OR for goal=medical /
+        # goal=crisis, where the same field carries the AI-authored safety line (no regex/template).
         clarify_question = (
-            (str(raw.get("clarify_question") or "").strip()[:300] or None)
-            if (clarify or goal == "medical")
+            (str(raw.get("clarify_question") or "").strip()[:600] or None)
+            if (clarify or goal in ("medical", "crisis"))
             else None
         )
         clarify_options = (
@@ -753,7 +773,7 @@ def _discovery_slot_payload(
         '  "linear_intent": "<Layer 1 intent id or null>",\n'
         '  "in_discovery": true|false,\n'
         '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
-        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"medical"|"none",\n'
+        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"medical"|"crisis"|"none",\n'
         '  "intro_direction": "sent"|"received"|"all"|null,\n'
         '  "intro_source": "block_log"|"peer_preview"|null,\n'
         '  "intro_list_index": 1-based integer when user picks #N from a shown list, else null,\n'

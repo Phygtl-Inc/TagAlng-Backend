@@ -85,6 +85,34 @@ def _parse_iso_ts(raw: str | None) -> str | None:
         return None
 
 
+def _ai_cover_emoji(title: str, description: str | None) -> str | None:
+    """Best-effort emoji pick for publish paths that skipped the setup-suggest call
+    (voice / transcript extraction). One tiny LLM call; None on any failure — the FE
+    falls back to its neutral icon, never a canned emoji that could clash with the vibe."""
+    try:
+        from app.lana_ui import sanitize_cover_emoji
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return None
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "Pick ONE emoji that captures this local event's vibe, for its card "
+                'cover. Reply with compact JSON: {"cover_emoji": "..."}. Match the '
+                "actual activity (soccer -> ⚽, book club -> 📚, coffee walk -> ☕)."
+            ),
+            user_payload=f"TITLE: {title}\nDESCRIPTION: {(description or '').strip()[:300]}",
+            max_tokens=20,
+            temperature=0.2,
+        )
+        if not isinstance(data, dict):
+            return None
+        return sanitize_cover_emoji(data.get("cover_emoji"))
+    except Exception:  # noqa: BLE001 - cover art must never block publishing
+        return None
+
+
 def build_create_event_fields(
     user_id: str,
     draft: EventDraft,
@@ -127,9 +155,22 @@ def build_create_event_fields(
         fields["auto_approve"] = bool(draft.auto_approve)
     if draft.allow_attendee_share is not None:
         fields["allow_attendee_share"] = bool(draft.allow_attendee_share)
-    bring = [str(b).strip()[:60] for b in (draft.bring_items or []) if str(b).strip()][:12]
+    from app.lana_ui import is_none_bring_item
+
+    bring = [
+        str(b).strip()[:60]
+        for b in (draft.bring_items or [])
+        if str(b).strip() and not is_none_bring_item(str(b))
+    ][:12]
     if bring:
         fields["bring_items"] = bring
+    from app.lana_ui import sanitize_cover_emoji
+
+    cover_emoji = sanitize_cover_emoji(draft.cover_emoji) or _ai_cover_emoji(
+        fields["title"], fields["description"]
+    )
+    if cover_emoji:
+        fields["cover_emoji"] = cover_emoji
     if cohost_id:
         fields["cohost_id"] = cohost_id
     return fields

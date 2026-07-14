@@ -32,6 +32,7 @@ _EVENT_DRAFT_FIELDS = {
     "auto_approve",
     "allow_attendee_share",
     "bring_items",
+    "cover_emoji",
     "cohort_tags",
     "affinity_prompt",
     "affinity_options",
@@ -318,6 +319,8 @@ def _ensure_setup_config(
     with timer.stage("llm_event_setup"):
         cfg = setup_suggestions(history=history, user_message=user_message, draft=ed)
     ed["event_setup"] = cfg
+    if not ed.get("cover_emoji") and cfg.get("cover_emoji"):
+        ed["cover_emoji"] = cfg["cover_emoji"]
     if not ed.get("bring_items") and cfg.get("bring_suggestions"):
         ed["bring_items"] = list(cfg["bring_suggestions"])
     if ed.get("max_attendees") is None and cfg.get("capacity_default"):

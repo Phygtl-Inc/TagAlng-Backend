@@ -1,48 +1,10 @@
 import re
-from dataclasses import dataclass
-from typing import Any
 
-
-@dataclass
-class InputRailResult:
-    passed: bool
-    safety_triggered: bool
-    category: str | None = None
-    severity: str | None = None
-    flags: dict[str, Any] | None = None
-    template_response: str | None = None
-
-
-_SAFETY_PATTERNS: list[tuple[str, str, str]] = [
-    (r"\b(kill myself|suicide|end my life|can't go on)\b", "mental_health", "high"),
-    (r"\b(hurt myself|self[- ]harm)\b", "mental_health", "high"),
-    (r"\b(throw(n)? something at me|hit me|abuse(d)? me)\b", "dv", "high"),
-    (r"\b(are you safe|unsafe at home)\b", "dv", "medium"),
-    (r"\b(child is missing|kidnapped)\b", "child_safety", "high"),
-]
-
-_SAFETY_TEMPLATES = {
-    "mental_health": (
-        "I'm here. *Are you safe right now?* "
-        "Postpartum Support International is 1-800-944-4773 (24/7). "
-        "If you need someone now, **988** connects to crisis support. "
-        "I'll stay with you."
-    ),
-    "dv": (
-        "That's not OK. *Are you and the kids safe right now?* "
-        "National Domestic Violence Hotline: 1-800-799-7233 or text START to 88788. "
-        "I won't share this with anyone on the block unless you ask."
-    ),
-    "child_safety": (
-        "That sounds urgent. *Are the kids safe right now?* "
-        "If anyone is in immediate danger, call **911**. "
-        "I'm here while you figure out next steps."
-    ),
-    "crisis": (
-        "I'm glad you said something. If you're in immediate danger, call **911**. "
-        "Crisis line **988** is available 24/7. I'll stay with you."
-    ),
-}
+# Crisis (self-harm / DV / emotional distress) is AI-detected — the discovery classifier
+# flags goal=crisis by meaning and authors the empathetic response itself (see
+# discovery_slots.py CRISIS + discovery_route._respond_crisis). There is deliberately no
+# keyword list here: the old regex rail missed everything phrased outside its five patterns
+# ("I cry every night" got a ZIP ask) while the classifier reads infinite phrasings.
 
 # Deterministic backstop for inappropriate/abusive content. The AI router (system.unsafe)
 # is the primary detector; these high-precision patterns catch egregious cases even if the
@@ -74,21 +36,6 @@ def scrub_pii(text: str) -> str:
     out = _PII_PHONE.sub("[phone redacted]", text)
     out = _PII_SSN.sub("[ssn redacted]", out)
     return out
-
-
-def run_input_rails(utterance: str) -> InputRailResult:
-    lower = utterance.lower()
-    for pattern, category, severity in _SAFETY_PATTERNS:
-        if re.search(pattern, lower, re.I):
-            return InputRailResult(
-                passed=False,
-                safety_triggered=True,
-                category=category,
-                severity=severity,
-                flags={"rail": "safety_keyword"},
-                template_response=_SAFETY_TEMPLATES.get(category, _SAFETY_TEMPLATES["crisis"]),
-            )
-    return InputRailResult(passed=True, safety_triggered=False, flags={"rail": "ok"})
 
 
 def check_refusal_without_capture(response: str, capture_fired: bool) -> bool:

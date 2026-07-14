@@ -3649,12 +3649,16 @@ def _is_host_answer(
     # let normal routing answer it instead of capturing it as an event detail.
     if is_meta_or_chat(slots):
         return False
-    # out_of_scope / unsafe are UNIVERSAL exits — never a host field answer, even at the
-    # place/settings steps where any reply is otherwise taken as the venue/chip. Without this,
-    # "fix my sink" at the where-step is captured as the venue and the user is trapped.
+    # out_of_scope / unsafe / crisis are UNIVERSAL exits — never a host field answer, even at
+    # the place/settings steps where any reply is otherwise taken as the venue/chip. Without
+    # this, "fix my sink" at the where-step is captured as the venue and the user is trapped.
     _g = str((slots or {}).get("goal") or "")
     _ln = str((slots or {}).get("linear_intent") or "")
-    if _g in ("out_of_scope", "unsafe") or _ln in ("system.out_of_scope", "system.unsafe"):
+    if _g in ("out_of_scope", "unsafe", "crisis") or _ln in (
+        "system.out_of_scope",
+        "system.unsafe",
+        "system.crisis",
+    ):
         return False
     draft = session_ctx.get("event_draft")
     draft = draft if isinstance(draft, dict) else {}
@@ -5037,14 +5041,56 @@ def _redirect_medical(
     return reply, ctx, _discovery_routing_stub("listening", "medical"), []
 
 
+# Safety fallback ONLY — used if the classifier returned no authored line. The real reply is
+# AI-written (Lana's voice, grounded in what the user said) and carried in clarify_question;
+# this guarantees the crisis beats (acknowledge / resource / stay with them) even on an empty
+# model turn. Not a detection template and never regex-matched.
+_CRISIS_SAFETY_FALLBACK = (
+    "I'm really glad you told me — that sounds so heavy, and you don't have to carry it alone. "
+    "If you need someone right now, **988** connects you to crisis support 24/7, and if you're "
+    "in immediate danger call **911**. I'm staying right here with you."
+)
+
+
+def _is_crisis_turn(slots: dict[str, Any], msg: str) -> bool:
+    """AI-driven: the classifier read emotional distress or danger (goal=crisis). Not
+    confidence-gated — the empathetic response is always safer than a mis-lane into a funnel
+    ask, and the classifier already applies its own threshold. No regex on the utterance."""
+    if not slots:
+        return False
+    enriched = enrich_slots(dict(slots), msg=msg)
+    goal = str(enriched.get("goal") or "")
+    linear = slots_linear_intent(enriched) or ""
+    return goal == "crisis" or linear == "system.crisis"
+
+
+def _respond_crisis(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Emotional distress or danger: Lana acknowledges what the user said, points to the
+    right resource when the distress is acute (988 / PSI / DV hotline / 911), and stays with
+    them — never a funnel ask. The message is AI-authored (Lana's voice, grounded in the
+    user's own words) and travels in clarify_question; the constant is only a safety fallback.
+    No feature is logged and no chips push an action — connection is offered inside the
+    message itself, only as a gentle no-pressure close."""
+    enriched = enrich_slots(dict(slots), msg=msg)
+    reply = str(enriched.get("clarify_question") or "").strip() or _CRISIS_SAFETY_FALLBACK
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    return reply, ctx, _discovery_routing_stub("listening", "crisis"), []
+
+
 _UNSAFE_HIGH_KINDS = frozenset({"sexual", "hate", "illegal"})
 
 
 def _unsafe_kind_for_turn(slots: dict[str, Any], msg: str) -> str | None:
     """Return the unsafe kind if this turn is inappropriate/abusive — from the regex backstop
     OR the AI router (goal=unsafe). Safety is NOT confidence-gated: any unsafe read refuses.
-    None when the turn is fine. Crisis content (self-harm/DV) is deliberately NOT caught here
-    — that is handled by the orchestrator's empathetic safety rails, not a flat refusal."""
+    None when the turn is fine. Crisis content (self-harm/DV/emotional distress) is deliberately
+    NOT caught here — the classifier flags it goal=crisis and _respond_crisis gives the
+    empathetic response, not a flat refusal."""
     matched, kind = utterance_is_unsafe(msg)
     if matched:
         return kind or "other"
@@ -5212,14 +5258,22 @@ def handle_discovery_turn(
     # refused before any intent routing, so it can never be captured as a swap/tip, logged
     # as a feature request, or funnelled into find_peers. Detected by the AI router
     # (goal=unsafe) with a regex backstop; refused + logged to moderation_flags, no
-    # escalation. Crisis content (self-harm/DV) is intentionally excluded — the orchestrator
-    # answers those with empathetic resources, not this flat boundary.
+    # escalation. Crisis content (self-harm/DV/emotional distress) is intentionally excluded
+    # — goal=crisis answers those with empathy + resources below, not this flat boundary.
     _unsafe_kind = _unsafe_kind_for_turn(slots, msg)
     if _unsafe_kind is not None:
         return _refuse_unsafe(
             msg=msg, kind=_unsafe_kind, session_ctx=session_ctx,
             user_id=user_id, home_block_id=home_block_id, phase=phase,
         )
+
+    # Crisis SECOND (AI-driven, no regex): emotional distress or danger gets the empathetic
+    # AI-authored response — acknowledge, right resource when acute (988 / PSI / DV hotline /
+    # 911), stay with them. Checked before every lane and funnel so a distress message can
+    # never be swallowed as a field answer or answered with a ZIP ask (the bug this fixes:
+    # "I cry every night… haven't talked to another adult in days" → browse funnel → ZIP ask).
+    if _is_crisis_turn(slots, msg):
+        return _respond_crisis(msg=msg, slots=slots, session_ctx=session_ctx)
 
     # A guest who finished an event, hit the verify gate, and is now verified: publish the
     # event RIGHT AWAY (mirrors the meet-seek publish-after-verify below) and show the

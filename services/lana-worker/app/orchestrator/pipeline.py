@@ -5,7 +5,7 @@ from typing import Any
 from app.orchestrator.audit import log_turn
 from app.orchestrator.llm import llm_configured
 from app.orchestrator.enforce import enforce_routing, should_execute_tool
-from app.orchestrator.guardrails import check_refusal_without_capture, run_input_rails, scrub_pii
+from app.orchestrator.guardrails import check_refusal_without_capture, scrub_pii
 from app.orchestrator.memory import (
     apply_core_patch,
     build_core_block,
@@ -116,45 +116,12 @@ def run_turn(
             prefetched=prefetched,
         )
 
-    rails = run_input_rails(utterance)
+    # Crisis (self-harm / DV / emotional distress) is AI-detected upstream — the discovery
+    # classifier flags goal=crisis and _respond_crisis answers with empathy + resources
+    # before this pipeline runs. The old regex input rail lived here; it was removed because
+    # its five keyword patterns missed real distress while the classifier reads meaning.
     capture_fired = False
     tool_result: dict[str, Any] | None = None
-
-    if rails.safety_triggered:
-        routing = {
-            "outcome": "T",
-            "intent_class": "companionship",
-            "confidence": 1.0,
-            "tool_to_call": "flag_sensitive",
-            "tool_args": {"category": rails.category, "severity": rails.severity},
-        }
-        tool_result = execute_tool(
-            tool_name="flag_sensitive",
-            tool_args=routing["tool_args"],
-            user_id=user_id,
-            user_jwt=user_jwt,
-            session_id=session_id,
-            block_id=block_id,
-            purpose=purpose,
-            session_ctx=session_ctx,
-            source_module="guardrails",
-        )
-        reply = rails.template_response or "I'm here with you."
-        status = "continue"
-        ui = {"bucket": None, "focus_phrase": None, "highlights": []}
-        core = strip_ephemeral(core)
-        out_ctx = {**session_ctx, "last_status": status, "core_block": core}
-        log_turn(
-            session_id=session_id,
-            user_id=user_id,
-            event_type="safety_gate",
-            module="guardrails",
-            utterance=utterance,
-            response=reply,
-            guardrail_result={"safety": True, "category": rails.category},
-            routing=routing,
-        )
-        return reply, status, out_ctx, ui, prev_draft if purpose == "event_draft" else None
 
     skip_router = should_skip_lana_router(
         purpose=purpose,
@@ -171,7 +138,7 @@ def run_turn(
             utterance=utterance,
             core_block=core,
             history=history,
-            guardrail_flags=rails.flags,
+            guardrail_flags={"rail": "ok"},
             timer=timer,
         )
     routing = enforce_routing(

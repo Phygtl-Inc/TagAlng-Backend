@@ -18,7 +18,8 @@ quick-setup cards to THIS event and return ONE compact JSON object:
 {"capacity_label": "...", "capacity_default": 8,
  "sharing_label": "...", "sharing_hint": "...",
  "approval_label": "...", "approval_hint": "...",
- "bring_label": "...", "bring_hint": "...", "bring_suggestions": ["...", "..."]}
+ "bring_label": "...", "bring_hint": "...", "bring_suggestions": ["...", "..."],
+ "cover_emoji": "..."}
 
 - capacity_label: a short "how many can come?" question using the RIGHT audience noun for
   this event — a moms meetup -> "How many moms?"; a dads hangout -> "How many dads?"; a
@@ -30,7 +31,11 @@ quick-setup cards to THIS event and return ONE compact JSON object:
 - bring_label / bring_hint: a friendly "anything to bring?" prompt.
 - bring_suggestions: 0-3 concrete items that fit THIS activity (stroller coffee walk ->
   ["Stroller","Coffee mug"]; picnic -> ["Blanket","A snack to share"]; beach -> ["Sunscreen"]).
-  [] if nothing obviously fits.
+  [] if nothing obviously fits. Concrete items ONLY — when the host said there's nothing
+  to bring, return []; never emit a none-answer ("nothing", "none") as an item.
+- cover_emoji: ONE emoji that captures THIS event's vibe, used as the card's cover art
+  (stroller coffee walk -> "☕"; soccer -> "⚽"; potluck -> "🥘"; book club -> "📚";
+  playdate -> "🧸"). Pick from the event's actual activity, never a generic default.
 
 Keep every label under ~40 chars, warm and concrete. Never invent event facts."""
 
@@ -44,6 +49,7 @@ _DEFAULTS: dict[str, Any] = {
     "bring_label": "Anything to bring?",
     "bring_hint": "I'll add it to the pinned list in chat.",
     "bring_suggestions": [],
+    "cover_emoji": None,
 }
 
 
@@ -89,10 +95,12 @@ def setup_suggestions(
             cap_default = max(2, min(int(cap_default), 30))
         except (TypeError, ValueError):
             cap_default = _DEFAULTS["capacity_default"]
+        from app.lana_ui import is_none_bring_item, sanitize_cover_emoji
+
         bring = [
             str(b).strip()[:60]
             for b in (data.get("bring_suggestions") or [])
-            if isinstance(b, str) and str(b).strip()
+            if isinstance(b, str) and str(b).strip() and not is_none_bring_item(b)
         ][:3]
         return {
             "capacity_label": _str(data.get("capacity_label"), _DEFAULTS["capacity_label"], 40),
@@ -104,6 +112,7 @@ def setup_suggestions(
             "bring_label": _str(data.get("bring_label"), _DEFAULTS["bring_label"], 60),
             "bring_hint": _str(data.get("bring_hint"), _DEFAULTS["bring_hint"], 80),
             "bring_suggestions": bring,
+            "cover_emoji": sanitize_cover_emoji(data.get("cover_emoji")),
         }
     except Exception:  # noqa: BLE001 - best-effort; deterministic fallback
         import logging

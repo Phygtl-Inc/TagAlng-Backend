@@ -1845,7 +1845,15 @@ def set_event_setup(
         draft["auto_approve"] = bool(body.auto_approve)
     if body.allow_attendee_share is not None:
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
-    bring = [str(b).strip()[:60] for b in (body.bring_items or []) if str(b).strip()][:12]
+    from app.lana_ui import is_none_bring_item
+
+    # A typed none-answer ("nothing", "no need") on the bring card is an empty list,
+    # not a literal chip.
+    bring = [
+        str(b).strip()[:60]
+        for b in (body.bring_items or [])
+        if str(b).strip() and not is_none_bring_item(str(b))
+    ][:12]
     draft["bring_items"] = bring
     ctx["event_draft"] = draft
     # Keep the scratch settings dict in sync so a same-turn re-parse doesn't clobber these.
