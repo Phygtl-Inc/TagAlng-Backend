@@ -35,6 +35,7 @@ load_dotenv(Path(__file__).parents[3] / ".env.local", override=True)
 
 import simulation
 import evaluation
+import qa_analyze
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -106,13 +107,21 @@ def main() -> None:
 
     results: list[dict] = []
     failures: list[dict] = []
+    qa_transcripts: list[dict] = []  # QA-rubric buckets only — for qa_analyze
+    qa_records_by_bucket: dict[str, list[tuple[dict, dict]]] = {}  # (transcript, result) pairs, for batch verdicts
 
     for i, (persona, bucket, seed) in enumerate(matrix, 1):
         print(f"\n[runner] {i}/{len(matrix)}")
         try:
             transcript = simulation.run(persona, bucket, seed)
-            result = evaluation.score(transcript)
+            # score_qa() only handles the find_coverage/host_confirm/edge_trust-style QA
+            # buckets and returns None otherwise, so this falls back to the original judge
+            # for every existing bucket unchanged.
+            result = evaluation.score_qa(transcript) or evaluation.score(transcript)
             results.append(result)
+            if evaluation._qa_rubric_for_bucket(bucket.bucket) is not None:
+                qa_transcripts.append(transcript)
+                qa_records_by_bucket.setdefault(bucket.bucket, []).append((transcript, result))
         except Exception as exc:
             entry = {
                 "persona_id": persona.id,
@@ -147,16 +156,48 @@ def main() -> None:
         for f in failures:
             print(f"    {f['persona_id']} × {f['bucket']}/{f['seed_label']}: {f['error']}")
 
+    if qa_transcripts:
+        print(f"\n[runner] qa_analyze — {len(qa_transcripts)} find/host/edge-style transcript(s)")
+        qa_stats = qa_analyze.analyze_transcripts(qa_transcripts)
+        print(f"  verify_walls={qa_stats['verify_walls']}  zip_dead_ends={qa_stats['zip_dead_ends']}"
+              f"  ny_bleed={qa_stats['ny_bleed']}  empty_replies={qa_stats['empty_replies']}")
+        if qa_stats["lang_mismatch"]:
+            print(f"  lang_mismatch: {[m['id'] for m in qa_stats['lang_mismatch']]}")
+        if qa_stats["kid_name_echo"]:
+            print(f"  kid_name_echo: {[m['id'] for m in qa_stats['kid_name_echo']]}")
+        if qa_stats["flags"]:
+            print(f"  flags: {[(f['id'], f['kind']) for f in qa_stats['flags']]}")
+        lat = qa_stats["latency_summary"]
+        if lat["n"]:
+            print(f"  latency: p50={lat['p50']}ms p90={lat['p90']}ms max={lat['max']}ms")
+
+    # Batch verdict per QA bucket — cross-conversation synthesis (systemic_issues,
+    # best_moments, one overall verdict), same shape as qa/run1's original judges.
+    qa_batch_verdicts: dict[str, dict] = {}
+    for bucket_name, records in qa_records_by_bucket.items():
+        verdict = evaluation.score_qa_batch(bucket_name, records)
+        if verdict:
+            qa_batch_verdicts[bucket_name] = verdict.model_dump()
+
     # Write a local run log to scratch/ for debugging (gitignored)
-    _write_run_log(run_ts, results, failures)
+    _write_run_log(run_ts, results, failures, qa_batch_verdicts)
 
 
-def _write_run_log(run_ts: str, results: list[dict], failures: list[dict]) -> None:
+def _write_run_log(
+    run_ts: str,
+    results: list[dict],
+    failures: list[dict],
+    qa_batch_verdicts: dict[str, dict] | None = None,
+) -> None:
     scratch_dir = Path(__file__).parent / "scratch"
     scratch_dir.mkdir(exist_ok=True)
     log_path = scratch_dir / f"run_{run_ts.replace(':', '-')}.json"
     log_path.write_text(
-        json.dumps({"results": results, "failures": failures}, indent=2, default=str),
+        json.dumps(
+            {"results": results, "failures": failures, "qa_batch_verdicts": qa_batch_verdicts or {}},
+            indent=2,
+            default=str,
+        ),
         encoding="utf-8",
     )
     print(f"\n[runner] run log → {log_path}")

@@ -12,6 +12,7 @@ For each (persona, seed) pair:
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -421,7 +422,9 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
                 repeat_count = 0
             last_user_message = user_turn.message
 
+            t0 = time.monotonic()
             lana_resp = _send_message(session_id, user_turn.message, jwt, http)
+            latency_ms = round((time.monotonic() - t0) * 1000)
             lana_reply = lana_resp.get("assistant_message", "")
             routing = lana_resp.get("routing") or {}
             print(f"  [lana {turn_num}] {lana_reply[:100]}")
@@ -431,11 +434,37 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
                 "user_message": user_turn.message,
                 "user_reasoning": user_turn.reasoning,
                 "lana_reply": lana_reply,
+                "latency_ms": latency_ms,
                 "intent_class": routing.get("intent_class"),
                 "intent_confidence": routing.get("confidence"),
                 "tool_called": routing.get("tool_called"),
+                "outcome": routing.get("outcome"),
                 "ui_intent": lana_resp.get("ui_intent"),
                 "ready_to_complete": lana_resp.get("ready_to_complete", False),
+                # Fuller raw-turn fields (mirrors qa/run1/harness/sim.mjs's extraction) — lets
+                # the same mechanical checks (verify-wall, ZIP-loop, NY-bleed, leaks) that run
+                # against qa/run1 transcripts also run against these Python-generated ones.
+                "ui_actions": [a.get("label") for a in (lana_resp.get("ui_actions") or [])],
+                "activity_previews": [
+                    {
+                        "title": p.get("title"),
+                        "when": p.get("starts_label") or p.get("starts_at"),
+                        "where": p.get("venue_name"),
+                    }
+                    for p in (lana_resp.get("activity_previews") or [])
+                ],
+                "event_draft": (
+                    {
+                        "title": (lana_resp.get("event_draft") or {}).get("title"),
+                        "starts_at": (lana_resp.get("event_draft") or {}).get("starts_at"),
+                        "location": (lana_resp.get("event_draft") or {}).get("venue_name"),
+                    }
+                    if lana_resp.get("event_draft")
+                    else None
+                ),
+                "peer_matches": len(lana_resp.get("peer_matches") or []),
+                "signal_saved": lana_resp.get("signal_saved"),
+                "requires_phone_verification": lana_resp.get("requires_phone_verification", False),
             })
 
             history.append({"role": "user", "content": user_turn.message})
