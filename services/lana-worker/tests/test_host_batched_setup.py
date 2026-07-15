@@ -172,11 +172,26 @@ class TestApplyHostBrain(unittest.TestCase):
         self.assertIs(ed["auto_approve"], False)
         self.assertIs(ed["allow_attendee_share"], True)
 
-    def test_monotonic_never_clobbers_real_title_or_venue(self) -> None:
-        ed = {"title": "Book Club", "venue_name": "Foxtail Coffee"}
+    def test_corrections_replace_title_and_venue(self) -> None:
+        # 2026-07-14 #9a: the brain only returns a value the host clearly stated, so a
+        # returned title/place is a CORRECTION and must replace the current draft value —
+        # the old fill-only-when-empty guard silently dropped "rename it / move it" edits.
+        ed = {
+            "title": "Book Club", "venue_name": "Foxtail Coffee",
+            "venue_address": "123 Oak St", "venue_lat": 28.4, "venue_lng": -81.3,
+            "place_id": "abc123",
+        }
         self._apply({"title": "Something Else", "place": "the park", "reply": "x"}, ed)
-        self.assertEqual(ed["title"], "Book Club")
-        self.assertEqual(ed["venue_name"], "Foxtail Coffee")
+        self.assertEqual(ed["title"], "Something Else")
+        self.assertEqual(ed["venue_name"], "the park")
+        # Moving the event drops the stale pin so publish re-resolves the new place.
+        for stale in ("venue_address", "venue_lat", "venue_lng", "place_id"):
+            self.assertIsNone(ed[stale])
+
+    def test_same_values_do_not_reset_pin(self) -> None:
+        ed = {"title": "Book Club", "venue_name": "Foxtail Coffee", "place_id": "abc123"}
+        self._apply({"title": "Book Club", "place": "Foxtail Coffee", "reply": "x"}, ed)
+        self.assertEqual(ed["place_id"], "abc123")
 
     def test_ignores_generic_title(self) -> None:
         ed: dict = {}

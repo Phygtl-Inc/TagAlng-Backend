@@ -406,17 +406,25 @@ def _apply_host_brain(
     """Apply the LLM host-turn brain's extraction to the draft — monotonically (never clobber a
     real value the host already gave). Understanding is the LLM's job; this just records it."""
     title = str(brain.get("title") or "").strip()
-    have_real_title = bool(existing_title) and not _is_generic_title(existing_title)
     # Reject a generic name in both raw ("meetup") and article-led ("a meetup") form.
     title_generic = _is_generic_title(title) or _is_generic_title(
         re.sub(r"^(?:a|an|the)\s+", "", title, flags=re.I)
     )
-    if title and not have_real_title and not title_generic:
+    # Corrections win (bug 2026-07-14 #9a): the brain only returns a title the host clearly
+    # stated, so a returned non-generic title REPLACES the current one — "don't call it that,
+    # call it X" used to be silently dropped by the fill-only-when-empty guard.
+    if title and not title_generic and title != existing_title:
         ed["title"] = title[:80]
     place = str(brain.get("place") or "").strip()
-    if place and not str(ed.get("venue_name") or "").strip():
+    prev_venue = str(ed.get("venue_name") or "").strip()
+    if place and place.lower() != prev_venue.lower():
         ed["venue_name"] = place[:80]
         turn_ctx["event_place_asked"] = True
+        if prev_venue:
+            # The host moved the event — drop the old pin so publish re-resolves the new place
+            # instead of shipping the stale address/coordinates under a new name.
+            for stale in ("venue_address", "venue_lat", "venue_lng", "place_id"):
+                ed[stale] = None
     cap = brain.get("capacity")
     if isinstance(cap, int):
         ed["max_attendees"] = cap

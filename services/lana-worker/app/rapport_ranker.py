@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 # Tunable without code changes; set both to 0 to effectively "always show" when a gap is open.
 _DEFAULT_MIN_HOURS = 6.0   # min gap between NEW asks (approximates once-per-session)
 _DEFAULT_MAX_PER_7D = 3    # rolling 7-day ceiling (the doc's "3/rolling-7-days")
+# A pending (shown-but-unanswered) ask is re-shown verbatim only this long. Past the
+# TTL it auto-rotates to a different question: silence IS an answer ("not this one").
+# Live evidence 2026-07-14: 25 gaps stuck in status='asked' up to 7 days, re-shown
+# every session — "Lana always asks the same question". 0 disables rotation.
+_DEFAULT_PENDING_TTL_HOURS = 48.0
 
 # relationship_tier enum order (see 20260613120000_social_graph_lana_tools.sql).
 _TIER_RANK = {"stranger": 0, "nudge": 1, "acquaintance": 2, "direct": 3, "irl_peer": 4}
@@ -164,6 +169,22 @@ def _backfill_from_claims(user_id: str) -> bool:
         return False
 
 
+def _pending_is_stale(pending: dict[str, Any]) -> bool:
+    """True when a pending ask has been on the tile past the TTL without an answer or
+    a skip — time to rotate instead of asking the same thing again."""
+    ttl_hours = _env_float("LANA_RAPPORT_PENDING_TTL_HOURS", _DEFAULT_PENDING_TTL_HOURS)
+    if ttl_hours <= 0:
+        return False
+    raw = str(pending.get("asked_at") or "").replace("Z", "+00:00")
+    try:
+        asked_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return True  # unparseable timestamp → rotate rather than pin forever
+    if asked_at.tzinfo is None:
+        asked_at = asked_at.replace(tzinfo=timezone.utc)
+    return _now() - asked_at > timedelta(hours=ttl_hours)
+
+
 def _pending_ask(user_id: str) -> dict[str, Any] | None:
     """A gap already shown and awaiting the user's action — re-show it verbatim."""
     try:
@@ -214,9 +235,19 @@ def next_ask(
     else:
         # 1) Re-show a still-pending ask — no re-mark, no duplicate impression event.
         #    Works for dynamic semantic gaps too (get_gap returns None → _build tolerates it).
+        #    Past the pending TTL, silence counts as "not this question": record a skip
+        #    (reopens or expires via the RPC) and fall through to pick a DIFFERENT ask.
         pending = _pending_ask(user_id)
-        if pending:
+        if pending and not _pending_is_stale(pending):
             return _build(pending, get_gap(pending["gap_id"]))
+        if pending:
+            exclude_id = pending.get("gap_row_id")
+            try:
+                service_client().rpc(
+                    "increment_skip_and_reopen", {"p_gap_row_id": exclude_id}
+                ).execute()
+            except Exception:
+                logger.exception("rapport: stale-pending rotate failed for %s", user_id)
 
         # 2) Daily cap — something was asked (and since answered/skipped) within the window.
         if _recently_asked(user_id):

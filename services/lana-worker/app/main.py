@@ -416,6 +416,8 @@ def _turn_debug_from_ctx(
         orchestrator=orchestrator,
         event_host_active=bool(ctx.get("event_host_active")),
         slots={k: v for k, v in (slots or {}).items() if not k.startswith("_")} or None,
+        thinking=str(routing.get("thinking") or "") or None,
+        enforce_notes=[str(n) for n in (routing.get("enforce_notes") or [])],
     )
 
 
@@ -1054,9 +1056,10 @@ def create_lana_session(
                 use_orch = bool(meta.get("orchestrator", use_orch))
                 break
             if not opening:
+                _opening_lang = get_user_preferred_language(auth.user_id)
                 if purpose == "lana":
                     opening, status, session_ctx, ui_raw = lana_unified_opening(
-                        is_anonymous=auth.is_anonymous
+                        is_anonymous=auth.is_anonymous, lang=_opening_lang
                     )
                     merged_ctx = {**merged_ctx, **session_ctx}
                     use_orch = False
@@ -1083,6 +1086,7 @@ def create_lana_session(
 
         use_orch = use_orchestrator_for_purpose(purpose)
         if purpose == "lana":
+            _opening_lang2 = get_user_preferred_language(auth.user_id)
             # Recover an event a guest built before logging into this (existing) account —
             # the login reset would otherwise lose it. Seed the host context so their next
             # message republishes it, and greet with the event instead of the cold opening.
@@ -1130,7 +1134,7 @@ def create_lana_session(
                 from app.look_meet import save_pending_meet_seek
 
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
-                    is_anonymous=auth.is_anonymous
+                    is_anonymous=auth.is_anonymous, lang=_opening_lang2
                 )
                 session_ctx["look_seek_pending"] = recovered_seek
                 saved_reply = save_pending_meet_seek(
@@ -1151,7 +1155,7 @@ def create_lana_session(
                 from app.discovery_route import save_pending_signal_ask
 
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
-                    is_anonymous=auth.is_anonymous
+                    is_anonymous=auth.is_anonymous, lang=_opening_lang2
                 )
                 session_ctx["signal_pending"] = recovered_signal
                 saved_reply = save_pending_signal_ask(
@@ -1171,7 +1175,7 @@ def create_lana_session(
                     auth.user_id, {}
                 )
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
-                    is_anonymous=auth.is_anonymous, needs_name=_needs_name
+                    is_anonymous=auth.is_anonymous, needs_name=_needs_name, lang=_opening_lang2
                 )
                 draft_raw = None
                 use_orch = False
@@ -2263,6 +2267,13 @@ class RapportSkipBody(_BaseModel):
     gap_row_id: str
 
 
+class LanaFeedbackBody(_BaseModel):
+    body: str
+    category: str = "other"  # bug | confusing | wrong_answer | idea | other
+    session_id: str | None = None
+    message_id: str | None = None
+
+
 class RapportMuteBody(_BaseModel):
     gap_id: str
 
@@ -2272,6 +2283,55 @@ class RapportNextAskBody(_BaseModel):
     # True when the user taps the tile's refresh (⟳): retire the current ask and return a
     # different one now, bypassing the 24h cap.
     cycle: bool = False
+
+
+@app.post("/lana/feedback")
+def post_lana_feedback(
+    body: LanaFeedbackBody,
+    authorization: str | None = Header(default=None),
+):
+    """In-session feedback (2026-07-14 #5): file the issue the moment it happens, anchored
+    to the session/message. The worker stamps the turn's routing snapshot so triage can
+    replay the exact state — a report without repro context is a guess."""
+    auth = verify_auth(authorization)
+    text = str(body.body or "").strip()[:2000]
+    if not text:
+        raise HTTPException(status_code=422, detail="feedback_body_empty")
+    category = body.category if body.category in (
+        "bug", "confusing", "wrong_answer", "idea", "other"
+    ) else "other"
+
+    context: dict[str, Any] = {}
+    if body.session_id:
+        try:
+            session = get_session_for_user(body.session_id, auth.user_id)
+            ctx = dict(session.get("context") or {})
+            context = {
+                "last_routing": ctx.get("last_routing"),
+                "routing_phase": ctx.get("routing_phase"),
+                "active_intent": ctx.get("active_intent"),
+                "lang": ctx.get("lang"),
+                "purpose": session.get("purpose"),
+            }
+        except Exception:  # noqa: BLE001 — feedback must never fail on context lookup
+            context = {"session_lookup": "failed"}
+
+    row = {
+        "user_id": auth.user_id,
+        "session_id": body.session_id,
+        "message_id": body.message_id,
+        "category": category,
+        "body": text,
+        "context": context,
+    }
+    try:
+        service_client().table("lana_feedback").insert(row).execute()
+    except Exception:
+        _LOG.exception("lana_feedback_insert_failed user=%s", auth.user_id)
+        raise HTTPException(status_code=500, detail="feedback_save_failed")
+    amplitude_track("lana_feedback_filed", user_id=auth.user_id,
+                    event_properties={"category": category, "session_id": body.session_id})
+    return {"ok": True}
 
 
 @app.post("/lana/rapport/next-ask")
