@@ -433,6 +433,10 @@ class TurnDebug(BaseModel):
     orchestrator: bool = False
     event_host_active: bool = False
     slots: dict[str, Any] | None = None
+    # Router rationale + deterministic overrides — the FE "thought process" drawer
+    # renders these as the detail lines under the one-line label (bug 2026-07-14 #4).
+    thinking: str | None = None
+    enforce_notes: list[str] = Field(default_factory=list)
 
 
 class SendMessageResponse(BaseModel):

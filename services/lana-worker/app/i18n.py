@@ -52,7 +52,7 @@ _ES_WORDS = frozenset({
     "también", "gracias", "soy", "estoy", "tengo", "vivo", "somos", "mucho",
     "muchas", "muchos", "otra", "otras", "otros", "nueva", "nuevo", "ciudad",
     "conocer", "hijos", "hija", "hijo", "ayuda", "ayúdame", "qué", "usted",
-    "ustedes", "mudé", "vecinas", "vecinos", "inglés", "español", "hablar",
+    "ustedes", "mudé", "vecinos", "vecinos", "inglés", "español", "hablar",
     "hablo", "habla", "pequeña", "pequeño", "encantada", "gustaría",
 })
 _PT_WORDS = frozenset({
@@ -61,7 +61,7 @@ _PT_WORDS = frozenset({
     "aqui", "perto", "filhos", "filha", "filho", "criança", "crianças",
     "pequenos", "pequenas", "obrigada", "obrigado", "também", "tenho", "muito",
     "muitas", "muitos", "outra", "outras", "outros", "nova", "novo", "moro",
-    "bairro", "vizinha", "vizinhas", "vizinhos", "procuro", "procurando",
+    "bairro", "vizinha", "vizinhos", "vizinhos", "procuro", "procurando",
     "brasileira", "brasileiro", "inglês", "português", "falo", "fala",
     "encontrar", "mamãe", "mamães", "ajuda", "quarteirão",
 })
@@ -273,8 +273,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     # discovery funnel — ZIP asks
     "discovery.ask_zip_peers": {
         "en": "What ZIP code is your block? That helps me find neighbors near you.",
-        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? Así puedo encontrar vecinas cerca de ti.",
-        "pt": "Qual é o ZIP code do seu quarteirão? Assim consigo encontrar vizinhas perto de você.",
+        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? Así puedo encontrar vecinos cerca de ti.",
+        "pt": "Qual é o ZIP code do seu quarteirão? Assim consigo encontrar vizinhos perto de você.",
     },
     "discovery.ask_zip_activities": {
         "en": "What ZIP code is your block? That helps me find activities near you.",
@@ -283,8 +283,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "discovery.ask_zip_both": {
         "en": "What ZIP code is your block? That helps me find neighbors and activities near you.",
-        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? Así puedo encontrar vecinas y actividades cerca de ti.",
-        "pt": "Qual é o ZIP code do seu quarteirão? Assim consigo encontrar vizinhas e atividades perto de você.",
+        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? Así puedo encontrar vecinos y actividades cerca de ti.",
+        "pt": "Qual é o ZIP code do seu quarteirão? Assim consigo encontrar vizinhos e atividades perto de você.",
     },
     "discovery.ask_zip_short": {
         "en": "What ZIP code is your block? (e.g. 32827)",
@@ -305,8 +305,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     # discovery — verify gates
     "discovery.verify_gate_neighbors": {
         "en": "I can see neighbors nearby — to show names and connect you, verify your email first. What's your email?",
-        "es": "Veo vecinas cerca — para mostrarte nombres y conectarte, primero verifica tu correo. ¿Cuál es tu email?",
-        "pt": "Estou vendo vizinhas por perto — para mostrar nomes e conectar você, primeiro verifique seu e-mail. Qual é o seu e-mail?",
+        "es": "Veo vecinos cerca — para mostrarte nombres y conectarte, primero verifica tu correo. ¿Cuál es tu email?",
+        "pt": "Estou vendo vizinhos por perto — para mostrar nomes e conectar você, primeiro verifique seu e-mail. Qual é o seu e-mail?",
     },
     "discovery.verify_gate_event": {
         "en": "To join {event}, verify your email first — I'll send you a code. What's your email?",
@@ -329,13 +329,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "discovery.activities_tail_verified": {
         "en": "Want to RSVP to one of these, or should I find neighbors like you?",
-        "es": "¿Quieres apuntarte a alguna, o busco vecinas como tú?",
-        "pt": "Quer confirmar presença em alguma, ou procuro vizinhas como você?",
+        "es": "¿Quieres apuntarte a alguna, o busco vecinos como tú?",
+        "pt": "Quer confirmar presença em alguma, ou procuro vizinhos como você?",
     },
     "discovery.activities_tail_guest": {
         "en": "Verify your email to RSVP — or ask me to find neighbors like you.",
-        "es": "Verifica tu correo para apuntarte — o pídeme que busque vecinas como tú.",
-        "pt": "Verifique seu e-mail para confirmar presença — ou me peça para encontrar vizinhas como você.",
+        "es": "Verifica tu correo para apuntarte — o pídeme que busque vecinos como tú.",
+        "pt": "Verifique seu e-mail para confirmar presença — ou me peça para encontrar vizinhos como você.",
     },
     # discovery — peer preview
     "discovery.peers_empty": {
@@ -353,8 +353,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "discovery.peers_header_many": {
         "en": "I found {n} neighbors near {where}:",
-        "es": "Encontré {n} vecinas cerca de {where}:",
-        "pt": "Encontrei {n} vizinhas perto de {where}:",
+        "es": "Encontré {n} vecinos cerca de {where}:",
+        "pt": "Encontrei {n} vizinhos perto de {where}:",
     },
     "discovery.peers_tail_verified": {
         "en": "Tell me more about you for sharper matches — or ask me to introduce you to someone.",

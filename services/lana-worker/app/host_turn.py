@@ -24,9 +24,12 @@ translate it); booleans/integers are language-neutral. Write the reply in the la
 are writing in.
 
 1) EXTRACT any event details they clearly stated (never guess; use null when unsure):
-   - title: a name for the event if they gave or proposed one
+   - title: a name for the event if they gave, proposed, or CHANGED one. A correction ("don't
+     call it that — call it X", "rename it to X") is a statement: extract the NEW name.
    - place: ONE clear location (their home, a named venue, a park). null if none — or if they're
-     weighing options ("my place or a café"), leave it null; don't pick for them.
+     weighing options ("my place or a café"), leave it null; don't pick for them. If they name a
+     DIFFERENT place than the event already has ("actually let's do the park"), extract the new
+     one — corrections win over the current draft.
    - capacity: an integer max headcount if they signalled one ("5-7 people" -> 7, "just a few" or
      "small group" -> a sensible small number like 6)
    - auto_approve: true if anyone can join freely, false if they want to approve joiners
@@ -38,7 +41,7 @@ are writing in.
      you to coordinate availability, suggest they pick a time and you'll post it so neighbors RSVP.
    - If they ask for advice (how many, where, what time), give a concrete suggestion.
    - Never invent a name, date, or place they didn't give. Don't repeat yourself mechanically.
-   - Warm and natural, mom-to-mom, under ~55 words. No markdown headers or lists.
+   - Warm and natural, neighbor-to-neighbor, under ~55 words. No markdown headers or lists.
 
 Return ONE JSON object:
 {"title": <string|null>, "place": <string|null>, "capacity": <int|null>,

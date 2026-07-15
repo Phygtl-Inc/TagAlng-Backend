@@ -7,16 +7,20 @@ from typing import Any
 from app.discovery_route import handle_discovery_turn
 from app.discovery_slots import discovery_ai_enabled
 from app.guest_login import wants_login as wants_login_intent
+from app.i18n import localize_text
 
+# English SOURCE copy only — never shipped verbatim in a non-EN session: the opening is
+# AI-rendered into the user's preferred language via i18n.localize_text (cached). Copy is
+# community-neutral by decree (2026-07-14): "neighbors", never "moms"; no she/her.
 LANA_UNIFIED_OPENING = "How can I help you today?"
 # Guests (not logged in) get a framing line that explains the two things Lana does;
-# signed-in moms go straight to the familiar prompt.
+# signed-in users go straight to the familiar prompt.
 LANA_UNIFIED_OPENING_GUEST = (
     "I help you do two things · find something nearby · "
-    "or share something with nearby moms."
+    "or create something for your neighbors."
 )
-# A signed-in mom who hasn't told us her name yet is greeted with the name-ask up front —
-# it's needed anyway, and asking first avoids interrupting a topic mid-chat.
+# A signed-in user who hasn't told us their name yet is greeted with the name-ask up
+# front — it's needed anyway, and asking first avoids interrupting a topic mid-chat.
 LANA_UNIFIED_OPENING_NEEDS_NAME = (
     "Before we dive in — what should neighbors call you? A first name's all I need."
 )
@@ -25,6 +29,7 @@ LANA_UNIFIED_OPENING_NEEDS_NAME = (
 def lana_unified_opening(
     is_anonymous: bool = False,
     needs_name: bool = False,
+    lang: str | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
     ui: dict[str, Any] = {
         "bucket": None,
@@ -48,9 +53,9 @@ def lana_unified_opening(
         ctx["awaiting_upfront_name"] = True
         ctx["upfront_name_attempts"] = 0
         ctx["routing_phase"] = "need_display_name"
-        return LANA_UNIFIED_OPENING_NEEDS_NAME, "continue", ctx, ui
+        return localize_text(LANA_UNIFIED_OPENING_NEEDS_NAME, lang), "continue", ctx, ui
     opening = LANA_UNIFIED_OPENING_GUEST if is_anonymous else LANA_UNIFIED_OPENING
-    return opening, "continue", ctx, ui
+    return localize_text(opening, lang), "continue", ctx, ui
 
 
 def lana_unified_turn(
