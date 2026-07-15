@@ -1,0 +1,109 @@
+{
+  "id": "host_7",
+  "tags": [
+    "host"
+  ],
+  "zip": "32812",
+  "turns": [
+    {
+      "sent": "I want to host a meet. park hangout sometime next week whenever people can",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 12565,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32812",
+      "hint": null,
+      "status": 200,
+      "ms": 10728,
+      "assistant_message": "Thanks for sharing your zip code! Could you let me know which park you'd like to meet at, and what day and time works for you? We also need a name for your event, but I can help with that if you like.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 10851,
+      "assistant_message": "Great! Could you let me know which park you’d like to meet at, and what day and time work best for you? Once we have those details and a name for your hangout, I can post the event for neighbors to join.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:46:36.476Z",
+  "session": "1e347806-6420-4b03-82f1-b9a0a1184ea2",
+  "finishedAt": "2026-07-10T10:47:11.496Z"
+}

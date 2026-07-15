@@ -12,9 +12,11 @@ const body = src
 const SCN = [];
 eval(body);
 
-const SUPABASE = "https://rjlcyvwogmfmngemhbmn.supabase.co";
-const ANON_KEY = "sb_publishable_KLsy-8OuVq92NKWtg8bt7A_bxGUFwf2";
-const WORKER = "https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app";
+// Configurable via env so this can target dev/staging instead of always hitting prod —
+// defaults preserve run #1's exact behavior when unset.
+const SUPABASE = process.env.QA_SUPABASE_URL ?? "https://rjlcyvwogmfmngemhbmn.supabase.co";
+const ANON_KEY = process.env.QA_SUPABASE_ANON_KEY ?? "sb_publishable_KLsy-8OuVq92NKWtg8bt7A_bxGUFwf2";
+const WORKER = process.env.QA_LANA_WORKER_URL ?? "https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app";
 const OUT = "./runs";
 
 // which scenarios still need a run?
@@ -89,7 +91,11 @@ async function runScenario(sc) {
   try {
     const jwt = await anonJwt(sc.tags.includes("edge"));
     const H = { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` };
-    const sess = await fetch(`${WORKER}/lana/sessions`, { method: "POST", headers: H, body: "{}" }).then((r) => r.json());
+    // See sim.mjs for why both fields are sent — force_new is live on prod today, fresh is
+    // the alias landing with feature/session-scoped-drafts. This directly fixes the
+    // pooling-interleave problem sim2.mjs's JWT-pool workaround exists to route around —
+    // worth keeping both belt-and-suspenders until that branch ships.
+    const sess = await fetch(`${WORKER}/lana/sessions`, { method: "POST", headers: H, body: JSON.stringify({ fresh: true, force_new: true }) }).then((r) => r.json());
     const sid = sess.session_id;
     record.session = sid;
     for (const turn of sc.turns) {

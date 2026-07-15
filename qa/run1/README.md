@@ -33,10 +33,27 @@ harness was standalone, driving the prod API directly.
    34 scenarios have clean dedicated sessions: all 32 find_* + host_0 + host_3).
    Fix for the gate: one account per scenario, or {"fresh": true} on session create
    (added in PR feature/session-scoped-drafts).
+   STATUS (2026-07-10): sim.mjs/sim2.mjs/probe.mjs now send both `fresh: true` and
+   `force_new: true` on every session create. `force_new` is already live on prod today
+   (verified against origin/main's CreateSessionRequest) so this already gets real
+   per-scenario session isolation on rerun; `fresh` is a no-op until
+   feature/session-scoped-drafts merges/deploys, at which point it becomes the primary
+   name (both fields keep working — unknown fields are ignored by the request model).
 2. Host sims stop at draft stage by design (never publish to prod). Use is_test accounts/events
    (PR feature/event-data-purge) or a staging worker for full-loop coverage.
 3. Conversation-level sim latency ≠ user-perceived latency once SSE deltas land
    (PR feature/sse-token-streaming) — keep measuring time-to-first-delta separately.
+
+## Retargeting the harness (2026-07-10)
+sim.mjs / sim2.mjs / probe.mjs now read their endpoints from env vars instead of hardcoding
+prod, so this suite can target a dev/staging worker without editing code:
+```
+QA_SUPABASE_URL=...
+QA_SUPABASE_ANON_KEY=...
+QA_LANA_WORKER_URL=...
+```
+All three default to run #1's exact original values when unset, so `node sim.mjs` with no
+env still reproduces the original behavior against prod.
 
 ## Suggested gate assertions (from the report, with baselines)
 canned-opener rate ≤2/24 (was 15/24) · verify-wall ≤5% of turns (was 17%) ·

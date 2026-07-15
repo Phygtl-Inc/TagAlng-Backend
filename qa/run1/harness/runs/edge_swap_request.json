@@ -1,0 +1,66 @@
+{
+  "id": "edge_swap_request",
+  "tags": [
+    "edge",
+    "comingsoon"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "I have 3T rain boots to give away",
+      "hint": "share_item",
+      "status": 200,
+      "ms": 3953,
+      "assistant_message": "Heard you — **3T rain boots · free**. What condition is it in?",
+      "routing": {
+        "outcome": "pass_along",
+        "intent_class": "swap",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "ok so what CAN you do?",
+      "hint": null,
+      "status": 200,
+      "ms": 3019,
+      "assistant_message": "I'm Lana — your block concierge. I can help you find neighbors like you, swap or borrow items, meet for playgroups, share local tips, host small gatherings, and make warm introductions when you're ready. What would you like to start with?",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "help_capabilities",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:49:59.310Z",
+  "session": "db38fdf2-9fac-4c7d-a0d0-e5552aa74b3f",
+  "finishedAt": "2026-07-10T10:50:09.038Z"
+}

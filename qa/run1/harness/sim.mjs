@@ -3,9 +3,11 @@
 // tapping offered ui_actions). Writes one JSON per conversation + a summary JSONL.
 import { writeFileSync, mkdirSync } from "node:fs";
 
-const SUPABASE = "https://rjlcyvwogmfmngemhbmn.supabase.co";
-const ANON_KEY = "sb_publishable_KLsy-8OuVq92NKWtg8bt7A_bxGUFwf2";
-const WORKER = "https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app";
+// Configurable via env so this can target dev/staging instead of always hitting prod —
+// defaults preserve run #1's exact behavior when unset.
+const SUPABASE = process.env.QA_SUPABASE_URL ?? "https://rjlcyvwogmfmngemhbmn.supabase.co";
+const ANON_KEY = process.env.QA_SUPABASE_ANON_KEY ?? "sb_publishable_KLsy-8OuVq92NKWtg8bt7A_bxGUFwf2";
+const WORKER = process.env.QA_LANA_WORKER_URL ?? "https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app";
 const OUT = "./runs";
 mkdirSync(OUT, { recursive: true });
 
@@ -172,7 +174,15 @@ async function runScenario(sc) {
   try {
     const jwt = await anonJwt();
     const H = { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` };
-    const sess = await fetch(`${WORKER}/lana/sessions`, { method: "POST", headers: H, body: "{}" }).then((r) => r.json());
+    // Forces a new session per scenario instead of resuming the account's active one — this
+    // is what run #1's session-pooling artifact needed (see qa/run1/README.md).
+    // force_new is already live on prod today (CreateSessionRequest.force_new, verified
+    // against origin/main). fresh is the alias added by feature/session-scoped-drafts
+    // (unmerged as of this writing) along with the deeper per-session-draft-state fix —
+    // sending both means this call gets real isolation now via force_new, and keeps working
+    // once that branch ships and `fresh` becomes the primary name (unknown fields are
+    // ignored by CreateSessionRequest, so this is safe pre- and post-merge).
+    const sess = await fetch(`${WORKER}/lana/sessions`, { method: "POST", headers: H, body: JSON.stringify({ fresh: true, force_new: true }) }).then((r) => r.json());
     const sid = sess.session_id;
     record.session = sid;
 

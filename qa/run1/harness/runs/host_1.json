@@ -1,0 +1,109 @@
+{
+  "id": "host_1",
+  "tags": [
+    "host"
+  ],
+  "zip": "32832",
+  "turns": [
+    {
+      "sent": "I want to host a meet. coffee at my place saturday 10am for moms on my street",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 10628,
+      "assistant_message": "Here's your meet — **Street Moms Coffee Morning**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Street Moms Coffee Morning",
+        "starts_at": "2026-07-11T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32832",
+      "hint": null,
+      "status": 200,
+      "ms": 8304,
+      "assistant_message": "Updated **Street Moms Coffee Morning** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Street Moms Coffee Morning",
+        "starts_at": "2026-07-11T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 8201,
+      "assistant_message": "Updated **Street Moms Coffee Morning** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Street Moms Coffee Morning",
+        "starts_at": "2026-07-11T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:45:19.004Z",
+  "session": "60796a0c-d10f-4dc1-bb15-e47f73a26da4",
+  "finishedAt": "2026-07-10T10:45:47.071Z"
+}

@@ -1,0 +1,139 @@
+{
+  "id": "find_fl_12",
+  "tags": [
+    "find",
+    "fl",
+    "Family & kids"
+  ],
+  "zip": "32812",
+  "turns": [
+    {
+      "sent": "I'm looking for a meet or playgroup",
+      "hint": "look_meet",
+      "status": 200,
+      "ms": 3913,
+      "assistant_message": "Love it — what kind of thing are you up for?",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "Family & kids",
+      "hint": null,
+      "status": 200,
+      "ms": 3716,
+      "assistant_message": "What's your ZIP code? Once I know your block I can show what's happening nearby.",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "32812",
+      "hint": null,
+      "status": 200,
+      "ms": 8290,
+      "assistant_message": "Nothing like **Family & kids** on your block in the next couple weeks. Want me to listen and text you the moment a neighbor wants the same — or widen the search?",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Yes, listen for me",
+        "Widen the search"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "Something for my 4 year old, we're free weekday mornings",
+      "hint": null,
+      "status": 200,
+      "ms": 3375,
+      "assistant_message": "Nothing like **Something for my 4 year old, we're free weekday mornings** on your block in the next couple weeks. Want me to listen and text you the moment a neighbor wants the same — or widen the search?",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Yes, listen for me",
+        "Widen the search"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:23:18.917Z",
+  "session": "a05fc1b6-218c-437e-8efc-41d7af0cccb9",
+  "finishedAt": "2026-07-10T10:23:39.389Z"
+}

@@ -1,7 +1,8 @@
 // Single-conversation probe: learn the worker's SSE format before scaling up.
-const SUPABASE = "https://rjlcyvwogmfmngemhbmn.supabase.co";
-const ANON_KEY = "sb_publishable_KLsy-8OuVq92NKWtg8bt7A_bxGUFwf2";
-const WORKER = "https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app";
+// Configurable via env (see sim.mjs) — defaults preserve run #1's exact behavior when unset.
+const SUPABASE = process.env.QA_SUPABASE_URL ?? "https://rjlcyvwogmfmngemhbmn.supabase.co";
+const ANON_KEY = process.env.QA_SUPABASE_ANON_KEY ?? "sb_publishable_KLsy-8OuVq92NKWtg8bt7A_bxGUFwf2";
+const WORKER = process.env.QA_LANA_WORKER_URL ?? "https://tagalng-lana-worker-s5gmxb6whq-ue.a.run.app";
 
 async function main() {
   // 1. anonymous signup
