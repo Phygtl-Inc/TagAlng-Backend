@@ -651,6 +651,89 @@ def persist_kids_count(user_id: str, kids_count: int | None) -> None:
     service_client().table("users").update({"kids_count": kids_count}).eq("id", user_id).execute()
 
 
+_BACKFILL_COOLDOWN: dict[str, float] = {}
+_BACKFILL_COOLDOWN_S = 300.0
+
+
+def backfill_claim_embeddings(*, user_ids: list[str], limit: int = 40) -> int:
+    """Embed claims that were saved without vectors (write-time embed is best-effort).
+
+    Exact-concept matching works without embeddings (lexical); this heals the
+    FUZZY match path for rows the embed API failed on. Returns rows fixed.
+    """
+    ids = [str(u) for u in user_ids if u]
+    if not ids:
+        return 0
+    sb = service_client()
+    res = (
+        sb.table("user_identity_claims")
+        .select("id, concept, label, source_quote, bucket")
+        .in_("user_id", ids)
+        .is_("embedding", "null")
+        .is_("dismissed_at", "null")
+        .limit(limit)
+        .execute()
+    )
+    fixed = 0
+    for row in res.data or []:
+        try:
+            embedding = vertex_embed(
+                claim_embedding_text(
+                    concept=str(row.get("concept") or ""),
+                    label=str(row.get("label") or ""),
+                    source_quote=row.get("source_quote"),
+                    bucket=row.get("bucket"),
+                )
+            )
+        except Exception:
+            logger.exception("claim_embed_backfill_failed id=%s", row.get("id"))
+            continue
+        if embedding is None:
+            continue
+        sb.table("user_identity_claims").update({"embedding": embedding}).eq(
+            "id", row["id"]
+        ).execute()
+        fixed += 1
+    if fixed:
+        logger.info("claim_embed_backfill fixed=%d users=%d", fixed, len(ids))
+    return fixed
+
+
+def kick_claim_embedding_backfill(
+    *, user_id: str | None, block_id: str | None = None
+) -> None:
+    """Fire-and-forget self-heal: embed the caller's (and their block's) NULL-embedding
+    claims in a daemon thread so the vector matcher is whole by the next turn."""
+    import threading
+    import time
+
+    key = f"{user_id or ''}:{block_id or ''}"
+    now = time.time()
+    if now - _BACKFILL_COOLDOWN.get(key, 0.0) < _BACKFILL_COOLDOWN_S:
+        return
+    _BACKFILL_COOLDOWN[key] = now
+
+    def _run() -> None:
+        try:
+            ids: list[str] = [user_id] if user_id else []
+            if block_id:
+                res = (
+                    service_client()
+                    .table("users")
+                    .select("id")
+                    .eq("home_block_id", block_id)
+                    .limit(30)
+                    .execute()
+                )
+                ids.extend(str(r["id"]) for r in res.data or [] if r.get("id"))
+            if ids:
+                backfill_claim_embeddings(user_ids=list(dict.fromkeys(ids)))
+        except Exception:
+            logger.exception("claim_embed_backfill_thread_failed")
+
+    threading.Thread(target=_run, daemon=True, name="claim-embed-backfill").start()
+
+
 def _embed_claim(c: ExtractedClaim) -> list[float] | None:
     try:
         text = claim_embedding_text(

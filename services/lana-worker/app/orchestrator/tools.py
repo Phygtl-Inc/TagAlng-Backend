@@ -82,6 +82,7 @@ def execute_tool(
             args=args,
             user_jwt=user_jwt,
             block_id=block_id,
+            user_id=user_id,
         )
     return {"status": "error", "tool": tool_name, "reason": "unknown_tool"}
 
@@ -457,6 +458,7 @@ def _find_peers(
     args: dict[str, Any],
     user_jwt: str | None,
     block_id: str | None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     from app.discovery_route import (
         fetch_blocks_for_zip,
@@ -490,13 +492,20 @@ def _find_peers(
         }
 
     if not session_ctx.get("identity_snippet"):
-        return {
-            "status": "blocked",
-            "tool": "find_peers",
-            "reason": "need_identity",
-            "routing_phase": "need_identity",
-            "block_id": bid,
-        }
+        # Signed-in users' saved claims answer "who are you" — never block on it.
+        from app.identity_ask import identity_from_saved_claims
+
+        seeded = identity_from_saved_claims(user_id)
+        if seeded:
+            session_ctx["identity_snippet"] = seeded
+        else:
+            return {
+                "status": "blocked",
+                "tool": "find_peers",
+                "reason": "need_identity",
+                "routing_phase": "need_identity",
+                "block_id": bid,
+            }
 
     if not session_ctx.get("phone_verified"):
         peers = fetch_preview_peers_on_block(bid, limit=int(args.get("limit") or 3))
@@ -518,6 +527,12 @@ def _find_peers(
             "requires_phone_verification": needs_verify_gate,
         }
 
+    try:
+        from app.claims_persist import kick_claim_embedding_backfill
+
+        kick_claim_embedding_backfill(user_id=user_id, block_id=bid)
+    except Exception:
+        pass
     peers = fetch_peer_matches(jwt, limit=int(args.get("limit") or 5))
     return {
         "status": "ok",

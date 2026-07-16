@@ -496,13 +496,6 @@ def format_peer_detail_reply(
     )
 
 
-def _short_peer_label(label: str, *, max_traits: int = 2) -> str:
-    parts = [p.strip() for p in str(label or "").split("·") if p.strip()]
-    if len(parts) <= max_traits:
-        return str(label or "shared traits").strip() or "shared traits"
-    return " · ".join(parts[:max_traits]) + " · …"
-
-
 def format_attr_peers_reply(
     peers: list[dict[str, Any]],
     *,
@@ -515,21 +508,17 @@ def format_attr_peers_reply(
                 f"No one on your block matches all of \"{filter_text}\" yet. "
                 f"{partial_summary}"
             )
+        # Search-first, then offer the broadcast — mirrors the empty activities lane.
         return (
             f"I don't see neighbors matching \"{filter_text}\" on your block yet. "
-            "Try broadening the description or complete your profile so I can match better."
+            "Want me to keep an ear out and text you when one joins — or try a broader description?"
         )
+    # The cards carry names + shared traits — the text stays to the count + next step.
     n = len(peers)
-    lines = [
+    return (
         f"I found {n} neighbor{'s' if n != 1 else ''} matching \"{filter_text}\" — "
-        "see the cards below."
-    ]
-    for p in peers[:5]:
-        nick = str(p.get("nickname") or "A neighbor")
-        label = _short_peer_label(str(p.get("matching_peer_label") or "shared traits"))
-        lines.append(f"• {nick} — {label}")
-    lines.append("Want me to introduce you to any of them?")
-    return "\n".join(lines)
+        "here's what you have in common. Want me to introduce you to any of them?"
+    )
 
 
 def handle_notification_prefs(user_jwt: str, message: str) -> tuple[str, str]:

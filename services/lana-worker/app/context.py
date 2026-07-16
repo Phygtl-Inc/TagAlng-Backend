@@ -158,7 +158,7 @@ def _load_vector_peer_hints(user_id: str) -> list[dict[str, Any]]:
         sb = service_client()
         res = sb.rpc(
             "match_peers_by_claim_vectors_for_user",
-            {"p_user_id": user_id, "p_limit": 5, "p_min_similarity": 0.65},
+            {"p_user_id": user_id, "p_limit": 5, "p_min_similarity": 0.70},
         ).execute()
         rows = res.data or []
         return rows if isinstance(rows, list) else []

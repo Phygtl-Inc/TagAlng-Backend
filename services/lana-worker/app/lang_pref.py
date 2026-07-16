@@ -59,10 +59,19 @@ def set_user_preferred_language(user_id: str, lang: str) -> bool:
         service_client().table("users").update({"locale": code}).eq(
             "id", user_id
         ).execute()
-        return True
     except Exception:  # noqa: BLE001
         _LOG.exception("preferred_language_write_failed")
         return False
+    # Re-render the user's queued rapport-tile questions into the new language in the
+    # background (2–5 short renders), so the "By the way…" backlog is already in-language
+    # by her next home render — no stale old-language questions after a switch.
+    try:
+        from app.rapport_i18n import localize_user_gaps_async
+
+        localize_user_gaps_async(user_id, code)
+    except Exception:  # noqa: BLE001 — tile i18n must never block saving the preference
+        _LOG.exception("lang_pref_gap_rerender_kickoff_failed")
+    return True
 
 
 def _nudge_allowed_by_cooldown(user_id: str) -> bool:
@@ -212,11 +221,28 @@ def language_preference_post_turn(
                 session_ctx["lang_divergence_count"] = 0
                 session_ctx["lang_nudge_pending"] = None
                 session_ctx["lang_nudge_done"] = True
-                confirm = _compose_pref_saved(new_pref, observed)
+                session_ctx.pop("lang_offer_langs", None)
+                session_ctx.pop("lang_offer_ttl", None)
+                # Speak the chosen language IMMEDIATELY — the accept itself is often
+                # typed in the OLD language ("lets talk in urdu" is English), so the
+                # session flips to the new preference rather than mirroring the accept.
+                session_ctx["lang"] = new_pref
+                confirm = _compose_pref_saved(new_pref, new_pref)
                 # The synthesizer already answered the turn conversationally;
                 # the deterministic confirm states the SAVE actually happened.
                 return f"{reply}\n\n{confirm}" if reply else confirm
             return reply
+
+        # A rapport-concierge language offer stays live for a few turns (the accept is
+        # often a short negotiation: "yes" → "which one?" → "urdu"), then expires.
+        # Unlike the divergence nudge, letting it lapse does NOT mark the nudge done.
+        if session_ctx.get("lang_offer_langs"):
+            ttl = int(session_ctx.get("lang_offer_ttl") or 0) - 1
+            if ttl <= 0:
+                session_ctx.pop("lang_offer_langs", None)
+                session_ctx.pop("lang_offer_ttl", None)
+            else:
+                session_ctx["lang_offer_ttl"] = ttl
 
         if nudge_pending:
             # Offer was out and this turn didn't accept it — a decline or a

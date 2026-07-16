@@ -971,9 +971,11 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         reply, ctx, _, peers = result
-        self.assertIn("Marina", reply)
+        # Short reply — the card carries the name; text carries the count + next step.
+        self.assertIn("1 neighbor", reply)
         self.assertFalse(ctx.get("pending_post_verify"))
         self.assertEqual(len(peers), 1)
+        self.assertEqual(peers[0].get("nickname"), "Marina")
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
@@ -2141,6 +2143,115 @@ class TestMedicalRedirectRouting(unittest.TestCase):
         self.assertEqual(routing.get("tool_to_call"), "medical")
         self.assertIn("911", reply)
         self.assertIn("medical advice", reply.lower())
+
+
+class TestCrisisRouting(unittest.TestCase):
+    """Emotional distress must get the empathetic AI-authored response — never a funnel ask
+    (the ZIP-ask bug), never captured as a lane answer, never logged as a feature request.
+    Detection is the AI classifier (goal=crisis), no regex on the utterance."""
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_crisis_uses_ai_authored_line_never_zip_ask(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        authored = (
+            "That sounds so heavy — crying every night and going days without another adult "
+            "is a lot to carry alone. Postpartum Support International is at 1-800-944-4773 "
+            "any time. I'm right here with you, and when you're ready I can help you find "
+            "other moms nearby — no rush."
+        )
+        mock_slots.return_value = {
+            "goal": "crisis",
+            "linear_intent": "system.crisis",
+            "in_discovery": False,
+            "confidence": 0.95,
+            "clarify_question": authored,
+        }
+        result = handle_discovery_turn(
+            "I'm so overwhelmed, I cry every night after the kids sleep. "
+            "I haven't talked to another adult in days",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, peers = result
+        # The AI-authored line is used verbatim (no hardcoded template overriding it).
+        self.assertEqual(reply, authored)
+        self.assertEqual(routing.get("tool_to_call"), "crisis")
+        # Never the discovery funnel: no ZIP ask, no peers pushed, no active lane.
+        self.assertNotIn("ZIP", reply)
+        self.assertNotEqual(ctx.get("active_intent"), "discovery.find_peers")
+        self.assertEqual(peers, [])
+        # Distress is NOT a product gap — nothing logged, nothing promised.
+        mock_log.assert_not_called()
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_crisis_falls_back_to_safe_message_when_model_silent(
+        self, mock_slots, _mock_ai
+    ) -> None:
+        # Model flagged crisis but authored no line → the safety fallback guarantees the
+        # acknowledge / 988 / 911 / staying-with-you beats rather than leaking into chat.
+        mock_slots.return_value = {
+            "goal": "crisis",
+            "linear_intent": "system.crisis",
+            "in_discovery": False,
+            "confidence": 0.7,
+            "clarify_question": None,
+        }
+        result = handle_discovery_turn(
+            "I can't do this anymore",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, _ = result
+        self.assertEqual(routing.get("tool_to_call"), "crisis")
+        self.assertIn("988", reply)
+        self.assertIn("911", reply)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_crisis_wins_over_active_browse_lane(self, mock_slots, _mock_ai) -> None:
+        # The original bug: a distress message while the browse lane waits on a ZIP was
+        # consumed as the ZIP answer and re-asked for the ZIP. Crisis must exit the lane.
+        mock_slots.return_value = {
+            "goal": "crisis",
+            "linear_intent": "system.crisis",
+            "in_discovery": False,
+            "confidence": 0.9,
+            "clarify_question": "I'm right here with you — that sounds like so much.",
+        }
+        result = handle_discovery_turn(
+            "I'm so overwhelmed, I cry every night after the kids sleep",
+            session_ctx={
+                "routing_phase": "listening",
+                "activity_browse_active": True,
+                "browse_draft": {"interest": "any", "_need_zip": True},
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, _ = result
+        self.assertEqual(routing.get("tool_to_call"), "crisis")
+        self.assertNotIn("ZIP", reply)
 
 
 class TestUnsafeRouting(unittest.TestCase):

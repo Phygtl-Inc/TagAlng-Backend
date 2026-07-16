@@ -101,6 +101,10 @@ def synthesize_turn(
     lang_directive = synth_language_directive(lang) if lang else None
     if lang_directive:
         payload_parts.append(lang_directive)
+        # The reply comes back already in the session language — tell the
+        # final-mile localizer in main not to render it a second time.
+        if isinstance(session_ctx, dict):
+            session_ctx["_reply_localized"] = True
     if purpose == "profile_intake" and utterance.strip().startswith("(session start"):
         payload_parts.append(
             'OPENING TURN: First chat line after "Meet Lana". '

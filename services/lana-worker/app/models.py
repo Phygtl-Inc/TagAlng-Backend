@@ -26,6 +26,7 @@ class PeerMatchRow(BaseModel):
     avatar_url: str | None = None
     similarity_score: float | None = None
     matching_peer_label: str | None = None
+    matching_my_label: str | None = None
     matching_peer_concept: str | None = None
     has_exact_concept_match: bool = False
     preview: bool = False
@@ -205,6 +206,8 @@ class EventDraft(BaseModel):
     allow_attendee_share: bool | None = None
     # Items attendees should bring (the 4/4 quick-setup card) → the meet's pinned list.
     bring_items: list[str] = Field(default_factory=list)
+    # AI-picked emoji cover (☕🎨⚽…) — the card's visual when there's no cover image.
+    cover_emoji: str | None = None
     # AI-tailored quick-setup card config (capacity/sharing/approval/bring labels + bring
     # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
     event_setup: dict[str, Any] | None = None

@@ -49,6 +49,7 @@ LINEAR_INTENTS: frozenset[str] = frozenset({
     "system.out_of_scope",
     "system.unsafe",
     "system.medical",
+    "system.crisis",
 })
 
 LOOKING_SHARING_INTENTS: frozenset[str] = frozenset({
@@ -86,6 +87,7 @@ _GOAL_TO_LINEAR: dict[str, str] = {
     "out_of_scope": "system.out_of_scope",
     "unsafe": "system.unsafe",
     "medical": "system.medical",
+    "crisis": "system.crisis",
 }
 
 LAYER1_DEFAULT_CONFIDENCE = 0.85
@@ -126,6 +128,9 @@ INTENT_CONFIDENCE: dict[str, float] = {
     # A health/medical concern gets the safety redirect early — err toward the gentle
     # decline+doctor-handoff over a mis-lane, so keep the bar low like the other rails.
     "system.medical": 0.5,
+    # Emotional distress / danger: the empathetic response is always safer than a mis-lane
+    # into a funnel ask, so the bar stays as low as the other safety rails.
+    "system.crisis": 0.5,
 }
 
 for _li in LOOKING_SHARING_INTENTS:
@@ -727,11 +732,11 @@ def slots_want_layer1_handling(
         return False
     if not linear:
         return False
-    if linear in ("system.out_of_scope", "system.unsafe", "system.medical"):
+    if linear in ("system.out_of_scope", "system.unsafe", "system.medical", "system.crisis"):
         # Discovery owns these at ANY confidence so they never fall through to the
         # find_peers funnel: out_of_scope declines/clarifies, unsafe refuses, medical
-        # gives the safety redirect. The route layer makes the actual call (and unsafe
-        # has a regex backstop too).
+        # gives the safety redirect, crisis gets the empathetic response. The route layer
+        # makes the actual call (and unsafe has a regex backstop too).
         return True
     if linear == "discovery.find_in_block":
         return intent_confidence_met(enriched, linear)

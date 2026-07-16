@@ -6,7 +6,7 @@ from app.lana_ui import normalize_bucket, parse_mapped_spans
 from app.models import ExtractedClaim, MappedSpan
 from app.orchestrator.json_util import parse_json_object
 
-EXTRACT_PROMPT = """You are an identity extraction model for TagAlng, a block-based social app.
+EXTRACT_PROMPT = """You are an identity extraction model for a block-based neighborhood social app.
 
 Read the full conversation transcript between Lana and the user. Extract identity "threads" — by meaning, not keyword matching.
 
@@ -56,7 +56,8 @@ Rules:
 Transcript:
 """
 
-INCREMENTAL_EXTRACT_PROMPT = """You extract identity threads from ONE user message in a TagAlng block chat, \
+INCREMENTAL_EXTRACT_PROMPT = """You extract identity threads from ONE user message in a block-based \
+neighborhood app chat, \
 and you stay curious — after capturing what they said, you propose ONE warm follow-up that draws out more.
 
 Output ONLY valid JSON (no markdown):
@@ -88,8 +89,9 @@ Rules:
 - The user may write in ANY language (Spanish, Portuguese, Urdu, ...). Understand it, but ALWAYS \
 output concept/label/synonyms/followup_topic in ENGLISH — the DB is English-canonical so every \
 neighbor matches on the same terms ("me gusta jugar al cricket" → concept "cricket_player", label \
-"Plays cricket"). source_quote stays the exact original-language quote. followup_question is the \
-one field written in the USER'S language (she reads it on her home screen).
+"Plays cricket"). source_quote stays the exact original-language quote. followup_question and \
+followup_topic are ALSO English — they are stored canonically and AI-rendered into the user's preferred \
+language at display time, so a later language switch re-renders the whole queue.
 - Max 6 claims from this message only
 - If no identity content (greetings, "ok", ZIP, phone), return {"nickname": null, "kids_count": null, "claims": [], "followup_question": null}
 - Split distinct threads — capture EACH one, do not collapse (e.g. "pakistani dad, married 10 years, speak 5 languages, do triathlon" → pakistani_heritage + multilingual + married_ten_years + triathlon; "dad" and kid count go to kids_count, never a claim)
@@ -112,7 +114,7 @@ one field written in the USER'S language (she reads it on her home screen).
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 - nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
-- followup_question — becomes a "By the way…" tile on her home screen; her answer is stored as an identity claim used to match her with nearby moms. Warm neighborhood-concierge tone, not an interviewer; ask only what genuinely helps her connect locally. Propose ONE only if it adds a CONNECTION-MATCHABLE facet — something that would help her MEET or RELATE to nearby moms: shared activities/hobbies, kids or family stage, local spots she goes, cultural or community ties, her weekly rhythm. Generic consumer/brand/device/product preferences are NOT connection facets — which phone, which apps, gadgets, streaming services, operating system → return null (no neighbor connects over that). Reason about what you ALREADY know to hit a real GAP. Two shapes: (1) SHARPEN a "vague": true claim — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know. VARY the dimension to fit the topic — do NOT default to "solo or with others" for everything (that has become repetitive). Choose the ONE most natural from a range: sub-type/genre (books → "Any genres you gravitate to?"), frequency/rhythm (running → "Mornings or weekends?"), setting or local spot ("A local place you like for it?"), skill/level, doing-it-with-others, kids' involvement, teach-vs-learn. FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you started, what you enjoy/love most, or what "caught your interest"); those add NO matchable facet — replace with a concrete one or return null. Do NOT repeat a question shape listed in ALREADY ASKED above; if the only fitting angle was already asked, return null or pick a different dimension. Write ONLY the question itself — NO "By the way", no greeting or lead-in phrase (the tile shows its own "By the way…" framing; a prefix just doubles it). Short (<120 char), warm, OPEN, reference what she said. Return null when nothing is vague AND no fresh matchable dimension fits — silence beats filler. HARD RULE: null for any sensitive / help-seeking topic — divorce or relationship trouble, health/medical, mental health/safety, money/debt, legal/immigration — and when the message is a question aimed at you.
+- followup_question — becomes a "By the way…" tile on their home screen; their answer is stored as an identity claim used to match them with nearby neighbors. Warm neighborhood-concierge tone, not an interviewer; ask only what genuinely helps them connect locally. Propose ONE only if it adds a CONNECTION-MATCHABLE facet — something that would help them MEET or RELATE to nearby neighbors: shared activities/hobbies, kids or family stage, local spots they go, cultural or community ties, their weekly rhythm. Generic consumer/brand/device/product preferences are NOT connection facets — which phone, which apps, gadgets, streaming services, operating system → return null (no neighbor connects over that). Reason about what you ALREADY know to hit a real GAP. Two shapes: (1) SHARPEN a "vague": true claim — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know. VARY the dimension to fit the topic — do NOT default to "solo or with others" for everything (that has become repetitive). Choose the ONE most natural from a range: sub-type/genre (books → "Any genres you gravitate to?"), frequency/rhythm (running → "Mornings or weekends?"), setting or local spot ("A local place you like for it?"), skill/level, doing-it-with-others, kids' involvement, teach-vs-learn. FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you started, what you enjoy/love most, or what "caught your interest"); those add NO matchable facet — replace with a concrete one or return null. Do NOT repeat a question shape listed in ALREADY ASKED above; if the only fitting angle was already asked, return null or pick a different dimension. Write ONLY the question itself — NO "By the way", no greeting or lead-in phrase (the tile shows its own "By the way…" framing; a prefix just doubles it). Short (<120 char), warm, OPEN, reference what they said. Return null when nothing is vague AND no fresh matchable dimension fits — silence beats filler. HARD RULE: null for any sensitive / help-seeking topic — divorce or relationship trouble, health/medical, mental health/safety, money/debt, legal/immigration — and when the message is a question aimed at you.
 - followup_topic: a 2-5 word grammatical lead-in that names the thread for the tile, ending with "…" — e.g. "about your reading…", "about the World Cup…", "about your Portuguese…". Write natural English; NEVER glue a raw label ("about your interested in books…" is wrong). null whenever followup_question is null.
 
 User message:
