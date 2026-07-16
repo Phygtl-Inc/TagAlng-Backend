@@ -38,7 +38,7 @@ def fetch_peer_matches(user_jwt: str, *, limit: int = 5) -> list[dict[str, Any]]
     raw = call_rpc(
         user_jwt,
         "match_peers_by_claim_vectors",
-        {"p_limit": limit, "p_min_similarity": 0.55},
+        {"p_limit": limit, "p_min_similarity": 0.70},
     )
     if isinstance(raw, list):
         return [r for r in raw if isinstance(r, dict)]
@@ -51,15 +51,13 @@ def format_peer_matches(peers: list[dict[str, Any]]) -> str:
             "I don't see strong matches on your block yet. "
             "Tap Complete to save your profile — that helps me find neighbors like you."
         )
-    lines = [f"I found {len(peers)} neighbor{'s' if len(peers) != 1 else ''} on your block:"]
-    for p in peers[:5]:
-        nick = str(p.get("nickname") or "A neighbor")
-        label = str(p.get("matching_peer_label") or "shared interests")
-        score = p.get("similarity_score")
-        pct = f" ({int(float(score) * 100)}%)" if score is not None else ""
-        lines.append(f"• {nick} — {label}{pct}")
-    lines.append("Want me to introduce you to any of them?")
-    return "\n".join(lines)
+    # The match cards below the message carry names + shared traits — don't
+    # narrate the same list twice; keep the text to the count and the next step.
+    n = len(peers)
+    return (
+        f"I found {n} neighbor{'s' if n != 1 else ''} on your block — "
+        "here's what you have in common. Want me to introduce you to any of them?"
+    )
 
 
 def handle_guest_capability(

@@ -108,16 +108,39 @@ def _score(row: dict[str, Any]) -> float:
     return max(0.0, unlock * (1.0 - 0.2 * skips))
 
 
-def _build(row: dict[str, Any], gap: dict[str, Any] | None) -> dict[str, Any]:
+def _build(
+    row: dict[str, Any], gap: dict[str, Any] | None, lang: str | None = None
+) -> dict[str, Any]:
     # `gap` is the static gap-tree entry, or None for dynamic (semantic) gaps opened from the
     # extractor's follow-up. Prefer the question stored on the row; fall back to the tree.
     gap = gap or {}
+    question = row.get("question") or gap.get("question", "")
+    why_frame = row.get("why_frame") or ""
+    if lang and lang != "en":
+        # Questions are stored English-canonical and rendered into the user's language at
+        # WRITE time (question_i18n) — serving is a lookup, never an LLM wait. A miss (race
+        # right after a language switch, or a pre-i18n row) serves English once and kicks a
+        # background render so the next fetch has it.
+        i18n = row.get("question_i18n")
+        entry = i18n.get(lang) if isinstance(i18n, dict) else None
+        if isinstance(entry, dict) and entry.get("question"):
+            question = str(entry["question"])
+            why_frame = str(entry.get("why_frame") or why_frame)
+        elif question:
+            try:
+                from app.rapport_i18n import localize_gap_row_async
+
+                localize_gap_row_async(
+                    row["gap_row_id"], question, why_frame, lang, i18n
+                )
+            except Exception:  # noqa: BLE001 — self-heal is best-effort
+                logger.exception("rapport: i18n self-heal kickoff failed")
     return {
         "gap_row_id": row["gap_row_id"],
         "gap_id": row["gap_id"],
         "parent_bucket": row["parent_bucket"],
-        "why_frame": row.get("why_frame") or "",
-        "question": row.get("question") or gap.get("question", ""),
+        "why_frame": why_frame,
+        "question": question,
         "sensitivity_tier": gap.get("sensitivity_tier", "LOW"),
         "chip_color_token": f"--d-{row['parent_bucket']}",
     }
@@ -164,6 +187,17 @@ def _backfill_from_claims(user_id: str) -> bool:
         return False
 
 
+def _preferred_lang(user_id: str) -> str | None:
+    """users.locale, or None — one indexed single-row read on the home render."""
+    try:
+        from app.lang_pref import get_user_preferred_language
+
+        return get_user_preferred_language(user_id)
+    except Exception:  # noqa: BLE001 — language must never break the tile
+        logger.exception("rapport: preferred-lang lookup failed for %s", user_id)
+        return None
+
+
 def _pending_ask(user_id: str) -> dict[str, Any] | None:
     """A gap already shown and awaiting the user's action — re-show it verbatim."""
     try:
@@ -200,6 +234,10 @@ def next_ask(
     if not user_id:
         return None
 
+    # The tile lives on the home screen, outside any chat session — the persisted
+    # preference (users.locale) is the language authority, not the session-sticky lang.
+    lang = _preferred_lang(user_id)
+
     exclude_id: str | None = None
     if cycle:
         pending = _pending_ask(user_id)
@@ -216,7 +254,7 @@ def next_ask(
         #    Works for dynamic semantic gaps too (get_gap returns None → _build tolerates it).
         pending = _pending_ask(user_id)
         if pending:
-            return _build(pending, get_gap(pending["gap_id"]))
+            return _build(pending, get_gap(pending["gap_id"]), lang)
 
         # 2) Daily cap — something was asked (and since answered/skipped) within the window.
         if _recently_asked(user_id):
@@ -258,4 +296,4 @@ def next_ask(
         event_properties={"gap_id": row["gap_id"], "surface": surface, "score": round(score, 3)},
     )
 
-    return _build(row, gap)
+    return _build(row, gap, lang)

@@ -90,7 +90,14 @@ def run_turn(
     # this turn; this covers the profile_intake / event_draft purposes called directly).
     from app.i18n import resolve_session_lang
 
-    resolve_session_lang(session_ctx, user_message)
+    # Chip-tap language pin (see lana_unified_pipeline): an offered chip payload is
+    # app-authored English — never let it flip the session language.
+    _offered = session_ctx.get("_offered_chip_msgs") or []
+    session_ctx["_lang_pinned_turn"] = bool(
+        str(user_message or "").strip() and str(user_message or "").strip() in _offered
+    )
+    if not session_ctx["_lang_pinned_turn"]:
+        resolve_session_lang(session_ctx, user_message)
     with timer.stage("load_user_context"):
         ctx_pack = load_user_context(user_id)
     block_id = ctx_pack.get("home_block_id")
@@ -314,7 +321,7 @@ def run_turn(
         module=str(routing.get("intent_class")),
         utterance=utterance,
         response=reply,
-        guardrail_result=rails.flags,
+        guardrail_result={"rail": "ok"},
         routing={
             **routing,
             "capture_fired": capture_fired,

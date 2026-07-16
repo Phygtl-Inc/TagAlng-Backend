@@ -186,7 +186,14 @@ def apply_ai_lang(session_ctx: dict[str, Any], lang: Any) -> None:
     The classifier reports the language only when the message is clearly in it
     (null for ZIPs, names, 'ok'), so a verdict — including 'en' — flips the
     session: a mom who switches to English gets English back. Null keeps the
-    sticky language; the word-list heuristic never overrides an AI verdict."""
+    sticky language; the word-list heuristic never overrides an AI verdict.
+
+    Exception: a chip tap. The tapped message is app-authored (canonical
+    English payload), not the user writing English — the pipeline marks those
+    turns ``_lang_pinned_turn`` and the verdict is ignored so one tap never
+    flips an Urdu session back to English."""
+    if session_ctx.get("_lang_pinned_turn"):
+        return
     code = normalize_lang_code(lang)
     if code:
         session_ctx["lang"] = code
@@ -216,6 +223,59 @@ def localize_text(text: str, lang: str | None) -> str:
         return text  # LLM unconfigured — don't cache, stay deterministic
     _AI_RENDER_CACHE[cache_key] = rendered or text
     return rendered or text
+
+
+def localize_labels(labels: list[str], lang: str | None) -> list[str]:
+    """AI-render short UI chip labels in the session language — ONE batched LLM
+    call for all cache misses of the turn (never one call per chip). English /
+    unset / failure → the labels unchanged. Cached per (label, lang) like t(),
+    so static chips ("Yes, listen for me") cost one render per language per
+    process and dynamic chips one per unique label."""
+    code = normalize_lang_code(lang)
+    if not labels or not code or code == "en":
+        return labels
+    out = list(labels)
+    misses = [
+        (i, lbl) for i, lbl in enumerate(out)
+        if lbl and (lbl, code) not in _AI_RENDER_CACHE
+    ]
+    for i, lbl in enumerate(out):
+        cached = _AI_RENDER_CACHE.get((lbl, code))
+        if cached:
+            out[i] = cached
+    if not misses:
+        return out
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return out
+        label_name = _LANG_LABEL.get(code) or f"the language with ISO code '{code}'"
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "You are Lana, a warm neighborhood concierge. Rewrite each short UI "
+                f"button label ENTIRELY in {label_name}. Keep each label SHORT (a "
+                "button, not a sentence — aim under 28 characters), same meaning, "
+                "keep proper nouns and anything quoted as-is. Return JSON "
+                '{"labels": ["..."]} with EXACTLY one entry per input, same order.'
+            ),
+            user_payload="\n".join(f"- {lbl}" for _, lbl in misses),
+            max_tokens=40 * len(misses) + 60,
+            temperature=0.2,
+        )
+        rendered = data.get("labels") if isinstance(data, dict) else None
+        if isinstance(rendered, list) and len(rendered) == len(misses):
+            for (i, lbl), new in zip(misses, rendered):
+                new_s = str(new or "").strip()
+                if new_s:
+                    _AI_RENDER_CACHE[(lbl, code)] = new_s
+                    out[i] = new_s
+    except Exception:  # noqa: BLE001 — English chips beat a failed turn
+        import logging
+
+        logging.getLogger(__name__).exception("i18n_label_render_failed")
+    return out
 
 
 def session_lang(session_ctx: dict[str, Any] | None) -> str | None:
@@ -551,7 +611,9 @@ def _ai_render(en_text: str, lang: str) -> str | None:
                 'Return JSON {"message": "..."}.'
             ),
             user_payload=en_text,
-            max_tokens=220,
+            # Long deterministic replies (event lists, block summaries) must not
+            # truncate mid-sentence — budget scales with the source text.
+            max_tokens=max(220, min(1500, len(en_text) // 2)),
             temperature=0.2,
         )
         msg = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""

@@ -54,7 +54,7 @@ from app.profile_intake import (
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
-from app.i18n import localize_text, session_lang
+from app.i18n import localize_labels, localize_text, session_lang
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lang_pref import (
     get_user_preferred_language,
@@ -524,14 +524,22 @@ def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRow]:
+    rows = [
+        row for row in derive_ui_actions(ctx, ui_intent)
+        if isinstance(row, dict) and row.get("id")
+    ]
+    # Chips mirror the session language for DISPLAY only — the message payload stays
+    # canonical English so deterministic accept-matchers keep working; the chip-tap
+    # language pin (see _offered_chip_msgs) stops that English payload from flipping
+    # the session. One batched render per turn, cached per (label, lang).
+    labels = [str(r.get("label") or "") for r in rows]
+    labels = localize_labels(labels, session_lang(ctx))
     out: list[UiActionRow] = []
-    for row in derive_ui_actions(ctx, ui_intent):
-        if not isinstance(row, dict) or not row.get("id"):
-            continue
+    for row, label in zip(rows, labels):
         out.append(
             UiActionRow(
                 id=str(row["id"]),
-                label=str(row.get("label") or ""),
+                label=label or str(row.get("label") or ""),
                 message=str(row.get("message") or ""),
                 style=row.get("style") or "primary",
                 intro_id=str(row.get("intro_id") or "") or None,
@@ -539,6 +547,25 @@ def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRo
             )
         )
     return out
+
+
+def _offered_chip_messages(ob: dict[str, Any]) -> list[str]:
+    """Every message payload a chip in this response can post back, deduped — the
+    main ui_actions row plus card-attached actions (pending intros, peer cards)."""
+    msgs: list[str] = []
+
+    def _collect(actions: Any) -> None:
+        for a in actions or []:
+            m = str(getattr(a, "message", "") or "").strip()
+            if m and m not in msgs:
+                msgs.append(m)
+
+    _collect(ob.get("ui_actions"))
+    for row in ob.get("pending_intros") or []:
+        _collect(getattr(row, "actions", None))
+    for row in ob.get("peer_matches") or []:
+        _collect(getattr(row, "actions", None))
+    return msgs[:24]
 
 
 def _pending_intros_from_ctx(ctx: dict[str, Any]) -> list[PendingIntroRow]:
@@ -647,6 +674,7 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 avatar_url=str(row.get("avatar_url") or "") or None,
                 similarity_score=row.get("similarity_score"),
                 matching_peer_label=str(row.get("matching_peer_label") or "") or None,
+                matching_my_label=str(row.get("matching_my_label") or "") or None,
                 matching_peer_concept=str(row.get("matching_peer_concept") or "") or None,
                 has_exact_concept_match=bool(row.get("has_exact_concept_match")),
                 preview=bool(row.get("preview")),
@@ -1244,6 +1272,18 @@ def create_lana_session(
 
     ready = status == "ready_to_complete"
     ob = _onboarding_fields(merged_ctx, auth, ready_to_complete=ready)
+    # Chip-tap language pin: remember the opening's chip payloads too (the message
+    # endpoint does the same) — one extra tiny write, once per session, only when
+    # the opening actually offers chips.
+    _chip_msgs = _offered_chip_messages(ob)
+    if _chip_msgs:
+        merged_ctx["_offered_chip_msgs"] = _chip_msgs
+        try:
+            update_session_context(
+                session_id, merged_ctx, core_block=merged_ctx.get("core_block")
+            )
+        except Exception:  # noqa: BLE001 — the pin is best-effort, never fail the opening
+            _LOG.exception("opening_chip_stash_persist_failed")
     return CreateSessionResponse(
         session_id=session_id,
         purpose=purpose,
@@ -1456,6 +1496,18 @@ def _run_lana_message(
             timing_ms = timer.to_dict()
             orch_used = False
 
+        # Final-mile localization: deterministic replies (and LLM composes that
+        # run without a language directive) are authored in English. Render the
+        # reply in the session language here — one choke point instead of a
+        # per-string fix across every flow. The synthesizer marks its replies
+        # already-localized, so the main conversational path never pays a
+        # second model call. Pop unconditionally so the flag never persists.
+        _already_localized = bool(session_ctx.pop("_reply_localized", False))
+        _reply_lang = session_lang(session_ctx)
+        if _reply_lang and reply and not _already_localized:
+            with timer.stage("localize_reply"):
+                reply = localize_text(reply, _reply_lang)
+
         # These two writes hit different tables (lana_messages insert vs
         # lana_sessions update) and don't depend on each other, so run them
         # concurrently — one round-trip of wall-clock instead of two. Safe to
@@ -1550,6 +1602,15 @@ def _run_lana_message(
 
     ready = status == "ready_to_complete"
     ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
+    # Chip-tap language pin, part 1: remember EXACTLY which chip payloads this response
+    # offers, so the next turn can tell an app-authored tap from typed text (the pipeline
+    # pins the session language on a match — a canonical-English chip payload must never
+    # flip an Urdu session back to English). Chips are assembled after the session write
+    # above, so a changed set re-persists in the background; unchanged sets write nothing.
+    _chip_msgs = _offered_chip_messages(ob)
+    if (merged.get("_offered_chip_msgs") or []) != _chip_msgs:
+        merged["_offered_chip_msgs"] = _chip_msgs
+        background_tasks.add_task(_persist_session)
     # Debug + timing stay on the backend (logged) but are no longer sent to the FE —
     # they were noise on the wire and nothing in the client reads them.
     debug = _turn_debug_from_ctx(
@@ -2096,6 +2157,9 @@ def complete_lana_session(
         ) from exc
 
     _persist_claims(auth.user_id, claims)
+    # Extraction prompts are English-internal — render the closing in the
+    # session language before it reaches the user.
+    closing = localize_text(closing, session_lang(sess_ctx))
     final_ctx = {
         **sess_ctx,
         "last_status": "completed",
@@ -2168,6 +2232,9 @@ def _complete_event_draft(
             else:
                 raise
 
+    # Covers both the extractor's closing and the hardcoded verify-email
+    # override above — English until this point.
+    closing = localize_text(closing, session_lang(sess_ctx))
     final_ctx = {
         **sess_ctx,
         "last_status": "completed",

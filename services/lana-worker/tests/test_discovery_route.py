@@ -971,9 +971,11 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         reply, ctx, _, peers = result
-        self.assertIn("Marina", reply)
+        # Short reply — the card carries the name; text carries the count + next step.
+        self.assertIn("1 neighbor", reply)
         self.assertFalse(ctx.get("pending_post_verify"))
         self.assertEqual(len(peers), 1)
+        self.assertEqual(peers[0].get("nickname"), "Marina")
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)

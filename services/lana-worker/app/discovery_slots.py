@@ -330,7 +330,8 @@ _SYSTEM = (
     "meet_seek (looking.meet, goal=save_signal) = the user wants a NEIGHBOR or group to do an activity "
     "WITH them and to be MATCHED ('I want a tennis partner', 'looking for a stroller-walk buddy', 'find "
     "me moms to hang out with', 'set me up with people for a fifa night') — they broadcast a want to be "
-    "paired, not browse a calendar. "
+    "paired, not browse a calendar. But 'find/show me PEOPLE who play/do X' (no with-me/pair-me ask) "
+    "wants to SEE matching neighbors → discovery.find_by_attrs, not meet_seek. "
     "tip_seek (looking.tip, goal=save_signal, signal_intent=tip_seek) = the user wants a standing PLACE "
     "or SPOT to GO — a park, playground, trail, cafe, library, quiet corner, or a local service — which "
     "is NOT a time-bound event and NOT a person to be matched with. This INCLUDES generic place asks "
@@ -428,10 +429,16 @@ _SYSTEM = (
     "Use identity.add_claim when user describes themselves (heritage, stage, interests). "
     "Use identity.edit_claim for corrections ('I'm not X, I'm Y', 'edit my identity'). "
     "Heritage is one slot — if user states a new heritage that contradicts prior, ask to confirm before replacing. "
-    "Use discovery.find_by_attrs when user wants neighbors matching traits (ANY heritage/adjective + "
-    "mom/dad/parent/language/stage — infinite phrasing: show me american moms, find italian dads, "
-    "brazilian parents on my block). Set attr_filter to the trait phrase "
-    "(e.g. american moms, italian dads). NOT identity.add_claim, NOT identity.edit_claim, goal=peers. "
+    "Use discovery.find_by_attrs when user wants neighbors matching traits — heritage, life stage, "
+    "language, AND interests/activities/sports (infinite phrasing: show me american moms, find italian "
+    "dads, brazilian parents on my block, find me nearby people that play fifa, neighbors who love "
+    "hiking). Set attr_filter to the trait phrase (e.g. american moms, plays fifa). "
+    "NOT identity.add_claim, NOT identity.edit_claim, goal=peers. "
+    "PEOPLE-WHO-DO-X vs MEET: 'find/show me PEOPLE who play/do/love X' wants to BE SHOWN matching "
+    "neighbors → find_by_attrs (the peer cards then offer the meet as a follow-up); it is meet_seek "
+    "ONLY when they ask to be PAIRED to do it together ('someone to play fifa WITH me', 'set me up "
+    "with people for a fifa night', 'a tennis partner'). WORKED EXAMPLE: 'find me nearby people that "
+    "plays fifa' → discovery.find_by_attrs, goal=peers, attr_filter='plays fifa' — NOT looking.meet. "
     "find_by_attrs REQUIRES an explicit search verb (find/show/look for/who is/any/connect me) OR an "
     "'on my block' target. A bare self-description that only LISTS the user's OWN traits with NO search "
     "verb (I'm Asian with a teenager, we just moved here, I'm a new mom who loves hiking) is "
@@ -454,8 +461,11 @@ _SYSTEM = (
     "below is set. Then ALSO set set_preferred_lang to that ISO code. Merely writing in a language, "
     "or a one-off 'in english please', changes only this conversation — set_preferred_lang=null. "
     "When lang_pref_offer is not 'none', Lana just asked whether to make that language the user's "
-    "default: yes/accept → linear_intent=settings.change_language, set_preferred_lang=<that code>; "
-    "a decline keeps set_preferred_lang=null (goal=chat either way, unless the message pivots). "
+    "default: yes/accept → linear_intent=settings.change_language, set_preferred_lang=<that code>. "
+    "lang_pref_offer may list SEVERAL codes ('ur or es') — an accept that names or clearly picks one "
+    "('lets talk in urdu', 'urdu please') → set_preferred_lang=<the picked code>; a bare 'yes' that "
+    "picks none keeps set_preferred_lang=null (Lana will ask which). "
+    "A decline keeps set_preferred_lang=null (goal=chat either way, unless the message pivots). "
     "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.)."
 )
 
@@ -755,7 +765,14 @@ def _discovery_slot_payload(
     sc = session_ctx or {}
     active_intent = str(sc.get("active_intent") or "").strip() or "none"
     active_capture = _active_capture_context(sc)
-    lang_pref_offer = str(sc.get("lang_nudge_pending") or "").strip() or "none"
+    # A pending offer to change the default language: the divergence nudge (single code)
+    # or a rapport-concierge offer (possibly several codes the user named, TTL'd).
+    lang_pref_offer = str(sc.get("lang_nudge_pending") or "").strip()
+    if not lang_pref_offer:
+        offers = sc.get("lang_offer_langs")
+        if isinstance(offers, list):
+            lang_pref_offer = " or ".join(str(o) for o in offers if str(o or "").strip())
+    lang_pref_offer = lang_pref_offer or "none"
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"

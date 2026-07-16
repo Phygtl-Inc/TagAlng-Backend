@@ -712,7 +712,17 @@ def run_lana_unified_pipeline(
     # please" (or "en español"/"em português") flips it; ambiguous turns keep it.
     from app.i18n import resolve_session_lang
 
-    resolve_session_lang(session_ctx, user_message)
+    # Chip-tap language pin, part 2: when the incoming message is EXACTLY one of the chip
+    # payloads offered last turn, it's app-authored canonical English — not the user
+    # switching language. Pin the session language for this turn: skip the heuristic here
+    # and have apply_ai_lang ignore the classifier's verdict (the flag is re-derived every
+    # turn, so a genuinely typed next message unpins immediately).
+    _offered = session_ctx.get("_offered_chip_msgs") or []
+    session_ctx["_lang_pinned_turn"] = bool(
+        str(user_message or "").strip() and str(user_message or "").strip() in _offered
+    )
+    if not session_ctx["_lang_pinned_turn"]:
+        resolve_session_lang(session_ctx, user_message)
     # Set when a rapport concierge turn hands off (zero-tap dispatch) so we can log where the
     # re-driven request actually routed — diagnostic for "yes → wrong lane" mis-routes.
     rapport_handoff_send: str | None = None
@@ -890,6 +900,17 @@ def run_lana_unified_pipeline(
         # chips). Never the heritage-first profile-intake engine, which re-asks covered
         # threads like heritage regardless of what's already known. See rapport_reply.py.
         prior_followups = int(session_ctx.get("rapport_followup_count") or 0)
+        # Tell the concierge which language Lana currently speaks with her, so an answer
+        # naming another language can become a switch offer (the accept chip routes through
+        # the classifier's set_preferred_lang like any explicit request — no new machinery).
+        current_lang_name: str | None = None
+        try:
+            from app.i18n import lang_display_name
+            from app.lang_pref import get_user_preferred_language
+
+            current_lang_name = lang_display_name(get_user_preferred_language(user_id))
+        except Exception:  # noqa: BLE001 — a missed offer beats a failed reply
+            logging.getLogger(__name__).exception("rapport_lang_context_failed")
         concierge = rapport_concierge_reply(
             answer_text=user_message,
             question=question or None,
@@ -897,6 +918,7 @@ def run_lana_unified_pipeline(
             saved_bucket=saved_bucket,
             saved=saved_any,
             prior_followups=prior_followups,
+            current_lang_name=current_lang_name,
         )
         # ZERO-TAP HAND-OFF: only when she is ACCEPTING an app-move we put in front of her LAST turn
         # (rapport_offer_pending). Then the concierge returns an ACTION carrying a concrete first-person
@@ -955,6 +977,16 @@ def run_lana_unified_pipeline(
             ctx.pop("rapport_answer", None)
             reply = sanitize_assistant_message(str(concierge.get("reply") or ""))
             options = concierge.get("options")
+            # A language-switch offer arms the classifier's lang_pref_offer context for the
+            # next few turns, so a free-typed accept ("lets talk in urdu") actually persists
+            # the default via set_preferred_lang — not just a conversational promise. TTL'd
+            # in language_preference_post_turn so it never becomes a sticky lane.
+            lang_offer = concierge.get("language_offer") or []
+            if lang_offer:
+                ctx["lang_offer_langs"] = lang_offer
+                # Decremented every turn by language_preference_post_turn, INCLUDING this
+                # offer turn — 4 leaves three real user turns to land the accept.
+                ctx["lang_offer_ttl"] = 4
             if action_send:
                 ctx["rapport_reply"] = {"options": [], "action": action}
                 ctx["rapport_active"] = True

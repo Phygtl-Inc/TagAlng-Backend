@@ -26,6 +26,7 @@ class PeerMatchRow(BaseModel):
     avatar_url: str | None = None
     similarity_score: float | None = None
     matching_peer_label: str | None = None
+    matching_my_label: str | None = None
     matching_peer_concept: str | None = None
     has_exact_concept_match: bool = False
     preview: bool = False
