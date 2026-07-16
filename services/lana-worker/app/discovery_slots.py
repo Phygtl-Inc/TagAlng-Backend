@@ -9,8 +9,13 @@ from typing import Any
 from app.layer1_intents import (
     LINEAR_INTENTS,
     enrich_slots,
+    linear_intent_from_hierarchy,
     intent_confidence_met,
     normalize_attr_filter_text,
+    normalize_intent_action,
+    normalize_intent_direction,
+    normalize_intent_lane,
+    normalize_intent_scope,
     slots_indicate_hosting_signal,
     slots_linear_intent,
     slots_want_layer1_handling,
@@ -426,6 +431,10 @@ def _format_history(history: list[dict[str, Any]] | None, *, limit: int = 8) -> 
 def _empty_slots() -> dict[str, Any]:
     return {
         "in_discovery": False,
+        "intent_lane": None,
+        "intent_action": None,
+        "intent_direction": None,
+        "intent_scope": None,
         "linear_intent": None,
         "goal": "none",
         "intro_direction": None,
@@ -576,8 +585,18 @@ def ai_parse_discovery_turn(
             zip_s = m.group(1) if m else None
         ident = raw.get("identity_snippet")
         ident_s = str(ident).strip()[:400] if ident else None
+        intent_lane = normalize_intent_lane(raw.get("intent_lane"))
+        intent_action = normalize_intent_action(raw.get("intent_action"))
+        intent_direction = normalize_intent_direction(raw.get("intent_direction"))
+        intent_scope = normalize_intent_scope(raw.get("intent_scope"))
         linear_raw = str(raw.get("linear_intent") or "").strip().lower()
         linear_intent = linear_raw if linear_raw in LINEAR_INTENTS else None
+        if not linear_intent:
+            linear_intent = linear_intent_from_hierarchy({
+                "intent_lane": intent_lane,
+                "intent_action": intent_action,
+                "intent_direction": intent_direction,
+            })
         clarify_raw = str(raw.get("clarify") or "").strip().lower()
         clarify = clarify_raw if clarify_raw in ("browse_or_meet", "scope", "intent") else None
         # The classifier writes the clarifying question itself (Lana's voice, contextual) so
@@ -599,6 +618,10 @@ def ai_parse_discovery_turn(
         )
         return enrich_slots({
             "in_discovery": bool(raw.get("in_discovery")),
+            "intent_lane": intent_lane,
+            "intent_action": intent_action,
+            "intent_direction": intent_direction,
+            "intent_scope": intent_scope,
             "linear_intent": linear_intent,
             "goal": goal,
             "intro_direction": intro_direction_s,
@@ -674,7 +697,18 @@ def _discovery_slot_payload(
         f"LATEST USER MESSAGE:\n{text}\n\n"
         "Return JSON:\n"
         "{\n"
-        '  "linear_intent": "<Layer 1 intent id or null>",\n'
+        '  "intent_lane": "auth"|"help"|"settings"|"identity"|"discovery"|"recommendation"|'
+        '"local_signal"|"social"|"tier"|"safety"|"out_of_scope"|"chat"|null,\n'
+        '  "intent_action": "signup"|"login"|"logout"|"upload_photo"|"what_can_you_do"|'
+        '"who_are_you"|"change_name"|"change_zip"|"notification_prefs"|"add_claim"|'
+        '"edit_claim"|"complete_profile"|"show_profile"|"find_peers"|"find_by_attrs"|'
+        '"find_in_block"|"find_activities"|"block_log"|"show_peer_profile"|'
+        '"explain_peer_match"|"recommend_value"|"swap"|"meet"|"tip"|"host"|'
+        '"send_nudge"|"respond_nudge"|"list_intros"|"propose_intro"|"unsafe"|'
+        '"medical"|"out_of_scope"|"chat"|null,\n'
+        '  "intent_direction": "seek"|"offer"|"share"|"send"|"respond"|null,\n'
+        '  "intent_scope": "neighbor"|"event"|"local_signal"|"mixed"|"block"|null,\n'
+        '  "linear_intent": "<legacy Layer 1 intent id or null; fill when obvious for compatibility>",\n'
         '  "in_discovery": true|false,\n'
         '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
         '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"medical"|"none",\n'

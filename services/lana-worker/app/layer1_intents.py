@@ -68,6 +68,106 @@ SIGNAL_INTENT_BY_LINEAR: dict[str, str] = {
     "sharing.tip": "tip_share",
 }
 
+INTENT_LANES: frozenset[str] = frozenset({
+    "auth",
+    "help",
+    "settings",
+    "identity",
+    "discovery",
+    "recommendation",
+    "local_signal",
+    "social",
+    "tier",
+    "safety",
+    "out_of_scope",
+    "chat",
+})
+
+INTENT_ACTIONS: frozenset[str] = frozenset({
+    "signup",
+    "login",
+    "logout",
+    "upload_photo",
+    "what_can_you_do",
+    "who_are_you",
+    "change_name",
+    "change_zip",
+    "notification_prefs",
+    "add_claim",
+    "edit_claim",
+    "complete_profile",
+    "show_profile",
+    "find_peers",
+    "find_by_attrs",
+    "find_in_block",
+    "find_activities",
+    "block_log",
+    "show_peer_profile",
+    "explain_peer_match",
+    "recommend_value",
+    "swap",
+    "meet",
+    "tip",
+    "host",
+    "send_nudge",
+    "respond_nudge",
+    "list_intros",
+    "propose_intro",
+    "unsafe",
+    "medical",
+    "out_of_scope",
+    "chat",
+})
+
+INTENT_DIRECTIONS: frozenset[str] = frozenset({"seek", "offer", "share", "send", "respond"})
+INTENT_SCOPES: frozenset[str] = frozenset({"neighbor", "event", "local_signal", "mixed", "block"})
+
+_LINEAR_TO_HIERARCHICAL: dict[str, dict[str, str | None]] = {
+    "discovery.find_peers": {"intent_lane": "discovery", "intent_action": "find_peers"},
+    "discovery.find_by_attrs": {"intent_lane": "discovery", "intent_action": "find_by_attrs"},
+    "discovery.find_in_block": {"intent_lane": "discovery", "intent_action": "find_in_block", "intent_scope": "block"},
+    "discovery.find_activities": {"intent_lane": "discovery", "intent_action": "find_activities", "intent_scope": "event"},
+    "discovery.block_log": {"intent_lane": "discovery", "intent_action": "block_log", "intent_scope": "block"},
+    "discovery.show_peer_profile": {"intent_lane": "discovery", "intent_action": "show_peer_profile", "intent_scope": "neighbor"},
+    "discovery.explain_peer_match": {"intent_lane": "discovery", "intent_action": "explain_peer_match", "intent_scope": "neighbor"},
+    "identity.add_claim": {"intent_lane": "identity", "intent_action": "add_claim"},
+    "identity.edit_claim": {"intent_lane": "identity", "intent_action": "edit_claim"},
+    "identity.complete_profile": {"intent_lane": "identity", "intent_action": "complete_profile"},
+    "identity.show_my_profile": {"intent_lane": "identity", "intent_action": "show_profile"},
+    "looking.swap": {"intent_lane": "local_signal", "intent_action": "swap", "intent_direction": "seek"},
+    "sharing.swap": {"intent_lane": "local_signal", "intent_action": "swap", "intent_direction": "offer"},
+    "looking.meet": {"intent_lane": "local_signal", "intent_action": "meet", "intent_direction": "seek"},
+    "sharing.host": {"intent_lane": "local_signal", "intent_action": "host", "intent_direction": "offer"},
+    "looking.tip": {"intent_lane": "local_signal", "intent_action": "tip", "intent_direction": "seek"},
+    "sharing.tip": {"intent_lane": "local_signal", "intent_action": "tip", "intent_direction": "share"},
+    "tier.send_nudge": {"intent_lane": "tier", "intent_action": "send_nudge", "intent_direction": "send"},
+    "tier.respond_nudge": {"intent_lane": "tier", "intent_action": "respond_nudge", "intent_direction": "respond"},
+    "social.list_intros": {"intent_lane": "social", "intent_action": "list_intros"},
+    "social.propose_intro": {"intent_lane": "social", "intent_action": "propose_intro"},
+    "auth.signup_phone": {"intent_lane": "auth", "intent_action": "signup"},
+    "auth.login_phone": {"intent_lane": "auth", "intent_action": "login"},
+    "auth.logout": {"intent_lane": "auth", "intent_action": "logout"},
+    "auth.upload_photo": {"intent_lane": "auth", "intent_action": "upload_photo"},
+    "settings.change_name": {"intent_lane": "settings", "intent_action": "change_name"},
+    "settings.change_zip": {"intent_lane": "settings", "intent_action": "change_zip"},
+    "settings.notification_prefs": {"intent_lane": "settings", "intent_action": "notification_prefs"},
+    "help.what_can_you_do": {"intent_lane": "help", "intent_action": "what_can_you_do"},
+    "help.who_are_you": {"intent_lane": "help", "intent_action": "who_are_you"},
+    "system.out_of_scope": {"intent_lane": "out_of_scope", "intent_action": "out_of_scope"},
+    "system.unsafe": {"intent_lane": "safety", "intent_action": "unsafe"},
+    "system.medical": {"intent_lane": "safety", "intent_action": "medical"},
+}
+
+_HIERARCHICAL_TO_LINEAR: dict[tuple[str, str, str | None], str] = {
+    (str(v.get("intent_lane")), str(v.get("intent_action")), v.get("intent_direction")): k
+    for k, v in _LINEAR_TO_HIERARCHICAL.items()
+}
+_HIERARCHICAL_TO_LINEAR.update({
+    ("auth", "signup", None): "auth.signup_phone",
+    ("auth", "login", None): "auth.login_phone",
+    ("identity", "show_profile", None): "identity.show_my_profile",
+})
+
 # Legacy goal → linear_intent (backward compat for tests + gradual rollout).
 _GOAL_TO_LINEAR: dict[str, str] = {
     "peers": "discovery.find_peers",
@@ -271,11 +371,83 @@ def normalize_linear_intent(raw: str | None) -> str | None:
     return None
 
 
+def normalize_intent_lane(raw: str | None) -> str | None:
+    lane = str(raw or "").strip().lower()
+    return lane if lane in INTENT_LANES else None
+
+
+def normalize_intent_action(raw: str | None) -> str | None:
+    action = str(raw or "").strip().lower()
+    return action if action in INTENT_ACTIONS else None
+
+
+def normalize_intent_direction(raw: str | None) -> str | None:
+    direction = str(raw or "").strip().lower()
+    return direction if direction in INTENT_DIRECTIONS else None
+
+
+def normalize_intent_scope(raw: str | None) -> str | None:
+    scope = str(raw or "").strip().lower()
+    return scope if scope in INTENT_SCOPES else None
+
+
+def hierarchical_intent_from_linear(linear_intent: str | None) -> dict[str, str | None]:
+    linear = normalize_linear_intent(linear_intent)
+    if not linear:
+        return {"intent_lane": None, "intent_action": None, "intent_direction": None, "intent_scope": None}
+    base = dict(_LINEAR_TO_HIERARCHICAL.get(linear) or {})
+    return {
+        "intent_lane": base.get("intent_lane"),
+        "intent_action": base.get("intent_action"),
+        "intent_direction": base.get("intent_direction"),
+        "intent_scope": base.get("intent_scope"),
+    }
+
+
+def linear_intent_from_hierarchy(slots: dict[str, Any]) -> str | None:
+    lane = normalize_intent_lane(slots.get("intent_lane"))
+    action = normalize_intent_action(slots.get("intent_action"))
+    direction = normalize_intent_direction(slots.get("intent_direction"))
+    if not lane or not action:
+        return None
+    return _HIERARCHICAL_TO_LINEAR.get((lane, action, direction)) or _HIERARCHICAL_TO_LINEAR.get(
+        (lane, action, None)
+    )
+
+
+def stamp_hierarchical_intent(slots: dict[str, Any]) -> dict[str, Any]:
+    """Populate hierarchical intent fields while preserving legacy linear_intent."""
+    out = dict(slots)
+    linear = normalize_linear_intent(out.get("linear_intent")) or linear_intent_from_hierarchy(out)
+    if linear:
+        out["linear_intent"] = linear
+        hierarchical = hierarchical_intent_from_linear(linear)
+        # Keep legacy and hierarchical fields internally consistent during migration.
+        out["intent_lane"] = hierarchical["intent_lane"]
+        out["intent_action"] = hierarchical["intent_action"]
+        out["intent_direction"] = hierarchical["intent_direction"]
+        out["intent_scope"] = hierarchical["intent_scope"]
+        return out
+
+    lane = normalize_intent_lane(out.get("intent_lane"))
+    action = normalize_intent_action(out.get("intent_action"))
+    direction = normalize_intent_direction(out.get("intent_direction"))
+    scope = normalize_intent_scope(out.get("intent_scope"))
+    out["intent_lane"] = lane
+    out["intent_action"] = action
+    out["intent_direction"] = direction
+    out["intent_scope"] = scope
+    return out
+
+
 def slots_linear_intent(slots: dict[str, Any]) -> str | None:
     """Resolve canonical Layer 1 intent from classifier slots."""
     explicit = normalize_linear_intent(slots.get("linear_intent"))
     if explicit:
         return explicit
+    hierarchical = linear_intent_from_hierarchy(slots)
+    if hierarchical:
+        return hierarchical
     goal = str(slots.get("goal") or "none").lower()
     if goal == "save_signal":
         sig = str(slots.get("signal_intent") or "").lower()
@@ -626,7 +798,7 @@ def reconcile_hosting_peer_slot_conflict(out: dict[str, Any], *, msg: str) -> No
 
 def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
     """Derive linear_intent, goal, and signal_intent for handlers."""
-    out = dict(slots)
+    out = stamp_hierarchical_intent(slots)
     phrase = phrase_linear_intent(msg) if msg else None
     ai_linear = normalize_linear_intent(out.get("linear_intent"))
     ai_conf = float(out.get("confidence", 0.0))
@@ -681,7 +853,7 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
         out.pop("signal_intent", None)
         out.pop("signal_detail", None)
         out.pop("signal_category", None)
-    return out
+    return stamp_hierarchical_intent(out)
 
 
 def intent_confidence_met(slots: dict[str, Any], linear_intent: str) -> bool:

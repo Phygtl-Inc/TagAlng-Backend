@@ -6,7 +6,9 @@ from app.layer1_handlers import format_identity_profile_reply, stamp_identity_pr
 from app.layer1_intents import (
     attr_filter_tokens,
     enrich_slots,
+    hierarchical_intent_from_linear,
     is_block_activity_browse,
+    linear_intent_from_hierarchy,
     phrase_linear_intent,
     slots_linear_intent,
 )
@@ -21,6 +23,92 @@ from app.ui_intent import UI_INTENT_SHOW_IDENTITY_PROFILE, derive_ui_intent
 
 
 class TestLayer1IntentCatalog(unittest.TestCase):
+    def test_linear_intent_stamps_hierarchical_fields(self) -> None:
+        slots = enrich_slots({
+            "linear_intent": "sharing.swap",
+            "confidence": 0.9,
+            "goal": "save_signal",
+        }, msg="I have a stroller to give away")
+
+        self.assertEqual(slots_linear_intent(slots), "sharing.swap")
+        self.assertEqual(slots.get("intent_lane"), "local_signal")
+        self.assertEqual(slots.get("intent_action"), "swap")
+        self.assertEqual(slots.get("intent_direction"), "offer")
+        self.assertEqual(slots.get("signal_intent"), "swap_offer")
+
+    def test_hierarchical_intent_maps_to_legacy_linear_intent(self) -> None:
+        slots = enrich_slots({
+            "intent_lane": "local_signal",
+            "intent_action": "swap",
+            "intent_direction": "seek",
+            "confidence": 0.9,
+        }, msg="I need rain boots")
+
+        self.assertEqual(slots_linear_intent(slots), "looking.swap")
+        self.assertEqual(slots.get("linear_intent"), "looking.swap")
+        self.assertEqual(slots.get("signal_intent"), "swap_seek")
+
+    def test_legacy_linear_intent_keeps_hierarchy_consistent_on_conflict(self) -> None:
+        slots = enrich_slots({
+            "linear_intent": "looking.swap",
+            "intent_lane": "local_signal",
+            "intent_action": "swap",
+            "intent_direction": "offer",
+            "confidence": 0.9,
+        }, msg="I need rain boots")
+
+        self.assertEqual(slots.get("linear_intent"), "looking.swap")
+        self.assertEqual(slots.get("intent_lane"), "local_signal")
+        self.assertEqual(slots.get("intent_action"), "swap")
+        self.assertEqual(slots.get("intent_direction"), "seek")
+
+    def test_hierarchical_mapping_helpers(self) -> None:
+        self.assertEqual(
+            hierarchical_intent_from_linear("looking.tip"),
+            {
+                "intent_lane": "local_signal",
+                "intent_action": "tip",
+                "intent_direction": "seek",
+                "intent_scope": None,
+            },
+        )
+        self.assertEqual(
+            linear_intent_from_hierarchy({
+                "intent_lane": "social",
+                "intent_action": "propose_intro",
+            }),
+            "social.propose_intro",
+        )
+
+    @patch("app.discovery_slots.llm_configured", return_value=True)
+    @patch("app.discovery_slots.llm_json")
+    def test_discovery_classifier_accepts_hierarchical_output(self, mock_json, _mock_configured) -> None:
+        from app.discovery_slots import ai_parse_discovery_turn
+
+        mock_json.return_value = {
+            "intent_lane": "local_signal",
+            "intent_action": "tip",
+            "intent_direction": "share",
+            "in_discovery": False,
+            "goal": "save_signal",
+            "signal_detail": "Dr Lee is a great pediatrician",
+            "confidence": 0.93,
+        }
+
+        slots = ai_parse_discovery_turn(
+            "Dr Lee is a great pediatrician",
+            routing_phase="listening",
+            history=[],
+            has_block=True,
+            has_identity=True,
+        )
+
+        self.assertEqual(slots.get("intent_lane"), "local_signal")
+        self.assertEqual(slots.get("intent_action"), "tip")
+        self.assertEqual(slots.get("intent_direction"), "share")
+        self.assertEqual(slots.get("linear_intent"), "sharing.tip")
+        self.assertEqual(slots.get("signal_intent"), "tip_share")
+
     def test_open_ended_intents_left_to_ai_not_phrase_regex(self) -> None:
         """Find neighbors, swap, tip — classified by Flash, not phrase regex."""
         for msg in (
