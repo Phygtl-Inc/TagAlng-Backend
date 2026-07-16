@@ -21,6 +21,7 @@ from app.orchestrator.recall import prefetch_turn_memories
 from app.orchestrator.router import route_turn
 from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
 from app.orchestrator.tools import execute_tool
+from app import mem0_shadow
 from app.context import load_user_context
 from app.turn_surfaces import clear_turn_surfaces
 from app.turn_timing import TurnTimer
@@ -110,6 +111,15 @@ def run_turn(
             user_id=user_id,
             block_id=block_id,
             utterance=utterance,
+        )
+        # mem0 A/B trial (no-op unless LANA_MEM0_ENABLED): logs native-vs-mem0 retrieval for
+        # the offline judge; for arm-B users, swaps in mem0's results as the injected prefetch.
+        prefetched = mem0_shadow.apply_prefetch(
+            user_id=user_id,
+            session_id=session_id,
+            turn_id=None,
+            utterance=utterance,
+            native_prefetched=prefetched,
         )
     with timer.stage("build_core_block"):
         core = build_core_block(
@@ -313,6 +323,15 @@ def run_turn(
 
     if purpose == "lana":
         _stamp_lana_unified_fields(merged_ctx, routing=routing, tool_result=tool_result)
+
+    # mem0 dual-write (no-op unless LANA_MEM0_ENABLED): both arms feed the same exchange to mem0
+    # so its memory is built identically; only injection (arm B, above) differs. Fire-and-forget.
+    mem0_shadow.dual_write(
+        user_id=user_id,
+        session_id=session_id,
+        user_text=utterance,
+        assistant_text=reply,
+    )
 
     log_turn(
         session_id=session_id,
