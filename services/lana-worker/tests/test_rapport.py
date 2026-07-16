@@ -311,6 +311,92 @@ class TestRanker(unittest.TestCase):
         self.assertIsNotNone(ask)
         self.assertEqual(ask["gap_id"], "free_windows")
 
+    def test_fresh_pending_is_reshown_verbatim(self):
+        # A pending ask inside the rotation window keeps the tile (reload stability).
+        pending = self._row("kids_ages", status="asked")
+        pending["asked_at"] = rapport_ranker._now().isoformat()
+        ask, store, _t = self._run(
+            [self._row("free_windows", parent_bucket="interest")], pending=pending
+        )
+        self.assertEqual(ask["gap_id"], "kids_ages")
+        self.assertEqual(store["rpcs"], [])
+
+    def test_stale_pending_rotates_to_next_by_priority(self):
+        # Unanswered for a full rotation window = soft skip: retire it, show the next one.
+        from datetime import timedelta
+
+        pending = self._row("kids_ages", status="asked")
+        pending["asked_at"] = (rapport_ranker._now() - timedelta(hours=25)).isoformat()
+        ask, store, _t = self._run(
+            [self._row("free_windows", parent_bucket="interest")], pending=pending
+        )
+        self.assertIn(
+            ("increment_skip_and_reopen", {"p_gap_row_id": "row_kids_ages"}), store["rpcs"]
+        )
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["gap_id"], "free_windows")
+
+    def test_rotation_disabled_by_env_keeps_pending(self):
+        import os
+        from datetime import timedelta
+
+        pending = self._row("kids_ages", status="asked")
+        pending["asked_at"] = (rapport_ranker._now() - timedelta(hours=48)).isoformat()
+        with patch.dict(os.environ, {"LANA_RAPPORT_ROTATE_HOURS": "0"}):
+            ask, _s, _t = self._run(
+                [self._row("free_windows", parent_bucket="interest")], pending=pending
+            )
+        self.assertEqual(ask["gap_id"], "kids_ages")
+
+    def test_refresh_mode_rotates_without_skip_penalty(self):
+        # Reload isn't a rejection: pending is reopened (plain update, no skip RPC)
+        # and the tile hands over to another question.
+        import os
+        from datetime import timedelta
+
+        pending = self._row("kids_ages", status="asked")
+        pending["asked_at"] = (rapport_ranker._now() - timedelta(minutes=5)).isoformat()
+        with patch.dict(os.environ, {"LANA_RAPPORT_ROTATE_MODE": "refresh"}):
+            ask, store, _t = self._run(
+                [self._row("free_windows", parent_bucket="interest")], pending=pending
+            )
+        self.assertEqual(ask["gap_id"], "free_windows")
+        self.assertEqual(store["rpcs"], [])  # no increment_skip_and_reopen
+        reopened = [
+            p for t, p in store["updates"] if t == "rapport_gaps" and p.get("status") == "open"
+        ]
+        self.assertTrue(reopened)
+
+    def test_refresh_mode_debounce_keeps_pending(self):
+        # Two POSTs in quick succession (React double-effect) must show the SAME tile.
+        import os
+
+        pending = self._row("kids_ages", status="asked")
+        pending["asked_at"] = rapport_ranker._now().isoformat()
+        with patch.dict(os.environ, {"LANA_RAPPORT_ROTATE_MODE": "refresh"}):
+            ask, store, _t = self._run(
+                [self._row("free_windows", parent_bucket="interest")], pending=pending
+            )
+        self.assertEqual(ask["gap_id"], "kids_ages")
+        self.assertEqual(store["rpcs"], [])
+
+    def test_refresh_mode_round_robin_prefers_least_recently_shown(self):
+        # Both open; the one never shown wins over one shown recently, regardless of score.
+        import os
+        from datetime import timedelta
+
+        pending = self._row("kids_ages", status="asked")
+        pending["asked_at"] = (rapport_ranker._now() - timedelta(minutes=5)).isoformat()
+        shown_before = self._row(
+            "activity_social_pref",
+            unlock_score=0.9,
+            asked_at=(rapport_ranker._now() - timedelta(days=1)).isoformat(),
+        )
+        never_shown = self._row("free_windows", parent_bucket="interest", unlock_score=0.4)
+        with patch.dict(os.environ, {"LANA_RAPPORT_ROTATE_MODE": "refresh"}):
+            ask, _s, _t = self._run([shown_before, never_shown], pending=pending)
+        self.assertEqual(ask["gap_id"], "free_windows")
+
     def test_dynamic_semantic_gap_served_with_stored_question(self):
         # A gap not in the static tree (gap_id "deepen:…") is served with its stored
         # question and treated as LOW sensitivity — the whole point of the redesign.

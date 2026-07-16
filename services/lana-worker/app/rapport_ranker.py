@@ -198,6 +198,37 @@ def _preferred_lang(user_id: str) -> str | None:
         return None
 
 
+_DEFAULT_ROTATE_HOURS = 24.0  # daily mode: pending-unanswered window before rotating
+_DEFAULT_ROTATE_GUARD_S = 30.0  # refresh mode: debounce absorbing double-fired effects
+
+
+def _rotate_mode() -> str:
+    """'daily' (default): rotate a pending ask after LANA_RAPPORT_ROTATE_HOURS unanswered,
+    counting it as a soft skip. 'refresh': rotate on every reload (≥ the debounce window)
+    round-robin in priority order, with NO skip penalty — a reload isn't a rejection."""
+    mode = str(os.environ.get("LANA_RAPPORT_ROTATE_MODE", "daily")).strip().lower()
+    return mode if mode in ("daily", "refresh") else "daily"
+
+
+def _pending_is_stale(row: dict[str, Any]) -> bool:
+    """True when the pending ask should rotate out (window depends on rotate mode)."""
+    if _rotate_mode() == "refresh":
+        window = timedelta(seconds=_env_float("LANA_RAPPORT_ROTATE_GUARD_S", _DEFAULT_ROTATE_GUARD_S))
+    else:
+        hours = _env_float("LANA_RAPPORT_ROTATE_HOURS", _DEFAULT_ROTATE_HOURS)
+        if hours <= 0:
+            return False
+        window = timedelta(hours=hours)
+    raw = str(row.get("asked_at") or "")
+    try:
+        asked_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if asked_at.tzinfo is None:
+        asked_at = asked_at.replace(tzinfo=timezone.utc)
+    return (_now() - asked_at) >= window
+
+
 def _pending_ask(user_id: str) -> dict[str, Any] | None:
     """A gap already shown and awaiting the user's action — re-show it verbatim."""
     try:
@@ -253,11 +284,27 @@ def next_ask(
         # 1) Re-show a still-pending ask — no re-mark, no duplicate impression event.
         #    Works for dynamic semantic gaps too (get_gap returns None → _build tolerates it).
         pending = _pending_ask(user_id)
-        if pending:
+        if pending and not _pending_is_stale(pending):
             return _build(pending, get_gap(pending["gap_id"]), lang)
-
+        if pending:
+            # Rotation REPLACES the pending ask, so the new-ask cadence cap doesn't apply.
+            # daily mode: a full window without an answer is a soft skip — sink its score.
+            # refresh mode: reopen with NO penalty (a reload isn't a rejection); the row
+            # keeps its asked_at so the round-robin order sends it to the back of the queue.
+            exclude_id = pending.get("gap_row_id")
+            try:
+                if _rotate_mode() == "refresh":
+                    service_client().table("rapport_gaps").update(
+                        {"status": "open", "updated_at": _now().isoformat()}
+                    ).eq("gap_row_id", exclude_id).execute()
+                else:
+                    service_client().rpc(
+                        "increment_skip_and_reopen", {"p_gap_row_id": exclude_id}
+                    ).execute()
+            except Exception:
+                logger.exception("rapport: stale-rotate failed for %s", user_id)
         # 2) Daily cap — something was asked (and since answered/skipped) within the window.
-        if _recently_asked(user_id):
+        elif _recently_asked(user_id):
             return None
 
     tier_rank = _max_tier_rank(user_id)
@@ -279,7 +326,12 @@ def next_ask(
         candidates = _build_candidates(_load_open_rows(user_id), tier_rank)
         fresh = [c for c in candidates if c[2].get("gap_row_id") != exclude_id]
     pool = fresh or candidates
-    pool.sort(key=lambda t: (-t[0], t[1]))
+    if _rotate_mode() == "refresh":
+        # Round-robin: never-shown first (by priority), then least-recently-shown —
+        # each refresh walks the queue instead of ping-ponging between the top two.
+        pool.sort(key=lambda t: (str(t[2].get("asked_at") or ""), -t[0], t[1]))
+    else:
+        pool.sort(key=lambda t: (-t[0], t[1]))
     score, _opened, row, gap = pool[0]
 
     try:
