@@ -433,6 +433,13 @@ _SYSTEM = (
     "language, AND interests/activities/sports (infinite phrasing: show me american moms, find italian "
     "dads, brazilian parents on my block, find me nearby people that play fifa, neighbors who love "
     "hiking). Set attr_filter to the trait phrase (e.g. american moms, plays fifa). "
+    "With attr_filter, also set attr_terms — the SUBSTANTIVE requirements as search-term groups: "
+    "one group per trait the neighbor must actually have (groups are ANDed), each group listing "
+    "lowercase word forms + close synonyms of that ONE trait (ORed within the group). Drop filler "
+    "grammar and generic verbs — likes/enjoys/loves/plays/who/any/people are NOT requirements. "
+    "'likes to swim' → [[\"swim\",\"swimming\",\"swimmer\"]]; 'brazilian moms who swim' → "
+    "[[\"brazilian\",\"brazil\"],[\"mom\",\"mother\",\"mama\"],[\"swim\",\"swimming\"]]; "
+    "'find me nearby people that plays fifa' → [[\"fifa\"]]. "
     "NOT identity.add_claim, NOT identity.edit_claim, goal=peers. "
     "PEOPLE-WHO-DO-X vs MEET: 'find/show me PEOPLE who play/do/love X' wants to BE SHOWN matching "
     "neighbors → find_by_attrs (the peer cards then offer the meet as a follow-up); it is meet_seek "
@@ -632,6 +639,19 @@ def ai_parse_discovery_turn(
         signal_when_s = str(signal_when).strip()[:120] if signal_when else None
         attr_filter = raw.get("attr_filter")
         attr_filter_s = str(attr_filter).strip()[:200] if attr_filter else None
+        attr_terms_s: list[list[str]] = []
+        raw_terms = raw.get("attr_terms")
+        if attr_filter_s and isinstance(raw_terms, list):
+            for group in raw_terms[:4]:
+                if not isinstance(group, list):
+                    continue
+                terms: list[str] = []
+                for t in group[:6]:
+                    tok = str(t).strip().lower()
+                    if 2 <= len(tok) <= 40 and tok not in terms:
+                        terms.append(tok)
+                if terms:
+                    attr_terms_s.append(terms)
         peer_name = raw.get("peer_name")
         peer_name_s = str(peer_name).strip()[:80] if peer_name else None
         intro_direction = raw.get("intro_direction")
@@ -709,6 +729,7 @@ def ai_parse_discovery_turn(
             "signal_stage": signal_stage_s,
             "signal_when": signal_when_s,
             "attr_filter": attr_filter_s,
+            "attr_terms": attr_terms_s,
             "peer_name": peer_name_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
@@ -800,6 +821,7 @@ def _discovery_slot_payload(
         '  "signal_stage": "string or null",\n'
         '  "signal_when": "string or null",\n'
         '  "attr_filter": "string or null",\n'
+        '  "attr_terms": [["lowercase word forms of one required trait"], ...] with attr_filter, else null,\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '

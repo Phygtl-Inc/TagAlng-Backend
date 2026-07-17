@@ -18,6 +18,7 @@ from app.auth import (
     verify_jwt,
 )
 from app.context import (
+    cohort_tag_labels_for,
     format_event_draft_context,
     format_user_context,
     load_event_draft_context,
@@ -436,7 +437,10 @@ def _ui_from_dict(raw: dict[str, Any] | None) -> LanaTurnUi:
 def _draft_from_dict(raw: dict[str, Any] | None) -> EventDraft | None:
     if not raw:
         return None
-    return EventDraft(**raw)
+    draft = EventDraft(**raw)
+    if draft.cohort_tags and not draft.cohort_tag_labels:
+        draft.cohort_tag_labels = cohort_tag_labels_for(draft.cohort_tags)
+    return draft
 
 
 def _item_draft_from_dict(raw: dict[str, Any] | None) -> ItemDraft | None:

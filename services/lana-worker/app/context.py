@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from typing import Any
 
@@ -177,25 +178,54 @@ def _load_block_network(user_id: str) -> dict[str, Any]:
         return {}
 
 
-def load_event_purpose_ids() -> list[str]:
+# Mirrors the cohorts seed in 20260611120000_event_purpose_cohorts.sql.
+_PURPOSE_FALLBACK: list[dict[str, Any]] = [
+    {"id": "faith_small_group", "label": "Faith small group", "emoji": "⛪"},
+    {"id": "running_fitness", "label": "Running / fitness", "emoji": "🏃"},
+    {"id": "outdoor_adventure", "label": "Outdoor + adventure", "emoji": "🌳"},
+    {"id": "coffee_stroller", "label": "Coffee + stroller", "emoji": "☕"},
+    {"id": "heritage_language", "label": "Heritage / language", "emoji": "🌍"},
+    {"id": "postpartum_support", "label": "Postpartum + support", "emoji": "🌿"},
+    {"id": "book_club_learning", "label": "Book club / learning", "emoji": "📖"},
+    {"id": "beauty_wellness", "label": "Beauty + wellness", "emoji": "💆"},
+    {"id": "lifestyle_social", "label": "Lifestyle + social", "emoji": "🍷"},
+    {"id": "kids_led_activity", "label": "Kids-led activity", "emoji": "🧸"},
+]
+
+_purpose_cache: dict[str, Any] = {"at": 0.0, "rows": None}
+_PURPOSE_TTL_S = 600.0
+
+
+def load_event_purposes() -> list[dict[str, Any]]:
+    """Event Purpose catalog rows ({id, label, emoji}) — the taxonomy is near-static,
+    so rows are cached in-process; falls back to the migration seed on any DB failure."""
+    now = time.monotonic()
+    if _purpose_cache["rows"] is not None and now - _purpose_cache["at"] < _PURPOSE_TTL_S:
+        return _purpose_cache["rows"]
     try:
         sb = service_client()
         res = sb.rpc("get_event_purposes").execute()
-        rows = res.data or []
-        return [str(r["id"]) for r in rows if r.get("id")]
+        rows = [
+            {"id": str(r["id"]), "label": str(r.get("label") or ""), "emoji": r.get("emoji")}
+            for r in (res.data or [])
+            if r.get("id")
+        ] or list(_PURPOSE_FALLBACK)
     except Exception:
-        return [
-            "faith_small_group",
-            "running_fitness",
-            "outdoor_adventure",
-            "coffee_stroller",
-            "heritage_language",
-            "postpartum_support",
-            "book_club_learning",
-            "beauty_wellness",
-            "lifestyle_social",
-            "kids_led_activity",
-        ]
+        rows = list(_PURPOSE_FALLBACK)
+    _purpose_cache.update(at=now, rows=rows)
+    return rows
+
+
+def load_event_purpose_ids() -> list[str]:
+    return [r["id"] for r in load_event_purposes()]
+
+
+def cohort_tag_labels_for(tags: list[str]) -> list[str]:
+    """Display labels for cohort_tags ids (cohorts.label, e.g. lifestyle_social ->
+    'Lifestyle + social'); unknown ids de-snake as a last resort so a chip never
+    regresses to a raw taxonomy id."""
+    by_id = {r["id"]: r["label"] for r in load_event_purposes()}
+    return [by_id.get(t) or t.replace("_", " ") for t in tags]
 
 
 def format_user_context(ctx: dict[str, Any], purpose: str) -> str:

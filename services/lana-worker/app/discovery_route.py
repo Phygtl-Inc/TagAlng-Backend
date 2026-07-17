@@ -24,6 +24,7 @@ from app.db import (
 from app.orchestrator.guardrails import utterance_is_unsafe
 from app.out_of_scope_reply import author_out_of_scope_reply
 from app.claim_search import (
+    attr_display_filter,
     heritage_terms_in_text,
     parse_claim_filters,
     peer_heritage_key,
@@ -1684,7 +1685,7 @@ def _try_layer1_intent_turn(
             )
         reply = format_attr_peers_reply(
             peers,
-            filter_text=filter_text,
+            filter_text=attr_display_filter(filter_text, slots),
             partial_summary=partial_summary,
         )
         peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
@@ -2265,7 +2266,7 @@ def _try_attr_refine_turn(
         )
     reply = format_attr_peers_reply(
         peers,
-        filter_text=filter_text,
+        filter_text=attr_display_filter(filter_text, slots),
         partial_summary=partial_summary,
     )
     peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)

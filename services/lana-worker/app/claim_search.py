@@ -69,8 +69,45 @@ class ClaimFilter:
         }
 
 
+def _filters_from_ai_terms(slots: dict[str, Any] | None) -> list[ClaimFilter]:
+    """Classifier-authored requirement groups: AND across groups, OR within (word forms)."""
+    raw = (slots or {}).get("attr_terms")
+    if not isinstance(raw, list):
+        return []
+    filters: list[ClaimFilter] = []
+    for group in raw[:4]:
+        if not isinstance(group, list):
+            continue
+        terms = [
+            str(t).strip().lower()
+            for t in group[:6]
+            if isinstance(t, str) and 2 <= len(str(t).strip()) <= 40
+        ]
+        if terms:
+            filters.append(ClaimFilter(bucket=None, terms=terms))
+    return filters
+
+
+def attr_display_filter(filter_text: str, slots: dict[str, Any] | None = None) -> str:
+    """What Lana echoes back: the substantive traits, not the raw sentence — 'No one
+    lists "people in my block that likes paragliding"' reads broken; 'paragliding' doesn't."""
+    raw = (slots or {}).get("attr_terms")
+    heads: list[str] = []
+    if isinstance(raw, list):
+        for group in raw[:4]:
+            if isinstance(group, list) and group:
+                head = str(group[0]).strip()
+                if head:
+                    heads.append(head)
+    return " + ".join(heads) if heads else str(filter_text or "").strip()
+
+
 def parse_claim_filters(query: str, slots: dict[str, Any] | None = None) -> list[ClaimFilter]:
     """Turn natural language into bucket-scoped AND filters."""
+    # The AI already decided what's substantive vs filler — its groups win outright.
+    ai_filters = _filters_from_ai_terms(slots)
+    if ai_filters:
+        return ai_filters
     raw = normalize_attr_filter_text(query, slots)
     tokens = attr_filter_tokens(raw) or re.findall(r"[a-z0-9]+", raw.lower())
 
@@ -101,7 +138,15 @@ def parse_claim_filters(query: str, slots: dict[str, Any] | None = None) -> list
         # language often stored as interest/general — search any bucket
         filters.append(ClaimFilter(bucket=None, terms=language_terms))
     if general_terms and not filters:
-        filters.append(ClaimFilter(bucket=None, terms=general_terms))
+        # One filter per token (AND) — a single OR'd group let "likes to swim" match any
+        # "Likes X" claim. Singular/plural forms of a word stay together as one requirement.
+        groups: list[list[str]] = []
+        for tok in general_terms:
+            if groups and (tok == groups[-1][0] + "s" or groups[-1][0] == tok + "s"):
+                groups[-1].append(tok)
+            else:
+                groups.append([tok])
+        filters.extend(ClaimFilter(bucket=None, terms=g) for g in groups)
 
     return filters
 
@@ -114,7 +159,7 @@ def heritage_terms_in_text(text: str) -> set[str]:
     low = str(text or "").lower()
     found: set[str] = set()
     for key, syns in _HERITAGE.items():
-        if any(re.search(rf"\b{re.escape(s)}\b", low) for s in syns):
+        if any(re.search(rf"\b{re.escape(s)}s?\b", low) for s in syns):
             found.add(key)
     return found
 
@@ -146,6 +191,10 @@ def peer_matches_identity_snippet(peer: dict[str, Any], identity_snippet: str | 
     snippet_tokens = set(attr_filter_tokens(snippet))
     label_tokens = set(re.findall(r"[a-z0-9]+", label))
     if snippet_tokens and not (snippet_tokens & label_tokens):
+        # Embedding-matched peers surfaced against this exact ask — semantically fair
+        # even with zero lexical overlap ("gymmer" vs "Gym enthusiast").
+        if peer.get("semantic_match"):
+            return True
         # stage/heritage synonym overlap counts
         for t in snippet_tokens:
             if t in _HERITAGE_FLAT and peer_h == _HERITAGE_FLAT[t]:

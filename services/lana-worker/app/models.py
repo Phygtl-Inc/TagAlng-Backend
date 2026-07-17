@@ -212,6 +212,9 @@ class EventDraft(BaseModel):
     # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
     event_setup: dict[str, Any] | None = None
     cohort_tags: list[str] = Field(default_factory=list)
+    # Display-only labels for cohort_tags (same order; cohorts.label like "Lifestyle +
+    # social"). Chips render these; the ids above stay canonical for publish + matching.
+    cohort_tag_labels: list[str] = Field(default_factory=list)
     affinity_prompt: str | None = None
     affinity_options: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
