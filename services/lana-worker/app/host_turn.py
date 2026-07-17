@@ -23,8 +23,13 @@ user's own words exactly as authored (a title or place they named is THEIR conte
 translate it); booleans/integers are language-neutral. Write the reply in the language they
 are writing in.
 
-1) EXTRACT any event details they clearly stated (never guess; use null when unsure):
-   - title: a name for the event if they gave or proposed one
+1) EXTRACT any event details their LATEST message clearly states or changes (never guess; use
+   null when unsure). Your extraction is applied as-is: a field you return REPLACES what EVENT
+   SO FAR shows, so corrections win — "don't call it that, call it X" -> title: "X"; "actually
+   let's do the park instead" -> place: "the park". And a field their latest message does NOT
+   mention must be null — never repeat a value from EVENT SO FAR or earlier turns as if it
+   were new.
+   - title: a name for the event if they gave, proposed, or changed one
    - place: ONE clear location (their home, a named venue, a park). null if none — or if they're
      weighing options ("my place or a café"), leave it null; don't pick for them.
    - capacity: an integer max headcount if they signalled one ("5-7 people" -> 7, "just a few" or

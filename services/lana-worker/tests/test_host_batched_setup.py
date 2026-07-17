@@ -172,19 +172,20 @@ class TestFallbackNudge(unittest.TestCase):
 
 class TestApplyHostBrain(unittest.TestCase):
     """The brain OWNS understanding (any phrasing); this applies its extraction to the draft
-    monotonically — never clobbering a real value the host already gave."""
+    last-write-wins — a correction ("don't call it that — call it X") replaces the old value.
+    The brain's contract (null for anything the latest message didn't state) is what keeps an
+    unrelated turn from clobbering a value the host already gave."""
 
     def _apply(self, brain, ed):
         settings: dict = {}
         turn_ctx: dict = {}
         session_ctx: dict = {}
-        existing = str(ed.get("title") or "")
-        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings, existing)
-        return turn_ctx, settings
+        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
+        return turn_ctx, session_ctx, settings
 
     def test_applies_capacity_place_and_prefs(self) -> None:
         ed: dict = {}
-        turn_ctx, settings = self._apply(
+        turn_ctx, _, settings = self._apply(
             {
                 "title": "Neighbor Coffee",
                 "place": "my house",
@@ -203,16 +204,50 @@ class TestApplyHostBrain(unittest.TestCase):
         self.assertIs(ed["auto_approve"], False)
         self.assertIs(ed["allow_attendee_share"], True)
 
-    def test_monotonic_never_clobbers_real_title_or_venue(self) -> None:
-        ed = {"title": "Book Club", "venue_name": "Foxtail Coffee"}
-        self._apply({"title": "Something Else", "place": "the park", "reply": "x"}, ed)
-        self.assertEqual(ed["title"], "Book Club")
+    def test_corrections_overwrite_title_and_place(self) -> None:
+        # "don't call it that — call it Pasta Night, and actually let's do the community
+        # center" must not be silently dropped just because the fields were already filled.
+        ed = {"title": "Pizza Night", "venue_name": "Riverside Park"}
+        self._apply({"title": "Pasta Night", "place": "Community Center", "reply": "x"}, ed)
+        self.assertEqual(ed["title"], "Pasta Night")
+        self.assertEqual(ed["venue_name"], "Community Center")
+
+    def test_place_change_drops_stale_pin(self) -> None:
+        # Moving the meet invalidates the old venue's pin AND the event_venue stash —
+        # otherwise next turn's re-stamp resurrects the old spot / publish pins the
+        # wrong coordinates.
+        ed = {
+            "venue_name": "Foxtail Coffee",
+            "place_id": "pid-1",
+            "venue_lat": 1.0,
+            "venue_lng": 2.0,
+            "venue_address": "1 Old St",
+        }
+        turn_ctx, session_ctx, _ = self._apply({"place": "the park", "reply": "x"}, ed)
+        self.assertEqual(ed["venue_name"], "the park")
+        for k in ("place_id", "venue_lat", "venue_lng", "venue_address"):
+            self.assertNotIn(k, ed)
+        self.assertIsNone(turn_ctx["event_venue"])
+        self.assertIsNone(session_ctx["event_venue"])
+
+    def test_same_place_echo_keeps_pin(self) -> None:
+        # The brain re-stating the current place (an echo, not a change) must not wipe
+        # the precise pin a Search pick / auto-resolve already stamped.
+        ed = {"venue_name": "Foxtail Coffee", "place_id": "pid-1", "venue_lat": 1.0}
+        self._apply({"place": "foxtail coffee", "reply": "x"}, ed)
         self.assertEqual(ed["venue_name"], "Foxtail Coffee")
+        self.assertEqual(ed["place_id"], "pid-1")
+        self.assertEqual(ed["venue_lat"], 1.0)
 
     def test_ignores_generic_title(self) -> None:
         ed: dict = {}
         self._apply({"title": "a meetup", "reply": "x"}, ed)
         self.assertNotIn("title", ed)
+
+    def test_generic_title_never_overwrites_real_name(self) -> None:
+        ed = {"title": "Book Club"}
+        self._apply({"title": "meetup", "reply": "x"}, ed)
+        self.assertEqual(ed["title"], "Book Club")
 
     def test_nulls_are_left_alone(self) -> None:
         ed = {"title": "Book Club"}

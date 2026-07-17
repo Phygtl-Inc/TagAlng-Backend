@@ -404,20 +404,31 @@ def _apply_host_brain(
     turn_ctx: dict[str, Any],
     session_ctx: dict[str, Any],
     settings: dict[str, Any],
-    existing_title: str,
 ) -> None:
-    """Apply the LLM host-turn brain's extraction to the draft — monotonically (never clobber a
-    real value the host already gave). Understanding is the LLM's job; this just records it."""
+    """Apply the LLM host-turn brain's extraction to the draft. Understanding is the LLM's job;
+    this just records it — last write wins, so a correction ("don't call it that — call it X",
+    "actually let's do the park") replaces the old value instead of being silently dropped.
+    The brain only emits a field its LATEST message stated or changed (null otherwise), so an
+    unrelated turn can't clobber a value the host already gave."""
     title = str(brain.get("title") or "").strip()
-    have_real_title = bool(existing_title) and not _is_generic_title(existing_title)
     # Reject a generic name in both raw ("meetup") and article-led ("a meetup") form.
     title_generic = _is_generic_title(title) or _is_generic_title(
         re.sub(r"^(?:a|an|the)\s+", "", title, flags=re.I)
     )
-    if title and not have_real_title and not title_generic:
+    if title and not title_generic:
         ed["title"] = title[:80]
     place = str(brain.get("place") or "").strip()
-    if place and not str(ed.get("venue_name") or "").strip():
+    prev_place = str(ed.get("venue_name") or "").strip()
+    if place and place.lower() != prev_place.lower():
+        if prev_place:
+            # The place CHANGED — the old venue's pin (place_id/lat/lng/address) and the
+            # event_venue stash are stale now. Drop them, or the re-stamp at the top of the
+            # next host turn puts the old spot back and publish pins the wrong coordinates.
+            # The auto-resolve step re-pins the new name on the next turn.
+            for k in ("place_id", "venue_lat", "venue_lng", "venue_address"):
+                ed.pop(k, None)
+            turn_ctx["event_venue"] = None
+            session_ctx["event_venue"] = None
         ed["venue_name"] = place[:80]
         turn_ctx["event_place_asked"] = True
     cap = brain.get("capacity")
@@ -1655,9 +1666,10 @@ def run_lana_unified_pipeline(
                     # Free-text during setup — the host is TALKING, not tapping. Hand the whole
                     # turn to the LLM brain: it reads the message in ANY phrasing, extracts what
                     # it carries (title / place / capacity / prefs), and writes the reply — no
-                    # keyword gates. Apply the extraction monotonically and show the reply as an
-                    # aside (text + compact draft card) so it's visible over the carousel. The
-                    # deterministic nudge is only a fallback for when the LLM is unavailable.
+                    # keyword gates. Apply the extraction last-write-wins (a correction replaces
+                    # the old value) and show the reply as an aside (text + compact draft card)
+                    # so it's visible over the carousel. The deterministic nudge is only a
+                    # fallback for when the LLM is unavailable.
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
                     need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
@@ -1671,7 +1683,7 @@ def run_lana_unified_pipeline(
                             needed=need,
                         )
                     if brain:
-                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings, _title)
+                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
                         reply = brain["reply"]
                         turn_ctx["host_aside"] = True
                     else:
