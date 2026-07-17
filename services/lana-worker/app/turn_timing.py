@@ -24,22 +24,32 @@ class TurnTimer:
         # Optional progress emitter (streaming endpoint attaches one). No-op otherwise,
         # so every non-streaming caller is unaffected. The timer is already threaded
         # through every pipeline path, so this is the cheapest place to surface progress.
-        self._emit: Callable[[str], None] | None = None
+        self._emit: Callable[[str, str | None], None] | None = None
+        # Last label pushed this turn — lets seed labels ("Reading…") stay quiet once a
+        # more specific stage has already been shown (a generic label after a contextual
+        # one reads as the turn going backwards).
+        self.last_emitted: str | None = None
 
-    def set_emitter(self, emit: Callable[[str], None] | None) -> None:
+    def set_emitter(self, emit: Callable[[str, str | None], None] | None) -> None:
         self._emit = emit
 
-    def emit(self, label: str) -> None:
-        """Push a human-readable progress label to the client, if streaming.
+    def emit(self, label: str, detail: str | None = None) -> None:
+        """Push a human-readable progress label (+ optional subheading) to the client.
 
         Swallows any emitter error: progress is best-effort and must never break a turn.
         """
         if self._emit is None:
             return
         try:
-            self._emit(label)
+            self.last_emitted = label
+            self._emit(label, detail)
         except Exception:  # noqa: BLE001 — progress is best-effort
             pass
+
+    def emit_seed(self, label: str) -> None:
+        """Emit a generic opening label, but only when nothing was emitted yet this turn."""
+        if self.last_emitted is None:
+            self.emit(label)
 
     def set_count(self, name: str, value: int) -> None:
         if value > 0:

@@ -19,6 +19,7 @@ from app.layer1_intents import (
 )
 from app.signal_capture import is_signal_lane_intent
 from app.orchestrator.llm import llm_configured, llm_json, router_model
+from app.orchestrator.progress import normalize_progress
 from app.turn_timing import TurnTimer
 
 _ZIP_IN_TEXT = re.compile(r"\b(\d{5})\b")
@@ -473,7 +474,16 @@ _SYSTEM = (
     "('lets talk in urdu', 'urdu please') → set_preferred_lang=<the picked code>; a bare 'yes' that "
     "picks none keeps set_preferred_lang=null (Lana will ask which). "
     "A decline keeps set_preferred_lang=null (goal=chat either way, unless the message pivots). "
-    "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.)."
+    "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.). "
+    "PROGRESS — also author progress: a list with EXACTLY ONE stage "
+    "{\"label\": ..., \"detail\": ...} — the thinking-status line the user watches in the app "
+    "while Lana works on this turn. label ≤ 6 words, no trailing ellipsis/period; detail = one "
+    "short supporting phrase ≤ 12 words. Ground it in the USER'S OWN ask — name their thing "
+    "('Finding FIFA neighbors', 'Setting up your coffee morning', 'Saving your rain-boots ask'), "
+    "never a generic 'Processing request'. Write it in the language of the latest user message. "
+    "TRUTHFUL ONLY: describe what this turn actually does (understanding the message, searching "
+    "neighbors/events/places, saving their ask, setting up their event, writing back) — never "
+    "promise results or claim an action not taken. Warm, concrete, Lana's voice, no exclamation marks."
 )
 
 
@@ -534,6 +544,7 @@ def _empty_slots() -> dict[str, Any]:
         "lang": None,
         "set_preferred_lang": None,
         "confidence": 0.0,
+        "progress": [],
     }
 
 
@@ -572,7 +583,7 @@ def ai_parse_discovery_turn(
                         has_profile_photo=has_profile_photo,
                         session_ctx=session_ctx,
                     ),
-                    max_tokens=512,
+                    max_tokens=768,
                     temperature=0.0,
                     llm_attempts=attempts_box,
                 )
@@ -592,7 +603,7 @@ def ai_parse_discovery_turn(
                     has_profile_photo=has_profile_photo,
                     session_ctx=session_ctx,
                 ),
-                max_tokens=512,
+                max_tokens=768,
                 temperature=0.0,
             )
         goal = str(raw.get("goal") or "none").lower()
@@ -737,6 +748,8 @@ def ai_parse_discovery_turn(
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
             "confidence": float(raw.get("confidence", 0.0)),
+            # AI-authored thinking-status stage, streamed live to the client.
+            "progress": normalize_progress(raw.get("progress"), max_stages=1),
         }, msg=text)
     except Exception:
         return _empty_slots()
@@ -834,7 +847,9 @@ def _discovery_slot_payload(
         '  "abandon": true|false,\n'
         '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous",\n'
         '  "set_preferred_lang": "ISO code ONLY when the user wants that language as their default (settings.change_language), else null",\n'
-        '  "confidence": 0.0-1.0\n'
+        '  "confidence": 0.0-1.0,\n'
+        '  "progress": [{"label": "thinking-status line ≤6 words, grounded in the user\'s ask", '
+        '"detail": "one supporting phrase ≤12 words"}]\n'
         "}"
     )
 
@@ -871,6 +886,12 @@ def discovery_slots_for_turn(
     if text:
         session_ctx["_discovery_slots"] = slots
         session_ctx["_discovery_slots_for"] = text
+    # The classifier authored the thinking-status line for this turn — surface it the
+    # moment it exists (fresh classify only; cache hits within the turn stay silent).
+    if timer is not None:
+        plan = slots.get("progress") or []
+        if plan:
+            timer.emit(plan[0]["label"], plan[0].get("detail"))
     return slots
 
 
