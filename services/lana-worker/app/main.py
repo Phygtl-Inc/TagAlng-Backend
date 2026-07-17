@@ -1307,13 +1307,13 @@ def _run_lana_message(
     body: SendMessageRequest,
     background_tasks: BackgroundTasks,
     authorization: str | None,
-    emit: Callable[[str], None] | None = None,
+    emit: Callable[[str, str | None], None] | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
-    `emit`, when provided, receives human-readable progress labels as the turn
-    advances (attached to the TurnTimer, which is threaded through every path). The
-    blocking endpoint passes None, so it is a no-op there.
+    `emit`, when provided, receives human-readable progress labels (+ optional
+    detail subheading) as the turn advances (attached to the TurnTimer, which is
+    threaded through every path). The blocking endpoint passes None, a no-op.
     """
     _vertex_required()
     timer = TurnTimer()
@@ -1722,7 +1722,8 @@ def stream_lana_message(
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
-    Frames: `{"type":"status","label":...}` as the turn advances, then a terminal
+    Frames: `{"type":"status","label":...,"detail":...}` as the turn advances (detail
+    is an optional subheading, omitted when absent), then a terminal
     `{"type":"result","turn":<SendMessageResponse>}` (or `{"type":"error","detail":...}`).
     The turn logic is identical — only the transport differs.
 
@@ -1734,8 +1735,8 @@ def stream_lana_message(
     """
     events: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
-    def emit(label: str) -> None:
-        events.put(("status", label))
+    def emit(label: str, detail: str | None = None) -> None:
+        events.put(("status", (label, detail)))
 
     def worker() -> None:
         try:
@@ -1763,7 +1764,11 @@ def stream_lana_message(
                 yield ": ping\n\n"
                 continue
             if kind == "status":
-                yield _sse_frame({"type": "status", "label": payload})
+                label, detail = payload
+                frame: dict[str, Any] = {"type": "status", "label": label}
+                if detail:
+                    frame["detail"] = detail
+                yield _sse_frame(frame)
             elif kind == "result":
                 yield _sse_frame(
                     {"type": "result", "turn": payload.model_dump(mode="json")}

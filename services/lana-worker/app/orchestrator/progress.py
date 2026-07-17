@@ -41,6 +41,44 @@ _BY_TOOL: dict[str, str] = {
 }
 
 
+def normalize_progress(raw: Any, *, max_stages: int = 3) -> list[dict[str, str]]:
+    """Sanitize an AI-authored progress plan into [{"label": str, "detail": str?}, ...].
+
+    The router/classifier LLMs author these per turn (session language, grounded in the
+    user's actual ask); this trims/validates so a malformed model output can never leak
+    junk into the SSE stream. Empty list when nothing usable — callers fall back to the
+    static labels above.
+    """
+    if not isinstance(raw, list):
+        return []
+    plan: list[dict[str, str]] = []
+    for entry in raw[:max_stages]:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()[:60]
+        if not label:
+            continue
+        stage: dict[str, str] = {"label": label}
+        detail = str(entry.get("detail") or "").strip()[:100]
+        if detail:
+            stage["detail"] = detail
+        plan.append(stage)
+    return plan
+
+
+def emit_stage(timer: Any, plan: list[dict[str, str]], index: int, fallback: str) -> None:
+    """Emit AI-authored stage `index` from the plan, or the static fallback label.
+
+    `timer` is a TurnTimer (typed Any to avoid a circular import); emit is a no-op
+    when the turn isn't streaming.
+    """
+    if 0 <= index < len(plan):
+        stage = plan[index]
+        timer.emit(stage["label"], stage.get("detail"))
+    else:
+        timer.emit(fallback)
+
+
 def label_for_routing(routing: dict[str, Any] | None) -> str:
     """Pick the most specific honest label for a decided routing."""
     if not isinstance(routing, dict):

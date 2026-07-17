@@ -16,7 +16,7 @@ from app.orchestrator.lana_chat_fast_path import (
     should_skip_lana_router,
     discovery_slots_for_message,
 )
-from app.orchestrator.progress import COMPOSING, READING, label_for_routing
+from app.orchestrator.progress import COMPOSING, READING, emit_stage, label_for_routing
 from app.orchestrator.recall import prefetch_turn_memories
 from app.orchestrator.router import route_turn
 from app.orchestrator.synthesizer import synthesize_opening, synthesize_turn
@@ -84,7 +84,9 @@ def run_turn(
     timer: TurnTimer | None = None,
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     timer = timer or TurnTimer()
-    timer.emit(READING)
+    # Seed only — the unified pipeline (or the discovery classifier's authored stage)
+    # usually already put a label up; never regress from a contextual one to a generic.
+    timer.emit_seed(READING)
     clear_turn_surfaces(session_ctx)
     # Session-sticky language (idempotent when the unified pipeline already resolved it
     # this turn; this covers the profile_intake / event_draft purposes called directly).
@@ -161,8 +163,11 @@ def run_turn(
         if "discovery_chat_fast_path" not in prior:
             routing = {**routing, "enforce_notes": prior + ["discovery_chat_fast_path"]}
 
-    # Routing is decided — the label can now name the real work (find peers / host / …).
-    timer.emit(label_for_routing(routing))
+    # Routing is decided — the label can now name the real work. The router authors the
+    # stage copy itself (grounded in the user's ask, session language); the static map
+    # is the fallback when the plan is missing (skip_router fast path, malformed output).
+    progress_plan = list(routing.get("progress") or [])
+    emit_stage(timer, progress_plan, 0, label_for_routing(routing))
 
     if should_execute_tool(routing):
         with timer.stage("execute_tool"):
@@ -227,7 +232,7 @@ def run_turn(
                 [r for r in raw_rows if isinstance(r, dict)],
             )
 
-    timer.emit(COMPOSING)
+    emit_stage(timer, progress_plan, 1, COMPOSING)
     reply, status, synth_ctx, ui, draft = synthesize_turn(
         purpose=purpose,
         utterance=utterance,

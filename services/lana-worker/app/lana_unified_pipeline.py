@@ -710,7 +710,7 @@ def run_lana_unified_pipeline(
     2. Orchestrator (AI) — companionship, hosting; enforce still applies discovery overrides.
     """
     timer = timer or TurnTimer()
-    timer.emit(READING)
+    timer.emit_seed(READING)
     session_ctx = {
         **session_ctx,
         "phone_verified": phone_verified,
