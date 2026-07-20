@@ -1,11 +1,12 @@
 """AI-tailored quick-setup cards for the in-chat host flow.
 
 Instead of hardcoding "How many moms?" + generic bring chips, this asks the LLM to tailor
-the four setup cards (capacity / sharing / approval / bring) to THIS event — the audience
-noun ("moms" vs "dads" vs "neighbors"), and bring items that fit the activity (a stroller
-coffee walk → stroller + coffee mug; a potluck → a dish to share). All four come back in
-ONE call so the FE can render them as a single swipeable carousel. Best-effort: returns
-sensible defaults on any failure so the flow never breaks.
+the setup cards (name / capacity / sharing / approval / bring) to THIS event — suggested
+event names (the first pre-fills the name field, the rest are tap-to-swap chips), the
+audience noun ("moms" vs "dads" vs "neighbors"), and bring items that fit the activity (a
+stroller coffee walk → stroller + coffee mug; a potluck → a dish to share). All of it comes
+back in ONE call so the FE can render them as a single swipeable carousel. Best-effort:
+returns sensible defaults on any failure so the flow never breaks.
 """
 
 from __future__ import annotations
@@ -15,11 +16,19 @@ from typing import Any
 
 _SYSTEM = """You set up a neighbor's local event. Given the event so far, tailor the four \
 quick-setup cards to THIS event and return ONE compact JSON object:
-{"capacity_label": "...", "capacity_default": 8,
+{"title_suggestions": ["...", "...", "..."],
+ "capacity_label": "...", "capacity_default": 8,
  "sharing_label": "...", "sharing_hint": "...",
  "approval_label": "...", "approval_hint": "...",
  "bring_label": "...", "bring_hint": "...", "bring_suggestions": ["...", "..."],
  "cover_emoji": "..."}
+
+- title_suggestions: EXACTLY 3 short, specific event names tailored to THIS event — the
+  people, theme, or activity mentioned (a gathering of Brazilian moms ->
+  ["Brazilian Moms Meetup","Brazil Heritage Mixer","Cafezinho & Chat"]; a toddler park
+  meet -> ["Toddler Park Playdate","Morning Playground Meetup","Little Ones at the Park"]).
+  Put the best one FIRST — it pre-fills the name field as the default. When almost nothing
+  is known yet, still return 3 warm neighborly names ("Neighborhood Meetup").
 
 - capacity_label: a short "how many can come?" question using the RIGHT audience noun for
   this event — a moms meetup -> "How many moms?"; a dads hangout -> "How many dads?"; a
@@ -40,6 +49,7 @@ quick-setup cards to THIS event and return ONE compact JSON object:
 Keep every label under ~40 chars, warm and concrete. Never invent event facts."""
 
 _DEFAULTS: dict[str, Any] = {
+    "title_suggestions": ["Neighborhood Meetup", "Coffee & Catch-up", "Weekend Get-together"],
     "capacity_label": "How many can come?",
     "capacity_default": 8,
     "sharing_label": "Can attendees pass the link on?",
@@ -88,7 +98,7 @@ def setup_suggestions(
             model=router_model(),
             system=_SYSTEM,
             user_payload=payload,
-            max_tokens=300,
+            max_tokens=400,
             temperature=0.3,
         )
         if not isinstance(data, dict):
@@ -105,7 +115,14 @@ def setup_suggestions(
             for b in (data.get("bring_suggestions") or [])
             if isinstance(b, str) and str(b).strip() and not is_none_bring_item(b)
         ][:3]
+        titles: list[str] = []
+        for t in data.get("title_suggestions") or []:
+            name = str(t).strip()[:60] if isinstance(t, str) else ""
+            if name and name not in titles:
+                titles.append(name)
         return {
+            # The first name pre-fills the setup card; the rest render as tap-to-swap chips.
+            "title_suggestions": titles[:3] or list(_DEFAULTS["title_suggestions"]),
             "capacity_label": _str(data.get("capacity_label"), _DEFAULTS["capacity_label"], 40),
             "capacity_default": cap_default,
             "sharing_label": _str(data.get("sharing_label"), _DEFAULTS["sharing_label"], 60),
