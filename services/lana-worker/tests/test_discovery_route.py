@@ -99,10 +99,12 @@ class TestDiscoveryRouting(unittest.TestCase):
         self, mock_slots, _mock_ai
     ) -> None:
         mock_slots.return_value = {
-            "goal": "activities",
-            "linear_intent": "discovery.find_activities",
-            "clarify": "browse_or_meet",
-            "confidence": 0.72,
+            "intent_lane": "recommendation",
+            "intent_action": "recommend_value",
+            "intent_scope": "mixed",
+            "goal": "chat",
+            "in_discovery": False,
+            "confidence": 0.9,
         }
         session_ctx = {"routing_phase": "listening"}
 
@@ -121,6 +123,73 @@ class TestDiscoveryRouting(unittest.TestCase):
             session_ctx.get("pending_recommend_value_query"),
             "got any recommendations for me?",
         )
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_recommendation_words_do_not_defer_without_ai_recommendation_intent(
+        self, mock_slots, _mock_ai
+    ) -> None:
+        mock_slots.return_value = {
+            "intent_lane": "discovery",
+            "intent_action": "find_activities",
+            "intent_scope": "event",
+            "goal": "activities",
+            "linear_intent": "discovery.find_activities",
+            "confidence": 0.9,
+        }
+        session_ctx = {"routing_phase": "listening"}
+
+        result = handle_discovery_turn(
+            "what events do you recommend nearby?",
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            history=[],
+        )
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("pending_recommend_value_query", session_ctx)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    @patch("app.discovery_route.fetch_my_block_log", return_value=[])
+    @patch("app.discovery_route.save_local_signal")
+    def test_specific_tip_recommendation_stays_in_tip_lane(
+        self, mock_save_signal, _mock_block_log, mock_slots, _mock_ai
+    ) -> None:
+        mock_save_signal.return_value = {
+            "signal_id": "sig-1",
+            "intent": "tip_seek",
+            "detail_text": "pediatrician",
+            "category": "health",
+            "matches_created": 0,
+        }
+        mock_slots.return_value = {
+            "intent_lane": "local_signal",
+            "intent_action": "tip",
+            "intent_direction": "seek",
+            "goal": "save_signal",
+            "linear_intent": "looking.tip",
+            "signal_intent": "tip_seek",
+            "signal_detail": "pediatrician",
+            "confidence": 0.9,
+        }
+        session_ctx = {"routing_phase": "listening"}
+
+        result = handle_discovery_turn(
+            "recommend a pediatrician",
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            history=[],
+        )
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("pending_recommend_value_query", session_ctx)
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
