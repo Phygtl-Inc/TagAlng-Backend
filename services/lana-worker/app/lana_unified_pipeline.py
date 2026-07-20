@@ -351,7 +351,10 @@ def _ensure_review_draft(
     if not have_title:
         titles = sugg.get("title_suggestions") or []
         if titles:
+            # Default to the first name; keep the full list so the review card can offer
+            # the alternates as tap-to-rename chips ("or call it …").
             ed["title"] = titles[0]
+            ed["title_suggestions"] = titles[:3]
     if not have_desc and sugg.get("description"):
         ed["description"] = sugg["description"]
 
