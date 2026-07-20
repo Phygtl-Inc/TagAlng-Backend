@@ -63,7 +63,7 @@ def setup_suggestions(
 ) -> dict[str, Any]:
     """Return the tailored setup-card config (see _SYSTEM), or _DEFAULTS on any failure."""
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
 
         if not llm_configured():
             return dict(_DEFAULTS)
@@ -81,8 +81,11 @@ def setup_suggestions(
                 f"USER'S LATEST MESSAGE:\n{str(user_message or '').strip()}",
             ]
         )
+        # Router-tier model on purpose: this is a tiny fill-a-JSON-template task
+        # (labels + chips, ~300 tokens) that the full synth model spent ~6s on —
+        # the mini tier does it in a fraction of that with no quality cliff.
         data = llm_json(
-            model=synthesizer_model(),
+            model=router_model(),
             system=_SYSTEM,
             user_payload=payload,
             max_tokens=300,

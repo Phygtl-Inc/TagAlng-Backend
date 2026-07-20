@@ -1,10 +1,17 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from app.auth import service_client
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+# Fan-out pool for the independent Supabase reads in load_user_context. Each call is
+# one ~300ms REST round-trip; running them together bounds the load at the slowest
+# chain (user→block) instead of the sum of all six. The cached Supabase client is
+# shared across threads the same way main.py's write pool already shares it.
+_CTX_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="ctx-load")
 
 
 def load_prompt(name: str) -> str:
@@ -68,40 +75,55 @@ def load_event_draft_context(user_id: str) -> dict[str, Any]:
 
 
 def load_user_context(user_id: str) -> dict[str, Any]:
-    sb = service_client()
-    user_row = (
-        sb.table("users")
-        .select("id, nickname, home_block_id, home_zip, locale")
-        .eq("id", user_id)
-        .limit(1)
-        .execute()
-    )
-    user = user_row.data[0] if user_row.data else {}
-    block_id = user.get("home_block_id")
-    block: dict[str, Any] = {}
-    if block_id:
-        block_row = (
-            sb.table("blocks")
-            .select("id, display_name, cluster_id, state")
-            .eq("id", block_id)
+    def _user_and_block() -> tuple[dict[str, Any], dict[str, Any]]:
+        sb = service_client()
+        user_row = (
+            sb.table("users")
+            .select("id, nickname, home_block_id, home_zip, locale")
+            .eq("id", user_id)
             .limit(1)
             .execute()
         )
-        block = block_row.data[0] if block_row.data else {}
+        user = user_row.data[0] if user_row.data else {}
+        block_id = user.get("home_block_id")
+        block: dict[str, Any] = {}
+        if block_id:
+            block_row = (
+                sb.table("blocks")
+                .select("id, display_name, cluster_id, state")
+                .eq("id", block_id)
+                .limit(1)
+                .execute()
+            )
+            block = block_row.data[0] if block_row.data else {}
+        return user, block
 
-    claims_row = (
-        sb.table("user_identity_claims")
-        .select("concept, label, disclosure")
-        .eq("user_id", user_id)
-        .is_("dismissed_at", "null")
-        .execute()
-    )
-    claims = claims_row.data or []
+    def _claims() -> list[dict[str, Any]]:
+        sb = service_client()
+        claims_row = (
+            sb.table("user_identity_claims")
+            .select("concept, label, disclosure")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .execute()
+        )
+        return claims_row.data or []
 
-    network = _load_block_network(user_id)
-    vector_peers = _load_vector_peer_hints(user_id)
+    # Only the user→block chain and the tier lookup have ordering constraints; the
+    # rest are independent reads. Tiers still runs after peers+network (its inputs).
+    user_block_f = _CTX_POOL.submit(_user_and_block)
+    claims_f = _CTX_POOL.submit(_claims)
+    network_f = _CTX_POOL.submit(_load_block_network, user_id)
+    vector_peers_f = _CTX_POOL.submit(_load_vector_peer_hints, user_id)
+    purpose_ids_f = _CTX_POOL.submit(load_event_purpose_ids)
+
+    network = network_f.result()
+    vector_peers = vector_peers_f.result()
     relationship_tiers = _load_relationship_tiers(user_id, vector_peers, network)
-    event_purpose_ids = load_event_purpose_ids()
+    user, block = user_block_f.result()
+    block_id = user.get("home_block_id")
+    claims = claims_f.result()
+    event_purpose_ids = purpose_ids_f.result()
 
     return {
         "nickname": user.get("nickname"),
