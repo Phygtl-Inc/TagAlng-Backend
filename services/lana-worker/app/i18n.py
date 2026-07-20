@@ -488,30 +488,33 @@ _STRINGS: dict[str, dict[str, str]] = {
               "mais alguma coisa?",
     },
     "browse.empty_interest_offer": {
-        "en": "No **{interest}** activities on your block right now. Want me to keep an "
-              "ear out and text you the moment one pops up — or widen the search?",
-        "es": "No hay actividades de **{interest}** en tu cuadra ahora mismo. ¿Quieres que "
-              "me quede atenta y te escriba en cuanto aparezca una — o amplío la búsqueda?",
-        "pt": "Não tem atividades de **{interest}** no seu quarteirão agora. Quer que eu "
+        # "let you know", not "text you" — the gate that follows verifies an
+        # email, so the promised channel must match. "nearby", not "block" —
+        # the search is ZIP-wide.
+        "en": "No **{interest}** activities nearby right now. Want me to keep an "
+              "ear out and let you know the moment one pops up — or widen the search?",
+        "es": "No hay actividades de **{interest}** cerca de ti ahora mismo. ¿Quieres que "
+              "me quede atenta y te avise en cuanto aparezca una — o amplío la búsqueda?",
+        "pt": "Não tem atividades de **{interest}** por perto agora. Quer que eu "
               "fique de olho e te avise assim que aparecer uma — ou amplio a busca?",
     },
     "browse.empty_generic_offer": {
-        "en": "No matching activities on your block right now. Want me to keep an ear out "
-              "and text you the moment one pops up — or widen the search?",
-        "es": "No hay actividades que encajen en tu cuadra ahora mismo. ¿Quieres que me "
-              "quede atenta y te escriba en cuanto aparezca una — o amplío la búsqueda?",
-        "pt": "Não tem atividades assim no seu quarteirão agora. Quer que eu fique de olho "
+        "en": "No matching activities nearby right now. Want me to keep an ear out "
+              "and let you know the moment one pops up — or widen the search?",
+        "es": "No hay actividades que encajen cerca de ti ahora mismo. ¿Quieres que me "
+              "quede atenta y te avise en cuanto aparezca una — o amplío la búsqueda?",
+        "pt": "Não tem atividades assim por perto agora. Quer que eu fique de olho "
               "e te avise assim que aparecer uma — ou amplio a busca?",
     },
     "browse.events_header": {
-        "en": "Here's what's coming up on your block.",
-        "es": "Esto es lo que viene en tu cuadra.",
-        "pt": "Olha o que vem por aí no seu quarteirão.",
+        "en": "Here's what's coming up nearby.",
+        "es": "Esto es lo que viene cerca de ti.",
+        "pt": "Olha o que vem por aí perto de você.",
     },
     "browse.events_header_label": {
-        "en": "Here's what's coming up for {label} on your block.",
-        "es": "Esto es lo que viene de {label} en tu cuadra.",
-        "pt": "Olha o que vem por aí de {label} no seu quarteirão.",
+        "en": "Here's what's coming up for {label} nearby.",
+        "es": "Esto es lo que viene de {label} cerca de ti.",
+        "pt": "Olha o que vem por aí de {label} perto de você.",
     },
     "browse.events_empty": {
         "en": "Nothing on your block in the next couple weeks. Want me to widen it, "
