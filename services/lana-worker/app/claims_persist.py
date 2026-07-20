@@ -1,4 +1,9 @@
-"""Incremental identity claims: extract from each user turn and upsert to Postgres."""
+"""Incremental identity claims: extract from each user turn and upsert to Postgres.
+
+Legacy table user_identity_claims is written ALWAYS, unconditionally.
+The flag IDENTITY_CONCEPT_LINK_ENABLED gates only an ADDITIVE step that resolves
+the claim to a shared identity_concepts row and records a link in claim_concept_links.
+"""
 
 from __future__ import annotations
 
@@ -21,11 +26,10 @@ from app.vertex_extract import (
 logger = logging.getLogger(__name__)
 
 
-def _identity_split_write_enabled() -> bool:
-    """Phase 1 kill-switch. When False, writes go to user_identity_claims (legacy).
-    When True, writes go to identity_concepts + user_concept_claims (new)."""
+def _identity_concept_link_enabled() -> bool:
+    """Gates ONLY the additive concept-resolution + link step; never gates legacy reads/writes."""
     import os
-    return os.environ.get("IDENTITY_SPLIT_WRITE_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("IDENTITY_CONCEPT_LINK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _concept_top_k() -> int:
@@ -248,12 +252,6 @@ def message_might_assert_heritage(message: str) -> bool:
 def fetch_active_claim_labels(user_id: str) -> list[str]:
     """Active claim labels, so the extractor can MERGE instead of spawning a
     near-duplicate thread (e.g. 'English Speaker' next to 'Speaks 10 languages')."""
-    if _identity_split_write_enabled():
-        return _fetch_active_claim_labels_split(user_id)
-    return _fetch_active_claim_labels_legacy(user_id)
-
-
-def _fetch_active_claim_labels_legacy(user_id: str) -> list[str]:
     try:
         res = (
             service_client()
@@ -277,41 +275,8 @@ def _fetch_active_claim_labels_legacy(user_id: str) -> list[str]:
     return out
 
 
-def _fetch_active_claim_labels_split(user_id: str) -> list[str]:
-    try:
-        res = (
-            service_client()
-            .table("user_concept_claims")
-            .select("label, identity_concepts(concept)")
-            .eq("user_id", user_id)
-            .is_("dismissed_at", "null")
-            .limit(40)
-            .execute()
-        )
-    except Exception:
-        logger.exception("fetch_active_claim_labels_split_failed")
-        return []
-    out: list[str] = []
-    for row in res.data or []:
-        if not isinstance(row, dict):
-            continue
-        label = str(row.get("label") or "").strip()
-        if not label:
-            ic = row.get("identity_concepts") or {}
-            label = str((ic.get("concept") if isinstance(ic, dict) else "") or "").strip()
-        if label:
-            out.append(label)
-    return out
-
-
 def fetch_active_heritage_claims(user_id: str) -> list[tuple[str, str]]:
     """Return (concept, label) for active heritage rows."""
-    if _identity_split_write_enabled():
-        return _fetch_active_heritage_claims_split(user_id)
-    return _fetch_active_heritage_claims_legacy(user_id)
-
-
-def _fetch_active_heritage_claims_legacy(user_id: str) -> list[tuple[str, str]]:
     try:
         res = (
             service_client()
@@ -330,40 +295,6 @@ def _fetch_active_heritage_claims_legacy(user_id: str) -> list[tuple[str, str]]:
         if not isinstance(row, dict):
             continue
         concept = str(row.get("concept") or "").strip()
-        label = str(row.get("label") or "").strip()
-        if not concept and not label:
-            continue
-        if is_negative_claim(
-            ExtractedClaim(concept=concept, label=label, confidence=1.0)
-        ):
-            continue
-        out.append((concept, label))
-    return out
-
-
-def _fetch_active_heritage_claims_split(user_id: str) -> list[tuple[str, str]]:
-    try:
-        res = (
-            service_client()
-            .table("user_concept_claims")
-            .select("label, identity_concepts(concept, bucket)")
-            .eq("user_id", user_id)
-            .is_("dismissed_at", "null")
-            .execute()
-        )
-    except Exception:
-        logger.exception("fetch_active_heritage_claims_split_failed")
-        return []
-    out: list[tuple[str, str]] = []
-    for row in res.data or []:
-        if not isinstance(row, dict):
-            continue
-        ic = row.get("identity_concepts") or {}
-        if not isinstance(ic, dict):
-            continue
-        if ic.get("bucket") != "heritage":
-            continue
-        concept = str(ic.get("concept") or "").strip()
         label = str(row.get("label") or "").strip()
         if not concept and not label:
             continue
@@ -685,25 +616,8 @@ def _dismiss_claims_by_ids(sb: Any, claim_ids: list[str]) -> None:
     ).in_("id", claim_ids).execute()
 
 
-def _dismiss_claims_by_ids_split(sb: Any, claim_ids: list[str]) -> None:
-    if not claim_ids:
-        return
-    from datetime import datetime, timezone
-
-    sb.table("user_concept_claims").update(
-        {"dismissed_at": datetime.now(timezone.utc).isoformat()}
-    ).in_("id", claim_ids).execute()
-
-
 def reconcile_heritage_claims(user_id: str, batch: list[ExtractedClaim]) -> None:
     """One heritage slot per user — new batch replaces prior rows (dual in one line kept)."""
-    if _identity_split_write_enabled():
-        _reconcile_heritage_claims_split(user_id, batch)
-    else:
-        _reconcile_heritage_claims_legacy(user_id, batch)
-
-
-def _reconcile_heritage_claims_legacy(user_id: str, batch: list[ExtractedClaim]) -> None:
     positive = [
         c for c in batch if c.bucket == "heritage" and not is_negative_claim(c)
     ]
@@ -737,52 +651,8 @@ def _reconcile_heritage_claims_legacy(user_id: str, batch: list[ExtractedClaim])
     _dismiss_claims_by_ids(sb, to_dismiss)
 
 
-def _reconcile_heritage_claims_split(user_id: str, batch: list[ExtractedClaim]) -> None:
-    positive = [
-        c for c in batch if c.bucket == "heritage" and not is_negative_claim(c)
-    ]
-    if not positive:
-        return
-    sb = service_client()
-    res = (
-        sb.table("user_concept_claims")
-        .select("id, label, identity_concepts(concept, bucket)")
-        .eq("user_id", user_id)
-        .is_("dismissed_at", "null")
-        .execute()
-    )
-    to_dismiss: list[str] = []
-    batch_concepts = {c.concept for c in positive}
-    for row in res.data or []:
-        if not isinstance(row, dict):
-            continue
-        ic = row.get("identity_concepts") or {}
-        if not isinstance(ic, dict):
-            continue
-        if ic.get("bucket") != "heritage":
-            continue
-        cid = str(row.get("id") or "")
-        concept = str(ic.get("concept") or "")
-        label = str(row.get("label") or "")
-        if is_negative_claim(
-            ExtractedClaim(concept=concept, label=label, confidence=1.0)
-        ):
-            to_dismiss.append(cid)
-            continue
-        if concept in batch_concepts:
-            continue
-        to_dismiss.append(cid)
-    _dismiss_claims_by_ids_split(sb, to_dismiss)
-
-
 def dismiss_claims_from_edit_message(user_id: str, message: str) -> int:
     """Dismiss claims the user explicitly asked to remove."""
-    if _identity_split_write_enabled():
-        return _dismiss_claims_from_edit_message_split(user_id, message)
-    return _dismiss_claims_from_edit_message_legacy(user_id, message)
-
-
-def _dismiss_claims_from_edit_message_legacy(user_id: str, message: str) -> int:
     low = message.lower()
     if not re.search(r"\b(?:remove|delete|drop|clear|get rid of)\b", low):
         return 0
@@ -819,50 +689,6 @@ def _dismiss_claims_from_edit_message_legacy(user_id: str, message: str) -> int:
         if root and root in roots_to_remove:
             to_dismiss.append(cid)
     _dismiss_claims_by_ids(sb, list(dict.fromkeys(to_dismiss)))
-    return len(to_dismiss)
-
-
-def _dismiss_claims_from_edit_message_split(user_id: str, message: str) -> int:
-    low = message.lower()
-    if not re.search(r"\b(?:remove|delete|drop|clear|get rid of)\b", low):
-        return 0
-    roots_to_remove: set[str] = set()
-    for m in re.finditer(
-        r"\b(?:remove|delete|drop|clear|get rid of)\b[^.;!?]{0,80}",
-        low,
-    ):
-        chunk = m.group(0)
-        for root, terms in _HERITAGE_ROOT_TERMS.items():
-            if any(re.search(rf"\b{re.escape(t)}\b", chunk) for t in terms):
-                roots_to_remove.add(root)
-    sb = service_client()
-    res = (
-        sb.table("user_concept_claims")
-        .select("id, label, identity_concepts(concept, bucket)")
-        .eq("user_id", user_id)
-        .is_("dismissed_at", "null")
-        .execute()
-    )
-    to_dismiss: list[str] = []
-    for row in res.data or []:
-        if not isinstance(row, dict):
-            continue
-        ic = row.get("identity_concepts") or {}
-        if not isinstance(ic, dict):
-            continue
-        cid = str(row.get("id") or "")
-        concept = str(ic.get("concept") or "")
-        label = str(row.get("label") or "")
-        bucket = str(ic.get("bucket") or "")
-        if is_negative_claim(
-            ExtractedClaim(concept=concept, label=label, confidence=1.0)
-        ):
-            to_dismiss.append(cid)
-            continue
-        root = _heritage_root(concept, label)
-        if root and root in roots_to_remove:
-            to_dismiss.append(cid)
-    _dismiss_claims_by_ids_split(sb, list(dict.fromkeys(to_dismiss)))
     return len(to_dismiss)
 
 
@@ -978,8 +804,8 @@ def _resolve_concept_id(
         return None
 
 
-def _claim_row_legacy(user_id: str, c: ExtractedClaim) -> dict[str, Any]:
-    """Row shape for the LEGACY user_identity_claims table. Do not change."""
+def _claim_row(user_id: str, c: ExtractedClaim, embedding: list[float] | None) -> dict[str, Any]:
+    """Row shape for the user_identity_claims table."""
     row: dict[str, Any] = {
         "user_id": user_id,
         "concept": c.concept,
@@ -992,53 +818,42 @@ def _claim_row_legacy(user_id: str, c: ExtractedClaim) -> dict[str, Any]:
         "bucket": c.bucket,
         "transient": c.transient,
     }
-    embedding = _embed_claim(c)
     if embedding is not None:
         row["embedding"] = embedding
     return row
 
 
-def _claim_row_split(
-    user_id: str,
+def _link_claim_to_concept(
+    sb: Any,
+    claim_id: str,
     c: ExtractedClaim,
-    concept_id: str,
     utterance_emb: list[float] | None,
-) -> dict[str, Any]:
-    """Row shape for the SPLIT user_concept_claims table."""
-    row: dict[str, Any] = {
-        "user_id": user_id,
-        "concept_id": concept_id,
-        "label": c.label,
-        "tone": c.tone,
-        "confidence": c.confidence,
-        "disclosure": c.disclosure,
-        "source_quote": c.source_quote,
-        "transient": c.transient,
-    }
-    if utterance_emb is not None:
-        row["utterance_embedding"] = utterance_emb
-    return row
+) -> None:
+    """Resolve claim to a shared identity_concepts row and record the link.
 
-
-def _claim_row(user_id: str, c: ExtractedClaim) -> dict[str, Any]:
-    """Deprecated: prefer _claim_row_legacy or _claim_row_split. Preserved for
-    any external caller until Phase 2 cleanup."""
-    return _claim_row_legacy(user_id, c)
+    A failure here must NEVER propagate — the legacy write is already done.
+    """
+    try:
+        concept_id = _resolve_concept_id(sb, c, utterance_emb)
+        if not concept_id:
+            logger.warning(
+                "link_claim_to_concept: could not resolve concept_id, skipping concept=%s",
+                c.concept,
+            )
+            return
+        sb.table("claim_concept_links").upsert(
+            {"claim_id": claim_id, "concept_id": concept_id}, on_conflict="claim_id"
+        ).execute()
+    except Exception:
+        logger.exception("link_claim_to_concept_failed concept=%s claim_id=%s", c.concept, claim_id)
 
 
 def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
     """Merge claims by concept; reconcile heritage bucket per batch.
 
-    Dispatches to the legacy or split write path based on IDENTITY_SPLIT_WRITE_ENABLED.
+    Always writes to user_identity_claims (legacy). When IDENTITY_CONCEPT_LINK_ENABLED
+    is set, also resolves each claim to identity_concepts and writes claim_concept_links.
     """
-    if _identity_split_write_enabled():
-        return _upsert_claims_split(user_id, claims)
-    return _upsert_claims_legacy(user_id, claims)
-
-
-def _upsert_claims_legacy(user_id: str, claims: list[ExtractedClaim]) -> int:
-    """Legacy path — writes to user_identity_claims. Byte-identical to the
-    pre-Phase-1 upsert_claims body. Do not modify."""
     claims = clean_claims_for_persist(claims)
     sb = service_client()
     saved = 0
@@ -1046,7 +861,8 @@ def _upsert_claims_legacy(user_id: str, claims: list[ExtractedClaim]) -> int:
     for c in claims:
         if c.confidence < MIN_CLAIM_CONFIDENCE:
             continue
-        row = _claim_row_legacy(user_id, c)
+        embedding = _embed_claim(c)
+        row = _claim_row(user_id, c, embedding)
         existing = (
             sb.table("user_identity_claims")
             .select("id")
@@ -1060,87 +876,51 @@ def _upsert_claims_legacy(user_id: str, claims: list[ExtractedClaim]) -> int:
             claim_id = existing.data[0]["id"]
             sb.table("user_identity_claims").update(row).eq("id", claim_id).execute()
         else:
-            sb.table("user_identity_claims").insert(row).execute()
+            res = sb.table("user_identity_claims").insert(row).execute()
+            claim_id = None
+            if res.data and len(res.data) > 0:
+                claim_id = res.data[0].get("id")
+            if not claim_id:
+                try:
+                    resel = (
+                        sb.table("user_identity_claims")
+                        .select("id")
+                        .eq("user_id", user_id)
+                        .eq("concept", c.concept)
+                        .is_("dismissed_at", "null")
+                        .limit(1)
+                        .execute()
+                    )
+                    claim_id = resel.data[0]["id"] if resel.data else None
+                except Exception:
+                    logger.exception("claim_id_reselect_failed concept=%s", c.concept)
         saved += 1
-    _reconcile_heritage_claims_legacy(user_id, heritage_batch)
-    return saved
-
-
-def _upsert_claims_split(user_id: str, claims: list[ExtractedClaim]) -> int:
-    """Split path — writes to identity_concepts + user_concept_claims."""
-    claims = clean_claims_for_persist(claims)
-    sb = service_client()
-    saved = 0
-    heritage_batch = [c for c in claims if c.bucket == "heritage"]
-    for c in claims:
-        if c.confidence < MIN_CLAIM_CONFIDENCE:
-            continue
-        utterance_emb = _embed_claim(c)
-        concept_id = _resolve_concept_id(sb, c, utterance_emb)
-        if not concept_id:
-            logger.warning(
-                "upsert_split: could not resolve concept_id, skipping concept=%s",
-                c.concept,
-            )
-            continue
-        row = _claim_row_split(user_id, c, concept_id, utterance_emb)
-        existing = (
-            sb.table("user_concept_claims")
-            .select("id")
-            .eq("user_id", user_id)
-            .eq("concept_id", concept_id)
-            .is_("dismissed_at", "null")
-            .limit(1)
-            .execute()
-        )
-        if existing.data:
-            claim_id = existing.data[0]["id"]
-            sb.table("user_concept_claims").update(row).eq("id", claim_id).execute()
-        else:
-            sb.table("user_concept_claims").insert(row).execute()
-        saved += 1
-    _reconcile_heritage_claims_split(user_id, heritage_batch)
+        if _identity_concept_link_enabled() and claim_id:
+            _link_claim_to_concept(sb, claim_id, c, embedding)
+    reconcile_heritage_claims(user_id, heritage_batch)
     return saved
 
 
 def replace_all_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
     """Full session complete: replace active claims for user."""
-    if _identity_split_write_enabled():
-        _replace_all_claims_split(user_id, claims)
-    else:
-        _replace_all_claims_legacy(user_id, claims)
-
-
-def _replace_all_claims_legacy(user_id: str, claims: list[ExtractedClaim]) -> None:
     claims = clean_claims_for_persist(claims)
     sb = service_client()
     sb.table("user_identity_claims").delete().eq("user_id", user_id).is_(
         "dismissed_at", "null"
     ).execute()
-    rows = [_claim_row_legacy(user_id, c) for c in claims]
+    embeddings = [_embed_claim(c) for c in claims]
+    rows = [_claim_row(user_id, c, emb) for c, emb in zip(claims, embeddings)]
     if rows:
-        sb.table("user_identity_claims").insert(rows).execute()
-
-
-def _replace_all_claims_split(user_id: str, claims: list[ExtractedClaim]) -> None:
-    claims = clean_claims_for_persist(claims)
-    sb = service_client()
-    # Soft-delete-aware DELETE: only remove active rows for the user.
-    sb.table("user_concept_claims").delete().eq("user_id", user_id).is_(
-        "dismissed_at", "null"
-    ).execute()
-    # Master identity_concepts rows are never deleted.
-    for c in claims:
-        utterance_emb = _embed_claim(c)
-        concept_id = _resolve_concept_id(sb, c, utterance_emb)
-        if not concept_id:
-            logger.warning(
-                "replace_all_split: could not resolve concept_id, skipping concept=%s",
-                c.concept,
-            )
-            continue
-        row = _claim_row_split(user_id, c, concept_id, utterance_emb)
-        sb.table("user_concept_claims").insert(row).execute()
+        res = sb.table("user_identity_claims").insert(rows).execute()
+        if _identity_concept_link_enabled():
+            inserted = res.data if res.data else None
+            if inserted is None:
+                logger.warning("replace_all_claims: insert response has no .data, skipping linking")
+            else:
+                for row, claim, emb in zip(inserted, claims, embeddings):
+                    row_id = row.get("id") if isinstance(row, dict) else None
+                    if row_id:
+                        _link_claim_to_concept(sb, row_id, claim, emb)
 
 
 def regex_claims_from_message(message: str) -> list[ExtractedClaim]:
@@ -1354,12 +1134,6 @@ def extract_and_upsert_claims_from_message(
 def latest_claim_id(user_id: str) -> str | None:
     """The user's most recently created active claim — used to link a rapport answer to the
     claim the extractor just made from it (best-effort). Returns None if there's none."""
-    if _identity_split_write_enabled():
-        return _latest_claim_id_split(user_id)
-    return _latest_claim_id_legacy(user_id)
-
-
-def _latest_claim_id_legacy(user_id: str) -> str | None:
     if not user_id:
         return None
     try:
@@ -1376,24 +1150,4 @@ def _latest_claim_id_legacy(user_id: str) -> str | None:
         return res.data[0]["id"] if res.data else None
     except Exception:
         logger.exception("latest_claim_id_failed for %s", user_id)
-        return None
-
-
-def _latest_claim_id_split(user_id: str) -> str | None:
-    if not user_id:
-        return None
-    try:
-        res = (
-            service_client()
-            .table("user_concept_claims")
-            .select("id")
-            .eq("user_id", user_id)
-            .is_("dismissed_at", "null")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        return res.data[0]["id"] if res.data else None
-    except Exception:
-        logger.exception("latest_claim_id_split_failed for %s", user_id)
         return None

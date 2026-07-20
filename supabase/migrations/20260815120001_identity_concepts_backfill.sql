@@ -1,4 +1,4 @@
--- Phase 1 backfill: populate identity_concepts + user_concept_claims from user_identity_claims.
+-- Phase 1 backfill: populate identity_concepts + claim_concept_links from user_identity_claims.
 -- Idempotent (ON CONFLICT DO NOTHING). Does NOT modify user_identity_claims.
 
 do $$
@@ -11,7 +11,7 @@ begin
   -- Pre-check: emit counts so operator can abort if unexpectedly large.
   select count(distinct concept) into v_master_count from public.user_identity_claims;
   select count(*) into v_join_count from public.user_identity_claims;
-  raise notice 'identity_concepts backfill: % distinct concepts -> master rows; % source rows -> join rows',
+  raise notice 'identity_concepts backfill: % distinct concepts -> master rows; % source rows -> link rows',
     v_master_count, v_join_count;
 
   -- Report bucket disagreements before inserting.
@@ -68,28 +68,9 @@ join (
 ) agg on agg.concept = seed.concept
 on conflict (concept) do nothing;
 
--- Populate user_concept_claims. One-for-one from user_identity_claims.
--- Preserves original id, timestamps, and every per-user field.
-insert into public.user_concept_claims (
-  id, user_id, concept_id, label,
-  tone, confidence, disclosure, source_quote,
-  utterance_embedding, transient, dismissed_at,
-  created_at, updated_at
-)
-select
-  uic.id,
-  uic.user_id,
-  ic.id as concept_id,
-  uic.label,
-  uic.tone,
-  uic.confidence,
-  uic.disclosure,
-  uic.source_quote,
-  uic.embedding,
-  uic.transient,
-  uic.dismissed_at,
-  uic.created_at,
-  uic.updated_at
+-- Populate claim_concept_links. One-for-one from user_identity_claims.
+insert into public.claim_concept_links (claim_id, concept_id, created_at)
+select uic.id, ic.id, uic.created_at
 from public.user_identity_claims uic
 join public.identity_concepts ic on ic.concept = uic.concept
-on conflict (id) do nothing;
+on conflict (claim_id) do nothing;

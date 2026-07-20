@@ -1,5 +1,5 @@
--- Phase 1: identity_concepts master table + user_concept_claims join table + RPCs.
--- No changes to user_identity_claims. Feature-flagged write path in lana-worker.
+-- Phase 1: identity_concepts master table + claim_concept_links link table + RPCs.
+-- No changes to user_identity_claims. Feature-flagged additive step in lana-worker.
 
 -- ---------------------------------------------------------------------------
 -- 1. identity_concepts  (globally unique concept catalog)
@@ -49,65 +49,32 @@ create policy "concepts_no_client_write"
 
 
 -- ---------------------------------------------------------------------------
--- 2. user_concept_claims  (per-user claim linking user -> identity_concept)
+-- 2. claim_concept_links  (link each user_identity_claims row to identity_concepts)
 -- ---------------------------------------------------------------------------
 
-create table public.user_concept_claims (
-  id                  uuid primary key default gen_random_uuid(),
-  user_id             uuid not null references public.users(id) on delete cascade,
-  concept_id          uuid not null references public.identity_concepts(id) on delete restrict,
-  label               text not null,
-  tone                text,
-  confidence          real not null,
-  disclosure          public.claim_disclosure not null default 'public',
-  source_quote        text,
-  utterance_embedding extensions.vector(768),
-  transient           boolean not null default false,
-  dismissed_at        timestamptz,
-  created_at          timestamptz not null default now(),
-  updated_at          timestamptz not null default now(),
+-- Defensive no-op; table only ever existed in un-applied drafts.
+drop table if exists public.user_concept_claims;
 
-  constraint user_concept_claims_confidence_check
-    check (confidence >= 0 and confidence <= 1)
+create table public.claim_concept_links (
+  id          uuid primary key default gen_random_uuid(),
+  claim_id    uuid not null unique references public.user_identity_claims (id) on delete cascade,
+  concept_id  uuid not null references public.identity_concepts (id) on delete restrict,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
 );
 
-comment on table public.user_concept_claims is
-  'Per-user claim linking a user to an identity_concepts row. Soft-delete via dismissed_at. Written only by lana-worker (service_role). Phase 1.';
+create index claim_concept_links_concept_id_idx
+  on public.claim_concept_links (concept_id);
 
-create unique index user_concept_claims_user_concept_active_idx
-  on public.user_concept_claims (user_id, concept_id)
-  where dismissed_at is null;
-
-create index user_concept_claims_user_id_idx
-  on public.user_concept_claims (user_id)
-  where dismissed_at is null;
-
-create index user_concept_claims_concept_id_idx
-  on public.user_concept_claims (concept_id)
-  where dismissed_at is null;
-
-create index user_concept_claims_embedding_hnsw_idx
-  on public.user_concept_claims using hnsw (utterance_embedding extensions.vector_cosine_ops)
-  where dismissed_at is null and utterance_embedding is not null;
-
-create trigger user_concept_claims_updated_at
-  before update on public.user_concept_claims
+create trigger claim_concept_links_updated_at
+  before update on public.claim_concept_links
   for each row execute function public.set_updated_at();
 
-alter table public.user_concept_claims enable row level security;
+alter table public.claim_concept_links enable row level security;
+-- Deliberately NO policies: default deny; worker writes via service_role.
 
-create policy "user_concept_claims_select_own"
-  on public.user_concept_claims
-  for select
-  to authenticated
-  using (user_id = auth.uid());
-
-create policy "user_concept_claims_no_client_write"
-  on public.user_concept_claims
-  for all
-  to authenticated
-  using (false)
-  with check (false);
+comment on table public.claim_concept_links is
+  'Links each user_identity_claims row to the shared identity_concepts row it resolved to; worker-only.';
 
 
 -- ---------------------------------------------------------------------------
