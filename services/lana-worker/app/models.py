@@ -375,6 +375,8 @@ class CreateSessionResponse(BaseModel):
     purpose: str
     status: str
     assistant_message: str
+    # lana_messages row id of the opening, so it's 👍/👎-rateable like any other reply.
+    assistant_message_id: str | None = None
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
@@ -445,6 +447,9 @@ class SendMessageResponse(BaseModel):
     session_id: str
     status: str
     assistant_message: str
+    # lana_messages row id of this reply — the FE's 👍/👎 posts it to /lana/feedback.
+    # History scroll-back already carries ids; this covers the just-streamed turn.
+    assistant_message_id: str | None = None
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None

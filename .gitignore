@@ -50,3 +50,4 @@ logs/
 
 # Generated types
 supabase/types/database.ts
+deploy/lana-worker-prod.env

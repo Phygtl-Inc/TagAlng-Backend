@@ -171,10 +171,15 @@ create policy suggestion_queue_no_client_write on public.suggestion_queue
   for all to authenticated using (false) with check (false);
 
 -- ============================================================================
--- §4 · recommendation_impressions — the outcome ledger / ranker training data (spec §6.3)
+-- §4 · latent_suggestion_impressions — the outcome ledger / ranker training data (spec §6.3)
 -- feature_vector is the ranker's input features (NOT a text embedding) -> no similarity index.
+--
+-- Originally named recommendation_impressions, which collided with the rec branch's live
+-- impression log of the same name (20260630 — different shape, actively written by
+-- recommendations.py). This ledger has no writers yet, so it took the new name; databases
+-- that already ran §4 under the old name are renamed in place by the 20260630 migration.
 -- ============================================================================
-create table if not exists public.recommendation_impressions (
+create table if not exists public.latent_suggestion_impressions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users (id) on delete cascade,
   suggestion_id uuid references public.suggestion_queue (id) on delete set null,
@@ -185,20 +190,20 @@ create table if not exists public.recommendation_impressions (
   ranker_version text,
   ranker_score real,
   feature_vector extensions.vector(64),                 -- ranker inputs for replay/training (not embedded)
-  constraint recommendation_impressions_context_is_object check (jsonb_typeof(context) = 'object')
+  constraint latent_suggestion_impressions_context_is_object check (jsonb_typeof(context) = 'object')
 );
 
-comment on table public.recommendation_impressions is
+comment on table public.latent_suggestion_impressions is
   'Layer 3 labeled training data. One row per surfaced suggestion; user_action is the label (§7).';
 
-create index if not exists recommendation_impressions_user_time_idx
-  on public.recommendation_impressions (user_id, surfaced_at desc);
+create index if not exists latent_suggestion_impressions_user_time_idx
+  on public.latent_suggestion_impressions (user_id, surfaced_at desc);
 
-create index if not exists recommendation_impressions_suggestion_idx
-  on public.recommendation_impressions (suggestion_id);
+create index if not exists latent_suggestion_impressions_suggestion_idx
+  on public.latent_suggestion_impressions (suggestion_id);
 
-alter table public.recommendation_impressions enable row level security;
+alter table public.latent_suggestion_impressions enable row level security;
 
 -- Pure telemetry/training data: service-role only, no client access (like lana_audit_log).
-create policy recommendation_impressions_no_client_access on public.recommendation_impressions
+create policy latent_suggestion_impressions_no_client_access on public.latent_suggestion_impressions
   for all to authenticated using (false) with check (false);
