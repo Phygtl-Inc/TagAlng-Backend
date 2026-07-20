@@ -409,7 +409,26 @@ def _apply_host_brain(
     this just records it — last write wins, so a correction ("don't call it that — call it X",
     "actually let's do the park") replaces the old value instead of being silently dropped.
     The brain only emits a field its LATEST message stated or changed (null otherwise), so an
-    unrelated turn can't clobber a value the host already gave."""
+    unrelated turn can't clobber a value the host already gave.
+
+    redo = slots the host asked to change WITHOUT giving the new value ("let's pick a
+    different time") — clear the slot and its step flags so the flow re-collects it.
+    Cleared first, so a value the same message DID carry still lands afterwards."""
+    for slot in brain.get("redo") or []:
+        if slot == "title":
+            ed.pop("title", None)
+        elif slot == "when":
+            ed.pop("starts_at", None)
+            ed.pop("ends_at", None)
+            turn_ctx["event_when_date"] = None
+            turn_ctx["event_when_time"] = None
+        elif slot == "place":
+            for k in ("venue_name", "place_id", "venue_lat", "venue_lng", "venue_address"):
+                ed.pop(k, None)
+            turn_ctx["event_place_asked"] = False
+            turn_ctx["event_venue"] = None
+            turn_ctx["event_venue_tried"] = None
+            session_ctx["event_venue"] = None
     title = str(brain.get("title") or "").strip()
     # Reject a generic name in both raw ("meetup") and article-led ("a meetup") form.
     title_generic = _is_generic_title(title) or _is_generic_title(
@@ -780,6 +799,33 @@ def run_lana_unified_pipeline(
                 home_block_id = assigned  # use it for the rest of THIS turn too
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception("verified_block_assign_failed")
+
+    # Overlap the turn's DB context load with the classifier LLM calls below: both
+    # load_user_context and the memory prefetch depend only on user_id + the raw
+    # message, never on a classification, so by the time run_turn joins the future
+    # the ~5s of Supabase round-trips have already happened under the classifier's
+    # wall-clock. Skipped while a sticky capture owns the session — those lanes
+    # answer without the orchestrator (and on a release, run_turn simply falls back
+    # to loading inline). Spawned AFTER the verified-block guarantee above so a
+    # just-assigned home block is visible to the background read.
+    ctx_prefetch = None
+    if use_orchestrator and not isinstance(session_ctx.get("rapport_answer"), dict) and not any(
+        session_ctx.get(k)
+        for k in (
+            "pass_along_active",
+            "tip_share_active",
+            "look_meet_active",
+            "activity_browse_active",
+            "rapport_active",
+        )
+    ):
+        from app.orchestrator.pipeline import start_ctx_prefetch
+
+        try:
+            ctx_prefetch = start_ctx_prefetch(user_id=user_id, user_message=user_message)
+        except Exception:  # noqa: BLE001 — overlap is an optimization, never a blocker
+            logging.getLogger(__name__).exception("ctx_prefetch_spawn_failed")
+            ctx_prefetch = None
 
     # A "By the way…" tile answer owns the turn: save the claim, close the gap, and reply via
     # the concierge engine (acknowledge her answer + one grounded follow-up), NOT the classifier
@@ -1263,6 +1309,31 @@ def run_lana_unified_pipeline(
         clear_turn_surfaces(session_ctx)
     if use_orchestrator:
         prev_event_id = session_ctx.get("event_id")
+        # Host fast path: when the host stage machine below will provably own this
+        # turn, run_turn skips its router + synthesizer (their routing stamp, reply,
+        # and UI all get overwritten by the host block). "Provably" is deliberately
+        # narrow — every condition mirrors a gate the host block itself checks:
+        #  · event_host_active and no published event_id (the host block's own gate);
+        #  · discovery slots computed FOR THIS MESSAGE read as hosting — the exact
+        #    check the back-out cleanup below uses, so the release branch (which
+        #    would need the synth reply) cannot fire;
+        #  · not the confirm stage and no pending_confirmation — publish turns keep
+        #    the full path, where the router may own the create_event call.
+        # Anything else takes the unchanged full path.
+        from app.layer1_intents import slots_indicate_hosting_signal as _host_slots
+
+        _slots_fresh = (
+            str(session_ctx.get("_discovery_slots_for") or "")
+            == str(user_message or "").strip()
+        )
+        host_fast = (
+            bool(session_ctx.get("event_host_active"))
+            and not prev_event_id
+            and not session_ctx.get("pending_confirmation")
+            and str(session_ctx.get("host_stage") or "") in ("", "review", "setup")
+            and _slots_fresh
+            and _host_slots(session_ctx.get("_discovery_slots") or {})
+        )
         reply, status, turn_ctx, ui, draft = run_turn(
             user_id=user_id,
             session_id=session_id,
@@ -1273,6 +1344,8 @@ def run_lana_unified_pipeline(
             user_jwt=user_jwt,
             persisted_core=persisted_core,
             timer=timer,
+            ctx_prefetch=ctx_prefetch,
+            host_fast_path=host_fast,
         )
         turn_ctx["_orchestrator_turn"] = True
         # Keep sticky host mode across turns; clear it the moment the event publishes
@@ -1760,9 +1833,48 @@ def run_lana_unified_pipeline(
                                 ed.pop("venue_name", None)
                             reply = _publish_failure_reply(publish_error, _title)
                 else:
-                    turn_ctx["host_stage"] = "confirm"
+                    # Free text at confirm — an inline edit, a redo ask, or a question. The
+                    # brain reads it in any phrasing: corrections land last-write-wins, and a
+                    # slot asked to change WITHOUT its new value ("I want a different spot")
+                    # comes back in redo and clears here. A draft still complete afterwards
+                    # holds at confirm; a cleared blocker falls back to the setup carousel —
+                    # the confirm card has no pickers, so holding would strand the host with
+                    # a hole they can't fill.
                     ed["suggestions"] = []
-                    reply = "Tap **Drop the meet up** when you're ready and I'll post it."
+                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    from app.host_turn import host_turn_brain
+
+                    with timer.stage("llm_host_turn"):
+                        brain = host_turn_brain(
+                            history=history,
+                            user_message=user_message,
+                            draft=ed,
+                            needed=need,
+                        )
+                    if brain:
+                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
+                    # Re-derive the blockers AFTER the brain applied edits/redos — the locals
+                    # above predate them (and the router's clear_fields path may have already
+                    # blanked a slot before the stage machine ran).
+                    _title = str(ed.get("title") or "").strip()
+                    wd = turn_ctx.get("event_when_date")
+                    wt = turn_ctx.get("event_when_time")
+                    venue_resolvable = bool(str(ed.get("venue_name") or "").strip())
+                    if _title and wd and wt and venue_resolvable:
+                        turn_ctx["host_stage"] = "confirm"
+                        reply = (
+                            brain["reply"]
+                            if brain
+                            else "Tap **Drop the meet up** when you're ready and I'll post it."
+                        )
+                    else:
+                        _ensure_setup_config(
+                            ed, history=history, user_message=user_message, timer=timer
+                        )
+                        _seed_setup_defaults(ed)
+                        turn_ctx["host_stage"] = "setup"
+                        need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                        reply = brain["reply"] if brain else _host_fallback_nudge(need)
             turn_ctx["event_draft"] = ed
             draft = ed  # surface to the FE (5th return → response.event_draft)
 

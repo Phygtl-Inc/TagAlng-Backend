@@ -10,6 +10,7 @@ yarn-debug.log*
 .env.*.local
 deploy/identity-worker.env
 deploy/lana-worker.env
+deploy/*.env
 
 # GCP / keys
 gcp.json

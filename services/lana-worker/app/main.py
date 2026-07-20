@@ -1601,9 +1601,12 @@ def _run_lana_message(
     # only new row this turn is the assistant message we just inserted.
     final_msg_count = len(history) + (1 if assistant_msg_id else 0)
     if timing_ms is not None:
+        # timing_ms is a mid-turn snapshot of the SAME timer (to_dict() taken inside the
+        # pipeline) — timer.ms holds the authoritative full-turn accumulation. Overwrite,
+        # never add: adding double-counted every pre-snapshot stage, inflating total_ms
+        # by up to ~2× (a 23s turn logged as 40s).
         merged_timing = dict(timing_ms)
-        for key, ms in timer.ms.items():
-            merged_timing[key] = merged_timing.get(key, 0) + ms
+        merged_timing.update(timer.ms)
         timing_ms = merged_timing
     else:
         timing_ms = dict(timer.ms)

@@ -1,5 +1,6 @@
 """MemGPT archival retrieval — prefetch + recall tool backend."""
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.auth import service_client
@@ -9,6 +10,10 @@ RECALL_SCOPES = frozenset({"self", "neighbors", "block"})
 PREFETCH_SCOPES = ("self", "neighbors")
 DEFAULT_K = 5
 PREFETCH_K = 5
+
+# Per-scope recalls share one query embedding and hit independent RPCs — run them
+# together so prefetch costs one round-trip of wall-clock, not one per scope.
+_RECALL_POOL = ThreadPoolExecutor(max_workers=len(PREFETCH_SCOPES), thread_name_prefix="recall")
 
 
 def embed_query(text: str) -> list[float] | None:
@@ -85,10 +90,10 @@ def prefetch_turn_memories(
     combined: list[dict[str, Any]] = []
     seen: set[str] = set()
     per_scope = max(1, k // len(PREFETCH_SCOPES))
-    for scope in PREFETCH_SCOPES:
-        if scope == "neighbors" and not block_id:
-            continue
-        hits = recall_memories(
+    scopes = [s for s in PREFETCH_SCOPES if not (s == "neighbors" and not block_id)]
+    futures = [
+        _RECALL_POOL.submit(
+            recall_memories,
             user_id=user_id,
             block_id=block_id,
             query=utterance,
@@ -96,6 +101,11 @@ def prefetch_turn_memories(
             k=per_scope,
             query_embedding=embedding,
         )
+        for scope in scopes
+    ]
+    # Consume in scope order so the self-scope dedupe priority is unchanged.
+    for future in futures:
+        hits = future.result()
         for hit in hits:
             key = f"{hit.get('source_type')}:{hit.get('source_id')}"
             if key in seen:

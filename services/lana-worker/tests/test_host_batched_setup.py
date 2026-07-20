@@ -249,6 +249,46 @@ class TestApplyHostBrain(unittest.TestCase):
         self._apply({"title": "meetup", "reply": "x"}, ed)
         self.assertEqual(ed["title"], "Book Club")
 
+    def test_redo_place_reopens_where_step(self) -> None:
+        # "I want a different spot" (no new value) — clear the venue + pin + step flags so
+        # the flow re-collects the place instead of holding a card with a hole in it.
+        ed = {
+            "title": "Big Bros Meet",
+            "venue_name": "KFC",
+            "place_id": "pid-1",
+            "venue_lat": 1.0,
+            "venue_lng": 2.0,
+            "venue_address": "1 Old St",
+        }
+        turn_ctx, session_ctx, _ = self._apply({"redo": ["place"], "reply": "x"}, ed)
+        for k in ("venue_name", "place_id", "venue_lat", "venue_lng", "venue_address"):
+            self.assertNotIn(k, ed)
+        self.assertIs(turn_ctx["event_place_asked"], False)
+        self.assertIsNone(turn_ctx["event_venue"])
+        self.assertIsNone(turn_ctx["event_venue_tried"])
+        self.assertIsNone(session_ctx["event_venue"])
+        self.assertEqual(ed["title"], "Big Bros Meet")  # untouched slots survive
+
+    def test_redo_when_clears_dates(self) -> None:
+        ed = {"starts_at": "2026-07-25T21:00:00", "ends_at": "2026-07-25T22:30:00"}
+        turn_ctx, _, _ = self._apply({"redo": ["when"], "reply": "x"}, ed)
+        self.assertNotIn("starts_at", ed)
+        self.assertNotIn("ends_at", ed)
+        self.assertIsNone(turn_ctx["event_when_date"])
+        self.assertIsNone(turn_ctx["event_when_time"])
+
+    def test_redo_title_clears_name(self) -> None:
+        ed = {"title": "Big Bros Meet"}
+        self._apply({"redo": ["title"], "reply": "x"}, ed)
+        self.assertNotIn("title", ed)
+
+    def test_redo_with_inline_value_keeps_value(self) -> None:
+        # Belt-and-braces: if the brain emits both redo and the new value, the value wins —
+        # redo clears first, the extraction lands after.
+        ed = {"title": "Pizza Night"}
+        self._apply({"redo": ["title"], "title": "Pasta Night", "reply": "x"}, ed)
+        self.assertEqual(ed["title"], "Pasta Night")
+
     def test_nulls_are_left_alone(self) -> None:
         ed = {"title": "Book Club"}
         self._apply(
