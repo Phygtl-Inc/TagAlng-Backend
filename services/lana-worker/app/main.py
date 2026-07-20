@@ -149,6 +149,7 @@ from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
+from app.feedback import record_feedback as record_lana_feedback
 from app.notifications import email_html, notify_user
 from app.rapport_gaps import (
     mark_answered as rapport_mark_answered,
@@ -1076,10 +1077,12 @@ def create_lana_session(
             ui_raw: dict[str, Any] | None = None
             draft_raw = None
             use_orch = use_orchestrator_for_purpose(purpose)
+            opening_msg_id: str | None = None
             for m in reversed(messages):
                 if m.get("role") != "assistant":
                     continue
                 opening = str(m.get("content") or "")
+                opening_msg_id = str(m.get("id")) if m.get("id") else None
                 meta = m.get("metadata") or {}
                 status = str(meta.get("status") or status)
                 ui_raw = meta.get("ui") or ui_raw
@@ -1105,6 +1108,7 @@ def create_lana_session(
                 purpose=purpose,
                 status="active",
                 assistant_message=opening,
+                assistant_message_id=opening_msg_id,
                 ready_to_complete=ready,
                 ui=ui,
                 event_draft=event_draft,
@@ -1249,7 +1253,7 @@ def create_lana_session(
                 if effective_lang:
                     opening = localize_text(opening, effective_lang)
 
-        insert_message(
+        opening_msg_id = insert_message(
             session_id,
             "assistant",
             opening,
@@ -1293,6 +1297,7 @@ def create_lana_session(
         purpose=purpose,
         status="active",
         assistant_message=opening,
+        assistant_message_id=opening_msg_id,
         ready_to_complete=ready,
         ui=ui,
         event_draft=event_draft,
@@ -1685,6 +1690,7 @@ def _run_lana_message(
         session_id=session_id,
         status=status,
         assistant_message=reply,
+        assistant_message_id=assistant_msg_id,
         ready_to_complete=ready,
         ui=ui,
         event_draft=event_draft,
@@ -2430,3 +2436,44 @@ def post_rapport_mute_fact(
     auth = verify_auth(authorization)
     rapport_mute_gap(auth.user_id, body.gap_id)
     return {"ok": True}
+
+
+# ── Feedback (👍/👎 on Lana output) ────────────────────────────────────────────
+# One endpoint for both rateable surfaces: an assistant chat reply (message_id) or a
+# rapport tile question (gap_row_id). Same thumb again → the FE sends rating='clear'.
+# Rows land in lana_feedback (service-role only) for the team to review.
+
+
+class LanaFeedbackBody(_BaseModel):
+    rating: str  # 'up' | 'down' | 'clear'
+    message_id: str | None = None
+    gap_row_id: str | None = None
+    # Where the thumb lives in the UI ('chat', 'rapport_tile', …) — stored for triage.
+    surface: str | None = None
+
+
+@app.post("/lana/feedback")
+def post_lana_feedback(
+    body: LanaFeedbackBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    result = record_lana_feedback(
+        auth.user_id,
+        rating=body.rating,
+        message_id=(body.message_id or "").strip() or None,
+        gap_row_id=(body.gap_row_id or "").strip() or None,
+        context={"surface": (body.surface or "").strip() or None},
+    )
+    amplitude_track(
+        "lana_feedback",
+        user_id=auth.user_id,
+        event_properties={
+            "rating": result["rating"],
+            "target_kind": result["target_kind"],
+            "message_id": body.message_id,
+            "gap_row_id": body.gap_row_id,
+            "surface": body.surface,
+        },
+    )
+    return {"ok": True, **result}
