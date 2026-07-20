@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app.activity_browse import (
+    _asks_who_is_welcome,
     activity_browse_should_release,
     reset_activity_browse_state,
     run_activity_browse_turn,
@@ -11,6 +12,38 @@ from app.discovery_route import (
     _resolve_browse_or_meet_answer,
     handle_discovery_turn,
 )
+
+
+class TestWelcomeDoubtDetection(unittest.TestCase):
+    """The browse ZIP-ask must not talk past a 'do I belong here?' question."""
+
+    def test_matches_eligibility_doubt(self) -> None:
+        for line in [
+            "Hi — I'm a dad, home with our 2-year-old. Can I join walks or "
+            "playgroups here, or is this only for moms?",
+            "is this only for moms?",
+            "Can dads join?",
+            "Am I welcome here as a grandfather?",
+            "I'm a nanny — is it okay for me to be here?",
+            "is this just for moms or can caregivers use it too",
+        ]:
+            self.assertTrue(_asks_who_is_welcome(line), line)
+
+    def test_ignores_ordinary_asks(self) -> None:
+        # "mom meetup" mentions moms but is not a welcome question — must not fire.
+        for line in [
+            "Looking for a mom meetup or playgroup this week. I'm in 10001.",
+            "A stroller walk on Saturday morning around the park",
+            "32827",
+            "Family & kids",
+            "I want to find toddler activities near me",
+            "my son is 2, any playgroups?",
+        ]:
+            self.assertFalse(_asks_who_is_welcome(line), line)
+
+    def test_scans_multiple_lines(self) -> None:
+        self.assertTrue(_asks_who_is_welcome("", "walks", "are dads allowed?"))
+        self.assertFalse(_asks_who_is_welcome("", "walks", "32827"))
 
 
 class TestBrowseSeekDecision(unittest.TestCase):
