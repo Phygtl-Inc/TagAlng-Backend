@@ -238,7 +238,32 @@ def _count_upcoming_events_anywhere() -> int | None:
         return None
 
 
-def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = None) -> str:
+# Eligibility / "do I belong here?" doubt in the user's own words. Lana is
+# built for moms first, but dads, grandparents, and caregivers are welcome —
+# and the browse ZIP-ask sub-prompt is otherwise instructed to ONLY ask for a
+# ZIP, so without this it silently talks past the question (a dad who asked
+# "is this only for moms?" got a bare ZIP ask). Kept broad and cheap; the LLM
+# does the actual reassuring, this just decides whether to let it.
+_WELCOME_DOUBT_RE = re.compile(
+    r"\bonly (?:for|open to) (?:moms|mothers|women)\b"
+    r"|\b(?:can|could|may|am i|are dads|is it ok(?:ay)?)\b[^?]*\b"
+    r"(?:dad|dads|father|fathers|guy|guys|man|men|grandparent|grandpa|grandma|"
+    r"grandmother|grandfather|nanny|caregiver|caregivers|non-?mom)\b"
+    r"|\b(?:dad|dads|father|grandparent|grandpa|grandma|nanny|caregiver)\b[^?]*\b"
+    r"(?:welcome|allowed|join|belong|for me)\b"
+    r"|\bam i welcome\b|\bis this (?:just|only) for\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_who_is_welcome(*texts: str) -> bool:
+    """True when any of the user's own lines question whether they belong here."""
+    return any(_WELCOME_DOUBT_RE.search(str(x or "")) for x in texts)
+
+
+def _compose_zip_ask(
+    interest: str, *, user_reply: str = "", user_message: str = "", lang: str | None = None
+) -> str:
     """AI-authored ask for the user's ZIP (Lana's voice), not a canned template.
 
     Grounded ONLY in what's true: the user's own ask (interest) and the real count of
@@ -246,6 +271,8 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
     'nearby' is yet, and events are block-scoped, so listing other blocks' activities
     would show things the user can't attend). When the user replied without a ZIP (maybe
     hesitant), their reply is acknowledged instead of robotically repeating the ask.
+    When the user asked whether they belong here (dad/caregiver/"only for moms?"), that
+    is answered warmly FIRST — the ask must never talk past a welcome question.
     Falls back to a plain friendly ask (localized) when no LLM is configured."""
     interest = str(interest or "").strip()
     fallback = t("browse.ask_zip", lang)
@@ -271,9 +298,26 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
                 "(not a ZIP — maybe hesitant). Acknowledge their reply and gently explain "
                 "why you need the ZIP; do not repeat your previous ask verbatim."
             )
+        # If the user questioned whether they belong here, the reassurance comes
+        # first — otherwise the ZIP-only instruction below would talk right past it.
+        welcome_doubt = _asks_who_is_welcome(user_message, user_reply, interest)
+        if welcome_doubt:
+            facts.append(
+                'The user asked whether they are welcome (e.g. a dad, grandparent, or '
+                'caregiver, or "is this only for moms?"). Reassure them warmly in one '
+                "sentence FIRST — dads, grandparents, and caregivers ARE welcome, and each "
+                "host chooses their own meet's audience so plenty are open to any parent — "
+                "THEN ask for the ZIP."
+            )
         from app.i18n import synth_language_directive
 
         lang_line = synth_language_directive(lang) if lang else None
+        welcome_clause = (
+            "If the facts say the user asked whether they belong here, answer that warmly "
+            "in one sentence before the ZIP ask (you may use up to 3 sentences total). "
+            if welcome_doubt
+            else ""
+        )
         data = llm_json(
             model=synthesizer_model(),
             system=(
@@ -281,11 +325,12 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
                 "(max 2 sentences) asking for the user's ZIP code so you can show the "
                 "activities on their block. Ground it ONLY in the facts given — never "
                 "invent events or claim something is near them. "
+                + welcome_clause
                 + (f"{lang_line} " if lang_line else "")
                 + 'Return JSON {"message": "..."}.'
             ),
             user_payload="\n".join(f"- {f}" for f in facts),
-            max_tokens=120,
+            max_tokens=160,
             temperature=0.4,
         )
         msg = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
@@ -672,7 +717,10 @@ def run_activity_browse_turn(
             # in context instead of repeating the same canned line.
             return _ask_zip(
                 _compose_zip_ask(
-                    str(draft.get("interest") or ""), user_reply=msg, lang=lang
+                    str(draft.get("interest") or ""),
+                    user_reply=msg,
+                    user_message=msg,
+                    lang=lang,
                 )
             )
         # Create-on-miss (same as the discovery funnel): an uncovered-but-real ZIP gets a
@@ -709,7 +757,7 @@ def run_activity_browse_turn(
             else:
                 return _offer_expansion(str(zip5))
         if not block_id:
-            return _ask_zip(_compose_zip_ask(interest, lang=lang))
+            return _ask_zip(_compose_zip_ask(interest, user_message=msg, lang=lang))
 
     # "weekend" is handled by the LLM date matcher too, but keep the SQL-side weekend
     # filter as a cheap pre-narrow when the word appears verbatim.
