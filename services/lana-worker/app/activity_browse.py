@@ -339,11 +339,13 @@ def _compose_out_of_coverage(zip5: str, *, user_msg: str = "", lang: str | None 
         return fallback
 
 
-def _event_when_parts(raw: Any) -> str:
+def _event_when_parts(raw: Any, *, has_time: bool = True) -> str:
     """'2026-07-05 Sat 7:00 PM' for the LLM — in the EVENT's local timezone, so it can
     match date/timeframe AND time-of-day queries. starts_at is stored UTC; rendering it
     raw would put an 8:30 PM ET event on the wrong day (00:30 UTC next-day) and hide
-    the clock time the user's 'evenings after 6pm' must be checked against."""
+    the clock time the user's 'evenings after 6pm' must be checked against.
+    has_time=False (date-only event, midnight placeholder — #56) omits the clock so
+    the model never matches 'mornings'/'after 6pm' against a time nobody set."""
     from datetime import datetime, timezone
 
     from app.event_publish import event_tz
@@ -356,6 +358,8 @@ def _event_when_parts(raw: Any) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         local = dt.astimezone(event_tz())
+        if not has_time:
+            return f"{local.strftime('%Y-%m-%d %a')} (no time set)"
         clock = local.strftime("%I:%M %p").lstrip("0")
         return f"{local.strftime('%Y-%m-%d %a')} {clock}"
     except ValueError:
@@ -387,7 +391,9 @@ def _filter_events_by_query(
             for i, ev in enumerate(events):
                 tags = ev.get("cohort_tags")
                 tagstr = ", ".join(tags) if isinstance(tags, list) else str(tags or "")
-                when = _event_when_parts(ev.get("starts_at"))
+                when = _event_when_parts(
+                    ev.get("starts_at"), has_time=ev.get("has_time") is not False
+                )
                 host = str(ev.get("host_name") or "").strip()
                 lines.append(
                     f"{i}: {ev.get('title', '')} | date: {when} | "

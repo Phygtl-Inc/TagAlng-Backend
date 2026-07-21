@@ -447,6 +447,7 @@ def _find_block_events(
             "event_id": str(e.get("id")),
             "title": str(e.get("title") or "A neighbourhood meet"),
             "starts_at": e.get("starts_at"),
+            "has_time": e.get("has_time") is not False,
             "venue_name": e.get("venue_name"),
         })
     return out

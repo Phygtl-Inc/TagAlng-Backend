@@ -144,6 +144,11 @@ def build_create_event_fields(
     starts = _parse_iso_ts(draft.starts_at)
     if starts:
         fields["starts_at"] = starts
+        # Truthful clock flag: the pipeline stamps has_time from the when-resolver
+        # (True only when the host actually said a time). Absent = legacy draft →
+        # keep the DB default (true) rather than guessing here.
+        if draft.has_time is not None:
+            fields["has_time"] = bool(draft.has_time)
     ends = _parse_iso_ts(draft.ends_at)
     if ends:
         fields["ends_at"] = ends

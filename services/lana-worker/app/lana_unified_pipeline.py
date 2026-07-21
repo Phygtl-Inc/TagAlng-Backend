@@ -26,6 +26,7 @@ _EVENT_DRAFT_FIELDS = {
     "venue_lat",
     "venue_lng",
     "starts_at",
+    "has_time",
     "ends_at",
     "duration_minutes",
     "max_attendees",
@@ -181,6 +182,32 @@ def _rapport_should_release(
     return not lane_should_continue(
         message, session_ctx, slots, is_valid_answer=_is_rapport_answer, pivot_re=None
     )
+
+
+def _recover_when_from_draft(ed: dict[str, Any], wd: Any, wt: Any) -> tuple[Any, Any]:
+    """Back-fill missing when-keys from the draft's persisted starts_at.
+
+    The date is always safe to recover. The clock is recovered ONLY when the draft
+    says the host really gave one (has_time, stamped where starts_at is built): a
+    date-only draft carries a midnight placeholder, and the extractor fabricates a
+    time when the host said none — recovering either would launder it into
+    event_when_time, satisfy the confirm gate, and publish a "12 AM" meet (#56).
+    Drafts from before the flag existed have no key: trust a non-midnight clock
+    (a host-given time mid-flow at deploy), never a midnight one."""
+    if (wd and wt) or not ed.get("starts_at"):
+        return wd, wt
+    from datetime import datetime as _dt_recover
+
+    try:
+        _existing = _dt_recover.fromisoformat(str(ed["starts_at"]))
+    except (ValueError, TypeError):
+        return wd, wt
+    if not wd:
+        wd = _existing.date().isoformat()
+    _ht = ed.get("has_time")
+    if not wt and (_ht is True or (_ht is None and _existing.strftime("%H:%M") != "00:00")):
+        wt = _existing.strftime("%H:%M")
+    return wd, wt
 
 
 def _event_draft_complete(draft: Any) -> bool:
@@ -422,6 +449,7 @@ def _apply_host_brain(
             ed.pop("title", None)
         elif slot == "when":
             ed.pop("starts_at", None)
+            ed.pop("has_time", None)
             ed.pop("ends_at", None)
             turn_ctx["event_when_date"] = None
             turn_ctx["event_when_time"] = None
@@ -1437,6 +1465,7 @@ def run_lana_unified_pipeline(
                     turn_ctx["event_when_date"] = None
                     turn_ctx["event_when_time"] = None
                     ed.pop("starts_at", None)
+                    ed.pop("has_time", None)
                     ed.pop("ends_at", None)
                 if "venue_name" in cleared:
                     # Re-open the where-step and forget the picked pin so the venue isn't
@@ -1467,17 +1496,7 @@ def run_lana_unified_pipeline(
             # rebuilds starts_at from history — so the card kept the date while the step-gate
             # thought it was missing and re-asked "when?"). The draft is the single source of
             # truth; back-fill from it before re-deriving from the current message.
-            if (not wd or not wt) and ed.get("starts_at"):
-                from datetime import datetime as _dt_recover
-
-                try:
-                    _existing = _dt_recover.fromisoformat(str(ed["starts_at"]))
-                    if not wd:
-                        wd = _existing.date().isoformat()
-                    if not wt:
-                        wt = _existing.strftime("%H:%M")
-                except (ValueError, TypeError):
-                    pass
+            wd, wt = _recover_when_from_draft(ed, wd, wt)
             # AI-first when-resolution: the LLM (anchored on today's date inside
             # resolve_event_when) handles ordinals ("28th June"), negation ("not on
             # friday"), and relative phrasing the old regex choked on, and already
@@ -1511,16 +1530,25 @@ def run_lana_unified_pipeline(
             turn_ctx["event_when_time"] = wt
             if wd:
                 ed["starts_at"] = f"{wd}T{wt or '00:00'}:00"
+                # Truthful clock flag: midnight above is a date-only placeholder unless
+                # the host actually said a time. Persisted to events.has_time at publish;
+                # cards render date-only when False (#56).
+                ed["has_time"] = bool(wt)
                 # Rebuild ends_at off our corrected start — the LLM extractor mis-years
                 # ends_at (e.g. 2023) while we compute the real future date here, which
-                # used to ship a wrong-year ends_at through to publish.
+                # used to ship a wrong-year ends_at through to publish. No clock time →
+                # no ends_at: midnight + 90min is a fiction the meet page would render
+                # as a real duration.
                 from datetime import datetime as _dt, timedelta as _td
 
-                try:
-                    _start = _dt.fromisoformat(ed["starts_at"])
-                    _dur = int(ed.get("duration_minutes") or 90)
-                    ed["ends_at"] = (_start + _td(minutes=_dur)).isoformat()
-                except (ValueError, TypeError):
+                if wt:
+                    try:
+                        _start = _dt.fromisoformat(ed["starts_at"])
+                        _dur = int(ed.get("duration_minutes") or 90)
+                        ed["ends_at"] = (_start + _td(minutes=_dur)).isoformat()
+                    except (ValueError, TypeError):
+                        ed.pop("ends_at", None)
+                else:
                     ed.pop("ends_at", None)
 
             # Exact picked place (stamped via /event-venue) — overrides any venue the
