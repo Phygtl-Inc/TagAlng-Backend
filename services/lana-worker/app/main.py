@@ -709,6 +709,7 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
                 activity_id=str(row.get("activity_id") or "") or None,
                 title=title,
                 starts_at=str(row.get("starts_at") or "") or None,
+                has_time=row.get("has_time") is not False,
                 starts_label=str(row.get("starts_label") or "") or None,
                 venue_name=str(row.get("venue_name") or "") or None,
                 preview=bool(row.get("preview", True)),

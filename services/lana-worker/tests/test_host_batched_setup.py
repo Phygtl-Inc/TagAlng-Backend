@@ -13,6 +13,7 @@ from app.lana_unified_pipeline import (
     _is_host_confirm,
     _is_host_drop,
     _is_host_tweak,
+    _recover_when_from_draft,
     _seed_setup_defaults,
 )
 from app.models import EventDraft
@@ -297,6 +298,48 @@ class TestApplyHostBrain(unittest.TestCase):
             ed,
         )
         self.assertEqual(ed, {"title": "Book Club"})
+
+
+class TestRecoverWhenFromDraft(unittest.TestCase):
+    """#56: a date-only draft's midnight placeholder must never be recovered as a real
+    clock time — that laundered "00:00" through event_when_time, satisfied the confirm
+    gate, and published "12 AM" meets."""
+
+    def test_recovers_clock_when_host_gave_one(self) -> None:
+        ed = {"starts_at": "2026-08-12T15:00:00", "has_time": True}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual((wd, wt), ("2026-08-12", "15:00"))
+
+    def test_never_recovers_placeholder_midnight(self) -> None:
+        ed = {"starts_at": "2026-08-12T00:00:00", "has_time": False}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual(wd, "2026-08-12")
+        self.assertIsNone(wt)
+
+    def test_legacy_draft_trusts_non_midnight_clock(self) -> None:
+        # Pre-flag draft (no has_time key): a real-looking clock was host-given mid-flow.
+        ed = {"starts_at": "2026-08-12T18:30:00"}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual((wd, wt), ("2026-08-12", "18:30"))
+
+    def test_legacy_draft_never_trusts_midnight(self) -> None:
+        # Pre-flag draft at exactly midnight = the old date-only placeholder (or an
+        # extractor fabrication) — recover the date, re-ask the time.
+        ed = {"starts_at": "2026-08-12T00:00:00"}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual(wd, "2026-08-12")
+        self.assertIsNone(wt)
+
+    def test_existing_turn_keys_win(self) -> None:
+        ed = {"starts_at": "2026-08-12T15:00:00", "has_time": True}
+        wd, wt = _recover_when_from_draft(ed, "2026-08-13", "09:00")
+        self.assertEqual((wd, wt), ("2026-08-13", "09:00"))
+
+    def test_unparseable_start_is_ignored(self) -> None:
+        ed = {"starts_at": "soonish", "has_time": True}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertIsNone(wd)
+        self.assertIsNone(wt)
 
 
 if __name__ == "__main__":

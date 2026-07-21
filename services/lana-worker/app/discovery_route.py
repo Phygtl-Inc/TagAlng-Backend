@@ -4499,6 +4499,9 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 "activity_id": str(ev.get("id") or "") or None,
                 "title": str(ev.get("title") or "Activity"),
                 "starts_at": str(ev.get("starts_at") or "") or None,
+                # False = date-only event (starts_at's clock is a midnight placeholder);
+                # the FE must not render a time (#56). Absent in a row → assume real.
+                "has_time": ev.get("has_time") is not False,
                 "starts_label": _format_event_when(ev.get("starts_at")),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
                 "preview": True,
@@ -4527,7 +4530,7 @@ def fetch_preview_events_on_block(
         fetch_n = pool if pool and pool > 0 else limit * 3
         res = (
             sb.table("events")
-            .select("id, title, starts_at, venue_name, cohort_tags, host_id")
+            .select("id, title, starts_at, has_time, venue_name, cohort_tags, host_id")
             .eq("block_id", block_id)
             .eq("status", "open")
             .gte("starts_at", now_iso)

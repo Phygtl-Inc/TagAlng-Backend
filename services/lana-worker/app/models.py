@@ -57,6 +57,8 @@ class ActivityPreviewRow(BaseModel):
     activity_id: str | None = None
     title: str
     starts_at: str | None = None
+    # False = the event has no real clock time; render the date without "12 AM" (#56).
+    has_time: bool | None = None
     starts_label: str | None = None
     venue_name: str | None = None
     preview: bool = True
@@ -198,6 +200,9 @@ class EventDraft(BaseModel):
     venue_lat: float | None = None
     venue_lng: float | None = None
     starts_at: str | None = None
+    # Whether the host actually gave a clock time. False = starts_at's time component
+    # is a midnight placeholder (date-only ask) — cards must render the date alone (#56).
+    has_time: bool | None = None
     ends_at: str | None = None
     duration_minutes: int | None = None
     max_attendees: int | None = None

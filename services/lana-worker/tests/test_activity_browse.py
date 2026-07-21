@@ -589,5 +589,46 @@ class TestClarifierAnswerCarriesContext(unittest.TestCase):
         )
 
 
+class TestEventWhenParts(unittest.TestCase):
+    """#56: date-only events (has_time False) must not show the filter LLM a clock —
+    the placeholder midnight would match 'mornings'/'after 6pm' asks nobody scheduled."""
+
+    def test_timed_event_renders_local_clock(self) -> None:
+        from app.activity_browse import _event_when_parts
+
+        # 23:00 UTC = 7 PM ET (summer) — the local-time rendering this guards.
+        self.assertEqual(
+            _event_when_parts("2026-08-12T23:00:00Z", has_time=True),
+            "2026-08-12 Wed 7:00 PM",
+        )
+
+    def test_dateonly_event_omits_clock(self) -> None:
+        from app.activity_browse import _event_when_parts
+
+        # Placeholder midnight is event-local, stored as 04:00 UTC.
+        self.assertEqual(
+            _event_when_parts("2026-08-12T04:00:00Z", has_time=False),
+            "2026-08-12 Wed (no time set)",
+        )
+
+
+class TestActivityPreviewHasTime(unittest.TestCase):
+    def test_preview_passes_flag_through(self) -> None:
+        from app.discovery_route import activity_previews_from_events
+
+        rows = activity_previews_from_events(
+            [
+                {"id": "1", "title": "Dated party", "starts_at": "2026-08-12T04:00:00Z",
+                 "has_time": False},
+                {"id": "2", "title": "Timed party", "starts_at": "2026-08-12T23:00:00Z",
+                 "has_time": True},
+                {"id": "3", "title": "Legacy row", "starts_at": "2026-08-12T23:00:00Z"},
+            ]
+        )
+        self.assertEqual([p["has_time"] for p in rows], [False, True, True])
+        # The compact label never carries a clock, so it stays truthful either way.
+        self.assertEqual(rows[0]["starts_label"], "Wed Aug 12")
+
+
 if __name__ == "__main__":
     unittest.main()
