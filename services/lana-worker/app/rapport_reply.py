@@ -107,7 +107,7 @@ Output ONLY valid JSON (no markdown):
     "kind": "find_neighbors" | "find_activities" | "host_meet" | "seek_tip" | "share_tip" | "none",
     "label": "short button text under 32 chars (e.g. 'Meet neighbors into this'), or null when kind is none",
     "topic": "2-4 word noun phrase naming the thing, e.g. 'trail running', 'Sicilian cooking', or null when kind is none",
-    "send": "the EXACT request they'd type in normal chat, first-person, phrased as a request TO you — this text is what the app routes, so match the kind: seek_tip (a place/spot or tip) → 'find me a shaded playground nearby', 'recommend a quiet cafe near me', 'know any good pediatricians?' (NEVER 'show me … nearby' for a place); find_activities (events) → 'show me what's happening this weekend'; find_neighbors (people) → 'connect me with neighbors into trail running'; host_meet → 'help me host a park playdate'. Null when kind is none."
+    "send": "the EXACT request they'd type in normal chat, first-person, phrased as a request TO you — this text is what the app routes, so match the kind AND ALWAYS name the topic in it (a topic-less send searches everything and betrays the tap): seek_tip (a place/spot or tip) → 'find me a shaded playground nearby', 'recommend a quiet cafe near me', 'know any good pediatricians?' (NEVER 'show me … nearby' for a place); find_activities (events) → 'show me <topic> activities on my block' (e.g. 'show me badminton activities on my block'; a generic 'show me what's happening this weekend' ONLY when the offer genuinely isn't about one topic); find_neighbors (people) → 'connect me with neighbors into trail running'; host_meet → 'help me host a park playdate'. Null when kind is none."
   }
 }
 
@@ -185,6 +185,7 @@ def rapport_concierge_reply(
     saved_label: str | None = None,
     saved_bucket: str | None = None,
     saved: bool = True,
+    already_known: bool = False,
     prior_followups: int = 0,
     current_lang_name: str | None = None,
 ) -> dict[str, Any]:
@@ -201,7 +202,14 @@ def rapport_concierge_reply(
     context_lines = [f'The neighbor answered: "{answer}"']
     if question:
         context_lines.insert(0, f'Your "By the way…" question was: "{_clean(question, 300)}"')
-    if saved:
+    if already_known:
+        facet = saved_label or "this"
+        context_lines.append(
+            f"They had ALREADY told you this — “{facet}” was on their profile before this "
+            "message. Show you remember, naturally in your own words (the feel of "
+            "'I remember — you love this'), and do NOT claim you just saved or updated anything."
+        )
+    elif saved:
         facet = saved_label or "what they shared"
         bucket = f" ({saved_bucket})" if saved_bucket else ""
         context_lines.append(f"Saved to their profile as: {facet}{bucket}.")
@@ -246,7 +254,8 @@ def rapport_concierge_reply(
         _sanitize_language_offer(data.get("language_offer")) if isinstance(data, dict) else []
     )
     # An action with no save to hang it on would ring hollow — drop it, keep the warm line.
-    if action and not saved:
+    # A remembered thread counts: "I remember you love badminton — want me to search?" is fine.
+    if action and not (saved or already_known):
         action = None
     # A follow-up question and a call-to-action shouldn't compete for the same tap — the
     # action wins (it's a concrete next step); otherwise show the suggested answers.

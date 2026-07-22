@@ -316,6 +316,10 @@ _SYSTEM = (
     "A seeking/browsing frame (find / looking for / show me / any / is there / what's happening / "
     "going on / near me / around here / nearby) over an event/activity/party noun is ALWAYS "
     "discovery.find_activities — NEVER host_meet, even though it mentions an event or party. "
+    "But a bare statement of TASTE with no seeking frame ('I like badminton', 'I love swimming', "
+    "'I like playing in competitions') is the user telling you about THEMSELVES → "
+    "identity.add_claim (goal=chat), NEVER find_activities — even mid-browse; only an ask to "
+    "SEE/FIND what exists makes it a search. "
     "host_meet (sharing.host) is ONLY when the user is the ORGANIZER bringing others together "
     "(I want to host/throw/set up/organize/plan/create ...). They INVITE others; they do not ask to be "
     "shown what exists. When genuinely ambiguous between attending and organizing (a bare 'a party this "
@@ -761,12 +765,18 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
     instead of noun-matching it to a lane. 'none' when no capture is active — so this
     line is inert for every non-capture turn."""
     if session_ctx.get("rapport_active"):
+        pending_q = str(session_ctx.get("rapport_followup_question") or "").strip()
+        q_line = f' Lana\'s pending question was: "{pending_q[:300]}".' if pending_q else ""
         return (
-            "rapport — Lana asked a warm, getting-to-know-you question and the user is ANSWERING it. "
-            "A personal/preference reply ('I usually run alone', 'parks & trails', 'idk', 'both', "
-            "'yes please') is an ANSWER → goal=chat, NEVER a fresh intent like meet_seek / "
-            "find_activities / find_peers. Only a clear request to FIND/SHOW/HOST/GET something "
-            "(a place, an event, people, host an event) is a PIVOT — classify it fresh so it leaves rapport"
+            "rapport — Lana asked a warm, getting-to-know-you question and the user is ANSWERING it."
+            + q_line
+            + " A reply that ANSWERS that question is goal=chat, NEVER a fresh intent like tip_seek / "
+            "meet_seek / find_activities / find_peers — even when it is a bare NOUN PHRASE naming a "
+            "place or thing ('local cricket grounds', 'the park by the school', 'parks & trails'): "
+            "naming WHERE/WHAT they do it describes THEMSELVES, it does not ask you to find one "
+            "('I usually run alone', 'idk', 'both', 'yes please' likewise). Only an explicit REQUEST "
+            "to FIND/SHOW/RECOMMEND/HOST/GET something ('find me a cricket ground', 'any grounds "
+            "nearby?', 'recommend a cafe') is a PIVOT — classify it fresh so it leaves rapport"
         )
     if session_ctx.get("look_meet_active"):
         return (

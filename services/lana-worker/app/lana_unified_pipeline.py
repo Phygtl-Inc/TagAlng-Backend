@@ -102,9 +102,17 @@ def _forced_slots_for_kind(
     slots["clarify"] = None
     slots["clarify_question"] = None
     slots["clarify_options"] = []
-    if not str(slots.get("signal_detail") or "").strip():
-        topic = str(action.get("topic") or "").strip() if isinstance(action, dict) else ""
-        slots["signal_detail"] = topic or None
+    # The concierge's structured topic ("badminton") is the committed subject of the
+    # offer — authoritative over whatever the query parse mined from the send text.
+    topic = str(action.get("topic") or "").strip() if isinstance(action, dict) else ""
+    if topic:
+        slots["signal_detail"] = topic
+    elif not str(slots.get("signal_detail") or "").strip():
+        slots["signal_detail"] = None
+    # Stamp the dispatch so downstream lanes can trust the structured topic over the
+    # model-authored send text (which can come out generic, e.g. "what's happening this
+    # weekend" for a badminton offer — the tap must still search badminton).
+    slots["_forced_kind"] = str(kind or "").strip()
     return slots
 
 

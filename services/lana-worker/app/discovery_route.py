@@ -159,9 +159,6 @@ from app.layer1_handlers import (
     summarize_partial_claim_matches,
     stamp_identity_profile_ctx,
 )
-from app.context import load_event_draft_context
-from app.claims_persist import persist_profile_patch, try_upsert_claims_from_message
-from app.profile_intake import format_profile_intake_context, lana_profile_turn
 from app.layer1_intents import (
     LOOKING_SHARING_INTENTS,
     enrich_slots,
@@ -1199,70 +1196,98 @@ def _try_respond_nudge_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
-def _identity_conversational_reply(
+def _claim_concierge_reply(
     *,
     user_id: str | None,
     msg: str,
-    history: list[dict[str, Any]] | None,
+    res: Any,
+    known_labels: list[str],
     session_ctx: dict[str, Any],
     ctx: dict[str, Any],
 ) -> str:
-    """Reply for a profile-building turn via the history-aware intake engine.
+    """Reply for a spontaneous self-claim via the rapport concierge — a warm ack of what
+    they shared (or "I remember" when it was already on file) plus ONE AI-chosen next
+    move: an app-move chip ("Search badminton activities"), a follow-up, or a warm close.
 
-    One AI brain decides what Lana says: name capture in context, the next curious
-    follow-up, and when to wrap — no regex. Persistence already happened upstream.
-    Falls back to a warm ack if the engine call fails.
+    NEVER the profile-intake interviewer here: a taste dropped mid-chat ("I like
+    badminton") is not an invitation to be interviewed, and the intake engine re-asks
+    covered threads like heritage regardless of what's already known (the same reason
+    the rapport tile path avoids it — see lana_unified_pipeline's rapport branch).
     """
     import logging
 
-    fallback = "Got it — I've updated your profile. Tell me more about yourself anytime."
+    fallback = "Got it — I've saved that to your profile. Tell me more anytime."
+    label = str(getattr(res, "primary_label", None) or "").strip()
+    already_known = False
+    if label:
+        low = label.casefold()
+        for k in known_labels:
+            kl = str(k or "").strip().casefold()
+            if kl and (kl == low or kl in low or low in kl):
+                already_known = True
+                break
+    current_lang_name: str | None = None
     try:
-        ctx_pack = load_event_draft_context(user_id) if user_id else {}
-        user_block = format_profile_intake_context(ctx_pack)
-        # Tell the engine what it ALREADY knows so it stops re-asking covered threads
-        # (heritage, reading, …) as if the conversation were fresh — deepen or move on instead.
-        if user_id:
-            try:
-                from app.claims_persist import fetch_active_claim_labels
+        from app.i18n import lang_display_name
+        from app.lang_pref import get_user_preferred_language
 
-                known = fetch_active_claim_labels(user_id)
-            except Exception:
-                known = []
-            if known:
-                user_block += (
-                    "\n\nALREADY KNOWN about this neighbor — do NOT ask about these again; "
-                    "acknowledge briefly if relevant, then deepen a DIFFERENT angle or ask "
-                    "about a NEW thread: " + ", ".join(known[:20])
-                )
-        reply, status, turn_ctx, ui = lana_profile_turn(
-            user_block,
-            history or [],
-            msg,
-            ctx_pack=ctx_pack,
-            session_ctx=session_ctx,
-            continuous=True,
+        current_lang_name = lang_display_name(get_user_preferred_language(user_id))
+    except Exception:  # noqa: BLE001 — a missed language offer beats a failed reply
+        pass
+    prior_followups = int(session_ctx.get("rapport_followup_count") or 0)
+    try:
+        from app.rapport_reply import rapport_concierge_reply
+
+        concierge = rapport_concierge_reply(
+            answer_text=msg,
+            saved_label=label or None,
+            saved_bucket=getattr(res, "primary_bucket", None),
+            saved=bool(getattr(res, "saved", 0)),
+            already_known=already_known,
+            prior_followups=prior_followups,
+            current_lang_name=current_lang_name,
         )
-    except Exception:
-        logging.getLogger(__name__).exception("identity_conversational_reply_failed")
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("claim_concierge_reply_failed")
         return fallback
+    reply = str(concierge.get("reply") or "").strip() or fallback
 
-    # Persist the engine's AI-captured name (e.g. a bare "Drake" read in context).
-    patch = turn_ctx.get("profile_patch") if isinstance(turn_ctx, dict) else None
-    if patch and user_id:
-        try:
-            persist_profile_patch(user_id, patch)
-        except Exception:
-            logging.getLogger(__name__).exception("identity_profile_patch_failed")
-
-    # Carry conversational state for the frontend (threads still come from the dashboard).
-    ctx["profile_turn_status"] = status
-    if ui:
-        ctx["last_ui"] = ui
-    if isinstance(turn_ctx, dict):
-        for key in ("topics_covered", "topics_to_explore"):
-            if key in turn_ctx:
-                ctx[key] = turn_ctx[key]
-    return reply or fallback
+    # Wire the concierge's next move exactly like the rapport tile path, so the chip
+    # renders (ui_actions reads rapport_reply) and the NEXT turn's accept/decline/pivot
+    # is handled by the pipeline's rapport continuation — deterministic dispatch on
+    # accept, normal routing on pivot. Keys are set to None (not popped) to clear across
+    # the session merge.
+    lang_offer = concierge.get("language_offer") or []
+    if lang_offer:
+        ctx["lang_offer_langs"] = lang_offer
+        ctx["lang_offer_ttl"] = 4
+    action = concierge.get("action")
+    options = concierge.get("options")
+    if isinstance(action, dict) and str(action.get("send") or "").strip():
+        ctx["rapport_reply"] = {"options": [], "action": action}
+        ctx["rapport_active"] = True
+        ctx["rapport_followup_question"] = reply
+        ctx["rapport_followup_count"] = prior_followups + 1
+        ctx["rapport_offer_pending"] = True
+        ctx["rapport_pending_action"] = action
+    elif isinstance(options, list) and options:
+        ctx["rapport_reply"] = {"options": options, "action": None}
+        ctx["rapport_active"] = True
+        ctx["rapport_followup_question"] = reply
+        ctx["rapport_followup_count"] = prior_followups + 1
+        ctx["rapport_offer_pending"] = False
+        ctx["rapport_pending_action"] = None
+    else:
+        for k in (
+            "rapport_reply",
+            "rapport_active",
+            "rapport_followup_question",
+            "rapport_followup_count",
+            "rapport_offer_pending",
+            "rapport_pending_action",
+        ):
+            ctx[k] = None
+    return reply
 
 
 def _try_layer1_intent_turn(
@@ -1428,9 +1453,18 @@ def _try_layer1_intent_turn(
         if wants_neighbor_intro(msg) or wants_list_intros_phrase(msg):
             return None
         # Data path: extract + persist claims / kids / nickname (and detect heritage
-        # conflicts). The conversational REPLY is owned by lana_profile_turn — one
-        # AI brain for profile-building, so names, follow-ups, and wrap-up are decided
-        # by meaning in context, not regex.
+        # conflicts). The conversational REPLY is owned by the rapport concierge —
+        # names, follow-ups, and offers decided by meaning in context, not regex.
+        # Snapshot the labels BEFORE persisting so the reply can say "I remember"
+        # for a thread that was already on file (the persist enriches it in place).
+        known_before: list[str] = []
+        if user_id:
+            try:
+                from app.claims_persist import fetch_active_claim_labels
+
+                known_before = fetch_active_claim_labels(user_id)
+            except Exception:  # noqa: BLE001
+                known_before = []
         res = persist_identity_from_message(user_id, msg, linear_intent=linear)
         ctx = _routing_ctx(
             ctx_base,
@@ -1467,11 +1501,13 @@ def _try_layer1_intent_turn(
                 + f" identity thread{'s' if res.total != 1 else ''} on your profile."
             )
         else:
-            # Conversational reply via the profile-intake engine (history-aware).
-            reply = _identity_conversational_reply(
+            # Conversational reply via the rapport concierge (ack + one next move) —
+            # never the intake interviewer, which re-asks known threads like heritage.
+            reply = _claim_concierge_reply(
                 user_id=user_id,
                 msg=msg,
-                history=history,
+                res=res,
+                known_labels=known_before,
                 session_ctx=session_ctx,
                 ctx=ctx,
             )
