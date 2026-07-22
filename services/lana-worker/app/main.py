@@ -2454,6 +2454,9 @@ class LanaFeedbackBody(_BaseModel):
     gap_row_id: str | None = None
     # Where the thumb lives in the UI ('chat', 'rapport_tile', …) — stored for triage.
     surface: str | None = None
+    # Optional free-text follow-up (the FE offers it on 👎). Tracks the latest rating
+    # write: re-rating without one clears any previous comment.
+    comment: str | None = None
 
 
 @app.post("/lana/feedback")
@@ -2467,6 +2470,7 @@ def post_lana_feedback(
         rating=body.rating,
         message_id=(body.message_id or "").strip() or None,
         gap_row_id=(body.gap_row_id or "").strip() or None,
+        comment=body.comment,
         context={"surface": (body.surface or "").strip() or None},
     )
     amplitude_track(
@@ -2478,6 +2482,8 @@ def post_lana_feedback(
             "message_id": body.message_id,
             "gap_row_id": body.gap_row_id,
             "surface": body.surface,
+            # Comment text stays in the DB — analytics only needs to know one exists.
+            "has_comment": bool((body.comment or "").strip()),
         },
     )
     return {"ok": True, **result}

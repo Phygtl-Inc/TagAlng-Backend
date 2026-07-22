@@ -87,9 +87,14 @@ def record_feedback(
     rating: str,
     message_id: str | None = None,
     gap_row_id: str | None = None,
+    comment: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Upsert (rating in RATINGS) or delete (rating == 'clear') the caller's feedback.
+
+    `comment` is the optional free-text follow-up (the PWA offers it on a thumbs-down).
+    It always tracks the latest rating write: re-rating without a comment clears the old
+    one, so a stale 👎 explanation never survives onto a flipped 👍.
 
     Returns {"rating": <current rating or None>, "target_kind": ...} so the FE can
     render the thumb state straight from the response.
@@ -128,10 +133,11 @@ def record_feedback(
         ctx.setdefault("session_id", target["session_id"])
     if target.get("gap_id"):
         ctx.setdefault("gap_id", target["gap_id"])
+    comment = (comment or "").strip()[:2000] or None
 
     if existing_row:
         sb.table("lana_feedback").update(
-            {"rating": rating, "context": ctx, "updated_at": _now_iso()}
+            {"rating": rating, "comment": comment, "context": ctx, "updated_at": _now_iso()}
         ).eq("id", existing_row["id"]).execute()
     else:
         sb.table("lana_feedback").insert(
@@ -141,6 +147,7 @@ def record_feedback(
                 "message_id": message_id,
                 "gap_row_id": gap_row_id,
                 "rating": rating,
+                "comment": comment,
                 "content_snapshot": target["snapshot"],
                 "context": ctx,
             }

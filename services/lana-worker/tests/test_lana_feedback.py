@@ -132,6 +132,46 @@ class TestRecordFeedback(unittest.TestCase):
             self._run(store, rating="up", gap_row_id="g1")
         self.assertEqual(ctx.exception.status_code, 404)
 
+    def test_down_with_comment_stores_trimmed_comment(self):
+        store = _store(gaps=[_GAP])
+        self._run(store, rating="down", gap_row_id="g1", comment="  too personal  ")
+        (_, row), = store["inserts"]
+        self.assertEqual(row["comment"], "too personal")
+
+    def test_rating_without_comment_stores_null_comment(self):
+        store = _store(gaps=[_GAP])
+        self._run(store, rating="down", gap_row_id="g1")
+        (_, row), = store["inserts"]
+        self.assertIsNone(row["comment"])
+
+    def test_rerate_without_comment_clears_previous_comment(self):
+        # Flip 👎(+comment) → 👍: the stale explanation must not ride on the new thumb.
+        store = _store(
+            gaps=[_GAP],
+            existing=[{"id": "f1", "rating": "down", "comment": "too personal"}],
+        )
+        self._run(store, rating="up", gap_row_id="g1")
+        (_, row), = store["updates"]
+        self.assertIsNone(row["comment"])
+
+    def test_comment_followup_updates_existing_row(self):
+        # The FE posts 👎 first, then the free-text as a second call on the same rating.
+        store = _store(
+            gaps=[_GAP],
+            existing=[{"id": "f1", "rating": "down", "comment": None}],
+        )
+        out = self._run(store, rating="down", gap_row_id="g1", comment="asks this too often")
+        self.assertEqual(out["rating"], "down")
+        self.assertEqual(store["inserts"], [])
+        (_, row), = store["updates"]
+        self.assertEqual(row["comment"], "asks this too often")
+
+    def test_overlong_comment_is_capped(self):
+        store = _store(gaps=[_GAP])
+        self._run(store, rating="down", gap_row_id="g1", comment="x" * 3000)
+        (_, row), = store["inserts"]
+        self.assertEqual(len(row["comment"]), 2000)
+
     def test_second_rating_updates_in_place(self):
         store = _store(
             messages=[_MSG],
