@@ -669,7 +669,17 @@ class IdentityPersistResult:
     """Outcome of persisting one identity turn — data only; the REPLY is owned by
     the conversational engine (lana_profile_turn), per ai-authoritative-routing."""
 
-    __slots__ = ("verify_gate", "saved", "dismissed", "conflict", "conflict_prompt", "nickname", "kids_count")
+    __slots__ = (
+        "verify_gate",
+        "saved",
+        "dismissed",
+        "conflict",
+        "conflict_prompt",
+        "nickname",
+        "kids_count",
+        "primary_label",
+        "primary_bucket",
+    )
 
     def __init__(
         self,
@@ -681,6 +691,8 @@ class IdentityPersistResult:
         conflict_prompt: str | None = None,
         nickname: str | None = None,
         kids_count: int | None = None,
+        primary_label: str | None = None,
+        primary_bucket: str | None = None,
     ) -> None:
         self.verify_gate = verify_gate
         self.saved = saved
@@ -689,6 +701,8 @@ class IdentityPersistResult:
         self.conflict_prompt = conflict_prompt
         self.nickname = nickname
         self.kids_count = kids_count
+        self.primary_label = primary_label
+        self.primary_bucket = primary_bucket
 
     @property
     def total(self) -> int:
@@ -741,6 +755,8 @@ def persist_identity_from_message(
         dismissed=dismissed,
         nickname=result.nickname,
         kids_count=result.kids_count,
+        primary_label=result.primary_label,
+        primary_bucket=result.primary_bucket,
     )
 
 
