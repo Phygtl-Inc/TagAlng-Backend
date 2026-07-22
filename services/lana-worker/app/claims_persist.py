@@ -1,4 +1,9 @@
-"""Incremental identity claims: extract from each user turn and upsert to Postgres."""
+"""Incremental identity claims: extract from each user turn and upsert to Postgres.
+
+Legacy table user_identity_claims is written ALWAYS, unconditionally.
+The flag IDENTITY_CONCEPT_LINK_ENABLED gates only an ADDITIVE step that resolves
+the claim to a shared identity_concepts row and records a link in claim_concept_links.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ from typing import Any
 
 from app.auth import service_client
 from app.claim_embed import claim_embedding_text
+from app.lana_ui import normalize_bucket
 from app.models import ExtractedClaim
 from app.pii import redact_pii
 from app.vertex_extract import (
@@ -19,6 +25,28 @@ from app.vertex_extract import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _identity_concept_link_enabled() -> bool:
+    """Gates ONLY the additive concept-resolution + link step; never gates legacy reads/writes."""
+    import os
+    return os.environ.get("IDENTITY_CONCEPT_LINK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _concept_top_k() -> int:
+    import os
+    try:
+        return max(1, int(os.environ.get("LANA_CONCEPT_TOP_K", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _concept_min_sim() -> float:
+    import os
+    try:
+        return max(0.0, min(1.0, float(os.environ.get("LANA_CONCEPT_MIN_SIM", "0.75"))))
+    except (TypeError, ValueError):
+        return 0.75
 
 MIN_CLAIM_CONFIDENCE = 0.65
 _SKIP_OK = frozenset({"ok", "okay", "yes", "no", "yep", "nope", "sure", "thanks", "thank you"})
@@ -324,6 +352,62 @@ Output ONLY JSON: {"relation": "same" | "refine" | "broaden" | "additional" | "c
 - "conflict": genuinely incompatible — the new one replaces the saved one with an UNRELATED nationality/culture (e.g. saved "Italian", new "Korean").
 
 Regional or sub-cultural variants (Sicilian/Italian, Bavarian/German, Catalan/Spanish, Paulista/Brazilian) are NEVER "conflict" — they are "refine" or "broaden". Only use "conflict" for a real contradiction between unrelated heritages."""
+
+_CROSS_CONCEPT_MATCH_PROMPT = """You compare two identity concepts and decide whether they refer to the SAME real-world trait for the purpose of grouping users who share it.
+
+Output ONLY JSON: {"decision": "same" | "different"}
+
+Guidance:
+- "same" ONLY when the two concepts describe the SAME real-world trait (e.g. "brazilian" and "brazilian_heritage" for the heritage bucket; "runner" and "runs_regularly" for activity). Both concepts must belong to the same bucket.
+- "different" whenever there's a meaningful distinction (e.g. "sports_fan" vs "sports_coach"; "vegan" vs "vegetarian"; "yoga_teacher" vs "yoga_student"). When in doubt, choose "different" — false merges are more damaging than false separations.
+- Do NOT merge specific and broad forms when the broader form covers cases the specific one does not (e.g. "guitar_player" and "musician" are DIFFERENT; a musician might play piano). Prefer "different" for hierarchy pairs unless they're synonyms in ordinary speech.
+- Cross-bucket comparisons are never "same". You will only ever be asked to compare same-bucket pairs; if buckets differ, output "different"."""
+
+
+def resolve_cross_concept_match(
+    *,
+    incoming: ExtractedClaim,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the first candidate the LLM decides is the SAME real-world concept, or None.
+
+    Never auto-merges on similarity alone: the LLM's verdict is required.
+    Falls back to None (create-new) when the LLM is unavailable.
+
+    Heritage bucket short-circuit: if heritage_claim_key() matches, treat as same without
+    an LLM call (mirrors resolve_heritage_relation's existing regex-root shortcut).
+    """
+    if not candidates:
+        return None
+    for cand in candidates:
+        # Heritage shortcut: same root (e.g. "brazilian_heritage" vs "brazilian") is same.
+        if incoming.bucket == "heritage" and heritage_claim_key(
+            str(cand.get("concept") or ""), str(cand.get("label") or "")
+        ) == heritage_claim_key(incoming.concept, incoming.label):
+            return cand
+        try:
+            from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+            if not llm_configured():
+                return None
+            payload = (
+                f'incoming: concept="{incoming.concept}", label="{incoming.label}", bucket="{incoming.bucket}"\n'
+                f'candidate: concept="{cand.get("concept")}", label="{cand.get("label")}", bucket="{cand.get("bucket")}"'
+            )
+            data = llm_json(
+                model=router_model(),
+                system=_CROSS_CONCEPT_MATCH_PROMPT,
+                user_payload=payload,
+                max_tokens=100,
+                temperature=0.0,
+            )
+            decision = str((data or {}).get("decision", "")).strip().lower()
+            if decision == "same":
+                return cand
+        except Exception:
+            logger.exception("cross_concept_match_llm_failed")
+            return None  # Never blind-merge on error.
+    return None
 
 
 def resolve_heritage_relation(existing_label: str, new_label: str) -> str:
@@ -808,7 +892,67 @@ def _embed_claim(c: ExtractedClaim) -> list[float] | None:
         return None
 
 
-def _claim_row(user_id: str, c: ExtractedClaim) -> dict[str, Any]:
+def _resolve_concept_id(
+    sb: Any,
+    c: ExtractedClaim,
+    utterance_emb: list[float] | None,
+) -> str | None:
+    """Return the identity_concepts.id to link this claim to.
+
+    Steps:
+      1. If embedding failed, skip lookup — create new master via ON CONFLICT.
+      2. Query top-K nearest neighbors in same bucket above MIN_SIM.
+      3. LLM verifier decides whether any candidate is the same real-world concept.
+      4. If none, call get_or_create_concept RPC (atomic, handles concurrent races).
+
+    Returns concept_id, or None on RPC failure (caller should skip the write).
+    """
+    # identity_concepts has a strict bucket CHECK; the extractor's bucket is
+    # LLM output and may be off-list or null — coerce to a legal value.
+    bucket = normalize_bucket(c.bucket) or "general"
+    try:
+        if utterance_emb is not None:
+            res = sb.rpc(
+                "match_concepts_by_embedding",
+                {
+                    "p_bucket": bucket,
+                    "p_embedding": utterance_emb,
+                    "p_limit": _concept_top_k(),
+                    "p_min_similarity": _concept_min_sim(),
+                },
+            ).execute()
+            candidates = res.data if isinstance(res.data, list) else []
+            matched = resolve_cross_concept_match(incoming=c, candidates=candidates)
+            if matched is not None:
+                return str(matched["id"])
+
+        res = sb.rpc(
+            "get_or_create_concept",
+            {
+                "p_concept": c.concept,
+                "p_label": c.label,
+                "p_bucket": bucket,
+                "p_synonyms": list(c.synonyms or []),
+                "p_canonical_example_quote": c.source_quote,
+                "p_canonical_embedding": utterance_emb,
+            },
+        ).execute()
+        if isinstance(res.data, str):
+            return res.data
+        if isinstance(res.data, list) and res.data:
+            row = res.data[0]
+            if isinstance(row, dict):
+                # Supabase-py sometimes wraps scalar returns; pick common keys.
+                return str(row.get("get_or_create_concept") or row.get("id") or "")
+            return str(row)
+        return None
+    except Exception:
+        logger.exception("resolve_concept_id_failed concept=%s", c.concept)
+        return None
+
+
+def _claim_row(user_id: str, c: ExtractedClaim, embedding: list[float] | None) -> dict[str, Any]:
+    """Row shape for the user_identity_claims table."""
     row: dict[str, Any] = {
         "user_id": user_id,
         "concept": c.concept,
@@ -822,10 +966,34 @@ def _claim_row(user_id: str, c: ExtractedClaim) -> dict[str, Any]:
         "bucket": c.bucket,
         "transient": c.transient,
     }
-    embedding = _embed_claim(c)
     if embedding is not None:
         row["embedding"] = embedding
     return row
+
+
+def _link_claim_to_concept(
+    sb: Any,
+    claim_id: str,
+    c: ExtractedClaim,
+    utterance_emb: list[float] | None,
+) -> None:
+    """Resolve claim to a shared identity_concepts row and record the link.
+
+    A failure here must NEVER propagate — the legacy write is already done.
+    """
+    try:
+        concept_id = _resolve_concept_id(sb, c, utterance_emb)
+        if not concept_id:
+            logger.warning(
+                "link_claim_to_concept: could not resolve concept_id, skipping concept=%s",
+                c.concept,
+            )
+            return
+        sb.table("claim_concept_links").upsert(
+            {"claim_id": claim_id, "concept_id": concept_id}, on_conflict="claim_id"
+        ).execute()
+    except Exception:
+        logger.exception("link_claim_to_concept_failed concept=%s claim_id=%s", c.concept, claim_id)
 
 
 def _merge_into_existing(c: ExtractedClaim, existing_row: dict[str, Any]) -> ExtractedClaim:
@@ -850,7 +1018,11 @@ def _merge_into_existing(c: ExtractedClaim, existing_row: dict[str, Any]) -> Ext
 
 
 def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
-    """Merge claims by concept; reconcile heritage bucket per batch."""
+    """Merge claims by concept; reconcile heritage bucket per batch.
+
+    Always writes to user_identity_claims (legacy). When IDENTITY_CONCEPT_LINK_ENABLED
+    is set, also resolves each claim to identity_concepts and writes claim_concept_links.
+    """
     claims = clean_claims_for_persist(claims)
     sb = service_client()
     saved = 0
@@ -858,6 +1030,7 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
     for c in claims:
         if c.confidence < MIN_CLAIM_CONFIDENCE:
             continue
+        embedding = _embed_claim(c)
         existing = (
             sb.table("user_identity_claims")
             .select("id, confidence, synonyms, details")
@@ -870,12 +1043,31 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
         if existing.data:
             claim_id = existing.data[0]["id"]
             merged = _merge_into_existing(c, existing.data[0])
-            row = _claim_row(user_id, merged)
+            row = _claim_row(user_id, merged, embedding)
             sb.table("user_identity_claims").update(row).eq("id", claim_id).execute()
         else:
-            row = _claim_row(user_id, c)
-            sb.table("user_identity_claims").insert(row).execute()
+            row = _claim_row(user_id, c, embedding)
+            res = sb.table("user_identity_claims").insert(row).execute()
+            claim_id = None
+            if res.data and len(res.data) > 0:
+                claim_id = res.data[0].get("id")
+            if not claim_id:
+                try:
+                    resel = (
+                        sb.table("user_identity_claims")
+                        .select("id")
+                        .eq("user_id", user_id)
+                        .eq("concept", c.concept)
+                        .is_("dismissed_at", "null")
+                        .limit(1)
+                        .execute()
+                    )
+                    claim_id = resel.data[0]["id"] if resel.data else None
+                except Exception:
+                    logger.exception("claim_id_reselect_failed concept=%s", c.concept)
         saved += 1
+        if _identity_concept_link_enabled() and claim_id:
+            _link_claim_to_concept(sb, claim_id, c, embedding)
     reconcile_heritage_claims(user_id, heritage_batch)
     return saved
 
@@ -887,9 +1079,19 @@ def replace_all_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
     sb.table("user_identity_claims").delete().eq("user_id", user_id).is_(
         "dismissed_at", "null"
     ).execute()
-    rows = [_claim_row(user_id, c) for c in claims]
+    embeddings = [_embed_claim(c) for c in claims]
+    rows = [_claim_row(user_id, c, emb) for c, emb in zip(claims, embeddings)]
     if rows:
-        sb.table("user_identity_claims").insert(rows).execute()
+        res = sb.table("user_identity_claims").insert(rows).execute()
+        if _identity_concept_link_enabled():
+            inserted = res.data if res.data else None
+            if inserted is None:
+                logger.warning("replace_all_claims: insert response has no .data, skipping linking")
+            else:
+                for row, claim, emb in zip(inserted, claims, embeddings):
+                    row_id = row.get("id") if isinstance(row, dict) else None
+                    if row_id:
+                        _link_claim_to_concept(sb, row_id, claim, emb)
 
 
 def regex_claims_from_message(message: str) -> list[ExtractedClaim]:
