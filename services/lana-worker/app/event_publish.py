@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -113,6 +114,43 @@ def _ai_cover_emoji(title: str, description: str | None) -> str | None:
         return None
 
 
+def _ai_event_description(title: str, draft: EventDraft) -> str | None:
+    """Best-effort card blurb for publish paths where the chat flow never drafted one
+    (sparse opening → setup carousel, or an LLM miss on the entry turn). Grounded ONLY
+    in facts the host actually set; None on any failure — a missing description must
+    never block publishing, and no description beats a canned line."""
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return None
+        facts = {
+            "title": title,
+            "venue_name": (draft.venue_name or "").strip() or None,
+            "starts_at": draft.starts_at,
+            "bring_items": [str(b).strip() for b in (draft.bring_items or []) if str(b).strip()][:6],
+            "cohort_tags": list(draft.cohort_tags or [])[:4],
+        }
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "Write ONE short warm sentence (<=120 chars) describing this local "
+                "event for its card, e.g. \"Saturday morning coffee — open to "
+                'first-time Brazilian moms." Reply with compact JSON: '
+                '{"description": "..."}. Ground it ONLY in the facts given — never '
+                "invent details the host didn't set."
+            ),
+            user_payload=json.dumps(facts, ensure_ascii=False),
+            max_tokens=80,
+            temperature=0.3,
+        )
+        if not isinstance(data, dict):
+            return None
+        return str(data.get("description") or "").strip()[:500] or None
+    except Exception:  # noqa: BLE001 - description must never block publishing
+        return None
+
+
 def build_create_event_fields(
     user_id: str,
     draft: EventDraft,
@@ -130,11 +168,14 @@ def build_create_event_fields(
         lat, lng = float(draft.venue_lat), float(draft.venue_lng)
     else:
         lat, lng, block_id = resolve_event_location(user_id, draft.venue_name)
+    description = (draft.description or "").strip()[:500] or None
+    if not description:
+        description = _ai_event_description(title[:80], draft)
     fields: dict[str, Any] = {
         "lat": lat,
         "lng": lng,
         "title": title[:80],
-        "description": (draft.description or "").strip()[:500] or None,
+        "description": description,
         "venue_name": (draft.venue_name or "").strip()[:120] or None,
         "venue_address": (draft.venue_address or "").strip()[:300] or None,
         "place_id": (draft.place_id or "").strip()[:300] or None,
