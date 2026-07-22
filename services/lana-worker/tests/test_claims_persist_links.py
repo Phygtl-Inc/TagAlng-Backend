@@ -11,6 +11,7 @@ from app.claims_persist import (
     _concept_min_sim,
     _concept_top_k,
     _identity_concept_link_enabled,
+    _resolve_concept_id,
     resolve_cross_concept_match,
     upsert_claims,
 )
@@ -27,6 +28,42 @@ def _claim(concept, label, bucket="interest", confidence=0.9, tone=None, source_
         source_quote=source_quote,
         transient=transient,
     )
+
+
+# ---------------------------------------------------------------------------
+# Bucket normalization before concept RPCs
+# ---------------------------------------------------------------------------
+
+class TestResolveConceptIdBucket(unittest.TestCase):
+    def _sb_with_concept_id(self):
+        sb = MagicMock()
+        sb.rpc.return_value.execute.return_value.data = "concept-uuid-1"
+        return sb
+
+    def test_off_list_bucket_coerced_to_general(self):
+        sb = self._sb_with_concept_id()
+        c = _claim("runner", "Runner", bucket="hobby")
+        with patch("app.claims_persist.resolve_cross_concept_match", return_value=None):
+            result = _resolve_concept_id(sb, c, [0.2] * 768)
+        self.assertEqual(result, "concept-uuid-1")
+        for rpc_call in sb.rpc.call_args_list:
+            self.assertEqual(rpc_call.args[1]["p_bucket"], "general")
+
+    def test_null_bucket_coerced_to_general(self):
+        sb = self._sb_with_concept_id()
+        c = _claim("runner", "Runner", bucket=None)
+        result = _resolve_concept_id(sb, c, None)
+        self.assertEqual(result, "concept-uuid-1")
+        self.assertEqual(sb.rpc.call_args.args[1]["p_bucket"], "general")
+
+    def test_valid_bucket_passes_through(self):
+        sb = self._sb_with_concept_id()
+        c = _claim("runner", "Runner", bucket="activity")
+        with patch("app.claims_persist.resolve_cross_concept_match", return_value=None):
+            result = _resolve_concept_id(sb, c, [0.2] * 768)
+        self.assertEqual(result, "concept-uuid-1")
+        for rpc_call in sb.rpc.call_args_list:
+            self.assertEqual(rpc_call.args[1]["p_bucket"], "activity")
 
 
 # ---------------------------------------------------------------------------

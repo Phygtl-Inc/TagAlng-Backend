@@ -14,6 +14,7 @@ from typing import Any
 
 from app.auth import service_client
 from app.claim_embed import claim_embedding_text
+from app.lana_ui import normalize_bucket
 from app.models import ExtractedClaim
 from app.pii import redact_pii
 from app.vertex_extract import (
@@ -906,12 +907,15 @@ def _resolve_concept_id(
 
     Returns concept_id, or None on RPC failure (caller should skip the write).
     """
+    # identity_concepts has a strict bucket CHECK; the extractor's bucket is
+    # LLM output and may be off-list or null — coerce to a legal value.
+    bucket = normalize_bucket(c.bucket) or "general"
     try:
         if utterance_emb is not None:
             res = sb.rpc(
                 "match_concepts_by_embedding",
                 {
-                    "p_bucket": c.bucket,
+                    "p_bucket": bucket,
                     "p_embedding": utterance_emb,
                     "p_limit": _concept_top_k(),
                     "p_min_similarity": _concept_min_sim(),
@@ -927,7 +931,7 @@ def _resolve_concept_id(
             {
                 "p_concept": c.concept,
                 "p_label": c.label,
-                "p_bucket": c.bucket,
+                "p_bucket": bucket,
                 "p_synonyms": list(c.synonyms or []),
                 "p_canonical_example_quote": c.source_quote,
                 "p_canonical_embedding": utterance_emb,
