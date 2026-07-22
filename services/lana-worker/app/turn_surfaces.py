@@ -31,6 +31,10 @@ TURN_SCOPED_SURFACES = frozenset({
     # leaked that True into the identity turn — suppressing the claim-save so the user's
     # self-description never persisted. Re-stamped each turn by handlers that need it.
     "skip_claims_background_extract",
+    # A one-shot Supabase instruction the FE executes (send/verify an OTP, logout).
+    # Without this a login turn's send_login_otp survived the merge and kept
+    # re-announcing an auth stage on unrelated later turns.
+    "auth_action",
 })
 
 

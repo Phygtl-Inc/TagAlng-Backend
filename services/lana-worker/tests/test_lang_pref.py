@@ -163,6 +163,87 @@ class TestPostTurnNudge(unittest.TestCase):
         save.assert_called_once_with("u1", "es")
         self.assertIn(t("lang.pref_saved", "es", lang_name="Spanish"), out)
 
+    def test_guest_accept_flips_session_and_disarms_offer(self) -> None:
+        # QA 2026-07-23: for anonymous signup chats an accepted language offer
+        # was a full no-op (hook returned early), so the armed offer never
+        # expired and every "sí, hablemos en español" got another ack forever.
+        msg = "Sí, hablemos en español"
+        ctx: dict = {
+            "lang": "es",
+            "lang_offer_langs": ["es"],
+            "lang_offer_ttl": 3,
+            "_discovery_slots": {"set_preferred_lang": "es"},
+            "_discovery_slots_for": msg,
+        }
+        out = language_preference_post_turn(
+            user_id="anon-1",
+            user_message=msg,
+            session_ctx=ctx,
+            reply="¿Cuál es tu código postal?",
+            is_anonymous=True,
+        )
+        # First accept: confirm PREPENDED, then the turn's own question re-anchors —
+        # a silent accept made users repeat it and derailed the funnel (QA transcript #3).
+        self.assertEqual(
+            out,
+            t("lang.guest_confirm", "es") + "\n\n¿Cuál es tu código postal?",
+        )
+        self.assertEqual(ctx["lang"], "es")
+        self.assertEqual(ctx["preferred_lang"], "es")
+        self.assertEqual(ctx["guest_locale"], "es")
+        self.assertTrue(ctx["lang_nudge_done"])
+        self.assertFalse(ctx["lang_offer_langs"])  # None-cleared (survives the merge as a delete)
+        self.assertFalse(ctx["lang_offer_ttl"])
+
+        # A REPEATED accept stays silent — no confirm spam, the funnel question
+        # alone re-anchors.
+        ctx["_discovery_slots"] = {"set_preferred_lang": "es"}
+        ctx["_discovery_slots_for"] = msg
+        out2 = language_preference_post_turn(
+            user_id="anon-1",
+            user_message=msg,
+            session_ctx=ctx,
+            reply="¿Cuál es tu código postal?",
+            is_anonymous=True,
+        )
+        self.assertEqual(out2, "¿Cuál es tu código postal?")
+
+    def test_guest_offer_ttl_expires(self) -> None:
+        # The TTL decrement used to live behind the anonymous early-return, so
+        # a guest's armed offer stayed armed forever.
+        ctx: dict = {"lang_offer_langs": ["es"], "lang_offer_ttl": 2}
+        language_preference_post_turn(
+            user_id="anon-1", user_message="hola", session_ctx=ctx,
+            reply="Hi!", is_anonymous=True,
+        )
+        self.assertEqual(ctx["lang_offer_ttl"], 1)
+        language_preference_post_turn(
+            user_id="anon-1", user_message="hola", session_ctx=ctx,
+            reply="Hi!", is_anonymous=True,
+        )
+        self.assertFalse(ctx["lang_offer_langs"])  # None-cleared (survives the merge as a delete)
+        self.assertFalse(ctx["lang_offer_ttl"])
+
+    @patch("app.lang_pref.set_user_preferred_language", return_value=True)
+    @patch("app.lang_pref.get_user_preferred_language", return_value=None)
+    def test_guest_locale_inherited_after_signup(self, _get, save) -> None:
+        # A language accepted as a guest survives signup in-session and lands
+        # on the fresh account's users row.
+        ctx: dict = {"guest_locale": "es", "lang": "es"}
+        out = self._turn(ctx)
+        self.assertEqual(out, "Hi!")
+        save.assert_called_once_with("u1", "es")
+        self.assertIsNone(ctx["guest_locale"])
+        self.assertEqual(ctx["preferred_lang"], "es")
+
+    @patch("app.lang_pref.set_user_preferred_language", return_value=True)
+    @patch("app.lang_pref.get_user_preferred_language", return_value="ur")
+    def test_guest_locale_never_overrides_chosen_pref(self, _get, save) -> None:
+        ctx: dict = {"guest_locale": "es", "lang": "es"}
+        self._turn(ctx)
+        save.assert_not_called()
+        self.assertIsNone(ctx["guest_locale"])
+
     @patch("app.lang_pref.set_user_preferred_language", return_value=True)
     def test_stale_slots_never_fire(self, save) -> None:
         # Slots cached from an EARLIER turn (different message) must not re-fire.

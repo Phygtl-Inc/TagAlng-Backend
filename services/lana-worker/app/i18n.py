@@ -570,6 +570,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Pronto — {lang_name} é o seu idioma agora. Você pode mudar quando quiser nas "
               "Configurações, ou é só me dizer.",
     },
+    # Guest (pre-signup) accept — no account yet, so no Settings mention. Each
+    # localized template names its own language; the EN fallback stays generic
+    # for languages without a hand template (the AI compose covers them).
+    "lang.guest_confirm": {
+        "en": "You got it — we'll keep chatting in your language!",
+        "es": "¡Perfecto! Seguimos en español.",
+        "pt": "Perfeito! Seguimos em português.",
+    },
 }
 
 

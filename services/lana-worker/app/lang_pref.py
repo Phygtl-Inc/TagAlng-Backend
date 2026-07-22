@@ -184,6 +184,20 @@ def _compose_pref_saved(new_pref: str, reply_lang: str | None) -> str:
     )
 
 
+def _compose_guest_confirm(new_pref: str) -> str:
+    """Guest (pre-signup) accept — one short warm confirm that the chat now
+    continues in their language. No Settings mention (no account yet)."""
+    lang_name = lang_display_name(new_pref)
+    return _compose(
+        "Confirm in ONE short warm sentence that you'll keep chatting in the "
+        "user's language from here on. They don't have an account yet, so do "
+        "NOT mention settings or saving anything.",
+        [f"You will keep chatting in {lang_name}"],
+        t("lang.guest_confirm", new_pref),
+        new_pref,
+    )
+
+
 # ── post-turn hook ───────────────────────────────────────────────────────────
 
 def language_preference_post_turn(
@@ -202,10 +216,14 @@ def language_preference_post_turn(
     2. Track preference↔observed divergence and append the one-time nudge
        offer when it has held for ``_DIVERGENCE_TURNS`` turns.
 
-    Anonymous guests have no users row — mirroring still works for them via
-    the session language; only the preference machinery is skipped."""
-    if is_anonymous or not user_id:
-        return reply
+    Anonymous guests have no users row, so nothing persists for them — but the
+    session-level accept still works: the offer they said yes to flips the
+    session language and clears the offer state. Before this, a guest accept
+    was a full no-op (nothing saved, the armed offer never expired because the
+    TTL decrement lives here too), so every "sí, hablemos en español" produced
+    another warm ack forever — the endless language loop in the signup chats.
+    The accepted code is stashed as ``guest_locale`` and written to the users
+    row on the first post-signup turn of the same session."""
     try:
         slots = session_ctx.get("_discovery_slots")
         slots_for = str(session_ctx.get("_discovery_slots_for") or "")
@@ -215,14 +233,39 @@ def language_preference_post_turn(
         new_pref = normalize_lang_code(slots.get("set_preferred_lang")) if fresh else None
         nudge_pending = normalize_lang_code(session_ctx.get("lang_nudge_pending"))
 
+        if new_pref and (is_anonymous or not user_id):
+            # Session-only accept for guests: speak the language now, remember
+            # it for signup, and disarm the offer so it can't loop. No DB row
+            # to write. The FIRST accept gets an explicit confirm PREPENDED to
+            # the turn's reply — on funnel turns the reply is a deterministic
+            # step question, so without the confirm the accept lands silently
+            # and the user keeps repeating it (QA 2026-07-23, transcript #3).
+            # Repeats stay silent: the funnel question alone re-anchors.
+            already_settled = (
+                normalize_lang_code(session_ctx.get("guest_locale")) == new_pref
+            )
+            session_ctx["preferred_lang"] = new_pref
+            session_ctx["lang"] = new_pref
+            session_ctx["guest_locale"] = new_pref
+            session_ctx["lang_divergence_count"] = 0
+            session_ctx["lang_nudge_pending"] = None
+            session_ctx["lang_nudge_done"] = True
+            session_ctx["lang_offer_langs"] = None  # None, not pop — a popped key resurrects from the stored ctx on merge
+            session_ctx["lang_offer_ttl"] = None
+            if already_settled:
+                return reply
+            confirm = _compose_guest_confirm(new_pref)
+            return f"{confirm}\n\n{reply}" if reply else confirm
+
         if new_pref:
             if set_user_preferred_language(user_id, new_pref):
                 session_ctx["preferred_lang"] = new_pref
+                session_ctx["guest_locale"] = None
                 session_ctx["lang_divergence_count"] = 0
                 session_ctx["lang_nudge_pending"] = None
                 session_ctx["lang_nudge_done"] = True
-                session_ctx.pop("lang_offer_langs", None)
-                session_ctx.pop("lang_offer_ttl", None)
+                session_ctx["lang_offer_langs"] = None  # None, not pop — a popped key resurrects from the stored ctx on merge
+                session_ctx["lang_offer_ttl"] = None
                 # Speak the chosen language IMMEDIATELY — the accept itself is often
                 # typed in the OLD language ("lets talk in urdu" is English), so the
                 # session flips to the new preference rather than mirroring the accept.
@@ -235,14 +278,31 @@ def language_preference_post_turn(
 
         # A rapport-concierge language offer stays live for a few turns (the accept is
         # often a short negotiation: "yes" → "which one?" → "urdu"), then expires.
+        # Runs for guests too — an offer must never stay armed forever.
         # Unlike the divergence nudge, letting it lapse does NOT mark the nudge done.
         if session_ctx.get("lang_offer_langs"):
             ttl = int(session_ctx.get("lang_offer_ttl") or 0) - 1
             if ttl <= 0:
-                session_ctx.pop("lang_offer_langs", None)
-                session_ctx.pop("lang_offer_ttl", None)
+                session_ctx["lang_offer_langs"] = None  # None, not pop — a popped key resurrects from the stored ctx on merge
+                session_ctx["lang_offer_ttl"] = None
             else:
                 session_ctx["lang_offer_ttl"] = ttl
+
+        if is_anonymous or not user_id:
+            # No users row — the divergence nudge and preference persistence
+            # below need one. Session mirroring already happened upstream.
+            return reply
+
+        # A language accepted while still a guest, carried across signup in the
+        # same session: persist it onto the fresh account once, unless the user
+        # has since picked something themselves.
+        guest_locale = normalize_lang_code(session_ctx.get("guest_locale"))
+        if guest_locale:
+            session_ctx["guest_locale"] = None
+            saved = get_user_preferred_language(user_id)
+            if guest_locale != saved and saved in (None, "en"):
+                set_user_preferred_language(user_id, guest_locale)
+                session_ctx["preferred_lang"] = guest_locale
 
         if nudge_pending:
             # Offer was out and this turn didn't accept it — a decline or a

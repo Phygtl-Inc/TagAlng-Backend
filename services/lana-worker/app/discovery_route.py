@@ -116,9 +116,11 @@ from app.guest_login import (
     _exit_logout_ctx,
     _login_ctx,
     _logout_ctx,
+    compose_offscript_reply,
     extract_otp_code,
     extract_email,
     handle_guest_login,
+    interpret_login_reply,
     wants_cancel_logout,
     wants_login as wants_login_intent,
     wants_logout as wants_logout_intent,
@@ -4830,7 +4832,7 @@ def _handle_signup_phone_message(
         verify_type="email_change",
     )
     return (
-        f"Got it — I sent a 6-digit code to {email}. Enter it here when it arrives.",
+        f"Got it — I'm sending a 6-digit code to {email}. Enter it here when it arrives.",
         ctx,
         _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
         [],
@@ -4945,6 +4947,14 @@ _SUPPORTED_PIVOT_GOALS = frozenset(
 )
 
 
+def _slots_are_language_turn(enriched: dict[str, Any]) -> bool:
+    """True when the classifier read this turn as a language/settings request
+    (set_preferred_lang, or a settings.* linear intent) — always in scope."""
+    if str(enriched.get("set_preferred_lang") or "").strip():
+        return True
+    return (slots_linear_intent(enriched) or "").startswith("settings.")
+
+
 def _out_of_scope_decision(slots: dict[str, Any], msg: str) -> str | None:
     """AI-driven out-of-scope router. Returns:
       'decline' — confidently an errand TagAlng can't do → refuse + log,
@@ -4958,6 +4968,12 @@ def _out_of_scope_decision(slots: dict[str, Any], msg: str) -> str | None:
     if not slots:
         return None
     enriched = enrich_slots(dict(slots), msg=msg)
+    # Speaking the user's language is a core capability — a language request
+    # ("hablemos en español") must never be declined as an unsupported errand
+    # or logged as a feature gap (QA 2026-07-23: Lana refused Spanish IN
+    # Spanish). Backstop to the classifier's language arm.
+    if _slots_are_language_turn(enriched):
+        return None
     goal = str(enriched.get("goal") or "")
     linear = slots_linear_intent(enriched) or ""
     if goal != "out_of_scope" and linear != "system.out_of_scope":
@@ -4974,6 +4990,11 @@ def _reply_pivots_to_supported(slots: dict[str, Any], msg: str) -> bool:
     if not slots:
         return False
     enriched = enrich_slots(dict(slots), msg=msg)
+    # A language/settings turn mid-clarifier ("sí, hablemos en español") is a
+    # SUPPORTED intent, not a confirmation of the unsupported ask — release it
+    # so the language machinery handles it instead of a re-ask/decline loop.
+    if _slots_are_language_turn(enriched):
+        return True
     goal = str(enriched.get("goal") or "")
     if goal not in _SUPPORTED_PIVOT_GOALS:
         return False
@@ -5627,7 +5648,7 @@ def handle_discovery_turn(
             # ask declines + logs.
             if _reply_closes_out_of_scope(slots, msg):
                 close_subject = str(offer.get("detail") or "")
-                session_ctx.pop("out_of_scope_offer", None)
+                session_ctx["out_of_scope_offer"] = None  # None, not pop — a popped key resurrects on merge
                 return _acknowledge_out_of_scope_close(
                     session_ctx, user_msg=msg, subject=close_subject,
                 )
@@ -5641,12 +5662,12 @@ def handle_discovery_turn(
                     detail=str(_oos_reply.get("signal_detail") or offer.get("detail") or "").strip(),
                     msg=msg,
                 )
-            session_ctx.pop("out_of_scope_offer", None)
+            session_ctx["out_of_scope_offer"] = None  # None, not pop — a popped key resurrects on merge
             return _decline_out_of_scope(
                 msg=msg, slots=slots, session_ctx=session_ctx,
                 user_id=user_id, home_block_id=home_block_id,
             )
-        session_ctx.pop("out_of_scope_offer", None)
+        session_ctx["out_of_scope_offer"] = None  # None, not pop — a popped key resurrects on merge
         # else: a supported intent surfaced — fall through to its handler below.
 
     # Resolve a pending GENERAL clarify (clarify='intent'). The answer re-classifies and
@@ -5777,7 +5798,8 @@ def handle_discovery_turn(
             return _handle_signup_phone_message(msg, session_ctx, is_anonymous=is_anonymous)
         _otp_email = str(session_ctx.get("signup_phone") or "")
         return (
-            f"Enter the 6-digit code we sent to {_otp_email or 'your email'}.",
+            f"Enter the 6-digit code I sent to {_otp_email or 'your email'} — or give "
+            "me a different email to use.",
             _routing_ctx(
                 session_ctx, phase=PHASE_AWAIT_SIGNUP_OTP, signup_phone=_otp_email or None
             ),
@@ -5956,8 +5978,40 @@ def handle_discovery_turn(
         otp = extract_otp_code(msg)
         email = str(session_ctx.get("signup_phone") or "")
         if not otp:
+            # A new/corrected email at the code step restarts the send to that
+            # address — never re-prompt for a code sent to the wrong inbox.
+            if extract_email(msg):
+                return _handle_signup_phone_message(
+                    msg, session_ctx, is_anonymous=is_anonymous
+                )
+            # AI reads the turn: a resend ask re-runs the send; anything else
+            # off-script (a question, chatter) gets an AI-authored reply that
+            # answers what they actually said before steering back to the code
+            # — never the same canned line. Abandon/pivot released above.
+            read = interpret_login_reply(msg, expecting="code", known_email=email or None)
+            if read["action"] == "resend" and email:
+                return _handle_signup_phone_message(
+                    email, session_ctx, is_anonymous=is_anonymous
+                )
+            reply = compose_offscript_reply(
+                goal=(
+                    "The user replied with something that isn't the verification "
+                    "code. Respond briefly to what they actually said, then remind "
+                    "them you need the 6-digit code you sent to finish signing up — "
+                    "and that they can give a different email or ask for a resend."
+                ),
+                facts=[
+                    f'They said: "{msg[:300]}"',
+                    f"A 6-digit signup code was sent to {email or 'their email'}",
+                    "They can give a different email or ask you to resend the code",
+                ],
+                fallback=(
+                    f"Enter the 6-digit code I sent to {email or 'your email'} — or "
+                    "give me a different email to use."
+                ),
+            )
             return (
-                f"Enter the 6-digit code we sent to {email or 'your email'}.",
+                reply,
                 _routing_ctx(session_ctx, phase=PHASE_AWAIT_SIGNUP_OTP, signup_phone=email or None),
                 _discovery_routing_stub(PHASE_AWAIT_SIGNUP_OTP),
                 [],
@@ -6446,20 +6500,11 @@ def handle_discovery_turn(
             )
         login = handle_guest_login(msg, step=str(login_step), session_ctx=session_ctx)
         if login:
+            # guest_login authors auth_action itself (email-based send/verify) —
+            # only on turns that actually initiate one, so a re-prompt never
+            # re-fires a send. The old re-wiring here stamped phone=/"sms" onto
+            # an email flow, which the PWA's schema rejects outright.
             reply, ctx = login
-            if ctx.get("login_otp_token") and ctx.get("login_phone"):
-                ctx["auth_action"] = _auth_action(
-                    type="verify_login_otp",
-                    phone=ctx.get("login_phone"),
-                    token=ctx.get("login_otp_token"),
-                    verify_type="sms",
-                )
-            elif ctx.get("requires_login_otp") and ctx.get("login_phone"):
-                ctx["auth_action"] = _auth_action(
-                    type="send_login_otp",
-                    phone=ctx.get("login_phone"),
-                    verify_type="sms",
-                )
             ctx["unified_mode"] = True
             return reply, ctx, {"outcome": "A", "intent_class": "auth", "confidence": 1.0}, []
 

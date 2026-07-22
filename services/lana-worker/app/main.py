@@ -613,6 +613,7 @@ def _auth_action_from_ctx(ctx: dict[str, Any]) -> AuthActionPayload | None:
     return AuthActionPayload(
         type=str(raw["type"]),
         phone=str(raw.get("phone") or "") or None,
+        email=str(raw.get("email") or "") or None,
         token=str(raw.get("token") or "") or None,
         verify_type=str(raw.get("verify_type") or "") or None,
     )

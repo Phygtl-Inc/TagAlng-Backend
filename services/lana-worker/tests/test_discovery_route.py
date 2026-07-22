@@ -9,6 +9,8 @@ from app.discovery_route import (
     PHASE_NEED_ZIP,
     PHASE_PREVIEW,
     _effective_discovery_goal,
+    _out_of_scope_decision,
+    _reply_pivots_to_supported,
     _intro_should_use_block_log,
     _try_block_log_intro_turn,
     _try_neighbor_intro_turn,
@@ -2067,6 +2069,102 @@ class TestOutOfScopeRouting(unittest.TestCase):
         self.assertEqual(routing.get("tool_to_call"), "out_of_scope")  # routing unchanged
         mock_log.assert_called_once()  # still logged
         self.assertEqual(mock_author.call_args.kwargs.get("mode"), "decline")
+
+    # ── Language requests are ALWAYS in scope (QA 2026-07-23: "Sí, hablemos en
+    #    español" looped clarify → false "no puedo mantener conversaciones en
+    #    español" decline → clarify again, and logged Spanish as a feature gap). ──
+
+    def test_language_slots_never_out_of_scope(self) -> None:
+        # Even when the classifier mislabels the goal, set_preferred_lang wins.
+        self.assertIsNone(
+            _out_of_scope_decision(
+                {
+                    "goal": "out_of_scope",
+                    "set_preferred_lang": "es",
+                    "confidence": 0.95,
+                },
+                "hablemos en español",
+            )
+        )
+        self.assertIsNone(
+            _out_of_scope_decision(
+                {
+                    "goal": "out_of_scope",
+                    "linear_intent": "settings.change_language",
+                    "confidence": 0.95,
+                },
+                "talk to me in urdu",
+            )
+        )
+        # A real errand still declines — the guard is language-specific.
+        self.assertEqual(
+            _out_of_scope_decision(
+                {
+                    "goal": "out_of_scope",
+                    "linear_intent": "system.out_of_scope",
+                    "confidence": 0.95,
+                },
+                "deliver pizza for me",
+            ),
+            "decline",
+        )
+
+    def test_language_reply_pivots_out_of_pending_clarifier(self) -> None:
+        self.assertTrue(
+            _reply_pivots_to_supported(
+                {
+                    "goal": "chat",
+                    "linear_intent": "settings.change_language",
+                    "set_preferred_lang": "es",
+                    "confidence": 0.9,
+                },
+                "sí, hablemos en español",
+            )
+        )
+        # A bare chat reply still confirms the decline path.
+        self.assertFalse(
+            _reply_pivots_to_supported(
+                {"goal": "chat", "confidence": 0.9}, "sí"
+            )
+        )
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_language_reply_mid_clarifier_never_declines_or_logs(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        # Transcript turn 3: pending clarifier already re-asked once; the language
+        # accept must escape — no "no puedo hablar español" decline, no feature log.
+        mock_slots.return_value = {
+            "goal": "chat",
+            "linear_intent": "settings.change_language",
+            "set_preferred_lang": "es",
+            "in_discovery": False,
+            "confidence": 0.9,
+        }
+        session_ctx = {
+            "routing_phase": "listening",
+            "out_of_scope_pending": True,
+            "out_of_scope_reclarified": True,
+            "out_of_scope_offer": {"q": "¿evento o lugar?", "opts": [], "detail": ""},
+        }
+        result = handle_discovery_turn(
+            "Sí, hablemos en español",
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        mock_log.assert_not_called()
+        self.assertIsNone(session_ctx.get("out_of_scope_pending"))
+        self.assertIsNone(session_ctx.get("out_of_scope_offer"))
+        if result is not None:
+            _, _, routing, _ = result
+            self.assertNotEqual(routing.get("tool_to_call"), "out_of_scope")
 
 
 class TestMedicalRedirectRouting(unittest.TestCase):
