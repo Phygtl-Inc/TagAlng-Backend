@@ -72,6 +72,7 @@ Output ONLY valid JSON (no markdown):
       "confidence": 0.85,
       "disclosure": "public",
       "synonyms": ["tag1", "tag2", "tag3"],
+      "details": [],
       "source_quote": "exact short quote from this message",
       "bucket": "heritage",
       "vague": false,
@@ -107,6 +108,7 @@ language at display time, so a later language switch re-renders the whole queue.
 - NEVER make a claim from grief, loss, crisis, health, or relationship trouble, even when phrased emotionally — bereavement ("my friend passed away"), divorce/separation, mental-health ("I'm depressed", "anxious"), illness/diagnosis, money/legal distress. These are sensitive and are NOT identity; capture nothing and set followup_question null. "Sad my team lost" (an interest) and "sad someone passed" (grief) are different — one names a hobby, the other a loss.
 - NEVER emit a claim that is only a bare topic label ("Health", "Wellness", "Lifestyle", "General") or that expresses uncertainty ("Unsure what to call", "Not sure about time", "don't know"). Skip these entirely — they are not threads.
 - Do NOT emit the SAME thread twice with different wording — one claim per distinct thread
+- "details": short third-person sub-facts (2-6 words each, max 3 per claim) that ADD texture beyond the label — rhythm, level, setting, sub-type (e.g. label "State-level swimmer" + details ["Swims every weekend"]). Empty [] when the label already says everything. Never restate the label as a detail.
 - kids_count: an integer ONLY when the user states HOW MANY children they have ("2 sons" → 2, "three kids" → 3). null otherwise. This is private and never a claim. NEVER capture a child's name, age, gender, school, or photo — only the count.
 - NEVER extract race, exact age, sex/gender demographics, street address
 - NEVER extract negative or exclusion claims ("not Brazilian", "no Italian", "without X")
@@ -170,6 +172,10 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
         if not isinstance(syns, list):
             syns = []
         syns = [str(s)[:80] for s in syns[:4]]
+        details = item.get("details", [])
+        if not isinstance(details, list):
+            details = []
+        details = [str(d).strip()[:80] for d in details[:3] if str(d).strip()]
         tone = item.get("tone")
         source_quote = str(item.get("source_quote", "")).strip()[:160] or None
         bucket = normalize_bucket(item.get("bucket"))
@@ -187,6 +193,7 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
                 bucket=bucket,
                 transient=transient,
                 vague=vague,
+                details=details,
             )
         )
     return out[:8]
@@ -246,16 +253,47 @@ def parse_incremental_claims_data(
     return nickname, claims[:6], kids_count, followup
 
 
-def _existing_claims_block(existing_labels: list[str] | None) -> str:
-    """Tell the extractor what's already on the profile so it merges, not duplicates."""
-    labels = [str(s).strip() for s in (existing_labels or []) if str(s).strip()]
-    if not labels:
+def _existing_claims_block(existing_labels: list[Any] | None) -> str:
+    """Tell the extractor what's already on the profile so it ENRICHES, not duplicates.
+
+    Accepts plain label strings or thread dicts ({concept, label, details}). With
+    concepts present, the model can re-emit the SAME slug to enrich in place — that
+    slug is the upsert merge key, so no near-duplicate thread is ever created.
+    """
+    lines: list[str] = []
+    for item in existing_labels or []:
+        if isinstance(item, dict):
+            concept = str(item.get("concept") or "").strip()
+            label = str(item.get("label") or "").strip()
+            details = "; ".join(
+                str(d).strip() for d in item.get("details") or [] if str(d).strip()
+            )
+            if not (concept or label):
+                continue
+            line = f"{concept or '?'} — {label}"
+            if details:
+                line += f" (details: {details})"
+            lines.append(line)
+        else:
+            text = str(item).strip()
+            if text:
+                lines.append(text)
+    if not lines:
         return ""
     return (
-        "ALREADY ON PROFILE (do NOT create a new claim that duplicates or is a narrower "
-        "version of any of these — e.g. if 'Speaks 10 languages' is listed, do NOT add "
-        "'English Speaker'; only add genuinely NEW threads): "
-        + "; ".join(labels[:40])
+        "ALREADY ON PROFILE (concept — label). NEVER create a NEW claim that duplicates "
+        "or overlaps any of these. But when this message ADDS to one of these threads — "
+        "more specific level ('state level'), rhythm ('every weekend'), sub-type, setting "
+        "— RE-EMIT that thread with its EXACT SAME concept slug, carrying: (a) the label "
+        "UPGRADED if the new fact is a stronger identity statement (never downgraded), "
+        "(b) the new fact as one short entry in \"details\" (skip facts already listed), "
+        "(c) any new synonyms, (d) confidence reflecting that the user has now confirmed "
+        "it again (repeat first-person statements approach 1.0). A plain RESTATEMENT "
+        "with nothing new ('I swim' when swimmer is already listed) still counts: "
+        "re-emit that concept unchanged (same label, empty details) — it is "
+        "corroboration and raises confidence. Threads the message does not touch are "
+        "NOT re-emitted. Only genuinely new topics get a new concept:\n"
+        + "\n".join(lines[:40])
         + "\n\n"
     )
 

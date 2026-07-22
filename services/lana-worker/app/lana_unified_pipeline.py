@@ -1746,6 +1746,20 @@ def run_lana_unified_pipeline(
                     )
             elif stage == "setup":
                 if (_is_host_confirm(user_message) or _is_host_drop(user_message)) and blockers_done:
+                    # The sparse-opening path never runs _ensure_review_draft (the entry
+                    # gate needs a date/venue up front), so a carousel-built draft reaches
+                    # confirm with no description. The draft is final here — backfill the
+                    # card blurb now so the confirm card and the published event show one.
+                    # Description ONLY: the host's chosen title is never touched.
+                    if not str(ed.get("description") or "").strip():
+                        from app.event_suggest import event_suggestions
+
+                        with timer.stage("llm_event_suggest"):
+                            _sugg = event_suggestions(
+                                history=history, user_message=user_message, draft=ed
+                            )
+                        if _sugg.get("description"):
+                            ed["description"] = _sugg["description"]
                     turn_ctx["host_stage"] = "confirm"
                     ed["suggestions"] = []
                     reply = (

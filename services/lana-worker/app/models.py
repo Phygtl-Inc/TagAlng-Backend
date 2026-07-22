@@ -520,6 +520,9 @@ class ExtractedClaim(BaseModel):
     # True when the claim is coarse and a follow-up would sharpen it ("tech worker",
     # "speaks 5 languages" without naming them). Drives a curiosity follow-up.
     vague: bool = False
+    # Short user-visible sub-facts accumulated across turns for the same thread
+    # ("Swims every weekend"). Merged append-dedup on upsert, capped at 5.
+    details: list[str] = Field(default_factory=list)
 
 
 class CompleteSessionResponse(BaseModel):
