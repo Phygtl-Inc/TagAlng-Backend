@@ -60,54 +60,111 @@ class TestPersistIdentityFromMessage(unittest.TestCase):
         self.assertIn("Brazilian", res.conflict_prompt)
 
 
-class TestIdentityConversationalReply(unittest.TestCase):
-    @patch("app.discovery_route.persist_profile_patch")
-    @patch("app.discovery_route.lana_profile_turn")
-    @patch("app.discovery_route.format_profile_intake_context", return_value="CTX")
-    @patch("app.discovery_route.load_event_draft_context", return_value={})
-    def test_reply_persists_ai_captured_name(
-        self, _load, _fmt, mock_turn, mock_patch
-    ) -> None:
-        from app.discovery_route import _identity_conversational_reply
+class _Res:
+    """Minimal IdentityPersistResult stand-in."""
 
-        # Engine read a bare "Drake" as the name (in context) and proposes a follow-up.
-        mock_turn.return_value = (
-            "Nice to meet you, Drake! Road or trail?",
-            "continue",
-            {"profile_patch": {"nickname": "Drake"}, "topics_covered": ["activity"]},
-            {"highlights": []},
-        )
+    def __init__(self, saved=1, primary_label=None, primary_bucket=None) -> None:
+        self.saved = saved
+        self.primary_label = primary_label
+        self.primary_bucket = primary_bucket
+
+
+class TestClaimConciergeReply(unittest.TestCase):
+    @patch("app.rapport_reply.rapport_concierge_reply")
+    def test_offer_arms_rapport_continuation(self, mock_concierge) -> None:
+        from app.discovery_route import _claim_concierge_reply
+
+        action = {
+            "kind": "find_activities",
+            "label": "Search badminton activities",
+            "topic": "badminton",
+            "send": "show me badminton activities on my block",
+        }
+        mock_concierge.return_value = {
+            "reply": "Badminton — love it! Want me to look for badminton meets nearby?",
+            "options": [],
+            "action": action,
+            "language_offer": [],
+        }
         ctx: dict = {}
-        reply = _identity_conversational_reply(
+        reply = _claim_concierge_reply(
             user_id="user-1",
-            msg="Drake",
-            history=[{"role": "assistant", "content": "what should neighbors call you?"}],
+            msg="i like badminton",
+            res=_Res(saved=1, primary_label="Badminton", primary_bucket="interests"),
+            known_labels=[],
             session_ctx={},
             ctx=ctx,
         )
-        self.assertIn("Drake", reply)
-        mock_patch.assert_called_once_with("user-1", {"nickname": "Drake"})
-        self.assertEqual(ctx["profile_turn_status"], "continue")
+        self.assertIn("Badminton", reply)
+        # The chip renders from rapport_reply and the accept dispatches next turn.
+        self.assertEqual(ctx["rapport_reply"], {"options": [], "action": action})
+        self.assertTrue(ctx["rapport_offer_pending"])
+        self.assertEqual(ctx["rapport_pending_action"], action)
+        self.assertTrue(ctx["rapport_active"])
 
-    @patch("app.discovery_route.persist_profile_patch")
+    @patch("app.rapport_reply.rapport_concierge_reply")
+    def test_repeat_claim_flagged_already_known(self, mock_concierge) -> None:
+        from app.discovery_route import _claim_concierge_reply
+
+        mock_concierge.return_value = {
+            "reply": "I remember — badminton's your thing!",
+            "options": [],
+            "action": None,
+            "language_offer": [],
+        }
+        ctx: dict = {}
+        _claim_concierge_reply(
+            user_id="user-1",
+            msg="i like badminton",
+            res=_Res(saved=1, primary_label="Badminton", primary_bucket="interests"),
+            known_labels=["Badminton", "Two Kids"],
+            session_ctx={},
+            ctx=ctx,
+        )
+        self.assertTrue(mock_concierge.call_args.kwargs["already_known"])
+        # A warm close clears any stale rapport capture keys (None survives the merge).
+        self.assertIsNone(ctx["rapport_active"])
+        self.assertIsNone(ctx["rapport_reply"])
+
     @patch(
-        "app.discovery_route.lana_profile_turn",
-        side_effect=RuntimeError("vertex down"),
+        "app.rapport_reply.rapport_concierge_reply",
+        side_effect=RuntimeError("llm down"),
     )
-    @patch("app.discovery_route.format_profile_intake_context", return_value="CTX")
-    @patch("app.discovery_route.load_event_draft_context", return_value={})
-    def test_falls_back_when_engine_fails(self, _load, _fmt, _turn, mock_patch) -> None:
-        from app.discovery_route import _identity_conversational_reply
+    def test_falls_back_when_concierge_fails(self, _mock) -> None:
+        from app.discovery_route import _claim_concierge_reply
 
-        reply = _identity_conversational_reply(
+        reply = _claim_concierge_reply(
             user_id="user-1",
             msg="I'm Pakistani",
-            history=[],
+            res=_Res(saved=1, primary_label="Pakistani Heritage"),
+            known_labels=[],
             session_ctx={},
             ctx={},
         )
         self.assertTrue(reply)
-        mock_patch.assert_not_called()
+
+
+class TestRapportCaptureContext(unittest.TestCase):
+    def test_pending_question_reaches_classifier(self) -> None:
+        # The classifier must SEE the question Lana asked, so a bare noun-phrase answer
+        # ("local cricket grounds" to "where do you like to play?") reads as an ANSWER,
+        # not a confident tip_seek that releases into a real search + posted block ask.
+        from app.discovery_slots import _active_capture_context
+
+        ctx = {
+            "rapport_active": True,
+            "rapport_followup_question": "Do you have a favorite spot nearby where you like to play?",
+        }
+        note = _active_capture_context(ctx)
+        self.assertIn("favorite spot nearby", note)
+        self.assertIn("NOUN PHRASE", note)
+
+    def test_no_question_still_covers_bare_answers(self) -> None:
+        from app.discovery_slots import _active_capture_context
+
+        note = _active_capture_context({"rapport_active": True})
+        self.assertNotIn("pending question", note)
+        self.assertIn("NOUN PHRASE", note)
 
 
 if __name__ == "__main__":

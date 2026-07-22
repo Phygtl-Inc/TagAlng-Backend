@@ -26,12 +26,14 @@ _EVENT_DRAFT_FIELDS = {
     "venue_lat",
     "venue_lng",
     "starts_at",
+    "has_time",
     "ends_at",
     "duration_minutes",
     "max_attendees",
     "auto_approve",
     "allow_attendee_share",
     "bring_items",
+    "cover_emoji",
     "cohort_tags",
     "affinity_prompt",
     "affinity_options",
@@ -100,9 +102,17 @@ def _forced_slots_for_kind(
     slots["clarify"] = None
     slots["clarify_question"] = None
     slots["clarify_options"] = []
-    if not str(slots.get("signal_detail") or "").strip():
-        topic = str(action.get("topic") or "").strip() if isinstance(action, dict) else ""
-        slots["signal_detail"] = topic or None
+    # The concierge's structured topic ("badminton") is the committed subject of the
+    # offer — authoritative over whatever the query parse mined from the send text.
+    topic = str(action.get("topic") or "").strip() if isinstance(action, dict) else ""
+    if topic:
+        slots["signal_detail"] = topic
+    elif not str(slots.get("signal_detail") or "").strip():
+        slots["signal_detail"] = None
+    # Stamp the dispatch so downstream lanes can trust the structured topic over the
+    # model-authored send text (which can come out generic, e.g. "what's happening this
+    # weekend" for a badminton offer — the tap must still search badminton).
+    slots["_forced_kind"] = str(kind or "").strip()
     return slots
 
 
@@ -180,6 +190,32 @@ def _rapport_should_release(
     return not lane_should_continue(
         message, session_ctx, slots, is_valid_answer=_is_rapport_answer, pivot_re=None
     )
+
+
+def _recover_when_from_draft(ed: dict[str, Any], wd: Any, wt: Any) -> tuple[Any, Any]:
+    """Back-fill missing when-keys from the draft's persisted starts_at.
+
+    The date is always safe to recover. The clock is recovered ONLY when the draft
+    says the host really gave one (has_time, stamped where starts_at is built): a
+    date-only draft carries a midnight placeholder, and the extractor fabricates a
+    time when the host said none — recovering either would launder it into
+    event_when_time, satisfy the confirm gate, and publish a "12 AM" meet (#56).
+    Drafts from before the flag existed have no key: trust a non-midnight clock
+    (a host-given time mid-flow at deploy), never a midnight one."""
+    if (wd and wt) or not ed.get("starts_at"):
+        return wd, wt
+    from datetime import datetime as _dt_recover
+
+    try:
+        _existing = _dt_recover.fromisoformat(str(ed["starts_at"]))
+    except (ValueError, TypeError):
+        return wd, wt
+    if not wd:
+        wd = _existing.date().isoformat()
+    _ht = ed.get("has_time")
+    if not wt and (_ht is True or (_ht is None and _existing.strftime("%H:%M") != "00:00")):
+        wt = _existing.strftime("%H:%M")
+    return wd, wt
 
 
 def _event_draft_complete(draft: Any) -> bool:
@@ -318,6 +354,8 @@ def _ensure_setup_config(
     with timer.stage("llm_event_setup"):
         cfg = setup_suggestions(history=history, user_message=user_message, draft=ed)
     ed["event_setup"] = cfg
+    if not ed.get("cover_emoji") and cfg.get("cover_emoji"):
+        ed["cover_emoji"] = cfg["cover_emoji"]
     if not ed.get("bring_items") and cfg.get("bring_suggestions"):
         ed["bring_items"] = list(cfg["bring_suggestions"])
     if ed.get("max_attendees") is None and cfg.get("capacity_default"):
@@ -348,7 +386,10 @@ def _ensure_review_draft(
     if not have_title:
         titles = sugg.get("title_suggestions") or []
         if titles:
+            # Default to the first name; keep the full list so the review card can offer
+            # the alternates as tap-to-rename chips ("or call it …").
             ed["title"] = titles[0]
+            ed["title_suggestions"] = titles[:3]
     if not have_desc and sugg.get("description"):
         ed["description"] = sugg["description"]
 
@@ -401,20 +442,51 @@ def _apply_host_brain(
     turn_ctx: dict[str, Any],
     session_ctx: dict[str, Any],
     settings: dict[str, Any],
-    existing_title: str,
 ) -> None:
-    """Apply the LLM host-turn brain's extraction to the draft — monotonically (never clobber a
-    real value the host already gave). Understanding is the LLM's job; this just records it."""
+    """Apply the LLM host-turn brain's extraction to the draft. Understanding is the LLM's job;
+    this just records it — last write wins, so a correction ("don't call it that — call it X",
+    "actually let's do the park") replaces the old value instead of being silently dropped.
+    The brain only emits a field its LATEST message stated or changed (null otherwise), so an
+    unrelated turn can't clobber a value the host already gave.
+
+    redo = slots the host asked to change WITHOUT giving the new value ("let's pick a
+    different time") — clear the slot and its step flags so the flow re-collects it.
+    Cleared first, so a value the same message DID carry still lands afterwards."""
+    for slot in brain.get("redo") or []:
+        if slot == "title":
+            ed.pop("title", None)
+        elif slot == "when":
+            ed.pop("starts_at", None)
+            ed.pop("has_time", None)
+            ed.pop("ends_at", None)
+            turn_ctx["event_when_date"] = None
+            turn_ctx["event_when_time"] = None
+        elif slot == "place":
+            for k in ("venue_name", "place_id", "venue_lat", "venue_lng", "venue_address"):
+                ed.pop(k, None)
+            turn_ctx["event_place_asked"] = False
+            turn_ctx["event_venue"] = None
+            turn_ctx["event_venue_tried"] = None
+            session_ctx["event_venue"] = None
     title = str(brain.get("title") or "").strip()
-    have_real_title = bool(existing_title) and not _is_generic_title(existing_title)
     # Reject a generic name in both raw ("meetup") and article-led ("a meetup") form.
     title_generic = _is_generic_title(title) or _is_generic_title(
         re.sub(r"^(?:a|an|the)\s+", "", title, flags=re.I)
     )
-    if title and not have_real_title and not title_generic:
+    if title and not title_generic:
         ed["title"] = title[:80]
     place = str(brain.get("place") or "").strip()
-    if place and not str(ed.get("venue_name") or "").strip():
+    prev_place = str(ed.get("venue_name") or "").strip()
+    if place and place.lower() != prev_place.lower():
+        if prev_place:
+            # The place CHANGED — the old venue's pin (place_id/lat/lng/address) and the
+            # event_venue stash are stale now. Drop them, or the re-stamp at the top of the
+            # next host turn puts the old spot back and publish pins the wrong coordinates.
+            # The auto-resolve step re-pins the new name on the next turn.
+            for k in ("place_id", "venue_lat", "venue_lng", "venue_address"):
+                ed.pop(k, None)
+            turn_ctx["event_venue"] = None
+            session_ctx["event_venue"] = None
         ed["venue_name"] = place[:80]
         turn_ctx["event_place_asked"] = True
     cap = brain.get("capacity")
@@ -696,7 +768,7 @@ def run_lana_unified_pipeline(
     2. Orchestrator (AI) — companionship, hosting; enforce still applies discovery overrides.
     """
     timer = timer or TurnTimer()
-    timer.emit(READING)
+    timer.emit_seed(READING)
     session_ctx = {
         **session_ctx,
         "phone_verified": phone_verified,
@@ -709,7 +781,17 @@ def run_lana_unified_pipeline(
     # please" (or "en español"/"em português") flips it; ambiguous turns keep it.
     from app.i18n import resolve_session_lang
 
-    resolve_session_lang(session_ctx, user_message)
+    # Chip-tap language pin, part 2: when the incoming message is EXACTLY one of the chip
+    # payloads offered last turn, it's app-authored canonical English — not the user
+    # switching language. Pin the session language for this turn: skip the heuristic here
+    # and have apply_ai_lang ignore the classifier's verdict (the flag is re-derived every
+    # turn, so a genuinely typed next message unpins immediately).
+    _offered = session_ctx.get("_offered_chip_msgs") or []
+    session_ctx["_lang_pinned_turn"] = bool(
+        str(user_message or "").strip() and str(user_message or "").strip() in _offered
+    )
+    if not session_ctx["_lang_pinned_turn"]:
+        resolve_session_lang(session_ctx, user_message)
     # Set when a rapport concierge turn hands off (zero-tap dispatch) so we can log where the
     # re-driven request actually routed — diagnostic for "yes → wrong lane" mis-routes.
     rapport_handoff_send: str | None = None
@@ -756,6 +838,33 @@ def run_lana_unified_pipeline(
                 home_block_id = assigned  # use it for the rest of THIS turn too
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception("verified_block_assign_failed")
+
+    # Overlap the turn's DB context load with the classifier LLM calls below: both
+    # load_user_context and the memory prefetch depend only on user_id + the raw
+    # message, never on a classification, so by the time run_turn joins the future
+    # the ~5s of Supabase round-trips have already happened under the classifier's
+    # wall-clock. Skipped while a sticky capture owns the session — those lanes
+    # answer without the orchestrator (and on a release, run_turn simply falls back
+    # to loading inline). Spawned AFTER the verified-block guarantee above so a
+    # just-assigned home block is visible to the background read.
+    ctx_prefetch = None
+    if use_orchestrator and not isinstance(session_ctx.get("rapport_answer"), dict) and not any(
+        session_ctx.get(k)
+        for k in (
+            "pass_along_active",
+            "tip_share_active",
+            "look_meet_active",
+            "activity_browse_active",
+            "rapport_active",
+        )
+    ):
+        from app.orchestrator.pipeline import start_ctx_prefetch
+
+        try:
+            ctx_prefetch = start_ctx_prefetch(user_id=user_id, user_message=user_message)
+        except Exception:  # noqa: BLE001 — overlap is an optimization, never a blocker
+            logging.getLogger(__name__).exception("ctx_prefetch_spawn_failed")
+            ctx_prefetch = None
 
     # A "By the way…" tile answer owns the turn: save the claim, close the gap, and reply via
     # the concierge engine (acknowledge her answer + one grounded follow-up), NOT the classifier
@@ -887,6 +996,17 @@ def run_lana_unified_pipeline(
         # chips). Never the heritage-first profile-intake engine, which re-asks covered
         # threads like heritage regardless of what's already known. See rapport_reply.py.
         prior_followups = int(session_ctx.get("rapport_followup_count") or 0)
+        # Tell the concierge which language Lana currently speaks with her, so an answer
+        # naming another language can become a switch offer (the accept chip routes through
+        # the classifier's set_preferred_lang like any explicit request — no new machinery).
+        current_lang_name: str | None = None
+        try:
+            from app.i18n import lang_display_name
+            from app.lang_pref import get_user_preferred_language
+
+            current_lang_name = lang_display_name(get_user_preferred_language(user_id))
+        except Exception:  # noqa: BLE001 — a missed offer beats a failed reply
+            logging.getLogger(__name__).exception("rapport_lang_context_failed")
         concierge = rapport_concierge_reply(
             answer_text=user_message,
             question=question or None,
@@ -894,6 +1014,7 @@ def run_lana_unified_pipeline(
             saved_bucket=saved_bucket,
             saved=saved_any,
             prior_followups=prior_followups,
+            current_lang_name=current_lang_name,
         )
         # ZERO-TAP HAND-OFF: only when she is ACCEPTING an app-move we put in front of her LAST turn
         # (rapport_offer_pending). Then the concierge returns an ACTION carrying a concrete first-person
@@ -952,6 +1073,16 @@ def run_lana_unified_pipeline(
             ctx.pop("rapport_answer", None)
             reply = sanitize_assistant_message(str(concierge.get("reply") or ""))
             options = concierge.get("options")
+            # A language-switch offer arms the classifier's lang_pref_offer context for the
+            # next few turns, so a free-typed accept ("lets talk in urdu") actually persists
+            # the default via set_preferred_lang — not just a conversational promise. TTL'd
+            # in language_preference_post_turn so it never becomes a sticky lane.
+            lang_offer = concierge.get("language_offer") or []
+            if lang_offer:
+                ctx["lang_offer_langs"] = lang_offer
+                # Decremented every turn by language_preference_post_turn, INCLUDING this
+                # offer turn — 4 leaves three real user turns to land the accept.
+                ctx["lang_offer_ttl"] = 4
             if action_send:
                 ctx["rapport_reply"] = {"options": [], "action": action}
                 ctx["rapport_active"] = True
@@ -1217,6 +1348,31 @@ def run_lana_unified_pipeline(
         clear_turn_surfaces(session_ctx)
     if use_orchestrator:
         prev_event_id = session_ctx.get("event_id")
+        # Host fast path: when the host stage machine below will provably own this
+        # turn, run_turn skips its router + synthesizer (their routing stamp, reply,
+        # and UI all get overwritten by the host block). "Provably" is deliberately
+        # narrow — every condition mirrors a gate the host block itself checks:
+        #  · event_host_active and no published event_id (the host block's own gate);
+        #  · discovery slots computed FOR THIS MESSAGE read as hosting — the exact
+        #    check the back-out cleanup below uses, so the release branch (which
+        #    would need the synth reply) cannot fire;
+        #  · not the confirm stage and no pending_confirmation — publish turns keep
+        #    the full path, where the router may own the create_event call.
+        # Anything else takes the unchanged full path.
+        from app.layer1_intents import slots_indicate_hosting_signal as _host_slots
+
+        _slots_fresh = (
+            str(session_ctx.get("_discovery_slots_for") or "")
+            == str(user_message or "").strip()
+        )
+        host_fast = (
+            bool(session_ctx.get("event_host_active"))
+            and not prev_event_id
+            and not session_ctx.get("pending_confirmation")
+            and str(session_ctx.get("host_stage") or "") in ("", "review", "setup")
+            and _slots_fresh
+            and _host_slots(session_ctx.get("_discovery_slots") or {})
+        )
         reply, status, turn_ctx, ui, draft = run_turn(
             user_id=user_id,
             session_id=session_id,
@@ -1227,6 +1383,8 @@ def run_lana_unified_pipeline(
             user_jwt=user_jwt,
             persisted_core=persisted_core,
             timer=timer,
+            ctx_prefetch=ctx_prefetch,
+            host_fast_path=host_fast,
         )
         turn_ctx["_orchestrator_turn"] = True
         # Keep sticky host mode across turns; clear it the moment the event publishes
@@ -1315,6 +1473,7 @@ def run_lana_unified_pipeline(
                     turn_ctx["event_when_date"] = None
                     turn_ctx["event_when_time"] = None
                     ed.pop("starts_at", None)
+                    ed.pop("has_time", None)
                     ed.pop("ends_at", None)
                 if "venue_name" in cleared:
                     # Re-open the where-step and forget the picked pin so the venue isn't
@@ -1345,17 +1504,7 @@ def run_lana_unified_pipeline(
             # rebuilds starts_at from history — so the card kept the date while the step-gate
             # thought it was missing and re-asked "when?"). The draft is the single source of
             # truth; back-fill from it before re-deriving from the current message.
-            if (not wd or not wt) and ed.get("starts_at"):
-                from datetime import datetime as _dt_recover
-
-                try:
-                    _existing = _dt_recover.fromisoformat(str(ed["starts_at"]))
-                    if not wd:
-                        wd = _existing.date().isoformat()
-                    if not wt:
-                        wt = _existing.strftime("%H:%M")
-                except (ValueError, TypeError):
-                    pass
+            wd, wt = _recover_when_from_draft(ed, wd, wt)
             # AI-first when-resolution: the LLM (anchored on today's date inside
             # resolve_event_when) handles ordinals ("28th June"), negation ("not on
             # friday"), and relative phrasing the old regex choked on, and already
@@ -1389,16 +1538,25 @@ def run_lana_unified_pipeline(
             turn_ctx["event_when_time"] = wt
             if wd:
                 ed["starts_at"] = f"{wd}T{wt or '00:00'}:00"
+                # Truthful clock flag: midnight above is a date-only placeholder unless
+                # the host actually said a time. Persisted to events.has_time at publish;
+                # cards render date-only when False (#56).
+                ed["has_time"] = bool(wt)
                 # Rebuild ends_at off our corrected start — the LLM extractor mis-years
                 # ends_at (e.g. 2023) while we compute the real future date here, which
-                # used to ship a wrong-year ends_at through to publish.
+                # used to ship a wrong-year ends_at through to publish. No clock time →
+                # no ends_at: midnight + 90min is a fiction the meet page would render
+                # as a real duration.
                 from datetime import datetime as _dt, timedelta as _td
 
-                try:
-                    _start = _dt.fromisoformat(ed["starts_at"])
-                    _dur = int(ed.get("duration_minutes") or 90)
-                    ed["ends_at"] = (_start + _td(minutes=_dur)).isoformat()
-                except (ValueError, TypeError):
+                if wt:
+                    try:
+                        _start = _dt.fromisoformat(ed["starts_at"])
+                        _dur = int(ed.get("duration_minutes") or 90)
+                        ed["ends_at"] = (_start + _td(minutes=_dur)).isoformat()
+                    except (ValueError, TypeError):
+                        ed.pop("ends_at", None)
+                else:
                     ed.pop("ends_at", None)
 
             # Exact picked place (stamped via /event-venue) — overrides any venue the
@@ -1596,6 +1754,20 @@ def run_lana_unified_pipeline(
                     )
             elif stage == "setup":
                 if (_is_host_confirm(user_message) or _is_host_drop(user_message)) and blockers_done:
+                    # The sparse-opening path never runs _ensure_review_draft (the entry
+                    # gate needs a date/venue up front), so a carousel-built draft reaches
+                    # confirm with no description. The draft is final here — backfill the
+                    # card blurb now so the confirm card and the published event show one.
+                    # Description ONLY: the host's chosen title is never touched.
+                    if not str(ed.get("description") or "").strip():
+                        from app.event_suggest import event_suggestions
+
+                        with timer.stage("llm_event_suggest"):
+                            _sugg = event_suggestions(
+                                history=history, user_message=user_message, draft=ed
+                            )
+                        if _sugg.get("description"):
+                            ed["description"] = _sugg["description"]
                     turn_ctx["host_stage"] = "confirm"
                     ed["suggestions"] = []
                     reply = (
@@ -1620,9 +1792,10 @@ def run_lana_unified_pipeline(
                     # Free-text during setup — the host is TALKING, not tapping. Hand the whole
                     # turn to the LLM brain: it reads the message in ANY phrasing, extracts what
                     # it carries (title / place / capacity / prefs), and writes the reply — no
-                    # keyword gates. Apply the extraction monotonically and show the reply as an
-                    # aside (text + compact draft card) so it's visible over the carousel. The
-                    # deterministic nudge is only a fallback for when the LLM is unavailable.
+                    # keyword gates. Apply the extraction last-write-wins (a correction replaces
+                    # the old value) and show the reply as an aside (text + compact draft card)
+                    # so it's visible over the carousel. The deterministic nudge is only a
+                    # fallback for when the LLM is unavailable.
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
                     need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
@@ -1636,7 +1809,7 @@ def run_lana_unified_pipeline(
                             needed=need,
                         )
                     if brain:
-                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings, _title)
+                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
                         reply = brain["reply"]
                         turn_ctx["host_aside"] = True
                     else:
@@ -1713,9 +1886,48 @@ def run_lana_unified_pipeline(
                                 ed.pop("venue_name", None)
                             reply = _publish_failure_reply(publish_error, _title)
                 else:
-                    turn_ctx["host_stage"] = "confirm"
+                    # Free text at confirm — an inline edit, a redo ask, or a question. The
+                    # brain reads it in any phrasing: corrections land last-write-wins, and a
+                    # slot asked to change WITHOUT its new value ("I want a different spot")
+                    # comes back in redo and clears here. A draft still complete afterwards
+                    # holds at confirm; a cleared blocker falls back to the setup carousel —
+                    # the confirm card has no pickers, so holding would strand the host with
+                    # a hole they can't fill.
                     ed["suggestions"] = []
-                    reply = "Tap **Drop the meet up** when you're ready and I'll post it."
+                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    from app.host_turn import host_turn_brain
+
+                    with timer.stage("llm_host_turn"):
+                        brain = host_turn_brain(
+                            history=history,
+                            user_message=user_message,
+                            draft=ed,
+                            needed=need,
+                        )
+                    if brain:
+                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
+                    # Re-derive the blockers AFTER the brain applied edits/redos — the locals
+                    # above predate them (and the router's clear_fields path may have already
+                    # blanked a slot before the stage machine ran).
+                    _title = str(ed.get("title") or "").strip()
+                    wd = turn_ctx.get("event_when_date")
+                    wt = turn_ctx.get("event_when_time")
+                    venue_resolvable = bool(str(ed.get("venue_name") or "").strip())
+                    if _title and wd and wt and venue_resolvable:
+                        turn_ctx["host_stage"] = "confirm"
+                        reply = (
+                            brain["reply"]
+                            if brain
+                            else "Tap **Drop the meet up** when you're ready and I'll post it."
+                        )
+                    else:
+                        _ensure_setup_config(
+                            ed, history=history, user_message=user_message, timer=timer
+                        )
+                        _seed_setup_defaults(ed)
+                        turn_ctx["host_stage"] = "setup"
+                        need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                        reply = brain["reply"] if brain else _host_fallback_nudge(need)
             turn_ctx["event_draft"] = ed
             draft = ed  # surface to the FE (5th return → response.event_draft)
 

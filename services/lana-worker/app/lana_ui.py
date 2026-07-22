@@ -19,6 +19,39 @@ _UI_METADATA_LINE_RE = re.compile(
 )
 
 
+# None-answers a host gives on the "anything to bring?" card ("nothing", "no need…").
+# Deterministic format-parsing only — the semantic read ("guests come empty-handed")
+# stays with the AI; this just keeps the literal word from becoming a bring chip. Applied
+# at every bring_items ingestion point: the FE setup POST, the LLM draft parse, the LLM
+# bring_suggestions, and the final publish.
+_NONE_BRING_ITEMS = frozenset(
+    {
+        "nothing", "none", "nada", "no", "nope", "n/a", "na", "nil", "zilch",
+        "nothing needed", "no need", "nothing to bring", "nothing at all",
+        "nothing really", "no items", "not needed", "nothing thanks",
+    }
+)
+
+
+def is_none_bring_item(label: str) -> bool:
+    return str(label or "").strip().rstrip(".!,").strip().lower() in _NONE_BRING_ITEMS
+
+
+def sanitize_cover_emoji(raw: Any) -> str | None:
+    """Keep only a plausible emoji cover: first whitespace-separated token, capped to
+    16 chars (room for ZWJ sequences), no letters/digits (rejects words and CJK text),
+    and at least one symbol-plane char so plain punctuation can't slip through."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    token = text.split()[0][:16]
+    if any(ch.isalnum() for ch in token):
+        return None
+    if not any(ord(ch) >= 0x2600 for ch in token):
+        return None
+    return token
+
+
 def sanitize_assistant_message(text: str) -> str:
     """Drop orchestrator UI metadata lines leaked into assistant_message."""
     raw = str(text or "").strip()
@@ -163,11 +196,12 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
     if isinstance(bring_raw, list):
         for b in bring_raw[:12]:
             label = str(b).strip()[:60]
-            if label and label not in bring_items:
+            if label and not is_none_bring_item(label) and label not in bring_items:
                 bring_items.append(label)
     # AI-tailored quick-setup card config (opaque dict) — passed through untouched.
     event_setup_raw = raw.get("event_setup")
     event_setup = event_setup_raw if isinstance(event_setup_raw, dict) else None
+    cover_emoji = sanitize_cover_emoji(raw.get("cover_emoji"))
     missing_raw = raw.get("missing") or []
     missing: list[str] = []
     if isinstance(missing_raw, list):
@@ -205,6 +239,7 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
         "cohort_tags": cohort_tags,
         "bring_items": bring_items,
         "event_setup": event_setup,
+        "cover_emoji": cover_emoji,
         "affinity_prompt": affinity_prompt,
         "affinity_options": affinity_options,
         "missing": missing,
@@ -254,6 +289,11 @@ def merge_event_drafts(
         merged["event_setup"] = new["event_setup"]
     elif base.get("event_setup"):
         merged["event_setup"] = base["event_setup"]
+    # Cover emoji: picked once alongside the setup config, then sticks like a slot value.
+    if new.get("cover_emoji"):
+        merged["cover_emoji"] = new["cover_emoji"]
+    elif base.get("cover_emoji"):
+        merged["cover_emoji"] = base["cover_emoji"]
     # Honor explicit resets — the host wants to redo a slot they'd already filled
     # ("don't call it X", "change the time"). Slot-filling is otherwise monotonic, so
     # without this a rejected value sticks forever and the flow re-asks the NEXT slot

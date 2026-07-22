@@ -13,6 +13,7 @@ from app.lana_unified_pipeline import (
     _is_host_confirm,
     _is_host_drop,
     _is_host_tweak,
+    _recover_when_from_draft,
     _seed_setup_defaults,
 )
 from app.models import EventDraft
@@ -116,6 +117,37 @@ class TestBringItems(unittest.TestCase):
         merged = merge_event_drafts({"bring_items": ["Old"]}, {"bring_items": ["New", "Items"]})
         self.assertEqual(merged["bring_items"], ["New", "Items"])
 
+    def test_none_answers_never_become_chips(self) -> None:
+        # "Anything to bring?" → "nothing" is an empty list, not a literal chip — at the
+        # parse layer (LLM draft), and via is_none_bring_item at the FE-POST/publish layers.
+        from app.lana_ui import is_none_bring_item
+
+        parsed = parse_event_draft(
+            {"bring_items": ["nothing", "None", "no need!", "N/A", "Stroller"]}
+        )
+        self.assertEqual(parsed["bring_items"], ["Stroller"])
+        for none_word in ("nothing", "Nothing.", "NONE", "no need", "nada", "n/a"):
+            self.assertTrue(is_none_bring_item(none_word), none_word)
+        # Real items survive — including ones that merely contain a none-word.
+        for item in ("Stroller", "Nothing-brand cooler", "Snacks"):
+            self.assertFalse(is_none_bring_item(item), item)
+
+    def test_publish_fields_drop_none_answers(self) -> None:
+        from unittest.mock import patch
+
+        from app.event_publish import build_create_event_fields
+
+        draft = EventDraft(
+            title="Birthday Party with Kids",
+            bring_items=["nothing", "Balloons"],
+        )
+        with patch(
+            "app.event_publish.resolve_event_location",
+            return_value=(None, None, "blk-1"),
+        ), patch("app.event_publish._valid_purpose_ids", return_value=set()):
+            fields = build_create_event_fields("u-1", draft)
+        self.assertEqual(fields.get("bring_items"), ["Balloons"])
+
 
 class TestBlockersNeeded(unittest.TestCase):
     def test_lists_only_missing(self) -> None:
@@ -141,19 +173,20 @@ class TestFallbackNudge(unittest.TestCase):
 
 class TestApplyHostBrain(unittest.TestCase):
     """The brain OWNS understanding (any phrasing); this applies its extraction to the draft
-    monotonically — never clobbering a real value the host already gave."""
+    last-write-wins — a correction ("don't call it that — call it X") replaces the old value.
+    The brain's contract (null for anything the latest message didn't state) is what keeps an
+    unrelated turn from clobbering a value the host already gave."""
 
     def _apply(self, brain, ed):
         settings: dict = {}
         turn_ctx: dict = {}
         session_ctx: dict = {}
-        existing = str(ed.get("title") or "")
-        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings, existing)
-        return turn_ctx, settings
+        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
+        return turn_ctx, session_ctx, settings
 
     def test_applies_capacity_place_and_prefs(self) -> None:
         ed: dict = {}
-        turn_ctx, settings = self._apply(
+        turn_ctx, _, settings = self._apply(
             {
                 "title": "Neighbor Coffee",
                 "place": "my house",
@@ -172,16 +205,90 @@ class TestApplyHostBrain(unittest.TestCase):
         self.assertIs(ed["auto_approve"], False)
         self.assertIs(ed["allow_attendee_share"], True)
 
-    def test_monotonic_never_clobbers_real_title_or_venue(self) -> None:
-        ed = {"title": "Book Club", "venue_name": "Foxtail Coffee"}
-        self._apply({"title": "Something Else", "place": "the park", "reply": "x"}, ed)
-        self.assertEqual(ed["title"], "Book Club")
+    def test_corrections_overwrite_title_and_place(self) -> None:
+        # "don't call it that — call it Pasta Night, and actually let's do the community
+        # center" must not be silently dropped just because the fields were already filled.
+        ed = {"title": "Pizza Night", "venue_name": "Riverside Park"}
+        self._apply({"title": "Pasta Night", "place": "Community Center", "reply": "x"}, ed)
+        self.assertEqual(ed["title"], "Pasta Night")
+        self.assertEqual(ed["venue_name"], "Community Center")
+
+    def test_place_change_drops_stale_pin(self) -> None:
+        # Moving the meet invalidates the old venue's pin AND the event_venue stash —
+        # otherwise next turn's re-stamp resurrects the old spot / publish pins the
+        # wrong coordinates.
+        ed = {
+            "venue_name": "Foxtail Coffee",
+            "place_id": "pid-1",
+            "venue_lat": 1.0,
+            "venue_lng": 2.0,
+            "venue_address": "1 Old St",
+        }
+        turn_ctx, session_ctx, _ = self._apply({"place": "the park", "reply": "x"}, ed)
+        self.assertEqual(ed["venue_name"], "the park")
+        for k in ("place_id", "venue_lat", "venue_lng", "venue_address"):
+            self.assertNotIn(k, ed)
+        self.assertIsNone(turn_ctx["event_venue"])
+        self.assertIsNone(session_ctx["event_venue"])
+
+    def test_same_place_echo_keeps_pin(self) -> None:
+        # The brain re-stating the current place (an echo, not a change) must not wipe
+        # the precise pin a Search pick / auto-resolve already stamped.
+        ed = {"venue_name": "Foxtail Coffee", "place_id": "pid-1", "venue_lat": 1.0}
+        self._apply({"place": "foxtail coffee", "reply": "x"}, ed)
         self.assertEqual(ed["venue_name"], "Foxtail Coffee")
+        self.assertEqual(ed["place_id"], "pid-1")
+        self.assertEqual(ed["venue_lat"], 1.0)
 
     def test_ignores_generic_title(self) -> None:
         ed: dict = {}
         self._apply({"title": "a meetup", "reply": "x"}, ed)
         self.assertNotIn("title", ed)
+
+    def test_generic_title_never_overwrites_real_name(self) -> None:
+        ed = {"title": "Book Club"}
+        self._apply({"title": "meetup", "reply": "x"}, ed)
+        self.assertEqual(ed["title"], "Book Club")
+
+    def test_redo_place_reopens_where_step(self) -> None:
+        # "I want a different spot" (no new value) — clear the venue + pin + step flags so
+        # the flow re-collects the place instead of holding a card with a hole in it.
+        ed = {
+            "title": "Big Bros Meet",
+            "venue_name": "KFC",
+            "place_id": "pid-1",
+            "venue_lat": 1.0,
+            "venue_lng": 2.0,
+            "venue_address": "1 Old St",
+        }
+        turn_ctx, session_ctx, _ = self._apply({"redo": ["place"], "reply": "x"}, ed)
+        for k in ("venue_name", "place_id", "venue_lat", "venue_lng", "venue_address"):
+            self.assertNotIn(k, ed)
+        self.assertIs(turn_ctx["event_place_asked"], False)
+        self.assertIsNone(turn_ctx["event_venue"])
+        self.assertIsNone(turn_ctx["event_venue_tried"])
+        self.assertIsNone(session_ctx["event_venue"])
+        self.assertEqual(ed["title"], "Big Bros Meet")  # untouched slots survive
+
+    def test_redo_when_clears_dates(self) -> None:
+        ed = {"starts_at": "2026-07-25T21:00:00", "ends_at": "2026-07-25T22:30:00"}
+        turn_ctx, _, _ = self._apply({"redo": ["when"], "reply": "x"}, ed)
+        self.assertNotIn("starts_at", ed)
+        self.assertNotIn("ends_at", ed)
+        self.assertIsNone(turn_ctx["event_when_date"])
+        self.assertIsNone(turn_ctx["event_when_time"])
+
+    def test_redo_title_clears_name(self) -> None:
+        ed = {"title": "Big Bros Meet"}
+        self._apply({"redo": ["title"], "reply": "x"}, ed)
+        self.assertNotIn("title", ed)
+
+    def test_redo_with_inline_value_keeps_value(self) -> None:
+        # Belt-and-braces: if the brain emits both redo and the new value, the value wins —
+        # redo clears first, the extraction lands after.
+        ed = {"title": "Pizza Night"}
+        self._apply({"redo": ["title"], "title": "Pasta Night", "reply": "x"}, ed)
+        self.assertEqual(ed["title"], "Pasta Night")
 
     def test_nulls_are_left_alone(self) -> None:
         ed = {"title": "Book Club"}
@@ -191,6 +298,48 @@ class TestApplyHostBrain(unittest.TestCase):
             ed,
         )
         self.assertEqual(ed, {"title": "Book Club"})
+
+
+class TestRecoverWhenFromDraft(unittest.TestCase):
+    """#56: a date-only draft's midnight placeholder must never be recovered as a real
+    clock time — that laundered "00:00" through event_when_time, satisfied the confirm
+    gate, and published "12 AM" meets."""
+
+    def test_recovers_clock_when_host_gave_one(self) -> None:
+        ed = {"starts_at": "2026-08-12T15:00:00", "has_time": True}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual((wd, wt), ("2026-08-12", "15:00"))
+
+    def test_never_recovers_placeholder_midnight(self) -> None:
+        ed = {"starts_at": "2026-08-12T00:00:00", "has_time": False}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual(wd, "2026-08-12")
+        self.assertIsNone(wt)
+
+    def test_legacy_draft_trusts_non_midnight_clock(self) -> None:
+        # Pre-flag draft (no has_time key): a real-looking clock was host-given mid-flow.
+        ed = {"starts_at": "2026-08-12T18:30:00"}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual((wd, wt), ("2026-08-12", "18:30"))
+
+    def test_legacy_draft_never_trusts_midnight(self) -> None:
+        # Pre-flag draft at exactly midnight = the old date-only placeholder (or an
+        # extractor fabrication) — recover the date, re-ask the time.
+        ed = {"starts_at": "2026-08-12T00:00:00"}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertEqual(wd, "2026-08-12")
+        self.assertIsNone(wt)
+
+    def test_existing_turn_keys_win(self) -> None:
+        ed = {"starts_at": "2026-08-12T15:00:00", "has_time": True}
+        wd, wt = _recover_when_from_draft(ed, "2026-08-13", "09:00")
+        self.assertEqual((wd, wt), ("2026-08-13", "09:00"))
+
+    def test_unparseable_start_is_ignored(self) -> None:
+        ed = {"starts_at": "soonish", "has_time": True}
+        wd, wt = _recover_when_from_draft(ed, None, None)
+        self.assertIsNone(wd)
+        self.assertIsNone(wt)
 
 
 if __name__ == "__main__":

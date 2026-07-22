@@ -24,11 +24,14 @@ from app.db import (
 from app.orchestrator.guardrails import utterance_is_unsafe
 from app.out_of_scope_reply import author_out_of_scope_reply
 from app.claim_search import (
+    attr_display_filter,
     heritage_terms_in_text,
     parse_claim_filters,
     peer_heritage_key,
     peer_matches_identity_snippet,
 )
+from app.identity_ask import compose_identity_ask, identity_from_saved_claims
+from app.claims_persist import kick_claim_embedding_backfill
 from app.discovery_slots import (
     ai_parse_discovery_turn,
     discovery_ai_enabled,
@@ -156,9 +159,6 @@ from app.layer1_handlers import (
     summarize_partial_claim_matches,
     stamp_identity_profile_ctx,
 )
-from app.context import load_event_draft_context
-from app.claims_persist import persist_profile_patch, try_upsert_claims_from_message
-from app.profile_intake import format_profile_intake_context, lana_profile_turn
 from app.layer1_intents import (
     LOOKING_SHARING_INTENTS,
     enrich_slots,
@@ -448,6 +448,23 @@ def _ai_slots_block_propose_intro(msg: str, slots: dict[str, Any] | None) -> boo
     return conf >= 0.5 and goal in _SLOTS_BLOCK_PROPOSE_GOALS
 
 
+def _fetch_verified_peer_matches(
+    user_jwt: str,
+    *,
+    user_id: str | None,
+    block_id: str | None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Vector matches + self-heal: claims saved without embeddings (best-effort
+    write-time embed) get re-embedded in the background so fuzzy matching is
+    whole by the next turn; exact-concept matches already work without vectors."""
+    try:
+        kick_claim_embedding_backfill(user_id=user_id, block_id=block_id)
+    except Exception:
+        pass
+    return fetch_peer_matches(user_jwt, limit=limit)
+
+
 def _preview_peers_with_ids(
     *,
     user_jwt: str,
@@ -467,7 +484,9 @@ def _preview_peers_with_ids(
             home_block_id=home_block_id,
         )
         try:
-            peers = fetch_peer_matches(user_jwt, limit=5)
+            peers = _fetch_verified_peer_matches(
+                user_jwt, user_id=None, block_id=block_id, limit=5
+            )
             if peers:
                 return peers
         except Exception:
@@ -499,6 +518,7 @@ def _try_neighbor_intro_turn(
     goal: str,
     slots: dict[str, Any] | None,
     history: list[dict[str, Any]] | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     if not phone_verified:
         return None
@@ -582,9 +602,13 @@ def _try_neighbor_intro_turn(
         if wants_intro and not any(p.get("peer_user_id") for p in peers):
             snippet = str(session_ctx.get("identity_snippet") or "").strip()
             if not snippet:
+                snippet = identity_from_saved_claims(user_id) or ""
+                if snippet:
+                    session_ctx["identity_snippet"] = snippet
+                    ctx_base["identity_snippet"] = snippet
+            if not snippet:
                 return (
-                    "Tell me one thing about you — life stage, heritage, or what you're looking for — "
-                    "then I can introduce you to someone on your block.",
+                    compose_identity_ask(msg=msg, purpose="intro"),
                     _routing_ctx(
                         ctx_base,
                         phase=PHASE_NEED_IDENTITY,
@@ -1172,70 +1196,98 @@ def _try_respond_nudge_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
-def _identity_conversational_reply(
+def _claim_concierge_reply(
     *,
     user_id: str | None,
     msg: str,
-    history: list[dict[str, Any]] | None,
+    res: Any,
+    known_labels: list[str],
     session_ctx: dict[str, Any],
     ctx: dict[str, Any],
 ) -> str:
-    """Reply for a profile-building turn via the history-aware intake engine.
+    """Reply for a spontaneous self-claim via the rapport concierge — a warm ack of what
+    they shared (or "I remember" when it was already on file) plus ONE AI-chosen next
+    move: an app-move chip ("Search badminton activities"), a follow-up, or a warm close.
 
-    One AI brain decides what Lana says: name capture in context, the next curious
-    follow-up, and when to wrap — no regex. Persistence already happened upstream.
-    Falls back to a warm ack if the engine call fails.
+    NEVER the profile-intake interviewer here: a taste dropped mid-chat ("I like
+    badminton") is not an invitation to be interviewed, and the intake engine re-asks
+    covered threads like heritage regardless of what's already known (the same reason
+    the rapport tile path avoids it — see lana_unified_pipeline's rapport branch).
     """
     import logging
 
-    fallback = "Got it — I've updated your profile. Tell me more about yourself anytime."
+    fallback = "Got it — I've saved that to your profile. Tell me more anytime."
+    label = str(getattr(res, "primary_label", None) or "").strip()
+    already_known = False
+    if label:
+        low = label.casefold()
+        for k in known_labels:
+            kl = str(k or "").strip().casefold()
+            if kl and (kl == low or kl in low or low in kl):
+                already_known = True
+                break
+    current_lang_name: str | None = None
     try:
-        ctx_pack = load_event_draft_context(user_id) if user_id else {}
-        user_block = format_profile_intake_context(ctx_pack)
-        # Tell the engine what it ALREADY knows so it stops re-asking covered threads
-        # (heritage, reading, …) as if the conversation were fresh — deepen or move on instead.
-        if user_id:
-            try:
-                from app.claims_persist import fetch_active_claim_labels
+        from app.i18n import lang_display_name
+        from app.lang_pref import get_user_preferred_language
 
-                known = fetch_active_claim_labels(user_id)
-            except Exception:
-                known = []
-            if known:
-                user_block += (
-                    "\n\nALREADY KNOWN about this neighbor — do NOT ask about these again; "
-                    "acknowledge briefly if relevant, then deepen a DIFFERENT angle or ask "
-                    "about a NEW thread: " + ", ".join(known[:20])
-                )
-        reply, status, turn_ctx, ui = lana_profile_turn(
-            user_block,
-            history or [],
-            msg,
-            ctx_pack=ctx_pack,
-            session_ctx=session_ctx,
-            continuous=True,
+        current_lang_name = lang_display_name(get_user_preferred_language(user_id))
+    except Exception:  # noqa: BLE001 — a missed language offer beats a failed reply
+        pass
+    prior_followups = int(session_ctx.get("rapport_followup_count") or 0)
+    try:
+        from app.rapport_reply import rapport_concierge_reply
+
+        concierge = rapport_concierge_reply(
+            answer_text=msg,
+            saved_label=label or None,
+            saved_bucket=getattr(res, "primary_bucket", None),
+            saved=bool(getattr(res, "saved", 0)),
+            already_known=already_known,
+            prior_followups=prior_followups,
+            current_lang_name=current_lang_name,
         )
-    except Exception:
-        logging.getLogger(__name__).exception("identity_conversational_reply_failed")
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("claim_concierge_reply_failed")
         return fallback
+    reply = str(concierge.get("reply") or "").strip() or fallback
 
-    # Persist the engine's AI-captured name (e.g. a bare "Drake" read in context).
-    patch = turn_ctx.get("profile_patch") if isinstance(turn_ctx, dict) else None
-    if patch and user_id:
-        try:
-            persist_profile_patch(user_id, patch)
-        except Exception:
-            logging.getLogger(__name__).exception("identity_profile_patch_failed")
-
-    # Carry conversational state for the frontend (threads still come from the dashboard).
-    ctx["profile_turn_status"] = status
-    if ui:
-        ctx["last_ui"] = ui
-    if isinstance(turn_ctx, dict):
-        for key in ("topics_covered", "topics_to_explore"):
-            if key in turn_ctx:
-                ctx[key] = turn_ctx[key]
-    return reply or fallback
+    # Wire the concierge's next move exactly like the rapport tile path, so the chip
+    # renders (ui_actions reads rapport_reply) and the NEXT turn's accept/decline/pivot
+    # is handled by the pipeline's rapport continuation — deterministic dispatch on
+    # accept, normal routing on pivot. Keys are set to None (not popped) to clear across
+    # the session merge.
+    lang_offer = concierge.get("language_offer") or []
+    if lang_offer:
+        ctx["lang_offer_langs"] = lang_offer
+        ctx["lang_offer_ttl"] = 4
+    action = concierge.get("action")
+    options = concierge.get("options")
+    if isinstance(action, dict) and str(action.get("send") or "").strip():
+        ctx["rapport_reply"] = {"options": [], "action": action}
+        ctx["rapport_active"] = True
+        ctx["rapport_followup_question"] = reply
+        ctx["rapport_followup_count"] = prior_followups + 1
+        ctx["rapport_offer_pending"] = True
+        ctx["rapport_pending_action"] = action
+    elif isinstance(options, list) and options:
+        ctx["rapport_reply"] = {"options": options, "action": None}
+        ctx["rapport_active"] = True
+        ctx["rapport_followup_question"] = reply
+        ctx["rapport_followup_count"] = prior_followups + 1
+        ctx["rapport_offer_pending"] = False
+        ctx["rapport_pending_action"] = None
+    else:
+        for k in (
+            "rapport_reply",
+            "rapport_active",
+            "rapport_followup_question",
+            "rapport_followup_count",
+            "rapport_offer_pending",
+            "rapport_pending_action",
+        ):
+            ctx[k] = None
+    return reply
 
 
 def _try_layer1_intent_turn(
@@ -1401,9 +1453,18 @@ def _try_layer1_intent_turn(
         if wants_neighbor_intro(msg) or wants_list_intros_phrase(msg):
             return None
         # Data path: extract + persist claims / kids / nickname (and detect heritage
-        # conflicts). The conversational REPLY is owned by lana_profile_turn — one
-        # AI brain for profile-building, so names, follow-ups, and wrap-up are decided
-        # by meaning in context, not regex.
+        # conflicts). The conversational REPLY is owned by the rapport concierge —
+        # names, follow-ups, and offers decided by meaning in context, not regex.
+        # Snapshot the labels BEFORE persisting so the reply can say "I remember"
+        # for a thread that was already on file (the persist enriches it in place).
+        known_before: list[str] = []
+        if user_id:
+            try:
+                from app.claims_persist import fetch_active_claim_labels
+
+                known_before = fetch_active_claim_labels(user_id)
+            except Exception:  # noqa: BLE001
+                known_before = []
         res = persist_identity_from_message(user_id, msg, linear_intent=linear)
         ctx = _routing_ctx(
             ctx_base,
@@ -1440,11 +1501,13 @@ def _try_layer1_intent_turn(
                 + f" identity thread{'s' if res.total != 1 else ''} on your profile."
             )
         else:
-            # Conversational reply via the profile-intake engine (history-aware).
-            reply = _identity_conversational_reply(
+            # Conversational reply via the rapport concierge (ack + one next move) —
+            # never the intake interviewer, which re-asks known threads like heritage.
+            reply = _claim_concierge_reply(
                 user_id=user_id,
                 msg=msg,
-                history=history,
+                res=res,
+                known_labels=known_before,
                 session_ctx=session_ctx,
                 ctx=ctx,
             )
@@ -1658,7 +1721,7 @@ def _try_layer1_intent_turn(
             )
         reply = format_attr_peers_reply(
             peers,
-            filter_text=filter_text,
+            filter_text=attr_display_filter(filter_text, slots),
             partial_summary=partial_summary,
         )
         peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
@@ -1717,22 +1780,33 @@ def _try_layer1_intent_turn(
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "help.what_can_you_do":
+        from app.i18n import session_lang as _session_lang
+
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or "listening",
             active_intent="help.what_can_you_do",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_capabilities")
-        return HELP_WHAT_CAN_YOU_DO, ctx, ctx["last_routing"], []
+        reply, ai_authored = _compose_help_reply("what", msg, _session_lang(session_ctx))
+        if ai_authored:
+            # Composed under the language directive — skip the final-mile re-render.
+            ctx["_reply_localized"] = True
+        return reply, ctx, ctx["last_routing"], []
 
     if linear == "help.who_are_you":
+        from app.i18n import session_lang as _session_lang
+
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or "listening",
             active_intent="help.who_are_you",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
-        return HELP_WHO_ARE_YOU, ctx, ctx["last_routing"], []
+        reply, ai_authored = _compose_help_reply("who", msg, _session_lang(session_ctx))
+        if ai_authored:
+            ctx["_reply_localized"] = True
+        return reply, ctx, ctx["last_routing"], []
 
     if linear == "tier.respond_nudge":
         reply, pending, _action = handle_respond_nudge(
@@ -1836,6 +1910,63 @@ def _compose_verify_gate_ask(user_msg: str) -> str:
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("verify_gate_ask_failed")
         return fallback
+
+
+# The ONLY capabilities the help composer may claim — everything here is real.
+# Hallucinated abilities ("I can order groceries") are worse than canned copy.
+_HELP_FACTS = (
+    "TRUE capabilities (never claim anything beyond these): find neighbors like the "
+    "user on their block (matched by life stage, heritage, languages, interests), "
+    "swap / borrow / pass along items, find or set up meets and playgroups, share and "
+    "ask for local tips and recommendations, help host small gatherings, and make warm "
+    "introductions when the user is ready. Lana remembers who they are and what's "
+    "happening on their block, connects them at their pace, and nothing leaves their "
+    "block without them saying so."
+)
+
+
+def _compose_help_reply(kind: str, user_msg: str, lang: str | None) -> tuple[str, bool]:
+    """AI-authored "what can you do" / "who are you" — answers the user's actual phrasing
+    in Lana's voice (and their language), grounded in the true capability list, instead of
+    the same canned paragraph every time. Returns (reply, ai_authored); the canned line is
+    the fallback and ai_authored=False tells the caller to leave localization to main."""
+    fallback = HELP_WHO_ARE_YOU if kind == "who" else HELP_WHAT_CAN_YOU_DO
+    try:
+        from app.i18n import synth_language_directive
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return fallback, False
+        ask = (
+            "The user asked who you are. Introduce yourself briefly and warmly — "
+            "include the privacy promise."
+            if kind == "who"
+            else "The user asked what you can do. Give a quick concrete tour in your own "
+            "words and end by asking what they'd like to start with."
+        )
+        lang_line = synth_language_directive(lang) if lang else None
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "You are Lana, a warm neighborhood concierge for TagAlng. "
+                + _HELP_FACTS
+                + " Write ONE short chat message (2-3 sentences, no bullet lists) that "
+                "answers the user's actual question — mirror their wording, don't dump "
+                "every capability. "
+                + ((lang_line + " ") if lang_line else "")
+                + 'Return JSON {"message": "..."}.'
+            ),
+            user_payload=f"{ask}\nTheir exact words: {str(user_msg or '').strip()[:200]}",
+            max_tokens=160,
+            temperature=0.5,
+        )
+        msg = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        if msg:
+            return msg, True
+        return fallback, False
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("help_reply_compose_failed")
+        return fallback, False
 
 
 def _try_signal_lane_turn(
@@ -2171,7 +2302,7 @@ def _try_attr_refine_turn(
         )
     reply = format_attr_peers_reply(
         peers,
-        filter_text=filter_text,
+        filter_text=attr_display_filter(filter_text, slots),
         partial_summary=partial_summary,
     )
     peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
@@ -2880,6 +3011,7 @@ def _try_slots_intro_turn(
     home_block_id: str | None,
     phase: str,
     history: list[dict[str, Any]] | None,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Route propose_intro using AI slots + RECENT TURNS context (not regex #1)."""
     if _ai_slots_block_propose_intro(msg, slots):
@@ -2912,6 +3044,7 @@ def _try_slots_intro_turn(
                 goal="propose_intro",
                 slots=enriched,
                 history=history,
+                user_id=user_id,
             )
 
     if intro_source == "block_log" or (
@@ -2944,6 +3077,7 @@ def _try_slots_intro_turn(
         goal="propose_intro",
         slots=enriched,
         history=history,
+        user_id=user_id,
     )
 
 
@@ -3649,12 +3783,16 @@ def _is_host_answer(
     # let normal routing answer it instead of capturing it as an event detail.
     if is_meta_or_chat(slots):
         return False
-    # out_of_scope / unsafe are UNIVERSAL exits — never a host field answer, even at the
-    # place/settings steps where any reply is otherwise taken as the venue/chip. Without this,
-    # "fix my sink" at the where-step is captured as the venue and the user is trapped.
+    # out_of_scope / unsafe / crisis are UNIVERSAL exits — never a host field answer, even at
+    # the place/settings steps where any reply is otherwise taken as the venue/chip. Without
+    # this, "fix my sink" at the where-step is captured as the venue and the user is trapped.
     _g = str((slots or {}).get("goal") or "")
     _ln = str((slots or {}).get("linear_intent") or "")
-    if _g in ("out_of_scope", "unsafe") or _ln in ("system.out_of_scope", "system.unsafe"):
+    if _g in ("out_of_scope", "unsafe", "crisis") or _ln in (
+        "system.out_of_scope",
+        "system.unsafe",
+        "system.crisis",
+    ):
         return False
     draft = session_ctx.get("event_draft")
     draft = draft if isinstance(draft, dict) else {}
@@ -4319,7 +4457,13 @@ def fetch_preview_peers_on_block(
     limit: int = 3,
     include_peer_ids: bool = False,
 ) -> list[dict[str, Any]]:
-    """Anonymous-safe preview by default; verified users may get peer_user_id for intros."""
+    """Anonymous-safe preview by default; verified users may get peer_user_id for intros.
+
+    These are NOT matches — no similarity was computed. The label stays a plain
+    "On your block" so nothing downstream can present a peer's own claim as an
+    affinity the caller supposedly shares (similarity_score None keeps them
+    unscored through enrich_peer_match_row: no stars, no badge, no trait chips).
+    """
     try:
         sb = service_client()
         users = (
@@ -4335,19 +4479,6 @@ def fetch_preview_peers_on_block(
             uid = u.get("id")
             if not uid:
                 continue
-            claims = (
-                sb.table("user_identity_claims")
-                .select("label, bucket")
-                .eq("user_id", uid)
-                .eq("disclosure", "public")
-                .is_("dismissed_at", "null")
-                .order("confidence", desc=True)
-                .limit(1)
-                .execute()
-            )
-            label = "shared interests on your block"
-            if claims.data:
-                label = str(claims.data[0].get("label") or label)
             nick = str(u.get("nickname") or "").strip() or None
             out.append(
                 {
@@ -4355,7 +4486,7 @@ def fetch_preview_peers_on_block(
                     "nickname": nick if include_peer_ids else None,
                     "avatar_url": None,
                     "similarity_score": None,
-                    "matching_peer_label": label,
+                    "matching_peer_label": "On your block",
                     "matching_peer_concept": None,
                     "has_exact_concept_match": False,
                     "preview": not include_peer_ids,
@@ -4404,6 +4535,9 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 "activity_id": str(ev.get("id") or "") or None,
                 "title": str(ev.get("title") or "Activity"),
                 "starts_at": str(ev.get("starts_at") or "") or None,
+                # False = date-only event (starts_at's clock is a midnight placeholder);
+                # the FE must not render a time (#56). Absent in a row → assume real.
+                "has_time": ev.get("has_time") is not False,
                 "starts_label": _format_event_when(ev.get("starts_at")),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
                 "preview": True,
@@ -4432,7 +4566,7 @@ def fetch_preview_events_on_block(
         fetch_n = pool if pool and pool > 0 else limit * 3
         res = (
             sb.table("events")
-            .select("id, title, starts_at, venue_name, cohort_tags, host_id")
+            .select("id, title, starts_at, has_time, venue_name, cohort_tags, host_id")
             .eq("block_id", block_id)
             .eq("status", "open")
             .gte("starts_at", now_iso)
@@ -4554,9 +4688,12 @@ def format_preview_message(
         lines = [t("discovery.peers_header_one", lang, where=where)]
     else:
         lines = [t("discovery.peers_header_many", lang, n=len(peers), where=where)]
-    for i, p in enumerate(peers[:3], 1):
-        label = str(p.get("matching_peer_label") or "shared interests")
-        lines.append(f"• Neighbor {i} — {label}")
+    # Block-preview peers carry no computed similarity — list who they are (when
+    # the caller may see names) but never invent a per-peer shared trait.
+    for p in peers[:3]:
+        nick = str(p.get("nickname") or "").strip()
+        if nick:
+            lines.append(f"• {nick}")
     if phone_verified:
         lines.append(t("discovery.peers_tail_verified", lang))
     else:
@@ -5037,14 +5174,56 @@ def _redirect_medical(
     return reply, ctx, _discovery_routing_stub("listening", "medical"), []
 
 
+# Safety fallback ONLY — used if the classifier returned no authored line. The real reply is
+# AI-written (Lana's voice, grounded in what the user said) and carried in clarify_question;
+# this guarantees the crisis beats (acknowledge / resource / stay with them) even on an empty
+# model turn. Not a detection template and never regex-matched.
+_CRISIS_SAFETY_FALLBACK = (
+    "I'm really glad you told me — that sounds so heavy, and you don't have to carry it alone. "
+    "If you need someone right now, **988** connects you to crisis support 24/7, and if you're "
+    "in immediate danger call **911**. I'm staying right here with you."
+)
+
+
+def _is_crisis_turn(slots: dict[str, Any], msg: str) -> bool:
+    """AI-driven: the classifier read emotional distress or danger (goal=crisis). Not
+    confidence-gated — the empathetic response is always safer than a mis-lane into a funnel
+    ask, and the classifier already applies its own threshold. No regex on the utterance."""
+    if not slots:
+        return False
+    enriched = enrich_slots(dict(slots), msg=msg)
+    goal = str(enriched.get("goal") or "")
+    linear = slots_linear_intent(enriched) or ""
+    return goal == "crisis" or linear == "system.crisis"
+
+
+def _respond_crisis(
+    *,
+    msg: str,
+    slots: dict[str, Any],
+    session_ctx: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Emotional distress or danger: Lana acknowledges what the user said, points to the
+    right resource when the distress is acute (988 / PSI / DV hotline / 911), and stays with
+    them — never a funnel ask. The message is AI-authored (Lana's voice, grounded in the
+    user's own words) and travels in clarify_question; the constant is only a safety fallback.
+    No feature is logged and no chips push an action — connection is offered inside the
+    message itself, only as a gentle no-pressure close."""
+    enriched = enrich_slots(dict(slots), msg=msg)
+    reply = str(enriched.get("clarify_question") or "").strip() or _CRISIS_SAFETY_FALLBACK
+    ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+    return reply, ctx, _discovery_routing_stub("listening", "crisis"), []
+
+
 _UNSAFE_HIGH_KINDS = frozenset({"sexual", "hate", "illegal"})
 
 
 def _unsafe_kind_for_turn(slots: dict[str, Any], msg: str) -> str | None:
     """Return the unsafe kind if this turn is inappropriate/abusive — from the regex backstop
     OR the AI router (goal=unsafe). Safety is NOT confidence-gated: any unsafe read refuses.
-    None when the turn is fine. Crisis content (self-harm/DV) is deliberately NOT caught here
-    — that is handled by the orchestrator's empathetic safety rails, not a flat refusal."""
+    None when the turn is fine. Crisis content (self-harm/DV/emotional distress) is deliberately
+    NOT caught here — the classifier flags it goal=crisis and _respond_crisis gives the
+    empathetic response, not a flat refusal."""
     matched, kind = utterance_is_unsafe(msg)
     if matched:
         return kind or "other"
@@ -5212,14 +5391,22 @@ def handle_discovery_turn(
     # refused before any intent routing, so it can never be captured as a swap/tip, logged
     # as a feature request, or funnelled into find_peers. Detected by the AI router
     # (goal=unsafe) with a regex backstop; refused + logged to moderation_flags, no
-    # escalation. Crisis content (self-harm/DV) is intentionally excluded — the orchestrator
-    # answers those with empathetic resources, not this flat boundary.
+    # escalation. Crisis content (self-harm/DV/emotional distress) is intentionally excluded
+    # — goal=crisis answers those with empathy + resources below, not this flat boundary.
     _unsafe_kind = _unsafe_kind_for_turn(slots, msg)
     if _unsafe_kind is not None:
         return _refuse_unsafe(
             msg=msg, kind=_unsafe_kind, session_ctx=session_ctx,
             user_id=user_id, home_block_id=home_block_id, phase=phase,
         )
+
+    # Crisis SECOND (AI-driven, no regex): emotional distress or danger gets the empathetic
+    # AI-authored response — acknowledge, right resource when acute (988 / PSI / DV hotline /
+    # 911), stay with them. Checked before every lane and funnel so a distress message can
+    # never be swallowed as a field answer or answered with a ZIP ask (the bug this fixes:
+    # "I cry every night… haven't talked to another adult in days" → browse funnel → ZIP ask).
+    if _is_crisis_turn(slots, msg):
+        return _respond_crisis(msg=msg, slots=slots, session_ctx=session_ctx)
 
     # A guest who finished an event, hit the verify gate, and is now verified: publish the
     # event RIGHT AWAY (mirrors the meet-seek publish-after-verify below) and show the
@@ -5921,6 +6108,7 @@ def handle_discovery_turn(
             home_block_id=home_block_id,
             phase=phase,
             history=history,
+            user_id=user_id,
         )
         if slots_intro_turn is not None:
             reply, ctx, routing, peers = slots_intro_turn
@@ -5952,6 +6140,7 @@ def handle_discovery_turn(
                 goal=str((slots or {}).get("goal") or "none"),
                 slots=slots,
                 history=history,
+                user_id=user_id,
             )
             if intro_turn is not None:
                 reply, ctx, routing, peers = intro_turn
@@ -6425,13 +6614,20 @@ def handle_discovery_turn(
         )
 
     if not effective_snippet:
+        # Signed-in users already told us who they are — their saved claims ARE the
+        # identity; never re-interrogate them for what the profile answers.
+        seeded = identity_from_saved_claims(user_id)
+        if seeded:
+            ctx_base["identity_snippet"] = seeded
+            effective_snippet = seeded
+
+    if not effective_snippet:
         in_funnel = phase in _FUNNEL_PHASES or block_just_resolved
         if not in_funnel:
             if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
                 return None
         return (
-            "Tell me one thing about you — life stage, heritage, or what you're looking for — "
-            "so I can match you better.",
+            compose_identity_ask(msg=msg, purpose="match"),
             _routing_ctx(
                 session_ctx,
                 phase=PHASE_NEED_IDENTITY,
@@ -6469,6 +6665,7 @@ def handle_discovery_turn(
                 home_block_id=home_block_id,
                 phase=phase,
                 history=history,
+                user_id=user_id,
             )
             if slots_intro_turn is not None:
                 return slots_intro_turn
@@ -6493,6 +6690,7 @@ def handle_discovery_turn(
                 goal=effective_goal,
                 slots=slots,
                 history=history,
+                user_id=user_id,
             )
             if intro_turn is not None:
                 return intro_turn
@@ -6517,6 +6715,12 @@ def handle_discovery_turn(
         snippet = str(
             session_ctx.get("identity_snippet") or ctx_base.get("identity_snippet") or ""
         ).strip()
+        if not snippet:
+            # A just-verified account may still carry claims from guest intake —
+            # use them instead of asking who they are again.
+            snippet = identity_from_saved_claims(user_id) or ""
+            if snippet:
+                ctx_base["identity_snippet"] = snippet
         nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
         if extract_otp_code(msg) and not nick:
             return (
@@ -6552,8 +6756,7 @@ def handle_discovery_turn(
                 )
         if not snippet and (_is_affirmative(msg) or (phase == PHASE_NEED_DISPLAY_NAME and not nick)):
             return (
-                "Tell me one thing about you — life stage, heritage, or what you're looking for — "
-                "so I can match you better.",
+                compose_identity_ask(msg=msg, purpose="match"),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_IDENTITY,
@@ -6585,7 +6788,9 @@ def handle_discovery_turn(
             )
         _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
         try:
-            peers = fetch_peer_matches(user_jwt, limit=5)
+            peers = _fetch_verified_peer_matches(
+                user_jwt, user_id=user_id, block_id=block_id, limit=5
+            )
         except Exception:
             peers = []
         if not peers:
@@ -6636,7 +6841,9 @@ def handle_discovery_turn(
         if phone_verified:
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
             try:
-                peers = fetch_peer_matches(user_jwt, limit=5)
+                peers = _fetch_verified_peer_matches(
+                user_jwt, user_id=user_id, block_id=block_id, limit=5
+            )
             except Exception:
                 peers = []
             if peers:
@@ -6691,7 +6898,9 @@ def handle_discovery_turn(
         )
         if phone_verified and effective_home:
             try:
-                peers = fetch_peer_matches(user_jwt, limit=5)
+                peers = _fetch_verified_peer_matches(
+                user_jwt, user_id=user_id, block_id=block_id, limit=5
+            )
             except Exception:
                 peers = []
             if peers:

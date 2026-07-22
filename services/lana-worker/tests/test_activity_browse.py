@@ -100,6 +100,48 @@ class TestBrowseRelease(unittest.TestCase):
             )
         )
 
+    def test_self_claim_during_seek_offer_releases(self) -> None:
+        # The seek-offer trap: after an empty search, "I like badminton" must NOT be
+        # swallowed as a fresh search kind (→ another "No badminton activities…") — it is
+        # an identity claim and releases to the profile brain.
+        self.assertTrue(
+            activity_browse_should_release(
+                "i like badminton",
+                {
+                    "activity_browse_active": True,
+                    "browse_draft": {"interest": "swimming", "_seek_offer": True},
+                },
+                {"linear_intent": "identity.add_claim", "goal": "chat", "confidence": 0.9},
+            )
+        )
+
+    def test_accept_pill_during_seek_offer_stays(self) -> None:
+        # "Yes, listen for me" reads as a foreign meet_seek to the classifier but is THIS
+        # lane's own pill — the seek-offer accept must never release.
+        self.assertFalse(
+            activity_browse_should_release(
+                "Yes, listen for me",
+                {
+                    "activity_browse_active": True,
+                    "browse_draft": {"interest": "badminton", "_seek_offer": True},
+                },
+                {"goal": "save_signal", "signal_intent": "meet_seek", "confidence": 0.8},
+            )
+        )
+
+    def test_fresh_kind_during_seek_offer_stays(self) -> None:
+        # A new kind after the empty-search offer is a re-search, not a pivot.
+        self.assertFalse(
+            activity_browse_should_release(
+                "what about cricket",
+                {
+                    "activity_browse_active": True,
+                    "browse_draft": {"interest": "badminton", "_seek_offer": True},
+                },
+                {"goal": "activities", "confidence": 0.9},
+            )
+        )
+
 
 class TestResolveClarifier(unittest.TestCase):
     def test_resolve_seek(self) -> None:
@@ -160,6 +202,27 @@ class TestRunBrowseTurn(unittest.TestCase):
             [p["title"] for p in ctx.get("activity_previews") or []], ["FIFA watch party"]
         )
         self.assertEqual((ctx.get("browse_draft") or {}).get("interest"), "fifa")
+
+    @patch("app.activity_browse._fetch_block_events", return_value=[])
+    def test_dispatched_chip_topic_wins_over_generic_send(self, _fetch) -> None:
+        # Tapping "See badminton events" dispatches with a model-authored send that can be
+        # generic ("show me what's happening this weekend") — the offer's structured topic
+        # must drive the search, not the send text.
+        ctx: dict = {"activity_browse_active": True, "browse_draft": None}
+        run_activity_browse_turn(
+            user_message="show me what's happening this weekend",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+            slots={
+                "_forced_kind": "find_activities",
+                "signal_detail": "badminton",
+                "goal": "activities",
+                "confidence": 0.9,
+            },
+        )
+        self.assertEqual((ctx.get("browse_draft") or {}).get("interest"), "badminton")
 
     @patch("app.activity_browse._fetch_block_events", return_value=[])
     def test_nl_entry_empty_block_offers_seek(self, _fetch) -> None:
@@ -587,6 +650,47 @@ class TestClarifierAnswerCarriesContext(unittest.TestCase):
             _resolve_browse_or_meet_answer("Find neighbors to do something with", None),
             "seek",
         )
+
+
+class TestEventWhenParts(unittest.TestCase):
+    """#56: date-only events (has_time False) must not show the filter LLM a clock —
+    the placeholder midnight would match 'mornings'/'after 6pm' asks nobody scheduled."""
+
+    def test_timed_event_renders_local_clock(self) -> None:
+        from app.activity_browse import _event_when_parts
+
+        # 23:00 UTC = 7 PM ET (summer) — the local-time rendering this guards.
+        self.assertEqual(
+            _event_when_parts("2026-08-12T23:00:00Z", has_time=True),
+            "2026-08-12 Wed 7:00 PM",
+        )
+
+    def test_dateonly_event_omits_clock(self) -> None:
+        from app.activity_browse import _event_when_parts
+
+        # Placeholder midnight is event-local, stored as 04:00 UTC.
+        self.assertEqual(
+            _event_when_parts("2026-08-12T04:00:00Z", has_time=False),
+            "2026-08-12 Wed (no time set)",
+        )
+
+
+class TestActivityPreviewHasTime(unittest.TestCase):
+    def test_preview_passes_flag_through(self) -> None:
+        from app.discovery_route import activity_previews_from_events
+
+        rows = activity_previews_from_events(
+            [
+                {"id": "1", "title": "Dated party", "starts_at": "2026-08-12T04:00:00Z",
+                 "has_time": False},
+                {"id": "2", "title": "Timed party", "starts_at": "2026-08-12T23:00:00Z",
+                 "has_time": True},
+                {"id": "3", "title": "Legacy row", "starts_at": "2026-08-12T23:00:00Z"},
+            ]
+        )
+        self.assertEqual([p["has_time"] for p in rows], [False, True, True])
+        # The compact label never carries a clock, so it stays truthful either way.
+        self.assertEqual(rows[0]["starts_label"], "Wed Aug 12")
 
 
 if __name__ == "__main__":

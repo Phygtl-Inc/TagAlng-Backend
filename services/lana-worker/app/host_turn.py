@@ -23,14 +23,26 @@ user's own words exactly as authored (a title or place they named is THEIR conte
 translate it); booleans/integers are language-neutral. Write the reply in the language they
 are writing in.
 
-1) EXTRACT any event details they clearly stated (never guess; use null when unsure):
-   - title: a name for the event if they gave or proposed one
+1) EXTRACT any event details their LATEST message clearly states or changes (never guess; use
+   null when unsure). Your extraction is applied as-is: a field you return REPLACES what EVENT
+   SO FAR shows, so corrections win — "don't call it that, call it X" -> title: "X"; "actually
+   let's do the park instead" -> place: "the park". And a field their latest message does NOT
+   mention must be null — never repeat a value from EVENT SO FAR or earlier turns as if it
+   were new.
+   - title: a name for the event if they gave, proposed, or changed one
    - place: ONE clear location (their home, a named venue, a park). null if none — or if they're
      weighing options ("my place or a café"), leave it null; don't pick for them.
    - capacity: an integer max headcount if they signalled one ("5-7 people" -> 7, "just a few" or
      "small group" -> a sensible small number like 6)
    - auto_approve: true if anyone can join freely, false if they want to approve joiners
    - allow_share: true if attendees may pass the invite on, false if invite-only
+   - redo: parts they asked to CHANGE or REDO **without giving the new value in the same
+     message** ("let's change the title", "a different time", "I want another spot") — any of
+     "title", "when", "place". When they DID give the new value ("change the title to Pasta
+     Night"), extract the value into its field instead and leave redo empty. [] when none.
+
+   When redo is non-empty, the reply should ask what the new value should be (they can also
+   set it on the card below).
 
 2) REPLY warmly in 1-2 sentences: acknowledge what they just said, answer any question, and gently
    point to what's STILL NEEDED to post it. Rules:
@@ -42,7 +54,8 @@ are writing in.
 
 Return ONE JSON object:
 {"title": <string|null>, "place": <string|null>, "capacity": <int|null>,
- "auto_approve": <bool|null>, "allow_share": <bool|null>, "reply": <string>}"""
+ "auto_approve": <bool|null>, "allow_share": <bool|null>,
+ "redo": ["title"|"when"|"place", ...], "reply": <string>}"""
 
 
 def host_turn_brain(
@@ -92,7 +105,12 @@ def host_turn_brain(
             "capacity": None,
             "auto_approve": None,
             "allow_share": None,
+            "redo": [],
         }
+        raw_redo = data.get("redo")
+        if isinstance(raw_redo, list):
+            asked = {str(s).strip().lower() for s in raw_redo}
+            out["redo"] = [s for s in ("title", "when", "place") if s in asked]
         title = str(data.get("title") or "").strip()
         if title:
             out["title"] = title[:80]

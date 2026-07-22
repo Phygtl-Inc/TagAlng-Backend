@@ -18,6 +18,7 @@ from app.auth import (
     verify_jwt,
 )
 from app.context import (
+    cohort_tag_labels_for,
     format_event_draft_context,
     format_user_context,
     load_event_draft_context,
@@ -54,7 +55,7 @@ from app.profile_intake import (
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
-from app.i18n import localize_text, session_lang
+from app.i18n import localize_labels, localize_text, session_lang
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lang_pref import (
     get_user_preferred_language,
@@ -148,6 +149,7 @@ from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
+from app.feedback import record_feedback as record_lana_feedback
 from app.notifications import email_html, notify_user
 from app.rapport_gaps import (
     mark_answered as rapport_mark_answered,
@@ -436,7 +438,10 @@ def _ui_from_dict(raw: dict[str, Any] | None) -> LanaTurnUi:
 def _draft_from_dict(raw: dict[str, Any] | None) -> EventDraft | None:
     if not raw:
         return None
-    return EventDraft(**raw)
+    draft = EventDraft(**raw)
+    if draft.cohort_tags and not draft.cohort_tag_labels:
+        draft.cohort_tag_labels = cohort_tag_labels_for(draft.cohort_tags)
+    return draft
 
 
 def _item_draft_from_dict(raw: dict[str, Any] | None) -> ItemDraft | None:
@@ -524,14 +529,22 @@ def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRow]:
+    rows = [
+        row for row in derive_ui_actions(ctx, ui_intent)
+        if isinstance(row, dict) and row.get("id")
+    ]
+    # Chips mirror the session language for DISPLAY only — the message payload stays
+    # canonical English so deterministic accept-matchers keep working; the chip-tap
+    # language pin (see _offered_chip_msgs) stops that English payload from flipping
+    # the session. One batched render per turn, cached per (label, lang).
+    labels = [str(r.get("label") or "") for r in rows]
+    labels = localize_labels(labels, session_lang(ctx))
     out: list[UiActionRow] = []
-    for row in derive_ui_actions(ctx, ui_intent):
-        if not isinstance(row, dict) or not row.get("id"):
-            continue
+    for row, label in zip(rows, labels):
         out.append(
             UiActionRow(
                 id=str(row["id"]),
-                label=str(row.get("label") or ""),
+                label=label or str(row.get("label") or ""),
                 message=str(row.get("message") or ""),
                 style=row.get("style") or "primary",
                 intro_id=str(row.get("intro_id") or "") or None,
@@ -539,6 +552,25 @@ def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRo
             )
         )
     return out
+
+
+def _offered_chip_messages(ob: dict[str, Any]) -> list[str]:
+    """Every message payload a chip in this response can post back, deduped — the
+    main ui_actions row plus card-attached actions (pending intros, peer cards)."""
+    msgs: list[str] = []
+
+    def _collect(actions: Any) -> None:
+        for a in actions or []:
+            m = str(getattr(a, "message", "") or "").strip()
+            if m and m not in msgs:
+                msgs.append(m)
+
+    _collect(ob.get("ui_actions"))
+    for row in ob.get("pending_intros") or []:
+        _collect(getattr(row, "actions", None))
+    for row in ob.get("peer_matches") or []:
+        _collect(getattr(row, "actions", None))
+    return msgs[:24]
 
 
 def _pending_intros_from_ctx(ctx: dict[str, Any]) -> list[PendingIntroRow]:
@@ -647,6 +679,7 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 avatar_url=str(row.get("avatar_url") or "") or None,
                 similarity_score=row.get("similarity_score"),
                 matching_peer_label=str(row.get("matching_peer_label") or "") or None,
+                matching_my_label=str(row.get("matching_my_label") or "") or None,
                 matching_peer_concept=str(row.get("matching_peer_concept") or "") or None,
                 has_exact_concept_match=bool(row.get("has_exact_concept_match")),
                 preview=bool(row.get("preview")),
@@ -676,6 +709,7 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
                 activity_id=str(row.get("activity_id") or "") or None,
                 title=title,
                 starts_at=str(row.get("starts_at") or "") or None,
+                has_time=row.get("has_time") is not False,
                 starts_label=str(row.get("starts_label") or "") or None,
                 venue_name=str(row.get("venue_name") or "") or None,
                 preview=bool(row.get("preview", True)),
@@ -1044,10 +1078,12 @@ def create_lana_session(
             ui_raw: dict[str, Any] | None = None
             draft_raw = None
             use_orch = use_orchestrator_for_purpose(purpose)
+            opening_msg_id: str | None = None
             for m in reversed(messages):
                 if m.get("role") != "assistant":
                     continue
                 opening = str(m.get("content") or "")
+                opening_msg_id = str(m.get("id")) if m.get("id") else None
                 meta = m.get("metadata") or {}
                 status = str(meta.get("status") or status)
                 ui_raw = meta.get("ui") or ui_raw
@@ -1073,6 +1109,7 @@ def create_lana_session(
                 purpose=purpose,
                 status="active",
                 assistant_message=opening,
+                assistant_message_id=opening_msg_id,
                 ready_to_complete=ready,
                 ui=ui,
                 event_draft=event_draft,
@@ -1217,7 +1254,7 @@ def create_lana_session(
                 if effective_lang:
                     opening = localize_text(opening, effective_lang)
 
-        insert_message(
+        opening_msg_id = insert_message(
             session_id,
             "assistant",
             opening,
@@ -1244,11 +1281,24 @@ def create_lana_session(
 
     ready = status == "ready_to_complete"
     ob = _onboarding_fields(merged_ctx, auth, ready_to_complete=ready)
+    # Chip-tap language pin: remember the opening's chip payloads too (the message
+    # endpoint does the same) — one extra tiny write, once per session, only when
+    # the opening actually offers chips.
+    _chip_msgs = _offered_chip_messages(ob)
+    if _chip_msgs:
+        merged_ctx["_offered_chip_msgs"] = _chip_msgs
+        try:
+            update_session_context(
+                session_id, merged_ctx, core_block=merged_ctx.get("core_block")
+            )
+        except Exception:  # noqa: BLE001 — the pin is best-effort, never fail the opening
+            _LOG.exception("opening_chip_stash_persist_failed")
     return CreateSessionResponse(
         session_id=session_id,
         purpose=purpose,
         status="active",
         assistant_message=opening,
+        assistant_message_id=opening_msg_id,
         ready_to_complete=ready,
         ui=ui,
         event_draft=event_draft,
@@ -1263,13 +1313,13 @@ def _run_lana_message(
     body: SendMessageRequest,
     background_tasks: BackgroundTasks,
     authorization: str | None,
-    emit: Callable[[str], None] | None = None,
+    emit: Callable[[str, str | None], None] | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
-    `emit`, when provided, receives human-readable progress labels as the turn
-    advances (attached to the TurnTimer, which is threaded through every path). The
-    blocking endpoint passes None, so it is a no-op there.
+    `emit`, when provided, receives human-readable progress labels (+ optional
+    detail subheading) as the turn advances (attached to the TurnTimer, which is
+    threaded through every path). The blocking endpoint passes None, a no-op.
     """
     _vertex_required()
     timer = TurnTimer()
@@ -1456,6 +1506,18 @@ def _run_lana_message(
             timing_ms = timer.to_dict()
             orch_used = False
 
+        # Final-mile localization: deterministic replies (and LLM composes that
+        # run without a language directive) are authored in English. Render the
+        # reply in the session language here — one choke point instead of a
+        # per-string fix across every flow. The synthesizer marks its replies
+        # already-localized, so the main conversational path never pays a
+        # second model call. Pop unconditionally so the flag never persists.
+        _already_localized = bool(session_ctx.pop("_reply_localized", False))
+        _reply_lang = session_lang(session_ctx)
+        if _reply_lang and reply and not _already_localized:
+            with timer.stage("localize_reply"):
+                reply = localize_text(reply, _reply_lang)
+
         # These two writes hit different tables (lana_messages insert vs
         # lana_sessions update) and don't depend on each other, so run them
         # concurrently — one round-trip of wall-clock instead of two. Safe to
@@ -1540,9 +1602,12 @@ def _run_lana_message(
     # only new row this turn is the assistant message we just inserted.
     final_msg_count = len(history) + (1 if assistant_msg_id else 0)
     if timing_ms is not None:
+        # timing_ms is a mid-turn snapshot of the SAME timer (to_dict() taken inside the
+        # pipeline) — timer.ms holds the authoritative full-turn accumulation. Overwrite,
+        # never add: adding double-counted every pre-snapshot stage, inflating total_ms
+        # by up to ~2× (a 23s turn logged as 40s).
         merged_timing = dict(timing_ms)
-        for key, ms in timer.ms.items():
-            merged_timing[key] = merged_timing.get(key, 0) + ms
+        merged_timing.update(timer.ms)
         timing_ms = merged_timing
     else:
         timing_ms = dict(timer.ms)
@@ -1550,6 +1615,15 @@ def _run_lana_message(
 
     ready = status == "ready_to_complete"
     ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
+    # Chip-tap language pin, part 1: remember EXACTLY which chip payloads this response
+    # offers, so the next turn can tell an app-authored tap from typed text (the pipeline
+    # pins the session language on a match — a canonical-English chip payload must never
+    # flip an Urdu session back to English). Chips are assembled after the session write
+    # above, so a changed set re-persists in the background; unchanged sets write nothing.
+    _chip_msgs = _offered_chip_messages(ob)
+    if (merged.get("_offered_chip_msgs") or []) != _chip_msgs:
+        merged["_offered_chip_msgs"] = _chip_msgs
+        background_tasks.add_task(_persist_session)
     # Debug + timing stay on the backend (logged) but are no longer sent to the FE —
     # they were noise on the wire and nothing in the client reads them.
     debug = _turn_debug_from_ctx(
@@ -1620,6 +1694,7 @@ def _run_lana_message(
         session_id=session_id,
         status=status,
         assistant_message=reply,
+        assistant_message_id=assistant_msg_id,
         ready_to_complete=ready,
         ui=ui,
         event_draft=event_draft,
@@ -1657,7 +1732,8 @@ def stream_lana_message(
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
-    Frames: `{"type":"status","label":...}` as the turn advances, then a terminal
+    Frames: `{"type":"status","label":...,"detail":...}` as the turn advances (detail
+    is an optional subheading, omitted when absent), then a terminal
     `{"type":"result","turn":<SendMessageResponse>}` (or `{"type":"error","detail":...}`).
     The turn logic is identical — only the transport differs.
 
@@ -1669,8 +1745,8 @@ def stream_lana_message(
     """
     events: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
-    def emit(label: str) -> None:
-        events.put(("status", label))
+    def emit(label: str, detail: str | None = None) -> None:
+        events.put(("status", (label, detail)))
 
     def worker() -> None:
         try:
@@ -1698,7 +1774,11 @@ def stream_lana_message(
                 yield ": ping\n\n"
                 continue
             if kind == "status":
-                yield _sse_frame({"type": "status", "label": payload})
+                label, detail = payload
+                frame: dict[str, Any] = {"type": "status", "label": label}
+                if detail:
+                    frame["detail"] = detail
+                yield _sse_frame(frame)
             elif kind == "result":
                 yield _sse_frame(
                     {"type": "result", "turn": payload.model_dump(mode="json")}
@@ -1845,7 +1925,15 @@ def set_event_setup(
         draft["auto_approve"] = bool(body.auto_approve)
     if body.allow_attendee_share is not None:
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
-    bring = [str(b).strip()[:60] for b in (body.bring_items or []) if str(b).strip()][:12]
+    from app.lana_ui import is_none_bring_item
+
+    # A typed none-answer ("nothing", "no need") on the bring card is an empty list,
+    # not a literal chip.
+    bring = [
+        str(b).strip()[:60]
+        for b in (body.bring_items or [])
+        if str(b).strip() and not is_none_bring_item(str(b))
+    ][:12]
     draft["bring_items"] = bring
     ctx["event_draft"] = draft
     # Keep the scratch settings dict in sync so a same-turn re-parse doesn't clobber these.
@@ -2088,6 +2176,9 @@ def complete_lana_session(
         ) from exc
 
     _persist_claims(auth.user_id, claims)
+    # Extraction prompts are English-internal — render the closing in the
+    # session language before it reaches the user.
+    closing = localize_text(closing, session_lang(sess_ctx))
     final_ctx = {
         **sess_ctx,
         "last_status": "completed",
@@ -2160,6 +2251,9 @@ def _complete_event_draft(
             else:
                 raise
 
+    # Covers both the extractor's closing and the hardcoded verify-email
+    # override above — English until this point.
+    closing = localize_text(closing, session_lang(sess_ctx))
     final_ctx = {
         **sess_ctx,
         "last_status": "completed",
@@ -2346,3 +2440,50 @@ def post_rapport_mute_fact(
     auth = verify_auth(authorization)
     rapport_mute_gap(auth.user_id, body.gap_id)
     return {"ok": True}
+
+
+# ── Feedback (👍/👎 on Lana output) ────────────────────────────────────────────
+# One endpoint for both rateable surfaces: an assistant chat reply (message_id) or a
+# rapport tile question (gap_row_id). Same thumb again → the FE sends rating='clear'.
+# Rows land in lana_feedback (service-role only) for the team to review.
+
+
+class LanaFeedbackBody(_BaseModel):
+    rating: str  # 'up' | 'down' | 'clear'
+    message_id: str | None = None
+    gap_row_id: str | None = None
+    # Where the thumb lives in the UI ('chat', 'rapport_tile', …) — stored for triage.
+    surface: str | None = None
+    # Optional free-text follow-up (the FE offers it on 👎). Tracks the latest rating
+    # write: re-rating without one clears any previous comment.
+    comment: str | None = None
+
+
+@app.post("/lana/feedback")
+def post_lana_feedback(
+    body: LanaFeedbackBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    result = record_lana_feedback(
+        auth.user_id,
+        rating=body.rating,
+        message_id=(body.message_id or "").strip() or None,
+        gap_row_id=(body.gap_row_id or "").strip() or None,
+        comment=body.comment,
+        context={"surface": (body.surface or "").strip() or None},
+    )
+    amplitude_track(
+        "lana_feedback",
+        user_id=auth.user_id,
+        event_properties={
+            "rating": result["rating"],
+            "target_kind": result["target_kind"],
+            "message_id": body.message_id,
+            "gap_row_id": body.gap_row_id,
+            "surface": body.surface,
+            # Comment text stays in the DB — analytics only needs to know one exists.
+            "has_comment": bool((body.comment or "").strip()),
+        },
+    )
+    return {"ok": True, **result}

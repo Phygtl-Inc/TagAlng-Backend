@@ -249,6 +249,40 @@ def message_might_assert_heritage(message: str) -> bool:
     return False
 
 
+def fetch_active_claim_threads(user_id: str) -> list[dict[str, Any]]:
+    """Active threads as {concept, label, details} for the extractor's enrich block.
+
+    Concepts let the model re-emit the SAME slug when a message adds to an existing
+    thread (the upsert merge key); details let it skip facts already captured.
+    """
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("concept, label, details")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(40)
+            .execute()
+        )
+    except Exception:
+        logger.exception("fetch_active_claim_threads_failed")
+        return []
+    out: list[dict[str, Any]] = []
+    for row in res.data or []:
+        if not isinstance(row, dict):
+            continue
+        concept = str(row.get("concept") or "").strip()
+        label = str(row.get("label") or "").strip()
+        if not concept and not label:
+            continue
+        details = row.get("details") or []
+        if not isinstance(details, list):
+            details = []
+        out.append({"concept": concept, "label": label, "details": details})
+    return out
+
+
 def fetch_active_claim_labels(user_id: str) -> list[str]:
     """Active claim labels, so the extractor can MERGE instead of spawning a
     near-duplicate thread (e.g. 'English Speaker' next to 'Speaks 10 languages')."""
@@ -551,6 +585,27 @@ def _normalized_label_key(label: str) -> str:
     return " ".join(tokens).strip()
 
 
+MAX_CLAIM_DETAILS = 5
+MAX_CLAIM_SYNONYMS = 8
+# Bump applied when the user re-corroborates an existing thread ("I swim" said again,
+# or enriched — "state level"). Repeated first-person statements walk confidence to 1.0.
+CORROBORATION_CONFIDENCE_BUMP = 0.05
+
+
+def _merge_details(existing: list[str], new: list[str]) -> list[str]:
+    """Append-dedup sub-facts; keep the MOST RECENT five when over cap."""
+    merged: list[str] = [str(d).strip() for d in existing if str(d).strip()]
+    seen = {_normalized_label_key(d) for d in merged}
+    for d in new:
+        text = str(d).strip()[:80]
+        key = _normalized_label_key(text)
+        if not text or key in seen:
+            continue
+        merged.append(text)
+        seen.add(key)
+    return merged[-MAX_CLAIM_DETAILS:]
+
+
 def dedupe_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
     """Collapse claims describing the same thread (same normalized label).
 
@@ -568,6 +623,7 @@ def dedupe_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
             continue
         keep = winner if winner.confidence >= c.confidence else c
         keep.synonyms = list(dict.fromkeys([*winner.synonyms, *c.synonyms]))[:6]
+        keep.details = _merge_details(winner.details, c.details)
         # A thread is durable if ANY instance of it was durable.
         keep.transient = winner.transient and c.transient
         by_key[key] = keep
@@ -584,6 +640,8 @@ def clean_claims_for_persist(claims: list[ExtractedClaim]) -> list[ExtractedClai
             c.source_quote = redact_pii(c.source_quote)
         if c.synonyms:
             c.synonyms = [redact_pii(s) or s for s in c.synonyms]
+        if c.details:
+            c.details = [redact_pii(d) or d for d in c.details]
     return dedupe_claims(kept)
 
 
@@ -734,6 +792,90 @@ def persist_kids_count(user_id: str, kids_count: int | None) -> None:
     service_client().table("users").update({"kids_count": kids_count}).eq("id", user_id).execute()
 
 
+_BACKFILL_COOLDOWN: dict[str, float] = {}
+_BACKFILL_COOLDOWN_S = 300.0
+
+
+def backfill_claim_embeddings(*, user_ids: list[str], limit: int = 40) -> int:
+    """Embed claims that were saved without vectors (write-time embed is best-effort).
+
+    Exact-concept matching works without embeddings (lexical); this heals the
+    FUZZY match path for rows the embed API failed on. Returns rows fixed.
+    """
+    ids = [str(u) for u in user_ids if u]
+    if not ids:
+        return 0
+    sb = service_client()
+    res = (
+        sb.table("user_identity_claims")
+        .select("id, concept, label, source_quote, bucket, details")
+        .in_("user_id", ids)
+        .is_("embedding", "null")
+        .is_("dismissed_at", "null")
+        .limit(limit)
+        .execute()
+    )
+    fixed = 0
+    for row in res.data or []:
+        try:
+            embedding = vertex_embed(
+                claim_embedding_text(
+                    concept=str(row.get("concept") or ""),
+                    label=str(row.get("label") or ""),
+                    source_quote=row.get("source_quote"),
+                    bucket=row.get("bucket"),
+                    details=row.get("details") or [],
+                )
+            )
+        except Exception:
+            logger.exception("claim_embed_backfill_failed id=%s", row.get("id"))
+            continue
+        if embedding is None:
+            continue
+        sb.table("user_identity_claims").update({"embedding": embedding}).eq(
+            "id", row["id"]
+        ).execute()
+        fixed += 1
+    if fixed:
+        logger.info("claim_embed_backfill fixed=%d users=%d", fixed, len(ids))
+    return fixed
+
+
+def kick_claim_embedding_backfill(
+    *, user_id: str | None, block_id: str | None = None
+) -> None:
+    """Fire-and-forget self-heal: embed the caller's (and their block's) NULL-embedding
+    claims in a daemon thread so the vector matcher is whole by the next turn."""
+    import threading
+    import time
+
+    key = f"{user_id or ''}:{block_id or ''}"
+    now = time.time()
+    if now - _BACKFILL_COOLDOWN.get(key, 0.0) < _BACKFILL_COOLDOWN_S:
+        return
+    _BACKFILL_COOLDOWN[key] = now
+
+    def _run() -> None:
+        try:
+            ids: list[str] = [user_id] if user_id else []
+            if block_id:
+                res = (
+                    service_client()
+                    .table("users")
+                    .select("id")
+                    .eq("home_block_id", block_id)
+                    .limit(30)
+                    .execute()
+                )
+                ids.extend(str(r["id"]) for r in res.data or [] if r.get("id"))
+            if ids:
+                backfill_claim_embeddings(user_ids=list(dict.fromkeys(ids)))
+        except Exception:
+            logger.exception("claim_embed_backfill_thread_failed")
+
+    threading.Thread(target=_run, daemon=True, name="claim-embed-backfill").start()
+
+
 def _embed_claim(c: ExtractedClaim) -> list[float] | None:
     try:
         text = claim_embedding_text(
@@ -741,6 +883,7 @@ def _embed_claim(c: ExtractedClaim) -> list[float] | None:
             label=c.label,
             source_quote=c.source_quote,
             bucket=c.bucket,
+            details=c.details,
         )
         return vertex_embed(text)
     except Exception:
@@ -814,6 +957,7 @@ def _claim_row(user_id: str, c: ExtractedClaim, embedding: list[float] | None) -
         "confidence": c.confidence,
         "disclosure": c.disclosure,
         "synonyms": c.synonyms,
+        "details": c.details,
         "source_quote": c.source_quote,
         "bucket": c.bucket,
         "transient": c.transient,
@@ -848,6 +992,27 @@ def _link_claim_to_concept(
         logger.exception("link_claim_to_concept_failed concept=%s claim_id=%s", c.concept, claim_id)
 
 
+def _merge_into_existing(c: ExtractedClaim, existing_row: dict[str, Any]) -> ExtractedClaim:
+    """Enrich an existing thread instead of overwriting it wholesale.
+
+    A re-mention is corroboration: confidence only rises (max of both + bump, capped
+    at 1.0), synonyms union, details append-dedup. Label/quote stay the extractor's —
+    it saw the stored label in its prompt and chose the stronger statement.
+    """
+    try:
+        old_conf = float(existing_row.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        old_conf = 0.0
+    old_syns = [s for s in (existing_row.get("synonyms") or []) if str(s).strip()]
+    old_details = [d for d in (existing_row.get("details") or []) if str(d).strip()]
+    c.confidence = min(
+        1.0, max(old_conf, c.confidence) + CORROBORATION_CONFIDENCE_BUMP
+    )
+    c.synonyms = list(dict.fromkeys([*old_syns, *c.synonyms]))[:MAX_CLAIM_SYNONYMS]
+    c.details = _merge_details(old_details, c.details)
+    return c
+
+
 def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
     """Merge claims by concept; reconcile heritage bucket per batch.
 
@@ -862,10 +1027,9 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
         if c.confidence < MIN_CLAIM_CONFIDENCE:
             continue
         embedding = _embed_claim(c)
-        row = _claim_row(user_id, c, embedding)
         existing = (
             sb.table("user_identity_claims")
-            .select("id")
+            .select("id, confidence, synonyms, details")
             .eq("user_id", user_id)
             .eq("concept", c.concept)
             .is_("dismissed_at", "null")
@@ -874,8 +1038,11 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
         )
         if existing.data:
             claim_id = existing.data[0]["id"]
+            merged = _merge_into_existing(c, existing.data[0])
+            row = _claim_row(user_id, merged, embedding)
             sb.table("user_identity_claims").update(row).eq("id", claim_id).execute()
         else:
+            row = _claim_row(user_id, c, embedding)
             res = sb.table("user_identity_claims").insert(row).execute()
             claim_id = None
             if res.data and len(res.data) > 0:
@@ -1032,7 +1199,9 @@ def try_upsert_claims_from_message(
     if not should_extract_claims_from_message(message):
         return ClaimExtractResult(nickname=stated_nick)
     try:
-        existing_labels = fetch_active_claim_labels(user_id)
+        # Threads (concept — label — details) so the extractor can ENRICH in place
+        # by re-emitting a known concept slug, instead of staying silent on repeats.
+        existing_labels = fetch_active_claim_threads(user_id)
         # Recent rapport questions so the extractor's follow-up isn't a near-duplicate.
         recent_questions: list[str] = []
         if allow_rapport_gap:

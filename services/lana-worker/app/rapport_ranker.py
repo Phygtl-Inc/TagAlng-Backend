@@ -108,16 +108,39 @@ def _score(row: dict[str, Any]) -> float:
     return max(0.0, unlock * (1.0 - 0.2 * skips))
 
 
-def _build(row: dict[str, Any], gap: dict[str, Any] | None) -> dict[str, Any]:
+def _build(
+    row: dict[str, Any], gap: dict[str, Any] | None, lang: str | None = None
+) -> dict[str, Any]:
     # `gap` is the static gap-tree entry, or None for dynamic (semantic) gaps opened from the
     # extractor's follow-up. Prefer the question stored on the row; fall back to the tree.
     gap = gap or {}
+    question = row.get("question") or gap.get("question", "")
+    why_frame = row.get("why_frame") or ""
+    if lang and lang != "en":
+        # Questions are stored English-canonical and rendered into the user's language at
+        # WRITE time (question_i18n) — serving is a lookup, never an LLM wait. A miss (race
+        # right after a language switch, or a pre-i18n row) serves English once and kicks a
+        # background render so the next fetch has it.
+        i18n = row.get("question_i18n")
+        entry = i18n.get(lang) if isinstance(i18n, dict) else None
+        if isinstance(entry, dict) and entry.get("question"):
+            question = str(entry["question"])
+            why_frame = str(entry.get("why_frame") or why_frame)
+        elif question:
+            try:
+                from app.rapport_i18n import localize_gap_row_async
+
+                localize_gap_row_async(
+                    row["gap_row_id"], question, why_frame, lang, i18n
+                )
+            except Exception:  # noqa: BLE001 — self-heal is best-effort
+                logger.exception("rapport: i18n self-heal kickoff failed")
     return {
         "gap_row_id": row["gap_row_id"],
         "gap_id": row["gap_id"],
         "parent_bucket": row["parent_bucket"],
-        "why_frame": row.get("why_frame") or "",
-        "question": row.get("question") or gap.get("question", ""),
+        "why_frame": why_frame,
+        "question": question,
         "sensitivity_tier": gap.get("sensitivity_tier", "LOW"),
         "chip_color_token": f"--d-{row['parent_bucket']}",
     }
@@ -164,6 +187,48 @@ def _backfill_from_claims(user_id: str) -> bool:
         return False
 
 
+def _preferred_lang(user_id: str) -> str | None:
+    """users.locale, or None — one indexed single-row read on the home render."""
+    try:
+        from app.lang_pref import get_user_preferred_language
+
+        return get_user_preferred_language(user_id)
+    except Exception:  # noqa: BLE001 — language must never break the tile
+        logger.exception("rapport: preferred-lang lookup failed for %s", user_id)
+        return None
+
+
+_DEFAULT_ROTATE_HOURS = 24.0  # daily mode: pending-unanswered window before rotating
+_DEFAULT_ROTATE_GUARD_S = 30.0  # refresh mode: debounce absorbing double-fired effects
+
+
+def _rotate_mode() -> str:
+    """'daily' (default): rotate a pending ask after LANA_RAPPORT_ROTATE_HOURS unanswered,
+    counting it as a soft skip. 'refresh': rotate on every reload (≥ the debounce window)
+    round-robin in priority order, with NO skip penalty — a reload isn't a rejection."""
+    mode = str(os.environ.get("LANA_RAPPORT_ROTATE_MODE", "daily")).strip().lower()
+    return mode if mode in ("daily", "refresh") else "daily"
+
+
+def _pending_is_stale(row: dict[str, Any]) -> bool:
+    """True when the pending ask should rotate out (window depends on rotate mode)."""
+    if _rotate_mode() == "refresh":
+        window = timedelta(seconds=_env_float("LANA_RAPPORT_ROTATE_GUARD_S", _DEFAULT_ROTATE_GUARD_S))
+    else:
+        hours = _env_float("LANA_RAPPORT_ROTATE_HOURS", _DEFAULT_ROTATE_HOURS)
+        if hours <= 0:
+            return False
+        window = timedelta(hours=hours)
+    raw = str(row.get("asked_at") or "")
+    try:
+        asked_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if asked_at.tzinfo is None:
+        asked_at = asked_at.replace(tzinfo=timezone.utc)
+    return (_now() - asked_at) >= window
+
+
 def _pending_ask(user_id: str) -> dict[str, Any] | None:
     """A gap already shown and awaiting the user's action — re-show it verbatim."""
     try:
@@ -200,6 +265,10 @@ def next_ask(
     if not user_id:
         return None
 
+    # The tile lives on the home screen, outside any chat session — the persisted
+    # preference (users.locale) is the language authority, not the session-sticky lang.
+    lang = _preferred_lang(user_id)
+
     exclude_id: str | None = None
     if cycle:
         pending = _pending_ask(user_id)
@@ -215,11 +284,27 @@ def next_ask(
         # 1) Re-show a still-pending ask — no re-mark, no duplicate impression event.
         #    Works for dynamic semantic gaps too (get_gap returns None → _build tolerates it).
         pending = _pending_ask(user_id)
+        if pending and not _pending_is_stale(pending):
+            return _build(pending, get_gap(pending["gap_id"]), lang)
         if pending:
-            return _build(pending, get_gap(pending["gap_id"]))
-
+            # Rotation REPLACES the pending ask, so the new-ask cadence cap doesn't apply.
+            # daily mode: a full window without an answer is a soft skip — sink its score.
+            # refresh mode: reopen with NO penalty (a reload isn't a rejection); the row
+            # keeps its asked_at so the round-robin order sends it to the back of the queue.
+            exclude_id = pending.get("gap_row_id")
+            try:
+                if _rotate_mode() == "refresh":
+                    service_client().table("rapport_gaps").update(
+                        {"status": "open", "updated_at": _now().isoformat()}
+                    ).eq("gap_row_id", exclude_id).execute()
+                else:
+                    service_client().rpc(
+                        "increment_skip_and_reopen", {"p_gap_row_id": exclude_id}
+                    ).execute()
+            except Exception:
+                logger.exception("rapport: stale-rotate failed for %s", user_id)
         # 2) Daily cap — something was asked (and since answered/skipped) within the window.
-        if _recently_asked(user_id):
+        elif _recently_asked(user_id):
             return None
 
     tier_rank = _max_tier_rank(user_id)
@@ -241,7 +326,12 @@ def next_ask(
         candidates = _build_candidates(_load_open_rows(user_id), tier_rank)
         fresh = [c for c in candidates if c[2].get("gap_row_id") != exclude_id]
     pool = fresh or candidates
-    pool.sort(key=lambda t: (-t[0], t[1]))
+    if _rotate_mode() == "refresh":
+        # Round-robin: never-shown first (by priority), then least-recently-shown —
+        # each refresh walks the queue instead of ping-ponging between the top two.
+        pool.sort(key=lambda t: (str(t[2].get("asked_at") or ""), -t[0], t[1]))
+    else:
+        pool.sort(key=lambda t: (-t[0], t[1]))
     score, _opened, row, gap = pool[0]
 
     try:
@@ -258,4 +348,4 @@ def next_ask(
         event_properties={"gap_id": row["gap_id"], "surface": surface, "score": round(score, 3)},
     )
 
-    return _build(row, gap)
+    return _build(row, gap, lang)

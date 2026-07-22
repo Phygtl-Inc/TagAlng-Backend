@@ -1,9 +1,17 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from app.auth import service_client
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+# Fan-out pool for the independent Supabase reads in load_user_context. Each call is
+# one ~300ms REST round-trip; running them together bounds the load at the slowest
+# chain (user→block) instead of the sum of all six. The cached Supabase client is
+# shared across threads the same way main.py's write pool already shares it.
+_CTX_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="ctx-load")
 
 
 def load_prompt(name: str) -> str:
@@ -67,40 +75,55 @@ def load_event_draft_context(user_id: str) -> dict[str, Any]:
 
 
 def load_user_context(user_id: str) -> dict[str, Any]:
-    sb = service_client()
-    user_row = (
-        sb.table("users")
-        .select("id, nickname, home_block_id, home_zip, locale")
-        .eq("id", user_id)
-        .limit(1)
-        .execute()
-    )
-    user = user_row.data[0] if user_row.data else {}
-    block_id = user.get("home_block_id")
-    block: dict[str, Any] = {}
-    if block_id:
-        block_row = (
-            sb.table("blocks")
-            .select("id, display_name, cluster_id, state")
-            .eq("id", block_id)
+    def _user_and_block() -> tuple[dict[str, Any], dict[str, Any]]:
+        sb = service_client()
+        user_row = (
+            sb.table("users")
+            .select("id, nickname, home_block_id, home_zip, locale")
+            .eq("id", user_id)
             .limit(1)
             .execute()
         )
-        block = block_row.data[0] if block_row.data else {}
+        user = user_row.data[0] if user_row.data else {}
+        block_id = user.get("home_block_id")
+        block: dict[str, Any] = {}
+        if block_id:
+            block_row = (
+                sb.table("blocks")
+                .select("id, display_name, cluster_id, state")
+                .eq("id", block_id)
+                .limit(1)
+                .execute()
+            )
+            block = block_row.data[0] if block_row.data else {}
+        return user, block
 
-    claims_row = (
-        sb.table("user_identity_claims")
-        .select("concept, label, disclosure")
-        .eq("user_id", user_id)
-        .is_("dismissed_at", "null")
-        .execute()
-    )
-    claims = claims_row.data or []
+    def _claims() -> list[dict[str, Any]]:
+        sb = service_client()
+        claims_row = (
+            sb.table("user_identity_claims")
+            .select("concept, label, disclosure")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .execute()
+        )
+        return claims_row.data or []
 
-    network = _load_block_network(user_id)
-    vector_peers = _load_vector_peer_hints(user_id)
+    # Only the user→block chain and the tier lookup have ordering constraints; the
+    # rest are independent reads. Tiers still runs after peers+network (its inputs).
+    user_block_f = _CTX_POOL.submit(_user_and_block)
+    claims_f = _CTX_POOL.submit(_claims)
+    network_f = _CTX_POOL.submit(_load_block_network, user_id)
+    vector_peers_f = _CTX_POOL.submit(_load_vector_peer_hints, user_id)
+    purpose_ids_f = _CTX_POOL.submit(load_event_purpose_ids)
+
+    network = network_f.result()
+    vector_peers = vector_peers_f.result()
     relationship_tiers = _load_relationship_tiers(user_id, vector_peers, network)
-    event_purpose_ids = load_event_purpose_ids()
+    user, block = user_block_f.result()
+    block_id = user.get("home_block_id")
+    claims = claims_f.result()
+    event_purpose_ids = purpose_ids_f.result()
 
     return {
         "nickname": user.get("nickname"),
@@ -158,7 +181,7 @@ def _load_vector_peer_hints(user_id: str) -> list[dict[str, Any]]:
         sb = service_client()
         res = sb.rpc(
             "match_peers_by_claim_vectors_for_user",
-            {"p_user_id": user_id, "p_limit": 5, "p_min_similarity": 0.65},
+            {"p_user_id": user_id, "p_limit": 5, "p_min_similarity": 0.70},
         ).execute()
         rows = res.data or []
         return rows if isinstance(rows, list) else []
@@ -177,25 +200,54 @@ def _load_block_network(user_id: str) -> dict[str, Any]:
         return {}
 
 
-def load_event_purpose_ids() -> list[str]:
+# Mirrors the cohorts seed in 20260611120000_event_purpose_cohorts.sql.
+_PURPOSE_FALLBACK: list[dict[str, Any]] = [
+    {"id": "faith_small_group", "label": "Faith small group", "emoji": "⛪"},
+    {"id": "running_fitness", "label": "Running / fitness", "emoji": "🏃"},
+    {"id": "outdoor_adventure", "label": "Outdoor + adventure", "emoji": "🌳"},
+    {"id": "coffee_stroller", "label": "Coffee + stroller", "emoji": "☕"},
+    {"id": "heritage_language", "label": "Heritage / language", "emoji": "🌍"},
+    {"id": "postpartum_support", "label": "Postpartum + support", "emoji": "🌿"},
+    {"id": "book_club_learning", "label": "Book club / learning", "emoji": "📖"},
+    {"id": "beauty_wellness", "label": "Beauty + wellness", "emoji": "💆"},
+    {"id": "lifestyle_social", "label": "Lifestyle + social", "emoji": "🍷"},
+    {"id": "kids_led_activity", "label": "Kids-led activity", "emoji": "🧸"},
+]
+
+_purpose_cache: dict[str, Any] = {"at": 0.0, "rows": None}
+_PURPOSE_TTL_S = 600.0
+
+
+def load_event_purposes() -> list[dict[str, Any]]:
+    """Event Purpose catalog rows ({id, label, emoji}) — the taxonomy is near-static,
+    so rows are cached in-process; falls back to the migration seed on any DB failure."""
+    now = time.monotonic()
+    if _purpose_cache["rows"] is not None and now - _purpose_cache["at"] < _PURPOSE_TTL_S:
+        return _purpose_cache["rows"]
     try:
         sb = service_client()
         res = sb.rpc("get_event_purposes").execute()
-        rows = res.data or []
-        return [str(r["id"]) for r in rows if r.get("id")]
+        rows = [
+            {"id": str(r["id"]), "label": str(r.get("label") or ""), "emoji": r.get("emoji")}
+            for r in (res.data or [])
+            if r.get("id")
+        ] or list(_PURPOSE_FALLBACK)
     except Exception:
-        return [
-            "faith_small_group",
-            "running_fitness",
-            "outdoor_adventure",
-            "coffee_stroller",
-            "heritage_language",
-            "postpartum_support",
-            "book_club_learning",
-            "beauty_wellness",
-            "lifestyle_social",
-            "kids_led_activity",
-        ]
+        rows = list(_PURPOSE_FALLBACK)
+    _purpose_cache.update(at=now, rows=rows)
+    return rows
+
+
+def load_event_purpose_ids() -> list[str]:
+    return [r["id"] for r in load_event_purposes()]
+
+
+def cohort_tag_labels_for(tags: list[str]) -> list[str]:
+    """Display labels for cohort_tags ids (cohorts.label, e.g. lifestyle_social ->
+    'Lifestyle + social'); unknown ids de-snake as a last resort so a chip never
+    regresses to a raw taxonomy id."""
+    by_id = {r["id"]: r["label"] for r in load_event_purposes()}
+    return [by_id.get(t) or t.replace("_", " ") for t in tags]
 
 
 def format_user_context(ctx: dict[str, Any], purpose: str) -> str:

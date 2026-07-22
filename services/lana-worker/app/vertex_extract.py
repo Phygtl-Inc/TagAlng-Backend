@@ -6,7 +6,7 @@ from app.lana_ui import normalize_bucket, parse_mapped_spans
 from app.models import ExtractedClaim, MappedSpan
 from app.orchestrator.json_util import parse_json_object
 
-EXTRACT_PROMPT = """You are an identity extraction model for TagAlng, a block-based social app.
+EXTRACT_PROMPT = """You are an identity extraction model for a block-based neighborhood social app.
 
 Read the full conversation transcript between Lana and the user. Extract identity "threads" — by meaning, not keyword matching.
 
@@ -56,7 +56,8 @@ Rules:
 Transcript:
 """
 
-INCREMENTAL_EXTRACT_PROMPT = """You extract identity threads from ONE user message in a TagAlng block chat, \
+INCREMENTAL_EXTRACT_PROMPT = """You extract identity threads from ONE user message in a block-based \
+neighborhood app chat, \
 and you stay curious — after capturing what they said, you propose ONE warm follow-up that draws out more.
 
 Output ONLY valid JSON (no markdown):
@@ -71,6 +72,7 @@ Output ONLY valid JSON (no markdown):
       "confidence": 0.85,
       "disclosure": "public",
       "synonyms": ["tag1", "tag2", "tag3"],
+      "details": [],
       "source_quote": "exact short quote from this message",
       "bucket": "heritage",
       "vague": false,
@@ -88,8 +90,9 @@ Rules:
 - The user may write in ANY language (Spanish, Portuguese, Urdu, ...). Understand it, but ALWAYS \
 output concept/label/synonyms/followup_topic in ENGLISH — the DB is English-canonical so every \
 neighbor matches on the same terms ("me gusta jugar al cricket" → concept "cricket_player", label \
-"Plays cricket"). source_quote stays the exact original-language quote. followup_question is the \
-one field written in the USER'S language (she reads it on her home screen).
+"Plays cricket"). source_quote stays the exact original-language quote. followup_question and \
+followup_topic are ALSO English — they are stored canonically and AI-rendered into the user's preferred \
+language at display time, so a later language switch re-renders the whole queue.
 - Max 6 claims from this message only
 - If no identity content (greetings, "ok", ZIP, phone), return {"nickname": null, "kids_count": null, "claims": [], "followup_question": null}
 - Split distinct threads — capture EACH one, do not collapse (e.g. "pakistani dad, married 10 years, speak 5 languages, do triathlon" → pakistani_heritage + multilingual + married_ten_years + triathlon; "dad" and kid count go to kids_count, never a claim)
@@ -105,6 +108,7 @@ one field written in the USER'S language (she reads it on her home screen).
 - NEVER make a claim from grief, loss, crisis, health, or relationship trouble, even when phrased emotionally — bereavement ("my friend passed away"), divorce/separation, mental-health ("I'm depressed", "anxious"), illness/diagnosis, money/legal distress. These are sensitive and are NOT identity; capture nothing and set followup_question null. "Sad my team lost" (an interest) and "sad someone passed" (grief) are different — one names a hobby, the other a loss.
 - NEVER emit a claim that is only a bare topic label ("Health", "Wellness", "Lifestyle", "General") or that expresses uncertainty ("Unsure what to call", "Not sure about time", "don't know"). Skip these entirely — they are not threads.
 - Do NOT emit the SAME thread twice with different wording — one claim per distinct thread
+- "details": short third-person sub-facts (2-6 words each, max 3 per claim) that ADD texture beyond the label — rhythm, level, setting, sub-type (e.g. label "State-level swimmer" + details ["Swims every weekend"]). Empty [] when the label already says everything. Never restate the label as a detail.
 - kids_count: an integer ONLY when the user states HOW MANY children they have ("2 sons" → 2, "three kids" → 3). null otherwise. This is private and never a claim. NEVER capture a child's name, age, gender, school, or photo — only the count.
 - NEVER extract race, exact age, sex/gender demographics, street address
 - NEVER extract negative or exclusion claims ("not Brazilian", "no Italian", "without X")
@@ -112,7 +116,7 @@ one field written in the USER'S language (she reads it on her home screen).
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 - nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
-- followup_question — becomes a "By the way…" tile on her home screen; her answer is stored as an identity claim used to match her with nearby moms. Warm neighborhood-concierge tone, not an interviewer; ask only what genuinely helps her connect locally. Propose ONE only if it adds a CONNECTION-MATCHABLE facet — something that would help her MEET or RELATE to nearby moms: shared activities/hobbies, kids or family stage, local spots she goes, cultural or community ties, her weekly rhythm. Generic consumer/brand/device/product preferences are NOT connection facets — which phone, which apps, gadgets, streaming services, operating system → return null (no neighbor connects over that). Reason about what you ALREADY know to hit a real GAP. Two shapes: (1) SHARPEN a "vague": true claim — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know. VARY the dimension to fit the topic — do NOT default to "solo or with others" for everything (that has become repetitive). Choose the ONE most natural from a range: sub-type/genre (books → "Any genres you gravitate to?"), frequency/rhythm (running → "Mornings or weekends?"), setting or local spot ("A local place you like for it?"), skill/level, doing-it-with-others, kids' involvement, teach-vs-learn. FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you started, what you enjoy/love most, or what "caught your interest"); those add NO matchable facet — replace with a concrete one or return null. Do NOT repeat a question shape listed in ALREADY ASKED above; if the only fitting angle was already asked, return null or pick a different dimension. Write ONLY the question itself — NO "By the way", no greeting or lead-in phrase (the tile shows its own "By the way…" framing; a prefix just doubles it). Short (<120 char), warm, OPEN, reference what she said. Return null when nothing is vague AND no fresh matchable dimension fits — silence beats filler. HARD RULE: null for any sensitive / help-seeking topic — divorce or relationship trouble, health/medical, mental health/safety, money/debt, legal/immigration — and when the message is a question aimed at you.
+- followup_question — becomes a "By the way…" tile on their home screen; their answer is stored as an identity claim used to match them with nearby neighbors. Warm neighborhood-concierge tone, not an interviewer; ask only what genuinely helps them connect locally. Propose ONE only if it adds a CONNECTION-MATCHABLE facet — something that would help them MEET or RELATE to nearby neighbors: shared activities/hobbies, kids or family stage, local spots they go, cultural or community ties, their weekly rhythm. Generic consumer/brand/device/product preferences are NOT connection facets — which phone, which apps, gadgets, streaming services, operating system → return null (no neighbor connects over that). Reason about what you ALREADY know to hit a real GAP. Two shapes: (1) SHARPEN a "vague": true claim — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know. VARY the dimension to fit the topic — do NOT default to "solo or with others" for everything (that has become repetitive). Choose the ONE most natural from a range: sub-type/genre (books → "Any genres you gravitate to?"), frequency/rhythm (running → "Mornings or weekends?"), setting or local spot ("A local place you like for it?"), skill/level, doing-it-with-others, kids' involvement, teach-vs-learn. FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you started, what you enjoy/love most, or what "caught your interest"); those add NO matchable facet — replace with a concrete one or return null. Do NOT repeat a question shape listed in ALREADY ASKED above; if the only fitting angle was already asked, return null or pick a different dimension. Write ONLY the question itself — NO "By the way", no greeting or lead-in phrase (the tile shows its own "By the way…" framing; a prefix just doubles it). Short (<120 char), warm, OPEN, reference what they said. Return null when nothing is vague AND no fresh matchable dimension fits — silence beats filler. HARD RULE: null for any sensitive / help-seeking topic — divorce or relationship trouble, health/medical, mental health/safety, money/debt, legal/immigration — and when the message is a question aimed at you.
 - followup_topic: a 2-5 word grammatical lead-in that names the thread for the tile, ending with "…" — e.g. "about your reading…", "about the World Cup…", "about your Portuguese…". Write natural English; NEVER glue a raw label ("about your interested in books…" is wrong). null whenever followup_question is null.
 
 User message:
@@ -168,6 +172,10 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
         if not isinstance(syns, list):
             syns = []
         syns = [str(s)[:80] for s in syns[:4]]
+        details = item.get("details", [])
+        if not isinstance(details, list):
+            details = []
+        details = [str(d).strip()[:80] for d in details[:3] if str(d).strip()]
         tone = item.get("tone")
         source_quote = str(item.get("source_quote", "")).strip()[:160] or None
         bucket = normalize_bucket(item.get("bucket"))
@@ -185,6 +193,7 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
                 bucket=bucket,
                 transient=transient,
                 vague=vague,
+                details=details,
             )
         )
     return out[:8]
@@ -244,16 +253,47 @@ def parse_incremental_claims_data(
     return nickname, claims[:6], kids_count, followup
 
 
-def _existing_claims_block(existing_labels: list[str] | None) -> str:
-    """Tell the extractor what's already on the profile so it merges, not duplicates."""
-    labels = [str(s).strip() for s in (existing_labels or []) if str(s).strip()]
-    if not labels:
+def _existing_claims_block(existing_labels: list[Any] | None) -> str:
+    """Tell the extractor what's already on the profile so it ENRICHES, not duplicates.
+
+    Accepts plain label strings or thread dicts ({concept, label, details}). With
+    concepts present, the model can re-emit the SAME slug to enrich in place — that
+    slug is the upsert merge key, so no near-duplicate thread is ever created.
+    """
+    lines: list[str] = []
+    for item in existing_labels or []:
+        if isinstance(item, dict):
+            concept = str(item.get("concept") or "").strip()
+            label = str(item.get("label") or "").strip()
+            details = "; ".join(
+                str(d).strip() for d in item.get("details") or [] if str(d).strip()
+            )
+            if not (concept or label):
+                continue
+            line = f"{concept or '?'} — {label}"
+            if details:
+                line += f" (details: {details})"
+            lines.append(line)
+        else:
+            text = str(item).strip()
+            if text:
+                lines.append(text)
+    if not lines:
         return ""
     return (
-        "ALREADY ON PROFILE (do NOT create a new claim that duplicates or is a narrower "
-        "version of any of these — e.g. if 'Speaks 10 languages' is listed, do NOT add "
-        "'English Speaker'; only add genuinely NEW threads): "
-        + "; ".join(labels[:40])
+        "ALREADY ON PROFILE (concept — label). NEVER create a NEW claim that duplicates "
+        "or overlaps any of these. But when this message ADDS to one of these threads — "
+        "more specific level ('state level'), rhythm ('every weekend'), sub-type, setting "
+        "— RE-EMIT that thread with its EXACT SAME concept slug, carrying: (a) the label "
+        "UPGRADED if the new fact is a stronger identity statement (never downgraded), "
+        "(b) the new fact as one short entry in \"details\" (skip facts already listed), "
+        "(c) any new synonyms, (d) confidence reflecting that the user has now confirmed "
+        "it again (repeat first-person statements approach 1.0). A plain RESTATEMENT "
+        "with nothing new ('I swim' when swimmer is already listed) still counts: "
+        "re-emit that concept unchanged (same label, empty details) — it is "
+        "corroboration and raises confidence. Threads the message does not touch are "
+        "NOT re-emitted. Only genuinely new topics get a new concept:\n"
+        + "\n".join(lines[:40])
         + "\n\n"
     )
 

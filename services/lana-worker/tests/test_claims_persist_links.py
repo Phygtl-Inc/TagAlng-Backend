@@ -183,7 +183,7 @@ class TestClaimRowShape(unittest.TestCase):
 
         expected_keys = {
             "user_id", "concept", "label", "tone", "confidence",
-            "disclosure", "synonyms", "source_quote", "bucket",
+            "disclosure", "synonyms", "details", "source_quote", "bucket",
             "transient", "embedding",
         }
         self.assertEqual(set(row.keys()), expected_keys)

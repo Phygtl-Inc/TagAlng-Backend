@@ -103,15 +103,22 @@ def _is_browse_answer(
     # clarifier re-asked forever). Two pending prompts:
     #   • P1 "what kind of thing are you up for?" (offered chips like "Social"/"Outdoors"): the
     #     next reply IS the interest — stay and capture it, even if a bare topic reads off-lane.
-    #   • the "want me to listen for you?" seek offer (shown when a search came up empty): its
-    #     reply (yes / widen / a new kind) is interpreted by the turn.
+    #   • the "want me to listen for you?" seek offer (shown when a search came up empty): only
+    #     its KNOWN pills (accept / widen) are claimed unconditionally — "yes, listen for me"
+    #     reads as a foreign meet_seek to the classifier and must not release. Anything else
+    #     falls through to the normal off-lane check: a fresh kind ("what about cricket") reads
+    #     native/vague and stays as a re-search, while a self-description ("I like badminton")
+    #     is a confident identity.add_claim and RELEASES to the profile brain — it must never
+    #     be swallowed as a search and answered with another "No badminton activities…".
     # A genuine pivot/abandon/cancel already released upstream (lane_should_continue) before us.
     draft = session_ctx.get("browse_draft")
-    if isinstance(draft, dict) and (
-        draft.get("_seek_offer")
-        or (draft.get("_asked") and not str(draft.get("interest") or "").strip())
-    ):
-        return True
+    if isinstance(draft, dict):
+        if draft.get("_asked") and not str(draft.get("interest") or "").strip():
+            return True
+        if draft.get("_seek_offer") and (
+            _ACCEPT_SEEK_RE.search(message) or _WIDEN_RE.search(message)
+        ):
+            return True
     if is_meta_or_chat(slots):
         return False
     return not is_confident_off_lane(
@@ -339,11 +346,76 @@ def _compose_out_of_coverage(zip5: str, *, user_msg: str = "", lang: str | None 
         return fallback
 
 
-def _event_when_parts(raw: Any) -> str:
+def _compose_empty_seek_offer(
+    interest: str, *, user_msg: str = "", lang: str | None = None
+) -> str:
+    """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
+
+    Grounded ONLY in what's true: the user's own words, the kind searched, and that zero
+    matching activities exist on THEIR block right now — never invented events. The two
+    real options (keep listening + text them / widen the search) must both survive in the
+    copy because the pills under it say exactly that. Localized static fallback."""
+    interest = str(interest or "").strip()
+    fallback = (
+        t("browse.empty_interest_offer", lang, interest=interest)
+        if interest
+        else t("browse.empty_generic_offer", lang)
+    )
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return fallback
+        facts = [
+            (
+                f"You searched their block for: {interest}"
+                if interest
+                else "You searched their block for upcoming activities"
+            ),
+            "Zero matching activities exist on their block right now — that is the honest state",
+            "Option A: you can keep an ear out and TEXT them the moment a matching one pops up "
+            "(the pill under your message says 'Yes, listen for me')",
+            "Option B: they can widen the search to everything on the block "
+            "(the pill says 'Widen the search')",
+            "Never invent or promise events, and never claim something is happening nearby",
+        ]
+        if user_msg:
+            facts.append(
+                f'What the user actually said: "{str(user_msg)[:200]}" — acknowledge their '
+                "words naturally (if they shared a taste or excitement, react to it warmly "
+                "first) instead of a robotic no-results template."
+            )
+        from app.i18n import synth_language_directive
+
+        lang_line = synth_language_directive(lang) if lang else None
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
+                "(max 2 sentences) telling the user nothing matched on their block right now "
+                "and offering both options: you keep listening and text them when one pops up, "
+                "or widen the search. Ground it ONLY in the facts given. "
+                + (f"{lang_line} " if lang_line else "")
+                + 'Return JSON {"message": "..."}.'
+            ),
+            user_payload="\n".join(f"- {f}" for f in facts),
+            max_tokens=140,
+            temperature=0.4,
+        )
+        msg_out = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        return msg_out or fallback
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("activity_browse_empty_offer_failed")
+        return fallback
+
+
+def _event_when_parts(raw: Any, *, has_time: bool = True) -> str:
     """'2026-07-05 Sat 7:00 PM' for the LLM — in the EVENT's local timezone, so it can
     match date/timeframe AND time-of-day queries. starts_at is stored UTC; rendering it
     raw would put an 8:30 PM ET event on the wrong day (00:30 UTC next-day) and hide
-    the clock time the user's 'evenings after 6pm' must be checked against."""
+    the clock time the user's 'evenings after 6pm' must be checked against.
+    has_time=False (date-only event, midnight placeholder — #56) omits the clock so
+    the model never matches 'mornings'/'after 6pm' against a time nobody set."""
     from datetime import datetime, timezone
 
     from app.event_publish import event_tz
@@ -356,6 +428,8 @@ def _event_when_parts(raw: Any) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         local = dt.astimezone(event_tz())
+        if not has_time:
+            return f"{local.strftime('%Y-%m-%d %a')} (no time set)"
         clock = local.strftime("%I:%M %p").lstrip("0")
         return f"{local.strftime('%Y-%m-%d %a')} {clock}"
     except ValueError:
@@ -387,7 +461,9 @@ def _filter_events_by_query(
             for i, ev in enumerate(events):
                 tags = ev.get("cohort_tags")
                 tagstr = ", ".join(tags) if isinstance(tags, list) else str(tags or "")
-                when = _event_when_parts(ev.get("starts_at"))
+                when = _event_when_parts(
+                    ev.get("starts_at"), has_time=ev.get("has_time") is not False
+                )
                 host = str(ev.get("host_name") or "").strip()
                 lines.append(
                     f"{i}: {ev.get('title', '')} | date: {when} | "
@@ -679,6 +755,14 @@ def run_activity_browse_turn(
         _set_preview_block(zip5, block)
         draft["_need_zip"] = None
     elif msg:
+        # A tapped concierge chip ("See badminton events") dispatches with a model-authored
+        # send text that can come out generic ("show me what's happening this weekend") —
+        # the offer's structured topic is the committed subject, so it REPLACES the send
+        # text outright (filter, weekend pre-narrow, everything downstream).
+        if str((slots or {}).get("_forced_kind") or "") == "find_activities":
+            forced_topic = str((slots or {}).get("signal_detail") or "").strip()
+            if forced_topic:
+                msg = forced_topic
         draft["interest"] = msg[:80]
     interest = str(draft.get("interest") or "")
 
@@ -729,9 +813,7 @@ def run_activity_browse_turn(
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
         session_ctx["routing_phase"] = "listening"
-        if short:
-            return t("browse.empty_interest_offer", lang, interest=short)
-        return t("browse.empty_generic_offer", lang)
+        return _compose_empty_seek_offer(short, user_msg=msg, lang=lang)
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)

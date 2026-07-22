@@ -43,10 +43,11 @@ def is_meta_or_chat(slots: dict[str, Any] | None) -> bool:
 
 
 # Universal exits — these release EVERY sticky lane, at every step, no matter what the lane
-# owns. An errand Lana can't run (out_of_scope) or abusive content (unsafe) must never be
-# swallowed as a field answer; the decline / refuse handlers downstream must get the turn.
-_ALWAYS_OFF_LANE_GOALS = ("out_of_scope", "unsafe")
-_ALWAYS_OFF_LANE_LINEARS = ("system.out_of_scope", "system.unsafe")
+# owns. An errand Lana can't run (out_of_scope), abusive content (unsafe), or a user in
+# emotional distress (crisis) must never be swallowed as a field answer; the decline /
+# refuse / empathy handlers downstream must get the turn.
+_ALWAYS_OFF_LANE_GOALS = ("out_of_scope", "unsafe", "crisis")
+_ALWAYS_OFF_LANE_LINEARS = ("system.out_of_scope", "system.unsafe", "system.crisis")
 
 
 def is_confident_off_lane(
@@ -82,7 +83,7 @@ def is_confident_off_lane(
     linear = normalize_linear_intent(slots.get("linear_intent")) or ""
     signal_intent = str(slots.get("signal_intent") or "")
 
-    # Universal exits first — out_of_scope / unsafe always release, every lane, every step.
+    # Universal exits first — out_of_scope / unsafe / crisis always release, every lane, every step.
     if goal in _ALWAYS_OFF_LANE_GOALS or linear in _ALWAYS_OFF_LANE_LINEARS:
         return True
 

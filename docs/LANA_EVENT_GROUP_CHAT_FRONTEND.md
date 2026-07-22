@@ -156,12 +156,12 @@ matching this `event_id`. (Deferred in P1 precisely because this screen doesn't 
 
 ---
 
-## 7. Not built yet (backend gap)
+## 7. "Who Brings What" pinned panel — backend now built
 
-**"Who Brings What" pinned panel** (stroller/coffee/snacks claims) has **no backend** —
-there is no table or RPC for per-attendee item claims. It needs a new
-`event_contributions` (or similar) table + claim/list RPCs before the FE can build the
-pinned panel. Everything else above is ready to consume.
+The per-attendee item-claim backend exists (`event_bring_items` table + claim/list RPCs,
+migration `20260824120000_bring_claims_read_receipts.sql`), along with read receipts
+("Seen by …") and live unread-dot guidance. See **`LANA_BRING_LIST_SEEN_FRONTEND.md`**
+for the full FE contract.
 
 ---
 

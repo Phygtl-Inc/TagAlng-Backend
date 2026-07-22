@@ -366,7 +366,26 @@ class TestParseIncrementalClaims(unittest.TestCase):
         block = _existing_claims_block(["Speaks 10 languages", "Triathlon Athlete"])
         self.assertIn("ALREADY ON PROFILE", block)
         self.assertIn("Speaks 10 languages", block)
-        self.assertIn("do NOT", block)
+        self.assertIn("NEVER create a NEW claim", block)
+        # Enrichment contract: repeats re-emit the same concept, they don't go silent.
+        self.assertIn("RE-EMIT", block)
+
+    def test_existing_claims_block_renders_threads_with_details(self) -> None:
+        from app.vertex_extract import _existing_claims_block
+
+        block = _existing_claims_block(
+            [
+                {
+                    "concept": "swimmer",
+                    "label": "Weekend swimmer",
+                    "details": ["Swims every weekend"],
+                },
+                {"concept": "gardener", "label": "Gardener", "details": []},
+            ]
+        )
+        self.assertIn("swimmer — Weekend swimmer", block)
+        self.assertIn("details: Swims every weekend", block)
+        self.assertIn("gardener — Gardener", block)
 
     def test_existing_claims_block_empty(self) -> None:
         from app.vertex_extract import _existing_claims_block
@@ -407,6 +426,75 @@ class TestUpsertClaims(unittest.TestCase):
         n = upsert_claims("user-1", [claim])
         self.assertEqual(n, 1)
         table.insert.assert_called_once()
+
+    @patch("app.claims_persist.service_client")
+    @patch("app.claims_persist._embed_claim", return_value=[0.1] * 768)
+    def test_existing_concept_enriches_instead_of_overwriting(
+        self, _embed: MagicMock, mock_client: MagicMock
+    ) -> None:
+        sb = MagicMock()
+        mock_client.return_value = sb
+        table = MagicMock()
+        sb.table.return_value = table
+        select_chain = MagicMock()
+        table.select.return_value = select_chain
+        select_chain.eq.return_value = select_chain
+        select_chain.is_.return_value = select_chain
+        select_chain.limit.return_value = select_chain
+        select_chain.execute.return_value = MagicMock(
+            data=[
+                {
+                    "id": "claim-1",
+                    "confidence": 0.95,
+                    "synonyms": ["swimming", "sports"],
+                    "details": ["Swims every weekend"],
+                }
+            ]
+        )
+
+        claim = ExtractedClaim(
+            concept="swimmer",
+            label="State-level swimmer",
+            confidence=0.9,
+            synonyms=["competitive"],
+            details=["Competes at state level"],
+            source_quote="state level swimmer",
+            bucket="activity",
+        )
+        n = upsert_claims("user-1", [claim])
+        self.assertEqual(n, 1)
+        table.insert.assert_not_called()
+        table.update.assert_called_once()
+        row = table.update.call_args.args[0]
+        # Corroboration: confidence rises from the stored max, never overwritten down.
+        self.assertAlmostEqual(row["confidence"], 1.0)
+        self.assertEqual(row["label"], "State-level swimmer")
+        self.assertEqual(
+            row["synonyms"], ["swimming", "sports", "competitive"]
+        )
+        self.assertEqual(
+            row["details"], ["Swims every weekend", "Competes at state level"]
+        )
+
+
+class TestMergeDetails(unittest.TestCase):
+    def test_appends_dedup_and_caps_at_most_recent_five(self) -> None:
+        from app.claims_persist import _merge_details
+
+        merged = _merge_details(
+            ["a fact", "b fact", "c fact", "d fact", "e fact"],
+            ["A Fact", "f fact"],  # near-duplicate dropped, new appended
+        )
+        self.assertEqual(len(merged), 5)
+        self.assertEqual(merged[-1], "f fact")
+        self.assertNotIn("a fact", merged)  # oldest rolls off
+
+    def test_confidence_bump_caps_at_one(self) -> None:
+        from app.claims_persist import _merge_into_existing
+
+        c = ExtractedClaim(concept="swimmer", label="Swimmer", confidence=0.7)
+        merged = _merge_into_existing(c, {"confidence": 0.98, "synonyms": [], "details": []})
+        self.assertEqual(merged.confidence, 1.0)
 
 
 def _claim(concept, label, conf=0.9, syns=None, bucket="interest", transient=False):

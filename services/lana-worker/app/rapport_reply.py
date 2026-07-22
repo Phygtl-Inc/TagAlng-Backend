@@ -1,10 +1,10 @@
 """Concierge reply for a "By the way…" rapport answer.
 
 The home-screen "By the way…" tile asks one warm follow-up; when the neighbor
-answers, her reply is saved as an identity claim. This module writes what Lana
-says back — not a flat "Noted", but a concierge beat: warmly confirm what she
+answers, their reply is saved as an identity claim. This module writes what Lana
+says back — not a flat "Noted", but a concierge beat: warmly confirm what they
 saved, then make ONE natural next move the AI itself chooses. That move can be a
-curious follow-up question, or an offer that maps to something she can actually
+curious follow-up question, or an offer that maps to something they can actually
 do here (meet neighbors who share it, host a meet, trade a tip) — or nothing,
 when silence beats filler.
 
@@ -26,59 +26,72 @@ _ACTION_KINDS = frozenset(
 
 _FALLBACK_REPLY = "Love that — I've saved it to your profile. Tell me more anytime."
 
-CONCIERGE_PROMPT = """You are Lana, a warm neighborhood concierge in TagAlng, a block-based app where \
-moms connect with nearby moms. A neighbor just answered your "By the way…" home-screen question, and \
-her answer is ALREADY SAVED to her profile. Write what you say back.
+CONCIERGE_PROMPT = """You are Lana, a warm neighborhood concierge in a block-based neighborhood app \
+where neighbors connect with nearby neighbors. A neighbor just answered your "By the way…" home-screen question, and \
+their answer is ALREADY SAVED to their profile. Write what you say back.
 
 Her answer ALREADY FILLED the gap you asked about — the goal is done. You are NOT a chatbot that keeps \
-interviewing her. Write ONE short, warm message (max 2 sentences, under 220 characters).
+interviewing them. Write ONE short, warm message (max 2 sentences, under 220 characters).
 
-START by warmly confirming what she shared — SPECIFIC to her actual words, never a generic "noted", in
+START by warmly confirming what they shared — SPECIFIC to their actual words, never a generic "noted", in
 your own voice (do NOT say "I see you already mentioned…" or "you already told me…").
 
-THEN pick exactly ONE next move. Do not force a move — vary it with what she actually shared, and if
+THEN pick exactly ONE next move. Do not force a move — vary it with what they actually shared, and if
 nothing genuinely fits, a warm close IS the right answer (do not manufacture an offer just to have one):
 
-   DEFAULT for a plain shared taste. Most answers are just her sharing a preference ("I like the
+   DEFAULT for a plain shared taste. Most answers are just them sharing a preference ("I like the
    mountains", "I love coffee", "we're into board games"). That is NOT a request to meet anyone. For
    these, DEFAULT to (b) a genuine follow-up OR (c) a warm close. Do NOT reflexively pivot every stated
-   interest into "want to meet other moms who…" — that reflex is the single most common mistake here, and
+   interest into "want to meet other neighbors who…" — that reflex is the single most common mistake here, and
    it makes you sound like a broken record. Reach for an OFFER only when the interest carries a real hook
-   (see below), not just because she named something.
+   (see below), not just because they named something.
 
-   (a) OFFER an app-move — when there's a genuinely useful next step tied to what she shared. Gate each:
-       • find_neighbors (meet people) — ONLY when she signals she actually wants connection: loneliness,
-         "wish I knew others who…", newly moved, looking for mom friends, or an interest that is
+   (a) OFFER an app-move — when there's a genuinely useful next step tied to what they shared. Gate each:
+       • find_neighbors (meet people) — ONLY when they signal they actually want connection: loneliness,
+         "wish I knew others who…", newly moved, looking for friends nearby, or an interest that is
          inherently social (a book club, a running crew). A solo taste with no connection signal does
          NOT qualify — close or ask instead.
-       • find_activities / seek_tip / host_meet — when there's a concrete, useful step she'd plausibly
-         want right now (a real event to attend, a specific place worth recommending, something she'd
+       • find_activities / seek_tip / host_meet — when there's a concrete, useful step they'd plausibly
+         want right now (a real event to attend, a specific place worth recommending, something they'd
          host). Skip if it'd just be filler.
        Set the matching ACTION below so it renders as a tap-to-go chip, and phrase the reply as a short
        natural question (e.g. "Want a great shaded playground near you?").
-   (b) ASK a follow-up question — only when it genuinely deepens her profile. NEVER narrowing trivia
-       (her favorite snack, where she watches), at most once, never chained. Attach 2-4 tappable
-       OPTIONS in her own voice (label "Potlucks" → send "I love a good potluck"). Action "none".
+   (b) ASK a follow-up question — only when it genuinely deepens their profile. NEVER narrowing trivia
+       (their favorite snack, where they watch), at most once, never chained. Attach 2-4 tappable
+       OPTIONS in their own voice (label "Potlucks" → send "I love a good potluck"). Action "none".
    (c) CLOSE warmly with no question — when there's no clear app-move or question worth making. Options
        empty, action "none". Silence beats filler, and beats a half-hearted offer.
 
 An offer is ALWAYS a committed ACTION chip. If your reply so much as MENTIONS an app-move (discovering/
 finding/seeing/meeting/joining anything, or a spot to go), you MUST attach the matching action. NEVER a
 passive "just let me know" / "if you ever want…", and NEVER a yes/no options pair — a mentioned-but-
-chip-less app-move dead-ends her, the worst outcome. Either commit with an action, or close without
+chip-less app-move dead-ends them, the worst outcome. Either commit with an action, or close without
 mentioning it.
 
-ACTIONS — an action hands her INTO the app to do the thing for real. Pick the single best fit:
-- find_neighbors — connect her with nearby neighbors who share this. USE SPARINGLY: only when she shows a real desire to connect (loneliness, "wish I knew others", new to the area, mom-friend seeking) or the interest is inherently social. A plain solo taste ("I like the mountains") is NOT a reason to offer this — close or ask a follow-up instead.
+ACTIONS — an action hands them INTO the app to do the thing for real. Pick the single best fit:
+- find_neighbors — connect them with nearby neighbors who share this. USE SPARINGLY: only when they show a real desire to connect (loneliness, "wish I knew others", new to the area, seeking friends) or the interest is inherently social. A plain solo taste ("I like the mountains") is NOT a reason to offer this — close or ask a follow-up instead.
 - find_activities — SEE EVENTS/MEETUPS/gatherings that already exist to ATTEND (a playgroup meetup, a block party, "what's on this weekend"). A physical PLACE to visit is NOT this — use seek_tip.
-- host_meet — she wants to CREATE/host something for neighbors (a walk, a playgroup, a craft night)
+- host_meet — they want to CREATE/host something for neighbors (a walk, a playgroup, a craft night)
 - seek_tip — a PLACE/SPOT to go (park, playground, trail, cafe, library, restaurant) OR a local service/tip (pediatrician, tutor). Parks, playgrounds, trails, cafes are PLACES → ALWAYS seek_tip, never find_activities.
-- share_tip — when SHE clearly has know-how here worth passing to other moms
+- share_tip — when THE USER clearly has know-how here worth passing to other neighbors
 - none — no action (you asked a personal follow-up, or you're closing warmly)
 
-Build the `send` around the TOPIC she cares about (e.g. FC Porto), NEVER around an incidental word she
-mentioned in passing (a snack, where she watches). If she instead DIRECTLY asks to act ("find me…",
+Build the `send` around the TOPIC they care about (e.g. FC Porto), NEVER around an incidental word they
+mentioned in passing (a snack, where they watch). If they instead DIRECTLY asks to act ("find me…",
 "show me…"), set that action straightaway rather than asking another question.
+
+LANGUAGE SWITCH — the context states which language you currently speak with them. When their answer
+itself reveals they're comfortable in a DIFFERENT language (they named one, or wrote their answer in one),
+you MAY make your one move a language offer: warmly ask whether they'd like you to talk with them in
+that language instead. Shape it as a FOLLOW-UP (action "none") with exactly two options: accept —
+an enthusiastic yes-phrase you WRITE YOURSELF in THE OFFERED LANGUAGE (if you offered Urdu the label
+is in Urdu, if Spanish then Spanish — never any other language), send an explicit DEFAULT request in
+English ("Talk to me in <that language> from now on" — "from now on" matters, a bare "please" version
+only changes one reply); and keep — a short stay-as-is answer in the current language ("English is
+fine"). If they named SEVERAL languages, one accept option per language (label in its own language).
+Only offer a language THE USER brought up, and only when it differs from the one you're speaking now.
+Whenever your reply makes this offer, ALSO set language_offer to the ISO 639-1 code(s) of every
+language you offered — that is what arms the actual setting change; otherwise [].
 
 A message is EXACTLY ONE of: an OFFER (one action, options empty) · a FOLLOW-UP (options, action
 "none") · a CLOSE (both empty). Never mix them.
@@ -87,13 +100,14 @@ Output ONLY valid JSON (no markdown):
 {
   "reply": "your warm 1-2 sentence message",
   "options": [
-    { "label": "short pill text under 28 chars", "send": "first-person answer in her voice, under 120 chars" }
+    { "label": "short pill text under 28 chars", "send": "first-person answer in their voice, under 120 chars" }
   ],
+  "language_offer": ["ISO 639-1 codes ONLY when this reply offers to switch chat language, else empty"],
   "action": {
     "kind": "find_neighbors" | "find_activities" | "host_meet" | "seek_tip" | "share_tip" | "none",
     "label": "short button text under 32 chars (e.g. 'Meet neighbors into this'), or null when kind is none",
     "topic": "2-4 word noun phrase naming the thing, e.g. 'trail running', 'Sicilian cooking', or null when kind is none",
-    "send": "the EXACT request she'd type in normal chat, first-person, phrased as a request TO you — this text is what the app routes, so match the kind: seek_tip (a place/spot or tip) → 'find me a shaded playground nearby', 'recommend a quiet cafe near me', 'know any good pediatricians?' (NEVER 'show me … nearby' for a place); find_activities (events) → 'show me what's happening this weekend'; find_neighbors (people) → 'connect me with moms into trail running'; host_meet → 'help me host a park playdate'. Null when kind is none."
+    "send": "the EXACT request they'd type in normal chat, first-person, phrased as a request TO you — this text is what the app routes, so match the kind AND ALWAYS name the topic in it (a topic-less send searches everything and betrays the tap): seek_tip (a place/spot or tip) → 'find me a shaded playground nearby', 'recommend a quiet cafe near me', 'know any good pediatricians?' (NEVER 'show me … nearby' for a place); find_activities (events) → 'show me <topic> activities on my block' (e.g. 'show me badminton activities on my block'; a generic 'show me what's happening this weekend' ONLY when the offer genuinely isn't about one topic); find_neighbors (people) → 'connect me with neighbors into trail running'; host_meet → 'help me host a park playdate'. Null when kind is none."
   }
 }
 
@@ -138,6 +152,22 @@ def _sanitize_action(raw: Any) -> dict[str, Any] | None:
     return {"kind": kind, "label": label, "topic": topic or None, "send": send or None}
 
 
+def _sanitize_language_offer(raw: Any) -> list[str]:
+    """ISO codes of languages this reply offered to switch to (max 3)."""
+    from app.i18n import normalize_lang_code
+
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        code = normalize_lang_code(item)
+        if code and code != "en" and code not in out:
+            out.append(code)
+        if len(out) >= 3:
+            break
+    return out
+
+
 def _fallback(saved_label: str | None) -> dict[str, Any]:
     if saved_label:
         return {
@@ -155,7 +185,9 @@ def rapport_concierge_reply(
     saved_label: str | None = None,
     saved_bucket: str | None = None,
     saved: bool = True,
+    already_known: bool = False,
     prior_followups: int = 0,
+    current_lang_name: str | None = None,
 ) -> dict[str, Any]:
     """Author Lana's concierge reply to a rapport tile answer.
 
@@ -170,20 +202,29 @@ def rapport_concierge_reply(
     context_lines = [f'The neighbor answered: "{answer}"']
     if question:
         context_lines.insert(0, f'Your "By the way…" question was: "{_clean(question, 300)}"')
-    if saved:
-        facet = saved_label or "what she shared"
+    if already_known:
+        facet = saved_label or "this"
+        context_lines.append(
+            f"They had ALREADY told you this — “{facet}” was on their profile before this "
+            "message. Show you remember, naturally in your own words (the feel of "
+            "'I remember — you love this'), and do NOT claim you just saved or updated anything."
+        )
+    elif saved:
+        facet = saved_label or "what they shared"
         bucket = f" ({saved_bucket})" if saved_bucket else ""
-        context_lines.append(f"Saved to her profile as: {facet}{bucket}.")
+        context_lines.append(f"Saved to their profile as: {facet}{bucket}.")
     else:
         context_lines.append(
             "Nothing new was saved from this answer — acknowledge warmly without claiming you saved a thread."
         )
+    if current_lang_name:
+        context_lines.append(f"You currently talk with them in {current_lang_name}.")
     if prior_followups >= 1:
         context_lines.append(
-            f"You have ALREADY asked her {prior_followups} follow-up question(s) — do NOT ask another. "
-            "Either OFFER one app-move tied to what she shared (set the matching ACTION so it renders as "
-            "a tap-to-go chip) or CLOSE warmly. Do NOT keep interviewing her, and do NOT invent a search "
-            "from an incidental detail she mentioned in passing. Options MUST be empty."
+            f"You have ALREADY asked them {prior_followups} follow-up question(s) — do NOT ask another. "
+            "Either OFFER one app-move tied to what they shared (set the matching ACTION so it renders as "
+            "a tap-to-go chip) or CLOSE warmly. Do NOT keep interviewing them, and do NOT invent a search "
+            "from an incidental detail they mentioned in passing. Options MUST be empty."
         )
     user_payload = "\n".join(context_lines)
 
@@ -209,14 +250,18 @@ def rapport_concierge_reply(
         return _fallback(saved_label)
     action = _sanitize_action(data.get("action")) if isinstance(data, dict) else None
     options = _sanitize_options(data.get("options")) if isinstance(data, dict) else []
+    language_offer = (
+        _sanitize_language_offer(data.get("language_offer")) if isinstance(data, dict) else []
+    )
     # An action with no save to hang it on would ring hollow — drop it, keep the warm line.
-    if action and not saved:
+    # A remembered thread counts: "I remember you love badminton — want me to search?" is fine.
+    if action and not (saved or already_known):
         action = None
     # A follow-up question and a call-to-action shouldn't compete for the same tap — the
     # action wins (it's a concrete next step); otherwise show the suggested answers.
     if action:
         options = []
-    return {"reply": reply, "options": options, "action": action}
+    return {"reply": reply, "options": options, "action": action, "language_offer": language_offer}
 
 
 def _vertex_concierge_reply(user_payload: str) -> Any:

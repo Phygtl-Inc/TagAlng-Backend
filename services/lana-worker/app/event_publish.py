@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -85,6 +86,71 @@ def _parse_iso_ts(raw: str | None) -> str | None:
         return None
 
 
+def _ai_cover_emoji(title: str, description: str | None) -> str | None:
+    """Best-effort emoji pick for publish paths that skipped the setup-suggest call
+    (voice / transcript extraction). One tiny LLM call; None on any failure — the FE
+    falls back to its neutral icon, never a canned emoji that could clash with the vibe."""
+    try:
+        from app.lana_ui import sanitize_cover_emoji
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return None
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "Pick ONE emoji that captures this local event's vibe, for its card "
+                'cover. Reply with compact JSON: {"cover_emoji": "..."}. Match the '
+                "actual activity (soccer -> ⚽, book club -> 📚, coffee walk -> ☕)."
+            ),
+            user_payload=f"TITLE: {title}\nDESCRIPTION: {(description or '').strip()[:300]}",
+            max_tokens=20,
+            temperature=0.2,
+        )
+        if not isinstance(data, dict):
+            return None
+        return sanitize_cover_emoji(data.get("cover_emoji"))
+    except Exception:  # noqa: BLE001 - cover art must never block publishing
+        return None
+
+
+def _ai_event_description(title: str, draft: EventDraft) -> str | None:
+    """Best-effort card blurb for publish paths where the chat flow never drafted one
+    (sparse opening → setup carousel, or an LLM miss on the entry turn). Grounded ONLY
+    in facts the host actually set; None on any failure — a missing description must
+    never block publishing, and no description beats a canned line."""
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return None
+        facts = {
+            "title": title,
+            "venue_name": (draft.venue_name or "").strip() or None,
+            "starts_at": draft.starts_at,
+            "bring_items": [str(b).strip() for b in (draft.bring_items or []) if str(b).strip()][:6],
+            "cohort_tags": list(draft.cohort_tags or [])[:4],
+        }
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "Write ONE short warm sentence (<=120 chars) describing this local "
+                "event for its card, e.g. \"Saturday morning coffee — open to "
+                'first-time Brazilian moms." Reply with compact JSON: '
+                '{"description": "..."}. Ground it ONLY in the facts given — never '
+                "invent details the host didn't set."
+            ),
+            user_payload=json.dumps(facts, ensure_ascii=False),
+            max_tokens=80,
+            temperature=0.3,
+        )
+        if not isinstance(data, dict):
+            return None
+        return str(data.get("description") or "").strip()[:500] or None
+    except Exception:  # noqa: BLE001 - description must never block publishing
+        return None
+
+
 def build_create_event_fields(
     user_id: str,
     draft: EventDraft,
@@ -102,11 +168,14 @@ def build_create_event_fields(
         lat, lng = float(draft.venue_lat), float(draft.venue_lng)
     else:
         lat, lng, block_id = resolve_event_location(user_id, draft.venue_name)
+    description = (draft.description or "").strip()[:500] or None
+    if not description:
+        description = _ai_event_description(title[:80], draft)
     fields: dict[str, Any] = {
         "lat": lat,
         "lng": lng,
         "title": title[:80],
-        "description": (draft.description or "").strip()[:500] or None,
+        "description": description,
         "venue_name": (draft.venue_name or "").strip()[:120] or None,
         "venue_address": (draft.venue_address or "").strip()[:300] or None,
         "place_id": (draft.place_id or "").strip()[:300] or None,
@@ -116,6 +185,11 @@ def build_create_event_fields(
     starts = _parse_iso_ts(draft.starts_at)
     if starts:
         fields["starts_at"] = starts
+        # Truthful clock flag: the pipeline stamps has_time from the when-resolver
+        # (True only when the host actually said a time). Absent = legacy draft →
+        # keep the DB default (true) rather than guessing here.
+        if draft.has_time is not None:
+            fields["has_time"] = bool(draft.has_time)
     ends = _parse_iso_ts(draft.ends_at)
     if ends:
         fields["ends_at"] = ends
@@ -127,9 +201,22 @@ def build_create_event_fields(
         fields["auto_approve"] = bool(draft.auto_approve)
     if draft.allow_attendee_share is not None:
         fields["allow_attendee_share"] = bool(draft.allow_attendee_share)
-    bring = [str(b).strip()[:60] for b in (draft.bring_items or []) if str(b).strip()][:12]
+    from app.lana_ui import is_none_bring_item
+
+    bring = [
+        str(b).strip()[:60]
+        for b in (draft.bring_items or [])
+        if str(b).strip() and not is_none_bring_item(str(b))
+    ][:12]
     if bring:
         fields["bring_items"] = bring
+    from app.lana_ui import sanitize_cover_emoji
+
+    cover_emoji = sanitize_cover_emoji(draft.cover_emoji) or _ai_cover_emoji(
+        fields["title"], fields["description"]
+    )
+    if cover_emoji:
+        fields["cover_emoji"] = cover_emoji
     if cohost_id:
         fields["cohost_id"] = cohost_id
     return fields
