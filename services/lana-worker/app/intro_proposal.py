@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.claim_search import peer_matches_identity_snippet
 from app.intro_list import format_duplicate_intro_reply
 from app.layer1_tier import wants_respond_intro
+from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 
 INTENT_PROPOSE_INTRO = "social.propose_intro"
@@ -54,13 +55,13 @@ def build_match_reason(
     identity_snippet: str | None,
     peer: dict[str, Any],
 ) -> str:
-    label = str(peer.get("matching_peer_label") or "a neighbor on your block").strip()
+    label = str(peer.get("matching_peer_label") or "a neighbor near you").strip()
     snippet = str(identity_snippet or "").strip()
     # The fallback snippet can be several messages joined with "; " — only echo the
     # first clause so the reason stays a clean sentence, not a merged dump.
     first_clause = snippet.split(";")[0].strip()
     if snippet and not peer_matches_identity_snippet(peer, snippet):
-        return f"Lana matched you with {label} on your block."
+        return f"Lana matched you with {label}."
     if first_clause and label:
         # Skip the "you mentioned …" tail when it just restates the label.
         low_clause, low_label = first_clause.lower(), label.lower()
@@ -68,8 +69,8 @@ def build_match_reason(
             return f"You both fit {low_label}."
         return f"You both fit {low_label} — you mentioned {first_clause[:120]}."
     if first_clause:
-        return f"You mentioned {first_clause[:160]} — strong overlap on your block."
-    return f"Lana matched you with {label} on your block."
+        return f"You mentioned {first_clause[:160]} — strong overlap nearby."
+    return f"Lana matched you with {label}."
 
 
 _INTRO_NAME_RE = re.compile(
@@ -124,7 +125,7 @@ def pick_block_log_entry_for_intro(
         return entries[0]
     lower = str(msg or "").lower()
     if re.search(
-        r"\b(?:swap|regarding|about\s+the|block\s*log|neighbor\s+match|bicycle|bike)\b",
+        r"\b(?:swap|regarding|about\s+the|(?:block|neighborhood)\s*log|neighbor\s+match|bicycle|bike)\b",
         lower,
     ):
         return entries[0]
@@ -140,7 +141,7 @@ def block_log_peer_from_entry(row: dict[str, Any]) -> dict[str, Any]:
         "nickname": None if nick == "A neighbor" else nick,
         "matching_peer_label": str(row.get("match_summary") or "").strip()
         or str((row.get("match_reasons") or [""])[0] or "").strip()
-        or "swap match on your block",
+        or "swap match near you",
     }
 
 
@@ -239,25 +240,48 @@ def format_intro_proposed_reply(peer: dict[str, Any], match_reason: str) -> str:
     nick = str(peer.get("nickname") or peer.get("matching_peer_label") or "your neighbor").strip()
     reason = str(match_reason or "").strip()
     if reason:
-        return (
+        fallback = (
             f"Done — I introduced you to {nick}. {reason} "
             f"They'll get the intro and can accept when ready."
         )
-    return f"Done — I introduced you to {nick}. They'll see why you might click when they're ready."
+    else:
+        fallback = (
+            f"Done — I introduced you to {nick}. They'll see why you might click when they're ready."
+        )
+    return compose_reply(
+        goal=(
+            "Confirm you just sent the intro to this neighbor, mention why they "
+            "fit if a reason is given, and note they'll get the intro and can "
+            "accept when they're ready."
+        ),
+        facts=[f"Neighbor the intro went to: {nick}"]
+        + ([f"Why they fit: {reason}"] if reason else []),
+        fallback=fallback,
+    )
 
 
 def format_intro_offer_reply(peer: dict[str, Any], match_reason: str) -> str:
     label = str(peer.get("matching_peer_label") or peer.get("nickname") or "a neighbor").strip()
-    return (
-        f"{label} looks like a strong match — {match_reason} "
-        f"Want me to introduce you two?"
+    return compose_reply(
+        goal=(
+            "Tell the user this neighbor looks like a strong fit, give the reason, "
+            "and ask if they want you to introduce the two of them."
+        ),
+        facts=[
+            f"The neighbor: {label}",
+            f"Why they fit: {match_reason}",
+        ],
+        fallback=(
+            f"{label} looks like a strong fit — {match_reason} "
+            f"Want me to introduce you two?"
+        ),
     )
 
 
 def format_intro_offer_turn(peer: dict[str, Any], match_reason: str) -> str:
     """C-8 single featured match — replaces the multi-neighbor preview list in copy."""
     nick = str(peer.get("nickname") or "").strip()
-    label = str(peer.get("matching_peer_label") or "a neighbor on your block").strip()
+    label = str(peer.get("matching_peer_label") or "a neighbor near you").strip()
     who = nick or label
     reason = str(match_reason or "").strip().rstrip(".")
     lines = [f"I think I found a fit — {who}."]
@@ -266,7 +290,17 @@ def format_intro_offer_turn(peer: dict[str, Any], match_reason: str) -> str:
     if reason:
         lines.append(f"{reason}.")
     lines.append("Want me to introduce you two?")
-    return " ".join(lines)
+    return compose_reply(
+        goal=(
+            "Tell the user you think you found one neighbor who fits them, share "
+            "the reason exactly once (don't repeat the shared trait twice), and "
+            "ask if they want you to introduce the two of them."
+        ),
+        facts=[f"The neighbor: {who}"]
+        + ([f"Why they fit: {reason}"] if reason else []),
+        fallback=" ".join(lines),
+        max_sentences=3,
+    )
 
 
 def stamp_intro_proposal_ctx(
@@ -364,7 +398,14 @@ def try_propose_intro_from_preview(
             )
         if detail == "phone_not_verified":
             return (
-                "Verify your email first — then I can introduce you to neighbors.",
+                compose_reply(
+                    goal=(
+                        "Tell the user they need to verify their email first — then "
+                        "you can introduce them to neighbors."
+                    ),
+                    fallback="Verify your email first — then I can introduce you to neighbors.",
+                    cache=True,
+                ),
                 {"status": "need_verify"},
             )
         raise

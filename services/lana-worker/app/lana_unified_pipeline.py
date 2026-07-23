@@ -13,6 +13,7 @@ from app.lana_paths import unified_rules_first_enabled
 from app.loop_guard import discovery_reply_is_stuck, reset_sticky_discovery_state
 from app.orchestrator.pipeline import run_turn
 from app.orchestrator.progress import READING
+from app.reply_compose import compose_reply
 from app.turn_surfaces import clear_turn_surfaces
 from app.turn_timing import TurnTimer
 
@@ -255,18 +256,42 @@ def _publish_failure_reply(error: str | None, title: str) -> str:
     name = f"**{title}**" if title else "your event"
     detail = (error or "").lower()
     if "phone_not_verified" in detail or ":403" in detail or "not_authenticated" in detail:
-        return (
-            f"{name} is all set, but I can't post it until your account is verified. "
-            "Verify your email and I'll publish it right away."
+        return compose_reply(
+            goal=(
+                "The host's event is fully drafted but posting was rejected because "
+                "their account isn't verified yet. Reassure them the event is ready "
+                "and ask them to verify their email so you can publish it."
+            ),
+            facts=[f"The event: {name}"],
+            fallback=(
+                f"{name} is all set, but I can't post it until your account is verified. "
+                "Verify your email and I'll publish it right away."
+            ),
         )
     if "location" in detail or "venue" in detail:
-        return (
-            f"I have everything for {name} except a spot I can place on the map. "
-            "Pick a place or share an address and I'll post it."
+        return compose_reply(
+            goal=(
+                "The host's event couldn't post because its spot can't be placed on "
+                "the map. Ask them to pick a place or share an address so you can "
+                "post it."
+            ),
+            facts=[f"The event: {name}"],
+            fallback=(
+                f"I have everything for {name} except a spot I can place on the map. "
+                "Pick a place or share an address and I'll post it."
+            ),
         )
-    return (
-        f"I hit a snag posting {name} just now — give it another try in a moment "
-        "and I'll get it up."
+    return compose_reply(
+        goal=(
+            "Posting the host's event just failed for a temporary reason. Own the "
+            "hiccup honestly and ask them to try again in a moment — never fake "
+            "success."
+        ),
+        facts=[f"The event: {name}"],
+        fallback=(
+            f"I hit a snag posting {name} just now — give it another try in a moment "
+            "and I'll get it up."
+        ),
     )
 
 
@@ -293,7 +318,7 @@ def _when_suggestions() -> list[str]:
 _AFTERNOON_SUGGESTIONS = ["12 PM", "1 PM", "2 PM", "3 PM"]
 _MORNING_SUGGESTIONS = ["8 AM", "9 AM", "10 AM", "11 AM"]
 _EVENING_SUGGESTIONS = ["5 PM", "6 PM", "7 PM"]
-_PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere on the block"]
+_PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere nearby"]
 # Sentinel suggestion — the FE swaps this chip for a Google place-search field.
 _SEARCH_PLACE_OPTION = "🔍 Search a place"
 
@@ -307,6 +332,9 @@ _GENERIC_PLACES = {
     "the park", "park", "the playground", "playground", "the pool", "the clubhouse",
     "the community center", "community center", "the courtyard", "the lobby",
     "the block", "on the block", "somewhere on the block", "my block", "the green",
+    # The chip label was lexicon-scrubbed to "Somewhere nearby" (chips post their label
+    # back) — accept it alongside the old phrasing, never instead of it.
+    "somewhere nearby", "nearby",
 }
 
 
@@ -432,7 +460,7 @@ def _host_fallback_nudge(need: list[str]) -> str:
     """Deterministic safety net ONLY for when the LLM host-turn brain is unavailable — never the
     primary path. Kept minimal so a degraded turn still moves forward instead of dead-ending."""
     if not need:
-        return "That's everything — tap **Looks good** and I'll drop it on your block."
+        return "That's everything — tap **Looks good** and I'll post it for your neighbors."
     return f"Just need {' · '.join(need)} — tell me and I'll add it, or fill it in below."
 
 
@@ -738,7 +766,7 @@ def _inject_event_quick_replies(
 
 def _event_published_reply(reply: str, draft: dict[str, Any]) -> str:
     title = str((draft or {}).get("title") or "your event").strip() or "your event"
-    note = f"🎉 Done — **{title}** is live on your block. Neighbors who match can RSVP now."
+    note = f"🎉 Done — **{title}** is live in your area. Neighbors who match can RSVP now."
     base = str(reply or "").strip()
     # The orchestrator wrote `base` without knowing we'd publish this turn. If it's
     # still asking for a detail ("…where will the jog start?"), keeping it contradicts
@@ -1717,9 +1745,18 @@ def run_lana_unified_pipeline(
                 ed["suggestions"] = []
                 if blockers_done:
                     turn_ctx["host_stage"] = "review"
-                    reply = (
-                        f"Here's your meet — **{_title}**. Take a look: tap **Looks good** "
-                        "to set it up, or **Let me tweak** to change anything."
+                    reply = compose_reply(
+                        goal=(
+                            "The host's meet is drafted and shown on a review card. "
+                            "Present it and tell them to tap **Looks good** to set it "
+                            "up, or **Let me tweak** to change anything (mention both "
+                            "buttons by those exact names)."
+                        ),
+                        facts=[f"The drafted meet's name: {_title}"],
+                        fallback=(
+                            f"Here's your meet — **{_title}**. Take a look: tap **Looks good** "
+                            "to set it up, or **Let me tweak** to change anything."
+                        ),
                     )
                 else:
                     _ensure_setup_config(
@@ -1727,9 +1764,18 @@ def run_lana_unified_pipeline(
                     )
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
-                    reply = (
-                        "Let's set it up! Add a name, a date & time, and a place below — or "
-                        "just tell me here and I'll fill them in."
+                    reply = compose_reply(
+                        goal=(
+                            "The host is starting to set up a meet and a setup card is "
+                            "shown below your message. Invite them to add a name, a "
+                            "date & time, and a place in the card below — or to just "
+                            "tell you here so you fill them in."
+                        ),
+                        fallback=(
+                            "Let's set it up! Add a name, a date & time, and a place below — or "
+                            "just tell me here and I'll fill them in."
+                        ),
+                        cache=True,
                     )
             elif stage == "review":
                 if _is_host_confirm(user_message) or _is_host_drop(user_message):
@@ -1739,18 +1785,42 @@ def run_lana_unified_pipeline(
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
-                    reply = (
-                        "Quick set-up — set capacity, sharing, approval, and what to "
-                        "bring, then drop it on your block."
+                    reply = compose_reply(
+                        goal=(
+                            "The host approved their meet's review and a quick-setup "
+                            "card is shown below. Tell them to set capacity, sharing, "
+                            "approval, and what to bring there, then drop the meet for "
+                            "their neighbors."
+                        ),
+                        fallback=(
+                            "Quick set-up — set capacity, sharing, approval, and what to "
+                            "bring, then drop it for your neighbors."
+                        ),
+                        cache=True,
                     )
                 else:
                     # A free-text edit was already merged into the draft above; stay in review.
                     turn_ctx["host_stage"] = "review"
                     ed["suggestions"] = []
                     reply = (
-                        f"Sure — tell me what to change about **{_title}**."
+                        compose_reply(
+                            goal=(
+                                "The host asked to tweak their drafted meet. Invite them "
+                                "to say what to change about it."
+                            ),
+                            facts=[f"The meet's name: {_title}"],
+                            fallback=f"Sure — tell me what to change about **{_title}**.",
+                        )
                         if _is_host_tweak(user_message)
-                        else f"Updated **{_title}** — does this look right?"
+                        else compose_reply(
+                            goal=(
+                                "You just applied the host's edit to their drafted meet "
+                                "(the updated card is shown). Confirm the update and ask "
+                                "if it looks right now."
+                            ),
+                            facts=[f"The meet's name: {_title}"],
+                            fallback=f"Updated **{_title}** — does this look right?",
+                        )
                     )
             elif stage == "setup":
                 if (_is_host_confirm(user_message) or _is_host_drop(user_message)) and blockers_done:
@@ -1770,8 +1840,17 @@ def run_lana_unified_pipeline(
                             ed["description"] = _sugg["description"]
                     turn_ctx["host_stage"] = "confirm"
                     ed["suggestions"] = []
-                    reply = (
-                        f"It's all set — **{_title}**. One last look, then drop it on the block."
+                    reply = compose_reply(
+                        goal=(
+                            "The host finished their meet's setup and the final confirm "
+                            "card is shown. Tell them it's all set — one last look, then "
+                            "they can drop it for their neighbors."
+                        ),
+                        facts=[f"The meet's name: {_title}"],
+                        fallback=(
+                            f"It's all set — **{_title}**. One last look, then drop it "
+                            "for your neighbors."
+                        ),
                     )
                 elif _is_host_confirm(user_message) or _is_host_drop(user_message):
                     # Carousel submitted but a blocker is still missing — hold in setup and
@@ -1779,7 +1858,15 @@ def run_lana_unified_pipeline(
                     need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
-                    reply = "I just need " + " · ".join(need) + " to post it."
+                    reply = compose_reply(
+                        goal=(
+                            "The host tried to post their meet but a required detail is "
+                            "still missing. Tell them exactly which detail(s) you still "
+                            "need before it can post — only the ones in the facts."
+                        ),
+                        facts=[f"Still missing: {', '.join(need)}"],
+                        fallback="I just need " + " · ".join(need) + " to post it.",
+                    )
                 elif _norm_cta(user_message) in ("continue setting up", "continue setup"):
                     # The FE "Continue setting up" button — a deterministic tap that brings the
                     # setup carousel back (host_aside stays off so the card shows, not an aside).
@@ -1826,14 +1913,31 @@ def run_lana_unified_pipeline(
                     turn_ctx["host_publish_pending"] = True
                     if not session_ctx.get("host_publish_pending"):
                         turn_ctx["routing_phase"] = "await_signup_phone"
-                        reply = (
-                            f"Perfect — **{_title or 'your event'}** is all set! "
-                            "To post it I just need to verify your email — what's your email?"
+                        reply = compose_reply(
+                            goal=(
+                                "The guest host's meet is fully set, but posting it "
+                                "needs a verified email. Celebrate that it's ready, "
+                                "then ask for their email so you can verify and post "
+                                "it."
+                            ),
+                            facts=[f"The meet's name: {_title or 'your event'}"],
+                            fallback=(
+                                f"Perfect — **{_title or 'your event'}** is all set! "
+                                "To post it I just need to verify your email — what's your email?"
+                            ),
                         )
                     else:
-                        reply = (
-                            "Finishing verification — send one more message and I'll "
-                            f"post **{_title or 'your event'}** right away."
+                        reply = compose_reply(
+                            goal=(
+                                "The host is mid email-verification with their finished "
+                                "meet waiting. Tell them to send one more message once "
+                                "verified and you'll post it right away."
+                            ),
+                            facts=[f"The meet's name: {_title or 'your event'}"],
+                            fallback=(
+                                "Finishing verification — send one more message and I'll "
+                                f"post **{_title or 'your event'}** right away."
+                            ),
                         )
                 elif _is_host_drop(user_message) or _is_host_confirm(user_message):
                     event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
@@ -1868,14 +1972,32 @@ def run_lana_unified_pipeline(
                             turn_ctx["host_publish_pending"] = True
                             if not session_ctx.get("host_publish_pending"):
                                 turn_ctx["routing_phase"] = "await_signup_phone"
-                                reply = (
-                                    f"Perfect — **{_title or 'your event'}** is all set! "
-                                    "To post it I just need to verify your email — what's your email?"
+                                reply = compose_reply(
+                                    goal=(
+                                        "The guest host's meet is fully set, but "
+                                        "posting it needs a verified email. Celebrate "
+                                        "that it's ready, then ask for their email so "
+                                        "you can verify and post it."
+                                    ),
+                                    facts=[f"The meet's name: {_title or 'your event'}"],
+                                    fallback=(
+                                        f"Perfect — **{_title or 'your event'}** is all set! "
+                                        "To post it I just need to verify your email — what's your email?"
+                                    ),
                                 )
                             else:
-                                reply = (
-                                    "Finishing verification — send one more message and I'll "
-                                    f"post **{_title or 'your event'}** right away."
+                                reply = compose_reply(
+                                    goal=(
+                                        "The host is mid email-verification with their "
+                                        "finished meet waiting. Tell them to send one "
+                                        "more message once verified and you'll post it "
+                                        "right away."
+                                    ),
+                                    facts=[f"The meet's name: {_title or 'your event'}"],
+                                    fallback=(
+                                        "Finishing verification — send one more message and I'll "
+                                        f"post **{_title or 'your event'}** right away."
+                                    ),
                                 )
                         else:
                             if "location" in detail or "venue" in detail:

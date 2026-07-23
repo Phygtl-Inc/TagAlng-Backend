@@ -17,6 +17,8 @@ import json
 import re
 from typing import Any
 
+from app.reply_compose import compose_reply
+
 _TRAIT_PROMPT = "What makes them great?"
 _CATEGORY_SUGGESTIONS = ["Doctor / clinic", "Restaurant", "Park / playground", "Home service"]
 _MAX_ENRICH = 2
@@ -310,12 +312,27 @@ def run_tip_share_turn(
         draft["chips"] = _build_chips(draft)
         session_ctx["tip_draft"] = draft
         session_ctx["tip_listed_now"] = True
+        summary = _summary(draft)
         tail = (
             f" {matches} neighbor{'s' if matches != 1 else ''} asking for this just got it."
             if matches
             else " I'll pass it on when a neighbor asks for one."
         )
-        return f"🎉 Done — **{_summary(draft)}** is on your block.{tail}"
+        facts = [f"The tip just posted: {summary}"]
+        if matches:
+            facts.append(
+                f"{matches} neighbor{'s' if matches != 1 else ''} asking for this just got it"
+            )
+        else:
+            facts.append("Lana will pass the tip on when a neighbor asks for one")
+        return compose_reply(
+            goal=(
+                "Confirm the user's tip was just posted and is now out to nearby neighbors — "
+                "brief, warm celebration."
+            ),
+            facts=facts,
+            fallback=f"🎉 Done — **{summary}** is posted for your neighbors.{tail}",
+        )
 
     # ── Correction: chip tap "fix:<field>" → clear + re-ask that field ──
     fix = re.match(r"\s*fix:(\w+)\s*$", msg)
@@ -408,7 +425,16 @@ def run_tip_share_turn(
     session_ctx["tip_share_active"] = True
     session_ctx["tip_ready"] = True
     session_ctx["routing_phase"] = "listening"
-    return (
-        f"Got it — **{_summary(draft)}**. I'll pass it on when a neighbor asks. "
-        "**Pass the tip along** to post it to your block, or send it to a mom you know."
+    summary = _summary(draft)
+    return compose_reply(
+        goal=(
+            "The tip draft is complete and shown as a card. Tell the user you'll pass it on when "
+            "a neighbor asks, and prompt them to tap **Pass the tip along** (keep that button "
+            "name verbatim, bolded) to post it, or send it to a neighbor they know."
+        ),
+        facts=[f"Tip ready: {summary}"],
+        fallback=(
+            f"Got it — **{summary}**. I'll pass it on when a neighbor asks. "
+            "**Pass the tip along** to post it for your neighbors, or send it to a neighbor you know."
+        ),
     )

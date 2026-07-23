@@ -222,7 +222,7 @@ def test_surface_counts_unscored_as_block_neighbors() -> None:
     surface = ctx["discovery_surface"]
     assert surface["strong_count"] == 1
     assert surface["weak_count"] == 0
-    assert "on your block" in surface["status_label"]
+    assert "near you" in surface["status_label"]
     assert "AK" not in surface["ranked_summary"]
     assert "?" not in surface["ranked_summary"]
     assert surface["weak_peer"] is None
@@ -243,4 +243,4 @@ def test_surface_all_unscored_has_no_ranked_summary() -> None:
     )
     assert surface is not None
     assert surface["ranked_summary"] is None
-    assert "on your block" in surface["status_label"]
+    assert "near you" in surface["status_label"]

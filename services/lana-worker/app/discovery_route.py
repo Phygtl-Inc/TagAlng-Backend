@@ -23,6 +23,7 @@ from app.db import (
 )
 from app.orchestrator.guardrails import utterance_is_unsafe
 from app.out_of_scope_reply import author_out_of_scope_reply
+from app.reply_compose import compose_reply
 from app.claim_search import (
     attr_display_filter,
     heritage_terms_in_text,
@@ -323,7 +324,7 @@ def fetch_neighbors_on_block_by_nickname(
                     "nickname": nick,
                     "avatar_url": None,
                     "similarity_score": None,
-                    "matching_peer_label": "on your block",
+                    "matching_peer_label": "near you",
                     "matching_peer_concept": None,
                     "has_exact_concept_match": False,
                     "preview": False,
@@ -621,8 +622,17 @@ def _try_neighbor_intro_turn(
                     peers,
                 )
             return (
-                "I'm still loading named matches for your block — say your first name, "
-                "or tell me which neighbor (e.g. first one or Neighbor 1).",
+                compose_reply(
+                    goal=(
+                        "The user wants an intro but named peer matches are still "
+                        "loading. Ask them to say their first name, or to pick a "
+                        "neighbor by position (e.g. 'first one' or 'Neighbor 1')."
+                    ),
+                    fallback=(
+                        "I'm still loading named matches near you — say your first name, "
+                        "or tell me which neighbor (e.g. first one or Neighbor 1)."
+                    ),
+                ),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_PREVIEW,
@@ -692,14 +702,14 @@ def _try_neighbor_intro_turn(
                 _give = (
                     f"{_reason} — take a peek when you have a sec."
                     if _reason
-                    else "A neighbor on your block wants to connect — take a peek."
+                    else "A neighbor near you wants to connect — take a peek."
                 )
                 _notify_user(
                     _cand,
                     title="A neighbor wants to connect 🤝",
                     body=_give,
                     url="/chat",
-                    email_subject="A neighbor on your block wants to connect",
+                    email_subject="A neighbor near you wants to connect",
                     email_html=_email_html(
                         "A neighbor wants to connect",
                         _give,
@@ -1399,9 +1409,21 @@ def _try_layer1_intent_turn(
                 ]
                 known = [n for n in known if n]
                 hint = f" Identity matches: {', '.join(known[:5])}." if known else ""
-                reply = (
-                    f"I don't see anyone named {named.title()} on your block.{hint} "
-                    "They might use a different display name or be on another block."
+                reply = compose_reply(
+                    goal=(
+                        "Tell the user gently that nobody by the name they gave shows "
+                        "up nearby, mention the known display names if any were given "
+                        "as facts, and note the person might use a different display "
+                        "name or live in a different area."
+                    ),
+                    facts=[
+                        f"The user asked about someone named {named.title()}",
+                        f"Known display names nearby: {hint.strip() or '(none)'}",
+                    ],
+                    fallback=(
+                        f"I don't see anyone named {named.title()} near you.{hint} "
+                        "They might use a different display name or be in another area."
+                    ),
                 )
             else:
                 reply = "Which neighbor — say their name or a number from the list?"
@@ -1525,7 +1547,14 @@ def _try_layer1_intent_turn(
     if linear == "discovery.block_log":
         if not phone_verified:
             return (
-                "Verify your email first — then I can show your block log.",
+                compose_reply(
+                    goal=(
+                        "The user asked to see the neighborhood log but must verify "
+                        "their email first. Ask them warmly to verify, then you can "
+                        "show what neighbors are asking for and offering."
+                    ),
+                    fallback="Verify your email first — then I can show your neighborhood log.",
+                ),
                 _routing_ctx(
                     ctx_base,
                     phase=phase or "listening",
@@ -1545,7 +1574,18 @@ def _try_layer1_intent_turn(
                 or "25006" in detail
             ):
                 return (
-                    "Your block log isn't available yet — we're still rolling it out on this environment.",
+                    compose_reply(
+                        goal=(
+                            "The neighborhood log feature isn't available in this "
+                            "environment yet. Say so warmly, point forward (it's "
+                            "coming), never a bare error."
+                        ),
+                        fallback=(
+                            "Your neighborhood log isn't available quite yet — "
+                            "I'll have it for you soon."
+                        ),
+                        cache=True,
+                    ),
                     _routing_ctx(
                         ctx_base,
                         phase=phase or "listening",
@@ -1624,7 +1664,18 @@ def _try_layer1_intent_turn(
                     )
         if not block_id and not phone_verified:
             return (
-                "What ZIP are you in? Once I know your block I can summarize what's happening nearby.",
+                compose_reply(
+                    goal=(
+                        "The user wants a summary of what's happening nearby but "
+                        "hasn't shared a ZIP yet. Ask for their 5-digit ZIP so you "
+                        "can look at their area."
+                    ),
+                    user_message=msg,
+                    fallback=(
+                        "What ZIP are you in? Once I know your area I can "
+                        "summarize what's happening nearby."
+                    ),
+                ),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_ZIP,
@@ -1635,7 +1686,7 @@ def _try_layer1_intent_turn(
             )
         summary = fetch_block_summary(user_jwt, block_id=block_id)
         reply = format_block_summary_reply(
-            block_name=str(summary.get("block_name") or "your block"),
+            block_name=str(summary.get("block_name") or "your area"),
             neighbor_count=int(summary.get("neighbor_count") or 0),
             match_count=int(summary.get("match_count") or 0),
             block_state=summary.get("block_state"),
@@ -1644,7 +1695,7 @@ def _try_layer1_intent_turn(
         )
         sig_n = int(summary.get("active_signal_count") or 0)
         if sig_n > 0 and not is_block_activity_browse(msg):
-            reply += f" {sig_n} neighbor ask{'s' if sig_n != 1 else ''} or offer{'s' if sig_n != 1 else ''} active on your block."
+            reply += f" {sig_n} neighbor ask{'s' if sig_n != 1 else ''} or offer{'s' if sig_n != 1 else ''} active near you."
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or PHASE_PREVIEW,
@@ -1665,7 +1716,18 @@ def _try_layer1_intent_turn(
         if is_profile_acknowledgment(msg):
             ctx["last_routing"] = _discovery_routing_stub(phase or PHASE_PREVIEW, "profile_ack")
             return (
-                "Perfect — I've got you. Want neighbors like you, to post a swap, or your block log?",
+                compose_reply(
+                    goal=(
+                        "The user just confirmed their profile is complete. "
+                        "Acknowledge warmly and offer the three next steps: meet "
+                        "neighbors like them, post a swap, or see the neighborhood log."
+                    ),
+                    fallback=(
+                        "Perfect — I've got you. Want neighbors like you, to post "
+                        "a swap, or your neighborhood log?"
+                    ),
+                    cache=True,
+                ),
                 ctx,
                 ctx["last_routing"],
                 [],
@@ -1853,9 +1915,17 @@ def save_pending_signal_ask(
         session_ctx["signal_pending"] = None
         return None
     if not block_id:
-        return (
-            f"Welcome back! I still have your ask — {detail[:120]}. "
-            "What ZIP are you in so I can post it to your block?"
+        return compose_reply(
+            goal=(
+                "The user just came back and you still have their saved ask, but "
+                "you need their 5-digit ZIP before you can post it for neighbors. "
+                "Welcome them back, remind them of the ask, and ask for the ZIP."
+            ),
+            facts=[f"Their pending ask: {detail[:120]}"],
+            fallback=(
+                f"Welcome back! I still have your ask — {detail[:120]}. "
+                "What ZIP are you in so I can post it for neighbors nearby?"
+            ),
         )
     session_ctx["signal_pending"] = None
     try:
@@ -1870,9 +1940,17 @@ def save_pending_signal_ask(
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("save_pending_signal_ask_failed")
         return None
-    return (
-        f"Welcome back! ✅ I've posted your ask to your block — {detail[:120]} — "
-        "and I'll ping you the moment a neighbor responds."
+    return compose_reply(
+        goal=(
+            "The user just came back and you successfully posted their saved ask "
+            "for neighbors nearby. Welcome them back, confirm exactly what was "
+            "posted, and promise to ping them the moment a neighbor responds."
+        ),
+        facts=[f"The ask you just posted: {detail[:120]}"],
+        fallback=(
+            f"Welcome back! ✅ I've posted your ask for neighbors nearby — {detail[:120]} — "
+            "and I'll ping you the moment a neighbor responds."
+        ),
     )
 
 
@@ -1883,7 +1961,7 @@ def _compose_verify_gate_ask(user_msg: str) -> str:
     request ("can you recommend me a babysitter" → demand for email with zero empathy).
     Static friendly fallback when no LLM is configured."""
     fallback = (
-        "Happy to help with that! To save your ask and share it with your block I just "
+        "Happy to help with that! To save your ask and share it with neighbors nearby I just "
         "need to verify you first — what's your email?"
     )
     try:
@@ -1895,7 +1973,7 @@ def _compose_verify_gate_ask(user_msg: str) -> str:
             model=synthesizer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. The user asked for something "
-                "you CAN do — you'll save their ask to their neighborhood block and ping "
+                "you CAN do — you'll save their ask for neighbors nearby and ping "
                 "them when a neighbor responds — but they aren't verified yet, and you need "
                 "their email before you can post anything. Write ONE short chat message "
                 "(max 2 sentences): first acknowledge specifically what they asked for and "
@@ -2084,7 +2162,17 @@ def _try_signal_lane_turn(
                 ctx_base["preview_block_id"] = block_id
         if not resolve_block_id(ctx_base, home_block_id):
             return (
-                "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+                compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before their ask can be "
+                    "saved for neighbors nearby. Ask for it warmly."
+                ),
+                fallback=(
+                    "What ZIP are you in? Once I know your area I can save "
+                    "that for neighbors nearby."
+                ),
+                cache=True,
+            ),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_ZIP,
@@ -2234,7 +2322,7 @@ def _try_peer_trait_question_turn(
         else:
             reply = (
                 f"I don't see that heritage on {who}'s preview ({label}). "
-                "Want me to search your block for Brazilian moms?"
+                "Want me to search nearby for that?"
             )
     elif asked_mom:
         if re.search(r"\b(?:mom|mother|mama|mums?)\b", label, re.I):
@@ -2563,12 +2651,12 @@ def _tip_seek_fallback_reply(
         if reason_widen:
             return (
                 f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}). "
-                "Your ask is still posted to the block, so I'll ping you the moment a neighbor "
+                "Your ask is still posted for neighbors, so I'll ping you the moment a neighbor "
                 "recommends one."
             )
         return (
             f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
-            f"{_TIP_VOUCH}). I've also posted your ask to the block — I'll ping you the moment "
+            f"{_TIP_VOUCH}). I've also posted your ask for neighbors — I'll ping you the moment "
             "a neighbor recommends one."
         )
 
@@ -2654,7 +2742,7 @@ def _tip_seek_fallback_reply(
         reframe = chosen.get("reframe") or f"Focused on {chosen.get('label', 'a good fit').lower()} spots."
         return (
             f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}), "
-            "and I've posted your ask to the block — I'll ping you the moment a neighbor "
+            "and I've posted your ask for neighbors — I'll ping you the moment a neighbor "
             "recommends one. Want me to widen the search?"
         )
 
@@ -2670,7 +2758,7 @@ def _tip_seek_fallback_reply(
     label = str(chosen.get("label") or "").strip().lower() or "matching"
     return (
         f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
-        f"({_TIP_VOUCH}). Your ask is posted to the block — I'll ping you the moment a "
+        f"({_TIP_VOUCH}). Your ask is posted for neighbors — I'll ping you the moment a "
         "neighbor recommends one."
     )
 
@@ -2709,7 +2797,15 @@ def _try_save_signal_turn(
         return None
     if not detail:
         return (
-            "Tell me a bit more — what are you looking for or offering on your block?",
+            compose_reply(
+                goal=(
+                    "The user wants to post an ask or offer for neighbors but "
+                    "hasn't said what it is. Ask for a bit more detail — what "
+                    "they're looking for or offering."
+                ),
+                user_message=msg,
+                fallback="Tell me a bit more — what are you looking for or offering?",
+            ),
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
             _discovery_routing_stub(phase or "listening", "save_signal_need_detail"),
             [],
@@ -2730,7 +2826,17 @@ def _try_save_signal_turn(
     block_id = resolve_block_id(session_ctx, home_block_id)
     if not block_id:
         return (
-            "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+            compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before their ask can be "
+                    "saved for neighbors nearby. Ask for it warmly."
+                ),
+                fallback=(
+                    "What ZIP are you in? Once I know your area I can save "
+                    "that for neighbors nearby."
+                ),
+                cache=True,
+            ),
             _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
             _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
             [],
@@ -2749,7 +2855,17 @@ def _try_save_signal_turn(
         detail_err = str(exc.detail or "").lower()
         if "block_required" in detail_err:
             return (
-                "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+                compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before their ask can be "
+                    "saved for neighbors nearby. Ask for it warmly."
+                ),
+                fallback=(
+                    "What ZIP are you in? Once I know your area I can save "
+                    "that for neighbors nearby."
+                ),
+                cache=True,
+            ),
                 _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
                 _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
                 [],
@@ -2877,6 +2993,7 @@ def _history_recent_block_log(history: list[dict[str, Any]] | None) -> bool:
             phrase in text
             for phrase in (
                 "block log",
+                "neighborhood log",
                 "neighbor match",
                 "active match",
                 "i've noted you're looking",
@@ -3146,7 +3263,7 @@ def _try_block_log_intro_turn(
 
     peer = block_log_peer_from_entry(normalize_block_log_row(row))
     summary = block_log_match_summary(row)
-    match_reason = summary or "Swap match on your block."
+    match_reason = summary or "Swap match near you."
     if summary and not summary.lower().startswith("they"):
         match_reason = f"Swap match — {summary}"
 
@@ -3278,9 +3395,21 @@ def _try_block_log_nudge_turn(
     stamp_block_log_ctx(ctx, swap_entries)
     _clear_peer_surface(ctx)
     bit = f" — {summary}" if summary else ""
-    reply = (
-        f"I nudged {nick}{bit}. If they're interested, they'll get a notification "
-        "and can reply in Lana. Say show my block log to see all swap matches."
+    reply = compose_reply(
+        goal=(
+            "You just nudged a neighbor about a swap on the user's behalf. "
+            "Confirm it warmly: the neighbor gets a notification and can reply "
+            "here, and the user can say 'show my neighborhood log' to see all "
+            "their swap matches."
+        ),
+        facts=[
+            f"The neighbor you nudged: {nick}",
+            f"Why they matched: {bit.strip(' —') or '(no summary)'}",
+        ],
+        fallback=(
+            f"I nudged {nick}{bit}. If they're interested, they'll get a notification "
+            "and can reply in Lana. Say show my neighborhood log to see all swap matches."
+        ),
     )
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "block_log_nudge")
     return reply, ctx, ctx["last_routing"], []
@@ -3363,9 +3492,17 @@ def _try_meta_chat_turn(
     )
     _clear_peer_surface(ctx)
     ctx.pop("activity_previews", None)
-    reply = (
-        "I'm Lana — your block neighbor assistant. I can help you find people, "
-        "borrow or swap gear, get local tips, or plan meetups. What would you like?"
+    reply = compose_reply(
+        goal=(
+            "Introduce yourself: you're Lana, the user's local concierge. You "
+            "can help them find people nearby, borrow or swap gear, get local "
+            "tips, or plan meetups. Ask what they'd like."
+        ),
+        fallback=(
+            "I'm Lana — your local concierge. I can help you find people, "
+            "borrow or swap gear, get local tips, or plan meetups. What would you like?"
+        ),
+        cache=True,
     )
     ctx["last_routing"] = _discovery_routing_stub(phase or PHASE_PREVIEW, "meta_chat")
     return reply, ctx, ctx["last_routing"], []
@@ -3419,7 +3556,14 @@ def _try_show_block_log_turn(
     ctx_base = dict(session_ctx)
     if not phone_verified:
         return (
-            "Verify your email first — then I can show your block log.",
+            compose_reply(
+                goal=(
+                    "The user asked to see the neighborhood log but must verify "
+                    "their email first. Ask them warmly to verify, then you can "
+                    "show what neighbors are asking for and offering."
+                ),
+                fallback="Verify your email first — then I can show your neighborhood log.",
+            ),
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
             _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
             [],
@@ -3436,7 +3580,18 @@ def _try_show_block_log_turn(
             or "25006" in detail
         ):
             return (
-                "Your block log isn't available yet — we're still rolling it out on this environment.",
+                compose_reply(
+                    goal=(
+                        "The neighborhood log feature isn't available in this "
+                        "environment yet. Say so warmly, point forward (it's "
+                        "coming), never a bare error."
+                    ),
+                    fallback=(
+                        "Your neighborhood log isn't available quite yet — "
+                        "I'll have it for you soon."
+                    ),
+                    cache=True,
+                ),
                 _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
                 _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
                 [],
@@ -3698,6 +3853,28 @@ def _declines_to_answer(msg: str) -> bool:
     return bool(_DECLINE_INPUT_RE.search(str(msg or "").strip())) or is_signal_cancel(msg)
 
 
+def _zip_ask_declined(slots: dict[str, Any] | None, msg: str) -> bool:
+    """Should the need-ZIP gate off-ramp instead of re-asking?
+
+    AI-authoritative: the classifier's declined_slot='zip' verdict fires the
+    off-ramp regardless of goal — it reads "no ZIP right now, but still find me
+    people" by meaning, where goal stays peers. The decline regex is the
+    fallback-only backstop and stays suppressed while the AI reports an active
+    discovery goal ("find me people, stop asking questions" is frustration,
+    not a refusal to proceed)."""
+    if str((slots or {}).get("declined_slot") or "") == "zip":
+        return True
+    goal = str((slots or {}).get("goal") or "")
+    return _declines_to_answer(msg) and goal not in (
+        "peers",
+        "activities",
+        "both",
+        "continue",
+        "save_signal",
+        "verify",
+    )
+
+
 def _host_via_orchestrator() -> bool:
     """Hosting a full event runs through the orchestrator (OpenAI) in-chat, not the
     lightweight host_meet signal. Falls back to the signal lane when orchestrator off."""
@@ -3713,7 +3890,7 @@ def _host_via_orchestrator() -> bool:
 # description ("weekday playground meet with kids") is never mistaken for a pivot.
 _HOST_PIVOT_RE = re.compile(
     r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow my (?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b",
+    r"\bshow my (?:block log|neighborhood log|intros)\b|\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b",
     re.I,
 )
 # Backstop so a verified user can never be trapped in host mode.
@@ -3917,7 +4094,7 @@ def invalid_zip_hint(text: str) -> str | None:
     if len(digits) != 5:
         return (
             "I need a 5-digit US ZIP code only (e.g. 32827), not a longer number. "
-            "Which ZIP is your block?"
+            "Which ZIP are you in?"
         )
     return None
 
@@ -4488,7 +4665,7 @@ def fetch_preview_peers_on_block(
                     "nickname": nick if include_peer_ids else None,
                     "avatar_url": None,
                     "similarity_score": None,
-                    "matching_peer_label": "On your block",
+                    "matching_peer_label": "Near you",
                     "matching_peer_concept": None,
                     "has_exact_concept_match": False,
                     "preview": not include_peer_ids,
@@ -4610,7 +4787,7 @@ def format_activities_message(
 ) -> str:
     from app.i18n import t
 
-    where = block_label or "your block"
+    where = block_label or "your area"
     if not events:
         return t("discovery.activities_empty", lang, where=where)
     # The FE renders these same events as a card list (activity_previews) right under this
@@ -4683,7 +4860,7 @@ def format_preview_message(
 ) -> str:
     from app.i18n import t
 
-    where = block_label or "your block"
+    where = block_label or "your area"
     if not peers:
         return t("discovery.peers_empty", lang, where=where)
     if len(peers) == 1:
@@ -4930,7 +5107,7 @@ def _ask_browse_or_meet(
     ctx["suggestions"] = opts
     ctx["clarify_options"] = opts
     q = (question or "").strip() or (
-        "Happy to help! Want me to show what's already happening on your block, or set you "
+        "Happy to help! Want me to show what's already happening near you, or set you "
         "up with a meet so I can match you with neighbors who want the same?"
     )
     return (
@@ -5029,7 +5206,7 @@ def _acknowledge_out_of_scope_close(
     reply = author_out_of_scope_reply(
         mode="close", user_msg=user_msg, subject=subject,
     ) or (
-        "Totally understand — no worries at all! I'm right here on your block whenever you "
+        "Totally understand — no worries at all! I'm right here whenever you "
         "want to meet neighbors or see what's happening nearby."
     )
     return (
@@ -5065,13 +5242,13 @@ def _ask_out_of_scope(
         thing = (detail or "").strip()
         if thing:
             q = (
-                f"Ooh, {thing}! Do you want to get neighbors together for that on your block, "
+                f"Ooh, {thing}! Do you want to get neighbors together for that nearby, "
                 f"or are you asking me to order/handle it for you?"
             )
         else:
             q = (
-                "Just so I get this right — do you want to get neighbors together for that on "
-                "your block, or are you asking me to handle it for you directly?"
+                "Just so I get this right — do you want to get neighbors together for that "
+                "nearby, or are you asking me to handle it for you directly?"
             )
     ctx["suggestions"] = opts or ["Get neighbors together", "Just handle it for me"]
     ctx["clarify_options"] = ctx["suggestions"]
@@ -5143,7 +5320,7 @@ def _decline_out_of_scope(
         mode="decline", user_msg=msg, subject=what,
     ) or (
         f"Ah, {what} isn't something I can do yet — I'm here to connect you with neighbors "
-        "on your block: finding people, local activities, swapping things, and sharing tips. "
+        "near you: finding people, local activities, swapping things, and sharing tips. "
         "I've noted your request though, and we'll let you know if we add it! "
         "In the meantime, want to meet some neighbors or see what's happening nearby?"
     )
@@ -5159,7 +5336,7 @@ def _decline_out_of_scope(
 _MEDICAL_SAFETY_FALLBACK = (
     "I'm not able to give medical advice, and for something like this it's best to contact a "
     "doctor or a nurse line right away — if it's severe or an emergency, call 911. What I can "
-    "do is find a doctor or pediatrician recommendation from your block — want me to?"
+    "do is find a doctor or pediatrician recommendation from neighbors nearby — want me to?"
 )
 
 
@@ -5534,8 +5711,18 @@ def handle_discovery_turn(
             # back-out gets an explicit acknowledgement, not a silent topic switch.
             if not pivoted_away:
                 return (
-                    "No worries — we don't have to set up an event. Want to find neighbors, "
-                    "see what's happening on your block, or something else?",
+                    compose_reply(
+                        goal=(
+                            "The user backed out of setting up an event. Acknowledge "
+                            "warmly (no pressure), and offer next steps: find "
+                            "neighbors, see what's happening nearby, or something else."
+                        ),
+                        fallback=(
+                            "No worries — we don't have to set up an event. Want to find neighbors, "
+                            "see what's happening nearby, or something else?"
+                        ),
+                        cache=True,
+                    ),
                     _routing_ctx(session_ctx, phase="listening", active_intent="none"),
                     _discovery_routing_stub("listening"),
                     [],
@@ -5603,9 +5790,18 @@ def handle_discovery_turn(
                         block_id=block_id,
                         zip_code=str(session_ctx.get("zip") or "") or None,
                     )
-                    reply = (
-                        "✅ You're verified! I've posted your ask to your block — "
-                        f"{p_detail[:120]} — and I'll ping you the moment a neighbor responds."
+                    reply = compose_reply(
+                        goal=(
+                            "The user just verified their email and you immediately "
+                            "posted their saved ask for neighbors nearby. Celebrate "
+                            "the verification, confirm exactly what was posted, and "
+                            "promise to ping them when a neighbor responds."
+                        ),
+                        facts=[f"The ask you just posted: {p_detail[:120]}"],
+                        fallback=(
+                            "✅ You're verified! I've posted your ask for neighbors nearby — "
+                            f"{p_detail[:120]} — and I'll ping you the moment a neighbor responds."
+                        ),
                     )
                     ctx = _routing_ctx(
                         session_ctx, phase="listening", active_intent=INTENT_SAVE_SIGNAL
@@ -5623,8 +5819,18 @@ def handle_discovery_turn(
                     session_ctx, phase=PHASE_NEED_ZIP, active_intent=INTENT_SAVE_SIGNAL
                 )
                 return (
-                    "You're verified! What ZIP are you in? Once I know your block "
-                    "I'll post your ask to neighbors nearby.",
+                    compose_reply(
+                        goal=(
+                            "The user just verified their email; you still need their "
+                            "5-digit ZIP before their saved ask can be posted for "
+                            "neighbors nearby. Celebrate briefly and ask for the ZIP."
+                        ),
+                        fallback=(
+                            "You're verified! What ZIP are you in? Once I know your area "
+                            "I'll post your ask to neighbors nearby."
+                        ),
+                        cache=True,
+                    ),
                     ctx,
                     _discovery_routing_stub(PHASE_NEED_ZIP, "signal_pending_need_zip"),
                     [],
@@ -6033,7 +6239,7 @@ def handle_discovery_turn(
             verify_type="email_change",
         )
         reply = (
-            "Perfect — verifying you now. One moment and I'll post your event to the block."
+            "Perfect — verifying you now. One moment and I'll post your event for neighbors."
             if host_publishing
             else (
                 "Perfect — verifying you now. Once you're verified, tell me your first name "
@@ -6581,31 +6787,51 @@ def handle_discovery_turn(
                 _discovery_routing_stub("listening", "zip_out_of_coverage"),
                 [],
             )
-        # Off-ramp: user is declining the ZIP — don't re-prompt the same question forever.
-        # Skip the off-ramp when the AI says they still want discovery (e.g. "find me
-        # people, stop asking questions" is frustration, not a refusal to proceed).
-        _decline_goal = str((slots or {}).get("goal") or "")
-        if _declines_to_answer(msg) and _decline_goal not in (
-            "peers",
-            "activities",
-            "both",
-            "continue",
-            "save_signal",
-            "verify",
-        ):
+        # Off-ramp: user is declining the ZIP — don't re-prompt the same question
+        # forever (see _zip_ask_declined for the AI-signal vs regex-backstop split).
+        if _zip_ask_declined(slots, msg):
             off = _routing_ctx(session_ctx, phase="listening", active_intent="none")
             off["discovery_goal"] = None
             return (
-                "No problem — we can skip that for now. Tell me what you're looking for, "
-                "or share your ZIP whenever you're ready and I'll find your block.",
+                compose_reply(
+                    goal=(
+                        "The user declined to share their ZIP. Respect it — no "
+                        "pressure, and don't ask again. Be honest that you can't "
+                        "see who or what's nearby without a general area, say "
+                        "they can share it whenever they're ready, and invite "
+                        "them to tell you what they're looking for meanwhile."
+                    ),
+                    user_message=msg,
+                    fallback=(
+                        "No problem — we can skip that for now. Tell me what you're looking for, "
+                        "or share your ZIP whenever you're ready and I'll find your area."
+                    ),
+                ),
                 off,
                 _discovery_routing_stub("listening", "zip_declined"),
                 [],
             )
         zip_hint = invalid_zip_hint(msg)
         zip_goal = str(ctx_base.get("discovery_goal") or effective_goal or "peers")
+        # Re-asks never repeat verbatim: once the session is already in need_zip
+        # (Lana asked last turn), the ask is composed against what the user just
+        # said instead of replaying the same canned line — the loop that made
+        # her read as a broken record. First ask stays the canned t() string.
+        _zip_ask = zip_hint or _zip_prompt(zip_goal, _lang)
+        if not zip_hint and str(phase or "") == PHASE_NEED_ZIP:
+            _zip_ask = compose_reply(
+                goal=(
+                    "You already asked for their ZIP last turn and they replied "
+                    "with something else (not a ZIP, not a refusal). Respond to "
+                    "what they actually said first, then explain you need a "
+                    "5-digit US ZIP (e.g. 32827) to look around their area, and "
+                    "ask once more — gently, never robotic."
+                ),
+                user_message=msg,
+                fallback=_zip_ask,
+            )
         return (
-            zip_hint or _zip_prompt(zip_goal, _lang),
+            _zip_ask,
             _routing_ctx(
                 session_ctx,
                 phase=PHASE_NEED_ZIP,
@@ -6646,7 +6872,7 @@ def handle_discovery_turn(
     block_label = str(
         ctx_base.get("preview_block_label")
         or session_ctx.get("preview_block_label")
-        or "your block"
+        or "your area"
     )
 
     if goal == "activities":

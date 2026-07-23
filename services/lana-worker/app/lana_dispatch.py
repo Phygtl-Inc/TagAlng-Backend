@@ -7,13 +7,14 @@ from typing import Any
 from app.discovery_route import handle_discovery_turn
 from app.discovery_slots import discovery_ai_enabled
 from app.guest_login import wants_login as wants_login_intent
+from app.reply_compose import compose_reply
 
 LANA_UNIFIED_OPENING = "How can I help you today?"
 # Guests (not logged in) get a framing line that explains the two things Lana does;
-# signed-in moms go straight to the familiar prompt.
+# signed-in users go straight to the familiar prompt.
 LANA_UNIFIED_OPENING_GUEST = (
     "I help you do two things · find something nearby · "
-    "or share something with nearby moms."
+    "or share something with nearby neighbors."
 )
 # A signed-in mom who hasn't told us her name yet is greeted with the name-ask up front —
 # it's needed anyway, and asking first avoids interrupting a topic mid-chat.
@@ -49,7 +50,18 @@ def lana_unified_opening(
         ctx["upfront_name_attempts"] = 0
         ctx["routing_phase"] = "need_display_name"
         return LANA_UNIFIED_OPENING_NEEDS_NAME, "continue", ctx, ui
-    opening = LANA_UNIFIED_OPENING_GUEST if is_anonymous else LANA_UNIFIED_OPENING
+    if is_anonymous:
+        opening = compose_reply(
+            goal=(
+                "Open the chat for a signed-out guest: one short warm line saying Lana helps "
+                "with two things — finding something nearby, or sharing something with nearby "
+                "neighbors."
+            ),
+            fallback=LANA_UNIFIED_OPENING_GUEST,
+            cache=True,
+        )
+    else:
+        opening = LANA_UNIFIED_OPENING
     return opening, "continue", ctx, ui
 
 
@@ -96,9 +108,17 @@ def lana_unified_turn(
         }
         return reply, "continue", ctx, {"bucket": None, "focus_phrase": None, "highlights": []}, []
 
-    reply = (
-        "I'm here for your block — find neighbors, log in, or tell me about yourself. "
-        "What would you like to do?"
+    reply = compose_reply(
+        goal=(
+            "Gently orient the user: Lana is here for their neighborhood — she can find "
+            "neighbors, log them in (keep the phrase 'log in' verbatim), or learn about them. "
+            "End by asking what they'd like to do."
+        ),
+        fallback=(
+            "I'm here for your neighborhood — find neighbors, log in, or tell me about "
+            "yourself. What would you like to do?"
+        ),
+        cache=True,
     )
     ctx = {
         **session_ctx,

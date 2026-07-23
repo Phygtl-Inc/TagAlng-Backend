@@ -21,18 +21,26 @@ def load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
+def lingo_constitution() -> str:
+    """LANA_LINGO §2/§14.1: the hard word rules every user-facing composer obeys
+    (never "mom"/"block"/"circle" in-app, role/gender-aware address, locked
+    outcome verbs). Appended to every system prompt that authors user copy —
+    extractors and classifiers don't need it."""
+    return load_prompt("lana_lingo_constitution.md")
+
+
 def build_system_prompt() -> str:
     product = load_prompt("tagalng_product.md")
     persona = load_prompt("lana_persona.md")
-    return f"{product}\n\n---\n\n{persona}"
+    return f"{product}\n\n---\n\n{persona}\n\n---\n\n{lingo_constitution()}"
 
 
 def build_event_host_system_prompt() -> str:
-    return load_prompt("lana_event_host.md")
+    return load_prompt("lana_event_host.md") + "\n\n---\n\n" + lingo_constitution()
 
 
 def build_profile_system_prompt() -> str:
-    return load_prompt("lana_profile_intake.md")
+    return load_prompt("lana_profile_intake.md") + "\n\n---\n\n" + lingo_constitution()
 
 
 def format_event_draft_context(ctx: dict[str, Any]) -> str:
@@ -290,9 +298,12 @@ def format_user_context(ctx: dict[str, Any], purpose: str) -> str:
     if not net.get("has_block"):
         lines.append("- Block network: home block not assigned yet")
     else:
-        name = net.get("block_display_name") or ctx.get("home_block_id") or "your block"
+        name = net.get("block_display_name") or ctx.get("home_block_id") or "your area"
         mc = net.get("member_count", 0)
-        lines.append(f"- Block network ({name}): {mc} other member(s) on this block")
+        lines.append(
+            f"- Neighborhood ({name}): {mc} other member(s) nearby"
+            " (backstage unit: block — never say 'block' to the user)"
+        )
         for ev in (net.get("upcoming_events") or [])[:3]:
             title = ev.get("title") or "Event"
             when = ev.get("starts_at") or ""
@@ -324,7 +335,7 @@ def format_user_context(ctx: dict[str, Any], purpose: str) -> str:
                     f"  · {nick}{id_hint}: ~{pct} match via «{lbl}»{exact} · tier={tier}"
                 )
         lines.append(
-            "- Agent rule: you may mention that neighbors or activities exist on the block; "
+            "- Agent rule: you may mention that neighbors or activities exist nearby; "
             "do not invent names or events beyond this list."
         )
 

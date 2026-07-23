@@ -119,10 +119,10 @@ class TestCannedStrings(unittest.TestCase):
         self.assertTrue(t("discovery.zip_unplaceable", "pt"))
 
     def test_en_strings_match_previous_literals(self) -> None:
-        # Behavior-preserving for English sessions (the exact strings tests/QA knew).
+        # Pinned EN literals (post lingo-v2 scrub: user-facing "block" is banned).
         self.assertEqual(
             t("discovery.ask_zip_peers", "en"),
-            "What ZIP code is your block? That helps me find neighbors near you.",
+            "What's the ZIP code for your neighborhood? That helps me find neighbors near you.",
         )
         self.assertEqual(
             t("meet.ask_kind", "en"), "Love it — what kind of meet would help?"
@@ -154,7 +154,7 @@ class TestSynthDirective(unittest.TestCase):
         msg_en, _, _, _, _ = _parse_lana_synth(
             {}, routing={"enforce_notes": ["discovery_need_zip"]}, tool_result=None
         )
-        self.assertEqual(msg_en, "What ZIP code is your block? (e.g. 32827)")
+        self.assertEqual(msg_en, "What's the ZIP code for your neighborhood? (e.g. 32827)")
 
 
 class TestNoSpuriousEventDraft(unittest.TestCase):
@@ -274,7 +274,7 @@ class TestLocalizedFunnelTurns(unittest.TestCase):
         msg = format_activities_message([], "Lake Nona", phone_verified=True)
         self.assertEqual(
             msg,
-            "I don't see open activities on Lake Nona in the next couple weeks yet. "
+            "I don't see open activities around Lake Nona in the next couple weeks yet. "
             "You can host something, or tell me what you're looking for.",
         )
 

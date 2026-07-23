@@ -42,7 +42,7 @@ def _format_shown_peer_preview(session_ctx: dict[str, Any] | None) -> str | None
     if block:
         parts.append(f"Block/ZIP context: {block}")
     parts.append(
-        "Preview labels (heritage, Mom, interests) are what those neighbors shared on the block — "
+        "Preview labels (heritage, Mom, interests) are what those neighbors shared nearby — "
         "use them to answer trait questions (e.g. if label includes Brazilian, say yes). "
         "If labels do not match what the user asked for, say so honestly. "
         "Do NOT claim you cannot see heritage when labels list it. "
@@ -122,7 +122,7 @@ def synthesize_turn(
                 if fast_chat
                 else ""
             )
-            + "You are Lana, block concierge — warm, one line.\n"
+            + "You are Lana, local concierge — warm, one line.\n"
             "- Answer what the user actually asked first (are you real, frustration, small talk).\n"
             "- If routing_phase is need_zip/need_identity but they did not give ZIP/identity, "
             "respond to their question; gently offer ZIP or one identity line only if natural.\n"
@@ -265,7 +265,7 @@ def _parse_lana_synth(
             assistant_message = str(tool_result["summary"])[:1200]
         else:
             assistant_message = (
-                "Hey — I'm here for your block. Ask me to find neighbors like you or say log in."
+                "Hey — I'm here for your neighborhood. Ask me to find neighbors like you or say log in."
             )
     status = "continue"
     ctx: dict[str, Any] = {"last_status": status, "unified_mode": True}
@@ -363,7 +363,7 @@ def _parse_event_synth(
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
     assistant_message = str(raw.get("assistant_message", "")).strip()[:1200]
     if not assistant_message:
-        assistant_message = "What are you thinking of hosting on the block?"
+        assistant_message = "What are you thinking of hosting nearby?"
     status = str(raw.get("status", "continue")).lower()
     if status not in ("continue", "ready_to_complete"):
         status = "continue"

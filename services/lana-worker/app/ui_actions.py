@@ -198,7 +198,7 @@ def hosting_open_actions(*, matches_nearby: int = 0) -> list[dict[str, Any]]:
         ),
         _action(
             action_id="hosting_send",
-            label="Send to a mom",
+            label="Send to a parent",
             message="send to a mom",
             style="secondary",
         ),
@@ -216,7 +216,7 @@ def tip_pass_actions() -> list[dict[str, Any]]:
         ),
         _action(
             action_id="tip_send_mom",
-            label="Send to a mom",
+            label="Send to a parent",
             message="send to a mom",
             style="secondary",
         ),
@@ -228,7 +228,7 @@ def signal_saved_actions() -> list[dict[str, Any]]:
     return [
         _action(
             action_id="signal_show_block_log",
-            label="Show my block log",
+            label="Show my neighborhood log",
             message="show my block log",
             style="primary",
         ),
@@ -256,7 +256,7 @@ def rec_widen_actions(noun: str) -> list[dict[str, Any]]:
         ),
         _action(
             action_id="signal_show_block_log",
-            label="Show my block log",
+            label="Show my neighborhood log",
             message="show my block log",
             style="secondary",
         ),

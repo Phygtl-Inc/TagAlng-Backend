@@ -256,7 +256,7 @@ def _confirm_prompt(field: str, attempt: int) -> str:
         if attempt <= 1:
             return "What kind of tip is this — health, food, home, activities, or something else?"
         return "Which area fits best — health, food, home, activities, or other?"
-    return "Tell me a bit more and I'll get this on your block."
+    return "Tell me a bit more and I'll get this out to your neighbors."
 
 
 def needs_confirm(draft: dict[str, Any]) -> tuple[bool, str, str]:

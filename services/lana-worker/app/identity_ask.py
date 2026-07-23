@@ -24,7 +24,7 @@ FALLBACK_ASKS = {
     ),
     "intro": (
         "Tell me one thing about you — life stage, heritage, or what you're looking for — "
-        "then I can introduce you to someone on your block."
+        "then I can introduce you to a neighbor nearby."
     ),
 }
 
@@ -35,7 +35,7 @@ _ASK_PROMPT = (
     "looking for.\n"
     "Ground the question in the user's actual message — never invent facts about them, never "
     "imply you already know them. If purpose is 'intro', the question should lead toward an "
-    "introduction on their block.\n"
+    "introduction to a nearby neighbor.\n"
     'Return JSON only: {"ask": "<one warm sentence, under 160 characters>"}'
 )
 
