@@ -19,6 +19,7 @@ from app.layer1_intents import (
 )
 from app.signal_capture import is_signal_lane_intent
 from app.orchestrator.llm import llm_configured, llm_json, router_model
+from app.orchestrator.progress import normalize_progress
 from app.turn_timing import TurnTimer
 
 _ZIP_IN_TEXT = re.compile(r"\b(\d{5})\b")
@@ -95,6 +96,15 @@ _SYSTEM = (
     "If the user only sent a ZIP code with no prior self-description in RECENT TURNS, identity_snippet must be null. "
     "When the latest message is only a ZIP code, keep the same goal as the prior browse request "
     "(activities stays activities, peers stays peers) — use goal=continue, in_discovery=true. "
+    "zip: set ONLY when a 5-digit number is clearly the user's ZIP code for their area — they label it "
+    "('zip 10025', 'my zip code is…', '10025 area'), pair it with where they live/are ('I'm in NYC, 10025'), "
+    "or send digits alone right after Lana asked for a ZIP. A 5-digit number that is a price, a count, a "
+    "year, a street/house number, or any other quantity is NOT a zip → null. "
+    "When routing_phase=await_signup_phone or await_signup_otp the user is mid-verification and Lana "
+    "just asked for their email/code: a bare affirmative or a re-tap of a chip Lana offered earlier "
+    "('Yes, listen for me', 'Yes, text me at launch') → goal=continue, in_discovery=true — NEVER a "
+    "fresh activities/peers search, even though the words sound like one. Only an explicit new request "
+    "('actually just show me the events') changes lanes. "
     "Mid-funnel pushback or topic change in preview → in_discovery=false, goal=chat. "
     "When routing_phase=preview and phone_verified=true: user wants Lana to introduce them to a "
     "shown neighbor (introduce me, connect us, put us together, meet them, send intro to X, "
@@ -150,8 +160,26 @@ _SYSTEM = (
     "another person, hate speech or slurs, or requests for help with something illegal or dangerous "
     "(weapons, drugs, violence, harming someone). Set goal=unsafe, in_discovery=false, and "
     "unsafe_kind=sexual|abuse|hate|illegal|other. Do NOT treat unsafe content as a swap/tip/out_of_scope "
-    "or a feature request. (Self-harm / domestic-violence / child-safety CRISIS messages are handled "
-    "elsewhere — those are goal=chat, NOT unsafe.) "
+    "or a feature request. (Self-harm / domestic-violence / child-safety messages from someone who is "
+    "SUFFERING are CRISIS, not unsafe — see CRISIS below; unsafe is content Lana must refuse.) "
+    "CRISIS (goal=crisis, linear_intent=system.crisis, in_discovery=false) = the user is in emotional "
+    "distress or danger. Classify by MEANING, infinite phrasing: overwhelm with despair ('I'm so "
+    "overwhelmed, I cry every night', 'I can't do this anymore'), isolation expressed as suffering "
+    "('I haven't talked to another adult in days'), postpartum struggle, grief, self-harm or suicidal "
+    "thoughts, domestic violence or fear of someone at home, a child in danger. This takes PRIORITY over "
+    "EVERY other goal including medical — a distress message is NEVER a find/browse/meet ask even when "
+    "it mentions loneliness or wanting company. Distinguish by tone: 'I'd love to meet other moms' is "
+    "discovery; 'I cry every night after the kids sleep' is crisis. "
+    "WHENEVER goal=crisis, WRITE clarify_question yourself (leave clarify=null) — a warm, grounded "
+    "response in Lana's voice that (1) acknowledges what they actually said in their own terms (never "
+    "clinical, never chirpy), (2) gives the ONE resource that fits WHEN the distress is acute or there "
+    "is danger: 988 (24/7 crisis line) for despair or self-harm, Postpartum Support International "
+    "1-800-944-4773 for postpartum struggle, the National Domestic Violence Hotline 1-800-799-7233 "
+    "(or text START to 88788) for violence or fear at home, 911 for immediate danger — never dump a "
+    "list, and for plain overwhelm/loneliness with no danger a resource is optional, (3) makes clear "
+    "you're staying with them, and (4) only after the acknowledgment, may close with ONE gentle "
+    "no-pressure offer ('when you're ready, I can help you find other moms nearby — no rush'). "
+    "NEVER lead with a ZIP ask, a funnel question, or activities on a crisis turn. "
     "MEDICAL (goal=medical, linear_intent=system.medical, in_discovery=false) = the user asks what to DO "
     "about a HEALTH concern — a symptom, illness, injury, fever, pain, medication, or 'is this serious / "
     "how do I treat / what should I do' for THEMSELVES, their kid, or anyone. Lana is NOT a doctor and must "
@@ -161,8 +189,8 @@ _SYSTEM = (
     "it as a feature (it is not a product gap). CRITICAL DISTINCTION from tip_seek: asking Lana to FIND / "
     "RECOMMEND a local doctor, pediatrician, or clinic ('know a good pediatrician', 'recommend a doctor near "
     "me') is tip_seek (looking.tip), NOT medical — medical is asking for the ADVICE itself, not for a "
-    "referral. (Self-harm / suicide / domestic-violence / a missing child are the CRISIS rail = goal=chat, "
-    "NOT medical; medical is for physical illness/injury/symptoms.) "
+    "referral. (Self-harm / suicide / domestic-violence / a missing child / emotional despair are "
+    "goal=crisis — see CRISIS above; medical is for physical illness/injury/symptoms.) "
     "WHENEVER goal=medical, WRITE clarify_question yourself (leave clarify=null) — a warm, contextual line in "
     "Lana's voice that (1) says she can't give medical advice, (2) urges contacting a doctor or nurse line "
     "right away and calling 911 if it is severe or an emergency, and (3) offers to find a doctor/pediatrician "
@@ -219,6 +247,12 @@ _SYSTEM = (
     "A direct request for a RECOMMENDATION ('know a good pizza place', 'recommend a plumber') is "
     "already tip_seek — classify it as tip_seek, NOT out_of_scope/clarify. NEVER route any of this to "
     "goal=peers / find_peers just because no other lane fits. "
+    "LANGUAGE IS ALWAYS IN SCOPE: Lana speaks the user's language natively. A request to talk or "
+    "continue in a language ('hablemos en español', 'talk to me in urdu', 'can we chat in Portuguese?') "
+    "is settings.change_language (goal=chat; follow the LANGUAGE rules below for set_preferred_lang) — "
+    "NEVER out_of_scope, NEVER a missing capability to log, NEVER a scope clarify. This holds even "
+    "mid-clarifier: an accept phrased as a language ask ('sí, hablemos en español') is the language "
+    "request, not a confirmation of an unsupported errand. "
     "none = not discovery. "
     "abandon (separate boolean, any goal) = the user wants to STOP the activity Lana is currently "
     "helping with (hosting an event, a signal capture, the funnel) ENTIRELY, with NO replacement — "
@@ -288,6 +322,10 @@ _SYSTEM = (
     "A seeking/browsing frame (find / looking for / show me / any / is there / what's happening / "
     "going on / near me / around here / nearby) over an event/activity/party noun is ALWAYS "
     "discovery.find_activities — NEVER host_meet, even though it mentions an event or party. "
+    "But a bare statement of TASTE with no seeking frame ('I like badminton', 'I love swimming', "
+    "'I like playing in competitions') is the user telling you about THEMSELVES → "
+    "identity.add_claim (goal=chat), NEVER find_activities — even mid-browse; only an ask to "
+    "SEE/FIND what exists makes it a search. "
     "host_meet (sharing.host) is ONLY when the user is the ORGANIZER bringing others together "
     "(I want to host/throw/set up/organize/plan/create ...). They INVITE others; they do not ask to be "
     "shown what exists. When genuinely ambiguous between attending and organizing (a bare 'a party this "
@@ -303,7 +341,8 @@ _SYSTEM = (
     "meet_seek (looking.meet, goal=save_signal) = the user wants a NEIGHBOR or group to do an activity "
     "WITH them and to be MATCHED ('I want a tennis partner', 'looking for a stroller-walk buddy', 'find "
     "me moms to hang out with', 'set me up with people for a fifa night') — they broadcast a want to be "
-    "paired, not browse a calendar. "
+    "paired, not browse a calendar. But 'find/show me PEOPLE who play/do X' (no with-me/pair-me ask) "
+    "wants to SEE matching neighbors → discovery.find_by_attrs, not meet_seek. "
     "tip_seek (looking.tip, goal=save_signal, signal_intent=tip_seek) = the user wants a standing PLACE "
     "or SPOT to GO — a park, playground, trail, cafe, library, quiet corner, or a local service — which "
     "is NOT a time-bound event and NOT a person to be matched with. This INCLUDES generic place asks "
@@ -311,7 +350,10 @@ _SYSTEM = (
     "to hang out with the kids', 'where can we go to play') — a request to GO SOMEWHERE is a place "
     "recommendation, answered by a venue/Google lookup, and is NEVER the events browse. 'show me' or "
     "'find me' a PLACE/SPOT is tip_seek, not find_activities — do not let the 'show me' verb pull a "
-    "place into the browse. "
+    "place into the browse. It EQUALLY includes local SERVICE recommendations where nobody goes "
+    "anywhere ('recommend a babysitting service', 'know a good plumber?', 'need a tutor/daycare/"
+    "cleaner') — hiring or being pointed to a PROVIDER is tip_seek even right after talking about "
+    "kids or activities, and is NEVER find_activities or meet_seek. "
     "Decide by whether they want to BE SHOWN EVENTS that exist (find_activities), be MATCHED to people "
     "(meet_seek), or be pointed to a PLACE/SPOT to go (tip_seek). "
     "WHEN YOU GENUINELY CANNOT TELL — the message fits BOTH equally and the user's goal is truly "
@@ -377,7 +419,8 @@ _SYSTEM = (
     "help.what_can_you_do|help.who_are_you; "
     "system.out_of_scope (set with goal=out_of_scope for an errand TagAlng cannot do); "
     "system.unsafe (set with goal=unsafe for inappropriate/abusive content Lana must refuse); "
-    "system.medical (set with goal=medical for a health/medical concern — see MEDICAL below). "
+    "system.medical (set with goal=medical for a health/medical concern — see MEDICAL below); "
+    "system.crisis (set with goal=crisis for emotional distress or danger — see CRISIS below). "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
@@ -397,10 +440,23 @@ _SYSTEM = (
     "Use identity.add_claim when user describes themselves (heritage, stage, interests). "
     "Use identity.edit_claim for corrections ('I'm not X, I'm Y', 'edit my identity'). "
     "Heritage is one slot — if user states a new heritage that contradicts prior, ask to confirm before replacing. "
-    "Use discovery.find_by_attrs when user wants neighbors matching traits (ANY heritage/adjective + "
-    "mom/dad/parent/language/stage — infinite phrasing: show me american moms, find italian dads, "
-    "brazilian parents on my block). Set attr_filter to the trait phrase "
-    "(e.g. american moms, italian dads). NOT identity.add_claim, NOT identity.edit_claim, goal=peers. "
+    "Use discovery.find_by_attrs when user wants neighbors matching traits — heritage, life stage, "
+    "language, AND interests/activities/sports (infinite phrasing: show me american moms, find italian "
+    "dads, brazilian parents on my block, find me nearby people that play fifa, neighbors who love "
+    "hiking). Set attr_filter to the trait phrase (e.g. american moms, plays fifa). "
+    "With attr_filter, also set attr_terms — the SUBSTANTIVE requirements as search-term groups: "
+    "one group per trait the neighbor must actually have (groups are ANDed), each group listing "
+    "lowercase word forms + close synonyms of that ONE trait (ORed within the group). Drop filler "
+    "grammar and generic verbs — likes/enjoys/loves/plays/who/any/people are NOT requirements. "
+    "'likes to swim' → [[\"swim\",\"swimming\",\"swimmer\"]]; 'brazilian moms who swim' → "
+    "[[\"brazilian\",\"brazil\"],[\"mom\",\"mother\",\"mama\"],[\"swim\",\"swimming\"]]; "
+    "'find me nearby people that plays fifa' → [[\"fifa\"]]. "
+    "NOT identity.add_claim, NOT identity.edit_claim, goal=peers. "
+    "PEOPLE-WHO-DO-X vs MEET: 'find/show me PEOPLE who play/do/love X' wants to BE SHOWN matching "
+    "neighbors → find_by_attrs (the peer cards then offer the meet as a follow-up); it is meet_seek "
+    "ONLY when they ask to be PAIRED to do it together ('someone to play fifa WITH me', 'set me up "
+    "with people for a fifa night', 'a tennis partner'). WORKED EXAMPLE: 'find me nearby people that "
+    "plays fifa' → discovery.find_by_attrs, goal=peers, attr_filter='plays fifa' — NOT looking.meet. "
     "find_by_attrs REQUIRES an explicit search verb (find/show/look for/who is/any/connect me) OR an "
     "'on my block' target. A bare self-description that only LISTS the user's OWN traits with NO search "
     "verb (I'm Asian with a teenager, we just moved here, I'm a new mom who loves hiking) is "
@@ -412,7 +468,32 @@ _SYSTEM = (
     "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes "
     "(change my name, call me X, my name is X). "
     "Use help.what_can_you_do for help/what can you do; help.who_are_you for who are you. "
-    "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.)."
+    "LANGUAGE — set lang to the ISO 639-1 code of the language the LATEST USER MESSAGE is written "
+    "in ('en', 'es', 'pt', 'ur', 'hi', ...), whatever language that is. Report what you SEE: a full "
+    "sentence in English after non-English turns IS lang='en' (users code-switch; Lana follows). "
+    "When the message is too short or language-ambiguous to tell (a ZIP code, a name, a number, "
+    "'ok', an emoji, a chip label), set lang=null — never guess from history. "
+    "Use settings.change_language (goal=chat) when the user wants a language as their DEFAULT / "
+    "preferred app language — any phrasing meaning 'from now on' ('make Urdu my default', 'always "
+    "talk to me in Spanish', 'change my language to English'), or an ACCEPT when lang_pref_offer "
+    "below is set. Then ALSO set set_preferred_lang to that ISO code. Merely writing in a language, "
+    "or a one-off 'in english please', changes only this conversation — set_preferred_lang=null. "
+    "When lang_pref_offer is not 'none', Lana just asked whether to make that language the user's "
+    "default: yes/accept → linear_intent=settings.change_language, set_preferred_lang=<that code>. "
+    "lang_pref_offer may list SEVERAL codes ('ur or es') — an accept that names or clearly picks one "
+    "('lets talk in urdu', 'urdu please') → set_preferred_lang=<the picked code>; a bare 'yes' that "
+    "picks none keeps set_preferred_lang=null (Lana will ask which). "
+    "A decline keeps set_preferred_lang=null (goal=chat either way, unless the message pivots). "
+    "Also set legacy goal field when applicable (peers, save_signal, verify, login, etc.). "
+    "PROGRESS — also author progress: a list with EXACTLY ONE stage "
+    "{\"label\": ..., \"detail\": ...} — the thinking-status line the user watches in the app "
+    "while Lana works on this turn. label ≤ 6 words, no trailing ellipsis/period; detail = one "
+    "short supporting phrase ≤ 12 words. Ground it in the USER'S OWN ask — name their thing "
+    "('Finding FIFA neighbors', 'Setting up your coffee morning', 'Saving your rain-boots ask'), "
+    "never a generic 'Processing request'. Write it in the language of the latest user message. "
+    "TRUTHFUL ONLY: describe what this turn actually does (understanding the message, searching "
+    "neighbors/events/places, saving their ask, setting up their event, writing back) — never "
+    "promise results or claim an action not taken. Warm, concrete, Lana's voice, no exclamation marks."
 )
 
 
@@ -470,7 +551,10 @@ def _empty_slots() -> dict[str, Any]:
         "clarify_options": [],
         "unsafe_kind": None,
         "abandon": False,
+        "lang": None,
+        "set_preferred_lang": None,
         "confidence": 0.0,
+        "progress": [],
     }
 
 
@@ -509,7 +593,7 @@ def ai_parse_discovery_turn(
                         has_profile_photo=has_profile_photo,
                         session_ctx=session_ctx,
                     ),
-                    max_tokens=512,
+                    max_tokens=768,
                     temperature=0.0,
                     llm_attempts=attempts_box,
                 )
@@ -529,7 +613,7 @@ def ai_parse_discovery_turn(
                     has_profile_photo=has_profile_photo,
                     session_ctx=session_ctx,
                 ),
-                max_tokens=512,
+                max_tokens=768,
                 temperature=0.0,
             )
         goal = str(raw.get("goal") or "none").lower()
@@ -551,6 +635,7 @@ def ai_parse_discovery_turn(
             "out_of_scope",
             "unsafe",
             "medical",
+            "crisis",
             "none",
         ):
             goal = "none"
@@ -575,6 +660,19 @@ def ai_parse_discovery_turn(
         signal_when_s = str(signal_when).strip()[:120] if signal_when else None
         attr_filter = raw.get("attr_filter")
         attr_filter_s = str(attr_filter).strip()[:200] if attr_filter else None
+        attr_terms_s: list[list[str]] = []
+        raw_terms = raw.get("attr_terms")
+        if attr_filter_s and isinstance(raw_terms, list):
+            for group in raw_terms[:4]:
+                if not isinstance(group, list):
+                    continue
+                terms: list[str] = []
+                for t in group[:6]:
+                    tok = str(t).strip().lower()
+                    if 2 <= len(tok) <= 40 and tok not in terms:
+                        terms.append(tok)
+                if terms:
+                    attr_terms_s.append(terms)
         peer_name = raw.get("peer_name")
         peer_name_s = str(peer_name).strip()[:80] if peer_name else None
         intro_direction = raw.get("intro_direction")
@@ -609,11 +707,11 @@ def ai_parse_discovery_turn(
         clarify_raw = str(raw.get("clarify") or "").strip().lower()
         clarify = clarify_raw if clarify_raw in ("browse_or_meet", "scope", "intent") else None
         # The classifier writes the clarifying question itself (Lana's voice, contextual) so
-        # the route layer never hardcodes it. Kept when a clarify is set OR for goal=medical,
-        # where the same field carries the AI-authored safety-redirect line (no regex/template).
+        # the route layer never hardcodes it. Kept when a clarify is set OR for goal=medical /
+        # goal=crisis, where the same field carries the AI-authored safety line (no regex/template).
         clarify_question = (
-            (str(raw.get("clarify_question") or "").strip()[:300] or None)
-            if (clarify or goal == "medical")
+            (str(raw.get("clarify_question") or "").strip()[:600] or None)
+            if (clarify or goal in ("medical", "crisis"))
             else None
         )
         clarify_options = (
@@ -625,10 +723,21 @@ def ai_parse_discovery_turn(
             if clarify
             else []
         )
+        from app.i18n import apply_ai_lang, normalize_lang_code
+
+        lang_s = normalize_lang_code(raw.get("lang"))
+        set_pref_s = normalize_lang_code(raw.get("set_preferred_lang"))
+        if session_ctx is not None:
+            # AI-authoritative language mirroring — the verdict (including a
+            # confident flip back to 'en') lands on the session right here, so
+            # every lane composing a reply this turn already speaks it.
+            apply_ai_lang(session_ctx, lang_s)
         return enrich_slots({
             "in_discovery": bool(raw.get("in_discovery")),
             "linear_intent": linear_intent,
             "goal": goal,
+            "lang": lang_s,
+            "set_preferred_lang": set_pref_s,
             "intro_direction": intro_direction_s,
             "intro_source": intro_source_s,
             "intro_list_index": intro_list_index_s,
@@ -641,6 +750,7 @@ def ai_parse_discovery_turn(
             "signal_stage": signal_stage_s,
             "signal_when": signal_when_s,
             "attr_filter": attr_filter_s,
+            "attr_terms": attr_terms_s,
             "peer_name": peer_name_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
@@ -648,6 +758,8 @@ def ai_parse_discovery_turn(
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
             "confidence": float(raw.get("confidence", 0.0)),
+            # AI-authored thinking-status stage, streamed live to the client.
+            "progress": normalize_progress(raw.get("progress"), max_stages=1),
         }, msg=text)
     except Exception:
         return _empty_slots()
@@ -659,12 +771,18 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
     instead of noun-matching it to a lane. 'none' when no capture is active — so this
     line is inert for every non-capture turn."""
     if session_ctx.get("rapport_active"):
+        pending_q = str(session_ctx.get("rapport_followup_question") or "").strip()
+        q_line = f' Lana\'s pending question was: "{pending_q[:300]}".' if pending_q else ""
         return (
-            "rapport — Lana asked a warm, getting-to-know-you question and the user is ANSWERING it. "
-            "A personal/preference reply ('I usually run alone', 'parks & trails', 'idk', 'both', "
-            "'yes please') is an ANSWER → goal=chat, NEVER a fresh intent like meet_seek / "
-            "find_activities / find_peers. Only a clear request to FIND/SHOW/HOST/GET something "
-            "(a place, an event, people, host an event) is a PIVOT — classify it fresh so it leaves rapport"
+            "rapport — Lana asked a warm, getting-to-know-you question and the user is ANSWERING it."
+            + q_line
+            + " A reply that ANSWERS that question is goal=chat, NEVER a fresh intent like tip_seek / "
+            "meet_seek / find_activities / find_peers — even when it is a bare NOUN PHRASE naming a "
+            "place or thing ('local cricket grounds', 'the park by the school', 'parks & trails'): "
+            "naming WHERE/WHAT they do it describes THEMSELVES, it does not ask you to find one "
+            "('I usually run alone', 'idk', 'both', 'yes please' likewise). Only an explicit REQUEST "
+            "to FIND/SHOW/RECOMMEND/HOST/GET something ('find me a cricket ground', 'any grounds "
+            "nearby?', 'recommend a cafe') is a PIVOT — classify it fresh so it leaves rapport"
         )
     if session_ctx.get("look_meet_active"):
         return (
@@ -697,6 +815,14 @@ def _discovery_slot_payload(
     sc = session_ctx or {}
     active_intent = str(sc.get("active_intent") or "").strip() or "none"
     active_capture = _active_capture_context(sc)
+    # A pending offer to change the default language: the divergence nudge (single code)
+    # or a rapport-concierge offer (possibly several codes the user named, TTL'd).
+    lang_pref_offer = str(sc.get("lang_nudge_pending") or "").strip()
+    if not lang_pref_offer:
+        offers = sc.get("lang_offer_langs")
+        if isinstance(offers, list):
+            lang_pref_offer = " or ".join(str(o) for o in offers if str(o or "").strip())
+    lang_pref_offer = lang_pref_offer or "none"
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"
@@ -704,7 +830,8 @@ def _discovery_slot_payload(
         f"phone_verified: {phone_verified}\n"
         f"has_profile_photo: {has_profile_photo}\n"
         f"session_active_intent: {active_intent}\n"
-        f"active_capture: {active_capture}\n\n"
+        f"active_capture: {active_capture}\n"
+        f"lang_pref_offer: {lang_pref_offer}\n\n"
         "RECENT TURNS:\n"
         f"{_format_history(history)}\n\n"
         f"LATEST USER MESSAGE:\n{text}\n\n"
@@ -713,7 +840,7 @@ def _discovery_slot_payload(
         '  "linear_intent": "<Layer 1 intent id or null>",\n'
         '  "in_discovery": true|false,\n'
         '  "goal": "peers"|"activities"|"both"|"verify"|"login"|"logout"|"rsvp"|"propose_intro"|"list_intros"|'
-        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"medical"|"none",\n'
+        '"save_signal"|"show_block_log"|"profile_photo"|"chat"|"continue"|"out_of_scope"|"unsafe"|"medical"|"crisis"|"none",\n'
         '  "intro_direction": "sent"|"received"|"all"|null,\n'
         '  "intro_source": "block_log"|"peer_preview"|null,\n'
         '  "intro_list_index": 1-based integer when user picks #N from a shown list, else null,\n'
@@ -723,6 +850,7 @@ def _discovery_slot_payload(
         '  "signal_stage": "string or null",\n'
         '  "signal_when": "string or null",\n'
         '  "attr_filter": "string or null",\n'
+        '  "attr_terms": [["lowercase word forms of one required trait"], ...] with attr_filter, else null,\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
@@ -733,7 +861,11 @@ def _discovery_slot_payload(
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "abandon": true|false,\n'
-        '  "confidence": 0.0-1.0\n'
+        '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous",\n'
+        '  "set_preferred_lang": "ISO code ONLY when the user wants that language as their default (settings.change_language), else null",\n'
+        '  "confidence": 0.0-1.0,\n'
+        '  "progress": [{"label": "thinking-status line ≤6 words, grounded in the user\'s ask", '
+        '"detail": "one supporting phrase ≤12 words"}]\n'
         "}"
     )
 
@@ -770,6 +902,12 @@ def discovery_slots_for_turn(
     if text:
         session_ctx["_discovery_slots"] = slots
         session_ctx["_discovery_slots_for"] = text
+    # The classifier authored the thinking-status line for this turn — surface it the
+    # moment it exists (fresh classify only; cache hits within the turn stay silent).
+    if timer is not None:
+        plan = slots.get("progress") or []
+        if plan:
+            timer.emit(plan[0]["label"], plan[0].get("detail"))
     return slots
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -30,6 +31,7 @@ from app.layer1_intents import (
 )
 from app.local_signals import fetch_my_block_log
 from app.supabase_rpc import call_rpc
+from app.vec_util import to_pgvector
 
 HELP_WHAT_CAN_YOU_DO = (
     "I'm Lana — your block concierge. I can help you find neighbors like you, "
@@ -323,6 +325,115 @@ def summarize_partial_claim_matches(
     return "I see " + ", ".join(parts) + ", but no one with all of those yet."
 
 
+def _embed_attr_filter(filter_text: str) -> list[float] | None:
+    try:
+        from app.vertex_extract import vertex_embed
+
+        return vertex_embed(str(filter_text or "").strip()[:2000])
+    except Exception:
+        return None
+
+
+def _attr_semantic_min_similarity() -> float:
+    try:
+        return float(os.environ.get("LANA_ATTR_SEMANTIC_MIN_SIM", "0.55"))
+    except ValueError:
+        return 0.55
+
+
+def _semantic_query_texts(filter_text: str, slots: dict[str, Any] | None) -> list[str]:
+    """One embed query per substantive requirement. The classifier's attr_terms strip
+    location/verb filler — embedding the raw ask ("people in my block that likes
+    paragliding") lets "in my block" dominate and cosine-match boilerplate claims
+    like "Block Resident"."""
+    raw = (slots or {}).get("attr_terms")
+    texts: list[str] = []
+    if isinstance(raw, list):
+        for group in raw[:4]:
+            if not isinstance(group, list):
+                continue
+            terms = [
+                str(t).strip().lower()
+                for t in group[:6]
+                if isinstance(t, str) and 2 <= len(str(t).strip()) <= 40
+            ]
+            if terms:
+                texts.append(" ".join(terms))
+    return texts or [str(filter_text or "").strip()]
+
+
+def _fetch_peers_semantic_single(
+    user_jwt: str,
+    query_text: str,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    literal = to_pgvector(_embed_attr_filter(query_text))
+    if not literal:
+        return []
+    try:
+        raw = call_rpc(
+            user_jwt,
+            "find_peers_by_claim_semantic",
+            {
+                "p_query_embedding": literal,
+                "p_limit": limit,
+                "p_min_similarity": _attr_semantic_min_similarity(),
+            },
+        )
+    except HTTPException:
+        return []
+    return [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+
+
+def fetch_peers_semantic(
+    user_jwt: str,
+    filter_text: str,
+    *,
+    limit: int = 5,
+    slots: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Embedding match of the user's ask against block claim embeddings (no word lists).
+
+    Every requirement group must land (AND, like the lexical path); a peer's score is
+    their weakest requirement, and their label collects the claim per requirement."""
+    queries = _semantic_query_texts(filter_text, slots)
+    peer_maps: list[dict[str, dict[str, Any]]] = []
+    for q in queries:
+        rows = _fetch_peers_semantic_single(user_jwt, q, limit=20 if len(queries) > 1 else limit)
+        pm = {str(r.get("peer_user_id") or ""): r for r in rows if r.get("peer_user_id")}
+        if not pm:
+            return []
+        peer_maps.append(pm)
+
+    common_ids = set(peer_maps[0].keys())
+    for pm in peer_maps[1:]:
+        common_ids &= set(pm.keys())
+
+    out: list[dict[str, Any]] = []
+    for pid in common_ids:
+        base = dict(peer_maps[0][pid])
+        labels: list[str] = []
+        sims: list[float] = []
+        for pm in peer_maps:
+            row = pm[pid]
+            label = str(row.get("matching_peer_label") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+            try:
+                sims.append(float(row.get("similarity_score")))
+            except (TypeError, ValueError):
+                pass
+        if labels:
+            base["matching_peer_label"] = " · ".join(labels)
+        if sims:
+            base["similarity_score"] = min(sims)
+        base["semantic_match"] = True
+        out.append(base)
+    out.sort(key=lambda r: -(r.get("similarity_score") or 0))
+    return out[:limit]
+
+
 def fetch_peers_by_attr_filter(
     user_jwt: str,
     filter_text: str,
@@ -333,9 +444,13 @@ def fetch_peers_by_attr_filter(
     filters = parse_claim_filters(filter_text, slots)
     if filters:
         structured = _fetch_peers_by_claim_filters_rpc(user_jwt, filters, limit=limit)
-        if structured is not None:
+        if structured:
             return structured[:limit]
-    return _fetch_peers_token_and(user_jwt, filter_text, limit=limit)
+    lexical = _fetch_peers_token_and(user_jwt, filter_text, limit=limit)
+    if lexical:
+        return lexical
+    # Nothing matched word-for-word — fall back to meaning ("gymmer" → "Gym enthusiast").
+    return fetch_peers_semantic(user_jwt, filter_text, limit=limit, slots=slots)
 
 
 def peers_to_match_rows(
@@ -353,10 +468,13 @@ def peers_to_match_rows(
                 "peer_user_id": row.get("peer_user_id"),
                 "nickname": nick,
                 "avatar_url": row.get("avatar_url"),
-                "similarity_score": row.get("similarity_score") or 0.85,
+                # Unscored (lexical) rows stay unscored — no invented cosine; the
+                # truthful-match model shows them as fits by claim, not by percent.
+                "similarity_score": row.get("similarity_score"),
                 "matching_peer_label": str(row.get("matching_peer_label") or "shared traits"),
                 "matching_peer_concept": row.get("matching_peer_concept"),
                 "has_exact_concept_match": bool(row.get("has_exact_concept_match")),
+                "semantic_match": bool(row.get("semantic_match")),
                 "preview": not phone_verified or not nick,
             }
         )
@@ -496,13 +614,6 @@ def format_peer_detail_reply(
     )
 
 
-def _short_peer_label(label: str, *, max_traits: int = 2) -> str:
-    parts = [p.strip() for p in str(label or "").split("·") if p.strip()]
-    if len(parts) <= max_traits:
-        return str(label or "shared traits").strip() or "shared traits"
-    return " · ".join(parts[:max_traits]) + " · …"
-
-
 def format_attr_peers_reply(
     peers: list[dict[str, Any]],
     *,
@@ -515,21 +626,24 @@ def format_attr_peers_reply(
                 f"No one on your block matches all of \"{filter_text}\" yet. "
                 f"{partial_summary}"
             )
+        # Search-first, then offer the broadcast — mirrors the empty activities lane.
         return (
             f"I don't see neighbors matching \"{filter_text}\" on your block yet. "
-            "Try broadening the description or complete your profile so I can match better."
+            "Want me to keep an ear out and text you when one joins — or try a broader description?"
         )
+    # The cards carry names + shared traits — the text stays to the count + next step.
     n = len(peers)
-    lines = [
+    if all(p.get("semantic_match") for p in peers if isinstance(p, dict)):
+        # Meaning-based hits: stay truthful — nobody literally lists the user's word,
+        # the cards show the actual claims that came close.
+        return (
+            f"No one lists \"{filter_text}\" word-for-word, but {n} neighbor{'s' if n != 1 else ''} "
+            "come close — here's what they've shared. Want me to introduce you to any of them?"
+        )
+    return (
         f"I found {n} neighbor{'s' if n != 1 else ''} matching \"{filter_text}\" — "
-        "see the cards below."
-    ]
-    for p in peers[:5]:
-        nick = str(p.get("nickname") or "A neighbor")
-        label = _short_peer_label(str(p.get("matching_peer_label") or "shared traits"))
-        lines.append(f"• {nick} — {label}")
-    lines.append("Want me to introduce you to any of them?")
-    return "\n".join(lines)
+        "here's what you have in common. Want me to introduce you to any of them?"
+    )
 
 
 def handle_notification_prefs(user_jwt: str, message: str) -> tuple[str, str]:
@@ -555,7 +669,17 @@ class IdentityPersistResult:
     """Outcome of persisting one identity turn — data only; the REPLY is owned by
     the conversational engine (lana_profile_turn), per ai-authoritative-routing."""
 
-    __slots__ = ("verify_gate", "saved", "dismissed", "conflict", "conflict_prompt", "nickname", "kids_count")
+    __slots__ = (
+        "verify_gate",
+        "saved",
+        "dismissed",
+        "conflict",
+        "conflict_prompt",
+        "nickname",
+        "kids_count",
+        "primary_label",
+        "primary_bucket",
+    )
 
     def __init__(
         self,
@@ -567,6 +691,8 @@ class IdentityPersistResult:
         conflict_prompt: str | None = None,
         nickname: str | None = None,
         kids_count: int | None = None,
+        primary_label: str | None = None,
+        primary_bucket: str | None = None,
     ) -> None:
         self.verify_gate = verify_gate
         self.saved = saved
@@ -575,6 +701,8 @@ class IdentityPersistResult:
         self.conflict_prompt = conflict_prompt
         self.nickname = nickname
         self.kids_count = kids_count
+        self.primary_label = primary_label
+        self.primary_bucket = primary_bucket
 
     @property
     def total(self) -> int:
@@ -627,6 +755,8 @@ def persist_identity_from_message(
         dismissed=dismissed,
         nickname=result.nickname,
         kids_count=result.kids_count,
+        primary_label=result.primary_label,
+        primary_bucket=result.primary_bucket,
     )
 
 

@@ -26,6 +26,7 @@ class PeerMatchRow(BaseModel):
     avatar_url: str | None = None
     similarity_score: float | None = None
     matching_peer_label: str | None = None
+    matching_my_label: str | None = None
     matching_peer_concept: str | None = None
     has_exact_concept_match: bool = False
     preview: bool = False
@@ -56,6 +57,8 @@ class ActivityPreviewRow(BaseModel):
     activity_id: str | None = None
     title: str
     starts_at: str | None = None
+    # False = the event has no real clock time; render the date without "12 AM" (#56).
+    has_time: bool | None = None
     starts_label: str | None = None
     venue_name: str | None = None
     preview: bool = True
@@ -197,6 +200,9 @@ class EventDraft(BaseModel):
     venue_lat: float | None = None
     venue_lng: float | None = None
     starts_at: str | None = None
+    # Whether the host actually gave a clock time. False = starts_at's time component
+    # is a midnight placeholder (date-only ask) — cards must render the date alone (#56).
+    has_time: bool | None = None
     ends_at: str | None = None
     duration_minutes: int | None = None
     max_attendees: int | None = None
@@ -205,10 +211,15 @@ class EventDraft(BaseModel):
     allow_attendee_share: bool | None = None
     # Items attendees should bring (the 4/4 quick-setup card) → the meet's pinned list.
     bring_items: list[str] = Field(default_factory=list)
+    # AI-picked emoji cover (☕🎨⚽…) — the card's visual when there's no cover image.
+    cover_emoji: str | None = None
     # AI-tailored quick-setup card config (capacity/sharing/approval/bring labels + bring
     # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
     event_setup: dict[str, Any] | None = None
     cohort_tags: list[str] = Field(default_factory=list)
+    # Display-only labels for cohort_tags (same order; cohorts.label like "Lifestyle +
+    # social"). Chips render these; the ids above stay canonical for publish + matching.
+    cohort_tag_labels: list[str] = Field(default_factory=list)
     affinity_prompt: str | None = None
     affinity_options: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
@@ -369,6 +380,8 @@ class CreateSessionResponse(BaseModel):
     purpose: str
     status: str
     assistant_message: str
+    # lana_messages row id of the opening, so it's 👍/👎-rateable like any other reply.
+    assistant_message_id: str | None = None
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
@@ -439,6 +452,9 @@ class SendMessageResponse(BaseModel):
     session_id: str
     status: str
     assistant_message: str
+    # lana_messages row id of this reply — the FE's 👍/👎 posts it to /lana/feedback.
+    # History scroll-back already carries ids; this covers the just-streamed turn.
+    assistant_message_id: str | None = None
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
@@ -504,6 +520,9 @@ class ExtractedClaim(BaseModel):
     # True when the claim is coarse and a follow-up would sharpen it ("tech worker",
     # "speaks 5 languages" without naming them). Drives a curiosity follow-up.
     vague: bool = False
+    # Short user-visible sub-facts accumulated across turns for the same thread
+    # ("Swims every weekend"). Merged append-dedup on upsert, capped at 5.
+    details: list[str] = Field(default_factory=list)
 
 
 class CompleteSessionResponse(BaseModel):

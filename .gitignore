@@ -10,6 +10,7 @@ yarn-debug.log*
 .env.*.local
 deploy/identity-worker.env
 deploy/lana-worker.env
+deploy/*.env
 
 # GCP / keys
 gcp.json
@@ -53,3 +54,10 @@ supabase/types/database.ts
 
 # Scratch work
 scratch/
+
+supabase-go
+supabase.tar.gz
+deploy/lana-worker-prod.env
+
+# lana-admin-portal is its own repo (Phygtl-Inc/Lana-AdminPortal), not part of the backend
+lana-admin-portal/

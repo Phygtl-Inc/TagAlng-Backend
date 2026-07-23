@@ -4,6 +4,7 @@ from typing import Any
 from app.context import load_prompt
 from app.orchestrator.llm import llm_json, router_model
 from app.orchestrator.memory import format_core_block, format_recent_turns
+from app.orchestrator.progress import normalize_progress
 from app.turn_timing import TurnTimer
 
 
@@ -17,7 +18,11 @@ ROUTER_SCHEMA = """
   "missing_slots": [],
   "sentiment": "neutral",
   "needs_confirmation": false,
-  "thinking": "brief rationale"
+  "thinking": "brief rationale",
+  "progress": [
+    {"label": "Setting up your coffee meet", "detail": "Locking in Saturday morning at Foxtail"},
+    {"label": "Writing back", "detail": "Putting the next step together"}
+  ]
 }
 
 Allowed values:
@@ -97,4 +102,6 @@ def _normalize_router(raw: dict[str, Any], *, utterance: str) -> dict[str, Any]:
         "sentiment": str(raw.get("sentiment", "neutral"))[:32],
         "needs_confirmation": bool(raw.get("needs_confirmation", False)),
         "thinking": str(raw.get("thinking", ""))[:500],
+        # AI-authored thinking-status stages, streamed to the client as the turn runs.
+        "progress": normalize_progress(raw.get("progress")),
     }

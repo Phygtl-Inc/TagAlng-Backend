@@ -9,6 +9,8 @@ from app.discovery_route import (
     PHASE_NEED_ZIP,
     PHASE_PREVIEW,
     _effective_discovery_goal,
+    _out_of_scope_decision,
+    _reply_pivots_to_supported,
     _intro_should_use_block_log,
     _try_block_log_intro_turn,
     _try_neighbor_intro_turn,
@@ -66,6 +68,107 @@ class TestDiscoveryHelpers(unittest.TestCase):
         goal = _effective_discovery_goal("looking for a toy car", session, slots)
         self.assertEqual(goal, "save_signal")
         self.assertNotIn("discovery_goal", session)
+
+
+class TestMidVerifyChipRetap(unittest.TestCase):
+    """A stale offer chip re-tapped while Lana waits for the signup email/OTP re-anchors
+    to the verify step — it must never start a fresh browse ('No **Yes, listen for me**
+    activities…')."""
+
+    def test_seek_chip_retap_at_email_step_reasks_email(self) -> None:
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "requires_phone_verification": True,
+            "look_seek_pending": {"kind": "anything this week"},
+        }
+        result = handle_discovery_turn(
+            "Yes, listen for me",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _, _ = result
+        self.assertIn("email", reply.lower())
+        self.assertNotIn("activities", reply.lower())
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_phone")
+        # The stashed seek survives for the post-verify save.
+        self.assertTrue(ctx.get("look_seek_pending"))
+
+    def test_launch_chip_retap_at_email_step_reasks_email(self) -> None:
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "requires_phone_verification": True,
+        }
+        result = handle_discovery_turn(
+            "Yes, text me at launch",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _, _ = result
+        self.assertIn("email", reply.lower())
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_phone")
+
+    def test_bare_yes_at_otp_step_reasks_code(self) -> None:
+        ctx = {
+            "routing_phase": "await_signup_otp",
+            "signup_phone": "mom@example.com",
+        }
+        result = handle_discovery_turn(
+            "yes",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        reply, out_ctx, _, _ = result
+        self.assertIn("code", reply.lower())
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_otp")
+
+    @patch("app.discovery_route.email_has_registered_account", return_value=False)
+    def test_email_at_email_step_still_advances(self, _mock_registered) -> None:
+        # The guard must not swallow an actual answer that contains accept-y words.
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "requires_phone_verification": True,
+        }
+        result = handle_discovery_turn(
+            "sure — mom@example.com",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        self.assertIsNotNone(result)
+        _, out_ctx, _, _ = result
+        self.assertEqual(out_ctx.get("routing_phase"), "await_signup_otp")
+
+    @patch("app.discovery_route.handle_guest_login", return_value=None)
+    def test_yes_confirming_login_switch_not_intercepted(self, mock_login) -> None:
+        # A pending signup→login switch owns the yes/no reading — the re-anchor guard
+        # must stand aside.
+        ctx = {
+            "routing_phase": "await_signup_phone",
+            "pending_lane_switch": "login",
+        }
+        handle_discovery_turn(
+            "yes",
+            session_ctx=ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+        )
+        mock_login.assert_called_once()
 
 
 class TestDiscoveryRouting(unittest.TestCase):
@@ -182,11 +285,11 @@ class TestDiscoveryRouting(unittest.TestCase):
         reply, _, _, _ = result
         self.assertIn("5-digit", reply)
 
-    @patch("app.event_location.geocode_zip", return_value=None)
+    @patch("app.event_location.geocode_zip_detailed", return_value=("invalid", None))
     @patch("app.discovery_route.call_rpc")
-    def test_ungeocodable_zip_asks_to_recheck(self, mock_rpc, _mock_geo) -> None:
-        # ZIP not in any block AND not geocodable (no Google match) → we can't create a block,
-        # so ask the user to re-check the digits (the only remaining dead-end).
+    def test_fake_zip_asks_to_recheck(self, mock_rpc, _mock_geo) -> None:
+        # ZIP not in any block AND the geocoder confirms it isn't a real US ZIP → ask the
+        # user to re-check the digits (the only case where "your ZIP is wrong" is true).
         mock_rpc.side_effect = HTTPException(
             status_code=502,
             detail='rpc_failed:{"message":"zip_not_found"}',
@@ -205,7 +308,41 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertIn("double-check", reply.lower())
         self.assertEqual(ctx["routing_phase"], PHASE_NEED_ZIP)
 
-    @patch("app.event_location.geocode_zip", return_value=(32.7157, -117.1611, "San Diego"))
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.event_location.geocode_zip_detailed", return_value=("unavailable", None))
+    @patch("app.discovery_route.call_rpc")
+    def test_unplaceable_real_zip_is_out_of_coverage_not_rejected(
+        self, mock_rpc, _mock_geo, mock_log
+    ) -> None:
+        # ZIP not in any block and the geocoder couldn't be asked (no key / outage) → the
+        # ZIP may well be real: out-of-coverage state (capture + remember), NEVER "your
+        # ZIP is wrong" and never a re-ask for a different ZIP.
+        mock_rpc.side_effect = HTTPException(
+            status_code=502,
+            detail='rpc_failed:{"message":"zip_not_found"}',
+        )
+        ctx_in = {"routing_phase": PHASE_NEED_ZIP, "active_intent": "discovery.find_peers"}
+        result = handle_discovery_turn(
+            "10025",
+            session_ctx=ctx_in,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            user_id="u-guest",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertNotIn("double-check", reply.lower())
+        self.assertNotIn("try another", reply.lower())
+        self.assertIn("10025", reply)
+        # Demand captured for expansion marketing + ZIP remembered for the session.
+        mock_log.assert_called_once()
+        self.assertEqual(mock_log.call_args.kwargs.get("category"), "expansion_zip")
+        self.assertEqual(mock_log.call_args.kwargs.get("user_id"), "u-guest")
+        self.assertEqual(ctx_in.get("pending_zip"), "10025")
+
+    @patch("app.event_location.geocode_zip_detailed", return_value=("ok", (32.7157, -117.1611, "San Diego")))
     @patch("app.discovery_route.fetch_blocks_for_zip", return_value=[])
     @patch("app.discovery_route.call_rpc")
     def test_new_zip_creates_waitlist_block(self, mock_rpc, _mock_fetch, _mock_geo) -> None:
@@ -616,7 +753,9 @@ class TestDiscoveryRouting(unittest.TestCase):
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
     def test_find_activities_starts_browse(self, mock_slots, _mock_ai) -> None:
-        """A browse intent starts the agentic events browse (ask interest first)."""
+        """A browse intent starts the agentic events browse — the NL message IS the
+        interest (searched immediately); with no block known yet, the ZIP is asked
+        in-flow while the interest is kept on the draft."""
         mock_slots.return_value = {
             "goal": "activities",
             "in_discovery": True,
@@ -634,10 +773,15 @@ class TestDiscoveryRouting(unittest.TestCase):
             )
             self.assertIsNotNone(result)
             reply, ctx, _, peers = result
-            # Enters the browse flow and asks the refining question before fetching events.
             self.assertTrue(ctx.get("activity_browse_active"))
             self.assertEqual(peers, [])
-            self.assertIn("what kind of thing", reply.lower())
+            # No generic "what kind of thing" re-ask — the message was captured; the
+            # only blocker is location, so the ZIP is asked before fetching events.
+            self.assertIn("zip", reply.lower())
+            self.assertEqual(
+                (ctx.get("browse_draft") or {}).get("interest"),
+                "what's happening near me this weekend",
+            )
             mock_events.assert_not_called()
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
@@ -682,8 +826,8 @@ class TestDiscoveryRouting(unittest.TestCase):
             self.assertIsNotNone(peers_turn)
             self.assertTrue(peers_turn[3])
 
-            # Pivoting to activities hands off to the agentic browse (ask interest first) —
-            # no peer rows, no events fetch yet, browse now active.
+            # Pivoting to activities hands off to the agentic browse, which searches
+            # immediately (block already known) — no peer rows, events shown.
             activities_turn = handle_discovery_turn(
                 "find activities",
                 session_ctx=peers_turn[1],
@@ -696,8 +840,14 @@ class TestDiscoveryRouting(unittest.TestCase):
             reply, ctx, _, peer_rows = activities_turn
             self.assertTrue(ctx.get("activity_browse_active"))
             self.assertEqual(peer_rows, [])
-            self.assertIn("what kind of thing", reply.lower())
-            mock_events.assert_not_called()
+            # Events go to the card list (activity_previews), not the chat text.
+            self.assertIn("coming up", reply.lower())
+            self.assertNotIn("Stroller walk", reply)
+            self.assertEqual(
+                [p["title"] for p in ctx.get("activity_previews") or []],
+                ["Stroller walk"],
+            )
+            mock_events.assert_called()
 
     @patch("app.discovery_route.fetch_preview_events_on_block")
     def test_activities_in_preview_not_peer_loop(self, mock_events) -> None:
@@ -718,7 +868,9 @@ class TestDiscoveryRouting(unittest.TestCase):
         self.assertIsNotNone(result)
         reply, ctx, _, peers = result
         self.assertEqual(ctx["routing_phase"], PHASE_PREVIEW)
-        self.assertIn("Park walk", reply)
+        # Events go to the card list (activity_previews), not the chat text.
+        self.assertIn("coming up", reply.lower())
+        self.assertNotIn("Park walk", reply)
         self.assertEqual(peers, [])
         self.assertEqual(ctx.get("peer_matches"), [])
         previews = ctx.get("activity_previews") or []
@@ -821,9 +973,11 @@ class TestDiscoveryRouting(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         reply, ctx, _, peers = result
-        self.assertIn("Marina", reply)
+        # Short reply — the card carries the name; text carries the count + next step.
+        self.assertIn("1 neighbor", reply)
         self.assertFalse(ctx.get("pending_post_verify"))
         self.assertEqual(len(peers), 1)
+        self.assertEqual(peers[0].get("nickname"), "Marina")
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_slots.discovery_ai_enabled", return_value=True)
@@ -1916,6 +2070,102 @@ class TestOutOfScopeRouting(unittest.TestCase):
         mock_log.assert_called_once()  # still logged
         self.assertEqual(mock_author.call_args.kwargs.get("mode"), "decline")
 
+    # ── Language requests are ALWAYS in scope (QA 2026-07-23: "Sí, hablemos en
+    #    español" looped clarify → false "no puedo mantener conversaciones en
+    #    español" decline → clarify again, and logged Spanish as a feature gap). ──
+
+    def test_language_slots_never_out_of_scope(self) -> None:
+        # Even when the classifier mislabels the goal, set_preferred_lang wins.
+        self.assertIsNone(
+            _out_of_scope_decision(
+                {
+                    "goal": "out_of_scope",
+                    "set_preferred_lang": "es",
+                    "confidence": 0.95,
+                },
+                "hablemos en español",
+            )
+        )
+        self.assertIsNone(
+            _out_of_scope_decision(
+                {
+                    "goal": "out_of_scope",
+                    "linear_intent": "settings.change_language",
+                    "confidence": 0.95,
+                },
+                "talk to me in urdu",
+            )
+        )
+        # A real errand still declines — the guard is language-specific.
+        self.assertEqual(
+            _out_of_scope_decision(
+                {
+                    "goal": "out_of_scope",
+                    "linear_intent": "system.out_of_scope",
+                    "confidence": 0.95,
+                },
+                "deliver pizza for me",
+            ),
+            "decline",
+        )
+
+    def test_language_reply_pivots_out_of_pending_clarifier(self) -> None:
+        self.assertTrue(
+            _reply_pivots_to_supported(
+                {
+                    "goal": "chat",
+                    "linear_intent": "settings.change_language",
+                    "set_preferred_lang": "es",
+                    "confidence": 0.9,
+                },
+                "sí, hablemos en español",
+            )
+        )
+        # A bare chat reply still confirms the decline path.
+        self.assertFalse(
+            _reply_pivots_to_supported(
+                {"goal": "chat", "confidence": 0.9}, "sí"
+            )
+        )
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_language_reply_mid_clarifier_never_declines_or_logs(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        # Transcript turn 3: pending clarifier already re-asked once; the language
+        # accept must escape — no "no puedo hablar español" decline, no feature log.
+        mock_slots.return_value = {
+            "goal": "chat",
+            "linear_intent": "settings.change_language",
+            "set_preferred_lang": "es",
+            "in_discovery": False,
+            "confidence": 0.9,
+        }
+        session_ctx = {
+            "routing_phase": "listening",
+            "out_of_scope_pending": True,
+            "out_of_scope_reclarified": True,
+            "out_of_scope_offer": {"q": "¿evento o lugar?", "opts": [], "detail": ""},
+        }
+        result = handle_discovery_turn(
+            "Sí, hablemos en español",
+            session_ctx=session_ctx,
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        mock_log.assert_not_called()
+        self.assertIsNone(session_ctx.get("out_of_scope_pending"))
+        self.assertIsNone(session_ctx.get("out_of_scope_offer"))
+        if result is not None:
+            _, _, routing, _ = result
+            self.assertNotEqual(routing.get("tool_to_call"), "out_of_scope")
+
 
 class TestMedicalRedirectRouting(unittest.TestCase):
     """A health/medical concern must get the safety redirect (no advice / call a doctor or
@@ -1991,6 +2241,115 @@ class TestMedicalRedirectRouting(unittest.TestCase):
         self.assertEqual(routing.get("tool_to_call"), "medical")
         self.assertIn("911", reply)
         self.assertIn("medical advice", reply.lower())
+
+
+class TestCrisisRouting(unittest.TestCase):
+    """Emotional distress must get the empathetic AI-authored response — never a funnel ask
+    (the ZIP-ask bug), never captured as a lane answer, never logged as a feature request.
+    Detection is the AI classifier (goal=crisis), no regex on the utterance."""
+
+    @patch("app.discovery_route.log_feature_request")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_crisis_uses_ai_authored_line_never_zip_ask(
+        self, mock_slots, _mock_ai, mock_log
+    ) -> None:
+        authored = (
+            "That sounds so heavy — crying every night and going days without another adult "
+            "is a lot to carry alone. Postpartum Support International is at 1-800-944-4773 "
+            "any time. I'm right here with you, and when you're ready I can help you find "
+            "other moms nearby — no rush."
+        )
+        mock_slots.return_value = {
+            "goal": "crisis",
+            "linear_intent": "system.crisis",
+            "in_discovery": False,
+            "confidence": 0.95,
+            "clarify_question": authored,
+        }
+        result = handle_discovery_turn(
+            "I'm so overwhelmed, I cry every night after the kids sleep. "
+            "I haven't talked to another adult in days",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, peers = result
+        # The AI-authored line is used verbatim (no hardcoded template overriding it).
+        self.assertEqual(reply, authored)
+        self.assertEqual(routing.get("tool_to_call"), "crisis")
+        # Never the discovery funnel: no ZIP ask, no peers pushed, no active lane.
+        self.assertNotIn("ZIP", reply)
+        self.assertNotEqual(ctx.get("active_intent"), "discovery.find_peers")
+        self.assertEqual(peers, [])
+        # Distress is NOT a product gap — nothing logged, nothing promised.
+        mock_log.assert_not_called()
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_crisis_falls_back_to_safe_message_when_model_silent(
+        self, mock_slots, _mock_ai
+    ) -> None:
+        # Model flagged crisis but authored no line → the safety fallback guarantees the
+        # acknowledge / 988 / 911 / staying-with-you beats rather than leaking into chat.
+        mock_slots.return_value = {
+            "goal": "crisis",
+            "linear_intent": "system.crisis",
+            "in_discovery": False,
+            "confidence": 0.7,
+            "clarify_question": None,
+        }
+        result = handle_discovery_turn(
+            "I can't do this anymore",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, _ = result
+        self.assertEqual(routing.get("tool_to_call"), "crisis")
+        self.assertIn("988", reply)
+        self.assertIn("911", reply)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_crisis_wins_over_active_browse_lane(self, mock_slots, _mock_ai) -> None:
+        # The original bug: a distress message while the browse lane waits on a ZIP was
+        # consumed as the ZIP answer and re-asked for the ZIP. Crisis must exit the lane.
+        mock_slots.return_value = {
+            "goal": "crisis",
+            "linear_intent": "system.crisis",
+            "in_discovery": False,
+            "confidence": 0.9,
+            "clarify_question": "I'm right here with you — that sounds like so much.",
+        }
+        result = handle_discovery_turn(
+            "I'm so overwhelmed, I cry every night after the kids sleep",
+            session_ctx={
+                "routing_phase": "listening",
+                "activity_browse_active": True,
+                "browse_draft": {"interest": "any", "_need_zip": True},
+            },
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id="block-1",
+            is_anonymous=True,
+            history=[],
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, routing, _ = result
+        self.assertEqual(routing.get("tool_to_call"), "crisis")
+        self.assertNotIn("ZIP", reply)
 
 
 class TestUnsafeRouting(unittest.TestCase):

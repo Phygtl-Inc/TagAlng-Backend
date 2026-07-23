@@ -2,9 +2,9 @@
 
 Rapport gaps are normally opened per-turn from a chat message (the extractor's warm
 follow-up). Once a user stops chatting, that queue drains and the home "By the way…"
-tile goes silent — nothing left on the plate to keep building her profile.
+tile goes silent — nothing left on the plate to keep building their profile.
 
-This module refills the plate: given her existing identity claims, it asks the model
+This module refills the plate: given their existing identity claims, it asks the model
 for a couple of fresh follow-ups that DEEPEN the profile with matchable facets, then
 opens them as semantic gaps. Called by the ranker only when no gap is queued (and the
 cadence cap is already clear), so it stays off the home-render hot path in the common
@@ -54,28 +54,28 @@ def _cooling_down(user_id: str) -> bool:
     _last_attempt[user_id] = now
     return False
 
-SYNTH_PROMPT = """You are Lana, a warm neighborhood concierge in TagAlng, a block-based app where moms \
-connect with nearby moms. You keep her profile growing by asking ONE well-timed follow-up at a time on \
-her home screen ("By the way…").
+SYNTH_PROMPT = """You are Lana, a warm neighborhood concierge in a block-based neighborhood app where \
+neighbors connect with nearby neighbors. You keep their profile growing by asking ONE well-timed \
+follow-up at a time on their home screen ("By the way…").
 
-Below are THREADS TO ASK ABOUT — identity threads of hers we have NOT covered yet — plus the questions \
+Below are THREADS TO ASK ABOUT — identity threads of theirs we have NOT covered yet — plus the questions \
 you've ALREADY ASKED. Propose up to {max_new} NEW follow-up questions, each SHARPENING a DIFFERENT one of \
 the uncovered threads. Spread across threads — do NOT ask two questions about the same thread, and do NOT \
 ask about anything already covered by the ALREADY ASKED list.
 
-A good question adds a CONNECTION-MATCHABLE facet — something that helps her MEET or RELATE to nearby \
-moms: shared activities/hobbies, family/life stage, local spots she goes, cultural or community ties, \
-her weekly rhythm, skill/level, doing-it-with-others, kids' involvement, teach-vs-learn.
+A good question adds a CONNECTION-MATCHABLE facet — something that helps them MEET or RELATE to nearby \
+neighbors: shared activities/hobbies, family/life stage, local spots they go, cultural or community ties, \
+their weekly rhythm, skill/level, doing-it-with-others, kids' involvement, teach-vs-learn.
 
 Every question must clear THREE bars — drop any that fail even one:
 1. RELEVANT — it sharpens one of the UNCOVERED THREADS listed below, not a generic survey question out of nowhere.
-2. IMPORTANT — the answer meaningfully helps match HER to nearby moms. Apply the test: "would this change who she connects with on the block?" If not, drop it.
+2. IMPORTANT — the answer meaningfully helps match THEM to nearby neighbors. Apply the test: "would this change who they connect with on the block?" If not, drop it.
 3. FRESH — you have NOT asked it before. Scan ALREADY ASKED and skip anything you've asked or would just be rewording.
 
 HARD RULES on shape:
 - NEVER a yes/no question. If it starts with "Do you", "Are you", "Have you", "Would you" — rewrite it to ask for a SPECIFIC thing (a time, a place, a genre, an activity, a cadence) or drop it. Bad: "Do you and your spouse share any hobbies?" Good: "What's a spot nearby you love for a run?"
-- Keep HER the subject. You MAY sharpen her OWN life-stage facet (e.g. "married" → how long she's been married; "new to the block" → how long she's lived here). But NEVER ask about her partner or the relationship itself ("do you and your spouse…", "what does your husband…") — that's not a facet neighbors match on. Prefer her own activities, local spots, rhythm, and community ties; if a thread has no matchable angle left, skip it.
-- The answer should be a concrete facet another mom could share — a place, a time, a genre, an activity, a level — not a sentiment.
+- Keep THE USER the subject. You MAY sharpen their OWN life-stage facet (e.g. "married" → how long they've been married; "new to the block" → how long they've lived here). But NEVER ask about their partner or the relationship itself ("do you and your spouse…", "what does your husband…") — that's not a facet neighbors match on. Prefer their own activities, local spots, rhythm, and community ties; if a thread has no matchable angle left, skip it.
+- The answer should be a concrete facet another neighbor could share — a place, a time, a genre, an activity, a level — not a sentiment.
 
 FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you \
 started, what you enjoy/love most, or what "caught your interest"); those add no matchable facet. Never \
@@ -84,8 +84,16 @@ touch a sensitive topic — health/medical, grief, divorce/relationship trouble,
 legal/immigration, mental health.
 
 Write ONLY the question itself — NO "By the way" prefix, no greeting. Short (<120 chars), warm, OPEN, \
-and reference what you know. Quality over quantity: if only one question clears every bar, return just \
+and reference what you know. Write question, teaser, and label in ENGLISH regardless of the language of \
+any quotes below — questions are stored English-canonical and AI-rendered into the user's preferred \
+language at display time. Quality over quantity: if only one question clears every bar, return just \
 one; if none do, return an empty list — silence beats a filler, yes/no, or repeat question.
+
+SPECIAL THREAD — when the list includes `languages_spoken`, cover it FIRST: casually ask which \
+language(s) they're comfortable chatting in, or feel most at home in (open, never yes/no). NEVER name, \
+guess, or assume any language they haven't stated themselves — no "besides X" or "other than X" framing \
+unless one of their threads explicitly states they speak X. Their answer lets Lana speak their language \
+and match them with neighbors who share it.
 
 Each uncovered thread below is shown as `concept | Label [bucket] — "quote"`. For every question
 you write, echo back the `concept` of the thread it deepens (copy it EXACTLY from the list) so we
@@ -147,6 +155,37 @@ def _embed_question(text: str) -> list[float] | None:
         return None
 
 
+# Standing pseudo-thread: which language(s) they are comfortable chatting in. Not a claim (so the
+# coverage RPC never returns it) — injected once per user so Lana ASKS rather than relying on a
+# Settings toggle. deepens_concept marks it asked forever after; semantic dedup is the backstop.
+LANGUAGE_CONCEPT = "languages_spoken"
+_LANGUAGE_THREAD: dict[str, Any] = {
+    "concept": LANGUAGE_CONCEPT,
+    "label": "Languages they're comfortable chatting in",
+    "bucket": "heritage",
+    "source_quote": "",
+}
+
+
+def _language_thread_needed(user_id: str) -> bool:
+    """True until a language question has been opened for this user (any status —
+    answered, skipped, or still queued all count as covered; we never nag)."""
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id")
+            .eq("user_id", user_id)
+            .eq("deepens_concept", LANGUAGE_CONCEPT)
+            .limit(1)
+            .execute()
+        )
+        return not res.data
+    except Exception:
+        logger.exception("rapport-synth: language-thread check failed for %s", user_id)
+        return False  # fail closed — a missed ask beats a repeated one
+
+
 def _uncovered_claims(user_id: str) -> list[dict[str, Any]]:
     """Identity threads we have NOT yet asked about (least-covered first), via the coverage RPC.
     An empty list means every known thread already has a question — time to go quiet."""
@@ -196,13 +235,17 @@ def _parse_questions(data: Any) -> list[dict[str, str]]:
         question = str(item.get("question") or "").strip()[:200]
         if not question:
             continue
+        # Models sometimes echo the whole thread line ("concept | Label [bucket]") into
+        # deepens_concept despite "copy it EXACTLY" — keep only the concept token, or the
+        # exact-match coverage gates (e.g. languages_spoken once-per-user) silently break.
+        concept = str(item.get("deepens_concept") or "").split("|")[0].strip()[:64]
         out.append(
             {
                 "question": question,
                 "teaser": str(item.get("teaser") or "").strip()[:80],
                 "label": str(item.get("label") or "").strip()[:80],
                 "bucket": str(item.get("bucket") or "general").strip()[:32] or "general",
-                "deepens_concept": str(item.get("deepens_concept") or "").strip()[:64],
+                "deepens_concept": concept,
             }
         )
         if len(out) >= _MAX_NEW:
@@ -258,6 +301,10 @@ def synthesize_gaps_from_claims(user_id: str, max_new: int = _MAX_NEW) -> int:
     # Make sure older questions (pre-embedding) count toward coverage before we decide.
     _backfill_question_embeddings(user_id)
     uncovered = _uncovered_claims(user_id)
+    # Lana asks the user's language herself (replacing the Settings toggle): until a language
+    # question exists, it rides FIRST in the thread list so it lands within the first tiles.
+    if _language_thread_needed(user_id):
+        uncovered.insert(0, dict(_LANGUAGE_THREAD))
     logger.info(
         "rapport-synth[%s]: uncovered threads = %s",
         user_id,

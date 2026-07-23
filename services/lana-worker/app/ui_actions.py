@@ -306,17 +306,22 @@ def attach_intro_row_actions(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def activity_browse_actions(ctx: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Pills for the agentic browse. Normally interest refine chips (tap → re-filter). When a
-    search came up empty we instead offer the seek fallback (listen for me / widen) — tapping
-    posts the label back, which run_activity_browse_turn reads as accept/widen."""
+    """Pills for the agentic browse. When a search came up empty we offer the seek fallback
+    (listen for me / widen) — tapping posts the label back, which run_activity_browse_turn
+    reads as accept/widen. Otherwise the lane's draft owns the chips (draft.suggestions):
+    interest chips only on the P1 ask, event-tag refine chips under results, none on a ZIP
+    ask — no unconditional hardcoded category list."""
     draft = (ctx or {}).get("browse_draft")
-    if isinstance(draft, dict) and draft.get("_seek_offer"):
+    if not isinstance(draft, dict):
+        return []
+    if draft.get("_seek_offer"):
         return [
             _action(action_id="browse_seek_yes", label="Yes, listen for me",
                     message="Yes, listen for me", style="primary"),
             _action(action_id="browse_seek_widen", label="Widen the search",
                     message="Widen the search", style="secondary"),
         ]
+    labels = [str(s).strip() for s in (draft.get("suggestions") or []) if str(s).strip()]
     return [
         _action(
             action_id=f"browse_{label.split()[0].lower()}",
@@ -324,7 +329,7 @@ def activity_browse_actions(ctx: dict[str, Any] | None = None) -> list[dict[str,
             message=label,
             style="secondary",
         )
-        for label in ("Sports", "Family & kids", "Outdoors", "Social")
+        for label in labels[:4]
     ]
 
 

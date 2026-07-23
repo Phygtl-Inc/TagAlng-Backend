@@ -175,12 +175,26 @@ def open_semantic_gap(
     if literal:
         row["question_embedding"] = literal
     try:
-        service_client().table("rapport_gaps").insert(row).execute()
-        return True
+        res = service_client().table("rapport_gaps").insert(row).execute()
     except Exception:
         # unique(user_id, gap_id) violation = already open for this topic — fine
         logger.debug("rapport: semantic gap %s exists/race", gap_id)
         return False
+    # Write-time i18n: question/why_frame are English-canonical; render them into the
+    # user's preferred language NOW (off the read path) so the home tile serves a saved
+    # string. Background + best-effort — next_ask self-heals any miss.
+    try:
+        from app.lang_pref import get_user_preferred_language
+        from app.rapport_i18n import localize_gap_row_async
+
+        pref = get_user_preferred_language(user_id)
+        if pref and pref != "en":
+            gap_row_id = str(((res.data or [{}])[0] or {}).get("gap_row_id") or "")
+            if gap_row_id:
+                localize_gap_row_async(gap_row_id, q_text, why_frame, pref)
+    except Exception:  # noqa: BLE001 — localization must never block a gap opening
+        logger.exception("rapport: gap i18n kickoff failed")
+    return True
 
 
 def reconcile_gaps(user_id: str, message_id: str | None = None) -> None:

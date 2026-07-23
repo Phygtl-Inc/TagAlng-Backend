@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+_LOG = logging.getLogger(__name__)
 
 GUEST_STEP_LOGIN_PHONE = "await_login_phone"
 GUEST_STEP_LOGIN_OTP = "await_login_otp"
@@ -70,10 +73,11 @@ def _exit_login_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
         "routing_phase": "listening",
         "requires_login_otp": False,
         "login_otp_token": None,
+        "auth_action": None,
     }
-    out.pop("login_phone", None)
-    out.pop("login_email_attempts", None)
-    out.pop("login_otp_attempts", None)
+    out["login_phone"] = None  # None, not pop — a popped key resurrects from the stored ctx on merge
+    out["login_email_attempts"] = None
+    out["login_otp_attempts"] = None
     return out
 
 
@@ -87,7 +91,7 @@ def _exit_logout_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
         "requires_login_otp": False,
         "login_otp_token": None,
     }
-    out.pop("login_phone", None)
+    out["login_phone"] = None  # None, not pop — a popped key resurrects from the stored ctx on merge
     out.pop("auth_action", None)
     # Stale discovery/intro surface from before logout must not re-show peer cards.
     out.pop("intro_proposal", None)
@@ -107,7 +111,7 @@ def _logout_ctx(session_ctx: dict[str, Any]) -> dict[str, Any]:
         "login_otp_token": None,
         "requires_phone_verification": False,
     }
-    out.pop("login_phone", None)
+    out["login_phone"] = None  # None, not pop — a popped key resurrects from the stored ctx on merge
     return out
 
 
@@ -128,6 +132,130 @@ def extract_email(text: str) -> str | None:
     return m.group(0).lower() if m else None
 
 
+def _send_otp_action(email: str) -> dict[str, Any]:
+    """FE instruction: send (or resend) the login OTP to this address."""
+    return {"type": "send_login_otp", "email": email, "verify_type": "email"}
+
+
+def _verify_otp_action(email: str, token: str) -> dict[str, Any]:
+    """FE instruction: verify this login OTP for this address."""
+    return {
+        "type": "verify_login_otp",
+        "email": email,
+        "token": token,
+        "verify_type": "email",
+    }
+
+
+def _interpret_fallback(msg: str) -> dict[str, Any]:
+    """No-LLM read of a login-flow reply, from the format regexes alone."""
+    if wants_cancel_login(msg):
+        return {"action": "cancel", "email": None, "code": None}
+    email = extract_email(msg)
+    code = extract_otp_code(msg)
+    if email:
+        return {"action": "email", "email": email, "code": code}
+    if code:
+        return {"action": "code", "email": None, "code": code}
+    return {"action": "other", "email": None, "code": None}
+
+
+def interpret_login_reply(
+    msg: str,
+    *,
+    expecting: str,
+    known_email: str | None = None,
+) -> dict[str, Any]:
+    """AI-first read of a sign-in turn: what is the user doing?
+
+    The AI owns the intent verdict — give a code / give or correct an email /
+    ask for a resend / bail out / something else — so a user can say "I typed
+    the wrong email, use X" or cancel in any language (the cancel word-list is
+    English-only). The format regexes validate whatever it returns and are the
+    whole fallback when no LLM is configured.
+
+    Returns ``{"action": "code"|"email"|"resend"|"cancel"|"other",
+    "email": str|None, "code": str|None}``.
+    """
+    fallback = _interpret_fallback(msg)
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return fallback
+        asked = (
+            f"the 6-digit code they were sent at {known_email}"
+            if expecting == "code" and known_email
+            else "the 6-digit code they were sent"
+            if expecting == "code"
+            else "the email address on their account"
+        )
+        data = llm_json(
+            model=router_model(),
+            system=(
+                "You read ONE user message from an email sign-in chat and decide "
+                f"what the user is doing. Lana just asked them for {asked}. The "
+                "user may write in ANY language. Set action to exactly one of: "
+                "'code' — the message carries the 6-digit verification code (also return it in code); "
+                "'email' — it gives an email address to use, new or corrected (also return it in email, lowercased); "
+                "'resend' — they want the code sent again / say it never arrived, without giving an address; "
+                "'cancel' — they want to stop signing in or do something else instead; "
+                "'other' — anything else (questions, chatter, an answer that fits none of these). "
+                'Return JSON {"action": "...", "email": "...or null", "code": "...or null"}.'
+            ),
+            user_payload=str(msg or "").strip()[:600],
+            max_tokens=80,
+            temperature=0.0,
+        )
+        if not isinstance(data, dict):
+            return fallback
+        action = str(data.get("action") or "").strip().lower()
+        # The regexes validate the AI's extractions — a malformed address or
+        # code is re-read from the message itself, never trusted as returned.
+        email = extract_email(str(data.get("email") or "")) or extract_email(msg)
+        code = extract_otp_code(str(data.get("code") or "")) or extract_otp_code(msg)
+        if action == "email" and not email:
+            action = "other"
+        if action == "code" and not code:
+            action = "other"
+        if action not in ("code", "email", "resend", "cancel", "other"):
+            return fallback
+        return {"action": action, "email": email, "code": code}
+    except Exception:  # noqa: BLE001 — a failed read degrades to the regexes
+        _LOG.exception("login_reply_interpret_failed")
+        return fallback
+
+
+def compose_offscript_reply(*, goal: str, facts: list[str], fallback: str) -> str:
+    """One short Lana line AI-authored from true facts, for a turn that went
+    off-script mid-verification (a question, chatter, an answer that fits
+    nothing) — so she responds to what the user actually said instead of
+    repeating a canned re-prompt. The static line is the no-LLM fallback only.
+    English-canonical; the final-mile localizer renders the session language."""
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return fallback
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                "You are Lana, a warm neighborhood concierge, in the middle of an "
+                f"email verification with a user. {goal} Ground the reply ONLY in "
+                "the facts given — one or two short sentences, warm and casual, "
+                'never robotic. Return JSON {"message": "..."}.'
+            ),
+            user_payload="\n".join(f"- {f}" for f in facts),
+            max_tokens=120,
+            temperature=0.4,
+        )
+        msg = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        return msg or fallback
+    except Exception:  # noqa: BLE001 — the static line beats a failed turn
+        _LOG.exception("login_offscript_compose_failed")
+        return fallback
+
+
 def _login_ctx(
     session_ctx: dict[str, Any],
     *,
@@ -144,6 +272,9 @@ def _login_ctx(
         "requires_phone_verification": False,
         "requires_login_otp": requires_login_otp,
         "routing_phase": guest_step,
+        # One-shot FE instruction — cleared here so a stale send/verify from a
+        # prior turn never re-fires; action turns stamp a fresh one after.
+        "auth_action": None,
     }
     if login_phone:
         out["login_phone"] = login_phone
@@ -164,12 +295,13 @@ def handle_guest_login(
         return None
 
     if step == GUEST_STEP_LOGIN_PHONE:
-        if wants_cancel_login(msg):
+        read = interpret_login_reply(msg, expecting="email")
+        if read["action"] == "cancel":
             return (
                 "No problem — what would you like to do? Find neighbors, plan something, or tell me about yourself.",
                 _exit_login_ctx(session_ctx),
             )
-        email = extract_email(msg)
+        email = read["email"]
         if not email:
             # Cap re-prompts so a user who can't give an email isn't trapped here.
             attempts = int(session_ctx.get("login_email_attempts") or 0) + 1
@@ -181,29 +313,79 @@ def handle_guest_login(
                 )
             ctx = _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE)
             ctx["login_email_attempts"] = attempts
-            return (
-                "I didn't catch a valid email — something like you@example.com.",
-                ctx,
+            reply = compose_offscript_reply(
+                goal=(
+                    "The user replied with something that isn't an email address. "
+                    "Respond briefly to what they actually said, then ask again for "
+                    "the email on their account — and mention they can say stop to "
+                    "do this later."
+                ),
+                facts=[
+                    f'They said: "{msg[:300]}"',
+                    "You asked for the email address on their account to sign them in",
+                    "They can also say stop to sign in later",
+                ],
+                fallback="I didn't catch a valid email — something like you@example.com.",
             )
+            return (reply, ctx)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
             login_phone=email,
             requires_login_otp=True,
         )
-        ctx.pop("login_email_attempts", None)  # valid email — reset
+        ctx["login_email_attempts"] = None  # valid email — reset (None, not pop: merge)
+        ctx["auth_action"] = _send_otp_action(email)
         return (
-            f"Got it — I sent a 6-digit code to {email}. Enter it here when it arrives.",
+            f"Got it — I'm sending a 6-digit code to {email}. Enter it here when it arrives.",
             ctx,
         )
 
     if step == GUEST_STEP_LOGIN_OTP:
-        if wants_cancel_login(msg):
+        current = str(session_ctx.get("login_phone") or "").strip().lower()
+        read = interpret_login_reply(
+            msg, expecting="code", known_email=current or None
+        )
+        action = read["action"]
+        if action == "cancel":
             return (
                 "Okay — what would you like to do next?",
                 _exit_login_ctx(session_ctx),
             )
-        otp = extract_otp_code(msg)
+        if action == "email" and read["email"] and read["email"] != current:
+            # Correcting the address mid-flow — switch to it and send there,
+            # instead of re-prompting for a code sent to the wrong inbox.
+            email = read["email"]
+            ctx = _login_ctx(
+                session_ctx,
+                guest_step=GUEST_STEP_LOGIN_OTP,
+                login_phone=email,
+                requires_login_otp=True,
+            )
+            ctx["login_otp_attempts"] = None  # fresh address — reset (None, not pop: merge)
+            ctx["auth_action"] = _send_otp_action(email)
+            return (
+                f"Okay — I'm sending the code to {email} instead. Enter it here when it arrives.",
+                ctx,
+            )
+        if action == "resend" or (action == "email" and read["email"] == current):
+            if not current:
+                return (
+                    "Sure — what's the email on your account?",
+                    _login_ctx(session_ctx, guest_step=GUEST_STEP_LOGIN_PHONE),
+                )
+            ctx = _login_ctx(
+                session_ctx,
+                guest_step=GUEST_STEP_LOGIN_OTP,
+                login_phone=current,
+                requires_login_otp=True,
+            )
+            ctx["auth_action"] = _send_otp_action(current)
+            return (
+                f"On it — I'm sending a fresh code to {current}. Enter it here when it arrives.",
+                ctx,
+            )
+        otp = read["code"]
         if not otp:
             # Cap re-prompts: a user who keeps replying without a code (confused, or
             # quietly trying to bail) is released instead of looping the same line.
@@ -214,23 +396,42 @@ def handle_guest_login(
                     "What would you like to do?",
                     _exit_login_ctx(session_ctx),
                 )
-            email = str(session_ctx.get("login_phone") or "your email")
+            email = current or "your email"
             ctx = _login_ctx(
                 session_ctx,
                 guest_step=GUEST_STEP_LOGIN_OTP,
-                login_phone=str(session_ctx.get("login_phone") or "") or None,
+                login_phone=current or None,
                 requires_login_otp=True,
             )
             ctx["login_otp_attempts"] = attempts
-            return (f"Enter the 6-digit code we sent to {email}.", ctx)
+            reply = compose_offscript_reply(
+                goal=(
+                    "The user replied with something that isn't the verification "
+                    "code. Respond briefly to what they actually said, then remind "
+                    "them you need the 6-digit code you sent — and that they can "
+                    "give a different email, ask for a resend, or say stop."
+                ),
+                facts=[
+                    f'They said: "{msg[:300]}"',
+                    f"A 6-digit sign-in code was sent to {email}",
+                    "They can give a different email, ask you to resend it, or say stop",
+                ],
+                fallback=(
+                    f"Enter the 6-digit code I sent to {email} — or give me a "
+                    "different email to use."
+                ),
+            )
+            return (reply, ctx)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
-            login_phone=str(session_ctx.get("login_phone") or "") or None,
+            login_phone=current or None,
             requires_login_otp=True,
             login_otp_token=otp,
         )
-        ctx.pop("login_otp_attempts", None)  # real code entered — reset
+        ctx["login_otp_attempts"] = None  # real code entered — reset (None, not pop: merge)
+        if current:
+            ctx["auth_action"] = _verify_otp_action(current, otp)
         return ("Perfect — signing you in now. One moment…", ctx)
 
     if step in ("early_chat", "intro_declined"):
@@ -238,14 +439,16 @@ def handle_guest_login(
         # instead of re-asking and throwing the email they just typed away.
         email = extract_email(msg)
         if email:
+            ctx = _login_ctx(
+                session_ctx,
+                guest_step=GUEST_STEP_LOGIN_OTP,
+                login_phone=email,
+                requires_login_otp=True,
+            )
+            ctx["auth_action"] = _send_otp_action(email)
             return (
-                f"Got it — I sent a 6-digit code to {email}. Enter it here when it arrives.",
-                _login_ctx(
-                    session_ctx,
-                    guest_step=GUEST_STEP_LOGIN_OTP,
-                    login_phone=email,
-                    requires_login_otp=True,
-                ),
+                f"Got it — I'm sending a 6-digit code to {email}. Enter it here when it arrives.",
+                ctx,
             )
         return (
             "Sure — what's the email on your account?",

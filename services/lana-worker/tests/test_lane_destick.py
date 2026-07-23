@@ -57,6 +57,17 @@ class LaneShouldContinueTests(unittest.TestCase):
         self.assertTrue(is_confident_off_lane(_slots("out_of_scope", conf=0.9), native_goals=frozenset()))
         self.assertTrue(is_confident_off_lane(_slots("unsafe", conf=0.9), native_goals=frozenset()))
 
+    def test_crisis_always_releases(self):
+        # A user in distress must never have their message swallowed as a lane field answer
+        # (e.g. captured as a browse refinement and answered with a ZIP ask).
+        self.assertTrue(is_confident_off_lane(_slots("crisis", conf=0.9), native_goals=frozenset()))
+        self.assertTrue(
+            is_confident_off_lane(
+                _slots("crisis", linear="system.crisis", conf=0.9),
+                native_goals=frozenset({"activities"}),
+            )
+        )
+
 
 class ActivityBrowseReleaseTests(unittest.TestCase):
     def test_refine_stays(self):

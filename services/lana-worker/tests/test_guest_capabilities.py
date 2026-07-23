@@ -53,7 +53,9 @@ class TestGuestCapabilityIntents(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         reply, extra = result
-        self.assertIn("Maria", reply)
+        # The reply stays short — names/traits live on the match cards, not the text.
+        self.assertIn("1 neighbor", reply)
+        self.assertNotIn("Maria", reply)
         self.assertEqual(extra.get("intent"), "peer_find")
         self.assertEqual(len(extra.get("peer_matches", [])), 1)
 
@@ -98,9 +100,10 @@ class TestGuestCapabilityGating(unittest.TestCase):
             phone_verified=True,
             home_block_id="block-1",
         )
-        self.assertIn("Beatriz", reply)
+        self.assertIn("1 neighbor", reply)
         self.assertEqual(ctx.get("intent"), "peer_find")
         self.assertEqual(len(ctx.get("peer_matches", [])), 1)
+        self.assertEqual(ctx["peer_matches"][0].get("nickname"), "Beatriz")
 
 
 if __name__ == "__main__":
