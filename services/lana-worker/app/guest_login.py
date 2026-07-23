@@ -147,6 +147,40 @@ def _verify_otp_action(email: str, token: str) -> dict[str, Any]:
     }
 
 
+def _email_has_account(email: str) -> bool:
+    """Service-role check that the email belongs to a registered account. A failed
+    lookup reads as 'no account' on purpose: the pivot's link then 422s with
+    already-registered and the FE falls back to the login OTP anyway."""
+    try:
+        from app.auth import email_has_registered_account
+
+        return email_has_registered_account(email)
+    except Exception:  # noqa: BLE001 — a broken check must not kill the turn
+        _LOG.exception("login_email_account_check_failed")
+        return False
+
+
+def _signup_pivot(session_ctx: dict[str, Any], email: str) -> tuple[str, dict[str, Any]]:
+    """No account for this email — pivot the login lane into the signup link flow
+    (same one-code UX) instead of letting the FE's create_user:false OTP send
+    bounce off GoTrue with a raw "Signups not allowed for otp". Mirror of the
+    signup path's I-found-your-account pivot in _handle_signup_phone_message."""
+    ctx = _exit_login_ctx(session_ctx)
+    ctx["routing_phase"] = "await_signup_otp"
+    ctx["signup_phone"] = email
+    ctx["auth_action"] = {
+        "type": "link_email_signup",
+        "email": email,
+        "verify_type": "email_change",
+    }
+    return (
+        f"I don't see an account for {email} — no problem, I'll set you up fresh "
+        f"with that email. I'm sending a 6-digit code to {email} now; enter it "
+        "here when it arrives.",
+        ctx,
+    )
+
+
 def _interpret_fallback(msg: str) -> dict[str, Any]:
     """No-LLM read of a login-flow reply, from the format regexes alone."""
     if wants_cancel_login(msg):
@@ -328,6 +362,8 @@ def handle_guest_login(
                 fallback="I didn't catch a valid email — something like you@example.com.",
             )
             return (reply, ctx)
+        if not _email_has_account(email):
+            return _signup_pivot(session_ctx, email)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
@@ -356,6 +392,8 @@ def handle_guest_login(
             # Correcting the address mid-flow — switch to it and send there,
             # instead of re-prompting for a code sent to the wrong inbox.
             email = read["email"]
+            if not _email_has_account(email):
+                return _signup_pivot(session_ctx, email)
             ctx = _login_ctx(
                 session_ctx,
                 guest_step=GUEST_STEP_LOGIN_OTP,
@@ -439,6 +477,8 @@ def handle_guest_login(
         # instead of re-asking and throwing the email they just typed away.
         email = extract_email(msg)
         if email:
+            if not _email_has_account(email):
+                return _signup_pivot(session_ctx, email)
             ctx = _login_ctx(
                 session_ctx,
                 guest_step=GUEST_STEP_LOGIN_OTP,
