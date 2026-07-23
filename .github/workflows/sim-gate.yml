@@ -7,6 +7,12 @@ on:
       # Only run when Lana's brain or the sim pipeline itself changes
       - 'services/lana-worker/app/**'
       - 'services/lana-worker/simulations/**'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to post the gate-check comment to (optional — only needed for the comment step, the sim run itself works without it)'
+        required: false
+        default: ''
 
 jobs:
   gate:
@@ -49,6 +55,6 @@ jobs:
           BASELINE_TAG:              ${{ secrets.SIM_BASELINE_TAG }}
           PR_SHA:                    ${{ github.sha }}
           GH_TOKEN:                  ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER:                 ${{ github.event.pull_request.number }}
+          PR_NUMBER:                 ${{ github.event.pull_request.number || inputs.pr_number }}
           REPO:                      ${{ github.repository }}
         run: python gate_check.py
