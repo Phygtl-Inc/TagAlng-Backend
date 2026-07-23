@@ -201,7 +201,7 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
     if partial:
         parts.append(f"{partial} partial")
     if unscored:
-        parts.append(f"{unscored} neighbor{'s' if unscored != 1 else ''} on your block")
+        parts.append(f"{unscored} neighbor{'s' if unscored != 1 else ''} near you")
     if not parts:
         parts.append(f"{len(rows)} neighbor{'s' if len(rows) != 1 else ''}")
     status_label = " · ".join(parts)

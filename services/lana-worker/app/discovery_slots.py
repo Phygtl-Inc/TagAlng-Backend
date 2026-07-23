@@ -87,6 +87,12 @@ _SYSTEM = (
     "'I just want to know if you can help with my taxes', 'so you can't do it?' — is meta → goal=chat. It is "
     "NOT a fresh request to perform X and NOT a restatement of an errand to decline; the user is asking what "
     "Lana can do, so answer the question (don't re-log or refuse it as a new out_of_scope demand). "
+    "A QUESTION about how the PRODUCT works or why Lana needs something — 'what is a block?', "
+    "'why do you need my ZIP?', 'why are you asking for my block/area?', 'what do you do with my number?', "
+    "'how does this work?' — is meta → goal=chat, in_discovery=false, at ANY routing_phase, even while "
+    "Lana is waiting on a ZIP or identity answer. The words block/ZIP/area inside a QUESTION about the "
+    "product are NOT a discovery request and NOT a funnel answer — answer the question; only an actual "
+    "request to find/see people or events (or a supplied ZIP) continues the funnel. "
     "identity_snippet = self-description for matching from the latest message OR synthesized from RECENT TURNS "
     "when routing_phase=need_identity, when the latest message is ZIP-only, or when goal=peers and RECENT TURNS "
     "already describe the user (include short answers like 'toddlers', 'parents' when synthesizing). "
@@ -274,6 +280,14 @@ _SYSTEM = (
     "are closing the thread: 'I understand, I'll look elsewhere', 'no worries, I'll handle it myself', "
     "'that's ok, thanks anyway', 'never mind then', 'I'll ask someone else'. A polite acknowledgement "
     "that ends the request is an abandon, not a fresh out_of_scope ask to log again. "
+    "declined_slot (separate field, any goal) = the user is refusing to PROVIDE the specific piece of "
+    "info Lana just asked for — their ZIP, an identity line, or a display name — WITHOUT quitting the "
+    "overall goal (quitting entirely is abandon, not this). 'I don't want to enter my ZIP right now', "
+    "'I'd rather not share my zip', 'no zip from me', 'I'm not comfortable giving that' (when Lana just "
+    "asked for it) → declined_slot='zip'/'identity'/'display_name' matching what was asked; abandon=false; "
+    "keep goal as whatever they still want (often continue or peers). A QUESTION about why you need it "
+    "('why do you need my zip?') is not a decline — answer it (declined_slot=null). null when no ask is "
+    "being refused. "
     "When goal=profile_photo set profile_photo_action: start (wants upload), accept (yes after Lana suggested), "
     "done (finished uploading), skip (cancel/not now), none. "
     "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action. "
@@ -551,6 +565,7 @@ def _empty_slots() -> dict[str, Any]:
         "clarify_options": [],
         "unsafe_kind": None,
         "abandon": False,
+        "declined_slot": None,
         "lang": None,
         "set_preferred_lang": None,
         "confidence": 0.0,
@@ -695,6 +710,9 @@ def ai_parse_discovery_turn(
         photo_action = str(raw.get("profile_photo_action") or "none").lower()
         if photo_action not in ("start", "accept", "skip", "done", "none"):
             photo_action = "none"
+        declined_slot_s = str(raw.get("declined_slot") or "").strip().lower() or None
+        if declined_slot_s not in ("zip", "identity", "display_name"):
+            declined_slot_s = None
         zip_val = raw.get("zip")
         zip_s = str(zip_val).strip() if zip_val else None
         if zip_s:
@@ -757,6 +775,7 @@ def ai_parse_discovery_turn(
             "clarify_options": clarify_options,
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
+            "declined_slot": declined_slot_s,
             "confidence": float(raw.get("confidence", 0.0)),
             # AI-authored thinking-status stage, streamed live to the client.
             "progress": normalize_progress(raw.get("progress"), max_stages=1),
@@ -861,6 +880,7 @@ def _discovery_slot_payload(
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "abandon": true|false,\n'
+        '  "declined_slot": "zip"|"identity"|"display_name"|null,\n'
         '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous",\n'
         '  "set_preferred_lang": "ISO code ONLY when the user wants that language as their default (settings.change_language), else null",\n'
         '  "confidence": 0.0-1.0,\n'

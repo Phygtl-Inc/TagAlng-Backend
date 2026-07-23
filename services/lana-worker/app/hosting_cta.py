@@ -11,6 +11,7 @@ from app.local_signals import (
     refresh_my_signal_matches,
     stamp_signal_saved_ctx,
 )
+from app.reply_compose import compose_reply
 
 _HOSTING_OPEN_MESSAGES = frozenset({
     "open the meet up",
@@ -18,6 +19,9 @@ _HOSTING_OPEN_MESSAGES = frozenset({
 })
 _HOSTING_SEND_MOM_MESSAGES = frozenset({
     "send to a mom",
+    # The chip label was lexicon-scrubbed to "Send to a parent" (its message payload
+    # still posts "send to a mom") — accept the typed form of the new label too.
+    "send to a parent",
 })
 
 
@@ -102,11 +106,11 @@ def handle_hosting_open_turn(
     saved["hosting_opened"] = True
     hosting = saved.get("hosting") if isinstance(saved.get("hosting"), dict) else {}
     hosting = dict(hosting)
-    hosting["status_label"] = "Open on your block"
+    hosting["status_label"] = "Open to neighbors nearby"
     hosting["outreach_copy"] = (
         f"{len(entries)} neighbor{'s' if len(entries) != 1 else ''} may want to join."
         if entries
-        else "Neighbors on your block can see it — I'll notify you when someone fits."
+        else "Neighbors nearby can see it — I'll notify you when someone fits."
     )
     saved["hosting"] = hosting
     ctx["signal_saved"] = saved
@@ -114,15 +118,34 @@ def handle_hosting_open_turn(
 
     if entries:
         ctx["block_log_entries"] = [normalize_block_log_row(r) for r in entries[:8]]
-        reply = (
-            f"Done — **{title}** is open on your block. "
-            f"I found {len(entries)} neighbor{'s' if len(entries) != 1 else ''} who might join — see below."
+        reply = compose_reply(
+            goal=(
+                "The host just opened their meetup to neighbors nearby and you "
+                "found real potential joiners. Confirm it is open, give the real "
+                "count, and point them to the list shown below the message."
+            ),
+            facts=[
+                f"Meetup title: {title}",
+                f"Neighbors who might join (shown below the message): {len(entries)}",
+            ],
+            fallback=(
+                f"Done — **{title}** is open to neighbors nearby. "
+                f"I found {len(entries)} neighbor{'s' if len(entries) != 1 else ''} who might join — see below."
+            ),
         )
     else:
         ctx.pop("block_log_entries", None)
-        reply = (
-            f"Done — **{title}** is open on your block. "
-            "I'll let you know when a neighbor wants to join."
+        reply = compose_reply(
+            goal=(
+                "The host just opened their meetup to neighbors nearby but no "
+                "potential joiners were found yet. Confirm it is open and promise "
+                "to let them know when a neighbor wants to join."
+            ),
+            facts=[f"Meetup title: {title}"],
+            fallback=(
+                f"Done — **{title}** is open to neighbors nearby. "
+                "I'll let you know when a neighbor wants to join."
+            ),
         )
 
     ctx["active_intent"] = "sharing.host"
@@ -161,13 +184,33 @@ def handle_hosting_send_mom_turn(
     ctx["last_routing"] = {"outcome": "A", "intent_class": "discovery", "tool_called": "hosting_invite"}
 
     if peer_rows:
-        reply = (
-            f"Here are neighbors you could invite to **{title}** — "
-            "tap **Nudge** on someone who fits."
+        reply = compose_reply(
+            goal=(
+                "The host asked to invite a neighbor to their meetup and cards of "
+                "neighbors they could invite are shown below the message. Tell them "
+                "to tap the **Nudge** button (exact button name) on someone who fits."
+            ),
+            facts=[
+                f"Meetup title: {title}",
+                f"Neighbor cards shown below the message: {len(peer_rows)}",
+            ],
+            fallback=(
+                f"Here are neighbors you could invite to **{title}** — "
+                "tap **Nudge** on someone who fits."
+            ),
         )
     else:
-        reply = (
-            f"I don't have strong mom matches on your block yet for **{title}**. "
-            "Try broadening who you're hosting for, or say find people like me."
+        reply = compose_reply(
+            goal=(
+                "The host asked to invite a neighbor to their meetup but no strong "
+                "fits were found near them yet. Say so honestly, and suggest "
+                "broadening who they are hosting for, or saying exactly "
+                "'find people like me' (keep that phrase verbatim)."
+            ),
+            facts=[f"Meetup title: {title}"],
+            fallback=(
+                f"I don't see strong fits near you yet for **{title}**. "
+                "Try broadening who you're hosting for, or say find people like me."
+            ),
         )
     return reply, ctx, ctx["last_routing"], peer_rows

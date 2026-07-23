@@ -199,6 +199,62 @@ class TestDiscoveryRouting(unittest.TestCase):
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_zip_ask_stamps_zip_asked_on_session(self, mock_slots, _mock_ai) -> None:
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.92,
+            "identity_snippet": None,
+        }
+        result = handle_discovery_turn(
+            "Hey I wanna meet new people",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            history=[],
+        )
+        self.assertIsNotNone(result)
+        _, ctx, _, _ = result
+        self.assertTrue(ctx.get("zip_asked"))
+
+    @patch("app.discovery_route.compose_reply")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_zip_reask_after_offramp_composes_against_message(
+        self, mock_slots, _mock_ai, mock_compose
+    ) -> None:
+        # Transcript bug (2026-07-23): the decline off-ramp resets routing_phase to
+        # "listening", so a later mis-routed question ("Why are u asking for my
+        # block") counted as a FIRST ask and replayed the canned ZIP line verbatim.
+        # With zip_asked remembered on the session, any later ask must be composed
+        # against what the user actually said — never the canned t() string.
+        mock_compose.return_value = "composed-zip-reask"
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.9,
+            "identity_snippet": None,
+        }
+        result = handle_discovery_turn(
+            "Why are u asking for my block",
+            session_ctx={"routing_phase": "listening", "zip_asked": True},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            history=[],
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertEqual(reply, "composed-zip-reask")
+        self.assertEqual(ctx["routing_phase"], PHASE_NEED_ZIP)
+        kwargs = mock_compose.call_args.kwargs
+        self.assertEqual(kwargs.get("user_message"), "Why are u asking for my block")
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.fetch_blocks_for_zip")
     def test_late_find_uses_chat_history_for_identity(

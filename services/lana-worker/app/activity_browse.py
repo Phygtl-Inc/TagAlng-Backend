@@ -40,7 +40,8 @@ _CANCEL_RE = re.compile(
 # answer ("family", "all moms welcome") is never mistaken for a pivot.
 _PIVOT_OUT_RE = re.compile(
     r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow (?:my )?(?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b",
+    r"\bshow (?:my )?(?:(?:block|neighborhood) log|intros)\b|"
+    r"\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b",
     re.IGNORECASE,
 )
 
@@ -595,9 +596,18 @@ def run_activity_browse_turn(
     turns = int(session_ctx.get("browse_turns") or 0) + 1
     session_ctx["browse_turns"] = turns
     if _CANCEL_RE.search(msg) or turns > _BROWSE_TURN_CAP:
+        from app.reply_compose import compose_reply
+
         reset_activity_browse_state(session_ctx)
         session_ctx["routing_phase"] = "listening"
-        return "No problem — we can look another time. What else can I help with?"
+        return compose_reply(
+            goal=(
+                "The user cancelled the activity browse (or it ran long). Close "
+                "warmly with zero pressure and invite them to ask for anything else."
+            ),
+            fallback="No problem — we can look another time. What else can I help with?",
+            cache=True,
+        )
 
     # ── Seed turn: the "A meet or playgroup" CTA entered with a generic payload; don't mine
     #    it as an interest — drop it so P1 asks fresh (mirrors look_meet_skip_seed). ──

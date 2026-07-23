@@ -190,7 +190,8 @@ _BLOCK_BROWSE_PHRASE = (
     r"what(?:'s| is) on (?:the )?block(?: marketplace)?"
 )
 _BLOCK_LOG_RE = re.compile(
-    r"\b(?:show (?:my )?block logs?|block logs?|who matched(?: with me)?|what matched|"
+    r"\b(?:show (?:my )?(?:block|neighborhood) logs?|(?:block|neighborhood) logs?|"
+    r"who matched(?: with me)?|what matched|"
     r"block radar|my matches on (?:the )?block)\b",
     re.I,
 )

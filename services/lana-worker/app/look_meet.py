@@ -21,7 +21,7 @@ from app.i18n import session_lang, t
 
 _KIND_SUGGESTIONS = ["Playground meet", "Stroller walk", "Coffee & kids", "Library storytime"]
 _AFFINITY_QUESTION = "Anyone with a similar kid-stage matter?"
-_AFFINITY_OPTIONS = ["Same kid-stage", "Any toddler mom", "Open · all moms"]
+_AFFINITY_OPTIONS = ["Same kid-stage", "Any toddler parent", "Open to everyone"]
 _MAX_ENRICH = 2
 
 _CANCEL_RE = re.compile(
@@ -45,7 +45,8 @@ _LOOK_MEET_TURN_CAP = 12
 # Needs a find/show verb + a people noun so a meet answer ("all moms") is never a pivot.
 _PIVOT_OUT_RE = re.compile(
     r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow (?:my )?(?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b|"
+    r"\bshow (?:my )?(?:(?:block|neighborhood) log|intros)\b|"
+    r"\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b|"
     r"\b(?:host|create|throw|plan|organi[sz]e)\s+(?:an?\s+|my\s+)?(?:event|party|meetup|gathering)\b",
     re.IGNORECASE,
 )
@@ -211,9 +212,9 @@ def save_pending_meet_seek(
     session_ctx["look_meet_saved_now"] = True
     matches = int(saved.get("matches_created") or 0)
     tail = (
-        f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+        f" {matches} neighbor{'s' if matches != 1 else ''} wanting the same just matched!"
         if matches
-        else " I'll text you when another mom wants the same near you."
+        else " I'll text you when another neighbor wants the same near you."
     )
     return f"✅ You're in — I'm listening for a **{_summary(draft)}**.{tail}"
 
@@ -248,9 +249,9 @@ def start_meet_seek_from_interest(
     session_ctx["look_meet_saved_now"] = True
     matches = int(saved.get("matches_created") or 0)
     tail = (
-        f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+        f" {matches} neighbor{'s' if matches != 1 else ''} wanting the same just matched!"
         if matches
-        else " I'll text you when a mom wants the same near you."
+        else " I'll text you when a neighbor wants the same near you."
     )
     return f"✅ You're in — I'm listening for a **{_summary(draft)}**.{tail}"
 
@@ -523,9 +524,9 @@ def run_look_meet_turn(
         session_ctx["look_draft"] = draft
         session_ctx["look_meet_saved_now"] = True
         tail = (
-            f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+            f" {matches} neighbor{'s' if matches != 1 else ''} wanting the same just matched!"
             if matches
-            else " I'll text you when another mom wants the same near you."
+            else " I'll text you when another neighbor wants the same near you."
         )
         return f"✅ Saved — I'm listening for a **{_summary(draft)}**.{tail}"
 
@@ -634,18 +635,18 @@ def run_look_meet_turn(
     # already-listening — sign-up comes first, then the seek is created.
     guest = not session_ctx.get("phone_verified")
     listen_promise = (
-        "**Start listening for me** — I'll get you signed up, then text you when a mom wants the same"
+        "**Start listening for me** — I'll get you signed up, then text you when a neighbor wants the same"
         if guest
-        else "**Start listening for me** and I'll text you when a mom wants the same"
+        else "**Start listening for me** and I'll text you when a neighbor wants the same"
     )
     if events:
         n = len(events)
         return (
             f"Here's what I've got — **{_summary(draft)}**. I also found {n} meet"
-            f"{'s' if n != 1 else ''} on your block you could join — take a look below, or "
+            f"{'s' if n != 1 else ''} near you that you could join — take a look below, or "
             f"{listen_promise}."
         )
     return (
         f"Here's what I've got — **{_summary(draft)}**. {listen_promise}, "
-        "or send it to a mom you know."
+        "or send it to a neighbor you know."
     )

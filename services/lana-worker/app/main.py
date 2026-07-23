@@ -129,6 +129,7 @@ from app.claims_persist import (
     user_needs_display_name,
 )
 from app.rapport_synth import ensure_gap_buffer as rapport_ensure_gap_buffer
+from app.reply_compose import compose_reply
 from app.profile_photo import upload_profile_photo_bytes
 from app.signal_photo import upload_signal_photo_bytes
 from app.ui_actions import derive_ui_actions
@@ -1152,9 +1153,18 @@ def create_lana_session(
                     "unified_mode": True,
                 }
                 _rec_title = str(recovered["event_draft"].get("title") or "your event")
-                opening = (
-                    f"Welcome back! I still have **{_rec_title}** ready to go — "
-                    "send a message and I'll post it to your block."
+                opening = compose_reply(
+                    goal=(
+                        "The user just logged in and you still have the event they "
+                        "built before logging in, ready to post. Welcome them back "
+                        "and tell them to send any message so you can post it for "
+                        "their neighbors."
+                    ),
+                    facts=[f"The recovered event's name: {_rec_title}"],
+                    fallback=(
+                        f"Welcome back! I still have **{_rec_title}** ready to go — "
+                        "send a message and I'll post it for your neighbors."
+                    ),
                 )
                 status = "continue"
                 ui_raw = None
@@ -1673,12 +1683,12 @@ def _run_lana_message(
             notify_user(
                 auth.user_id,
                 title="Your meet is live 🎉",
-                body=f"“{_etitle}” is posted to your block — I’ll tell you when neighbors ask to join.",
+                body=f"“{_etitle}” is posted in your area — I’ll tell you when neighbors ask to join.",
                 url=f"/meet/{_eid}",
                 email_subject=f"Your meet “{_etitle}” is live",
                 email_html=email_html(
                     "Your meet is live 🎉",
-                    f"“{_etitle}” is now posted to your block. I’ll let you know as neighbors ask to join.",
+                    f"“{_etitle}” is now posted in your area. I’ll let you know as neighbors ask to join.",
                     cta_label="Open the meet",
                     cta_path=f"/meet/{_eid}",
                 ),
@@ -2245,9 +2255,17 @@ def _complete_event_draft(
             published = True
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":
-                closing = (
-                    "Your event draft is ready — verify your email in settings, "
-                    "then publish from the form or call complete again."
+                closing = compose_reply(
+                    goal=(
+                        "The user's event draft is finished but publishing needs a "
+                        "verified email. Tell them the draft is ready and to verify "
+                        "their email in settings, then publish again."
+                    ),
+                    fallback=(
+                        "Your event draft is ready — verify your email in settings, "
+                        "then publish from the form or call complete again."
+                    ),
+                    cache=True,
                 )
             else:
                 raise
@@ -2377,6 +2395,11 @@ def post_rapport_next_ask(
     # POST (not GET): the PWA service worker breaks cross-origin GETs to the worker but
     # lets POSTs through — same reason the chat/places calls are POST.
     auth = verify_auth(authorization)
+    # Guests (anonymous auth) never get the "By the way…" tile — profile-deepening
+    # questions are for committed accounts. Their claims still accrue in chat and
+    # carry over on verify (same user_id), so nothing is lost by waiting.
+    if auth.is_anonymous:
+        return {"ask": None}
     surface = (body.surface if body else "homescreen") or "homescreen"
     cycle = bool(body.cycle) if body else False
     return {"ask": rapport_next_ask(auth.user_id, surface, cycle=cycle)}

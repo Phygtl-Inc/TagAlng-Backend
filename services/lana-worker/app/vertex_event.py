@@ -74,7 +74,8 @@ Affinity (who the meet is for) — ONE tailored question, never a blocker:
 - Once you know the activity, ask ONE short question about who it's for, phrased for THIS meet,
   and offer 2-3 quick answers in affinity_options. Put the question in affinity_prompt.
   Example (playground meet): affinity_prompt "Anyone with a similar kid-stage matters?",
-  affinity_options ["Same kid-stage", "Any toddler mom", "Open · all moms"].
+  affinity_options ["Same kid-stage", "Any toddler parent", "Open to everyone"].
+  Never use gendered nouns ("moms", "dads") in options — say "parents", "families", "neighbors".
 - When the host answers (taps an option or replies), fold their choice into cohort_tags using the
   allowed Purpose ids, then set affinity_prompt null and affinity_options []. Ask it at most once.
 - NEVER block ready_to_complete on affinity — title + when + place are the only blockers.

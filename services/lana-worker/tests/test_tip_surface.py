@@ -55,7 +55,9 @@ class TestTipSurface(unittest.TestCase):
     def test_tip_pass_actions(self) -> None:
         actions = tip_pass_actions()
         self.assertEqual(actions[0]["message"], "pass the tip along")
-        self.assertEqual(actions[1]["label"], "Send to a mom")
+        # Display label is lingo-scrubbed; the posted message payload stays
+        # "send to a mom" for backward-compatible server matching.
+        self.assertEqual(actions[1]["label"], "Send to a parent")
 
     def test_derive_tip_ctas(self) -> None:
         ctx = {

@@ -8,6 +8,7 @@ from typing import Any
 from app.guest_capabilities import handle_guest_capability
 from app.guest_login import GUEST_STEP_LOGIN_OTP, GUEST_STEP_LOGIN_PHONE, handle_guest_login
 from app.profile_intake import collect_profile_buckets, lana_profile_turn
+from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 
 GUEST_STEP_EARLY = "early_chat"
@@ -133,9 +134,18 @@ def known_intro_name(
 def _scrub_early_name_ask(reply: str) -> str:
     if not _NAME_ASK_RE.search(reply):
         return reply
-    return (
-        "Got it — tell me a bit more about your background "
-        "and what you're hoping to find on the block."
+    return compose_reply(
+        goal=(
+            "It's too early in guest intake to ask for the user's name. Warmly "
+            "ask them instead to share a bit more about their background and "
+            "what they're hoping to find in the neighborhood — do NOT ask for "
+            "their name."
+        ),
+        fallback=(
+            "Got it — tell me a bit more about your background "
+            "and what you're hoping to find nearby."
+        ),
+        cache=True,
     )
 
 
@@ -149,9 +159,17 @@ def _offer_message(jm: dict[str, Any]) -> str:
     if copy:
         return copy
     nick = _candidate_nickname(jm)
-    return (
-        f"{nick} told me she's looking for neighbors like you on the block. "
-        f"Want me to put you two together?"
+    return compose_reply(
+        goal=(
+            "Offer the user an intro to a nearby neighbor who told you she's "
+            "looking for neighbors like them. End with a clear yes-or-no "
+            "question asking whether to put the two of them together."
+        ),
+        facts=[f"The neighbor's name: {nick}"],
+        fallback=(
+            f"{nick} told me she's looking for neighbors like you nearby. "
+            f"Want me to put you two together?"
+        ),
     )
 
 
@@ -248,20 +266,46 @@ def lana_profile_guest_turn(
                     requires_phone=True,
                 )
             else:
-                reply = f"Love it! What should {nick} call you when I introduce you?"
+                reply = compose_reply(
+                    goal=(
+                        "The user accepted an intro to a neighbor. Celebrate "
+                        "briefly and ask what that neighbor should call them "
+                        "when you introduce them (their first name)."
+                    ),
+                    facts=[f"The neighbor's name: {nick}"],
+                    fallback=f"Love it! What should {nick} call you when I introduce you?",
+                )
                 ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_INTRO_NAME)
             return reply, "continue", ctx, _ui_joint_moment(), joint_moment
         if choice is False:
             decline_joint_moment(user_jwt, str(jm_id))
-            reply = (
-                "No problem — we can keep exploring your block. "
-                "What are you hoping to find here?"
+            reply = compose_reply(
+                goal=(
+                    "The user declined an intro to a neighbor. Accept gracefully, "
+                    "say you can keep exploring their neighborhood together, and "
+                    "ask what they're hoping to find here."
+                ),
+                fallback=(
+                    "No problem — we can keep exploring your neighborhood. "
+                    "What are you hoping to find here?"
+                ),
+                cache=True,
             )
             ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_DECLINED)
             ctx.pop("joint_moment", None)
             ctx.pop("joint_moment_id", None)
             return reply, "continue", ctx, _ui_joint_moment(), None
-        reply = f"Just say yes if you'd like an intro to {nick}, or no to keep exploring."
+        reply = compose_reply(
+            goal=(
+                "The user's answer to your intro offer wasn't a clear yes or no. "
+                "Ask them to say literally 'yes' to get the intro to the neighbor, "
+                "or 'no' to keep exploring (keep the words yes and no verbatim)."
+            ),
+            facts=[f"The neighbor's name: {nick}"],
+            fallback=(
+                f"Just say yes if you'd like an intro to {nick}, or no to keep exploring."
+            ),
+        )
         ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_OFFERED)
         return reply, "continue", ctx, _ui_joint_moment(), joint_moment
 
@@ -270,7 +314,15 @@ def lana_profile_guest_turn(
         name = extract_intro_name(user_message)
         nick = _candidate_nickname(joint_moment or {})
         if not name:
-            reply = f"What should {nick} call you? Just your first name is fine."
+            reply = compose_reply(
+                goal=(
+                    "You still need the user's first name before introducing them "
+                    "to the neighbor. Ask again what that neighbor should call "
+                    "them, reassuring that just a first name is fine."
+                ),
+                facts=[f"The neighbor's name: {nick}"],
+                fallback=f"What should {nick} call you? Just your first name is fine.",
+            )
             ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_INTRO_NAME)
             return reply, "continue", ctx, _ui_joint_moment(), joint_moment
         reply = (
@@ -288,9 +340,17 @@ def lana_profile_guest_turn(
     # --- await_phone ---
     if step == GUEST_STEP_PHONE:
         if phone_verified:
-            reply = (
-                "You're verified! Quick one — how many kids do you have? "
-                "(Just the number — I never ask their names or ages.)"
+            reply = compose_reply(
+                goal=(
+                    "The user just verified. Celebrate briefly, then ask one quick "
+                    "question: how many kids they have — just the number, and "
+                    "reassure them you never ask kids' names or ages."
+                ),
+                fallback=(
+                    "You're verified! Quick one — how many kids do you have? "
+                    "(Just the number — I never ask their names or ages.)"
+                ),
+                cache=True,
             )
             ctx = _merge_guest_ctx(session_ctx, guest_step=GUEST_STEP_POST_VERIFY)
             ctx["requires_phone_verification"] = False

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 
 _HOST_RE = re.compile(
@@ -47,16 +48,34 @@ def fetch_peer_matches(user_jwt: str, *, limit: int = 5) -> list[dict[str, Any]]
 
 def format_peer_matches(peers: list[dict[str, Any]]) -> str:
     if not peers:
-        return (
-            "I don't see strong matches on your block yet. "
-            "Tap Complete to save your profile — that helps me find neighbors like you."
+        return compose_reply(
+            goal=(
+                "The user asked to find neighbors like them but no strong fits "
+                "were found near them yet. Say so honestly, and tell them to tap "
+                "the Complete button (exact button name) to save their profile so "
+                "you can find neighbors like them."
+            ),
+            fallback=(
+                "I don't see strong fits near you yet. "
+                "Tap Complete to save your profile — that helps me find neighbors like you."
+            ),
+            cache=True,
         )
     # The match cards below the message carry names + shared traits — don't
     # narrate the same list twice; keep the text to the count and the next step.
     n = len(peers)
-    return (
-        f"I found {n} neighbor{'s' if n != 1 else ''} on your block — "
-        "here's what you have in common. Want me to introduce you to any of them?"
+    return compose_reply(
+        goal=(
+            "You just found nearby neighbors similar to the user; cards below "
+            "the message show their names and shared traits. Give the real "
+            "count, point to what they have in common below, and offer to "
+            "introduce them to any of these neighbors. Do not invent names."
+        ),
+        facts=[f"Neighbors found nearby (cards shown below the message): {n}"],
+        fallback=(
+            f"I found {n} neighbor{'s' if n != 1 else ''} nearby — "
+            "here's what you have in common. Want me to introduce you to any of them?"
+        ),
     )
 
 
@@ -83,16 +102,38 @@ def handle_guest_capability(
 
     if not home_block_id:
         return (
-            "You're verified! I still need your home block before I can show neighbors or host "
-            "on the block — share your location when prompted, or finish onboarding.",
+            compose_reply(
+                goal=(
+                    "The user is verified but you don't know their home area yet, "
+                    "so you can't show neighbors or set up hosting. Congratulate "
+                    "them on verifying, and ask them to share their location when "
+                    "prompted or finish onboarding."
+                ),
+                fallback=(
+                    "You're verified! I still need your home area before I can show neighbors "
+                    "or host nearby — share your location when prompted, or finish onboarding."
+                ),
+                cache=True,
+            ),
             {"requires_phone_verification": False, "guest_step": guest_step},
         )
 
     if host:
         return (
-            "You're set to host on your block. Tell me what you're planning — brunch, playdate, "
-            "walk, anything — and I'll help you draft it. (Say something like "
-            "\"Sunday coffee for new moms at 10am\".)",
+            compose_reply(
+                goal=(
+                    "The user wants to host something for neighbors and is all set "
+                    "to do it. Ask what they're planning — brunch, playdate, walk, "
+                    "anything — and offer to help draft it, including one concrete "
+                    "example ask like \"Sunday coffee for new parents at 10am\"."
+                ),
+                fallback=(
+                    "You're set to host for neighbors nearby. Tell me what you're planning — "
+                    "brunch, playdate, walk, anything — and I'll help you draft it. "
+                    "(Say something like \"Sunday coffee for new parents at 10am\".)"
+                ),
+                cache=True,
+            ),
             {"requires_phone_verification": False, "guest_step": guest_step, "intent": "host_activity"},
         )
 

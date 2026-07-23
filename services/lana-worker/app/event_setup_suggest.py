@@ -1,9 +1,9 @@
 """AI-tailored quick-setup cards for the in-chat host flow.
 
-Instead of hardcoding "How many moms?" + generic bring chips, this asks the LLM to tailor
+Instead of hardcoding "How many people?" + generic bring chips, this asks the LLM to tailor
 the setup cards (name / capacity / sharing / approval / bring) to THIS event — suggested
 event names (the first pre-fills the name field, the rest are tap-to-swap chips), the
-audience noun ("moms" vs "dads" vs "neighbors"), and bring items that fit the activity (a
+audience noun ("parents" vs "neighbors" vs "families"), and bring items that fit the activity (a
 stroller coffee walk → stroller + coffee mug; a potluck → a dish to share). All of it comes
 back in ONE call so the FE can render them as a single swipeable carousel. Best-effort:
 returns sensible defaults on any failure so the flow never breaks.
@@ -24,15 +24,16 @@ quick-setup cards to THIS event and return ONE compact JSON object:
  "cover_emoji": "..."}
 
 - title_suggestions: EXACTLY 3 short, specific event names tailored to THIS event — the
-  people, theme, or activity mentioned (a gathering of Brazilian moms ->
-  ["Brazilian Moms Meetup","Brazil Heritage Mixer","Cafezinho & Chat"]; a toddler park
+  people, theme, or activity mentioned (a gathering of Brazilian parents ->
+  ["Brazilian Families Meetup","Brazil Heritage Mixer","Cafezinho & Chat"]; a toddler park
   meet -> ["Toddler Park Playdate","Morning Playground Meetup","Little Ones at the Park"]).
   Put the best one FIRST — it pre-fills the name field as the default. When almost nothing
-  is known yet, still return 3 warm neighborly names ("Neighborhood Meetup").
+  is known yet, still return 3 warm neighborly names ("Neighborhood Meetup"). Use neutral
+  audience nouns — "parents", "neighbors", "families" — never gendered ones like "moms" or "dads".
 
 - capacity_label: a short "how many can come?" question using the RIGHT audience noun for
-  this event — a moms meetup -> "How many moms?"; a dads hangout -> "How many dads?"; a
-  mixed/family/neighbor event -> "How many neighbors?" or "How many can come?".
+  this event — a parents meetup -> "How many parents?"; a family event -> "How many families?";
+  a mixed/neighbor event -> "How many neighbors?", "How many people?", or "How many can come?".
 - capacity_default: a sensible max headcount for this kind of event (small coffee ~8,
   a park playdate ~12, a big potluck ~20). Integer 2-30.
 - sharing_label / sharing_hint: whether attendees can pass the invite link to a friend.
