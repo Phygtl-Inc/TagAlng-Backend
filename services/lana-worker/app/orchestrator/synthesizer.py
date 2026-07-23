@@ -40,7 +40,7 @@ def _format_shown_peer_preview(session_ctx: dict[str, Any] | None) -> str | None
     if snippet:
         parts.append(f"User matching ask stored: {snippet[:200]}")
     if block:
-        parts.append(f"Block/ZIP context: {block}")
+        parts.append(f"Area context (backstage): {block}")
     parts.append(
         "Preview labels (heritage, Mom, interests) are what those neighbors shared nearby — "
         "use them to answer trait questions (e.g. if label includes Brazilian, say yes). "
@@ -122,8 +122,15 @@ def synthesize_turn(
                 if fast_chat
                 else ""
             )
-            + "You are Lana, local concierge — warm, one line.\n"
-            "- Answer what the user actually asked first (are you real, frustration, small talk).\n"
+            + "You are Lana, local concierge — warm and natural. Short (1-2 sentences) by default, "
+            "but MATCH LENGTH TO THE ASK: when the user asks for detail or an overview ('explain "
+            "more', 'in detail', 'what can you do'), answer fully from the CAPABILITIES FACT SHEET "
+            "with concrete examples — a short structured paragraph, not a re-worded pitch.\n"
+            "- Answer what the user actually asked first (are you real, frustration, small talk, a "
+            "complaint). If they repeat a question or say your replies sound canned/hardcoded/"
+            "robotic, acknowledge that directly first, then answer DIFFERENTLY: never re-summarize "
+            "what RECENT TURNS show you already said — go one level deeper with concrete examples, "
+            "or ask which part they want.\n"
             "- If routing_phase is need_zip/need_identity but they did not give ZIP/identity, "
             "respond to their question; gently offer ZIP or one identity line only if natural.\n"
             "- Greetings: answer naturally; mention find neighbors / log in when helpful.\n"
@@ -143,7 +150,17 @@ def synthesize_turn(
             "- If USER has no profile photo yet, you may suggest adding one once (warm, optional). "
             "If they agree, tell them to tap Add photo below — do not ask for a URL.\n"
             "- If routing_phase is await_profile_photo, direct them to the Add photo button.\n"
+            "- LINGO: context around you is full of backstage words — 'block', 'match', routing "
+            "keys. NEVER repeat them to the user: say 'your area', 'your neighborhood', 'near "
+            "you', 'someone to meet'. This applies even when describing what you can do. "
+            "(Asking for a ZIP code when you need one is fine — 'block' never is.)\n"
         )
+        caps = load_prompt("lana_capabilities.md")
+        if caps:
+            payload_parts.append(
+                "CAPABILITIES FACT SHEET (all true today — the material for any 'what can you "
+                "do' / 'explain more' answer; never promise beyond it):\n" + caps
+            )
         preview_ctx = _format_shown_peer_preview(session_ctx)
         if preview_ctx:
             payload_parts.append(preview_ctx)
@@ -232,12 +249,13 @@ def synthesize_opening(
 
 def _lana_synth_schema() -> str:
     return """{
-  "assistant_message": "single-line warm reply",
+  "assistant_message": "warm reply — short by default, fuller when the user asked for detail",
   "status": "continue",
   "ui": { "bucket": null, "focus_phrase": null, "highlights": [] }
 }
 
-Rules: assistant_message ONE line only. status is continue."""
+Rules: assistant_message is short (1-2 sentences) UNLESS the user asked for detail or repeated
+a question — then give a fuller structured answer (still one JSON string). status is continue."""
 
 
 def _parse_lana_synth(

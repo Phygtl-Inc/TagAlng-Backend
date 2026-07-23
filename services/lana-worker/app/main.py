@@ -2395,6 +2395,11 @@ def post_rapport_next_ask(
     # POST (not GET): the PWA service worker breaks cross-origin GETs to the worker but
     # lets POSTs through — same reason the chat/places calls are POST.
     auth = verify_auth(authorization)
+    # Guests (anonymous auth) never get the "By the way…" tile — profile-deepening
+    # questions are for committed accounts. Their claims still accrue in chat and
+    # carry over on verify (same user_id), so nothing is lost by waiting.
+    if auth.is_anonymous:
+        return {"ask": None}
     surface = (body.surface if body else "homescreen") or "homescreen"
     cycle = bool(body.cycle) if body else False
     return {"ask": rapport_next_ask(auth.user_id, surface, cycle=cycle)}

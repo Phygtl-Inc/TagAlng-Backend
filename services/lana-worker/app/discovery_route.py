@@ -4493,6 +4493,12 @@ def _routing_ctx(
         "active_intent": active_intent,
         "routing_phase": phase,
     }
+    if phase == PHASE_NEED_ZIP:
+        # The ZIP ask happened — remembered for the whole session, because the
+        # decline off-ramp resets routing_phase to "listening" and every later
+        # ask would otherwise count as a "first ask" and replay the canned line
+        # verbatim (the broken-record loop). See the need-ZIP gate.
+        out["zip_asked"] = True
     clear_turn_surfaces(out)
     out.update(extra)
     return out
@@ -6813,19 +6819,24 @@ def handle_discovery_turn(
             )
         zip_hint = invalid_zip_hint(msg)
         zip_goal = str(ctx_base.get("discovery_goal") or effective_goal or "peers")
-        # Re-asks never repeat verbatim: once the session is already in need_zip
-        # (Lana asked last turn), the ask is composed against what the user just
-        # said instead of replaying the same canned line — the loop that made
-        # her read as a broken record. First ask stays the canned t() string.
+        # Re-asks never repeat verbatim: once Lana has asked for the ZIP at any
+        # point this session (zip_asked survives the decline off-ramp's phase
+        # reset), the ask is composed against what the user just said instead of
+        # replaying the same canned line — the loop that made her read as a
+        # broken record. Only the very first ask stays the canned t() string.
         _zip_ask = zip_hint or _zip_prompt(zip_goal, _lang)
-        if not zip_hint and str(phase or "") == PHASE_NEED_ZIP:
+        if not zip_hint and (
+            str(phase or "") == PHASE_NEED_ZIP or session_ctx.get("zip_asked")
+        ):
             _zip_ask = compose_reply(
                 goal=(
-                    "You already asked for their ZIP last turn and they replied "
+                    "You already asked for their ZIP earlier and they replied "
                     "with something else (not a ZIP, not a refusal). Respond to "
-                    "what they actually said first, then explain you need a "
-                    "5-digit US ZIP (e.g. 32827) to look around their area, and "
-                    "ask once more — gently, never robotic."
+                    "what they actually said first — if they asked a question "
+                    "(e.g. what a block is, or why you need the ZIP), answer it "
+                    "honestly and warmly — then explain you need a 5-digit US "
+                    "ZIP (e.g. 32827) to look around their area, and ask once "
+                    "more — gently, never robotic."
                 ),
                 user_message=msg,
                 fallback=_zip_ask,
