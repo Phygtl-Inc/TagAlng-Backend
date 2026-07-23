@@ -11,7 +11,7 @@ simulation.py's turn dict, which was extended to carry the same raw fields analy
 reads: ui_actions, activity_previews, event_draft, peer_matches, signal_saved,
 requires_phone_verification, outcome).
 
-Usage:
+Usage: 
     from qa_analyze import analyze_transcripts
     stats = analyze_transcripts(transcripts)  # list[dict] as returned by simulation.run()
 
