@@ -198,3 +198,45 @@ def search_places(
         if len(out) >= limit:
             break
     return out
+
+
+# Classic Geocoding API — reverse geocoding has no Places API (New) equivalent.
+_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+
+
+def reverse_geocode(lat: float, lng: float) -> dict[str, Any] | None:
+    """lat/lng → {name, address, place_id, lat, lng} for a bare device pin ("Use my
+    current location", issue #42). The returned lat/lng are the CALLER's coordinates,
+    not the geocode result's — the device pin stays authoritative; this only names it.
+    Best-effort: None on any failure or missing key (a nameless pin is still correct)."""
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        with httpx.Client(timeout=6.0) as client:
+            res = client.get(
+                _GEOCODE_URL,
+                params={
+                    "latlng": f"{float(lat)},{float(lng)}",
+                    "key": api_key,
+                    # Prefer a human-scale label over a plus-code or a whole city.
+                    "result_type": "street_address|premise|point_of_interest|neighborhood",
+                },
+            )
+        data = res.json() if res.status_code == 200 else {}
+    except Exception:  # noqa: BLE001
+        return None
+    results = data.get("results") or []
+    if not results:
+        return None
+    top = results[0] or {}
+    address = str(top.get("formatted_address") or "").strip()
+    if not address:
+        return None
+    return {
+        "name": address.split(",")[0].strip()[:120],
+        "address": address[:300],
+        "place_id": str(top.get("place_id") or "").strip() or None,
+        "lat": float(lat),
+        "lng": float(lng),
+    }
