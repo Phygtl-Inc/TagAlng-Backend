@@ -1908,7 +1908,50 @@ def run_lana_unified_pipeline(
                     else:
                         reply = _host_fallback_nudge(need)
             else:  # stage == "confirm" → publish when the host drops it
-                if (_is_host_drop(user_message) or _is_host_confirm(user_message)) and not phone_verified:
+                # Two ways to say "post it": the confirm card's CTA (the FE always sends
+                # its canonical English payload — "Drop the meet up" — whatever locale the
+                # label is rendered in), and the same ask TYPED free-form in any language
+                # ("publícalo", "pode postar"). The CTA matchers catch the first; the host
+                # brain's `publish` read catches the second — an AI signal, not a word list.
+                drop_asked = _is_host_drop(user_message) or _is_host_confirm(user_message)
+                brain = None
+                if not drop_asked:
+                    # Free text at confirm — an inline edit, a redo ask, a question, or a
+                    # publish ask in the host's own words. The brain reads it in any
+                    # phrasing: corrections land last-write-wins, and a slot asked to
+                    # change WITHOUT its new value ("I want a different spot") comes back
+                    # in redo and clears here.
+                    ed["suggestions"] = []
+                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    from app.host_turn import host_turn_brain
+
+                    with timer.stage("llm_host_turn"):
+                        brain = host_turn_brain(
+                            history=history,
+                            user_message=user_message,
+                            draft=ed,
+                            needed=need,
+                        )
+                    if brain:
+                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
+                    # Re-derive the blockers AFTER the brain applied edits/redos — the
+                    # locals above predate them (and the router's clear_fields path may
+                    # have already blanked a slot before the stage machine ran).
+                    _title = str(ed.get("title") or "").strip()
+                    wd = turn_ctx.get("event_when_date")
+                    wt = turn_ctx.get("event_when_time")
+                    venue_resolvable = bool(str(ed.get("venue_name") or "").strip())
+                    # Honor the AI's publish read only while the draft is still complete —
+                    # a turn that also cleared a blocker must route back to setup instead.
+                    drop_asked = bool(
+                        brain
+                        and brain.get("publish")
+                        and _title
+                        and wd
+                        and wt
+                        and venue_resolvable
+                    )
+                if drop_asked and not phone_verified:
                     # Guest dropping the meet: DON'T attempt create_event first — it would
                     # 403 (auto_publish_event_failed: create_event_failed:403). Gate on auth
                     # up front: ask to sign up / log in and mark the finished draft
@@ -1945,7 +1988,7 @@ def run_lana_unified_pipeline(
                                 f"post **{_title or 'your event'}** right away."
                             ),
                         )
-                elif _is_host_drop(user_message) or _is_host_confirm(user_message):
+                elif drop_asked:
                     event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
                     if event_id:
                         turn_ctx["event_id"] = event_id
@@ -2014,33 +2057,10 @@ def run_lana_unified_pipeline(
                                 ed.pop("venue_name", None)
                             reply = _publish_failure_reply(publish_error, _title)
                 else:
-                    # Free text at confirm — an inline edit, a redo ask, or a question. The
-                    # brain reads it in any phrasing: corrections land last-write-wins, and a
-                    # slot asked to change WITHOUT its new value ("I want a different spot")
-                    # comes back in redo and clears here. A draft still complete afterwards
-                    # holds at confirm; a cleared blocker falls back to the setup carousel —
-                    # the confirm card has no pickers, so holding would strand the host with
-                    # a hole they can't fill.
-                    ed["suggestions"] = []
-                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
-                    from app.host_turn import host_turn_brain
-
-                    with timer.stage("llm_host_turn"):
-                        brain = host_turn_brain(
-                            history=history,
-                            user_message=user_message,
-                            draft=ed,
-                            needed=need,
-                        )
-                    if brain:
-                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
-                    # Re-derive the blockers AFTER the brain applied edits/redos — the locals
-                    # above predate them (and the router's clear_fields path may have already
-                    # blanked a slot before the stage machine ran).
-                    _title = str(ed.get("title") or "").strip()
-                    wd = turn_ctx.get("event_when_date")
-                    wt = turn_ctx.get("event_when_time")
-                    venue_resolvable = bool(str(ed.get("venue_name") or "").strip())
+                    # Free text that wasn't a publish ask (brain already ran + applied
+                    # above). A draft still complete afterwards holds at confirm; a cleared
+                    # blocker falls back to the setup carousel — the confirm card has no
+                    # pickers, so holding would strand the host with a hole they can't fill.
                     if _title and wd and wt and venue_resolvable:
                         turn_ctx["host_stage"] = "confirm"
                         reply = (

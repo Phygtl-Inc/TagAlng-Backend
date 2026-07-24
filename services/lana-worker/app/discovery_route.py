@@ -4000,6 +4000,22 @@ def _is_host_answer(
     return not _host_confident_foreign(slots)
 
 
+def _is_host_cta_turn(msg: str, session_ctx: dict[str, Any]) -> bool:
+    """Is this turn a tap on the host review/setup/confirm card's OWN buttons ("Looks
+    good", "Let me tweak", "Drop the meet up")? The FE sends those labels as plain chat
+    text, and "drop the meet up" reliably reads to the classifier as an ABANDON — "drop"
+    means cancel in plain English, publish in ours. Mirror of the seed-turn rule: a
+    button's own payload is an explicit choice, never re-classified out of the lane whose
+    card is on screen. A hard cancel word ("drop it", "cancel") still wins and backs out."""
+    from app.lana_unified_pipeline import _is_host_confirm, _is_host_drop, _is_host_tweak
+
+    return (
+        str(session_ctx.get("host_stage") or "") in ("review", "setup", "confirm")
+        and (_is_host_confirm(msg) or _is_host_drop(msg) or _is_host_tweak(msg))
+        and not is_signal_cancel(msg)
+    )
+
+
 def _release_host_mode(session_ctx: dict[str, Any]) -> None:
     """Exit the sticky event-host flow and drop the in-progress draft, so a later
     'host an event' starts clean instead of resuming this abandoned one. Keys are set
@@ -5700,6 +5716,10 @@ def handle_discovery_turn(
         # flow on turn 1 (the look_meet seed bug, mirrored). The entry is an explicit choice;
         # never release on turn 0 — run the flow. Later turns re-decide intent normally.
         seed_turn = int(session_ctx.get("event_host_turns") or 0) == 0 and not host_verifying
+        # CTA turn: the review/setup/confirm card's own button labels are explicit
+        # choices — never re-classified out of the lane (the "Drop the meet up" tap used
+        # to read as an abandon, wiping the finished draft; see _is_host_cta_turn).
+        cta_turn = _is_host_cta_turn(msg, session_ctx)
         # Back out when the AI reads the turn as an abandon ("I dont wanna host anything" — no
         # replacement), on a hard cancel word, or on a pivot to another lane. No keyword
         # matching for the back-out — the AI's `abandon` flag is what decides it.
@@ -5707,7 +5727,7 @@ def handle_discovery_turn(
         # turns (an email address, a 6-digit code) reliably read as a "foreign" intent to the
         # classifier and would spuriously release host mode — wiping the draft + host_publish_pending
         # before the signup handler can stash/publish it (the "logged in but no event" bug).
-        wants_out = not seed_turn and not host_verifying and (
+        wants_out = not seed_turn and not host_verifying and not cta_turn and (
             bool(slots.get("abandon")) or is_signal_cancel(msg) or pivoted_away
         )
         if wants_out:
