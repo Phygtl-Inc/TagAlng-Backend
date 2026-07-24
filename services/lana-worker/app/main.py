@@ -78,6 +78,7 @@ from app.models import (
     CreateSessionResponse,
     DiscoverySurfacePayload,
     DiscoveryWeakPeerRow,
+    EventCancelHookRequest,
     EventDecisionHookRequest,
     EventDraft,
     EventJoinHookRequest,
@@ -89,6 +90,7 @@ from app.models import (
     PlaceSearchRequest,
     PlaceSearchResponse,
     ProfilePhotoUploadResponse,
+    ReverseGeocodeRequest,
     SignalPhotoUploadResponse,
     TipDraft,
     ExtractedClaim,
@@ -2114,6 +2116,72 @@ def hook_event_decision(
     return {"ok": True}
 
 
+@app.post("/hooks/event-cancel")
+def hook_event_cancel(
+    body: EventCancelHookRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Called by the HOST's client right after cancel_event. Fans out push + email to the
+    going roster so the FE's "I let everyone know" / per-attendee "Notified" is truthful.
+    The in-app group-chat system message is posted by cancel_event itself; this hook only
+    handles device/email delivery. Host ownership + cancelled status are re-checked here."""
+    auth = verify_auth(authorization)
+    from app.auth import service_client
+
+    sb = service_client()
+    if sb is None:
+        return {"ok": False}
+    try:
+        ev = (
+            sb.table("events")
+            .select("title,host_id,status")
+            .eq("id", body.event_id)
+            .single()
+            .execute()
+            .data
+            or {}
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+    if ev.get("host_id") != auth.user_id:  # only the host may trigger this
+        return {"ok": False}
+    if ev.get("status") != "cancelled":  # cancel_event must have run first
+        return {"ok": False}
+
+    title = ev.get("title") or "a meet"
+    eid = body.event_id
+    try:
+        rows = (
+            sb.table("event_requests")
+            .select("requester_id")
+            .eq("event_id", eid)
+            .in_("status", ["approved", "attended"])
+            .eq("rsvp_status", "going")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+
+    roster = {r.get("requester_id") for r in rows} - {None, auth.user_id}
+    for uid in roster:
+        notify_user(
+            uid,
+            title=f"“{title}” was cancelled",
+            body="The host cancelled this meet. Sorry — hopefully next time.",
+            url=f"/meet/{eid}",
+            email_subject=f"Cancelled: “{title}”",
+            email_html=email_html(
+                f"“{title}” was cancelled",
+                "The host had to call this one off. Keep an eye out — "
+                "something new is usually around the corner.",
+                "See what’s nearby", "/",
+            ),
+        )
+    return {"ok": True, "notified": len(roster)}
+
+
 @app.post("/lana/places/search", response_model=PlaceSearchResponse)
 def search_places_endpoint(
     body: PlaceSearchRequest,
@@ -2128,6 +2196,22 @@ def search_places_endpoint(
 
     rows = search_places(query=body.q, block_id=auth.home_block_id, user_id=auth.user_id)
     return PlaceSearchResponse(results=[PlaceResult(**r) for r in rows])
+
+
+@app.post("/lana/places/reverse-geocode", response_model=PlaceSearchResponse)
+def reverse_geocode_endpoint(
+    body: ReverseGeocodeRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Name a bare device pin ("Use my current location") — lat/lng in, at most one
+    PlaceResult out with a human label + address (issue #42). The result echoes the
+    CALLER's coordinates: the device pin stays authoritative, this only names it.
+    Server-side proxy like /lana/places/search; [] when the key isn't configured."""
+    verify_auth(authorization)
+    from app.places import reverse_geocode
+
+    row = reverse_geocode(body.lat, body.lng)
+    return PlaceSearchResponse(results=[PlaceResult(**row)] if row else [])
 
 
 @app.post("/lana/sessions/{session_id}/complete", response_model=CompleteSessionResponse)

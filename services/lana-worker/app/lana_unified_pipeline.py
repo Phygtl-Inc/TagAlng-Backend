@@ -1634,8 +1634,14 @@ def run_lana_unified_pipeline(
             # A named venue ("KFC", "Foxtail Coffee") is only resolvable once the host has
             # picked the exact place (place_id) — otherwise publish would blind-geocode the
             # name to *some* matching spot. Block-local answers ("my place", "the park")
-            # need no pin; they resolve to the host's block.
-            has_pin = bool(str(ed.get("place_id") or "").strip())
+            # need no pin; they resolve to the host's block. Raw coordinates count as a
+            # pin too: "Use my current location" sends lat/lng with NO place_id, and
+            # without this arm the auto-resolve below Google-searched the literal name
+            # "My current location" biased to the home block and re-pinned the event
+            # there (the Lake Nona mispin) — the device coordinates are authoritative.
+            has_pin = bool(str(ed.get("place_id") or "").strip()) or (
+                ed.get("venue_lat") is not None and ed.get("venue_lng") is not None
+            )
             # Auto-pin a tapped nearby suggestion. Those chips are real Google places we
             # surfaced WITH a pin (place_id/lat/lng), but the chip only sends its NAME, so
             # the extractor leaves it unpinned and the host gets bounced into "Which X

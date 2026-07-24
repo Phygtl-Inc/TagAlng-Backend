@@ -305,6 +305,14 @@ class PlaceSearchRequest(BaseModel):
     q: str
 
 
+class ReverseGeocodeRequest(BaseModel):
+    """A bare device pin ("Use my current location") to resolve into a name/address
+    (issue #42). The coordinates themselves stay authoritative for the event pin."""
+
+    lat: float
+    lng: float
+
+
 class EventVenueRequest(BaseModel):
     """The exact place the host picked from search — stamped onto the session's event
     draft so publish stores the precise pin (not a re-geocoded name)."""
@@ -347,6 +355,12 @@ class EventDecisionHookRequest(BaseModel):
     """FE calls this right after decide_event_request so the requester gets the outcome."""
 
     request_id: str
+
+
+class EventCancelHookRequest(BaseModel):
+    """FE calls this right after cancel_event so the going roster gets push + email."""
+
+    event_id: str
 
 
 class PlaceResult(BaseModel):
