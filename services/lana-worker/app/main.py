@@ -2214,6 +2214,292 @@ def reverse_geocode_endpoint(
     return PlaceSearchResponse(results=[PlaceResult(**row)] if row else [])
 
 
+# ── Circles (§A/§G · Place Profile §3) ────────────────────────────────────────
+# The user's real-world communities, optionally grounded to a canonical places row.
+# POST-only (same service-worker reason as the rapport/places endpoints). The word
+# "circle" is internal-only (§A.4 M7) — surfaces name the place, never the term.
+
+
+class CirclesListBody(_BaseModel):
+    pass
+
+
+class CircleAddBody(_BaseModel):
+    circle_type: str
+    detail: str | None = None
+    google_place_id: str | None = None
+
+
+class CircleUpdateBody(_BaseModel):
+    affiliation_id: str
+    detail: str | None = None
+
+
+class CircleRemoveBody(_BaseModel):
+    affiliation_id: str
+
+
+class CircleGroundOptionsBody(_BaseModel):
+    affiliation_id: str
+    # "search for another" free text; defaults to the user's own captured phrase.
+    query: str | None = None
+
+
+class CircleGroundBody(_BaseModel):
+    affiliation_id: str
+    # The tapped option. Only the id crosses the wire — name/geo/address are fetched
+    # server-side from Google (places.place_details), never taken from the client.
+    google_place_id: str
+
+
+@app.post("/lana/circles/mine")
+def post_circles_mine(
+    body: CirclesListBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import list_my_circles
+
+    return {"circles": list_my_circles(auth.user_id)}
+
+
+@app.post("/lana/circles/add")
+def post_circles_add(
+    body: CircleAddBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import add_circle
+
+    try:
+        result = add_circle(
+            auth.user_id,
+            circle_type=(body.circle_type or "").strip().lower(),
+            detail=body.detail,
+            google_place_id=(body.google_place_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    amplitude_track(
+        "circle_added",
+        user_id=auth.user_id,
+        event_properties={"circle_type": body.circle_type, "grounded": bool(body.google_place_id)},
+    )
+    return result
+
+
+@app.post("/lana/circles/update")
+def post_circles_update(
+    body: CircleUpdateBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import update_circle
+
+    try:
+        update_circle(auth.user_id, body.affiliation_id, detail=body.detail)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/lana/circles/remove")
+def post_circles_remove(
+    body: CircleRemoveBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import remove_circle
+
+    try:
+        remove_circle(auth.user_id, body.affiliation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    amplitude_track(
+        "circle_removed",
+        user_id=auth.user_id,
+        event_properties={"affiliation_id": body.affiliation_id},
+    )
+    return {"ok": True}
+
+
+@app.post("/lana/circles/ground-options")
+def post_circles_ground_options(
+    body: CircleGroundOptionsBody,
+    authorization: str | None = Header(default=None),
+):
+    """2-3 real nearby places for the "which spot — X, or somewhere else?" chips,
+    biased to the caller's block (server-side Google proxy, same as /lana/places)."""
+    auth = verify_auth(authorization)
+    from app.circles_flow import _own_affiliation, ground_options
+
+    affiliation = _own_affiliation(auth.user_id, body.affiliation_id)
+    if not affiliation:
+        raise HTTPException(status_code=404, detail="affiliation_not_found")
+    options = ground_options(
+        auth.user_id, affiliation, block_id=auth.home_block_id, query=body.query
+    )
+    return {"affiliation_id": body.affiliation_id, "options": options}
+
+
+@app.post("/lana/circles/ground")
+def post_circles_ground(
+    body: CircleGroundBody,
+    authorization: str | None = Header(default=None),
+):
+    """Pin an affiliation to its canonical place and confirm it. Also flushes any
+    pre-grounding feature notes onto the place and queues the §4.3 enrichment
+    question ("What do you enjoy most at {place}?") on the rapport tile."""
+    auth = verify_auth(authorization)
+    from app.circles_flow import ground_affiliation
+
+    try:
+        result = ground_affiliation(auth.user_id, body.affiliation_id, body.google_place_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail == "affiliation_not_found" else 502
+        raise HTTPException(status_code=status, detail=detail) from exc
+    amplitude_track(
+        "circle_grounded",
+        user_id=auth.user_id,
+        event_properties={
+            "affiliation_id": body.affiliation_id,
+            "place_id": result.get("place_id"),
+        },
+    )
+    return result
+
+
+# ── Invites + ZIP unlock (§A.2 · §D · §E) ─────────────────────────────────────
+# Invite ≠ membership: redeem records growth only; a circle row appears only when
+# the joiner self-confirms her own community (generic prompt, never the inviter's
+# place). Unlock state gates consumption of others' supply — never creation.
+
+
+class InviteMintBody(_BaseModel):
+    # Optional label: which of the caller's circles this link is for.
+    circle_key: str | None = None
+
+
+class InviteRedeemBody(_BaseModel):
+    token: str
+
+
+class InviteSelfConfirmBody(_BaseModel):
+    token: str
+    circle_type: str
+    detail: str | None = None
+
+
+class AreaProgressBody(_BaseModel):
+    zip: str | None = None
+
+
+@app.post("/lana/invites/mint")
+def post_invites_mint(
+    body: InviteMintBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circle_invites import mint_invite
+
+    try:
+        result = mint_invite(
+            auth.user_id, circle_key=(body.circle_key if body else None)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    amplitude_track(
+        "circle_invite_minted",
+        user_id=auth.user_id,
+        event_properties={"labeled": bool(body.circle_key if body else None)},
+    )
+    return result
+
+
+@app.post("/lana/invites/redeem")
+def post_invites_redeem(
+    body: InviteRedeemBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circle_invites import redeem_invite
+
+    try:
+        result = redeem_invite(auth.user_id, body.token)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 429 if detail == "invite_rate_limited" else 404
+        raise HTTPException(status_code=status, detail=detail) from exc
+    amplitude_track(
+        "circle_invite_redeemed",
+        user_id=auth.user_id,
+        event_properties={"confirm_prompt": result.get("confirm_prompt")},
+    )
+    return result
+
+
+@app.post("/lana/invites/self-confirm")
+def post_invites_self_confirm(
+    body: InviteSelfConfirmBody,
+    authorization: str | None = Header(default=None),
+):
+    """The joiner's yes to "are you part of a <type> community nearby?" — writes
+    her own (ungrounded) affiliation. Grounding her own place then runs through
+    /lana/circles/ground-options → /ground, which is what confirms it."""
+    auth = verify_auth(authorization)
+    from app.circle_invites import self_confirm
+
+    try:
+        result = self_confirm(
+            auth.user_id,
+            body.token,
+            circle_type=(body.circle_type or "").strip().lower(),
+            detail=body.detail,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail == "invite_not_found" else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    return result
+
+
+class EventInviteSuggestionsBody(_BaseModel):
+    event_id: str
+
+
+@app.post("/lana/events/invite-suggestions")
+def post_event_invite_suggestions(
+    body: EventInviteSuggestionsBody,
+    authorization: str | None = Header(default=None),
+):
+    """"N people already go here — invite them?" (Place Profile §5.2): confirmed
+    members of the event's anchored place, host-only, first names only."""
+    auth = verify_auth(authorization)
+    from app.event_place import invite_suggestions
+
+    try:
+        return invite_suggestions(auth.user_id, body.event_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 403 if detail == "not_event_host" else 404
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.post("/lana/area/progress")
+def post_area_progress(
+    body: AreaProgressBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Warm goal-gradient status for the caller's area (§E.2): state + count/threshold
+    + founding eligibility. Recounts on read (read-repair), so it is also the
+    transition trigger alongside redeem — no cron at pilot scale."""
+    auth = verify_auth(authorization)
+    from app.zip_unlock import area_progress
+
+    return area_progress(auth.user_id, (body.zip if body else None))
+
+
 @app.post("/lana/sessions/{session_id}/complete", response_model=CompleteSessionResponse)
 def complete_lana_session(
     session_id: str,
@@ -2512,6 +2798,12 @@ def post_rapport_record_answer(
         # privacy case). Trust that judgment rather than storing a non-answer as a claim.
         if saved > 0:
             claim_id = latest_claim_id(auth.user_id)
+            # Circles §4.3: a place-enrichment gap tags the claim its answer produced,
+            # so "the Saturday long runs" is attributable to that gym. Best-effort.
+            if claim_id:
+                from app.circles_flow import tag_claim_place_from_gap
+
+                tag_claim_place_from_gap(body.gap_row_id, claim_id)
     # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
     rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
     # Refill the reserve so the "By the way…" tile always has a fresh, non-repeat question queued

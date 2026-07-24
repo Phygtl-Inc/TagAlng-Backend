@@ -1227,6 +1227,14 @@ def try_upsert_claims_from_message(
     except Exception:
         logger.exception("incremental_claim_extract_failed")
         return ClaimExtractResult(nickname=stated_nick)
+    # Circles Stage 1 (extract-and-park, §H.1): persist circle / place-feature candidates
+    # from the same extractor pass. Best-effort and additive — must never affect claims.
+    try:
+        from app.circles_capture import run_circle_capture
+
+        run_circle_capture(user_id, data)
+    except Exception:
+        logger.exception("circle_capture_failed")
     if nickname and not stated_nick:
         nickname = _normalize_nickname(nickname)
         persist_profile_patch(user_id, {"nickname": nickname})

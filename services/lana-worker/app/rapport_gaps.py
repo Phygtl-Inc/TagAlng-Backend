@@ -127,6 +127,7 @@ def open_semantic_gap(
     bucket: str | None = None,
     teaser: str | None = None,
     deepens_concept: str | None = None,
+    place_ref: str | None = None,
 ) -> bool:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
 
@@ -171,6 +172,9 @@ def open_semantic_gap(
     }
     if deepens_concept:
         row["deepens_concept"] = str(deepens_concept).strip()[:64] or None
+    if place_ref:
+        # Circles §4.3: the claim made from this gap's answer inherits this place tag.
+        row["place_ref"] = str(place_ref)
     literal = to_pgvector(embedding)
     if literal:
         row["question_embedding"] = literal
@@ -242,7 +246,7 @@ def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
         res = (
             service_client()
             .table("rapport_gaps")
-            .select("gap_id, covers_concept, parent_bucket, why_frame")
+            .select("gap_id, covers_concept, parent_bucket, why_frame, place_ref")
             .eq("gap_row_id", gap_row_id)
             .limit(1)
             .execute()
