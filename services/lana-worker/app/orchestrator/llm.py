@@ -168,7 +168,27 @@ def _openai_generate(
     else:
         params["max_tokens"] = max_tokens
         params["temperature"] = temperature
+    import time as _time
+
+    t0 = _time.monotonic()
     response = client.chat.completions.create(**params)
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+    # Latency diagnostics: cached=0 on a >1k-token static system prompt means OpenAI's
+    # automatic prefix caching is NOT engaging (attack the input); cached≈prompt with a
+    # slow call means the time is OUTPUT generation (attack completion length instead).
+    try:
+        usage = getattr(response, "usage", None)
+        details = getattr(usage, "prompt_tokens_details", None)
+        logging.getLogger(__name__).info(
+            "llm_usage model=%s prompt=%s cached=%s completion=%s ms=%d",
+            model,
+            getattr(usage, "prompt_tokens", None),
+            getattr(details, "cached_tokens", None),
+            getattr(usage, "completion_tokens", None),
+            elapsed_ms,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must never break a call
+        pass
     choice = response.choices[0].message.content if response.choices else None
     return choice or ""
 

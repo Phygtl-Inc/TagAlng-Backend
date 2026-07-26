@@ -124,9 +124,41 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
     for k in (
         "rapport_active", "rapport_answer",
         "rapport_followup_question", "rapport_followup_count", "rapport_reply",
-        "rapport_offer_pending", "rapport_pending_action",
+        "rapport_offer_pending", "rapport_pending_action", "rapport_grounding",
     ):
         session_ctx[k] = None
+
+
+def _grounding_turn_result(
+    session_ctx: dict[str, Any], result: dict[str, Any], timer: Any
+) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
+    """Package a circles place-grounding turn (circles_flow.handle_grounding_answer /
+    _confirmation) as the rapport block's return. Chips pending keeps the capture armed
+    so the next reply routes back here; a closed thread clears every rapport key with
+    None (never popped — the session merge resurrects popped keys)."""
+    ctx = dict(session_ctx)
+    ctx["rapport_answer"] = None
+    reply = sanitize_assistant_message(str(result.get("reply") or ""))
+    pending = result.get("pending")
+    options = result.get("options") or []
+    if isinstance(pending, dict):
+        ctx["rapport_active"] = True
+        ctx["rapport_grounding"] = pending
+        ctx["rapport_reply"] = {"options": options, "action": None}
+        ctx["rapport_followup_question"] = reply
+        ctx["rapport_offer_pending"] = False
+        ctx["rapport_pending_action"] = None
+    else:
+        _reset_rapport_state(ctx)
+    ctx["_orchestrator_turn"] = False
+    ctx["timing_ms"] = timer.to_dict()
+    ctx["last_routing"] = {
+        "outcome": "circle_grounding",
+        "intent_class": "identity",
+        "tool_called": "ground_circle_affiliation" if result.get("grounded") else None,
+    }
+    ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+    return reply, "continue", ctx, ui, None
 
 
 # Coarse "family" of an app-move so we can tell a genuine PIVOT (offer running moms → she asks for a
@@ -848,7 +880,7 @@ def run_lana_unified_pipeline(
             # Rapport concierge capture releases on logout too — same universal exit, one path.
             "rapport_active", "rapport_answer", "rapport_followup_question",
             "rapport_followup_count", "rapport_reply", "rapport_offer_pending",
-            "rapport_pending_action",
+            "rapport_pending_action", "rapport_grounding",
         ):
             session_ctx[_k] = None
 
@@ -907,7 +939,48 @@ def run_lana_unified_pipeline(
     if not isinstance(rapport, dict) and session_ctx.get("rapport_active"):
         from app.discovery_slots import discovery_slots_for_turn
 
-        if session_ctx.get("rapport_offer_pending"):
+        grounding = session_ctx.get("rapport_grounding")
+        if isinstance(grounding, dict):
+            # Place-grounding chips are pending ("is that OrangeTheory on Narcoossee?").
+            # A chip tap / named candidate confirms deterministically — never re-classified
+            # (same principle as the offer-chip dispatch below). Anything else classifies
+            # once: abandon → close warmly keeping their words; a confident pivot to a
+            # real request → release to normal routing; else one more search with their text.
+            from app.circles_flow import (
+                handle_grounding_confirmation,
+                match_grounding_candidate,
+            )
+
+            matched = match_grounding_candidate(grounding.get("candidates"), user_message)
+            abandon = False
+            release = False
+            if not matched:
+                rap_slots = discovery_slots_for_turn(
+                    session_ctx,
+                    user_message,
+                    routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+                    history=history,
+                    has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+                    has_identity=bool(session_ctx.get("identity_snippet")),
+                    phone_verified=phone_verified,
+                    timer=timer,
+                )
+                abandon = bool(isinstance(rap_slots, dict) and rap_slots.get("abandon"))
+                release = not abandon and _rapport_should_release(
+                    user_message, session_ctx, rap_slots
+                )
+            if release:
+                _reset_rapport_state(session_ctx)  # normal routing owns the turn (slots cached)
+            else:
+                result = handle_grounding_confirmation(
+                    user_id,
+                    grounding,
+                    user_message,
+                    session_ctx=session_ctx,
+                    abandon=abandon,
+                )
+                return _grounding_turn_result(session_ctx, result, timer)
+        elif session_ctx.get("rapport_offer_pending"):
             # She's responding to a pending app-move offer ("Want to meet other park moms?"). Decide
             # accept / decline / pivot, then DISPATCH the concierge's stored action ourselves on accept
             # — deterministically, whether she TAPPED the chip or typed "sure"/"yes". We never re-hand
@@ -1001,6 +1074,34 @@ def run_lana_unified_pipeline(
 
         gap_row_id = str(rapport.get("gap_row_id") or "").strip()
         question = str(rapport.get("question") or "").strip()
+
+        # Circles: a place-grounding question ("which spot is it?") routes to the
+        # grounding flow, not the claims extractor — the answer is a place NAME to
+        # resolve against the map, not an identity fact to store. The gap closes
+        # regardless of how grounding ends (she engaged — never re-ask); a chip tap
+        # grounds outright, free text comes back as confirm chips.
+        if gap_row_id:
+            grounding_gap = None
+            try:
+                from app.rapport_gaps import get_gap_row
+
+                candidate_row = get_gap_row(gap_row_id)
+                if candidate_row and candidate_row.get("affiliation_ref"):
+                    grounding_gap = candidate_row
+            except Exception:  # noqa: BLE001 — fall back to the normal concierge path
+                logging.getLogger(__name__).exception("rapport_grounding_lookup_failed")
+            if grounding_gap:
+                from app.circles_flow import handle_grounding_answer
+
+                try:
+                    mark_answered(gap_row_id)
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception("rapport_grounding_close_failed")
+                result = handle_grounding_answer(
+                    user_id, grounding_gap, user_message, session_ctx=session_ctx
+                )
+                return _grounding_turn_result(session_ctx, result, timer)
+
         claim_id: str | None = None
         saved_any = False
         saved_label: str | None = None
@@ -1099,6 +1200,10 @@ def run_lana_unified_pipeline(
             # topic-named request that routes for real. The count backstops runaway qualifying.
             ctx = dict(session_ctx)
             ctx.pop("rapport_answer", None)
+            # A concierge turn supersedes any pending grounding chips (e.g. she left them
+            # hanging and answered a NEW tile question) — cleared with None, never popped,
+            # or the session merge would resurrect it and hijack the next reply.
+            ctx["rapport_grounding"] = None
             reply = sanitize_assistant_message(str(concierge.get("reply") or ""))
             options = concierge.get("options")
             # A language-switch offer arms the classifier's lang_pref_offer context for the

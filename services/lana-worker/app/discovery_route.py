@@ -1852,7 +1852,9 @@ def _try_layer1_intent_turn(
             active_intent="help.what_can_you_do",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_capabilities")
-        reply, ai_authored = _compose_help_reply("what", msg, _session_lang(session_ctx))
+        reply, ai_authored = _compose_help_reply(
+            "what", msg, _session_lang(session_ctx), history=history
+        )
         if ai_authored:
             # Composed under the language directive — skip the final-mile re-render.
             ctx["_reply_localized"] = True
@@ -1867,7 +1869,9 @@ def _try_layer1_intent_turn(
             active_intent="help.who_are_you",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
-        reply, ai_authored = _compose_help_reply("who", msg, _session_lang(session_ctx))
+        reply, ai_authored = _compose_help_reply(
+            "who", msg, _session_lang(session_ctx), history=history
+        )
         if ai_authored:
             ctx["_reply_localized"] = True
         return reply, ctx, ctx["last_routing"], []
@@ -2005,11 +2009,34 @@ _HELP_FACTS = (
 )
 
 
-def _compose_help_reply(kind: str, user_msg: str, lang: str | None) -> tuple[str, bool]:
+def _help_recent_turns(history: list[dict[str, Any]] | None, *, limit: int = 6) -> str:
+    """Compact transcript of the last few turns for the help composer — so it can see
+    it already pitched capabilities and stop re-pitching."""
+    lines: list[str] = []
+    for turn in (history or [])[-limit:]:
+        if not isinstance(turn, dict):
+            continue
+        role = "Lana" if str(turn.get("role") or "") == "assistant" else "User"
+        text = str(turn.get("content") or "").strip().replace("\n", " ")
+        if text:
+            lines.append(f"{role}: {text[:200]}")
+    return "\n".join(lines)
+
+
+def _compose_help_reply(
+    kind: str,
+    user_msg: str,
+    lang: str | None,
+    *,
+    history: list[dict[str, Any]] | None = None,
+) -> tuple[str, bool]:
     """AI-authored "what can you do" / "who are you" — answers the user's actual phrasing
     in Lana's voice (and their language), grounded in the true capability list, instead of
-    the same canned paragraph every time. Returns (reply, ai_authored); the canned line is
-    the fallback and ai_authored=False tells the caller to leave localization to main."""
+    the same canned paragraph every time. Sees the recent turns so a skeptical follow-up
+    ("how would I know you're useful?") gets engaged with instead of the same pitch
+    reworded — the stateless version looped the tour four turns in a row. Returns
+    (reply, ai_authored); the canned line is the fallback and ai_authored=False tells the
+    caller to leave localization to main."""
     fallback = HELP_WHO_ARE_YOU if kind == "who" else HELP_WHAT_CAN_YOU_DO
     try:
         from app.i18n import synth_language_directive
@@ -2021,9 +2048,19 @@ def _compose_help_reply(kind: str, user_msg: str, lang: str | None) -> tuple[str
             "The user asked who you are. Introduce yourself briefly and warmly — "
             "include the privacy promise."
             if kind == "who"
-            else "The user asked what you can do. Give a quick concrete tour in your own "
-            "words and end by asking what they'd like to start with."
+            else "The user is asking about what you can do or whether you're useful. "
+            "Answer their ACTUAL question. If this is their first capabilities ask, give a "
+            "quick concrete tour in your own words and end by asking what they'd like to "
+            "start with. But read the recent turns: if you already pitched your "
+            "capabilities and they're pushing back, doubting your usefulness, or mocking "
+            "you, do NOT repeat the pitch in new words — that's what's frustrating them. "
+            "Instead acknowledge the doubt plainly, own that a list of promises isn't "
+            "proof, and offer ONE specific thing they can try right now to see for "
+            "themselves (e.g. ask what's happening on their block, or name an interest "
+            "and you'll find a neighbor who shares it). Never be defensive about insults; "
+            "stay warm and answer the substance."
         )
+        recent = _help_recent_turns(history)
         lang_line = synth_language_directive(lang) if lang else None
         data = llm_json(
             model=synthesizer_model(),
@@ -2032,11 +2069,15 @@ def _compose_help_reply(kind: str, user_msg: str, lang: str | None) -> tuple[str
                 + _HELP_FACTS
                 + " Write ONE short chat message (2-3 sentences, no bullet lists) that "
                 "answers the user's actual question — mirror their wording, don't dump "
-                "every capability. "
+                "every capability. Never repeat a message you already sent in the recent "
+                "turns, even reworded. "
                 + ((lang_line + " ") if lang_line else "")
                 + 'Return JSON {"message": "..."}.'
             ),
-            user_payload=f"{ask}\nTheir exact words: {str(user_msg or '').strip()[:200]}",
+            user_payload=(
+                (f"Recent turns:\n{recent}\n\n" if recent else "")
+                + f"{ask}\nTheir exact words: {str(user_msg or '').strip()[:200]}"
+            ),
             max_tokens=160,
             temperature=0.5,
         )

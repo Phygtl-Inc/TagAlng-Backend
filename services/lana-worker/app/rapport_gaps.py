@@ -127,6 +127,10 @@ def open_semantic_gap(
     bucket: str | None = None,
     teaser: str | None = None,
     deepens_concept: str | None = None,
+    place_ref: str | None = None,
+    affiliation_ref: str | None = None,
+    gap_id: str | None = None,
+    unlock_score: float = 0.8,
 ) -> bool:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
 
@@ -144,7 +148,10 @@ def open_semantic_gap(
     if not user_id or not question or not str(question).strip():
         return False
     topic = label or question
-    gap_id = f"deepen:{_slug(topic)}"
+    # An explicit gap_id (e.g. "ground:<affiliation_id>") keys idempotency to the THING
+    # the question is about, not its wording — so a grounding question can never reopen
+    # for an affiliation that was already asked, answered, or skipped out.
+    gap_id = gap_id or f"deepen:{_slug(topic)}"
     bucket = bucket or "general"
     # Teaser is AI-generated (grammatical, contextual) — e.g. "about your reading…". We no
     # longer glue the raw claim label, which broke on predicate labels ("about your interested
@@ -165,12 +172,19 @@ def open_semantic_gap(
         "covers_concept": f"deepen_{_slug(topic)}",
         "why_frame": why_frame,
         "question": q_text,
-        "unlock_score": 0.8,
+        "unlock_score": unlock_score,
         "opened_from_message_id": message_id,
         "status": "open",
     }
     if deepens_concept:
         row["deepens_concept"] = str(deepens_concept).strip()[:64] or None
+    if place_ref:
+        # Circles §4.3: the claim made from this gap's answer inherits this place tag.
+        row["place_ref"] = str(place_ref)
+    if affiliation_ref:
+        # A place-grounding question: the answer path grounds this affiliation instead
+        # of persisting an identity claim (see circles_flow.handle_grounding_answer).
+        row["affiliation_ref"] = str(affiliation_ref)
     literal = to_pgvector(embedding)
     if literal:
         row["question_embedding"] = literal
@@ -242,7 +256,10 @@ def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
         res = (
             service_client()
             .table("rapport_gaps")
-            .select("gap_id, covers_concept, parent_bucket, why_frame")
+            .select(
+                "gap_row_id, gap_id, covers_concept, parent_bucket, why_frame, "
+                "place_ref, affiliation_ref, grounding_options"
+            )
             .eq("gap_row_id", gap_row_id)
             .limit(1)
             .execute()
