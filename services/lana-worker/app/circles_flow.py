@@ -22,6 +22,7 @@ soft-delete (dismissed_at) — staleness is user-curated, no auto-decay.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -35,7 +36,10 @@ logger = logging.getLogger(__name__)
 # as a strict type across categories).
 _TYPE_SEARCH: dict[str, tuple[str | None, str]] = {
     "fitness": ("gym", "gym"),
-    "faith": ("place_of_worship", "church mosque synagogue temple"),
+    # includedType must be a Table-A type in Places API (New); "place_of_worship"
+    # is Table-B and silently 400s the whole search. Faith spans several Table-A
+    # types (church/mosque/synagogue/hindu_temple), so keyword-only.
+    "faith": (None, "church mosque synagogue temple"),
     "school": ("school", "school"),
     "kids_activity": (None, "kids activity center"),
     "neighborhood": (None, "community center"),
@@ -72,6 +76,15 @@ _GOOGLE_TYPE_MAP: tuple[tuple[str, str], ...] = (
 
 _FEATURE_NOTE_RE = re.compile(r"\b([a-z][a-z0-9_]{1,63})=([^;]+)")
 
+# Lingo §2/§14 backstop for AI-authored tile questions: the prompt forbids the
+# backstage words, but models still leak them ("…the cycling activities on your
+# block?", seen in dev) — a leaked question falls back to the clean template.
+_BANNED_LEXICON_RE = re.compile(r"\b(moms?|mommy|mama|blocks?|circles?)\b", re.IGNORECASE)
+
+
+def _lexicon_clean(*texts: str) -> bool:
+    return not any(_BANNED_LEXICON_RE.search(t or "") for t in texts)
+
 _PLACE_QUESTION_PROMPT = """You write ONE warm question for a neighborhood app user who \
 just pinned a community place they belong to. Goal: learn what they personally value there \
 — the answer becomes a matchable interest (e.g. "the Saturday long runs", "the pool", \
@@ -107,7 +120,7 @@ def _place_affinity_question(place_name: str) -> tuple[str, str]:
         )
         question = str((data or {}).get("question") or "").strip()
         teaser = str((data or {}).get("teaser") or "").strip()
-        if question:
+        if question and _lexicon_clean(question, teaser):
             return question[:160], (teaser or fallback[1])[:80]
     except Exception:
         logger.exception("place_affinity_question_llm_failed")
@@ -202,22 +215,37 @@ def ground_options(
     q = (query or "").strip() or phrase or keyword
     if not q:
         return []
-    rows = search_places(
-        query=q,
-        block_id=block_id,
-        user_id=user_id,
-        limit=3,
-        included_type=included_type,
-    )
-    return [
-        {
-            "name": r["name"],
-            "address": r.get("address"),
-            "google_place_id": r["place_id"],
-        }
-        for r in rows
-        if r.get("place_id")
-    ]
+
+    def _search(text: str) -> list[dict[str, Any]]:
+        rows = search_places(
+            query=text,
+            block_id=block_id,
+            user_id=user_id,
+            limit=3,
+            included_type=included_type,
+        )
+        return [
+            {
+                "name": r["name"],
+                "address": r.get("address"),
+                "google_place_id": r["place_id"],
+            }
+            for r in rows
+            if r.get("place_id")
+        ]
+
+    options = _search(q)
+    if (
+        not options
+        and not (query or "").strip()  # never second-guess an EXPLICIT search
+        and keyword
+        and q.lower() != keyword.lower()
+    ):
+        # The captured phrase is often a whole sentence ("We go to church on
+        # sundays") that text-search can't match to a place. Retry with the
+        # circle type's keyword — block bias still narrows it to THEIR area.
+        options = _search(keyword)
+    return options
 
 
 def _flush_parked_features(
@@ -327,6 +355,462 @@ def tag_claim_place_from_gap(gap_row_id: str, claim_id: str) -> None:
         ).eq("id", claim_id).execute()
     except Exception:
         logger.exception("tag_claim_place_failed gap=%s claim=%s", gap_row_id, claim_id)
+
+
+# ── Grounding questions on the rapport tile ────────────────────────────────────
+# A suggested affiliation with no place_ref is invisible to the onion matcher —
+# only confirmed + grounded rows match. The "By the way…" tile is the one surface
+# that reliably reaches every user, so each ungrounded affiliation opens ONE
+# rapport gap ("You mentioned a gym — which spot is it?"); the ranker interleaves
+# it with normal rapport questions (app/rapport_ranker.py) and the answer flows
+# back through here to ground the affiliation. Never the word "circle" (§A.4 M7).
+
+# At most this many open/asked grounding questions at a time — a chatty session
+# that names five places must not turn the tile into a week-long interrogation.
+_GROUND_GAP_MAX_OPEN_DEFAULT = 2
+# Below the semantic-gap default (0.8): a fresh personal follow-up still wins a
+# tie, and the ranker's cadence guard owns the pacing.
+_GROUND_GAP_SCORE = 0.75
+
+# circle_type -> the warm-neutral noun the fallback question uses (lingo-clean).
+_GROUND_NOUN: dict[str, str] = {
+    "fitness": "gym",
+    "faith": "place of worship",
+    "school": "school",
+    "kids_activity": "kids' activity",
+    "neighborhood": "neighborhood spot",
+    "hobby": "hobby group",
+    "support": "group",
+    "heritage": "community",
+    "friends": "go-to spot",
+    "other": "spot",
+}
+
+_GROUNDING_QUESTION_PROMPT = """You write ONE warm question for a neighborhood app user who \
+mentioned a community/place they're part of, but never named WHICH one. Goal: learn the \
+specific local spot (so the app can connect them with the people there).
+
+Output ONLY JSON: {"question": "...", "teaser": "about your <thing>…"}
+
+Rules:
+- Echo THEIR framing (their phrase is given) — ask which specific place/spot it is.
+- Short (<120 chars), warm, direct — never yes/no, never an interrogation.
+- NEVER the words "circle", "block", or "match". Say "spot", "place", or their own word.
+- teaser: 2-5 word lead-in ending with "…".
+- English only (rendered into the user's language downstream)."""
+
+
+def _grounding_question(circle_type: str, detail: str | None) -> tuple[str, str]:
+    """AI-authored per the lingo rules; a type-templated line as fallback."""
+    noun = _GROUND_NOUN.get(str(circle_type or "other"), "spot")
+    phrase = _FEATURE_NOTE_RE.sub("", str(detail or "")).strip(" ;")
+    fallback = (
+        f"You mentioned your {noun} — which one is it, exactly?",
+        f"about your {noun}…",
+    )
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return fallback
+        data = llm_json(
+            model=router_model(),
+            system=_GROUNDING_QUESTION_PROMPT,
+            user_payload=f'their phrase: "{phrase or noun}" (kind: {noun})',
+            max_tokens=120,
+            temperature=0.4,
+        )
+        question = str((data or {}).get("question") or "").strip()
+        teaser = str((data or {}).get("teaser") or "").strip()
+        if question and _lexicon_clean(question, teaser):
+            return question[:160], (teaser or fallback[1])[:80]
+    except Exception:
+        logger.exception("grounding_question_llm_failed")
+    return fallback
+
+
+def ensure_grounding_gaps(user_id: str, *, max_open: int | None = None) -> int:
+    """Open grounding questions for ungrounded affiliations, newest first, capped.
+
+    Idempotent per affiliation: the gap is keyed "ground:<affiliation_id>", so an
+    affiliation whose question was already asked/answered/skipped never re-opens.
+    Best-effort — called from capture (background) and the tile's buffer refill.
+    """
+    if not user_id:
+        return 0
+    if max_open is None:
+        try:
+            max_open = int(os.environ.get("LANA_CIRCLE_GAP_MAX_OPEN", _GROUND_GAP_MAX_OPEN_DEFAULT))
+        except (TypeError, ValueError):
+            max_open = _GROUND_GAP_MAX_OPEN_DEFAULT
+    try:
+        sb = service_client()
+        existing = (
+            sb.table("rapport_gaps")
+            .select("gap_row_id, status, affiliation_ref")
+            .eq("user_id", user_id)
+            .not_.is_("affiliation_ref", "null")
+            .execute()
+        ).data or []
+        already_asked = {str(r["affiliation_ref"]) for r in existing if r.get("affiliation_ref")}
+        open_count = sum(1 for r in existing if r.get("status") in ("open", "asked"))
+        need = max_open - open_count
+        if need <= 0:
+            return 0
+        affs = (
+            sb.table("circle_affiliations")
+            .select("id, circle_type, detail")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .is_("place_ref", "null")
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("ensure_grounding_gaps_load_failed user=%s", user_id)
+        return 0
+
+    from app.rapport_gaps import open_semantic_gap
+
+    opened = 0
+    for aff in affs:
+        if opened >= need:
+            break
+        aff_id = str(aff.get("id") or "")
+        if not aff_id or aff_id in already_asked:
+            continue
+        question, teaser = _grounding_question(aff.get("circle_type"), aff.get("detail"))
+        if open_semantic_gap(
+            user_id,
+            None,
+            question,
+            label=str(aff.get("detail") or aff.get("circle_type") or "place"),
+            bucket="interest",
+            teaser=teaser,
+            affiliation_ref=aff_id,
+            gap_id=f"ground:{aff_id}",
+            unlock_score=_GROUND_GAP_SCORE,
+        ):
+            opened += 1
+    return opened
+
+
+def _home_block_id(user_id: str) -> str | None:
+    try:
+        res = (
+            service_client()
+            .table("users")
+            .select("home_block_id")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        return ((res.data or [{}])[0] or {}).get("home_block_id")
+    except Exception:
+        logger.exception("home_block_lookup_failed user=%s", user_id)
+        return None
+
+
+def _chip(option: dict[str, Any]) -> dict[str, Any]:
+    """One grounding option in the shape both surfaces consume: the tile taps
+    google_place_id straight into /lana/circles/ground; a chat chip posts `send`."""
+    name = str(option.get("name") or "").strip()
+    return {
+        "label": name[:28],
+        "address": option.get("address"),
+        "google_place_id": option.get("google_place_id"),
+        "send": f"It's {name}"[:120],
+    }
+
+
+def grounding_payload_for_gap(user_id: str, gap_row: dict[str, Any]) -> dict[str, Any]:
+    """Serve-time extras for a grounding ask: kind + affiliation + place chips.
+
+    Chips are fetched from Google ONCE (first serve) and cached on the row, so
+    pending re-shows and React double-fires are pure lookups — the home render
+    never pays a repeat Places call. An empty result is cached too (free-text
+    still works); on a hard failure nothing is stored so the next serve retries.
+    """
+    affiliation_id = str(gap_row.get("affiliation_ref") or "")
+    payload: dict[str, Any] = {
+        "kind": "place_grounding",
+        "affiliation_id": affiliation_id,
+        "options": [],
+    }
+    stored = gap_row.get("grounding_options")
+    if isinstance(stored, list):
+        payload["options"] = stored
+        return payload
+    try:
+        affiliation = _own_affiliation(user_id, affiliation_id)
+        if not affiliation:
+            return payload
+        options = [
+            _chip(o)
+            for o in ground_options(
+                user_id, affiliation, block_id=_home_block_id(user_id)
+            )
+        ]
+        service_client().table("rapport_gaps").update(
+            {"grounding_options": options}
+        ).eq("gap_row_id", gap_row["gap_row_id"]).execute()
+        payload["options"] = options
+    except Exception:
+        logger.exception("grounding_options_fetch_failed gap=%s", gap_row.get("gap_row_id"))
+    return payload
+
+
+def note_ungrounded_detail(user_id: str, affiliation_id: str, text: str) -> None:
+    """Keep an un-matchable answer ("the little studio by Publix") as detail on the
+    affiliation — still useful context, just not grounded yet. Never clobbers."""
+    text = str(text or "").strip()[:120]
+    if not text:
+        return
+    try:
+        affiliation = _own_affiliation(user_id, affiliation_id)
+        if not affiliation:
+            return
+        detail = str(affiliation.get("detail") or "")
+        if text.lower() in detail.lower():
+            return
+        merged = f"{detail}; {text}".strip("; ")[:200]
+        service_client().table("circle_affiliations").update({"detail": merged}).eq(
+            "id", affiliation["id"]
+        ).execute()
+    except Exception:
+        logger.exception("note_ungrounded_detail_failed aff=%s", affiliation_id)
+
+
+def match_grounding_candidate(
+    candidates: list[dict[str, Any]] | None, message: str
+) -> dict[str, Any] | None:
+    """The user picked one of the offered places — by tapping its chip (exact `send`
+    echo) or naming it. Containment either way, so "orangetheory" hits
+    "OrangeTheory Narcoossee". Deliberately NOT fuzzy beyond that: a wrong canonical
+    place silently attached to a user is the §F trust failure, so anything less
+    certain re-confirms via search instead."""
+    msg = str(message or "").strip().lower()
+    if not msg or not candidates:
+        return None
+    for cand in candidates:
+        if not isinstance(cand, dict) or not cand.get("google_place_id"):
+            continue
+        name = str(cand.get("name") or cand.get("label") or "").strip().lower()
+        send = str(cand.get("send") or "").strip().lower()
+        if send and msg == send:
+            return cand
+        if len(name) >= 4 and (name in msg or msg in name):
+            return cand
+    return None
+
+
+def _compose_grounding_reply(
+    goal: str, facts: list[str], fallback: str, session_ctx: dict[str, Any] | None
+) -> str:
+    from app.reply_compose import compose_reply
+
+    return compose_reply(
+        goal=goal, facts=facts, fallback=fallback, session_ctx=session_ctx
+    )
+
+
+def ground_and_confirm(
+    user_id: str,
+    affiliation_id: str,
+    google_place_id: str,
+    *,
+    session_ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ground the affiliation and author the confirmation line. ground_affiliation
+    also queues the §4.3 enrichment question ("What do you enjoy most at X?"), so
+    the follow-up thread arms itself."""
+    try:
+        result = ground_affiliation(user_id, affiliation_id, google_place_id)
+    except ValueError:
+        logger.exception("grounding_confirm_failed aff=%s", affiliation_id)
+        return {
+            "reply": "Hmm, I couldn't pin that spot just now — I'll ask again another time.",
+            "options": [],
+            "pending": None,
+            "grounded": False,
+        }
+    place_name = str(result.get("place_name") or "that spot")
+    reply = _compose_grounding_reply(
+        goal=(
+            "Confirm you've noted which place they meant — warm, one sentence, no "
+            "follow-up question. Do not promise introductions or anything else."
+        ),
+        facts=[f"The place: {place_name}."],
+        fallback=f"Locked in — {place_name}. Good to know your spot.",
+        session_ctx=session_ctx,
+    )
+    return {"reply": reply, "options": [], "pending": None, "grounded": True}
+
+
+def handle_grounding_answer(
+    user_id: str,
+    gap_row: dict[str, Any],
+    answer_text: str,
+    *,
+    session_ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """First reply to a grounding question from the tile.
+
+    Returns {reply, options, pending, grounded}: `pending` is the confirmation
+    state to stash in session ctx (rapport_grounding) when chips were offered,
+    None when the thread closed this turn. The gap itself is closed by the caller
+    (she engaged — never re-ask), independent of whether grounding completed.
+    NEVER auto-grounds from free text: their words drive a search, a tap confirms.
+    """
+    affiliation_id = str(gap_row.get("affiliation_ref") or "")
+    answer = str(answer_text or "").strip()
+
+    # A tile chip tap (or typing exactly the offered name) IS the confirmation —
+    # they chose a specific place we showed them.
+    stored = gap_row.get("grounding_options")
+    tapped = match_grounding_candidate(stored if isinstance(stored, list) else None, answer)
+    if tapped:
+        return ground_and_confirm(
+            user_id, affiliation_id, str(tapped["google_place_id"]), session_ctx=session_ctx
+        )
+
+    affiliation = _own_affiliation(user_id, affiliation_id)
+    close = {
+        "reply": "Got it — thanks for telling me.",
+        "options": [],
+        "pending": None,
+        "grounded": False,
+    }
+    if not affiliation or affiliation.get("place_ref"):
+        # Dismissed or grounded through another surface since the question opened.
+        return close
+
+    candidates = [
+        {**_chip(o), "name": o.get("name")}
+        for o in ground_options(
+            user_id, affiliation, block_id=_home_block_id(user_id), query=answer
+        )
+    ]
+    if not candidates:
+        note_ungrounded_detail(user_id, affiliation_id, answer)
+        close["reply"] = _compose_grounding_reply(
+            goal=(
+                "Warmly acknowledge the spot they named — you couldn't find it on the "
+                "map, so just note you'll remember it. One sentence, no question."
+            ),
+            facts=[f'They said: "{answer[:120]}"'],
+            fallback="Got it — I'll remember that one.",
+            session_ctx=session_ctx,
+        )
+        return close
+
+    names = [str(c.get("name") or "") for c in candidates]
+    reply = _compose_grounding_reply(
+        goal=(
+            "They named their spot; you found likely matches nearby. Ask them to "
+            "confirm which one — one short warm sentence referencing the first "
+            "match. The matches render as tappable chips below your message."
+        ),
+        facts=[f'They said: "{answer[:120]}"', f"Nearby matches: {', '.join(names[:3])}."],
+        fallback=f"Nice — is that {names[0]}?",
+        session_ctx=session_ctx,
+    )
+    return {
+        "reply": reply,
+        "options": [{"label": c["label"], "send": c["send"]} for c in candidates],
+        "pending": {
+            "affiliation_id": affiliation_id,
+            "candidates": candidates,
+            "answer_text": answer[:120],
+            "attempts": 1,
+        },
+        "grounded": False,
+    }
+
+
+def handle_grounding_confirmation(
+    user_id: str,
+    state: dict[str, Any],
+    message: str,
+    *,
+    session_ctx: dict[str, Any] | None = None,
+    abandon: bool = False,
+) -> dict[str, Any]:
+    """A turn while grounding chips are pending. Same return shape as
+    handle_grounding_answer. The caller has already ruled out a pivot/release."""
+    affiliation_id = str(state.get("affiliation_id") or "")
+    candidates = state.get("candidates") if isinstance(state.get("candidates"), list) else []
+    attempts = int(state.get("attempts") or 1)
+    msg = str(message or "").strip()
+
+    matched = match_grounding_candidate(candidates, msg)
+    if matched:
+        return ground_and_confirm(
+            user_id, affiliation_id, str(matched["google_place_id"]), session_ctx=session_ctx
+        )
+
+    if abandon or attempts >= 3:
+        # "no" / "neither" / worn out — keep their words as detail and close warmly.
+        note_ungrounded_detail(user_id, affiliation_id, str(state.get("answer_text") or msg))
+        reply = _compose_grounding_reply(
+            goal=(
+                "None of the map matches were their spot — close warmly, noting "
+                "you'll remember what they told you. One sentence, no question."
+            ),
+            facts=[f'They told you: "{str(state.get("answer_text") or msg)[:120]}"'],
+            fallback="No problem — I'll remember it the way you said it.",
+            session_ctx=session_ctx,
+        )
+        return {"reply": reply, "options": [], "pending": None, "grounded": False}
+
+    # They typed a different name / correction — search once more with their words.
+    affiliation = _own_affiliation(user_id, affiliation_id)
+    if not affiliation or affiliation.get("place_ref"):
+        return {"reply": "Got it — thanks!", "options": [], "pending": None, "grounded": False}
+    fresh = [
+        {**_chip(o), "name": o.get("name")}
+        for o in ground_options(
+            user_id, affiliation, block_id=_home_block_id(user_id), query=msg
+        )
+    ]
+    if not fresh:
+        note_ungrounded_detail(user_id, affiliation_id, msg)
+        return {
+            "reply": _compose_grounding_reply(
+                goal=(
+                    "You couldn't find the place they named on the map — acknowledge "
+                    "warmly and note you'll remember it as they said it. One sentence."
+                ),
+                facts=[f'They said: "{msg[:120]}"'],
+                fallback="Got it — I'll remember that one.",
+                session_ctx=session_ctx,
+            ),
+            "options": [],
+            "pending": None,
+            "grounded": False,
+        }
+    names = [str(c.get("name") or "") for c in fresh]
+    return {
+        "reply": _compose_grounding_reply(
+            goal=(
+                "They corrected which place they meant; you found new likely matches. "
+                "Ask them to confirm which one — short and warm; the matches render "
+                "as tappable chips."
+            ),
+            facts=[f'They said: "{msg[:120]}"', f"Nearby matches: {', '.join(names[:3])}."],
+            fallback=f"Is it {names[0]}?",
+            session_ctx=session_ctx,
+        ),
+        "options": [{"label": c["label"], "send": c["send"]} for c in fresh],
+        "pending": {
+            "affiliation_id": affiliation_id,
+            "candidates": fresh,
+            "answer_text": str(state.get("answer_text") or msg)[:120],
+            "attempts": attempts + 1,
+        },
+        "grounded": False,
+    }
 
 
 def _member_count(place_id: str) -> int:

@@ -13,8 +13,11 @@ Persona-neutral throughout: the specs say "mom", the product is for any user.
    `circle_invites`, `circle_invite_redemptions`; columns on `users`,
    `user_identity_claims`, `rapport_gaps`, `events`; `recount_zip_unlock()` fn;
    events→places backfill). Nothing reads it until the worker deploys.
-2. Worker deploy (all changes below). The worker reads `rapport_gaps.place_ref`
-   and writes the new tables, so **migration first**.
+2. `supabase/migrations/20260907120000_rapport_circle_grounding.sql` — additive
+   (`rapport_gaps.affiliation_ref` + `rapport_gaps.grounding_options`; see the
+   grounding-questions section below).
+3. Worker deploy (all changes below). The worker reads `rapport_gaps.place_ref`
+   and `affiliation_ref`, so **migrations first**.
 
 All new tables have RLS enabled with **no client policies** — PostgREST hands out
 nothing; every read goes through the worker. That is the §F disclosure guarantee
@@ -31,6 +34,42 @@ at the schema layer.
   existing record-answer path. Zero FE work.
 - **Event anchoring:** publish now stamps `events.place_ref` (background, dual-write
   with legacy `events.place_id` text; historical events backfilled by the migration).
+
+## Grounding questions on the rapport tile (conversion step of the funnel)
+
+A suggested affiliation with no `place_ref` is invisible to the onion matcher —
+only confirmed + grounded rows match. The "By the way…" tile is the surface that
+reliably reaches every user, so each ungrounded affiliation now opens ONE tile
+question ("You mentioned a gym — which spot is it?"), interleaved with normal
+rapport questions. All backend; the tile chips are the only optional FE upgrade.
+
+- **Synthesis** (`circles_flow.ensure_grounding_gaps`): runs after circle capture
+  (fresh mentions get asked while they're warm) and inside the tile's buffer
+  refill. Capped at `LANA_CIRCLE_GAP_MAX_OPEN` (default 2) open grounding asks;
+  keyed `ground:<affiliation_id>` so an asked/answered/skipped affiliation never
+  re-opens. Question + teaser are AI-authored (lingo-clean), template fallback.
+- **Cadence** (`rapport_ranker`): at most one grounding ask per
+  `LANA_RAPPORT_CIRCLE_EVERY_N` (default 3) tile questions — suppress-only; with
+  nothing else open the grounding ask still serves. Skip decay + 3-skip expiry
+  apply unchanged (a skipped question sinks like any other).
+- **Serve payload** (FE contract, additive): a grounding ask returned by
+  `/lana/rapport/next-ask` also carries
+  `kind: "place_grounding"`, `affiliation_id`, and
+  `options: [{label, address, google_place_id, send}]` (2-3 nearby places,
+  fetched from Google once and cached on the row). A chip tap should POST
+  `/lana/circles/ground {affiliation_id, google_place_id}` — one-tap grounding.
+  Free text keeps working with **zero FE change** (below). `options` may be `[]`.
+- **Answer path** (chat, zero FE): a free-text answer runs a Places search with
+  the user's own words and Lana replies with 2-3 confirmation chips through the
+  existing rapport-concierge options; the tap (or typing the name) grounds via
+  `ground_affiliation`, which also queues the §4.3 enrichment question. NEVER
+  auto-grounds from a fuzzy text match — a wrong canonical place silently
+  attached to a user is the §F trust failure. Un-matchable answers persist onto
+  `circle_affiliations.detail`; "neither"/abandon closes warmly keeping their
+  words; a confident pivot releases to normal routing like every rapport turn.
+- `/lana/rapport/record-answer` on a grounding gap: matches a cached option →
+  grounds; otherwise stores the text as detail. Never feeds the claims extractor
+  (a place name is not an identity fact); returns `{ok, grounded}`.
 
 ## Worker endpoints (all POST, Bearer auth — same conventions as /lana/rapport/*)
 

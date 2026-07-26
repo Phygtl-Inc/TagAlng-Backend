@@ -328,6 +328,16 @@ def run_circle_capture(user_id: str, data: Any) -> dict[str, int]:
         circles = parse_circle_candidates(data)
         if circles:
             result["circles"] = persist_circle_candidates(user_id, circles)
+            if result["circles"]:
+                # Queue the tile's grounding question ("which spot is it?") while the
+                # mention is fresh — asking the day they said it is warm continuity;
+                # three weeks later it's surveillance. Capped + idempotent inside.
+                try:
+                    from app.circles_flow import ensure_grounding_gaps
+
+                    ensure_grounding_gaps(user_id)
+                except Exception:
+                    logger.exception("ensure_grounding_gaps_failed user=%s", user_id)
         features = parse_place_feature_candidates(data)
         if features:
             result["features"] = persist_place_feature_candidates(user_id, features)

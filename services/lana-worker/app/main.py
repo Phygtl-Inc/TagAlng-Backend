@@ -2783,6 +2783,49 @@ def post_rapport_record_answer(
 ):
     auth = verify_auth(authorization)
     text = (body.text or "").strip()
+
+    # Circles: a place-grounding gap's answer is a place NAME, not an identity fact —
+    # skip the claims extractor. A tapped chip (or typed candidate name) grounds the
+    # affiliation outright; free text is kept as detail on it. The conversational
+    # confirm-chips flow lives on the chat path (lana_unified_pipeline) — this
+    # endpoint just never lets a grounding answer decay into a junk claim.
+    from app.rapport_gaps import get_gap_row
+
+    gap_row = get_gap_row(body.gap_row_id)
+    if gap_row and gap_row.get("affiliation_ref"):
+        from app.circles_flow import (
+            ground_and_confirm,
+            match_grounding_candidate,
+            note_ungrounded_detail,
+        )
+
+        affiliation_id = str(gap_row["affiliation_ref"])
+        grounded = False
+        stored = gap_row.get("grounding_options")
+        tapped = match_grounding_candidate(
+            stored if isinstance(stored, list) else None, text
+        )
+        if tapped:
+            grounded = bool(
+                ground_and_confirm(
+                    auth.user_id, affiliation_id, str(tapped["google_place_id"])
+                ).get("grounded")
+            )
+        elif text:
+            note_ungrounded_detail(auth.user_id, affiliation_id, text)
+        rapport_mark_answered(body.gap_row_id)
+        background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
+        amplitude_track(
+            "rapport_gap_answered",
+            user_id=auth.user_id,
+            event_properties={
+                "gap_row_id": body.gap_row_id,
+                "kind": "place_grounding",
+                "grounded": grounded,
+            },
+        )
+        return {"ok": True, "grounded": grounded}
+
     claim_id: str | None = None
     saved = 0
     if text:
