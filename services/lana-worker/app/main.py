@@ -1531,6 +1531,32 @@ def _run_lana_message(
             with timer.stage("localize_reply"):
                 reply = localize_text(reply, _reply_lang)
 
+        # Final-mile lingo guard: EVERY reply from every composer passes here, so
+        # this one check makes the constitution's banned lexicon unshippable —
+        # regardless of which inline prompt forgot the rules (the leaks all came
+        # from composers that never append the constitution). Regex-only on clean
+        # turns (~0ms); one rewrite call only on a violation. After localization
+        # on purpose: the banned lexicon includes the es/pt forms, and the
+        # rewriter keeps the reply's language. LANA_LINGO_GUARD=0 disables.
+        if reply and os.environ.get("LANA_LINGO_GUARD", "1").strip().lower() not in (
+            "0", "false", "off"
+        ):
+            try:
+                from app.lingo_guard import enforce as _lingo_enforce
+                from app.lingo_guard import find_violations as _lingo_hits
+
+                if _lingo_hits(reply):
+                    with timer.stage("lingo_guard"):
+                        _guard = _lingo_enforce(reply)
+                    reply = _guard.text
+                    _LOG.warning(
+                        "lingo_guard_final_mile hits=%s rewritten=%s naive=%s",
+                        _guard.hits, _guard.rewritten, _guard.naive_fallback,
+                    )
+                    session_ctx["_lingo_guard_result"] = _guard.audit_dict()
+            except Exception:  # noqa: BLE001 — the guard must never break a turn
+                _LOG.exception("lingo_guard_final_mile_failed")
+
         # These two writes hit different tables (lana_messages insert vs
         # lana_sessions update) and don't depend on each other, so run them
         # concurrently — one round-trip of wall-clock instead of two. Safe to
@@ -1608,6 +1634,13 @@ def _run_lana_message(
             auth.home_block_id,
             body.message.strip(),
         )
+    # Rolling conversation summary (memory hygiene) — folds turns older than the
+    # recent window into lana_sessions.context.rolling_summary for decide_turn.
+    # The len gate keeps short sessions free; the task re-checks its own stride.
+    if purpose == "lana" and len(history) >= 28:
+        from app.policy.summary import maybe_update_rolling_summary
+
+        background_tasks.add_task(maybe_update_rolling_summary, session_id, auth.user_id)
 
     # Message count for the debug log below — computed in memory instead of
     # re-fetching the whole thread from Supabase. `history` already holds every

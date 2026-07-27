@@ -618,6 +618,30 @@ def _compose_grounding_reply(
     )
 
 
+def _place_co_member_count(place_id: str, exclude_user: str) -> int:
+    """Other users with a confirmed, non-dismissed affiliation at this place —
+    the truth behind an intro offer. 0 on any error (fail toward create+invite,
+    which is always-on)."""
+    if not place_id:
+        return 0
+    try:
+        res = (
+            service_client()
+            .table("circle_affiliations")
+            .select("id", count="exact")
+            .eq("place_ref", place_id)
+            .eq("status", "confirmed")
+            .is_("dismissed_at", "null")
+            .neq("user_id", exclude_user)
+            .limit(1)
+            .execute()
+        )
+        return int(res.count or 0)
+    except Exception:
+        logger.exception("place_co_member_count_failed place=%s", place_id)
+        return 0
+
+
 def ground_and_confirm(
     user_id: str,
     affiliation_id: str,
@@ -625,9 +649,23 @@ def ground_and_confirm(
     *,
     session_ctx: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ground the affiliation and author the confirmation line. ground_affiliation
-    also queues the §4.3 enrichment question ("What do you enjoy most at X?"), so
-    the follow-up thread arms itself."""
+    """Ground the affiliation, then ACKNOWLEDGE → OFFER (the rapport-bridge shape,
+    LANA_RAPPORT_BRIDGE_SPEC_v1 §1/§3): one warm confirm plus exactly ONE
+    state-aware CTA, never a bare acknowledgement.
+
+      · co-members confirmed at the place → offer an intro (bridge rule 4 —
+        an offer gated on a REAL count, never a vague "on my radar" promise);
+      · nobody there yet → offer create+invite at the place (rule 5/6 —
+        always-on per Circles master §D.2, and the act that seeds the area);
+      · offer already made this session, or no chat ctx (tile endpoint) →
+        today's plain warm close (the fallback, not the default).
+
+    The returned `offer` {kind, label, send, topic} rides the existing rapport
+    offer rails: the pipeline arms rapport_pending_action so a tap OR a typed
+    "sure" dispatches deterministically (_forced_slots_for_kind), and a decline
+    closes warmly. ground_affiliation also queues the §4.3 enrichment question,
+    so the follow-up thread arms itself."""
+    affiliation = _own_affiliation(user_id, affiliation_id) or {}
     try:
         result = ground_affiliation(user_id, affiliation_id, google_place_id)
     except ValueError:
@@ -639,16 +677,76 @@ def ground_and_confirm(
             "grounded": False,
         }
     place_name = str(result.get("place_name") or "that spot")
-    reply = _compose_grounding_reply(
-        goal=(
-            "Confirm you've noted which place they meant — warm, one sentence, no "
-            "follow-up question. Do not promise introductions or anything else."
-        ),
-        facts=[f"The place: {place_name}."],
-        fallback=f"Locked in — {place_name}. Good to know your spot.",
-        session_ctx=session_ctx,
+    place_id = str(result.get("place_id") or "")
+    topic = str(affiliation.get("circle_key") or "").replace("_", " ").strip()
+
+    # Fallback register (spec'd in docs/LANA_CIRCLES_BACKEND.md · grounding confirm):
+    # warm close, no question, no promises — used when the bridge already fired.
+    offer: dict[str, Any] | None = None
+    goal = (
+        "Confirm you've noted which place they meant — warm, one sentence, no "
+        "follow-up question. Do not promise introductions or anything else — "
+        "never 'on my radar' / 'noted in my system'; say it like 'Good to know "
+        "your spot' or 'I'll keep an ear out'."
     )
-    return {"reply": reply, "options": [], "pending": None, "grounded": True}
+    facts = [f"The place: {place_name}."]
+    fallback = f"Locked in — {place_name}. Good to know your spot."
+
+    if session_ctx is not None and not session_ctx.get("_grounding_offer_done"):
+        others = _place_co_member_count(place_id, user_id)
+        if others >= 1:
+            offer = {
+                "kind": "find_neighbors",
+                "label": "Yes, introduce me",
+                "send": f"connect me with neighbors into {topic or place_name}",
+                "topic": topic,
+            }
+            noun = "neighbor" if others == 1 else "neighbors"
+            goal = (
+                "Confirm the place in one warm sentence, then offer ONE next step: "
+                "an introduction, grounded ONLY in the real count given. End on the "
+                "'want an intro?' question — the chip below is the tap. Never "
+                "promise anything beyond the offer, never 'on my radar'."
+            )
+            facts = [
+                f"The place: {place_name}.",
+                f"{others} other {noun} confirmed the same spot as theirs.",
+            ]
+            fallback = (
+                f"Locked in — {place_name}. {others} of your {noun} call it their "
+                "spot too — want an intro?"
+            )
+        else:
+            offer = {
+                "kind": "host_meet",
+                "label": "Set something up",
+                "send": f"help me host a {topic or 'get-together'} meet at {place_name}",
+                "topic": topic,
+            }
+            thing = f"a {topic} get-together" if topic else "a get-together"
+            goal = (
+                "Confirm the place in one warm sentence, then offer ONE next step: "
+                "setting up a small get-together there they can share with their own "
+                "group. Nobody else is confirmed at this spot yet, so never claim or "
+                "imply people are waiting — creating and inviting is how their area "
+                "comes alive. End on the offer question; the chip below is the tap. "
+                "Never 'on my radar'."
+            )
+            facts = [
+                f"The place: {place_name}.",
+                "Nobody else has confirmed this spot yet.",
+                f"They could set up {thing} there and share it with their own people.",
+            ]
+            fallback = (
+                f"Locked in — {place_name}. Want to set up {thing} there you can "
+                "share with your group?"
+            )
+        session_ctx["_grounding_offer_done"] = True
+
+    reply = _compose_grounding_reply(
+        goal=goal, facts=facts, fallback=fallback, session_ctx=session_ctx
+    )
+    return {"reply": reply, "options": [], "pending": None, "grounded": True, "offer": offer}
 
 
 def handle_grounding_answer(

@@ -9,7 +9,7 @@ from typing import Any
 from app.discovery_route import handle_discovery_turn, looks_like_logout
 from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
-from app.lana_paths import unified_rules_first_enabled
+from app.lana_paths import decide_turn_mode, unified_rules_first_enabled
 from app.loop_guard import discovery_reply_is_stuck, reset_sticky_discovery_state
 from app.orchestrator.pipeline import run_turn
 from app.orchestrator.progress import READING
@@ -141,6 +141,7 @@ def _grounding_turn_result(
     reply = sanitize_assistant_message(str(result.get("reply") or ""))
     pending = result.get("pending")
     options = result.get("options") or []
+    offer = result.get("offer")
     if isinstance(pending, dict):
         ctx["rapport_active"] = True
         ctx["rapport_grounding"] = pending
@@ -148,6 +149,24 @@ def _grounding_turn_result(
         ctx["rapport_followup_question"] = reply
         ctx["rapport_offer_pending"] = False
         ctx["rapport_pending_action"] = None
+    elif isinstance(offer, dict) and str(offer.get("send") or "").strip():
+        # Grounding closed WITH a bridge offer (rapport-bridge shape): arm the
+        # existing offer rails so a chip tap or a typed "sure" dispatches the
+        # stored action deterministically, and a decline closes warmly — the
+        # same accept/decline/pivot branch every concierge offer already uses.
+        _reset_rapport_state(ctx)
+        ctx["rapport_active"] = True
+        ctx["rapport_offer_pending"] = True
+        ctx["rapport_pending_action"] = {
+            "kind": str(offer.get("kind") or ""),
+            "label": str(offer.get("label") or ""),
+            "send": str(offer.get("send") or ""),
+            "topic": str(offer.get("topic") or ""),
+        }
+        ctx["rapport_reply"] = {
+            "options": [],
+            "action": {"label": offer.get("label"), "send": offer.get("send")},
+        }
     else:
         _reset_rapport_state(ctx)
     ctx["_orchestrator_turn"] = False
@@ -1427,6 +1446,70 @@ def run_lana_unified_pipeline(
                 "intent_class": "discovery",
                 "tool_called": None,
             }
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+    def _utterance_is_unsafe_backstop(msg: str) -> bool:
+        try:
+            from app.orchestrator.guardrails import utterance_is_unsafe
+
+            return utterance_is_unsafe(msg)
+        except Exception:  # noqa: BLE001 — a broken import must fail SAFE (skip policy)
+            return True
+
+    # ── Unified conversational policy (decide_turn, engineering doc §C.1) ──────
+    # LANA_DECIDE_TURN: off (default) | shadow | on. Shadow logs the policy's
+    # would-be decision to lana_audit_log on a daemon thread while the legacy
+    # path answers — the cutover diff. On answers conversational turns directly;
+    # `handoff` and every failure fall through to the legacy engines below, so
+    # action flows (search, host, auth, signals) keep their proven paths.
+    _decide_mode = decide_turn_mode()
+    if _decide_mode == "shadow":
+        try:
+            from app.policy.decide import run_shadow
+
+            run_shadow(
+                user_id=user_id, session_id=session_id,
+                session_ctx=session_ctx, history=history, user_message=user_message,
+            )
+        except Exception:  # noqa: BLE001 — shadow is observability, never a blocker
+            logging.getLogger(__name__).exception("decide_shadow_spawn_failed")
+    elif (
+        _decide_mode == "on"
+        and phone_verified
+        and str(session_ctx.get("routing_phase") or "") in ("", "listening")
+        and not session_ctx.get("event_host_active")
+        and not session_ctx.get("pending_confirmation")
+        # Regex unsafe backstop stays ahead of the policy — safety turns belong
+        # to the legacy rails (the policy prompt also hands them off, belt+braces).
+        and not _utterance_is_unsafe_backstop(user_message)
+        # A tapped LEGACY chip is an engine command ("Widen the search") — never
+        # the policy's turn. Taps on the policy's own chips stay with the policy.
+        and not (
+            str(user_message or "").strip() in (session_ctx.get("_offered_chip_msgs") or [])
+            and str(user_message or "").strip()
+            not in (session_ctx.get("policy_chip_msgs") or [])
+        )
+    ):
+        from app.policy.decide import apply_defer, audit_decision, decide_turn
+
+        with timer.stage("decide_turn"):
+            _action = decide_turn(
+                user_id=user_id, session_ctx=session_ctx,
+                history=history, user_message=user_message,
+            )
+        if _action is not None and _action.kind != "handoff":
+            apply_defer(session_ctx, _action)
+            audit_decision(
+                session_id=session_id, user_id=user_id,
+                user_message=user_message, action=_action, shadow=False,
+            )
+            session_ctx["policy_chips"] = _action.chips or None
+            session_ctx["policy_chip_msgs"] = [c["send"] for c in _action.chips] or None
+            session_ctx["last_routing"] = _action.routing_dict()
+            session_ctx["_orchestrator_turn"] = False
+            session_ctx["timing_ms"] = timer.to_dict()
+            reply = sanitize_assistant_message(_action.utterance)
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 

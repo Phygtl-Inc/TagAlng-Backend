@@ -525,6 +525,7 @@ def _preview_peers_with_ids(
     block_id: str,
     phone_verified: bool,
     home_block_id: str | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     stored = session_ctx.get("peer_matches")
     if isinstance(stored, list) and stored:
@@ -544,8 +545,10 @@ def _preview_peers_with_ids(
                 return peers
         except Exception:
             pass
-        return fetch_preview_peers_on_block(block_id, limit=5, include_peer_ids=True)
-    return fetch_preview_peers_on_block(block_id, limit=3)
+        return fetch_preview_peers_on_block(
+            block_id, limit=5, include_peer_ids=True, exclude_user_id=user_id
+        )
+    return fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
 
 
 def _message_names_shown_peer(msg: str, peers: list[dict[str, Any]]) -> bool:
@@ -602,6 +605,7 @@ def _try_neighbor_intro_turn(
         block_id=block_id,
         phone_verified=phone_verified,
         home_block_id=ctx_base.get("home_block_id"),
+        user_id=user_id,
     )
     intro_source = str((slots or {}).get("intro_source") or "").strip().lower()
     if intro_source == "peer_preview" or slots_picking_shown_peer(slots, session_ctx):
@@ -1420,6 +1424,7 @@ def _try_layer1_intent_turn(
             block_id=block_id or "",
             phone_verified=phone_verified,
             home_block_id=home_block_id,
+            user_id=user_id,
         )
         peer_hint = str(slots.get("peer_name") or "").strip() or msg
         selected = pick_peer_for_intro(peers, msg=peer_hint) if peers else None
@@ -2509,6 +2514,7 @@ def _try_peer_detail_turn(
     phone_verified: bool,
     home_block_id: str | None,
     phase: str,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     if not looks_like_peer_drilldown(msg):
         return None
@@ -2529,6 +2535,7 @@ def _try_peer_detail_turn(
         block_id=block_id,
         phone_verified=phone_verified,
         home_block_id=home_block_id,
+        user_id=user_id,
     )
     if not peers:
         return (
@@ -4748,6 +4755,7 @@ def fetch_preview_peers_on_block(
     *,
     limit: int = 3,
     include_peer_ids: bool = False,
+    exclude_user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Anonymous-safe preview by default; verified users may get peer_user_id for intros.
 
@@ -4755,16 +4763,21 @@ def fetch_preview_peers_on_block(
     "On your block" so nothing downstream can present a peer's own claim as an
     affinity the caller supposedly shares (similarity_score None keeps them
     unscored through enrich_peer_match_row: no stars, no badge, no trait chips).
+
+    exclude_user_id keeps the caller out of their own neighbor list (their block +
+    nickname are persisted earlier in the same turn, so without it a fresh signup
+    is shown — and counted — as their own neighbor).
     """
     try:
         sb = service_client()
-        users = (
+        q = (
             sb.table("users")
             .select("id, nickname")
             .eq("home_block_id", block_id)
-            .limit(15)
-            .execute()
         )
+        if exclude_user_id:
+            q = q.neq("id", str(exclude_user_id))
+        users = q.limit(15).execute()
         rows = users.data or []
         out: list[dict[str, Any]] = []
         for u in rows[:limit]:
@@ -4891,6 +4904,18 @@ def fetch_preview_events_on_block(
         return []
 
 
+_PLACEHOLDER_LABEL_RE = re.compile(r"\s*\(placeholder\)", re.IGNORECASE)
+
+
+def clean_block_label(label: str | None) -> str | None:
+    """The phase1 seed blocks shipped with '(placeholder)' in display_name and that
+    leaked verbatim into replies ("near Lake Nona — Block A (placeholder)"). The
+    data is renamed by migration 20260912120000; this keeps any stale row or
+    stashed session label from ever reaching copy."""
+    s = _PLACEHOLDER_LABEL_RE.sub("", str(label or "")).strip().strip("—–-").strip()
+    return s or None
+
+
 def format_activities_message(
     events: list[dict[str, Any]],
     block_label: str | None,
@@ -4900,7 +4925,7 @@ def format_activities_message(
 ) -> str:
     from app.i18n import t
 
-    where = block_label or "your area"
+    where = clean_block_label(block_label) or "your area"
     if not events:
         return t("discovery.activities_empty", lang, where=where)
     # The FE renders these same events as a card list (activity_previews) right under this
@@ -4941,12 +4966,29 @@ def _verify_gate_reply(
     ctx_base: dict[str, Any],
     block_id: str,
     event_label: str | None = None,
+    origin: str = "peers",
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """origin records WHY signup started: 'peers' (gated mid-funnel — resume the
+    preview after verify) vs 'direct' (they just asked for an account — end at a
+    neutral welcome, never an unrequested neighbors list)."""
     from app.i18n import session_lang as _session_lang, t as _t
 
     _lang = _session_lang(session_ctx)
     if event_label:
         reply = _t("discovery.verify_gate_event", _lang, event=event_label)
+    elif origin == "direct":
+        # AI-authored (final-mile localizer renders the session language);
+        # the i18n line is the no-LLM fallback only.
+        reply = compose_offscript_reply(
+            goal=(
+                "The user asked to create an account. Kick off signup warmly: "
+                "you need their email address to send a verification code. Ask "
+                "for the email — one short line, and do NOT mention neighbors "
+                "or matches; they only asked to sign up."
+            ),
+            facts=["Signing up sends a 6-digit verification code to their email"],
+            fallback=_t("discovery.verify_gate_direct", _lang),
+        )
     else:
         reply = _t("discovery.verify_gate_neighbors", _lang)
     ctx = _routing_ctx(
@@ -4956,6 +4998,7 @@ def _verify_gate_reply(
     )
     ctx["requires_phone_verification"] = True
     ctx["peer_matches"] = []
+    ctx["signup_origin"] = origin
     return (
         reply,
         ctx,
@@ -4973,7 +5016,7 @@ def format_preview_message(
 ) -> str:
     from app.i18n import t
 
-    where = block_label or "your area"
+    where = clean_block_label(block_label) or "your area"
     if not peers:
         return t("discovery.peers_empty", lang, where=where)
     if len(peers) == 1:
@@ -6344,6 +6387,7 @@ def handle_discovery_turn(
         # auto-publishes it (see the post-verify host block above). Don't route them into the
         # find-peers name/identity funnel, and tell them their event is about to go up.
         host_publishing = bool(session_ctx.get("host_publish_pending"))
+        direct_signup = str(session_ctx.get("signup_origin") or "") == "direct"
         ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=email)
         if not host_publishing:
             ctx["pending_post_verify"] = True
@@ -6355,14 +6399,21 @@ def handle_discovery_turn(
             token=otp,
             verify_type="email_change",
         )
-        reply = (
-            "Perfect — verifying you now. One moment and I'll post your event for neighbors."
-            if host_publishing
-            else (
+        if host_publishing:
+            reply = (
+                "Perfect — verifying you now. One moment and I'll post your event for neighbors."
+            )
+        elif direct_signup:
+            # Direct account ask: never pre-promise a neighbors list they didn't request.
+            reply = (
+                "Perfect — verifying you now. Once you're verified, tell me your first name "
+                "and you're all set."
+            )
+        else:
+            reply = (
                 "Perfect — verifying you now. Once you're verified, tell me your first name "
                 "and I'll show neighbors you can connect with."
             )
-        )
         return (
             reply,
             ctx,
@@ -6633,6 +6684,7 @@ def handle_discovery_turn(
             phone_verified=phone_verified,
             home_block_id=home_block_id,
             phase=phase,
+            user_id=user_id,
         )
         if peer_detail_turn is not None:
             reply, ctx, routing, peers = peer_detail_turn
@@ -6971,10 +7023,22 @@ def handle_discovery_turn(
     if not phone_verified and session_ctx.get("pending_signup_gate"):
         session_ctx.pop("pending_signup_gate", None)
         ctx_base.pop("pending_signup_gate", None)
+        # Direct account ask vs verify-gated mid-peers-funnel: someone already in
+        # the peers funnel told Lana who they are (identity_snippet) — resuming the
+        # preview after verify is a genuine flow resume. Someone who just said
+        # "sign up" gets an account, not an unrequested neighbors list.
+        _had_identity = bool(
+            str(
+                session_ctx.get("identity_snippet")
+                or ctx_base.get("identity_snippet")
+                or ""
+            ).strip()
+        )
         return _verify_gate_reply(
             session_ctx=session_ctx,
             ctx_base=ctx_base,
             block_id=block_id,
+            origin="peers" if _had_identity else "direct",
         )
 
     # Slot: identity snippet (Flash — not chat history heuristics)
@@ -7014,7 +7078,14 @@ def handle_discovery_turn(
             ctx_base["identity_snippet"] = seeded
             effective_snippet = seeded
 
-    if not effective_snippet:
+    _direct_signup_pending = (
+        str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
+        == "direct"
+        and (ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME)
+    )
+    if not effective_snippet and not _direct_signup_pending:
+        # Direct signups skip the identity interrogation too — they asked for an
+        # account, not matches; the post-verify branch below ends at a welcome.
         in_funnel = phase in _FUNNEL_PHASES or block_just_resolved
         if not in_funnel:
             if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
@@ -7160,6 +7231,10 @@ def handle_discovery_turn(
                 _discovery_routing_stub(PHASE_NEED_IDENTITY),
                 [],
             )
+        direct_signup = (
+            str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
+            == "direct"
+        )
         if not phone_verified:
             nick = str(
                 (ctx_base.get("display_name_saved") and extract_display_name_reply(msg))
@@ -7167,8 +7242,13 @@ def handle_discovery_turn(
                 or ""
             ).strip()
             lead = f"Got it{', ' + nick if nick else ''}! "
+            tail = (
+                "Finishing verification — send one more message and you're all set."
+                if direct_signup
+                else "Finishing verification — send one more message and I'll show your matches."
+            )
             return (
-                f"{lead}Finishing verification — send one more message and I'll show your matches.",
+                f"{lead}{tail}",
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_PREVIEW,
@@ -7180,6 +7260,38 @@ def handle_discovery_turn(
                 [],
             )
         _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+        if direct_signup:
+            # They asked for an account, not for matches — end at a neutral welcome
+            # (the FE home state), never an unrequested neighbors list. Intent gets
+            # re-decided on their next message.
+            nick = str(
+                extract_display_name_reply(msg)
+                or extract_nickname_from_message(msg)
+                or ""
+            ).strip()
+            reply = compose_offscript_reply(
+                goal=(
+                    "The user just created their account and verified their email — "
+                    "signup is complete. Welcome them warmly (by first name if known), "
+                    "briefly mention what you can do — find people or things to do "
+                    "nearby, or help them set up something of their own — and ask what "
+                    "they'd like. One short friendly message, no pressure."
+                ),
+                facts=(
+                    [f"Their first name is {nick}"] if nick else ["Their name was saved earlier"]
+                ),
+                fallback=(
+                    f"You're all set{', ' + nick if nick else ''}! I can help you find "
+                    "people or things to do nearby — or set up something of your own. "
+                    "What sounds good?"
+                ),
+            )
+            ctx = _routing_ctx(ctx_base, phase="listening", active_intent="none")
+            # None, not pop — the session-ctx merge resurrects popped keys.
+            ctx["pending_post_verify"] = None
+            ctx["signup_origin"] = None
+            ctx["activity_previews"] = None
+            return reply, ctx, _discovery_routing_stub("listening"), []
         gated = _zip_gate_peers_turn(ctx_base, user_id=user_id, block_id=block_id)
         if gated is not None:
             return gated
@@ -7194,6 +7306,7 @@ def handle_discovery_turn(
                 block_id,
                 limit=3,
                 include_peer_ids=phone_verified,
+                exclude_user_id=user_id,
             )
             from app.i18n import session_lang as _session_lang
 
@@ -7260,7 +7373,7 @@ def handle_discovery_turn(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
                 return reply, ctx, ctx["last_routing"], peers
-        peers = fetch_preview_peers_on_block(block_id, limit=3)
+        peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
         from app.i18n import session_lang as _session_lang
 
         reply = format_preview_message(
@@ -7322,7 +7435,7 @@ def handle_discovery_turn(
                 return reply, ctx, ctx["last_routing"], peers
 
         if wants_peers or phase != PHASE_PREVIEW:
-            peers = fetch_preview_peers_on_block(block_id, limit=3)
+            peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
             from app.i18n import session_lang as _session_lang
 
             reply = format_preview_message(

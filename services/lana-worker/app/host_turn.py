@@ -55,7 +55,7 @@ are writing in.
      you to coordinate availability, suggest they pick a time and you'll post it so neighbors RSVP.
    - If they ask for advice (how many, where, what time), give a concrete suggestion.
    - Never invent a name, date, or place they didn't give. Don't repeat yourself mechanically.
-   - Warm and natural, mom-to-mom, under ~55 words. No markdown headers or lists.
+   - Warm and natural, neighbor-to-neighbor, under ~55 words. No markdown headers or lists.
 
 Return ONE JSON object:
 {"title": <string|null>, "place": <string|null>, "capacity": <int|null>,

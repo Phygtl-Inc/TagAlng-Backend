@@ -71,6 +71,26 @@ rapport questions. All backend; the tile chips are the only optional FE upgrade.
   grounds; otherwise stores the text as detail. Never feeds the claims extractor
   (a place name is not an identity fact); returns `{ok, grounded}`.
 
+### Grounding confirm register (the reply after a place is pinned)
+
+The confirm is a **bridge, never a bare acknowledgement**
+(LANA_RAPPORT_BRIDGE_SPEC_v1 §1/AC-1): one warm sentence confirming the place,
+then exactly ONE state-aware offer chip. Implemented in
+`circles_flow.ground_and_confirm`; chat path only (the tile endpoint returns
+`{ok, grounded}` and renders natively).
+
+| State (real reads, no extra LLM call) | Reply shape | Offer chip |
+|---|---|---|
+| ≥1 other confirmed member at the place | "Locked in — {place}. N of your neighbors call it their spot too — want an intro?" | `find_neighbors` (bridge rule 4 — intro only on a REAL count) |
+| nobody else confirmed yet (default) | "Locked in — {place}. Want to set up a {topic} get-together there you can share with your group?" | `host_meet` (rule 5/6 — create+invite is always-on, §D.2) |
+| offer already made this session | "Locked in — {place}. Good to know your spot." | none (annoyance guard) |
+
+Hard register rules: never "on my radar" / "noted in my system" (vague promises);
+never claim people are waiting when the count is 0; approved forward-looking idiom
+is "I'll keep an ear out" (lingo constitution's own example). Accept/decline rides
+the existing rapport offer rails — a tap or typed "sure" dispatches
+deterministically, a decline closes warmly with no re-pitch.
+
 ## Worker endpoints (all POST, Bearer auth — same conventions as /lana/rapport/*)
 
 ### Circles profile surface (§G)

@@ -26,6 +26,10 @@ TURN_SCOPED_SURFACES = frozenset({
     "rec_widen_noun",
     # Tap-able answers for a clarify question — only valid on the turn that asked it.
     "clarify_options",
+    # decide_turn policy chips — one-turn CTAs authored by the policy call.
+    # (policy_chip_msgs is NOT here: the next turn reads it to recognize a tap
+    # on the policy's own chip, then the next policy turn re-stamps it.)
+    "policy_chips",
     # Per-turn signal to main.py's background claim extractor. Must NOT persist: a
     # prior peer-discovery turn (e.g. ZIP entry) set it True, and {**old, **new} merge
     # leaked that True into the identity turn — suppressing the claim-save so the user's

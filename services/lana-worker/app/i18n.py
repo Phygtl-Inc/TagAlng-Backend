@@ -375,6 +375,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Para unirte a {event}, primero verifica tu correo — te envío un código. ¿Cuál es tu email?",
         "pt": "Para participar de {event}, primeiro verifique seu e-mail — eu te envio um código. Qual é o seu e-mail?",
     },
+    # Direct account ask ("sign up") — neutral copy, no neighbors promise: the
+    # post-verify turn ends at a welcome, not the peers preview.
+    "discovery.verify_gate_direct": {
+        "en": "Let's get you set up! What's your email? I'll send you a code to verify.",
+        "es": "¡Vamos a crear tu cuenta! ¿Cuál es tu correo? Te envío un código para verificar.",
+        "pt": "Vamos criar sua conta! Qual é o seu e-mail? Eu te envio um código para verificar.",
+    },
     # discovery — activities preview (the event list QA hit in Portuguese)
     "discovery.activities_empty": {
         "en": "I don't see open activities around {where} in the next couple weeks yet. "
