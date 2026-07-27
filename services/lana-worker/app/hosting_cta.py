@@ -18,9 +18,9 @@ _HOSTING_OPEN_MESSAGES = frozenset({
     "open the meetup",
 })
 _HOSTING_SEND_MOM_MESSAGES = frozenset({
+    # Legacy payload — chips rendered before the 2026-07 lexicon scrub still post it.
     "send to a mom",
-    # The chip label was lexicon-scrubbed to "Send to a parent" (its message payload
-    # still posts "send to a mom") — accept the typed form of the new label too.
+    # Current label AND payload ("Send to a parent") post this form.
     "send to a parent",
 })
 

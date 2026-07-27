@@ -199,7 +199,7 @@ def hosting_open_actions(*, matches_nearby: int = 0) -> list[dict[str, Any]]:
         _action(
             action_id="hosting_send",
             label="Send to a parent",
-            message="send to a mom",
+            message="send to a parent",
             style="secondary",
         ),
     ]
@@ -217,7 +217,7 @@ def tip_pass_actions() -> list[dict[str, Any]]:
         _action(
             action_id="tip_send_mom",
             label="Send to a parent",
-            message="send to a mom",
+            message="send to a parent",
             style="secondary",
         ),
     ]
@@ -410,6 +410,27 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
         chips = clarify_chip_actions([str(o) for o in clarify_opts])
         if chips:
             return chips
+
+    # decide_turn policy chips — label + send are policy-authored (lexicon-enforced
+    # upstream by lingo_guard). Render regardless of ui_intent, same as clarify.
+    policy_chips = ctx.get("policy_chips")
+    if isinstance(policy_chips, list) and policy_chips:
+        rows = []
+        for i, c in enumerate(policy_chips[:3]):
+            label = str((c or {}).get("label") or "").strip() if isinstance(c, dict) else ""
+            if not label:
+                continue
+            send = str(c.get("send") or label).strip()
+            rows.append(
+                _action(
+                    action_id=f"policy_{i}",
+                    label=label,
+                    message=send,
+                    style="primary" if i == 0 else "secondary",
+                )
+            )
+        if rows:
+            return rows
 
     # Concierge reply to a rapport tile answer — suggested answers or one action chip.
     # Also render regardless of ui_intent (the turn is a plain "chat" reply).

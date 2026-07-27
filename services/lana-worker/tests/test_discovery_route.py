@@ -2574,5 +2574,165 @@ class TestUpfrontDisplayNameGate(unittest.TestCase):
         )
 
 
+class TestDirectSignupEnding(unittest.TestCase):
+    """A user who just asked for an account ends at a welcome, never an
+    unrequested neighbors list; gated (mid-peers-funnel) signups still resume
+    the preview."""
+
+    @patch("app.discovery_route.fetch_preview_peers_on_block")
+    @patch("app.discovery_route.fetch_peer_matches", return_value=[])
+    @patch("app.discovery_route._try_assign_home_block", return_value="block-1")
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    @patch("app.discovery_route.persist_profile_patch")
+    def test_direct_signup_name_turn_ends_at_welcome(
+        self, _persist, _needs_name, _assign, _match, mock_preview
+    ) -> None:
+        result = handle_discovery_turn(
+            "Asjid",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_DISPLAY_NAME,
+                "preview_block_id": "block-1",
+                "pending_post_verify": True,
+                "signup_origin": "direct",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id=None,
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        # Neutral welcome, not a peers preview.
+        mock_preview.assert_not_called()
+        self.assertEqual(peers, [])
+        self.assertNotIn("neighbor", reply.lower())
+        self.assertEqual(ctx["routing_phase"], "listening")
+        self.assertFalse(ctx.get("pending_post_verify"))
+        self.assertFalse(ctx.get("signup_origin"))
+
+    @patch("app.discovery_route.fetch_preview_peers_on_block", return_value=[])
+    @patch("app.discovery_route.fetch_peer_matches", return_value=[])
+    @patch("app.discovery_route._zip_gate_peers_turn", return_value=None)
+    @patch("app.discovery_route._try_assign_home_block", return_value="block-1")
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    @patch("app.discovery_route.persist_profile_patch")
+    def test_gated_signup_name_turn_still_previews(
+        self, _persist, _needs_name, _assign, _gate, _match, mock_preview
+    ) -> None:
+        result = handle_discovery_turn(
+            "Tom",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_DISPLAY_NAME,
+                "preview_block_id": "block-1",
+                "identity_snippet": "dad, italian",
+                "pending_post_verify": True,
+                "signup_origin": "peers",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id=None,
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        _reply, ctx, _, _peers = result
+        mock_preview.assert_called_once()
+        self.assertEqual(
+            mock_preview.call_args.kwargs.get("exclude_user_id"), "user-1"
+        )
+        self.assertEqual(ctx["routing_phase"], PHASE_PREVIEW)
+
+    def test_verify_gate_direct_origin_marks_ctx(self) -> None:
+        from app.discovery_route import _verify_gate_reply
+
+        reply, ctx, _, _ = _verify_gate_reply(
+            session_ctx={},
+            ctx_base={},
+            block_id="block-1",
+            origin="direct",
+        )
+        self.assertEqual(ctx.get("signup_origin"), "direct")
+        self.assertNotIn("neighbor", reply.lower())
+
+    def test_verify_gate_default_origin_keeps_neighbors_copy(self) -> None:
+        from app.discovery_route import _verify_gate_reply
+
+        reply, ctx, _, _ = _verify_gate_reply(
+            session_ctx={},
+            ctx_base={},
+            block_id="block-1",
+        )
+        self.assertEqual(ctx.get("signup_origin"), "peers")
+        self.assertIn("neighbor", reply.lower())
+
+
+class TestPreviewPeersSelfExclusion(unittest.TestCase):
+    def test_caller_excluded_from_own_roster(self) -> None:
+        from app.discovery_route import fetch_preview_peers_on_block
+
+        class FakeQuery:
+            def __init__(self) -> None:
+                self.neq_calls: list[tuple[str, str]] = []
+
+            def select(self, *_a, **_k):
+                return self
+
+            def eq(self, *_a, **_k):
+                return self
+
+            def neq(self, col, val):
+                self.neq_calls.append((col, val))
+                return self
+
+            def limit(self, *_a, **_k):
+                return self
+
+            def execute(self):
+                class R:
+                    data = [{"id": "peer-2", "nickname": "Maria"}]
+
+                return R()
+
+        fake = FakeQuery()
+
+        class FakeClient:
+            def table(self, *_a, **_k):
+                return fake
+
+        with patch("app.discovery_route.service_client", return_value=FakeClient()):
+            rows = fetch_preview_peers_on_block(
+                "block-1", limit=3, include_peer_ids=True, exclude_user_id="me-1"
+            )
+        self.assertEqual(fake.neq_calls, [("id", "me-1")])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["nickname"], "Maria")
+
+
+class TestCleanBlockLabel(unittest.TestCase):
+    def test_placeholder_suffix_stripped(self) -> None:
+        from app.discovery_route import clean_block_label
+
+        self.assertEqual(
+            clean_block_label("Lake Nona — Block A (placeholder)"),
+            "Lake Nona — Block A",
+        )
+        self.assertEqual(clean_block_label("Block B (Placeholder)"), "Block B")
+        self.assertEqual(clean_block_label("Lake Nona"), "Lake Nona")
+        self.assertIsNone(clean_block_label("(placeholder)"))
+        self.assertIsNone(clean_block_label(None))
+
+    def test_preview_message_never_shows_placeholder(self) -> None:
+        msg = format_preview_message(
+            [{"nickname": "Maria"}],
+            "Lake Nona — Block A (placeholder)",
+            phone_verified=True,
+        )
+        self.assertNotIn("placeholder", msg.lower())
+        self.assertIn("Lake Nona — Block A", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

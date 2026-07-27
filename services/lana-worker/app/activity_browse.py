@@ -266,11 +266,11 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
         facts = [
             f"The user is looking for: {interest or '(anything nearby)'}",
             (
-                f"Neighbors have {count} upcoming activities across TagAlng blocks right now"
+                f"Neighbors have {count} upcoming activities across neighborhoods right now"
                 if count
                 else "You don't know yet how many activities are coming up"
             ),
-            "You don't know the user's block yet; activities are grouped per neighborhood block",
+            "You don't know the user's neighborhood yet; activities are grouped per neighborhood",
             "You only need a 5-digit US ZIP code — never a street address",
         ]
         if user_reply:
@@ -287,8 +287,9 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
             system=(
                 "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
                 "(max 2 sentences) asking for the user's ZIP code so you can show the "
-                "activities on their block. Ground it ONLY in the facts given — never "
-                "invent events or claim something is near them. "
+                "activities happening near them. Say 'near you' / 'your area' — NEVER the "
+                "word 'block' (backstage vocabulary). Ground it ONLY in the facts given — "
+                "never invent events or claim something is near them. "
                 + (f"{lang_line} " if lang_line else "")
                 + 'Return JSON {"message": "..."}.'
             ),

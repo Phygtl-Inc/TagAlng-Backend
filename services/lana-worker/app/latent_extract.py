@@ -33,7 +33,7 @@ _SUGGESTION_TTL_DAYS = 30
 _SKIP_SHORT = frozenset({"ok", "okay", "yes", "no", "yep", "nope", "sure", "thanks", "thank you"})
 
 LATENT_EXTRACT_PROMPT = """You extract latent signals from ONE user message in a TagAlng block chat \
-(a neighborhood app for moms). These are things the user MENTIONED but did not explicitly ask for — \
+(a neighborhood app for local families). These are things the user MENTIONED but did not explicitly ask for — \
 activities, places, gear, needs, life events — that might map to something the app could help with.
 
 Output ONLY valid JSON (no markdown):
