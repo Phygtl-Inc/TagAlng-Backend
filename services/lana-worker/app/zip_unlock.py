@@ -17,12 +17,25 @@ create/host/invite path may ever check unlock_state.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any
 
 from app.auth import service_client
 
 logger = logging.getLogger(__name__)
+
+# Discovery gating rollout knob (§D.2 — the consumption side):
+#   off  — no gating anywhere (pre-Circles behavior).
+#   soft — DEFAULT. Real supply is never hidden; only EMPTY discovery states gain
+#          the seed-forward framing ("N of M neighbors — host something / bring
+#          your people in") instead of a bare "nothing found".
+#   hard — soft, plus find-peers intros require an OPEN area (sparse-area intros
+#          are junk-quality and privacy-risky; peers is the true density product).
+# Supply-aware on purpose: a waitlist ZIP that already HAS events keeps them
+# visible — hiding a host's event from neighbors would fight the north star
+# (meets that actually happen) instead of feeding it.
+_GATE_MODES = ("off", "soft", "hard")
 
 _OPEN_PUSH_TITLE = "Your neighborhood just came alive"
 _OPEN_PUSH_BODY = (
@@ -123,6 +136,102 @@ def _has_confirmed_thing(user_id: str) -> bool:
     except Exception:
         logger.exception("has_confirmed_thing_failed user=%s", user_id)
         return False
+
+
+def gate_mode() -> str:
+    mode = str(os.environ.get("LANA_ZIP_UNLOCK_GATE", "soft")).strip().lower()
+    return mode if mode in _GATE_MODES else "soft"
+
+
+def _unlock_snapshot(zip5: str) -> dict[str, Any] | None:
+    """Stored unlock row for a ZIP — no recount on the hot path. A missing row
+    (nobody ever counted this ZIP) recounts once, read-repair style."""
+    z = str(zip5 or "").strip()
+    if not z:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("zip_unlock")
+            .select("zip5, unlock_state, verified_active_count, unlock_threshold")
+            .eq("zip5", z)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+    except Exception:
+        logger.exception("unlock_snapshot_failed zip=%s", z)
+        return None
+    if row:
+        return {
+            "zip5": row.get("zip5"),
+            "state": row.get("unlock_state"),
+            "count": row.get("verified_active_count"),
+            "threshold": row.get("unlock_threshold"),
+        }
+    state = recount_zip(z)
+    return (
+        {
+            "zip5": state.get("zip5") or z,
+            "state": state.get("state"),
+            "count": state.get("count"),
+            "threshold": state.get("threshold"),
+        }
+        if state
+        else None
+    )
+
+
+def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] | None:
+    """§D.2 consumption gate for one discovery surface ('peers' | 'browse').
+
+    None → proceed normally (mode off, area open, or unknown ZIP — fail OPEN:
+    a gating error must never lock a user out of discovery). Otherwise a framing
+    dict {mode, blocked, zip5, state, count, threshold}: `blocked` is True only
+    for peers in hard mode — every other consumer treats the dict as copy facts
+    for its EMPTY state, never as a reason to hide real supply.
+    """
+    mode = gate_mode()
+    if mode == "off" or not user_id:
+        return None
+    try:
+        profile = _user_home_zip(user_id) or {}
+        snap = _unlock_snapshot(str(profile.get("home_zip") or ""))
+    except Exception:
+        logger.exception("discovery_zip_gate_failed user=%s", user_id)
+        return None
+    if not snap or str(snap.get("state") or "") == "open":
+        return None
+    return {
+        "mode": mode,
+        "blocked": mode == "hard" and surface == "peers",
+        "zip5": snap.get("zip5"),
+        "state": snap.get("state"),
+        "count": int(snap.get("count") or 0),
+        "threshold": snap.get("threshold"),
+    }
+
+
+def gate_framing_facts(frame: dict[str, Any]) -> list[str]:
+    """Compose-ready facts about the user's not-yet-open area, for AI-authored
+    empty states. Lingo-clean: 'your area', never 'block'/'ZIP <n>' in copy."""
+    count = int(frame.get("count") or 0)
+    threshold = frame.get("threshold")
+    facts = [
+        "Their area is still coming alive — not enough verified neighbors have "
+        "joined yet for full discovery.",
+    ]
+    if threshold:
+        facts.append(
+            f"Progress: {count} of {threshold} neighbors so far. Never call it a "
+            "waitlist or quota — frame it as their area waking up."
+        )
+    facts.append(
+        "The genuinely useful move: they can host something or bring their own "
+        "people in — creating is always available and is exactly what brings "
+        "their area to life."
+    )
+    return facts
 
 
 def area_progress(user_id: str, zip5: str | None = None) -> dict[str, Any]:

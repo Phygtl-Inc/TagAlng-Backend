@@ -368,9 +368,12 @@ def tag_claim_place_from_gap(gap_row_id: str, claim_id: str) -> None:
 # At most this many open/asked grounding questions at a time — a chatty session
 # that names five places must not turn the tile into a week-long interrogation.
 _GROUND_GAP_MAX_OPEN_DEFAULT = 2
-# Below the semantic-gap default (0.8): a fresh personal follow-up still wins a
-# tie, and the ranker's cadence guard owns the pacing.
-_GROUND_GAP_SCORE = 0.75
+# ABOVE the semantic-gap default (0.8): grounding asks first. Deliberate — the
+# affinity follow-up about the same topic is superseded by the §4.3 enrichment
+# question that fires AFTER grounding (same ask, but place-tagged), so grounding
+# first converts the thread into matcher data instead of burning it ungrounded.
+# The ranker's cadence guard still paces circle asks to 1-in-N overall.
+_GROUND_GAP_SCORE = 0.85
 
 # circle_type -> the warm-neutral noun the fallback question uses (lingo-clean).
 _GROUND_NOUN: dict[str, str] = {

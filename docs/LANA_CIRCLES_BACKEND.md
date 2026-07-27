@@ -114,8 +114,33 @@ service-role only), called from redeem + area-progress (read-repair; no cron).
 verify also stamps) + a Lana session ≤30d + ≥1 confirmed thing (circle or accepted
 intro). `warming→open` stamps founding (U4, quality-gated) and fires one push to
 all members. **Unlock gates consumption of others' supply only — no create/host/
-invite path checks `unlock_state`, ever (§D.2).** Discovery filtering by state is
-NOT yet wired into browse — that lands with the onion integration.
+invite path checks `unlock_state`, ever (§D.2).**
+
+### Discovery gating (§D.2 consumption side) — wired, mode-flagged
+
+`LANA_ZIP_UNLOCK_GATE = off | soft | hard` (default **soft**), enforced by
+`zip_unlock.discovery_zip_gate` + hooks in browse and find-peers. Deliberately
+**supply-aware**: an area that already has events keeps them fully visible in any
+mode — hiding a host's event from neighbors starves the meets that make the area
+come alive. What changes per mode:
+
+- **soft** (default): EMPTY discovery states in a not-open area get the
+  seed-forward framing instead of a bare "nothing found" — AI-authored from true
+  facts ("7 of 10 neighbors so far"), with the seek-offer pills kept on an
+  interest search and a "Host a meet" pill on a generic browse. Nothing is
+  blocked.
+- **hard**: soft, plus **find-peers introductions require an OPEN area** — the
+  peers turn returns the exemplar-#7 seed reply ("your area's just getting
+  started — want to host something and bring your people in?") instead of
+  running the match. Sparse-area intros are junk-quality and privacy-risky, so
+  peers is the one surface that truly locks.
+- Fail-open everywhere: any gate lookup error proceeds ungated — a gating bug
+  must never lock discovery. State reads are the stored `zip_unlock` row (no
+  recount on the hot path; missing rows recount once, read-repair style).
+- `capability_index.required_state` is now populated to match (migration
+  `20260908`): `looking.meet` + `discovery.find_peers` → `{zip_open}`,
+  `sharing.*` → `{}` explicitly, `discovery.find_activities` stays `{}` on
+  purpose (browse availability is never state-gated; only its empty copy is).
 
 ## Contract for the onion matcher (other dev)
 

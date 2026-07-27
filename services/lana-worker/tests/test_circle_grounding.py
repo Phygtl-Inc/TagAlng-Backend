@@ -66,7 +66,9 @@ class TestEnsureGroundingGaps(unittest.TestCase):
         asked_affs = [c.kwargs["affiliation_ref"] for c in open_gap.call_args_list]
         self.assertEqual(asked_affs, ["a2", "a3"])
         self.assertEqual(open_gap.call_args_list[0].kwargs["gap_id"], "ground:a2")
-        self.assertEqual(open_gap.call_args_list[0].kwargs["unlock_score"], 0.75)
+        # Above the 0.8 semantic default — grounding outranks the extractor's
+        # same-topic follow-up (which is suppressed on capture turns anyway).
+        self.assertEqual(open_gap.call_args_list[0].kwargs["unlock_score"], 0.85)
 
     @patch("app.circles_flow.service_client")
     def test_cap_already_reached_is_a_noop(self, sb) -> None:
@@ -246,6 +248,44 @@ class TestHandleGroundingConfirmation(unittest.TestCase):
         result = handle_grounding_confirmation("u1", state, "some other gym")
         self.assertIsNone(result["pending"])
         note.assert_called_once()
+
+
+class TestFollowupYieldsToGrounding(unittest.TestCase):
+    """A turn that captured a circle gives its tile slot to the grounding question:
+    the extractor's same-topic follow-up ("what do you enjoy at book club?") is
+    suppressed — the §4.3 place-tagged enrichment re-asks it after grounding."""
+
+    def _run(self, circles: int):
+        from types import SimpleNamespace
+
+        import app.claims_persist as cp
+
+        claim = SimpleNamespace(bucket="activity", confidence=0.9, label="Book club member")
+        with patch.object(cp, "persist_nickname_if_stated", return_value=None), \
+             patch.object(cp, "should_extract_claims_from_message", return_value=True), \
+             patch.object(cp, "fetch_active_claim_threads", return_value=[]), \
+             patch("app.rapport_gaps.recent_gap_questions", return_value=[]), \
+             patch.object(cp, "incremental_claims_from_utterance", return_value={"followup_topic": "about your book club…"}), \
+             patch.object(cp, "parse_incremental_claims_data",
+                          return_value=(None, [claim], None, "What do you enjoy most at book club?")), \
+             patch.object(cp, "filter_extracted_claims", side_effect=lambda _m, c: c), \
+             patch.object(cp, "persist_kids_count"), \
+             patch.object(cp, "upsert_claims", return_value=1), \
+             patch("app.circles_capture.run_circle_capture",
+                   return_value={"circles": circles, "features": 0}), \
+             patch.object(cp, "_open_rapport_gap") as open_gap:
+            res = cp.try_upsert_claims_from_message("u1", "I'm in a book club with friends")
+        return res, open_gap
+
+    def test_circle_capture_suppresses_same_turn_followup(self) -> None:
+        res, open_gap = self._run(circles=1)
+        self.assertEqual(res.saved, 1)
+        open_gap.assert_not_called()
+
+    def test_no_circle_keeps_followup(self) -> None:
+        res, open_gap = self._run(circles=0)
+        self.assertEqual(res.saved, 1)
+        open_gap.assert_called_once()
 
 
 class TestRankerCadence(unittest.TestCase):

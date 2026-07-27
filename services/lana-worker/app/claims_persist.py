@@ -1229,10 +1229,11 @@ def try_upsert_claims_from_message(
         return ClaimExtractResult(nickname=stated_nick)
     # Circles Stage 1 (extract-and-park, §H.1): persist circle / place-feature candidates
     # from the same extractor pass. Best-effort and additive — must never affect claims.
+    circles_captured = 0
     try:
         from app.circles_capture import run_circle_capture
 
-        run_circle_capture(user_id, data)
+        circles_captured = int(run_circle_capture(user_id, data).get("circles") or 0)
     except Exception:
         logger.exception("circle_capture_failed")
     if nickname and not stated_nick:
@@ -1272,7 +1273,13 @@ def try_upsert_claims_from_message(
 
     saved = upsert_claims(user_id, claims)
     primary = max(claims, key=lambda c: c.confidence, default=None)
-    if allow_rapport_gap:
+    # A turn that captured a circle gives its tile slot to the GROUNDING question
+    # ("which spot is it?") instead of the extractor's follow-up — the two are about
+    # the same topic and would collide as near-twins on the tile. Nothing is lost:
+    # once grounded, the §4.3 enrichment asks the affinity question anyway, place-
+    # tagged ("What do you enjoy most at Book Club Bar?") — strictly better than the
+    # ungrounded version it replaces.
+    if allow_rapport_gap and not circles_captured:
         _open_rapport_gap(
             user_id,
             message_id,
