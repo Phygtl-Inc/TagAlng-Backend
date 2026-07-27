@@ -347,8 +347,49 @@ def _compose_out_of_coverage(zip5: str, *, user_msg: str = "", lang: str | None 
         return fallback
 
 
+def _zip_gate_frame(user_id: str | None) -> dict[str, Any] | None:
+    """Area-not-open framing facts for EMPTY browse states (§D.2 soft gate).
+    Never consulted when real events matched — supply is never hidden."""
+    try:
+        from app.zip_unlock import discovery_zip_gate
+
+        return discovery_zip_gate(user_id, surface="browse")
+    except Exception:  # noqa: BLE001 — framing is an upgrade, never a blocker
+        logging.getLogger(__name__).exception("browse_zip_gate_failed")
+        return None
+
+
+def _compose_area_warming_empty(
+    msg: str, frame: dict[str, Any], session_ctx: dict[str, Any]
+) -> str:
+    """Generic browse in a not-yet-open area with zero events: the honest state plus
+    the seed-forward move (policy exemplar #7) — never a bare "nothing found"."""
+    from app.reply_compose import compose_reply
+    from app.zip_unlock import gate_framing_facts
+
+    return compose_reply(
+        goal=(
+            "Their area has no upcoming activities yet AND is still coming alive. "
+            "Tell them that honestly, then turn it forward: they don't have to wait — "
+            "hosting something (the pill below says 'Host a meet') is how their area "
+            "wakes up. Warm, zero guilt, max 2 sentences."
+        ),
+        facts=gate_framing_facts(frame),
+        fallback=(
+            "Nothing on the calendar near you just yet — your area is still coming "
+            "alive. Want to host something and get it started?"
+        ),
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+
+
 def _compose_empty_seek_offer(
-    interest: str, *, user_msg: str = "", lang: str | None = None
+    interest: str,
+    *,
+    user_msg: str = "",
+    lang: str | None = None,
+    area_facts: list[str] | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -386,6 +427,11 @@ def _compose_empty_seek_offer(
                 "words naturally (if they shared a taste or excitement, react to it warmly "
                 "first) instead of a robotic no-results template."
             )
+        if area_facts:
+            # §D.2 soft gate: their area isn't open yet — weave in ONE honest line of
+            # that context so the empty result reads as "area still waking up", not
+            # "the app is dead". Both pills above must still survive in the copy.
+            facts.extend(area_facts)
         from app.i18n import synth_language_directive
 
         lang_line = synth_language_directive(lang) if lang else None
@@ -823,7 +869,27 @@ def run_activity_browse_turn(
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
         session_ctx["routing_phase"] = "listening"
-        return _compose_empty_seek_offer(short, user_msg=msg, lang=lang)
+        frame = _zip_gate_frame(user_id)
+        area_facts = None
+        if frame:
+            from app.zip_unlock import gate_framing_facts
+
+            area_facts = gate_framing_facts(frame)
+        return _compose_empty_seek_offer(short, user_msg=msg, lang=lang, area_facts=area_facts)
+
+    # Generic browse ("what's happening?") with a zero-event calendar in an area that
+    # isn't open yet: the seed-forward framing instead of a bare "nothing found".
+    # Real events always render below — this branch only fires when there are none.
+    if not matched and not interest:
+        frame = _zip_gate_frame(user_id)
+        if frame:
+            draft["_seek_offer"] = None
+            draft["suggestions"] = ["Host a meet"]
+            session_ctx["browse_draft"] = draft
+            session_ctx["activity_browse_active"] = True
+            session_ctx["activity_previews"] = []
+            session_ctx["routing_phase"] = "listening"
+            return _compose_area_warming_empty(msg, frame, session_ctx)
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)

@@ -468,6 +468,56 @@ def _fetch_verified_peer_matches(
     return fetch_peer_matches(user_jwt, limit=limit)
 
 
+def _zip_gate_peers_turn(
+    ctx_base: dict[str, Any],
+    *,
+    user_id: str | None,
+    block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Circles §D.2, hard mode only: peer introductions need an OPEN area — in a
+    3-person ZIP the matches are junk-quality and privacy-risky. Returns the
+    seed-forward turn (exemplar #7: honest + host pill, never a dead end) when
+    gated, None to proceed. Default mode is 'soft', which never blocks peers;
+    creation paths (host/share/invite) must never call this."""
+    try:
+        from app.zip_unlock import discovery_zip_gate, gate_framing_facts
+
+        frame = discovery_zip_gate(user_id, surface="peers")
+    except Exception:  # noqa: BLE001 — a gating error must fail OPEN
+        logging.getLogger(__name__).exception("peers_zip_gate_failed")
+        return None
+    if not frame or not frame.get("blocked"):
+        return None
+    from app.reply_compose import compose_reply
+
+    reply = compose_reply(
+        goal=(
+            "They asked to meet people nearby, but their area is still coming alive, "
+            "so introductions aren't available quite yet. Say that honestly, then turn "
+            "it forward: they don't have to wait — setting something up themselves "
+            "(the pill below says 'Host a meet') is exactly what brings their area to "
+            "life. Warm, zero guilt, max 2 sentences, never the word waitlist."
+        ),
+        facts=gate_framing_facts(frame),
+        fallback=(
+            "Your area is still coming alive, so I can't set up introductions just "
+            "yet — but you don't have to wait. Want to host something and bring "
+            "your people in?"
+        ),
+        session_ctx=ctx_base,
+    )
+    ctx = _routing_ctx(
+        ctx_base,
+        phase="listening",
+        active_intent=INTENT_FIND_PEERS,
+        preview_block_id=block_id,
+    )
+    ctx["suggestions"] = ["Host a meet"]
+    ctx.pop("activity_previews", None)
+    ctx["last_routing"] = _discovery_routing_stub("listening", "zip_gate_peers")
+    return reply, ctx, ctx["last_routing"], []
+
+
 def _preview_peers_with_ids(
     *,
     user_jwt: str,
@@ -7130,6 +7180,9 @@ def handle_discovery_turn(
                 [],
             )
         _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+        gated = _zip_gate_peers_turn(ctx_base, user_id=user_id, block_id=block_id)
+        if gated is not None:
+            return gated
         try:
             peers = _fetch_verified_peer_matches(
                 user_jwt, user_id=user_id, block_id=block_id, limit=5
@@ -7236,6 +7289,9 @@ def handle_discovery_turn(
     if phase != PHASE_PREVIEW or wants_peers or wants_more_peer_detail(msg):
         if _peer_find_turn_blocked(slots, msg=msg, session_ctx=session_ctx, history=history):
             return None
+        gated = _zip_gate_peers_turn(ctx_base, user_id=user_id, block_id=block_id)
+        if gated is not None:
+            return gated
         effective_home = home_block_id or _try_assign_home_block(
             user_jwt, session_ctx=ctx_base, home_block_id=home_block_id
         )
