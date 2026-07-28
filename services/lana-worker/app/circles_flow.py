@@ -389,6 +389,12 @@ _GROUND_NOUN: dict[str, str] = {
     "other": "spot",
 }
 
+def place_relation_noun(circle_type: str | None) -> str:
+    """Caller-relative noun for a grounded place ("gym" → tag "your gym").
+    Disclosure-safe by construction (§F / O7): names the RELATION, never the place."""
+    return _GROUND_NOUN.get(str(circle_type or "other"), "spot")
+
+
 _GROUNDING_QUESTION_PROMPT = """You write ONE warm question for a neighborhood app user who \
 mentioned a community/place they're part of, but never named WHICH one. Goal: learn the \
 specific local spot (so the app can connect them with the people there).
@@ -405,7 +411,7 @@ Rules:
 
 def _grounding_question(circle_type: str, detail: str | None) -> tuple[str, str]:
     """AI-authored per the lingo rules; a type-templated line as fallback."""
-    noun = _GROUND_NOUN.get(str(circle_type or "other"), "spot")
+    noun = place_relation_noun(circle_type)
     phrase = _FEATURE_NOTE_RE.sub("", str(detail or "")).strip(" ;")
     fallback = (
         f"You mentioned your {noun} — which one is it, exactly?",
