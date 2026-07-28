@@ -465,7 +465,17 @@ def _fetch_verified_peer_matches(
         kick_claim_embedding_backfill(user_id=user_id, block_id=block_id)
     except Exception:
         pass
-    return fetch_peer_matches(user_jwt, limit=limit)
+    peers = fetch_peer_matches(user_jwt, limit=limit)
+    # Circles §C: fold onion-scored circle overlap into the list — proven
+    # same-place peers join (and outrank) pure-cosine fits. Fail-open: the
+    # onion must never cost a user the matches they already had.
+    try:
+        from app.onion_blend import blend_onion_matches
+
+        return blend_onion_matches(peers, user_id=user_id, limit=limit)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("onion_blend_failed")
+        return peers
 
 
 def _zip_gate_peers_turn(
