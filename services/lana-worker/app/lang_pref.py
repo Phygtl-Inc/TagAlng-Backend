@@ -207,6 +207,9 @@ def _compose_guest_confirm(new_pref: str) -> str:
 _LANGUAGE_THREAD_CONCEPT = "multilingual"
 # Older/free-form language threads the extractor may have slugged differently.
 _LANGUAGE_THREAD_HINT_RE = re.compile(r"\b(?:speak\w*|language\w*|lingual|polyglot)\b", re.I)
+# Unconfirmed watch-and-learn rows (below) live under their own per-language slug so
+# their confidence can ramp independently of the confirmed multilingual thread.
+_OBSERVED_CONCEPT_PREFIX = "lang_observed_"
 
 
 def _remember_language_claim(user_id: str, lang: str, source_quote: str | None) -> None:
@@ -244,6 +247,8 @@ def _remember_language_claim(user_id: str, lang: str, source_quote: str | None) 
                 continue
             concept = str(row.get("concept") or "").strip()
             label = str(row.get("label") or "").strip()
+            if concept.lower().startswith(_OBSERVED_CONCEPT_PREFIX):
+                continue  # watch-and-learn rows are not the confirmed thread
             if concept.lower() == _LANGUAGE_THREAD_CONCEPT or _LANGUAGE_THREAD_HINT_RE.search(
                 f"{concept.replace('_', ' ')} {label}"
             ):
@@ -258,7 +263,10 @@ def _remember_language_claim(user_id: str, lang: str, source_quote: str | None) 
                 ]
             )
             if re.search(rf"\b{re.escape(name)}\b", blob, re.I):
-                return  # already on the thread — nothing new to remember
+                # Already confirmed — retire any leftover watch-and-learn row so
+                # the profile never shows the language twice.
+                _dismiss_observed_language_row(user_id, code)
+                return
         claim = ExtractedClaim(
             concept=str(thread.get("concept")) if thread else _LANGUAGE_THREAD_CONCEPT,
             # The upsert merge keeps the INCOMING label — hand back the stored one
@@ -272,6 +280,8 @@ def _remember_language_claim(user_id: str, lang: str, source_quote: str | None) 
             bucket="interest",
         )
         upsert_claims(user_id, [claim])
+        # An explicit statement supersedes the low-surety observed row (if any).
+        _dismiss_observed_language_row(user_id, code)
     except Exception:  # noqa: BLE001 — remembering is best-effort, never the turn's problem
         _LOG.exception("language_claim_upsert_failed")
 
@@ -289,6 +299,145 @@ def remember_language_claim_async(
         args=(user_id, code, source_quote),
         daemon=True,
         name="lang-claim",
+    ).start()
+
+
+# ── watch-and-learn: implicit language observation ───────────────────────────
+#
+# Speaking a language IS evidence of speaking it — but one message could be a
+# pasted quote or a one-off "gracias". So merely WRITING in a language earns a
+# low-surety claim that ramps toward certainty, instead of the all-or-nothing
+# model where only an explicit statement/accept ever reached the profile:
+# after a couple of turns in the language a per-language observed row is
+# created at the persist floor, every later batch of turns re-corroborates it
+# (upsert's +CORROBORATION_CONFIDENCE_BUMP walk), and once it would cross
+# _OBS_GRADUATE_CONFIDENCE it graduates onto the confirmed multilingual thread
+# and the observed row is retired. An explicit "let's talk German" at any
+# point short-circuits the ramp the same way (see _remember_language_claim).
+
+# Turns in a language within a session before the first low-surety write.
+_OBS_FIRST_WRITE_TURNS = 2
+# Additional turns between re-corroborations within the same session.
+_OBS_CORROBORATE_EVERY = 4
+# Observed-row confidence at (or beyond) which the language counts as proven.
+_OBS_GRADUATE_CONFIDENCE = 0.9
+
+
+def _observed_claims_enabled() -> bool:
+    import os
+
+    return os.environ.get("LANA_LANG_OBSERVED_CLAIMS", "on").strip().lower() not in (
+        "0",
+        "off",
+        "false",
+        "no",
+    )
+
+
+def _dismiss_observed_language_row(user_id: str, code: str) -> None:
+    """Retire the watch-and-learn row for a language (confirmed or superseded)."""
+    try:
+        from datetime import datetime, timezone
+
+        service_client().table("user_identity_claims").update(
+            {"dismissed_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("user_id", user_id).eq(
+            "concept", f"{_OBSERVED_CONCEPT_PREFIX}{code}"
+        ).is_("dismissed_at", "null").execute()
+    except Exception:  # noqa: BLE001
+        _LOG.exception("observed_language_dismiss_failed")
+
+
+def _record_language_observation(user_id: str, lang: str, source_quote: str | None) -> None:
+    """One corroboration step of the ramp described above. Best-effort."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    name = lang_display_name(code)
+    if not name or name.lower() == code:
+        return  # no display name — never persist "Speaks xx"
+    try:
+        from app.claims_persist import (
+            CORROBORATION_CONFIDENCE_BUMP,
+            MIN_CLAIM_CONFIDENCE,
+            upsert_claims,
+        )
+        from app.models import ExtractedClaim
+
+        observed_concept = f"{_OBSERVED_CONCEPT_PREFIX}{code}"
+        rows = (
+            service_client()
+            .table("user_identity_claims")
+            .select("concept, label, synonyms, details, confidence")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(40)
+            .execute()
+        ).data or []
+        observed_row: dict[str, Any] | None = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            concept = str(row.get("concept") or "").strip().lower()
+            label = str(row.get("label") or "").strip()
+            if concept == observed_concept:
+                observed_row = row
+                continue
+            if concept == _LANGUAGE_THREAD_CONCEPT or _LANGUAGE_THREAD_HINT_RE.search(
+                f"{concept.replace('_', ' ')} {label}"
+            ):
+                blob = " ".join(
+                    [
+                        label,
+                        " ".join(str(s) for s in (row.get("synonyms") or [])),
+                        " ".join(str(d) for d in (row.get("details") or [])),
+                    ]
+                )
+                if re.search(rf"\b{re.escape(name)}\b", blob, re.I):
+                    # Already proven on the confirmed thread — nothing to ramp;
+                    # self-heal a leftover observed row.
+                    _dismiss_observed_language_row(user_id, code)
+                    return
+        if observed_row is not None:
+            try:
+                old_conf = float(observed_row.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                old_conf = 0.0
+            if old_conf + CORROBORATION_CONFIDENCE_BUMP >= _OBS_GRADUATE_CONFIDENCE:
+                # Sure enough now — promote onto the confirmed thread and retire
+                # the watch-and-learn row (the promote also dismisses it).
+                _remember_language_claim(user_id, code, source_quote)
+                return
+        quote = (source_quote or "").strip()[:120] or f"Has been chatting with Lana in {name}"
+        claim = ExtractedClaim(
+            concept=observed_concept,
+            label=f"Speaks {name}",
+            # New row lands at the persist floor (low surety); an existing row
+            # takes upsert's corroboration bump instead (max(old, new) + bump).
+            confidence=MIN_CLAIM_CONFIDENCE,
+            synonyms=[name],
+            details=[],
+            source_quote=quote,
+            bucket="interest",
+        )
+        upsert_claims(user_id, [claim])
+    except Exception:  # noqa: BLE001 — observing is best-effort, never the turn's problem
+        _LOG.exception("language_observation_upsert_failed")
+
+
+def record_language_observation_async(
+    user_id: str, lang: str, source_quote: str | None = None
+) -> None:
+    """Fire-and-forget ``_record_language_observation`` — callers sit on the reply
+    path and the write embeds the claim (a model call)."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    threading.Thread(
+        target=_record_language_observation,
+        args=(user_id, code, source_quote),
+        daemon=True,
+        name="lang-observe",
     ).start()
 
 
@@ -389,6 +538,22 @@ def language_preference_post_turn(
             # No users row — the divergence nudge and preference persistence
             # below need one. Session mirroring already happened upstream.
             return reply
+
+        # Watch-and-learn: turns spoken in a non-English language accumulate as
+        # a low-surety identity claim that ramps with corroboration (see
+        # _record_language_observation). Counted per session; the write itself
+        # is async and self-skips languages already proven on the profile.
+        if observed != "en" and _observed_claims_enabled():
+            counts_raw = session_ctx.get("lang_obs_counts")
+            counts = dict(counts_raw) if isinstance(counts_raw, dict) else {}
+            seen = int(counts.get(observed) or 0) + 1
+            counts[observed] = seen
+            session_ctx["lang_obs_counts"] = counts
+            if seen == _OBS_FIRST_WRITE_TURNS or (
+                seen > _OBS_FIRST_WRITE_TURNS
+                and (seen - _OBS_FIRST_WRITE_TURNS) % _OBS_CORROBORATE_EVERY == 0
+            ):
+                record_language_observation_async(user_id, observed, user_message)
 
         # A language accepted while still a guest, carried across signup in the
         # same session: persist it onto the fresh account once, unless the user

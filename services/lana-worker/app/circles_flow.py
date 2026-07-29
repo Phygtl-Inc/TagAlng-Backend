@@ -688,15 +688,22 @@ def ground_and_confirm(
 
     # Fallback register (spec'd in docs/LANA_CIRCLES_BACKEND.md · grounding confirm):
     # warm close, no question, no promises — used when the bridge already fired.
+    # EVERY variant must SAY the community was saved (2026-07-28 product decision:
+    # a community is created only here, with its place, and never silently — the
+    # user is always told it's now on their profile).
+    saved_fact = (
+        f"{place_name} is now saved as one of their communities on their profile "
+        "— they're in it."
+    )
     offer: dict[str, Any] | None = None
     goal = (
-        "Confirm you've noted which place they meant — warm, one sentence, no "
-        "follow-up question. Do not promise introductions or anything else — "
-        "never 'on my radar' / 'noted in my system'; say it like 'Good to know "
-        "your spot' or 'I'll keep an ear out'."
+        "Tell them their community at this place is saved on their profile now — "
+        "warm, one sentence, no follow-up question. Do not promise introductions "
+        "or anything else — never 'on my radar' / 'noted in my system'; say it "
+        "like 'that's on your profile now' or 'I'll keep an ear out'."
     )
-    facts = [f"The place: {place_name}."]
-    fallback = f"Locked in — {place_name}. Good to know your spot."
+    facts = [f"The place: {place_name}.", saved_fact]
+    fallback = f"Done — {place_name} is saved to your communities now."
 
     if session_ctx is not None and not session_ctx.get("_grounding_offer_done"):
         others = _place_co_member_count(place_id, user_id)
@@ -709,18 +716,20 @@ def ground_and_confirm(
             }
             noun = "neighbor" if others == 1 else "neighbors"
             goal = (
-                "Confirm the place in one warm sentence, then offer ONE next step: "
-                "an introduction, grounded ONLY in the real count given. End on the "
+                "Tell them their community at this place is saved on their profile "
+                "now — one warm sentence — then offer ONE next step: an "
+                "introduction, grounded ONLY in the real count given. End on the "
                 "'want an intro?' question — the chip below is the tap. Never "
                 "promise anything beyond the offer, never 'on my radar'."
             )
             facts = [
                 f"The place: {place_name}.",
+                saved_fact,
                 f"{others} other {noun} confirmed the same spot as theirs.",
             ]
             fallback = (
-                f"Locked in — {place_name}. {others} of your {noun} call it their "
-                "spot too — want an intro?"
+                f"Done — {place_name} is saved to your communities now. {others} of "
+                f"your {noun} call it their spot too — want an intro?"
             )
         else:
             offer = {
@@ -731,21 +740,23 @@ def ground_and_confirm(
             }
             thing = f"a {topic} get-together" if topic else "a get-together"
             goal = (
-                "Confirm the place in one warm sentence, then offer ONE next step: "
-                "setting up a small get-together there they can share with their own "
-                "group. Nobody else is confirmed at this spot yet, so never claim or "
+                "Tell them their community at this place is saved on their profile "
+                "now — one warm sentence — then offer ONE next step: setting up a "
+                "small get-together there they can share with their own group. "
+                "Nobody else is confirmed at this spot yet, so never claim or "
                 "imply people are waiting — creating and inviting is how their area "
                 "comes alive. End on the offer question; the chip below is the tap. "
                 "Never 'on my radar'."
             )
             facts = [
                 f"The place: {place_name}.",
+                saved_fact,
                 "Nobody else has confirmed this spot yet.",
                 f"They could set up {thing} there and share it with their own people.",
             ]
             fallback = (
-                f"Locked in — {place_name}. Want to set up {thing} there you can "
-                "share with your group?"
+                f"Done — {place_name} is saved to your communities now. Want to set "
+                f"up {thing} there you can share with your group?"
             )
         session_ctx["_grounding_offer_done"] = True
 
@@ -939,15 +950,20 @@ def _member_count(place_id: str) -> int:
 
 
 def list_my_circles(user_id: str) -> list[dict[str, Any]]:
-    """The user's own circles for the profile surface (§G.1) — she always sees all
-    of hers; what OTHERS see is tier-gated elsewhere. member_count/active power the
-    '"active · 3 neighbors" / "just you so far"' status line."""
+    """The user's own communities for the profile surface (§G.1) — she always sees
+    all of hers; what OTHERS see is tier-gated elsewhere. member_count/active power
+    the '"active · 3 neighbors" / "just you so far"' status line.
+
+    Grounded rows ONLY: a community without a place does not exist (2026-07-28
+    product decision). Ungrounded rows are internal candidates — they surface
+    exclusively through Lana's "which spot is it?" ask, never as communities."""
     sb = service_client()
     res = (
         sb.table("circle_affiliations")
         .select("id, circle_type, circle_key, detail, status, place_ref, created_at")
         .eq("user_id", user_id)
         .is_("dismissed_at", "null")
+        .not_.is_("place_ref", "null")
         .order("created_at", desc=True)
         .limit(40)
         .execute()
@@ -995,12 +1011,18 @@ def add_circle(
     source: str = "profile_add",
     invited_by: str | None = None,
 ) -> dict[str, Any]:
-    """Profile 'Add' (§G.2) — same grounding semantics as chat; grounding optional.
-    Also the invite self-confirm write (source='invite_confirmed', §A.2)."""
+    """Profile 'Add' (§G.2). A community's place is MANDATORY (2026-07-28 product
+    decision): a profile add without a google_place_id is rejected — the created
+    row grounds and confirms in one step. The invite self-confirm write
+    (source='invite_confirmed', §A.2) is the one place-less entry left: it parks a
+    CANDIDATE, not a community — the joiner grounds her own place right after via
+    ground-options → ground, and until then the row is invisible everywhere."""
     if circle_type not in CIRCLE_TYPES:
         raise ValueError("invalid_circle_type")
     if source not in ("profile_add", "invite_confirmed"):
         raise ValueError("invalid_source")
+    if source == "profile_add" and not (google_place_id or "").strip():
+        raise ValueError("place_required")
     from app.circles_capture import _slugify
 
     key = _slugify(detail or "") or circle_type
