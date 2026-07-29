@@ -2717,12 +2717,36 @@ class TestCleanBlockLabel(unittest.TestCase):
 
         self.assertEqual(
             clean_block_label("Lake Nona — Block A (placeholder)"),
-            "Lake Nona — Block A",
+            "Lake Nona — Area A",
         )
-        self.assertEqual(clean_block_label("Block B (Placeholder)"), "Block B")
+        self.assertEqual(clean_block_label("Block B (Placeholder)"), "Area B")
         self.assertEqual(clean_block_label("Lake Nona"), "Lake Nona")
         self.assertIsNone(clean_block_label("(placeholder)"))
         self.assertIsNone(clean_block_label(None))
+
+    def test_banned_block_word_swapped(self) -> None:
+        # "Block" in a label trips the final-mile lingo guard, whose rewrite
+        # garbled the whole sentence ("your area A"). The label is swapped at the
+        # source instead.
+        from app.discovery_route import clean_block_label
+
+        self.assertEqual(clean_block_label("Lake Nona — Block A"), "Lake Nona — Area A")
+        self.assertEqual(clean_block_label("blocks 3-4"), "Area 3-4")
+
+    def test_ask_excerpt_cuts_at_word_boundary(self) -> None:
+        from app.discovery_route import _ask_excerpt
+
+        short = "Looking for toddler-friendly activities"
+        self.assertEqual(_ask_excerpt(short), short)
+        long = (
+            "Hello! I'm a nanny — the family I nanny for just moved to Lake Nona "
+            "and I'm looking for toddler-friendly activities for the little one I care for"
+        )
+        cut = _ask_excerpt(long)
+        self.assertLessEqual(len(cut), 121)
+        self.assertTrue(cut.endswith("…"))
+        # never ends mid-word: the char before the ellipsis closes a whole word
+        self.assertIn(cut[:-1].rsplit(" ", 1)[-1], long)
 
     def test_preview_message_never_shows_placeholder(self) -> None:
         msg = format_preview_message(
@@ -2731,7 +2755,7 @@ class TestCleanBlockLabel(unittest.TestCase):
             phone_verified=True,
         )
         self.assertNotIn("placeholder", msg.lower())
-        self.assertIn("Lake Nona — Block A", msg)
+        self.assertIn("Lake Nona — Area A", msg)
 
 
 if __name__ == "__main__":

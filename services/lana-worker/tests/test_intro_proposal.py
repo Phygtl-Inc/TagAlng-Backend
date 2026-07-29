@@ -65,6 +65,49 @@ class TestIntroProposalHelpers(unittest.TestCase):
         self.assertIn("morning runs", reason.lower())
         self.assertNotIn("two kids", reason.lower())
 
+    def test_build_match_reason_never_says_matched_you_with(self) -> None:
+        # Lingo rule 4 — persisted to intros.match_reason, which the reply guard
+        # never scans. The old fallback shipped "Lana matched you with Near you."
+        for peer in (
+            {"matching_peer_label": "Near you"},
+            {"matching_peer_label": ""},
+            {},
+        ):
+            for snippet in (None, "", "unrelated snippet the peer does not share"):
+                reason = build_match_reason(identity_snippet=snippet, peer=peer)
+                self.assertNotIn("matched you with", reason.lower(), reason)
+                self.assertTrue(reason.strip(), "reason must never be empty")
+
+    def test_build_match_reason_generic_label_not_echoed_as_trait(self) -> None:
+        # "Near you" names proximity, not a shared trait — "You both fit near you."
+        # is as garbled as the old string.
+        reason = build_match_reason(
+            identity_snippet="", peer={"matching_peer_label": "Near you"}
+        )
+        self.assertNotIn("near you.", reason.lower().replace("— ", ""))
+        self.assertIn("click", reason.lower())
+
+    def test_build_match_reason_scrubs_banned_claim_words(self) -> None:
+        # Labels echo the users' own claim words, which can carry the banned lexicon.
+        reason = build_match_reason(
+            identity_snippet="", peer={"matching_peer_label": "Mom of two"}
+        )
+        self.assertNotIn("mom", reason.lower())
+
+    def test_pick_peer_without_consent_or_name_returns_none(self) -> None:
+        # Regression: a bare "Dana" (answering a name ask, misclassified as
+        # propose_intro) auto-picked peers[0] and sent a real intro. With no
+        # pending offer, no index, no matching name, and no intro phrasing in the
+        # message, the picker must refuse so the caller clarifies.
+        peers = [
+            {"peer_user_id": "u1", "nickname": "Maria", "matching_peer_label": "Near you"},
+            {"peer_user_id": "u2", "nickname": "Sofia", "matching_peer_label": "Near you"},
+        ]
+        self.assertIsNone(pick_peer_for_intro(peers, msg="Dana"))
+        # Explicit consent still falls back to the top card.
+        self.assertIsNotNone(pick_peer_for_intro(peers, msg="yes"))
+        self.assertIsNotNone(pick_peer_for_intro(peers, msg="Can you introduce us?"))
+
     def test_requested_peer_name(self) -> None:
         self.assertEqual(requested_peer_name("introduce me to Kashaf"), "kashaf")
         self.assertIsNone(requested_peer_name("introduce me to neighbor 1"))

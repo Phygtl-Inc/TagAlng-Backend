@@ -1990,9 +1990,9 @@ def save_pending_signal_ask(
                 "you need their 5-digit ZIP before you can post it for neighbors. "
                 "Welcome them back, remind them of the ask, and ask for the ZIP."
             ),
-            facts=[f"Their pending ask: {detail[:120]}"],
+            facts=[f"Their pending ask: {_ask_excerpt(detail)}"],
             fallback=(
-                f"Welcome back! I still have your ask — {detail[:120]}. "
+                f"Welcome back! I still have your ask — {_ask_excerpt(detail)}. "
                 "What ZIP are you in so I can post it for neighbors nearby?"
             ),
         )
@@ -2015,9 +2015,9 @@ def save_pending_signal_ask(
             "for neighbors nearby. Welcome them back, confirm exactly what was "
             "posted, and promise to ping them the moment a neighbor responds."
         ),
-        facts=[f"The ask you just posted: {detail[:120]}"],
+        facts=[f"The ask you just posted: {_ask_excerpt(detail)}"],
         fallback=(
-            f"Welcome back! ✅ I've posted your ask for neighbors nearby — {detail[:120]} — "
+            f"Welcome back! ✅ I've posted your ask for neighbors nearby — {_ask_excerpt(detail)} — "
             "and I'll ping you the moment a neighbor responds."
         ),
     )
@@ -4914,15 +4914,30 @@ def fetch_preview_events_on_block(
         return []
 
 
+def _ask_excerpt(detail: str, limit: int = 120) -> str:
+    """Echo of a saved ask, cut at a word boundary with an ellipsis. The hard
+    ``[:120]`` slice ended confirmations mid-word ("…toddler-friendly activities
+    for'") — and the composer quotes the excerpt verbatim, so it must read whole."""
+    s = " ".join(str(detail or "").split())
+    if len(s) <= limit:
+        return s
+    cut = s[:limit].rsplit(" ", 1)[0].rstrip(",;:—–-")
+    return f"{cut}…"
+
+
 _PLACEHOLDER_LABEL_RE = re.compile(r"\s*\(placeholder\)", re.IGNORECASE)
+_BLOCK_WORD_LABEL_RE = re.compile(r"\bblocks?\b", re.IGNORECASE)
 
 
 def clean_block_label(label: str | None) -> str | None:
     """The phase1 seed blocks shipped with '(placeholder)' in display_name and that
     leaked verbatim into replies ("near Lake Nona — Block A (placeholder)"). The
-    data is renamed by migration 20260912120000; this keeps any stale row or
-    stashed session label from ever reaching copy."""
-    s = _PLACEHOLDER_LABEL_RE.sub("", str(label or "")).strip().strip("—–-").strip()
+    data is renamed by migrations 20260912/20260915; this keeps any stale row or
+    stashed session label from ever reaching copy. "Block" is also swapped here:
+    it's lingo-banned, and a label carrying it trips the final-mile guard whose
+    rewrite garbles the whole sentence."""
+    s = _PLACEHOLDER_LABEL_RE.sub("", str(label or ""))
+    s = _BLOCK_WORD_LABEL_RE.sub("Area", s).strip().strip("—–-").strip()
     return s or None
 
 
@@ -5967,10 +5982,10 @@ def handle_discovery_turn(
                             "the verification, confirm exactly what was posted, and "
                             "promise to ping them when a neighbor responds."
                         ),
-                        facts=[f"The ask you just posted: {p_detail[:120]}"],
+                        facts=[f"The ask you just posted: {_ask_excerpt(p_detail)}"],
                         fallback=(
                             "✅ You're verified! I've posted your ask for neighbors nearby — "
-                            f"{p_detail[:120]} — and I'll ping you the moment a neighbor responds."
+                            f"{_ask_excerpt(p_detail)} — and I'll ping you the moment a neighbor responds."
                         ),
                     )
                     ctx = _routing_ctx(
@@ -5993,13 +6008,16 @@ def handle_discovery_turn(
                         goal=(
                             "The user just verified their email; you still need their "
                             "5-digit ZIP before their saved ask can be posted for "
-                            "neighbors nearby. Celebrate briefly and ask for the ZIP."
+                            "neighbors nearby. Celebrate briefly and ask for the ZIP. "
+                            "If their message this turn is something else (their first "
+                            "name, a question), acknowledge it first — never repeat a "
+                            "previous ask verbatim."
                         ),
+                        user_message=msg,
                         fallback=(
                             "You're verified! What ZIP are you in? Once I know your area "
                             "I'll post your ask to neighbors nearby."
                         ),
-                        cache=True,
                     ),
                     ctx,
                     _discovery_routing_stub(PHASE_NEED_ZIP, "signal_pending_need_zip"),

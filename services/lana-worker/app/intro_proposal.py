@@ -50,27 +50,57 @@ def accepts_intro_offer(msg: str) -> bool:
     return text in _AFFIRMATIVE
 
 
+# matching_peer_label fallbacks that name proximity, not a shared trait — building
+# "You both fit Near you." (or the old "Lana matched you with Near you.") from these
+# produced garbled copy. Treat them as no-label.
+_GENERIC_PEER_LABELS = frozenset(
+    {"near you", "nearby", "close by", "neighbor", "a neighbor", "a neighbor near you"}
+)
+
+
+def _trait_label(peer: dict[str, Any]) -> str | None:
+    label = str(peer.get("matching_peer_label") or "").strip()
+    if not label or label.lower().strip(" .!") in _GENERIC_PEER_LABELS:
+        return None
+    return label
+
+
 def build_match_reason(
     *,
     identity_snippet: str | None,
     peer: dict[str, Any],
 ) -> str:
-    label = str(peer.get("matching_peer_label") or "a neighbor near you").strip()
+    # Lingo rule 4: a person is never "a match" and Lana never "matched you with"
+    # someone — say an intro / someone to meet. Persisted to intros.match_reason,
+    # which the reply-path guard never scans, so this must be clean at the source.
+    label = _trait_label(peer)
     snippet = str(identity_snippet or "").strip()
     # The fallback snippet can be several messages joined with "; " — only echo the
     # first clause so the reason stays a clean sentence, not a merged dump.
     first_clause = snippet.split(";")[0].strip()
     if snippet and not peer_matches_identity_snippet(peer, snippet):
-        return f"Lana matched you with {label}."
-    if first_clause and label:
+        if label:
+            reason = f"You both fit {label.lower()}."
+        else:
+            reason = "A neighbor close by — Lana thinks you two would click."
+    elif first_clause and label:
         # Skip the "you mentioned …" tail when it just restates the label.
         low_clause, low_label = first_clause.lower(), label.lower()
         if low_clause in low_label or low_label in low_clause:
-            return f"You both fit {low_label}."
-        return f"You both fit {low_label} — you mentioned {first_clause[:120]}."
-    if first_clause:
-        return f"You mentioned {first_clause[:160]} — strong overlap nearby."
-    return f"Lana matched you with {label}."
+            reason = f"You both fit {low_label}."
+        else:
+            reason = f"You both fit {low_label} — you mentioned {first_clause[:120]}."
+    elif first_clause:
+        reason = f"You mentioned {first_clause[:160]} — strong overlap nearby."
+    elif label:
+        reason = f"You both fit {label.lower()}."
+    else:
+        reason = "A neighbor close by — Lana thinks you two would click."
+    # The label/snippet echo the users' own claim words, which can carry the banned
+    # lexicon ("Mom of two", "on my block"). This string is persisted, so scrub here.
+    from app.lingo_guard import find_violations, naive_clean
+
+    return naive_clean(reason) if find_violations(reason) else reason
 
 
 _INTRO_NAME_RE = re.compile(
@@ -206,9 +236,15 @@ def pick_peer_for_intro(
         label = str(p.get("matching_peer_label") or "").lower()
         if label and len(label) > 3 and label in lower:
             return p
-    if idx is not None and identified:
+    # Nothing above says WHO — the message named no shown peer, no pending offer,
+    # no list index. Auto-picking the first card here sent a real intro on a
+    # misclassified turn (a bare "Dana" answering the name ask introduced
+    # peers[0]). An intro is outward-facing: only fall back to the top card when
+    # the message itself asks for one; otherwise return None so the caller
+    # clarifies instead of guessing.
+    if wants_neighbor_intro(msg) or accepts_intro_offer(msg):
         return identified[0]
-    return identified[0]
+    return None
 
 
 def propose_neighbor_intro(

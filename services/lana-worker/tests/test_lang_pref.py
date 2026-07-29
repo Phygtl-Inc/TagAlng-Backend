@@ -7,7 +7,7 @@ t() strings deterministically — the logic under test is the state machine.
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.i18n import apply_ai_lang, localize_text, normalize_lang_code, t
 from app.lang_pref import language_preference_post_turn, seed_session_language
@@ -255,6 +255,152 @@ class TestPostTurnNudge(unittest.TestCase):
         out = self._turn(ctx, msg="what's on my block?")
         save.assert_not_called()
         self.assertEqual(out, "Hi!")
+
+
+class TestLanguageClaim(unittest.TestCase):
+    """Accepting a language as default is a statement the user SPEAKS it — the hook
+    must remember it as an identity claim, not just flip the locale."""
+
+    def _turn(self, ctx: dict, *, msg: str = "hello there", reply: str = "Hi!") -> str:
+        return language_preference_post_turn(
+            user_id="u1",
+            user_message=msg,
+            session_ctx=ctx,
+            reply=reply,
+            is_anonymous=False,
+        )
+
+    @patch("app.lang_pref.remember_language_claim_async")
+    @patch("app.lang_pref.set_user_preferred_language", return_value=True)
+    def test_accept_kicks_language_claim(self, _save, remember) -> None:
+        msg = "talk to me in german from now on"
+        ctx: dict = {
+            "lang": "de",
+            "_discovery_slots": {"set_preferred_lang": "de"},
+            "_discovery_slots_for": msg,
+        }
+        self._turn(ctx, msg=msg)
+        remember.assert_called_once_with("u1", "de", msg)
+
+    @patch("app.lang_pref.remember_language_claim_async")
+    @patch("app.lang_pref.set_user_preferred_language", return_value=False)
+    def test_failed_locale_save_kicks_no_claim(self, _save, remember) -> None:
+        msg = "talk to me in german from now on"
+        ctx: dict = {
+            "lang": "de",
+            "_discovery_slots": {"set_preferred_lang": "de"},
+            "_discovery_slots_for": msg,
+        }
+        self._turn(ctx, msg=msg)
+        remember.assert_not_called()
+
+    @patch("app.lang_pref.remember_language_claim_async")
+    @patch("app.lang_pref.set_user_preferred_language", return_value=True)
+    @patch("app.lang_pref.get_user_preferred_language", return_value=None)
+    def test_guest_carryover_kicks_language_claim(self, _get, _save, remember) -> None:
+        ctx: dict = {"guest_locale": "es", "lang": "es"}
+        self._turn(ctx)
+        remember.assert_called_once_with("u1", "es")
+
+    @patch("app.lang_pref.remember_language_claim_async")
+    @patch("app.lang_pref.get_user_preferred_language", return_value="ur")
+    def test_guest_carryover_claim_even_when_locale_kept(self, _get, remember) -> None:
+        # A self-chosen pref blocks the locale overwrite, but "I speak Spanish"
+        # is still true — the claim lands regardless.
+        ctx: dict = {"guest_locale": "es", "lang": "es"}
+        self._turn(ctx)
+        remember.assert_called_once_with("u1", "es")
+
+    @patch("app.lang_pref.remember_language_claim_async")
+    def test_anonymous_accept_kicks_no_claim(self, remember) -> None:
+        # Guests have no users row — the claim waits for the post-signup carry-over.
+        msg = "Sí, hablemos en español"
+        ctx: dict = {
+            "lang": "es",
+            "_discovery_slots": {"set_preferred_lang": "es"},
+            "_discovery_slots_for": msg,
+        }
+        language_preference_post_turn(
+            user_id="anon-1", user_message=msg, session_ctx=ctx,
+            reply="Hi!", is_anonymous=True,
+        )
+        remember.assert_not_called()
+
+    def test_async_wrapper_skips_english_and_missing_user(self) -> None:
+        with patch("app.lang_pref.threading.Thread") as thread:
+            from app.lang_pref import remember_language_claim_async
+
+            remember_language_claim_async("u1", "en", "english is fine")
+            remember_language_claim_async("", "de", None)
+            thread.assert_not_called()
+
+
+class TestRememberLanguageClaimWrite(unittest.TestCase):
+    """The deterministic claim write: enrich the extractor's languages thread, never
+    clobber its label, no-op on a language already recorded."""
+
+    def _rows(self, rows: list[dict]) -> object:
+        sb = MagicMock()
+        result = MagicMock()
+        result.data = rows
+        (
+            sb.table.return_value.select.return_value.eq.return_value
+            .is_.return_value.limit.return_value.execute.return_value
+        ) = result
+        return sb
+
+    def test_enriches_existing_thread_keeping_label(self) -> None:
+        from app.lang_pref import _remember_language_claim
+
+        existing = {
+            "concept": "multilingual",
+            "label": "Speaks Urdu and English",
+            "synonyms": ["urdu", "english"],
+            "details": [],
+        }
+        with patch("app.lang_pref.service_client", return_value=self._rows([existing])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _remember_language_claim("u1", "de", "talk to me in german from now on")
+        upsert.assert_called_once()
+        claim = upsert.call_args[0][1][0]
+        self.assertEqual(claim.concept, "multilingual")
+        self.assertEqual(claim.label, "Speaks Urdu and English")  # never clobbered
+        self.assertEqual(claim.synonyms, ["German"])
+        self.assertEqual(claim.details, ["Speaks German"])
+
+    def test_noop_when_language_already_on_thread(self) -> None:
+        from app.lang_pref import _remember_language_claim
+
+        existing = {
+            "concept": "multilingual",
+            "label": "Speaks Urdu, English, and German",
+            "synonyms": [],
+            "details": [],
+        }
+        with patch("app.lang_pref.service_client", return_value=self._rows([existing])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _remember_language_claim("u1", "de", None)
+        upsert.assert_not_called()
+
+    def test_creates_thread_when_none_exists(self) -> None:
+        from app.lang_pref import _remember_language_claim
+
+        unrelated = {"concept": "badminton", "label": "Badminton player",
+                     "synonyms": [], "details": []}
+        with patch("app.lang_pref.service_client", return_value=self._rows([unrelated])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _remember_language_claim("u1", "de", None)
+        claim = upsert.call_args[0][1][0]
+        self.assertEqual(claim.concept, "multilingual")
+        self.assertEqual(claim.label, "Speaks German")
+        self.assertEqual(claim.details, [])
+
+    def test_skips_english(self) -> None:
+        from app.lang_pref import _remember_language_claim
+
+        with patch("app.lang_pref.service_client") as sb:
+            _remember_language_claim("u1", "en", None)
+        sb.assert_not_called()
 
 
 if __name__ == "__main__":

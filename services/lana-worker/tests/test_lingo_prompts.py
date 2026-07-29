@@ -61,5 +61,48 @@ class TestPromptLexicon(unittest.TestCase):
         self.assertEqual(violations, [], "\n".join(violations))
 
 
+class TestAddressGuidance(unittest.TestCase):
+    """§3.3/§4: role/gender stamped per turn reach every constitution-bearing prompt."""
+
+    def tearDown(self) -> None:
+        from app.context import set_address_context
+
+        set_address_context(None, None)
+
+    def test_neutral_by_default(self) -> None:
+        from app.context import address_guidance, set_address_context
+
+        set_address_context(None, None)
+        self.assertEqual(address_guidance(), "")
+        # The constitution md mentions "USER CONTEXT" in its rules; the appended
+        # per-user guidance lines must be absent when nothing is known.
+        self.assertNotIn("USER CONTEXT — household role", lingo_constitution())
+        self.assertNotIn("USER CONTEXT — grammatical gender", lingo_constitution())
+
+    def test_role_and_gender_reach_the_constitution(self) -> None:
+        from app.context import address_guidance, set_address_context
+
+        set_address_context("grandparent", "masculine")
+        guidance = address_guidance()
+        self.assertIn("your grandkids", guidance)
+        self.assertIn("masculine", guidance)
+        self.assertIn(guidance, lingo_constitution())
+        self.assertIn(guidance, build_system_prompt())
+
+    def test_unknown_role_stays_neutral(self) -> None:
+        from app.context import address_guidance, set_address_context
+
+        set_address_context("astronaut", None)
+        self.assertEqual(address_guidance(), "")
+
+    def test_caregiver_framing_never_parent_label(self) -> None:
+        from app.context import address_guidance, set_address_context
+
+        set_address_context("caregiver", None)
+        guidance = address_guidance()
+        self.assertIn("the family you care for", guidance)
+        self.assertIn("never a parent label", guidance)
+
+
 if __name__ == "__main__":
     unittest.main()

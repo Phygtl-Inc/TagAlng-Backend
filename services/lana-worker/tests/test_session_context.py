@@ -81,6 +81,47 @@ class TestMergeSessionContext(unittest.TestCase):
         self.assertIn("recent_intro_duplicate", merged)
 
 
+class TestRapportCloseClearsAcrossMerge(unittest.TestCase):
+    """A concierge warm close must clear the capture ACROSS the session merge —
+    popped keys resurrect from the stored ctx ({**old, **new}), which kept the
+    previous turn's chips (e.g. a language offer's accept/keep pair) rendering
+    under the close and the capture armed forever."""
+
+    _STORED = {
+        "rapport_active": True,
+        "rapport_followup_question": "Want me to switch to Urdu?",
+        "rapport_followup_count": 1,
+        "rapport_reply": {
+            "options": [
+                {"label": "ہاں، اردو میں بات کریں", "send": "Talk to me in Urdu from now on"},
+                {"label": "English is fine", "send": "English is fine"},
+            ],
+            "action": None,
+        },
+        "rapport_offer_pending": False,
+    }
+
+    def test_reset_state_survives_merge(self) -> None:
+        from app.lana_unified_pipeline import _reset_rapport_state
+        from app.ui_actions import derive_ui_actions
+
+        turn_ctx = dict(self._STORED)
+        _reset_rapport_state(turn_ctx)
+        merged = merge_session_context(self._STORED, turn_ctx)
+        self.assertFalse(merged.get("rapport_active"))
+        self.assertFalse(merged.get("rapport_reply"))
+        self.assertEqual(derive_ui_actions(merged, "chat"), [])
+
+    def test_popped_keys_would_resurrect(self) -> None:
+        # Documents WHY the reset sets None instead of popping: absent keys keep
+        # their stored value through the merge.
+        turn_ctx = dict(self._STORED)
+        for k in list(turn_ctx):
+            turn_ctx.pop(k)
+        merged = merge_session_context(self._STORED, turn_ctx)
+        self.assertTrue(merged.get("rapport_active"))
+
+
 class TestSignalDraftAbandon(unittest.TestCase):
     def test_abandon_on_bicycle_typo_while_confirming_size(self) -> None:
         draft = {

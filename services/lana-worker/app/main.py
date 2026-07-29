@@ -23,6 +23,7 @@ from app.context import (
     format_user_context,
     load_event_draft_context,
     load_user_context,
+    set_address_context,
 )
 from app.event_context import host_display_name
 from app.db import (
@@ -1360,6 +1361,15 @@ def _run_lana_message(
         history = list_messages(session_id)
 
     session_ctx_in = dict(session.get("context") or {})
+    # Lingo §3.3/§4: the inferred household role + grammatical gender ride along on
+    # every turn so composers can address the user correctly ("your grandkids",
+    # bienvenido/bienvenida). Free — verify_auth already loaded the users row.
+    # Re-stamped (None clears) each turn so a role extracted mid-conversation
+    # reaches copy from the very next turn. set_address_context feeds every prompt
+    # built through lingo_constitution() for the rest of this request.
+    session_ctx_in["user_role"] = auth.role
+    session_ctx_in["user_grammatical_gender"] = auth.grammatical_gender
+    set_address_context(auth.role, auth.grammatical_gender)
     if purpose in ("lana", "profile_intake"):
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True

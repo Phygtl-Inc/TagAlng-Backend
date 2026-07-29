@@ -16,6 +16,8 @@ The model (product decision, 2026-07-11):
 from __future__ import annotations
 
 import logging
+import re
+import threading
 from typing import Any
 
 from app.auth import service_client
@@ -198,6 +200,98 @@ def _compose_guest_confirm(new_pref: str) -> str:
     )
 
 
+# ── identity claim from an accepted language ─────────────────────────────────
+
+# The extractor stores languages spoken as ONE thread under this slug
+# (vertex prompt: 'speak 7 languages' → concept "multilingual").
+_LANGUAGE_THREAD_CONCEPT = "multilingual"
+# Older/free-form language threads the extractor may have slugged differently.
+_LANGUAGE_THREAD_HINT_RE = re.compile(r"\b(?:speak\w*|language\w*|lingual|polyglot)\b", re.I)
+
+
+def _remember_language_claim(user_id: str, lang: str, source_quote: str | None) -> None:
+    """Persist "speaks <language>" as an identity claim when the user ASKS for that
+    language as their default — the same statement we already trust enough to flip
+    their whole app language. Without this the fact never reached the profile: Lana
+    would happily chat in German yet the user could never match on it unless they
+    separately said "I speak German". Deterministic enrich, never clobber: an
+    existing languages thread keeps its extractor-authored label and gains the new
+    language in synonyms + details; a missing thread is created under the
+    extractor's own slug so a later tile answer merges into it. English is skipped
+    (the default — no matching signal), as is a language already on the thread."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    name = lang_display_name(code)
+    if not name or name.lower() == code:
+        return  # no display name for this code — never persist "Speaks xx"
+    try:
+        from app.claims_persist import upsert_claims
+        from app.models import ExtractedClaim
+
+        rows = (
+            service_client()
+            .table("user_identity_claims")
+            .select("concept, label, synonyms, details")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(40)
+            .execute()
+        ).data or []
+        thread: dict[str, Any] | None = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            concept = str(row.get("concept") or "").strip()
+            label = str(row.get("label") or "").strip()
+            if concept.lower() == _LANGUAGE_THREAD_CONCEPT or _LANGUAGE_THREAD_HINT_RE.search(
+                f"{concept.replace('_', ' ')} {label}"
+            ):
+                thread = row
+                break
+        if thread is not None:
+            blob = " ".join(
+                [
+                    str(thread.get("label") or ""),
+                    " ".join(str(s) for s in (thread.get("synonyms") or [])),
+                    " ".join(str(d) for d in (thread.get("details") or [])),
+                ]
+            )
+            if re.search(rf"\b{re.escape(name)}\b", blob, re.I):
+                return  # already on the thread — nothing new to remember
+        claim = ExtractedClaim(
+            concept=str(thread.get("concept")) if thread else _LANGUAGE_THREAD_CONCEPT,
+            # The upsert merge keeps the INCOMING label — hand back the stored one
+            # so this deterministic write never clobbers the extractor's phrasing
+            # ("Speaks Urdu and English" must not collapse to "Speaks German").
+            label=str(thread.get("label")) if thread else f"Speaks {name}",
+            confidence=1.0,
+            synonyms=[name],
+            details=[f"Speaks {name}"] if thread else [],
+            source_quote=(source_quote or "").strip()[:120] or f"Asked Lana to chat in {name}",
+            bucket="interest",
+        )
+        upsert_claims(user_id, [claim])
+    except Exception:  # noqa: BLE001 — remembering is best-effort, never the turn's problem
+        _LOG.exception("language_claim_upsert_failed")
+
+
+def remember_language_claim_async(
+    user_id: str, lang: str, source_quote: str | None = None
+) -> None:
+    """Fire-and-forget ``_remember_language_claim`` — callers sit on the reply path
+    and the write embeds the claim (a model call)."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    threading.Thread(
+        target=_remember_language_claim,
+        args=(user_id, code, source_quote),
+        daemon=True,
+        name="lang-claim",
+    ).start()
+
+
 # ── post-turn hook ───────────────────────────────────────────────────────────
 
 def language_preference_post_turn(
@@ -270,6 +364,9 @@ def language_preference_post_turn(
                 # typed in the OLD language ("lets talk in urdu" is English), so the
                 # session flips to the new preference rather than mirroring the accept.
                 session_ctx["lang"] = new_pref
+                # Asking for a language IS stating you speak it — remember it as an
+                # identity claim so it becomes matchable, not just a locale.
+                remember_language_claim_async(user_id, new_pref, user_message)
                 confirm = _compose_pref_saved(new_pref, new_pref)
                 # The synthesizer already answered the turn conversationally;
                 # the deterministic confirm states the SAVE actually happened.
@@ -299,6 +396,10 @@ def language_preference_post_turn(
         guest_locale = normalize_lang_code(session_ctx.get("guest_locale"))
         if guest_locale:
             session_ctx["guest_locale"] = None
+            # The guest accepted this language pre-signup — now that a users row
+            # exists, remember the claim regardless of whether the locale write
+            # below is skipped (a self-chosen pref doesn't unsay "I speak X").
+            remember_language_claim_async(user_id, guest_locale)
             saved = get_user_preferred_language(user_id)
             if guest_locale != saved and saved in (None, "en"):
                 set_user_preferred_language(user_id, guest_locale)

@@ -830,7 +830,15 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "a tip_seek PIVOT (a place is not an event) — classify it fresh, do not keep it in browse"
         )
     if session_ctx.get("event_host_active"):
-        return "event_host — helping the user CREATE/host an event of their own"
+        return (
+            "event_host — helping the user CREATE/host an event of their own. The host card's "
+            "buttons arrive as plain chat text: 'Looks good' (approve), 'Let me tweak' (edit), "
+            "and 'Drop the meet up' / 'drop it' — which in this product means PUBLISH the event "
+            "on the block, NEVER cancel. A drop/publish turn is goal=continue with abandon "
+            "omitted, and its progress line must describe POSTING the event ('Posting your meet "
+            "up'), never cancelling it. Only an explicit back-out ('cancel', 'forget it', "
+            "'don't post it') is an abandon"
+        )
     return "none"
 
 

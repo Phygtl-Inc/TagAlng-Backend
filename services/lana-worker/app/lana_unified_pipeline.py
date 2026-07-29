@@ -1182,12 +1182,7 @@ def run_lana_unified_pipeline(
             )
             rapport_handoff_send = action_send
             user_message = action_send
-            for _k in (
-                "rapport_active", "rapport_answer", "rapport_followup_question",
-                "rapport_followup_count", "rapport_reply", "rapport_offer_pending",
-                "rapport_pending_action",
-            ):
-                session_ctx.pop(_k, None)
+            _reset_rapport_state(session_ctx)
             # Route by the concierge's SEMANTIC decision (kind), not by re-classifying the noun:
             # force the intent to match the chosen kind and prime the slot cache the discovery
             # gates below reuse. This is what keeps "find me a playground" in the places lane
@@ -1218,10 +1213,11 @@ def run_lana_unified_pipeline(
             # request still releases via _rapport_should_release above; tapping an offer chip posts a
             # topic-named request that routes for real. The count backstops runaway qualifying.
             ctx = dict(session_ctx)
-            ctx.pop("rapport_answer", None)
-            # A concierge turn supersedes any pending grounding chips (e.g. she left them
-            # hanging and answered a NEW tile question) — cleared with None, never popped,
-            # or the session merge would resurrect it and hijack the next reply.
+            # A concierge turn supersedes the seed answer and any pending grounding chips
+            # (e.g. she left them hanging and answered a NEW tile question) — cleared with
+            # None, never popped, or the session merge would resurrect them and hijack the
+            # next reply.
+            ctx["rapport_answer"] = None
             ctx["rapport_grounding"] = None
             reply = sanitize_assistant_message(str(concierge.get("reply") or ""))
             options = concierge.get("options")
@@ -1252,12 +1248,11 @@ def run_lana_unified_pipeline(
                 ctx["rapport_followup_count"] = prior_followups + 1
                 ctx["rapport_offer_pending"] = False
             else:
-                ctx.pop("rapport_reply", None)
-                ctx.pop("rapport_active", None)
-                ctx.pop("rapport_followup_question", None)
-                ctx.pop("rapport_followup_count", None)
-                ctx.pop("rapport_offer_pending", None)
-                ctx.pop("rapport_pending_action", None)
+                # A warm close ends the capture — cleared with None via the shared reset,
+                # never popped: a popped key resurrects from the stored ctx on merge, which
+                # kept the previous turn's chips (e.g. a language offer's accept/keep pair)
+                # rendering under the close AND the capture armed forever.
+                _reset_rapport_state(ctx)
             ctx["_orchestrator_turn"] = False
             ctx["timing_ms"] = timer.to_dict()
             ctx["last_routing"] = {

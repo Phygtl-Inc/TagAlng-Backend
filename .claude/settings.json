@@ -10,7 +10,21 @@
       "Bash(.venv/bin/python -c ' *)",
       "Bash(sed -n '1,30p' tests/test_layer1_intents.py)",
       "Bash(sed -n '1,25p' tests/test_claims_persist.py)",
-      "Bash(.venv/bin/python -m pytest tests/test_layer1_intents.py tests/test_claims_persist.py tests/test_tip_surface.py tests/test_ui_intent.py tests/test_hosting_surface.py -q)"
+      "Bash(.venv/bin/python -m pytest tests/test_layer1_intents.py tests/test_claims_persist.py tests/test_tip_surface.py tests/test_ui_intent.py tests/test_hosting_surface.py -q)",
+      "Bash(grep -rn \"placeholder\\\\|_PLACEHOLDER_LABEL_RE\" /Users/dev/Downloads/TagAlng-backend/services/lana-worker/app/discovery_route.py | head -5; grep -rn \"sent your intro\\\\|posted your ask\" /Users/dev/Downloads/TagAlng-backend/services/lana-worker/app/i18n.py /Users/dev/Downloads/TagAlng-backend/services/lana-worker/app/*.py 2>/dev/null | grep -v __pycache__ | head; echo ....; sed -n '1,30p' /Users/dev/Downloads/TagAlng-backend/supabase/migrations/20260912120000*.sql 2>/dev/null | head -40; ls /Users/dev/Downloads/TagAlng-backend/supabase/migrations/ | grep 20260912)",
+      "Bash(python3 -m pytest tests/test_intro_proposal.py tests/test_lingo_prompts.py tests/test_discovery_route.py -x -q)",
+      "Bash(/Users/dev/Downloads/TagAlng-backend/.venv_lana_worker/bin/python -m pytest tests/test_intro_proposal.py tests/test_lingo_prompts.py -q)",
+      "Bash(/Users/dev/Downloads/TagAlng-backend/.venv_lana_worker/bin/python -m pytest tests/test_discovery_route.py -q)",
+      "Bash(/Users/dev/Downloads/TagAlng-backend/.venv_lana_worker/bin/python -m pytest \"tests/test_discovery_route.py::TestCleanBlockLabel::test_preview_message_never_shows_placeholder\" -q)",
+      "Bash(/Users/dev/Downloads/TagAlng-backend/.venv_lana_worker/bin/python -m pytest tests -q)",
+      "Bash(git -C /Users/dev/Downloads/TagAlng-backend stash -q)",
+      "Bash(git -C /Users/dev/Downloads/TagAlng-backend stash pop -q)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(./scripts/db-push.sh dev *)",
+      "Bash(./scripts/deploy-lana-worker-prod.sh)"
+    ],
+    "additionalDirectories": [
+      "/Users/dev/Downloads/TagAlng-backend/supabase/migrations"
     ]
   }
 }

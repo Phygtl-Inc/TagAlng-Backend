@@ -20,6 +20,11 @@ class AuthSession:
     # as the generic "is this a permanent, verified account?" signal.
     phone_verified: bool
     home_block_id: str | None
+    # Lingo §3.3/§4 (migration 20260909): inferred household role + grammatical
+    # gender, read from the same users row this loader already fetches. None means
+    # unspecified/unknown — composers stay neutral.
+    role: str | None = None
+    grammatical_gender: str | None = None
 
 
 def verify_auth(authorization: str | None) -> AuthSession:
@@ -47,6 +52,8 @@ def verify_auth(authorization: str | None) -> AuthSession:
         is_anonymous=bool(user.get("is_anonymous")),
         phone_verified=_resolve_verified(str(user_id), user, profile),
         home_block_id=profile.get("home_block_id"),
+        role=profile.get("role") or None,
+        grammatical_gender=profile.get("grammatical_gender") or None,
     )
 
 
@@ -194,11 +201,22 @@ def _load_user_profile(user_id: str) -> dict:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
     sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    profile = (
-        sb.table("users")
-        .select("home_block_id, phone_verified_at, email_verified_at")
-        .eq("id", user_id)
-        .execute()
-    )
+    try:
+        profile = (
+            sb.table("users")
+            .select(
+                "home_block_id, phone_verified_at, email_verified_at, "
+                "role, grammatical_gender"
+            )
+            .eq("id", user_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — pre-20260909 environments miss role/gender
+        profile = (
+            sb.table("users")
+            .select("home_block_id, phone_verified_at, email_verified_at")
+            .eq("id", user_id)
+            .execute()
+        )
     row = profile.data[0] if profile.data else {}
     return row if isinstance(row, dict) else {}
