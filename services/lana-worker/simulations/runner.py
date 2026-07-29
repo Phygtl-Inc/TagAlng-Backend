@@ -21,7 +21,9 @@ Dry run (load and validate data, print the matrix, don't call any API):
 import argparse
 import json
 import sys
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,6 +49,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--bucket", help="Bucket name to run (e.g. in_scope_success). Default: all.")
     parser.add_argument("--seed", help="Seed label to run (e.g. 'create meet happy path'). Default: all.")
     parser.add_argument("--dry-run", action="store_true", help="Print the run matrix without calling any API.")
+    parser.add_argument(
+        "--pr", action="store_true",
+        help="PR-gate mode: run ONLY the must-have buckets (pr_gate=true in scenarios.json — "
+             "refusals/safety, PII/privacy, core function, routing). The rest run in the nightly. "
+             "sim-gate.yml uses this; sim-nightly.yml runs the full matrix.",
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=None,
+        help="Parallel persona workers. Default: one per distinct persona in the matrix (≤6). "
+             "Use 1 to force the old fully-sequential behavior. Parallelism is ACROSS personas "
+             "only — a persona's own seeds always run sequentially (claims-seeding is per-user "
+             "and would race otherwise).",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +105,12 @@ def main() -> None:
         args.persona, args.bucket, args.seed,
     )
 
+    if args.pr:
+        pr_buckets = sorted({b.bucket for b in buckets if b.pr_gate})
+        matrix = [(p, b, s) for (p, b, s) in matrix if b.pr_gate]
+        print(f"[runner] --pr: must-have buckets only → {pr_buckets} "
+              f"({len(matrix)} cases; the rest run in the nightly)")
+
     if not matrix:
         print("No runs matched the filters. Check --persona / --bucket / --seed values.")
         print(f"  Valid persona IDs: {[p.id for p in personas]}")
@@ -101,38 +122,67 @@ def main() -> None:
     for p, b, s in matrix:
         print(f"  {p.id} × {b.bucket}/{s.label}")
 
+    # Group the matrix by persona. Parallelism is ACROSS personas only: a persona's own seeds
+    # run sequentially in one worker, because _seed_claims() does a DELETE+reseed on that
+    # persona's user_identity_claims at the start of every run — two concurrent same-persona runs
+    # would corrupt each other's context. Different personas are different accounts/rows, so they
+    # never collide.
+    groups: dict[str, list[tuple]] = {}
+    for persona, bucket, seed in matrix:
+        groups.setdefault(persona.id, []).append((persona, bucket, seed))
+
+    concurrency = args.concurrency if args.concurrency and args.concurrency > 0 else len(groups)
+    concurrency = max(1, min(concurrency, len(groups)))
+
     if args.dry_run:
-        print("\n[runner] dry-run — exiting without calling any API")
+        print(f"\n[runner] dry-run — {len(groups)} persona group(s), would run "
+              f"{concurrency}-way parallel across personas (each persona's seeds sequential)")
+        for pid, cases in groups.items():
+            print(f"  {pid}: {len(cases)} case(s)")
+        print("[runner] dry-run — exiting without calling any API")
         return
+
+    print(f"[runner] running {concurrency}-way parallel across {len(groups)} persona(s) "
+          f"(each persona's seeds sequential)")
+    _print_lock = threading.Lock()
+
+    def _run_group(cases: list[tuple]) -> tuple[list[dict], list[dict], dict[str, list[tuple[dict, dict]]]]:
+        """Process one persona's seeds sequentially. Returns local (results, failures, qa_records)
+        so nothing mutable is shared across threads — merged in the main thread afterwards."""
+        g_results: list[dict] = []
+        g_failures: list[dict] = []
+        g_qa: dict[str, list[tuple[dict, dict]]] = {}
+        for persona, bucket, seed in cases:
+            try:
+                transcript = simulation.run(persona, bucket, seed)
+                # score_qa() only handles the find/host/edge-style QA buckets and returns None
+                # otherwise, so this falls back to the original judge for every other bucket.
+                result = evaluation.score_qa(transcript) or evaluation.score(transcript)
+                g_results.append(result)
+                if evaluation._qa_rubric_for_bucket(bucket.bucket) is not None:
+                    g_qa.setdefault(bucket.bucket, []).append((transcript, result))
+            except Exception as exc:
+                g_failures.append({
+                    "persona_id": persona.id, "bucket": bucket.bucket, "seed_label": seed.label,
+                    "error": str(exc), "traceback": traceback.format_exc(),
+                })
+                with _print_lock:
+                    print(f"  [runner] FAILED: {persona.id} × {bucket.bucket}/{seed.label}: {exc}")
+                    print(traceback.format_exc())
+        return g_results, g_failures, g_qa
 
     results: list[dict] = []
     failures: list[dict] = []
     qa_transcripts: list[dict] = []  # QA-rubric buckets only — for qa_analyze
-    qa_records_by_bucket: dict[str, list[tuple[dict, dict]]] = {}  # (transcript, result) pairs, for batch verdicts
+    qa_records_by_bucket: dict[str, list[tuple[dict, dict]]] = {}  # (transcript, result) pairs
 
-    for i, (persona, bucket, seed) in enumerate(matrix, 1):
-        print(f"\n[runner] {i}/{len(matrix)}")
-        try:
-            transcript = simulation.run(persona, bucket, seed)
-            # score_qa() only handles the find_coverage/host_confirm/edge_trust-style QA
-            # buckets and returns None otherwise, so this falls back to the original judge
-            # for every existing bucket unchanged.
-            result = evaluation.score_qa(transcript) or evaluation.score(transcript)
-            results.append(result)
-            if evaluation._qa_rubric_for_bucket(bucket.bucket) is not None:
-                qa_transcripts.append(transcript)
-                qa_records_by_bucket.setdefault(bucket.bucket, []).append((transcript, result))
-        except Exception as exc:
-            entry = {
-                "persona_id": persona.id,
-                "bucket": bucket.bucket,
-                "seed_label": seed.label,
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            }
-            failures.append(entry)
-            print(f"  [runner] FAILED: {exc}")
-            print(traceback.format_exc())
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        for g_results, g_failures, g_qa in pool.map(_run_group, groups.values()):
+            results.extend(g_results)
+            failures.extend(g_failures)
+            for bname, recs in g_qa.items():
+                qa_records_by_bucket.setdefault(bname, []).extend(recs)
+                qa_transcripts.extend(t for t, _ in recs)
 
     # --- Summary ---
     print(f"\n[runner] complete — {len(results)} passed, {len(failures)} failed")
