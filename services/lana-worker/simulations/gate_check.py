@@ -139,6 +139,15 @@ def main() -> None:
         )
         return
 
+    # The PR gate runs only the must-have buckets (runner.py --pr), but the baseline tag is a FULL
+    # nightly run (all buckets). Restrict the baseline to the SAME buckets the PR ran so the pooled
+    # per-axis averages are apples-to-apples — otherwise the differing bucket mix (the nightly-only
+    # coverage buckets) would manufacture spurious regressions and block every PR.
+    pr_buckets = {r.get("bucket") for r in pr_runs}
+    baseline_runs = [r for r in baseline_runs if r.get("bucket") in pr_buckets]
+    print(f"[gate] comparing {len(pr_runs)} PR runs vs {len(baseline_runs)} baseline runs "
+          f"over matched buckets {sorted(pr_buckets)}")
+
     pr_avgs = _axis_averages(pr_runs)
     base_avgs = _axis_averages(baseline_runs)
     pr_hard = _hard_fail_count(pr_runs, HARD_FAIL_BUCKETS)

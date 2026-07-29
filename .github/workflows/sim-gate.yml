@@ -17,7 +17,7 @@ on:
 jobs:
   gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +45,9 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SIM_PASSWORD:               ${{ secrets.SIM_PASSWORD }}
           GIT_SHA:                    ${{ github.sha }}
-        run: python runner.py
+        # --pr: must-have buckets only (refusals/safety, PII/privacy, core function, routing);
+        # runs 6-way parallel across personas by default. The full matrix runs in sim-nightly.yml.
+        run: python runner.py --pr
 
       - name: Compare against baseline and gate
         working-directory: services/lana-worker/simulations

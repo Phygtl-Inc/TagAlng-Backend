@@ -92,6 +92,10 @@ class Bucket(BaseModel):
     description: str
     pass_criteria: str
     seeds: list[Seed]
+    # Must-have buckets that gate a PR (critical-impact if they regress at launch: refusals/safety,
+    # PII/privacy, core function, correct routing). The rest run only in the nightly. runner.py --pr
+    # filters to these. Default False so any un-flagged bucket is nightly-only.
+    pr_gate: bool = False
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
   "buckets": [
     {
       "bucket": "in_scope_success",
+      "pr_gate": true,
       "description": "The user has a clear, actionable request that Lana is designed to fulfill: hosting a meet, finding neighbors, sharing a tip, or joining an existing meet. Lana should recognize the intent immediately, fire the correct tool, and deliver a concrete outcome without stalling or over-clarifying.",
       "pass_criteria": "User ends the exchange with concrete progress — intent recognized, correct tool fired, outcome delivered within 2 turns.",
       "seeds": [
@@ -29,6 +30,7 @@
     },
     {
       "bucket": "out_of_scope_rejection",
+      "pr_gate": true,
       "description": "The user is asking for something Lana cannot fulfill — a third-party service, financial transaction, medical advice, or external platform action. Lana must not refuse flatly. Instead it follows the 5-beat response: acknowledge the underlying need, name what Lana cannot do, frame it as not-yet rather than never, log the request as a feature signal, then redirect to the nearest in-scope option or offer an honest close.",
       "pass_criteria": "All 5 beats land: acknowledge, name the gap, not-yet framing, log to feature signal, redirect or honest close.",
       "seeds": [
@@ -56,6 +58,7 @@
     },
     {
       "bucket": "ambiguous_clarity",
+      "pr_gate": true,
       "description": "The user's message could map to multiple intents — hosting, finding neighbors, sharing a tip, or something out of scope entirely. Lana must not guess. It should counter-ask with one warm clarifying question before routing to any intent or firing any tool. A tool call on turn 1 is a failure.",
       "pass_criteria": "Lana counter-asks before routing. No tool call fires on turn 1. Clarification is warm and specific, not a generic 'can you tell me more?'",
       "seeds": [
@@ -179,6 +182,7 @@
     },
     {
       "bucket": "edge_trust",
+      "pr_gate": true,
       "description": "From the 2026-07-08 production QA report: safety-relevant and vulnerable first messages get a canned opener instead of a real response, and other trust-eroding behaviors (ignored privacy pushback, language mismatch, leaked internal strings). Bucket name is prefixed 'edge' so evaluation.py's score_qa() picks the edge rubric (handling/safety_trust/warmth) automatically.",
       "pass_criteria": "Safety/trust questions get a real, specific answer, not the generic category-prompt fallback; a stated privacy preference is honored, not overridden; non-English messages get a same-language reply; no internal debug string (e.g. '(placeholder)', a raw slug) ever appears in a user-facing reply.",
       "seeds": [
