@@ -207,6 +207,56 @@ class TestHandleGroundingAnswer(unittest.TestCase):
         note.assert_called_once_with("u1", "a1", "the little studio by Publix")
 
 
+class TestGroundAndConfirmAnnounces(unittest.TestCase):
+    """Grounding is the moment the community is CREATED (place mandatory,
+    2026-07-28) — every register variant must tell the user it's now saved on
+    their profile, never a silent create."""
+
+    def _run(self, others: int, session_ctx):
+        from app.circles_flow import ground_and_confirm
+
+        with patch(
+            "app.circles_flow._own_affiliation",
+            return_value={"id": "a1", "circle_key": "book_club"},
+        ), patch(
+            "app.circles_flow.ground_affiliation",
+            return_value={
+                "affiliation_id": "a1",
+                "place_id": "p1",
+                "place_name": "OrangeTheory",
+                "status": "confirmed",
+            },
+        ), patch(
+            "app.circles_flow._place_co_member_count", return_value=others
+        ), patch(
+            "app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK
+        ) as compose:
+            result = ground_and_confirm("u1", "a1", "gp1", session_ctx=session_ctx)
+            return result, compose.call_args.kwargs
+
+    def _assert_announced(self, result, kwargs) -> None:
+        self.assertIn("saved to your communities", result["reply"])
+        self.assertTrue(
+            any("saved as one of their communities" in f for f in kwargs["facts"])
+        )
+
+    def test_intro_variant_announces_saved_community(self) -> None:
+        result, kwargs = self._run(2, {})
+        self._assert_announced(result, kwargs)
+        self.assertEqual(result["offer"]["kind"], "find_neighbors")
+
+    def test_host_variant_announces_saved_community(self) -> None:
+        result, kwargs = self._run(0, {})
+        self._assert_announced(result, kwargs)
+        self.assertEqual(result["offer"]["kind"], "host_meet")
+
+    def test_plain_close_still_announces(self) -> None:
+        # Tile endpoint path (no chat ctx): no offer, but the save is still said.
+        result, kwargs = self._run(0, None)
+        self._assert_announced(result, kwargs)
+        self.assertIsNone(result["offer"])
+
+
 class TestHandleGroundingConfirmation(unittest.TestCase):
     STATE = {
         "affiliation_id": "a1",

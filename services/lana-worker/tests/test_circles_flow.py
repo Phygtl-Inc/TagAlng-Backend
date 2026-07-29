@@ -7,6 +7,7 @@ from app.circles_flow import (
     add_circle,
     ground_affiliation,
     ground_options,
+    list_my_circles,
     tag_claim_place_from_gap,
     upsert_canonical_place,
 )
@@ -161,22 +162,93 @@ class TestGroundOptions(unittest.TestCase):
 class TestAddCircle(unittest.TestCase):
     def test_invalid_type_raises(self) -> None:
         with self.assertRaises(ValueError):
-            add_circle("u1", circle_type="gym")
+            add_circle("u1", circle_type="gym", google_place_id="g1")
 
+    def test_profile_add_without_place_raises(self) -> None:
+        # A community's place is mandatory: a profile add can never create one
+        # without a real location.
+        with self.assertRaises(ValueError) as ctx:
+            add_circle("u1", circle_type="hobby", detail="book club")
+        self.assertEqual(str(ctx.exception), "place_required")
+        with self.assertRaises(ValueError):
+            add_circle("u1", circle_type="hobby", detail="book club", google_place_id="  ")
+
+    @patch(
+        "app.circles_flow.ground_affiliation",
+        return_value={
+            "affiliation_id": "a9",
+            "place_id": "p1",
+            "place_name": "OrangeTheory",
+            "status": "confirmed",
+        },
+    )
     @patch("app.circles_flow.service_client")
-    def test_add_ungrounded(self, sb) -> None:
+    def test_profile_add_grounds_and_confirms_in_one_step(self, sb, ground) -> None:
         table = _chain()
         table.execute.side_effect = [
             MagicMock(data=[]),  # no existing
             MagicMock(data=[{"id": "a9"}]),  # insert
         ]
         sb.return_value.table.return_value = table
-        result = add_circle("u1", circle_type="hobby", detail="book club")
-        self.assertEqual(result["affiliation_id"], "a9")
+        result = add_circle(
+            "u1", circle_type="hobby", detail="book club", google_place_id="g1"
+        )
+        self.assertEqual(result["status"], "confirmed")
+        ground.assert_called_once_with("u1", "a9", "g1")
         row = table.insert.call_args[0][0]
         self.assertEqual(row["source"], "profile_add")
         self.assertEqual(row["circle_key"], "book_club")
         self.assertEqual(row["status"], "suggested")
+
+    @patch("app.circles_flow.service_client")
+    def test_invite_self_confirm_still_parks_placeless_candidate(self, sb) -> None:
+        # §A.2: the joiner grounds her OWN place right after — until then the row
+        # is an internal candidate, not a community, and shows nowhere.
+        table = _chain()
+        table.execute.side_effect = [
+            MagicMock(data=[]),  # no existing
+            MagicMock(data=[{"id": "a9"}]),  # insert
+        ]
+        sb.return_value.table.return_value = table
+        result = add_circle(
+            "u1", circle_type="hobby", detail="book club", source="invite_confirmed"
+        )
+        self.assertEqual(
+            result, {"affiliation_id": "a9", "status": "suggested", "grounded": False}
+        )
+        row = table.insert.call_args[0][0]
+        self.assertEqual(row["source"], "invite_confirmed")
+
+
+class TestListMyCircles(unittest.TestCase):
+    @patch("app.circles_flow._member_count", return_value=3)
+    @patch("app.circles_flow.service_client")
+    def test_only_grounded_rows_are_communities(self, sb, _count) -> None:
+        affs = _chain(
+            [
+                {
+                    "id": "a1",
+                    "circle_type": "fitness",
+                    "circle_key": "gym",
+                    "detail": "my gym",
+                    "status": "confirmed",
+                    "place_ref": "p1",
+                    "created_at": "2026-07-01",
+                }
+            ]
+        )
+        affs.not_ = affs  # .not_.is_ chains back through the same stub
+        places = _chain([{"id": "p1", "name": "OrangeTheory", "address": "123 Elm"}])
+        sb.return_value = _sb_with_tables(
+            {"circle_affiliations": affs, "places": places}
+        )
+        rows = list_my_circles("u1")
+        # The query itself excludes ungrounded rows — a community without a place
+        # does not exist, so it can never reach the profile surface.
+        self.assertIn(("place_ref", "null"), [c.args for c in affs.is_.call_args_list])
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["grounded"])
+        self.assertEqual(rows[0]["place_name"], "OrangeTheory")
 
 
 class TestTagClaimPlace(unittest.TestCase):

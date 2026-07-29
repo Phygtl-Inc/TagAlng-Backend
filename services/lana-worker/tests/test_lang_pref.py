@@ -335,6 +335,161 @@ class TestLanguageClaim(unittest.TestCase):
             thread.assert_not_called()
 
 
+class TestLanguageObservationCounting(unittest.TestCase):
+    """Merely WRITING in a language ramps a low-surety claim: the post-turn hook
+    counts non-English turns per session and kicks the async observation write
+    after 2 turns, then every 4 more."""
+
+    def _turn(self, ctx: dict, *, msg: str = "hallo zusammen") -> str:
+        return language_preference_post_turn(
+            user_id="u1",
+            user_message=msg,
+            session_ctx=ctx,
+            reply="Hi!",
+            is_anonymous=False,
+        )
+
+    @patch("app.lang_pref.record_language_observation_async")
+    def test_first_write_after_two_turns_then_every_four(self, record) -> None:
+        ctx: dict = {"lang": "de"}
+        self._turn(ctx)
+        record.assert_not_called()  # one message could be a one-off paste
+        self._turn(ctx)
+        record.assert_called_once_with("u1", "de", "hallo zusammen")
+        for _ in range(3):  # turns 3-5: no re-corroboration yet
+            self._turn(ctx)
+        record.assert_called_once()
+        self._turn(ctx)  # turn 6 = 2 + 4 — corroborate again
+        self.assertEqual(record.call_count, 2)
+        self.assertEqual(ctx["lang_obs_counts"], {"de": 6})
+
+    @patch("app.lang_pref.record_language_observation_async")
+    def test_counts_are_per_language(self, record) -> None:
+        ctx: dict = {"lang": "de"}
+        self._turn(ctx)
+        ctx["lang"] = "es"
+        self._turn(ctx, msg="hola")
+        record.assert_not_called()  # neither language reached two turns
+        self.assertEqual(ctx["lang_obs_counts"], {"de": 1, "es": 1})
+
+    @patch("app.lang_pref.record_language_observation_async")
+    def test_english_turns_never_count(self, record) -> None:
+        ctx: dict = {"lang": "en"}
+        for _ in range(6):
+            self._turn(ctx, msg="hello there")
+        record.assert_not_called()
+        self.assertNotIn("lang_obs_counts", ctx)
+
+    @patch("app.lang_pref.record_language_observation_async")
+    def test_anonymous_turns_never_count(self, record) -> None:
+        ctx: dict = {"lang": "de"}
+        for _ in range(3):
+            language_preference_post_turn(
+                user_id="anon-1",
+                user_message="hallo",
+                session_ctx=ctx,
+                reply="Hi!",
+                is_anonymous=True,
+            )
+        record.assert_not_called()
+
+    @patch("app.lang_pref.record_language_observation_async")
+    def test_flag_off_disables_observation(self, record) -> None:
+        ctx: dict = {"lang": "de"}
+        with patch.dict("os.environ", {"LANA_LANG_OBSERVED_CLAIMS": "off"}):
+            for _ in range(3):
+                self._turn(ctx)
+        record.assert_not_called()
+
+
+class TestRecordLanguageObservation(unittest.TestCase):
+    """The observation write itself: create at the persist floor, re-corroborate
+    (upsert bumps), graduate onto the confirmed thread, self-heal duplicates."""
+
+    def _rows(self, rows: list[dict]) -> object:
+        sb = MagicMock()
+        result = MagicMock()
+        result.data = rows
+        (
+            sb.table.return_value.select.return_value.eq.return_value
+            .is_.return_value.limit.return_value.execute.return_value
+        ) = result
+        return sb
+
+    def test_creates_observed_row_at_persist_floor(self) -> None:
+        from app.claims_persist import MIN_CLAIM_CONFIDENCE
+        from app.lang_pref import _record_language_observation
+
+        with patch("app.lang_pref.service_client", return_value=self._rows([])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _record_language_observation("u1", "de", "hallo zusammen")
+        upsert.assert_called_once()
+        claim = upsert.call_args[0][1][0]
+        self.assertEqual(claim.concept, "lang_observed_de")
+        self.assertEqual(claim.label, "Speaks German")
+        self.assertEqual(claim.confidence, MIN_CLAIM_CONFIDENCE)
+        self.assertEqual(claim.synonyms, ["German"])
+        self.assertEqual(claim.source_quote, "hallo zusammen")
+
+    def test_recorroboration_upserts_existing_row(self) -> None:
+        # upsert_claims merges by concept: max(old, new) + bump — the ramp.
+        from app.lang_pref import _record_language_observation
+
+        existing = {
+            "concept": "lang_observed_de",
+            "label": "Speaks German",
+            "synonyms": ["German"],
+            "details": [],
+            "confidence": 0.7,
+        }
+        with patch("app.lang_pref.service_client", return_value=self._rows([existing])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _record_language_observation("u1", "de", None)
+        upsert.assert_called_once()
+        self.assertEqual(upsert.call_args[0][1][0].concept, "lang_observed_de")
+
+    @patch("app.lang_pref._remember_language_claim")
+    def test_graduates_to_confirmed_thread_when_sure(self, remember) -> None:
+        from app.lang_pref import _record_language_observation
+
+        existing = {
+            "concept": "lang_observed_de",
+            "label": "Speaks German",
+            "synonyms": ["German"],
+            "details": [],
+            "confidence": 0.85,  # + bump crosses the graduation bar
+        }
+        with patch("app.lang_pref.service_client", return_value=self._rows([existing])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _record_language_observation("u1", "de", "noch eine nachricht")
+        remember.assert_called_once_with("u1", "de", "noch eine nachricht")
+        upsert.assert_not_called()
+
+    @patch("app.lang_pref._dismiss_observed_language_row")
+    def test_language_already_proven_dismisses_and_skips(self, dismiss) -> None:
+        from app.lang_pref import _record_language_observation
+
+        confirmed = {
+            "concept": "multilingual",
+            "label": "Speaks Urdu, English, and German",
+            "synonyms": [],
+            "details": [],
+            "confidence": 1.0,
+        }
+        with patch("app.lang_pref.service_client", return_value=self._rows([confirmed])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _record_language_observation("u1", "de", None)
+        upsert.assert_not_called()
+        dismiss.assert_called_once_with("u1", "de")
+
+    def test_skips_english(self) -> None:
+        from app.lang_pref import _record_language_observation
+
+        with patch("app.lang_pref.service_client") as sb:
+            _record_language_observation("u1", "en", None)
+        sb.assert_not_called()
+
+
 class TestRememberLanguageClaimWrite(unittest.TestCase):
     """The deterministic claim write: enrich the extractor's languages thread, never
     clobber its label, no-op on a language already recorded."""
@@ -401,6 +556,43 @@ class TestRememberLanguageClaimWrite(unittest.TestCase):
         with patch("app.lang_pref.service_client") as sb:
             _remember_language_claim("u1", "en", None)
         sb.assert_not_called()
+
+    @patch("app.lang_pref._dismiss_observed_language_row")
+    def test_observed_row_is_not_the_thread_and_gets_retired(self, dismiss) -> None:
+        # An explicit accept of URDU must not enrich the watch-and-learn German
+        # row (its label matches the thread-hint regex) — and an explicit accept
+        # of GERMAN retires that row after promoting the claim.
+        from app.lang_pref import _remember_language_claim
+
+        observed = {
+            "concept": "lang_observed_de",
+            "label": "Speaks German",
+            "synonyms": ["German"],
+            "details": [],
+        }
+        with patch("app.lang_pref.service_client", return_value=self._rows([observed])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _remember_language_claim("u1", "ur", None)
+        claim = upsert.call_args[0][1][0]
+        self.assertEqual(claim.concept, "multilingual")  # fresh thread, not the observed row
+        self.assertEqual(claim.label, "Speaks Urdu")
+        dismiss.assert_called_once_with("u1", "ur")
+
+    @patch("app.lang_pref._dismiss_observed_language_row")
+    def test_already_confirmed_language_still_retires_observed_row(self, dismiss) -> None:
+        from app.lang_pref import _remember_language_claim
+
+        confirmed = {
+            "concept": "multilingual",
+            "label": "Speaks Urdu, English, and German",
+            "synonyms": [],
+            "details": [],
+        }
+        with patch("app.lang_pref.service_client", return_value=self._rows([confirmed])), \
+                patch("app.claims_persist.upsert_claims") as upsert:
+            _remember_language_claim("u1", "de", None)
+        upsert.assert_not_called()
+        dismiss.assert_called_once_with("u1", "de")
 
 
 if __name__ == "__main__":
