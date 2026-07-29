@@ -564,6 +564,45 @@ class TestLayer1DiscoveryRouting(unittest.TestCase):
         self.assertEqual(derive_ui_intent(ctx), UI_INTENT_SHOW_IDENTITY_PROFILE)
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.claims_persist.fetch_active_claim_labels", return_value=[])
+    @patch("app.discovery_route._claim_concierge_reply", return_value="That's lovely!")
+    @patch("app.discovery_route.persist_identity_from_message")
+    @patch("app.discovery_route.fetch_identity_dashboard")
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_add_claim_turn_never_shows_identity_card(
+        self, mock_slots, mock_dashboard, mock_persist, _mock_reply, _mock_labels, _mock_ai
+    ) -> None:
+        # A self-description ("my grandkids visit every weekend") saves a claim but must
+        # NOT render the full claims card — that is reserved for an explicit
+        # "show my claims" ask (identity.show_my_profile).
+        from app.layer1_handlers import IdentityPersistResult
+
+        mock_slots.return_value = {
+            "linear_intent": "identity.add_claim",
+            "goal": "chat",
+            "in_discovery": False,
+            "confidence": 0.92,
+        }
+        mock_persist.return_value = IdentityPersistResult(
+            saved=1, primary_label="Grandparent", primary_bucket="stage"
+        )
+        reply, ctx, _, peers = handle_discovery_turn(
+            "my grandkids visit me every weekend",
+            session_ctx={"routing_phase": PHASE_PREVIEW},
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id="block-1",
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertEqual(peers, [])
+        self.assertEqual(ctx.get("active_intent"), "identity.add_claim")
+        self.assertIsNone(ctx.get("identity_profile"))
+        self.assertNotEqual(derive_ui_intent(ctx), UI_INTENT_SHOW_IDENTITY_PROFILE)
+        mock_dashboard.assert_not_called()
+        self.assertEqual(reply, "That's lovely!")
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
     def test_looking_meet_searches_first_offers_seek(self, mock_slots, _mock_ai) -> None:
         # Meet ≡ activity (search-first): a clear meet_seek enters the events browse;

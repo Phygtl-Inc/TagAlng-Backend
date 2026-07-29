@@ -141,6 +141,9 @@ def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
 
 
 def stamp_identity_profile_ctx(ctx: dict[str, Any], dashboard: dict[str, Any]) -> None:
+    # Payload only — never sets active_intent. The claims card renders solely when
+    # the handler itself routed the turn as identity.show_my_profile (an explicit
+    # "show my claims" ask), so stamping this on any other turn stays invisible.
     claims = dashboard.get("claims") if isinstance(dashboard.get("claims"), list) else []
     profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
     sorted_claims = _sort_claims_for_display([c for c in claims if isinstance(c, dict)])
@@ -150,7 +153,6 @@ def stamp_identity_profile_ctx(ctx: dict[str, Any], dashboard: dict[str, Any]) -
         "claims": sorted_claims,
         "stats": dashboard.get("stats") if isinstance(dashboard.get("stats"), dict) else {},
     }
-    ctx["active_intent"] = "identity.show_my_profile"
 
 
 def format_block_summary_reply(

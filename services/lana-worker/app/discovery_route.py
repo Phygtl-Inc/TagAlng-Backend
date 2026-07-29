@@ -970,12 +970,6 @@ def _try_pending_heritage_turn(
             phase=phase or "listening",
             active_intent="identity.add_claim",
         )
-        if phone_verified:
-            try:
-                dashboard = fetch_identity_dashboard(user_jwt)
-                stamp_identity_profile_ctx(ctx, dashboard)
-            except HTTPException:
-                pass
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "heritage_confirmed")
         return reply, ctx, ctx["last_routing"], []
 
@@ -1600,12 +1594,6 @@ def _try_layer1_intent_turn(
                 session_ctx=session_ctx,
                 ctx=ctx,
             )
-        if res.total > 0 and phone_verified:
-            try:
-                dashboard = fetch_identity_dashboard(user_jwt)
-                stamp_identity_profile_ctx(ctx, dashboard)
-            except HTTPException:
-                pass
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "extract_identity_claims")
         return reply, ctx, ctx["last_routing"], []
 
