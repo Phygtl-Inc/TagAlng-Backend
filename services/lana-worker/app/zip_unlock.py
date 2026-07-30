@@ -27,14 +27,14 @@ logger = logging.getLogger(__name__)
 
 # Discovery gating rollout knob (§D.2 — the consumption side):
 #   off  — no gating anywhere (pre-Circles behavior).
-#   soft — DEFAULT. Real supply is never hidden; only EMPTY discovery states gain
-#          the seed-forward framing ("N of M neighbors — host something / bring
-#          your people in") instead of a bare "nothing found".
+#   soft — DEFAULT. Empty discovery states gain the seed-forward framing
+#          ("N of M neighbors — host something / bring your people in")
+#          instead of a bare "nothing found".
 #   hard — soft, plus find-peers intros require an OPEN area (sparse-area intros
 #          are junk-quality and privacy-risky; peers is the true density product).
-# Supply-aware on purpose: a waitlist ZIP that already HAS events keeps them
-# visible — hiding a host's event from neighbors would fight the north star
-# (meets that actually happen) instead of feeding it.
+# Browse (others' events) is gated pre-open in BOTH soft and hard since the
+# rapport-bridge alignment (2026-07-30) — see discovery_zip_gate's docstring.
+# The original "supply is never hidden" soft-mode stance is retired for browse.
 _GATE_MODES = ("off", "soft", "hard")
 
 _OPEN_PUSH_TITLE = "Your neighborhood just came alive"
@@ -187,9 +187,18 @@ def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] |
 
     None → proceed normally (mode off, area open, or unknown ZIP — fail OPEN:
     a gating error must never lock a user out of discovery). Otherwise a framing
-    dict {mode, blocked, zip5, state, count, threshold}: `blocked` is True only
-    for peers in hard mode — every other consumer treats the dict as copy facts
-    for its EMPTY state, never as a reason to hide real supply.
+    dict {mode, blocked, zip5, state, count, threshold}.
+
+    `blocked` (§D.2 as amended by LANA_RAPPORT_BRIDGE_SPEC_v1, 2026-07-30):
+      · peers  — blocked in hard mode (sparse-area intros are junk-quality and
+        privacy-risky);
+      · browse — blocked in every gating mode while the area is not open.
+        Others'-events discovery before unlock undercuts the bridge (QA: a lone
+        off-topic event card answered "meet other runners" in a waitlist ZIP) —
+        pre-open, the product move is always create+invite, so consumers route
+        to that instead of listing supply. The original soft-mode "supply is
+        never hidden" stance is retired for browse; copy must stay honest
+        (the area isn't open yet) and must NOT claim nothing exists.
     """
     mode = gate_mode()
     if mode == "off" or not user_id:
@@ -204,7 +213,7 @@ def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] |
         return None
     return {
         "mode": mode,
-        "blocked": mode == "hard" and surface == "peers",
+        "blocked": surface == "browse" or (mode == "hard" and surface == "peers"),
         "zip5": snap.get("zip5"),
         "state": snap.get("state"),
         "count": int(snap.get("count") or 0),

@@ -176,6 +176,48 @@ def decide_turn(
         if action is None:
             logger.warning("decide_turn_unparseable user=%s", user_id)
             return None
+        utt = str(action.utterance or "")
+        if (
+            action.kind != "handoff"
+            and not action.chips
+            and not any(ch in utt for ch in ("?", "؟"))
+        ):
+            # Dead-end backstop. The prompt's prime directive ("never leave a
+            # turn as a dead end") had no enforcement — bare acknowledgements
+            # shipped as-is (QA 2026-07-30: "thanks for sharing your go-to
+            # spot", end of thread). One corrective retry re-raising the rule;
+            # the revised answer stands either way, so a deliberate warm close
+            # after an explicit decline/goodbye survives by simply repeating.
+            retry = dict(payload)
+            retry["revision_note"] = (
+                "Your decision for this turn was "
+                + json.dumps({"kind": action.kind, "utterance": action.utterance},
+                             ensure_ascii=False)
+                + " — it ends the conversation with no question, no chips and no "
+                "actionable offer: a dead end. Revise it: keep the warm "
+                "acknowledgement, but end on either ONE gentle follow-up question "
+                "or ONE concrete offer (with a chip) drawn from CANDIDATE GOALS / "
+                "AVAILABLE CAPABILITIES. Only if the person explicitly declined, "
+                "said goodbye, or closed the conversation themselves may a plain "
+                "close stand — in that case return it unchanged."
+            )
+            try:
+                data = llm_json(
+                    model=synthesizer_model(),
+                    system=_system_prompt(),
+                    user_payload=json.dumps(retry, ensure_ascii=False),
+                    max_tokens=700,
+                    temperature=0.4,
+                )
+                revised = parse_next_action(data)
+                if revised is not None and revised.kind != "handoff":
+                    logger.info(
+                        "decide_turn_deadend_revised user=%s kind=%s->%s",
+                        user_id, action.kind, revised.kind,
+                    )
+                    action = revised
+            except Exception:  # noqa: BLE001 — the backstop must never kill the decision
+                logger.exception("decide_turn_deadend_retry_failed user=%s", user_id)
     except Exception:
         logger.exception("decide_turn_failed user=%s", user_id)
         return None

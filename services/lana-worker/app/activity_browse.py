@@ -385,6 +385,37 @@ def _compose_area_warming_empty(
     )
 
 
+def _compose_area_gated_browse(
+    msg: str, frame: dict[str, Any], session_ctx: dict[str, Any]
+) -> str:
+    """Pre-open area asked to browse others' events (§D.2 hard gate, bridge-spec
+    alignment 2026-07-30): the area is still waking up, so nothing is listed —
+    turn it forward to hosting. Copy must stay honest: never claim the calendar
+    is empty (supply may exist; it is gated), and never blame the user."""
+    from app.reply_compose import compose_reply
+    from app.zip_unlock import gate_framing_facts
+
+    return compose_reply(
+        goal=(
+            "Their area hasn't opened up yet, so you can't show them what other "
+            "neighbors are hosting — say that honestly (their area is still "
+            "waking up; never claim nothing is happening, never blame them). "
+            "Then turn it forward: they don't have to wait — they can host "
+            "something and share it with their own people (the pill below says "
+            "'Host a meet'), which is exactly what brings their area to life. "
+            "Warm, zero guilt, max 2 sentences."
+        ),
+        facts=gate_framing_facts(frame),
+        fallback=(
+            "Your area is still waking up, so I can't show what neighbors are "
+            "hosting quite yet. You don't have to wait, though — want to host "
+            "something and bring your people in?"
+        ),
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+
+
 def _compose_empty_seek_offer(
     interest: str,
     *,
@@ -533,7 +564,12 @@ def _filter_events_by_query(
                     'JSON {"match_indices":[ints], "label":"short phrase"}: indices of '
                     "events satisfying EVERY constraint the request expresses (a date query "
                     "must match the event's date; a time-of-day query the start time; a "
-                    "host query the host). label "
+                    "host query the host). When the request names an activity, interest or "
+                    "kind of people ('runners', 'cricket', 'meet other gamers'), the TOPIC "
+                    "is a hard constraint too: only events that are genuinely that kind of "
+                    "activity match — a matching date or time of day alone NEVER qualifies "
+                    "an unrelated event (a coffee catch-up is not a match for 'runners', "
+                    "even at the right hour). label "
                     "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
                     "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
                     "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "
@@ -850,6 +886,22 @@ def run_activity_browse_turn(
     # filter as a cheap pre-narrow when the word appears verbatim.
     weekend_only = bool(re.search(r"\bweekend\b", interest, re.I) or re.search(r"\bweekend\b", msg, re.I))
     events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
+
+    # §D.2 hard gate (bridge-spec alignment 2026-07-30): while the user's area is
+    # not open, others' events are never listed — the pre-open move is hosting +
+    # bringing your own people in. Checked BEFORE the filter so gated supply
+    # can't leak through a topical match (QA: a lone coffee event answered
+    # "meet other runners" in a waitlist ZIP).
+    gate = _zip_gate_frame(user_id)
+    if gate and gate.get("blocked"):
+        draft["_seek_offer"] = None
+        draft["suggestions"] = ["Host a meet"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["activity_previews"] = []
+        session_ctx["routing_phase"] = "listening"
+        return _compose_area_gated_browse(msg, gate, session_ctx)
+
     matched, label = _filter_events_by_query(events, interest)
 
     from app.discovery_route import activity_previews_from_events

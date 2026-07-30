@@ -55,16 +55,21 @@ class TestDiscoveryZipGate(unittest.TestCase):
     def test_open_area_returns_none(self) -> None:
         self.assertIsNone(self._gate("hard", _OPEN, "peers"))
 
-    def test_soft_frames_but_never_blocks(self) -> None:
+    def test_soft_frames_peers_without_blocking(self) -> None:
         frame = self._gate("soft", _WARMING, "peers")
         self.assertIsNotNone(frame)
         self.assertFalse(frame["blocked"])
         self.assertEqual(frame["count"], 7)
         self.assertEqual(frame["threshold"], 10)
 
-    def test_hard_blocks_peers_only(self) -> None:
+    def test_browse_blocked_pre_open_in_every_mode(self) -> None:
+        # §D.2 as amended by the rapport-bridge spec (2026-07-30): others' events
+        # are never surfaced before the area opens — soft AND hard.
+        self.assertTrue(self._gate("soft", _WARMING, "browse")["blocked"])
+        self.assertTrue(self._gate("hard", _WARMING, "browse")["blocked"])
+
+    def test_hard_blocks_peers(self) -> None:
         self.assertTrue(self._gate("hard", _WARMING, "peers")["blocked"])
-        self.assertFalse(self._gate("hard", _WARMING, "browse")["blocked"])
 
     def test_unknown_zip_fails_open(self) -> None:
         # No unlock row AND the recount fails → None (never lock discovery on a gap).

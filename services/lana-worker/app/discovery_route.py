@@ -3142,10 +3142,86 @@ def _try_save_signal_turn(
         )
         if _tip_reply:
             reply = _tip_reply
+    # Item need/offer with no neighbor match → the create+invite bridge, never
+    # the canned "I've noted…" close (bridge spec §2 rule 3 / §7).
+    if intent in ("swap_seek", "swap_offer") and matches_shown <= 0:
+        _bridge_reply = _compose_item_need_bridge(
+            ctx=ctx, intent=intent, detail=detail, session_ctx=session_ctx, msg=msg
+        )
+        if _bridge_reply:
+            reply = _bridge_reply
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
     ctx.pop("activity_previews", None)
     clear_signal_draft(ctx)
     return reply, ctx, ctx["last_routing"], []
+
+
+def _compose_item_need_bridge(
+    *,
+    ctx: dict[str, Any],
+    intent: str,
+    detail: str,
+    session_ctx: dict[str, Any],
+    msg: str,
+) -> str | None:
+    """Bridge-shaped close for an item need/offer with zero neighbor matches
+    (LANA_RAPPORT_BRIDGE_SPEC_v1 §2 rule 3). The canned "Got it — I've noted
+    you're looking for…" close is §7 mechanic-talk and its "Show my neighborhood
+    log" chip dead-ends on an empty log (QA 2026-07-30, the rain-boots case).
+
+    The signal IS saved and matching keeps running — say that truthfully — then
+    end on ONE create+invite offer: a small swap meetup they can share with
+    neighbors they invite. Arms the same offer rails as the grounding bridge
+    (rapport_pending_action), so a chip tap or a typed "sure" dispatches the
+    host flow deterministically and a decline closes warmly."""
+    what = str(detail or "").strip()
+    if not what:
+        return None
+    from app.reply_compose import compose_reply
+
+    seeking = intent == "swap_seek"
+    label = "Set up a swap meetup"
+    send = f"help me host a swap meetup for {what[:80]}"
+    reply = compose_reply(
+        goal=(
+            (
+                "They asked their neighbors for something"
+                if seeking
+                else "They offered their neighbors something"
+            )
+            + " and no neighbor matches it yet. Acknowledge warmly in one "
+            "sentence — you'll text them the moment a neighbor matches (that is "
+            "true; never 'noted' / 'saved to my system' / 'on my radar' "
+            "phrasing). Then offer ONE next step: they don't have to wait — "
+            "they could set up a small swap meetup and share it with neighbors "
+            "they know; that's how a quiet area comes alive. End on the offer "
+            "question — the chip below your message is the tap."
+        ),
+        facts=[
+            f'What they {"need" if seeking else "have"}: "{what[:120]}"',
+            "Their ask is live and matching keeps running — you WILL text them "
+            "when a neighbor matches. Zero matches exist right now.",
+            "The offer: set up a small swap meetup they can share with "
+            "neighbors they invite.",
+        ],
+        fallback=(
+            f"I'll text you the moment a neighbor matches on {what}. You don't "
+            "have to wait, though — want to set up a little swap meetup you can "
+            "share with neighbors you know?"
+        ),
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+    ctx["rapport_active"] = True
+    ctx["rapport_offer_pending"] = True
+    ctx["rapport_pending_action"] = {
+        "kind": "host_meet",
+        "label": label,
+        "send": send,
+        "topic": f"swap meetup — {what[:60]}",
+    }
+    ctx["rapport_reply"] = {"options": [], "action": {"label": label, "send": send}}
+    return reply
 
 
 def _try_hosting_cta_turn(

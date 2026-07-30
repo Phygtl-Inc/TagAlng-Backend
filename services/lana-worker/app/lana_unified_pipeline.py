@@ -117,6 +117,78 @@ def _forced_slots_for_kind(
     return slots
 
 
+def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[str, Any]) -> None:
+    """Connect a policy `ground_place` decision to the REAL grounding rails.
+
+    The policy LLM authors the question but its chips are fiction — it has no
+    Places tool, so a tap like "It's the main rec center" used to land as plain
+    text with nothing armed, and the turn after dead-ended (QA 2026-07-30, the
+    squash case). Here we resolve the affiliation the ask is about, run the same
+    Places search the tile flow uses, replace the invented chips with real
+    candidates, and arm rapport_grounding — so the next turn's tap or free text
+    flows into handle_grounding_confirmation → ground_and_confirm, which ends on
+    the bridge offer (intro when co-members exist, create+invite otherwise).
+
+    No resolvable affiliation (capture hasn't landed yet, or the goal is
+    ambiguous) → the chips are still stripped (never ship invented places) and
+    the question goes out free-text; the ungrounded-circle goal resurfaces once
+    capture lands. Empty Places results still arm the pending state with zero
+    candidates — the user's ANSWER then drives the search (the existing
+    re-search path in handle_grounding_confirmation)."""
+    if getattr(action, "kind", None) != "ground_place":
+        return
+    action.chips = []
+    try:
+        from app.auth import service_client
+        from app.circles_flow import _chip, _home_block_id, ground_options
+
+        key = ""
+        gid = str(getattr(action, "goal_id", None) or "")
+        if gid.startswith("circle:"):
+            key = gid.split(":", 1)[1].strip()
+        q = (
+            service_client()
+            .table("circle_affiliations")
+            .select("id, circle_type, circle_key, detail, status, place_ref")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .is_("place_ref", "null")
+        )
+        if key:
+            q = q.eq("circle_key", key)
+        rows = [
+            r for r in (q.order("created_at", desc=True).limit(2).execute().data or [])
+            if isinstance(r, dict)
+        ]
+        if not rows or (not key and len(rows) > 1):
+            return  # not captured yet / ambiguous — leave a free-text ask
+        aff = rows[0]
+        options = ground_options(
+            user_id, aff, block_id=_home_block_id(user_id), query=None
+        )
+        candidates = [{**_chip(o), "name": o.get("name")} for o in options]
+        chips = [{"label": c["label"], "send": c["send"]} for c in candidates]
+        session_ctx["rapport_active"] = True
+        session_ctx["rapport_grounding"] = {
+            "affiliation_id": str(aff.get("id") or ""),
+            "candidates": candidates,
+            "answer_text": "",
+            "attempts": 1,
+        }
+        session_ctx["rapport_followup_question"] = str(
+            getattr(action, "utterance", "") or ""
+        )
+        session_ctx["rapport_offer_pending"] = False
+        session_ctx["rapport_pending_action"] = None
+        action.chips = chips
+        logging.getLogger(__name__).info(
+            "ground_place_wired aff=%s key=%s candidates=%d",
+            aff.get("id"), aff.get("circle_key"), len(candidates),
+        )
+    except Exception:  # noqa: BLE001 — wiring is an upgrade; the ask still goes out
+        logging.getLogger(__name__).exception("ground_place_wire_failed")
+
+
 def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
     """Drop the concierge follow-up capture so the turn falls through to normal routing. Set to
     None (not popped) so the {**old, **new} session merge clears them instead of keeping a stale
@@ -184,6 +256,9 @@ def _policy_rapport_reply(
     # The policy owns the thread from here — clear the rapport capture
     # (None, never popped) so the merge can't resurrect it next turn.
     _reset_rapport_state(session_ctx)
+    # A ground_place ask must be backed by real place candidates + armed state,
+    # or the answer turn dead-ends (re-arms AFTER the reset above, on purpose).
+    _wire_ground_place_action(action, user_id=user_id, session_ctx=session_ctx)
     session_ctx["policy_chips"] = action.chips or None
     session_ctx["policy_chip_msgs"] = [c["send"] for c in action.chips] or None
     session_ctx["last_routing"] = action.routing_dict()
@@ -1585,7 +1660,13 @@ def run_lana_unified_pipeline(
         try:
             from app.orchestrator.guardrails import utterance_is_unsafe
 
-            return utterance_is_unsafe(msg)
+            # utterance_is_unsafe returns (matched, kind) — returning the raw
+            # tuple here made this ALWAYS truthy ((False, None) is truthy), so
+            # the policy gate silently skipped decide_turn on EVERY typed chat
+            # turn and legacy paths answered instead (found 2026-07-30, the
+            # bridge QA: none of the policy behavior ever showed in chat).
+            matched, _kind = utterance_is_unsafe(msg)
+            return bool(matched)
         except Exception:  # noqa: BLE001 — a broken import must fail SAFE (skip policy)
             return True
 
@@ -1637,6 +1718,9 @@ def run_lana_unified_pipeline(
                 session_id=session_id, user_id=user_id,
                 user_message=user_message, action=_action, shadow=False,
             )
+            # A ground_place ask must be backed by real place candidates + armed
+            # grounding state, or the answer turn dead-ends (QA 2026-07-30).
+            _wire_ground_place_action(_action, user_id=user_id, session_ctx=session_ctx)
             session_ctx["policy_chips"] = _action.chips or None
             session_ctx["policy_chip_msgs"] = [c["send"] for c in _action.chips] or None
             session_ctx["last_routing"] = _action.routing_dict()
