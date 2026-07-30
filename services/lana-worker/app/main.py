@@ -2702,6 +2702,8 @@ def _complete_event_draft(
                     ),
                     cache=True,
                 )
+            elif exc.detail == "duplicate_event":
+                closing = "Looks like you already have that meet — want to edit it instead?"
             else:
                 raise
 

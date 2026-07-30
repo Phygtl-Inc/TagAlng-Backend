@@ -459,6 +459,9 @@ def _publish_failure_reply(error: str | None, title: str) -> str:
                 "Verify your email and I'll publish it right away."
             ),
         )
+    if "duplicate_event" in detail or "duplicate key" in detail:
+        # The dedupe guard fired — same title + start already posted by this host.
+        return f"Looks like you already have that meet — want to edit {name} instead?"
     if "location" in detail or "venue" in detail:
         return compose_reply(
             goal=(

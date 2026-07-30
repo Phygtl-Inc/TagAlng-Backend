@@ -5065,6 +5065,7 @@ def fetch_preview_events_on_block(
             .select("id, title, starts_at, has_time, venue_name, cohort_tags, host_id")
             .eq("block_id", block_id)
             .eq("status", "open")
+            .eq("is_test", False)  # QA fixtures never reach member-facing previews
             .gte("starts_at", now_iso)
             .order("starts_at")
             .limit(fetch_n)
