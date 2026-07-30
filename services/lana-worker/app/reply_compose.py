@@ -13,9 +13,9 @@ lingo constitution, so role/gender-aware address and the banned-lexicon rules
 apply to these turns exactly like chat turns.
 
 Language: when the session has a language, the reply is authored directly in
-it and the turn is marked ``_reply_localized`` so main.py's final-mile
-localizer doesn't pay a second call. Fallback strings stay English-canonical —
-the final-mile localizer renders those as before.
+it (better first-pass quality); main.py's final-mile localizer still renders
+every outbound reply unconditionally — no opt-out — so an in-language compose
+just makes that render a near no-op. Fallback strings stay English-canonical.
 """
 
 from __future__ import annotations
@@ -58,8 +58,7 @@ def compose_reply(
                     real counts, flow state). Keep them short and literal.
     fallback      — the previous hardcoded line; returned verbatim whenever
                     the LLM is unconfigured, disabled, or fails.
-    session_ctx   — session context; used for language and to stamp
-                    ``_reply_localized`` when composing in-language.
+    session_ctx   — session context; used for the session language.
     user_message  — the user's current message when the reply should engage
                     with their words (optional; becomes a fact).
     max_sentences — soft length cap passed to the prompt.
@@ -81,7 +80,6 @@ def compose_reply(
         if cache:
             hit = _STATIC_CACHE.get(cache_key)
             if hit:
-                _mark_localized(session_ctx, lang_norm)
                 return hit
 
         fact_lines = [str(f).strip() for f in (facts or []) if str(f or "").strip()]
@@ -124,16 +122,7 @@ def compose_reply(
             return fallback
         if cache:
             _STATIC_CACHE[cache_key] = msg
-        _mark_localized(session_ctx, lang_norm)
         return msg
     except Exception:  # noqa: BLE001 — the static line beats a failed turn
         _LOG.exception("reply_compose_failed (goal=%s)", goal[:80])
         return fallback
-
-
-def _mark_localized(session_ctx: dict[str, Any] | None, lang_norm: str) -> None:
-    """A composed reply is already in the session language — tell main.py's
-    final-mile localizer not to render it a second time. English needs no
-    render, so the flag only matters (and is only set) for non-EN sessions."""
-    if lang_norm != "en" and isinstance(session_ctx, dict):
-        session_ctx["_reply_localized"] = True

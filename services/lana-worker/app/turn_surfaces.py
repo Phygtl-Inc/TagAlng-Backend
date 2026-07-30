@@ -30,6 +30,10 @@ TURN_SCOPED_SURFACES = frozenset({
     # (policy_chip_msgs is NOT here: the next turn reads it to recognize a tap
     # on the policy's own chip, then the next policy turn re-stamps it.)
     "policy_chips",
+    # Empty peers-search offer pills ("Yes, notify me" / "Show everyone nearby").
+    # (peer_seek_offer_pending is NOT here: the next turn reads it to interpret
+    # the tap, then clears it with None — same split as policy_chip_msgs.)
+    "peer_seek_offer",
     # Per-turn signal to main.py's background claim extractor. Must NOT persist: a
     # prior peer-discovery turn (e.g. ZIP entry) set it True, and {**old, **new} merge
     # leaked that True into the identity turn — suppressing the claim-save so the user's

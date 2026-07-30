@@ -206,6 +206,30 @@ class TestHandleGroundingAnswer(unittest.TestCase):
         self.assertFalse(result["grounded"])
         note.assert_called_once_with("u1", "a1", "the little studio by Publix")
 
+    @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
+    @patch("app.circles_flow.note_ungrounded_detail")
+    @patch("app.circles_flow.ground_options")
+    def test_abandon_never_searches_or_keeps_detail(self, go, note, _cr) -> None:
+        # "none of these" fed to Places search returns arbitrary nearby spots —
+        # the abandon verdict must close the thread without a search and without
+        # storing the rejection as detail.
+        result = handle_grounding_answer("u1", self.GAP, "none of these", abandon=True)
+        self.assertIsNone(result["pending"])
+        self.assertFalse(result["grounded"])
+        self.assertEqual(result["options"], [])
+        go.assert_not_called()
+        note.assert_not_called()
+
+    @patch("app.circles_flow.ground_and_confirm",
+           return_value={"reply": "Locked in", "options": [], "pending": None, "grounded": True})
+    def test_chip_tap_wins_over_abandon(self, gac) -> None:
+        # A tap is deterministic — even a stray abandon verdict never blocks it.
+        result = handle_grounding_answer(
+            "u1", self.GAP, "It's OrangeTheory Narcoossee", abandon=True
+        )
+        self.assertTrue(result["grounded"])
+        gac.assert_called_once()
+
 
 class TestGroundAndConfirmAnnounces(unittest.TestCase):
     """Grounding is the moment the community is CREATED (place mandatory,
