@@ -61,7 +61,8 @@ class TestGroundAndConfirmBridge(unittest.TestCase):
             ctx = {"_grounding_offer_done": True}
             result = ground_and_confirm("u1", "aff1", "gpid", session_ctx=ctx)
         self.assertIsNone(result["offer"])
-        self.assertIn("Good to know your spot", result["reply"])
+        # Announce decision 2026-07-28: even the plain close says the save happened.
+        self.assertIn("saved to your communities", result["reply"])
 
     def test_tile_endpoint_path_has_no_offer(self, *_mocks) -> None:
         with patch("app.circles_flow._place_co_member_count", return_value=3):

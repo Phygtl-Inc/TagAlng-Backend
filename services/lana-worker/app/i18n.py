@@ -180,6 +180,41 @@ def normalize_lang_code(value: Any) -> str | None:
     return code if _LANG_CODE_RE.match(code) else None
 
 
+def lang_from_accept_language(header: str | None) -> str | None:
+    """Best language code from an Accept-Language header, or None.
+
+    The device locale already renders the app's own UI (buttons, labels), so it
+    is the natural seed for a session with no saved preference — otherwise a
+    guest whose typed turns are all taps / emails / OTP codes never gets a
+    language signal and every deterministic reply ships in English while the
+    surrounding UI speaks their language. Region subtags are dropped ("es-MX"
+    → "es"); live AI detection owns every turn after the seed."""
+    raw = str(header or "").strip()
+    if not raw:
+        return None
+    best: tuple[float, str] | None = None
+    for part in raw.split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        tag, _, params = piece.partition(";")
+        tag = tag.strip().lower()
+        if not tag or tag == "*":
+            continue
+        q = 1.0
+        params = params.strip()
+        if params.startswith("q="):
+            try:
+                q = float(params[2:])
+            except ValueError:
+                q = 0.0
+        if best is None or q > best[0]:  # earlier tags win ties
+            best = (q, tag)
+    if not best:
+        return None
+    return normalize_lang_code(best[1].split("-", 1)[0])
+
+
 def apply_ai_lang(session_ctx: dict[str, Any], lang: Any) -> None:
     """Apply the classifier's per-turn language verdict (AI-authoritative).
 
@@ -223,6 +258,24 @@ def localize_text(text: str, lang: str | None) -> str:
         return text  # LLM unconfigured — don't cache, stay deterministic
     _AI_RENDER_CACHE[cache_key] = rendered or text
     return rendered or text
+
+
+def finalize_reply_language(reply: str, session_ctx: dict[str, Any] | None) -> str:
+    """Final-mile render of an outbound reply into the session language —
+    ALWAYS, with no composer opt-out. The retired ``_reply_localized`` flag
+    let a composer vouch that its text was in-language without anyone checking
+    the text, and mixed English/Spanish replies shipped (QA 2026-07-30: an
+    English promise line inside a Spanish tip-seek reply). Rendering
+    already-in-language text is a cheap same-language rewrite, so the opt-out
+    bought latency at the cost of correctness. The legacy flag is cleared with
+    None (never popped — the session merge resurrects popped keys) so stale
+    stamps can't linger in stored contexts."""
+    if isinstance(session_ctx, dict):
+        session_ctx["_reply_localized"] = None
+    lang = session_lang(session_ctx)
+    if not lang or not reply:
+        return reply
+    return localize_text(reply, lang)
 
 
 def localize_labels(labels: list[str], lang: str | None) -> list[str]:

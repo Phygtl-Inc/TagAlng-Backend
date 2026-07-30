@@ -129,6 +129,71 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
         session_ctx[k] = None
 
 
+def _policy_rapport_reply(
+    *,
+    user_id: str,
+    session_id: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_message: str,
+    timer: Any,
+    rapport_question: str | None = None,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], Any] | None:
+    """Divert a rapport-thread answer's REPLY to the unified policy (decide_turn).
+
+    The rapport branch's bookkeeping (claim saved, gap closed) has already run by
+    the time this is called — the policy only authors what Lana says back, so one
+    voice (acknowledge → bridge → offer) owns every conversational turn instead of
+    the mini-model concierge. Guests included on purpose: a rapport answer is
+    exactly the conversational turn the policy exists for, and its chips route
+    through the normal pipeline next turn. Returns None — caller falls through to
+    the concierge fallback — when the policy is off, hands off, or fails.
+
+    QA 2026-07-29: the concierge answered these turns with the bridge policy
+    bypassed entirely — "English is my language of choice" got a hallucinated
+    "explore language learning" close instead of an app-move.
+    """
+    if decide_turn_mode() != "on":
+        return None
+    if session_ctx.get("event_host_active") or session_ctx.get("pending_confirmation"):
+        return None
+    from app.policy.decide import (
+        apply_defer, ask_streak, audit_decision, decide_turn, note_ask_streak,
+    )
+
+    # The message being answered IS a rapport ask (the tile/thread question),
+    # which the streak stamp never saw — count it so the policy knows it's
+    # already one personal question deep before asking another.
+    session_ctx["policy_ask_streak"] = max(ask_streak(session_ctx), 1)
+    with timer.stage("decide_turn"):
+        action = decide_turn(
+            user_id=user_id, session_ctx=session_ctx,
+            history=history, user_message=user_message,
+            # The tile question lives on the home screen, not in chat history —
+            # without it the policy can't tell which ask this message answers.
+            answering_question=rapport_question,
+        )
+    if action is None or action.kind == "handoff":
+        return None
+    apply_defer(session_ctx, action)
+    note_ask_streak(session_ctx, action)
+    audit_decision(
+        session_id=session_id, user_id=user_id,
+        user_message=user_message, action=action, shadow=False,
+    )
+    # The policy owns the thread from here — clear the rapport capture
+    # (None, never popped) so the merge can't resurrect it next turn.
+    _reset_rapport_state(session_ctx)
+    session_ctx["policy_chips"] = action.chips or None
+    session_ctx["policy_chip_msgs"] = [c["send"] for c in action.chips] or None
+    session_ctx["last_routing"] = action.routing_dict()
+    session_ctx["_orchestrator_turn"] = False
+    session_ctx["timing_ms"] = timer.to_dict()
+    reply = sanitize_assistant_message(action.utterance)
+    ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+    return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+
 def _grounding_turn_result(
     session_ctx: dict[str, Any], result: dict[str, Any], timer: Any
 ) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
@@ -954,7 +1019,9 @@ def run_lana_unified_pipeline(
     # owns (active_capture=rapport): re-classify the turn and RELEASE to normal routing on any pivot,
     # abandon, or unsafe (logout is caught above). Only a genuine getting-to-know-you answer
     # ("I usually run alone", "idk", "yes") stays and gets a concierge reply. The seed turn (first
-    # tile answer, rapport_answer set) never re-classifies — it always seeds the flow.
+    # tile answer, rapport_answer set) never re-classifies — it always seeds the flow. (One
+    # exception: a place-GROUNDING seed classifies unmatched free text once, below — its answer
+    # feeds a Places search, so a decline/pivot must be caught before it becomes a query.)
     if not isinstance(rapport, dict) and session_ctx.get("rapport_active"):
         from app.discovery_slots import discovery_slots_for_turn
 
@@ -1083,6 +1150,91 @@ def run_lana_unified_pipeline(
             else:
                 followup_q = str(session_ctx.get("rapport_followup_question") or "").strip()
                 rapport = {"gap_row_id": None, "question": followup_q or None}
+    # Circles: a place-grounding question ("which spot is it?") owns its seed turn — the
+    # answer is a place NAME to resolve against the map, not an identity fact for the claims
+    # extractor. Handled BEFORE the concierge block so a pivot can fall through to normal
+    # routing. A tile-chip tap grounds deterministically (never re-classified); any other
+    # text classifies ONCE with the tile question as context — the same three arms as the
+    # pending-chips turn above: abandon ("none of these") closes warmly, a confident pivot
+    # to a real request ("show me events") releases with the gap left open to re-ask later,
+    # and only a genuine place answer drives the Places search.
+    if isinstance(rapport, dict) and str(rapport.get("gap_row_id") or "").strip():
+        grounding_gap_id = str(rapport.get("gap_row_id")).strip()
+        grounding_gap = None
+        try:
+            from app.rapport_gaps import get_gap_row
+
+            candidate_row = get_gap_row(grounding_gap_id)
+            if candidate_row and candidate_row.get("affiliation_ref"):
+                grounding_gap = candidate_row
+        except Exception:  # noqa: BLE001 — fall back to the normal concierge path
+            logging.getLogger(__name__).exception("rapport_grounding_lookup_failed")
+        if grounding_gap:
+            from app.circles_flow import (
+                handle_grounding_answer,
+                match_grounding_candidate,
+            )
+            from app.discovery_slots import discovery_slots_for_turn
+
+            stored_opts = grounding_gap.get("grounding_options")
+            tapped = match_grounding_candidate(
+                stored_opts if isinstance(stored_opts, list) else None, user_message
+            )
+            abandon = False
+            release = False
+            if not tapped:
+                # The seed turn has no rapport_* ctx yet — stamp the tile's ask (plus
+                # the spots its chips offered) as the pending question so the
+                # classifier doesn't judge "none of these" context-blind. Every exit
+                # (_grounding_turn_result / the reset below) normalizes these keys.
+                tile_q = str(rapport.get("question") or "").strip()
+                if tile_q:
+                    opt_names = ", ".join(
+                        str(o.get("name") or "").strip()
+                        for o in (stored_opts if isinstance(stored_opts, list) else [])
+                        if isinstance(o, dict) and str(o.get("name") or "").strip()
+                    )
+                    session_ctx["rapport_active"] = True
+                    session_ctx["rapport_followup_question"] = (
+                        f"{tile_q} (offered place options: {opt_names})"
+                        if opt_names else tile_q
+                    )
+                rap_slots = discovery_slots_for_turn(
+                    session_ctx,
+                    user_message,
+                    routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+                    history=history,
+                    has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+                    has_identity=bool(session_ctx.get("identity_snippet")),
+                    phone_verified=phone_verified,
+                    timer=timer,
+                )
+                abandon = bool(isinstance(rap_slots, dict) and rap_slots.get("abandon"))
+                release = not abandon and _rapport_should_release(
+                    user_message, session_ctx, rap_slots
+                )
+            if release:
+                # Their real request drives normal routing (slots cached). The gap
+                # stays OPEN — they ignored the ask rather than engaging it, so the
+                # tile may try again later.
+                _reset_rapport_state(session_ctx)
+                rapport = None
+            else:
+                from app.rapport_gaps import mark_answered
+
+                try:
+                    mark_answered(grounding_gap_id)
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception("rapport_grounding_close_failed")
+                result = handle_grounding_answer(
+                    user_id,
+                    grounding_gap,
+                    user_message,
+                    session_ctx=session_ctx,
+                    abandon=abandon,
+                )
+                return _grounding_turn_result(session_ctx, result, timer)
+
     if isinstance(rapport, dict):
         from app.claims_persist import (
             latest_claim_id,
@@ -1093,33 +1245,6 @@ def run_lana_unified_pipeline(
 
         gap_row_id = str(rapport.get("gap_row_id") or "").strip()
         question = str(rapport.get("question") or "").strip()
-
-        # Circles: a place-grounding question ("which spot is it?") routes to the
-        # grounding flow, not the claims extractor — the answer is a place NAME to
-        # resolve against the map, not an identity fact to store. The gap closes
-        # regardless of how grounding ends (she engaged — never re-ask); a chip tap
-        # grounds outright, free text comes back as confirm chips.
-        if gap_row_id:
-            grounding_gap = None
-            try:
-                from app.rapport_gaps import get_gap_row
-
-                candidate_row = get_gap_row(gap_row_id)
-                if candidate_row and candidate_row.get("affiliation_ref"):
-                    grounding_gap = candidate_row
-            except Exception:  # noqa: BLE001 — fall back to the normal concierge path
-                logging.getLogger(__name__).exception("rapport_grounding_lookup_failed")
-            if grounding_gap:
-                from app.circles_flow import handle_grounding_answer
-
-                try:
-                    mark_answered(gap_row_id)
-                except Exception:  # noqa: BLE001
-                    logging.getLogger(__name__).exception("rapport_grounding_close_failed")
-                result = handle_grounding_answer(
-                    user_id, grounding_gap, user_message, session_ctx=session_ctx
-                )
-                return _grounding_turn_result(session_ctx, result, timer)
 
         claim_id: str | None = None
         saved_any = False
@@ -1139,6 +1264,18 @@ def run_lana_unified_pipeline(
                 mark_answered(gap_row_id, answer_claim_id=claim_id)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("rapport_answer_close_gap_failed")
+        # ONE VOICE owns the reply: with the unified policy live, the answer to a
+        # rapport-thread turn comes from decide_turn (acknowledge → bridge → offer) —
+        # the bookkeeping above (claim saved, gap closed) already happened, so the
+        # policy only has to talk. The concierge below stays as the fallback voice
+        # (policy off, handoff, or any failure) so this turn can never go silent.
+        policy_turn = _policy_rapport_reply(
+            user_id=user_id, session_id=session_id, session_ctx=session_ctx,
+            history=history, user_message=user_message, timer=timer,
+            rapport_question=question or None,
+        )
+        if policy_turn is not None:
+            return policy_turn
         # A tile answer is NOT fresh onboarding — reply via the concierge engine, which
         # acknowledges HER actual answer and asks one grounded follow-up (with tappable
         # chips). Never the heritage-first profile-intake engine, which re-asks covered
@@ -1486,7 +1623,7 @@ def run_lana_unified_pipeline(
             not in (session_ctx.get("policy_chip_msgs") or [])
         )
     ):
-        from app.policy.decide import apply_defer, audit_decision, decide_turn
+        from app.policy.decide import apply_defer, audit_decision, decide_turn, note_ask_streak
 
         with timer.stage("decide_turn"):
             _action = decide_turn(
@@ -1495,6 +1632,7 @@ def run_lana_unified_pipeline(
             )
         if _action is not None and _action.kind != "handoff":
             apply_defer(session_ctx, _action)
+            note_ask_streak(session_ctx, _action)
             audit_decision(
                 session_id=session_id, user_id=user_id,
                 user_message=user_message, action=_action, shadow=False,

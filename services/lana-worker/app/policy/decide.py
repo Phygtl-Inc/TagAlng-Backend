@@ -70,6 +70,26 @@ def _claims(user_id: str) -> list[dict[str, Any]]:
         return []
 
 
+_ASK_KINDS = ("ask_gap", "ground_place")
+
+
+def ask_streak(session_ctx: dict[str, Any]) -> int:
+    try:
+        return max(0, int(session_ctx.get("policy_ask_streak") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def note_ask_streak(session_ctx: dict[str, Any], action: NextAction) -> None:
+    """Annoyance-guard input: how many personal questions Lana has asked
+    back-to-back. ask_gap/ground_place extend the streak; anything else clears
+    it (with None, never popped — the session merge resurrects popped keys)."""
+    if action.kind in _ASK_KINDS:
+        session_ctx["policy_ask_streak"] = ask_streak(session_ctx) + 1
+    else:
+        session_ctx["policy_ask_streak"] = None
+
+
 def parse_next_action(data: Any) -> NextAction | None:
     """Validate the raw LLM object into a NextAction; None when unusable."""
     if not isinstance(data, dict):
@@ -111,6 +131,7 @@ def decide_turn(
     session_ctx: dict[str, Any],
     history: list[dict[str, Any]],
     user_message: str,
+    answering_question: str | None = None,
 ) -> NextAction | None:
     """One policy decision. None means 'no decision' — the caller falls
     through to the legacy path (same effect as kind=handoff)."""
@@ -128,6 +149,11 @@ def decide_turn(
         goals = candidate_goals(user_id, world, deferred_goal_ids=deferred)
         payload = {
             "message": str(user_message or "")[:1000],
+            # The rapport-tile question this message replies to. The tile lives on
+            # the home screen, NOT in chat — without this the policy can't tell
+            # which ask a "why are you asking?" refers to (QA 2026-07-29: it
+            # explained the name ask when the tile had asked about languages).
+            "answering_question": (str(answering_question or "").strip()[:300] or None),
             "recent_turns": _recent_turns(history),
             "conversation_summary": str(session_ctx.get("rolling_summary") or "") or None,
             "known_about_them": _claims(user_id),
@@ -136,6 +162,7 @@ def decide_turn(
             "available_capabilities": [
                 g["context"]["capability_id"] for g in goals if g["kind"] == "capability"
             ],
+            "consecutive_personal_asks": ask_streak(session_ctx),
             "session_language": session_ctx.get("lang") or "en",
         }
         data = llm_json(
@@ -222,6 +249,7 @@ def run_shadow(
         "deferred_goal_ids": list(session_ctx.get("deferred_goal_ids") or []),
         "rolling_summary": session_ctx.get("rolling_summary"),
         "lang": session_ctx.get("lang"),
+        "policy_ask_streak": session_ctx.get("policy_ask_streak"),
     }
     hist_snapshot = [dict(m) for m in history[-_RECENT_TURNS:]]
 

@@ -5,7 +5,9 @@ stride math). LLM and DB paths are exercised by shadow-run diffing, not here."""
 import unittest
 
 from app.lingo_guard import GuardResult, find_violations, naive_clean
-from app.policy.decide import NextAction, apply_defer, parse_next_action
+from app.policy.decide import (
+    NextAction, apply_defer, ask_streak, note_ask_streak, parse_next_action,
+)
 
 
 class TestLingoGuardRegex(unittest.TestCase):
@@ -112,6 +114,30 @@ class TestDeferBookkeeping(unittest.TestCase):
                                     defer_goal_id="g_new"))
         self.assertEqual(len(ctx["deferred_goal_ids"]), 10)
         self.assertEqual(ctx["deferred_goal_ids"][-1], "g_new")
+
+
+class TestAskStreak(unittest.TestCase):
+    """note_ask_streak — the don't-stack-asks annoyance-guard input."""
+
+    def test_ask_kinds_extend_the_streak(self) -> None:
+        ctx: dict = {}
+        note_ask_streak(ctx, NextAction(kind="ask_gap", utterance="Mornings or evenings?"))
+        self.assertEqual(ask_streak(ctx), 1)
+        note_ask_streak(ctx, NextAction(kind="ground_place", utterance="Which spot?"))
+        self.assertEqual(ask_streak(ctx), 2)
+
+    def test_non_ask_kinds_clear_with_none_not_pop(self) -> None:
+        ctx: dict = {"policy_ask_streak": 3}
+        note_ask_streak(ctx, NextAction(kind="reply", utterance="No worries."))
+        # cleared with None (never popped) — the session merge resurrects popped keys
+        self.assertIn("policy_ask_streak", ctx)
+        self.assertIsNone(ctx["policy_ask_streak"])
+        self.assertEqual(ask_streak(ctx), 0)
+
+    def test_ask_streak_survives_garbage(self) -> None:
+        self.assertEqual(ask_streak({"policy_ask_streak": "junk"}), 0)
+        self.assertEqual(ask_streak({"policy_ask_streak": -4}), 0)
+        self.assertEqual(ask_streak({}), 0)
 
 
 class TestGoalNormalization(unittest.TestCase):

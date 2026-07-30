@@ -21,7 +21,19 @@
       "Bash(git -C /Users/dev/Downloads/TagAlng-backend stash pop -q)",
       "Bash(echo \"exit:$?\")",
       "Bash(./scripts/db-push.sh dev *)",
-      "Bash(./scripts/deploy-lana-worker-prod.sh)"
+      "Bash(./scripts/deploy-lana-worker-prod.sh)",
+      "Bash(sed -n 591:602p messages/es.json)",
+      "Bash(sed -n 591:602p messages/pt-BR.json)",
+      "Bash(git reset *)",
+      "Bash(python3 -m py_compile app/lana_unified_pipeline.py app/rapport_reply.py)",
+      "Bash(python3 -m pytest tests/test_rapport.py tests/test_policy_decide.py -q)",
+      "Bash(.venv/bin/pytest tests/test_rapport.py tests/test_policy_decide.py -q)",
+      "Bash(.venv/bin/pytest tests/test_ui_intent.py::TestDeriveUiIntent::test_signup_phone -q)",
+      "Bash(.venv/bin/pytest tests/ -q --ignore=tests/test_policy_rapport_reply.py)",
+      "Bash(.venv/bin/pytest tests/test_policy_rapport_reply.py tests/test_rapport.py tests/test_policy_decide.py tests/test_claim_followup.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_policy_rapport_reply.py tests/test_policy_decide.py -q)",
+      "Bash(git log *)",
+      "Bash(.venv/bin/python -m pytest \"tests/test_claim_followup.py::TestRapportCaptureContext::test_no_question_still_covers_bare_answers\" -q)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations"

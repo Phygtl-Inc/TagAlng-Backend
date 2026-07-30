@@ -6,6 +6,27 @@ separate developer and is NOT in this drop — everything else backend is. The w
 "circle" is internal-only (§A.4 M7): user-facing copy names the place, never the term.
 Persona-neutral throughout: the specs say "mom", the product is for any user.
 
+## A community's place is MANDATORY (2026-07-28 product decision)
+
+Supersedes the "grounding optional" stance below wherever they conflict. A
+**community** — anything user-visible, matchable, or counted — is a
+`circle_affiliations` row with `status='confirmed'`, and confirmation requires a
+canonical place (DB check `circle_affiliations_confirmed_has_place`, migration
+`20260916`). Consequences:
+
+- `/lana/circles/add` **requires** `google_place_id` (400 `place_required`
+  otherwise) and creates the community grounded + confirmed in one step.
+- `/lana/circles/mine` returns **grounded rows only**. Ungrounded rows are
+  internal grounding candidates — chat-captured mentions and invite
+  self-confirms — that surface exclusively through Lana's "which spot is it?"
+  ask, never as communities. (FE note: the Communities panel's "pick the spot"
+  rows stop appearing; the panel shows real communities only.)
+- Chat capture therefore never silently creates a community: a mention parks a
+  candidate, Lana asks for the location (grounding ask), and only the user's
+  answer creates the community — with its place, announced.
+- The grounding confirm **always announces the save** ("{place} is saved to your
+  communities now") in every register variant — see the confirm table below.
+
 ## Deploy ordering (matters)
 
 1. `supabase/migrations/20260906120000_circles_places_phase_a.sql` — additive only
@@ -81,9 +102,12 @@ then exactly ONE state-aware offer chip. Implemented in
 
 | State (real reads, no extra LLM call) | Reply shape | Offer chip |
 |---|---|---|
-| ≥1 other confirmed member at the place | "Locked in — {place}. N of your neighbors call it their spot too — want an intro?" | `find_neighbors` (bridge rule 4 — intro only on a REAL count) |
-| nobody else confirmed yet (default) | "Locked in — {place}. Want to set up a {topic} get-together there you can share with your group?" | `host_meet` (rule 5/6 — create+invite is always-on, §D.2) |
-| offer already made this session | "Locked in — {place}. Good to know your spot." | none (annoyance guard) |
+| ≥1 other confirmed member at the place | "Done — {place} is saved to your communities now. N of your neighbors call it their spot too — want an intro?" | `find_neighbors` (bridge rule 4 — intro only on a REAL count) |
+| nobody else confirmed yet (default) | "Done — {place} is saved to your communities now. Want to set up a {topic} get-together there you can share with your group?" | `host_meet` (rule 5/6 — create+invite is always-on, §D.2) |
+| offer already made this session | "Done — {place} is saved to your communities now." | none (annoyance guard) |
+
+Every variant states the save — grounding is the moment the community is created
+(place mandatory), and a community must never be created silently.
 
 Hard register rules: never "on my radar" / "noted in my system" (vague promises);
 never claim people are waiting when the count is 0; approved forward-looking idiom
@@ -97,7 +121,8 @@ deterministically, a decline closes warmly with no re-pitch.
 - `POST /lana/circles/mine` → `{circles:[{id, circle_type, status, grounded,
   place_name, place_address, detail, member_count, active, added_at}]}`
   (own circles — always fully visible to the owner)
-- `POST /lana/circles/add` `{circle_type, detail?, google_place_id?}` — grounding optional
+- `POST /lana/circles/add` `{circle_type, detail?, google_place_id}` — place
+  REQUIRED (400 `place_required` without it); creates grounded + confirmed
 - `POST /lana/circles/update` `{affiliation_id, detail?}`
 - `POST /lana/circles/remove` `{affiliation_id}` — soft-delete; drops from matching immediately
 - `POST /lana/circles/ground-options` `{affiliation_id, query?}` →

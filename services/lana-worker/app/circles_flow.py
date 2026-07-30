@@ -772,6 +772,7 @@ def handle_grounding_answer(
     answer_text: str,
     *,
     session_ctx: dict[str, Any] | None = None,
+    abandon: bool = False,
 ) -> dict[str, Any]:
     """First reply to a grounding question from the tile.
 
@@ -780,6 +781,8 @@ def handle_grounding_answer(
     None when the thread closed this turn. The gap itself is closed by the caller
     (she engaged — never re-ask), independent of whether grounding completed.
     NEVER auto-grounds from free text: their words drive a search, a tap confirms.
+    `abandon` is the caller's classifier verdict that the reply DECLINES the ask
+    ("none of these", "skip that") — close warmly, never search with those words.
     """
     affiliation_id = str(gap_row.get("affiliation_ref") or "")
     answer = str(answer_text or "").strip()
@@ -792,6 +795,25 @@ def handle_grounding_answer(
         return ground_and_confirm(
             user_id, affiliation_id, str(tapped["google_place_id"]), session_ctx=session_ctx
         )
+
+    if abandon:
+        # A rejection of the offered chips, not a place name: feeding it to Places
+        # search returns arbitrary nearby spots ("none of these" → random cafés),
+        # and it isn't detail worth keeping either.
+        return {
+            "reply": _compose_grounding_reply(
+                goal=(
+                    "They passed on pinning down the spot — close warmly, one "
+                    "sentence, no question. Never push for the place again."
+                ),
+                facts=[f'They said: "{answer[:120]}"'],
+                fallback="No worries — we can leave that one.",
+                session_ctx=session_ctx,
+            ),
+            "options": [],
+            "pending": None,
+            "grounded": False,
+        }
 
     affiliation = _own_affiliation(user_id, affiliation_id)
     close = {

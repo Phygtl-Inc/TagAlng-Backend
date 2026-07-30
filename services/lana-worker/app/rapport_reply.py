@@ -27,7 +27,11 @@ _ACTION_KINDS = frozenset(
 _FALLBACK_REPLY = "Love that — I've saved it to your profile. Tell me more anytime."
 
 CONCIERGE_PROMPT = """You are Lana, a warm neighborhood concierge in a block-based neighborhood app \
-where neighbors connect with nearby neighbors. A neighbor just answered your "By the way…" home-screen question, and \
+where neighbors connect with nearby neighbors. Everything the app does is LOCAL and NEIGHBORLY: meeting \
+nearby neighbors, local events and meetups, hosting a meet, and trading local tips. You are NOT a \
+language-learning app, a tutoring service, or a general-purpose chatbot — never describe yourself as one, \
+and never offer to "chat more" or "explore" a TOPIC as if talking about it were something the app does. \
+A neighbor just answered your "By the way…" home-screen question, and \
 their answer is ALREADY SAVED to their profile. Write what you say back.
 
 Her answer ALREADY FILLED the gap you asked about — the goal is done. You are NOT a chatbot that keeps \
@@ -229,11 +233,15 @@ def rapport_concierge_reply(
     user_payload = "\n".join(context_lines)
 
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, router_model
+        # Synth-class model on purpose: the mini router-class models can't hold this
+        # prompt's constraint set (they parrot the topic into an app purpose and emit
+        # the banned passive "I'm here whenever…" close — QA 2026-07-29). One
+        # low-volume call per claim, so the latency/cost delta is negligible.
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
 
         if llm_configured():
             data = llm_json(
-                model=router_model(),
+                model=synthesizer_model(),
                 system=CONCIERGE_PROMPT,
                 user_payload=user_payload,
                 max_tokens=512,

@@ -699,7 +699,11 @@ def format_attr_peers_reply(
                 goal=(
                     "Tell the user gently that no neighbor nearby matches everything "
                     "they asked for yet, and share the partial matches that do exist "
-                    "exactly as given."
+                    "exactly as given. Then offer the two real options: you can "
+                    "notify them the moment a full match joins (the pill under your "
+                    "message says 'Yes, notify me'), or widen the search — show "
+                    "neighbors nearby even without that exact match (the pill says "
+                    "'Show everyone nearby')."
                 ),
                 facts=[
                     f'What they searched for: "{filter_text}"',
@@ -707,20 +711,29 @@ def format_attr_peers_reply(
                 ],
                 fallback=(
                     f"No one near you matches all of \"{filter_text}\" yet. "
-                    f"{partial_summary}"
+                    f"{partial_summary} I can notify you when a full match joins — "
+                    "or widen the search and show everyone nearby."
                 ),
             )
         # Search-first, then offer the broadcast — mirrors the empty activities lane.
+        # Both options must survive in the copy because the pills under this message
+        # say exactly that (ui_actions.peer_seek_offer_actions); the tap is read by
+        # discovery_route._try_peer_seek_offer_reply_turn.
         return compose_reply(
             goal=(
                 "Tell the user you don't see neighbors matching their search nearby "
-                "yet, and offer to keep an ear out and text them when one joins — "
-                "or suggest trying a broader description."
+                "yet. Offer the two real options: you can keep listening and notify "
+                "them the moment a matching neighbor joins (the pill under your "
+                "message says 'Yes, notify me'), or you can widen the search — "
+                "meaning you drop their specific filter and show neighbors nearby "
+                "anyway (the pill says 'Show everyone nearby'). Never invent or "
+                "promise neighbors who don't exist."
             ),
             facts=[f'What they searched for: "{filter_text}"'],
             fallback=(
                 f"I don't see neighbors matching \"{filter_text}\" near you yet. "
-                "Want me to keep an ear out and text you when one joins — or try a broader description?"
+                "I can notify you the moment someone like that joins — or widen the "
+                "search and show everyone nearby."
             ),
         )
     # The cards carry names + shared traits — the text stays to the count + next step.

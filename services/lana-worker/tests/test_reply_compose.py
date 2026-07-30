@@ -2,8 +2,10 @@
 
 The contract under test: the fallback string is returned verbatim whenever the
 LLM is unconfigured, disabled via LANA_AI_REPLIES, or fails; a successful
-compose returns the model text, honors the static cache only when asked, and
-stamps _reply_localized only for non-English sessions."""
+compose returns the model text and honors the static cache only when asked.
+Composers never stamp _reply_localized — the final-mile localizer in main.py
+renders every outbound reply unconditionally (the trust-based opt-out shipped
+mixed-language replies, QA 2026-07-30)."""
 
 import os
 import unittest
@@ -95,28 +97,27 @@ class TestLocalization(unittest.TestCase):
     def setUp(self) -> None:
         rc._STATIC_CACHE.clear()
 
-    def test_non_english_session_marks_localized(self) -> None:
+    def test_non_english_session_composes_in_language(self) -> None:
         ctx = {"lang": "es"}
         with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
             "app.orchestrator.llm.llm_json", return_value={"message": "¡Hola!"}
-        ):
+        ) as llm:
             out = compose_reply(goal="Greet.", fallback="Hi.", session_ctx=ctx)
         self.assertEqual(out, "¡Hola!")
-        self.assertTrue(ctx.get("_reply_localized"))
+        self.assertIn("Spanish", llm.call_args.kwargs["system"])
 
-    def test_english_session_does_not_mark_localized(self) -> None:
-        ctx = {"lang": "en"}
-        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
-            "app.orchestrator.llm.llm_json", return_value={"message": "Hey!"}
-        ):
-            compose_reply(goal="Greet.", fallback="Hi.", session_ctx=ctx)
-        self.assertNotIn("_reply_localized", ctx)
-
-    def test_fallback_never_marks_localized(self) -> None:
-        ctx = {"lang": "es"}
-        with patch("app.orchestrator.llm.llm_configured", return_value=False):
-            compose_reply(goal="Greet.", fallback="Hi.", session_ctx=ctx)
-        self.assertNotIn("_reply_localized", ctx)
+    def test_compose_never_stamps_reply_localized(self) -> None:
+        # The final-mile localizer renders every reply; a composer stamping
+        # the legacy opt-out would re-open the mixed-language leak.
+        for configured in (True, False):
+            ctx = {"lang": "es"}
+            with patch(
+                "app.orchestrator.llm.llm_configured", return_value=configured
+            ), patch(
+                "app.orchestrator.llm.llm_json", return_value={"message": "¡Hola!"}
+            ):
+                compose_reply(goal="Greet.", fallback="Hi.", session_ctx=ctx)
+            self.assertNotIn("_reply_localized", ctx)
 
 
 if __name__ == "__main__":

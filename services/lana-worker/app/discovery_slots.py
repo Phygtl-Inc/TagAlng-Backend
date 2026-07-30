@@ -499,6 +499,9 @@ _SYSTEM = (
     "LANGUAGE — set lang to the ISO 639-1 code of the language the LATEST USER MESSAGE is written "
     "in ('en', 'es', 'pt', 'ur', 'hi', ...), whatever language that is. Report what you SEE: a full "
     "sentence in English after non-English turns IS lang='en' (users code-switch; Lana follows). "
+    "SCRIPT IS NOT LANGUAGE: romanized text is still its language — Roman Urdu/Hindi in Latin "
+    "letters ('bht achy, or kuch?', 'kya haal hai', 'theek hai yaar') is lang='ur'/'hi', NOT 'en'. "
+    "English requires English WORDS, not just the Latin alphabet. "
     "When the message is too short or language-ambiguous to tell (a ZIP code, a name, a number, "
     "'ok', an emoji, a chip label), set lang=null — never guess from history. "
     "Use settings.change_language (goal=chat) when the user wants a language as their DEFAULT / "
@@ -518,7 +521,11 @@ _SYSTEM = (
     "while Lana works on this turn. label ≤ 6 words, no trailing ellipsis/period; detail = one "
     "short supporting phrase ≤ 12 words. Ground it in the USER'S OWN ask — name their thing "
     "('Finding FIFA neighbors', 'Setting up your coffee morning', 'Saving your rain-boots ask'), "
-    "never a generic 'Processing request'. Write it in the language of the latest user message. "
+    "never a generic 'Processing request'. Write it in the SAME LANGUAGE you set in lang — an Urdu "
+    "turn gets an Urdu progress line ('Aap ke parosi dhoond rahi hoon'), Spanish gets Spanish "
+    "('Buscando vecinos futboleros'); romanized Urdu/Hindi input gets a romanized line back. When "
+    "lang is null (message too short to tell), write it in conversation_lang from the context "
+    "block — English ONLY when the conversation is actually in English. "
     "TRUTHFUL ONLY: describe what this turn actually does (understanding the message, searching "
     "neighbors/events/places, saving their ask, setting up their event, writing back) — never "
     "promise results or claim an action not taken. Warm, concrete, Lana's voice, no exclamation marks."
@@ -815,7 +822,12 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "naming WHERE/WHAT they do it describes THEMSELVES, it does not ask you to find one "
             "('I usually run alone', 'idk', 'both', 'yes please' likewise). Only an explicit REQUEST "
             "to FIND/SHOW/RECOMMEND/HOST/GET something ('find me a cricket ground', 'any grounds "
-            "nearby?', 'recommend a cafe') is a PIVOT — classify it fresh so it leaves rapport"
+            "nearby?', 'recommend a cafe') is a PIVOT — classify it fresh so it leaves rapport. "
+            "EXCEPTION: when Lana's pending question offered candidate options (place chips) and "
+            "the reply REJECTS them without naming an alternative ('none of these', 'neither', "
+            "'nope, not those', 'it's not any of them'), that is abandon=true — they are declining "
+            "the options, not answering with one. A reply that rejects them but NAMES a different "
+            "place ('no, it's the one by Publix') is a normal answer (goal=chat, abandon=false)"
         )
     if session_ctx.get("look_meet_active"):
         return (
@@ -864,6 +876,9 @@ def _discovery_slot_payload(
         if isinstance(offers, list):
             lang_pref_offer = " or ".join(str(o) for o in offers if str(o or "").strip())
     lang_pref_offer = lang_pref_offer or "none"
+    # The session's current language (AI-detected on prior turns) — the progress
+    # line's fallback when the latest message is too short to carry a language.
+    conversation_lang = str(sc.get("lang") or "").strip().lower() or "en"
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"
@@ -872,7 +887,8 @@ def _discovery_slot_payload(
         f"has_profile_photo: {has_profile_photo}\n"
         f"session_active_intent: {active_intent}\n"
         f"active_capture: {active_capture}\n"
-        f"lang_pref_offer: {lang_pref_offer}\n\n"
+        f"lang_pref_offer: {lang_pref_offer}\n"
+        f"conversation_lang: {conversation_lang}\n\n"
         "RECENT TURNS:\n"
         f"{_format_history(history)}\n\n"
         f"LATEST USER MESSAGE:\n{text}\n\n"
@@ -909,7 +925,11 @@ def _discovery_slot_payload(
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "abandon": true|false,\n'
         '  "declined_slot": "zip"|"identity"|"display_name"|null,\n'
-        '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous",\n'
+        '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous. '
+        "Judge by words not script (a language typed in Latin letters is still that language). Report a language DIFFERENT "
+        "from conversation_lang only on a genuine switch — the person now writing sentences in another language. Bare app "
+        "commands or borrowed words inside an established conversation (signup, login, ok, cancel, yes — normal "
+        'code-switching) are NOT a switch: return null and let conversation_lang stand",\n'
         '  "set_preferred_lang": "ISO code ONLY when the user wants that language as their default (settings.change_language), else null",\n'
         '  "confidence": 0.0-1.0,\n'
         '  "progress": [{"label": "thinking-status line ≤6 words, grounded in the user\'s ask", '

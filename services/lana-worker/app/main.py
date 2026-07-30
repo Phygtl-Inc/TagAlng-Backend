@@ -56,7 +56,13 @@ from app.profile_intake import (
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
-from app.i18n import localize_labels, localize_text, session_lang
+from app.i18n import (
+    finalize_reply_language,
+    lang_from_accept_language,
+    localize_labels,
+    localize_text,
+    session_lang,
+)
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lang_pref import (
     get_user_preferred_language,
@@ -1064,6 +1070,7 @@ def _profile_context_pack(
 def create_lana_session(
     body: CreateSessionRequest,
     authorization: str | None = Header(default=None),
+    accept_language: str | None = Header(default=None),
 ):
     _vertex_required()
     auth = verify_auth(authorization)
@@ -1258,10 +1265,15 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
-        if purpose == "lana" and not auth.is_anonymous:
+        if purpose == "lana":
             # The saved preference decides how the conversation STARTS — the
-            # opening greets in it. Live detection owns every turn after.
-            pref = get_user_preferred_language(auth.user_id)
+            # opening greets in it. Guests have no saved row, so their device
+            # locale (Accept-Language — the same signal rendering the app's own
+            # UI in their language) is the preference; same fallback for a
+            # signed-in user who never saved one. Live detection owns every
+            # turn after.
+            pref = None if auth.is_anonymous else get_user_preferred_language(auth.user_id)
+            pref = pref or lang_from_accept_language(accept_language)
             if pref:
                 seed_session_language(session_ctx, pref)
                 effective_lang = session_lang(session_ctx)
@@ -1328,6 +1340,7 @@ def _run_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None,
     emit: Callable[[str, str | None], None] | None = None,
+    accept_language: str | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
@@ -1361,6 +1374,14 @@ def _run_lana_message(
         history = list_messages(session_id)
 
     session_ctx_in = dict(session.get("context") or {})
+    # Sessions opened before any language signal (guest funnels: every turn a tap,
+    # an email, an OTP) would ship deterministic replies in English forever — the
+    # final-mile localizer has no language to render into. Seed once from the
+    # device locale; any AI verdict or saved preference already present wins.
+    if "lang" not in session_ctx_in and "preferred_lang" not in session_ctx_in:
+        device_lang = lang_from_accept_language(accept_language)
+        if device_lang:
+            seed_session_language(session_ctx_in, device_lang)
     # Lingo §3.3/§4: the inferred household role + grammatical gender ride along on
     # every turn so composers can address the user correctly ("your grandkids",
     # bienvenido/bienvenida). Free — verify_auth already loaded the users row.
@@ -1529,17 +1550,12 @@ def _run_lana_message(
             timing_ms = timer.to_dict()
             orch_used = False
 
-        # Final-mile localization: deterministic replies (and LLM composes that
-        # run without a language directive) are authored in English. Render the
-        # reply in the session language here — one choke point instead of a
-        # per-string fix across every flow. The synthesizer marks its replies
-        # already-localized, so the main conversational path never pays a
-        # second model call. Pop unconditionally so the flag never persists.
-        _already_localized = bool(session_ctx.pop("_reply_localized", False))
-        _reply_lang = session_lang(session_ctx)
-        if _reply_lang and reply and not _already_localized:
-            with timer.stage("localize_reply"):
-                reply = localize_text(reply, _reply_lang)
+        # Final-mile localization: EVERY reply renders into the session
+        # language at this one choke point — composer opt-outs are gone. The
+        # old `_reply_localized` stamp let a composer vouch for text nobody
+        # verified, and mixed English/Spanish replies shipped (QA 2026-07-30).
+        with timer.stage("localize_reply"):
+            reply = finalize_reply_language(reply, session_ctx)
 
         # Final-mile lingo guard: EVERY reply from every composer passes here, so
         # this one check makes the constitution's banned lexicon unshippable —
@@ -1770,9 +1786,13 @@ def send_lana_message(
     body: SendMessageRequest,
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
+    accept_language: str | None = Header(default=None),
 ):
     """Blocking turn — returns the full SendMessageResponse as one JSON body."""
-    return _run_lana_message(session_id, body, background_tasks, authorization)
+    return _run_lana_message(
+        session_id, body, background_tasks, authorization,
+        accept_language=accept_language,
+    )
 
 
 def _sse_frame(obj: Any) -> str:
@@ -1785,6 +1805,7 @@ def stream_lana_message(
     body: SendMessageRequest,
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
+    accept_language: str | None = Header(default=None),
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
@@ -1807,7 +1828,8 @@ def stream_lana_message(
     def worker() -> None:
         try:
             resp = _run_lana_message(
-                session_id, body, background_tasks, authorization, emit=emit
+                session_id, body, background_tasks, authorization, emit=emit,
+                accept_language=accept_language,
             )
             events.put(("result", resp))
         except HTTPException as exc:

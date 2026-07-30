@@ -1836,9 +1836,10 @@ def _try_layer1_intent_turn(
                 user_jwt,
                 parse_claim_filters(filter_text, slots),
             )
+        display_filter = attr_display_filter(filter_text, slots)
         reply = format_attr_peers_reply(
             peers,
-            filter_text=attr_display_filter(filter_text, slots),
+            filter_text=display_filter,
             partial_summary=partial_summary,
         )
         peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
@@ -1852,6 +1853,8 @@ def _try_layer1_intent_turn(
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
         ctx["skip_claims_background_extract"] = True
         ctx.pop("activity_previews", None)
+        if not peers:
+            _stamp_peer_seek_offer(ctx, display_filter)
         return reply, ctx, ctx["last_routing"], peer_rows
 
     if linear == "settings.change_zip":
@@ -1905,12 +1908,9 @@ def _try_layer1_intent_turn(
             active_intent="help.what_can_you_do",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_capabilities")
-        reply, ai_authored = _compose_help_reply(
+        reply, _ai_authored = _compose_help_reply(
             "what", msg, _session_lang(session_ctx), history=history
         )
-        if ai_authored:
-            # Composed under the language directive — skip the final-mile re-render.
-            ctx["_reply_localized"] = True
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "help.who_are_you":
@@ -1922,11 +1922,9 @@ def _try_layer1_intent_turn(
             active_intent="help.who_are_you",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
-        reply, ai_authored = _compose_help_reply(
+        reply, _ai_authored = _compose_help_reply(
             "who", msg, _session_lang(session_ctx), history=history
         )
-        if ai_authored:
-            ctx["_reply_localized"] = True
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "tier.respond_nudge":
@@ -2438,6 +2436,122 @@ def _try_peer_trait_question_turn(
     return reply, ctx, ctx["last_routing"], ctx["peer_matches"]
 
 
+# Tap replies to the empty-peers seek offer (pills in ui_actions.peer_seek_offer_actions).
+# Vocabulary mirrors activity_browse's accept/widen so typed replies work too; matching is
+# capped to short messages so a long unrelated sentence containing "yes" is never swallowed.
+_PEER_SEEK_ACCEPT_RE = re.compile(
+    r"\b(yes|yeah|yep|yup|sure|ok(?:ay)?|please|do it|go ahead|sounds good|listen|"
+    r"text me|notify me|let me know)\b",
+    re.IGNORECASE,
+)
+_PEER_SEEK_WIDEN_RE = re.compile(
+    r"\b(widen|broaden|wider|expand|everyone|show all|everything|anyone nearby)\b",
+    re.IGNORECASE,
+)
+_PEER_SEEK_TAP_MAX_LEN = 60
+
+
+def _stamp_peer_seek_offer(ctx: dict[str, Any], display_filter: str) -> None:
+    """Arm the one-turn 'notify me / widen' offer under an empty peers search.
+    peer_seek_offer renders the pills (turn-scoped surface); the _pending copy is
+    what the NEXT turn reads to interpret the tap (cleared with None, never pop)."""
+    ctx["peer_seek_offer"] = {"filter": display_filter}
+    ctx["peer_seek_offer_pending"] = {"filter": display_filter}
+
+
+def _try_peer_seek_offer_reply_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    user_id: str | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Reply to the offer under an empty peers search. The offer is one-turn:
+    whatever comes next consumes it. Accept → save a seek signal so the "I'll
+    notify you" promise is real (same machinery as the browse lane's 'listen for
+    me'); widen → drop the attr filter and show neighbors nearby on their own
+    claims; anything else → disarm and fall through to normal routing."""
+    pending = session_ctx.get("peer_seek_offer_pending")
+    if not isinstance(pending, dict):
+        return None
+    # None, not pop — the session-ctx merge resurrects popped keys.
+    session_ctx["peer_seek_offer_pending"] = None
+    msg_s = str(msg or "").strip()
+    if len(msg_s) > _PEER_SEEK_TAP_MAX_LEN:
+        return None
+    widen = bool(_PEER_SEEK_WIDEN_RE.search(msg_s))
+    accept = bool(_PEER_SEEK_ACCEPT_RE.search(msg_s)) and not widen
+    if not accept and not widen:
+        return None
+    filter_text = str(pending.get("filter") or "").strip()
+    block_id = _resolve_block_id_for_turn(
+        session_ctx=session_ctx,
+        home_block_id=home_block_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+    )
+
+    if accept:
+        from app.look_meet import start_meet_seek_from_interest
+
+        zip_code = (
+            str(session_ctx.get("zip") or session_ctx.get("zip_code") or "").strip() or None
+        )
+        reply = start_meet_seek_from_interest(
+            interest=filter_text or "neighbors like you",
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            block_id=block_id,
+            zip_code=zip_code,
+        )
+        ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+        # _routing_ctx cleared the turn surfaces — re-stamp the saved-card flag the
+        # seek helper just set so the FE still shows the confirmation card.
+        ctx["look_meet_saved_now"] = session_ctx.get("look_meet_saved_now")
+        ctx["peer_seek_offer_pending"] = None
+        ctx["last_routing"] = _discovery_routing_stub("listening", "peer_seek_saved")
+        return reply, ctx, ctx["last_routing"], []
+
+    # Widen: the filter is gone — show neighbors nearby (their own claim match first,
+    # block preview as fallback), exactly what the pill label promised.
+    peers: list[dict[str, Any]] = []
+    if block_id:
+        try:
+            peers = _fetch_verified_peer_matches(
+                user_jwt, user_id=user_id, block_id=block_id, limit=5
+            )
+        except Exception:  # noqa: BLE001
+            peers = []
+    if peers:
+        reply = format_peer_matches(peers)
+    else:
+        if block_id:
+            peers = fetch_preview_peers_on_block(
+                block_id,
+                limit=3,
+                include_peer_ids=phone_verified,
+                exclude_user_id=user_id,
+            )
+        from app.i18n import session_lang as _session_lang
+
+        reply = format_preview_message(
+            peers,
+            session_ctx.get("preview_block_label"),
+            phone_verified=phone_verified,
+            lang=_session_lang(session_ctx),
+        )
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=PHASE_PREVIEW,
+        preview_block_id=block_id,
+    )
+    ctx["peer_seek_offer_pending"] = None
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "peer_seek_widened")
+    return reply, ctx, ctx["last_routing"], peers
+
+
 def _try_attr_refine_turn(
     *,
     msg: str,
@@ -2484,9 +2598,10 @@ def _try_attr_refine_turn(
             user_jwt,
             parse_claim_filters(filter_text, slots),
         )
+    display_filter = attr_display_filter(filter_text, slots)
     reply = format_attr_peers_reply(
         peers,
-        filter_text=attr_display_filter(filter_text, slots),
+        filter_text=display_filter,
         partial_summary=partial_summary,
     )
     peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
@@ -2500,6 +2615,8 @@ def _try_attr_refine_turn(
     ctx["peer_matches"] = peer_rows
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
     ctx.pop("activity_previews", None)
+    if not peers:
+        _stamp_peer_seek_offer(ctx, display_filter)
     return reply, ctx, ctx["last_routing"], peer_rows
 
 
@@ -6607,6 +6724,23 @@ def handle_discovery_turn(
 
     if discovery_ai_enabled() and slots:
         enriched_slots = enrich_slots(dict(slots), msg=msg)
+
+        # Tap on the empty-peers seek offer ("Yes, notify me" / "Show everyone nearby")
+        # — read it BEFORE the signal lane so the accept can't be captured as a fresh
+        # signal; a non-tap reply just disarms the offer and falls through.
+        seek_offer_turn = _try_peer_seek_offer_reply_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            user_id=user_id,
+        )
+        if seek_offer_turn is not None:
+            reply, ctx, routing, peers = seek_offer_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
         signal_turn = _try_signal_lane_turn(
             msg=msg,
             slots=enriched_slots,
