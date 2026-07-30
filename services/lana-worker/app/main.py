@@ -1068,18 +1068,19 @@ def _profile_context_pack(
 
 @app.post("/lana/sessions", response_model=CreateSessionResponse)
 def create_lana_session(
-    body: CreateSessionRequest,
+    body: CreateSessionRequest | None = None,
     authorization: str | None = Header(default=None),
     accept_language: str | None = Header(default=None),
 ):
     _vertex_required()
+    body = body or CreateSessionRequest()
     auth = verify_auth(authorization)
     require_home_block_for_purpose(auth, body.purpose)
 
     purpose = body.purpose
     try:
         session, resumed = create_session(
-            auth.user_id, purpose, force_new=body.force_new
+            auth.user_id, purpose, force_new=body.fresh or body.force_new
         )
         session_id = str(session["id"])
         if resumed:

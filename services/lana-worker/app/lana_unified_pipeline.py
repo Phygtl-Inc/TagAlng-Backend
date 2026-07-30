@@ -992,6 +992,10 @@ def run_lana_unified_pipeline(
         **session_ctx,
         "phone_verified": phone_verified,
         "unified_mode": True,
+        # Source-session attribution for anything a turn persists outside this session's
+        # own row (e.g. the pending_event_drafts stash) — drafts are keyed per session,
+        # never per user, so concurrent sessions of one account can't bleed.
+        "_session_id": session_id,
     }
     # Language mirroring (QA 2026-07-08: Brazilian moms got English). Detect once per
     # turn BEFORE any gate can answer — the sticky lanes and discovery return early, so

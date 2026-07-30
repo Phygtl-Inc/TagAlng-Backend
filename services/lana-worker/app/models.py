@@ -387,6 +387,10 @@ class PlaceSearchResponse(BaseModel):
 class CreateSessionRequest(BaseModel):
     purpose: Literal["lana", "profile_intake", "event_draft"] = "lana"
     force_new: bool = False
+    # Client "New Ask": archive the caller's current active session server-side and start
+    # clean. Alias of force_new (which the login-reset flow already sends); either forces
+    # a new session. Default (no body / false) keeps resume-active behavior.
+    fresh: bool = False
 
 
 class CreateSessionResponse(BaseModel):
