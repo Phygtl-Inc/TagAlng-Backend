@@ -1,4 +1,4 @@
-"""Language preference: seeding, AI lang verdicts, and the divergence nudge.
+"""Language preference: seeding, AI lang verdicts, and the divergence auto-switch.
 
 No LLM is configured under test, so every AI-composed line falls back to the
 t() strings deterministically — the logic under test is the state machine.
@@ -63,75 +63,85 @@ class TestSeedSessionLanguage(unittest.TestCase):
         self.assertEqual(ctx, {})
 
 
-class TestPostTurnNudge(unittest.TestCase):
-    def _turn(self, ctx: dict, *, msg: str = "hello there", reply: str = "Hi!") -> str:
+class TestPostTurnAutoSwitch(unittest.TestCase):
+    def _turn(
+        self,
+        ctx: dict,
+        *,
+        msg: str = "hello there",
+        reply: str = "Hi!",
+        user_id: str | None = "u1",
+        is_anonymous: bool = False,
+    ) -> str:
         return language_preference_post_turn(
-            user_id="u1",
+            user_id=user_id,
             user_message=msg,
             session_ctx=ctx,
             reply=reply,
-            is_anonymous=False,
+            is_anonymous=is_anonymous,
         )
 
-    def test_anonymous_untouched(self) -> None:
+    def test_no_user_id_untouched(self) -> None:
         ctx: dict = {"preferred_lang": "ur", "lang": "en"}
-        out = language_preference_post_turn(
-            user_id=None,
-            user_message="hi",
-            session_ctx=ctx,
-            reply="Hi!",
-            is_anonymous=True,
-        )
+        out = self._turn(ctx, msg="hi", user_id=None, is_anonymous=True)
         self.assertEqual(out, "Hi!")
         self.assertNotIn("lang_divergence_count", ctx)
 
-    @patch("app.lang_pref._mark_nudged")
-    @patch("app.lang_pref._nudge_allowed_by_cooldown", return_value=True)
-    def test_nudge_after_three_divergent_turns(self, _cool, mark) -> None:
+    @patch("app.lang_pref.set_user_preferred_language", return_value=True)
+    def test_auto_switch_after_two_divergent_turns(self, save) -> None:
         ctx: dict = {"preferred_lang": "ur", "lang": "en"}
         out1 = self._turn(ctx)
-        out2 = self._turn(ctx)
-        self.assertEqual(out1, "Hi!")  # turns 1-2: no nudge yet
-        self.assertEqual(out2, "Hi!")
-        out3 = self._turn(ctx)
-        expected = t("lang.nudge_offer", "en", new_name="English", old_name="Urdu")
-        self.assertIn(expected, out3)
-        self.assertEqual(ctx["lang_nudge_pending"], "en")
-        mark.assert_called_once_with("u1")
+        self.assertEqual(out1, "Hi!")  # turn 1: streak only, nothing persists
+        save.assert_not_called()
+        out2 = self._turn(ctx)  # turn 2: the preference follows the user
+        save.assert_called_once_with("u1", "en")
+        self.assertIn(t("lang.pref_saved", "en", lang_name="English"), out2)
+        self.assertEqual(ctx["preferred_lang"], "en")
+        self.assertEqual(ctx["lang_divergence_count"], 0)
+        out3 = self._turn(ctx)  # preference now matches — no re-save, no spam
+        self.assertEqual(out3, "Hi!")
+        save.assert_called_once()
 
-    @patch("app.lang_pref._mark_nudged")
-    @patch("app.lang_pref._nudge_allowed_by_cooldown", return_value=True)
-    def test_matching_turn_resets_divergence(self, _cool, _mark) -> None:
+    @patch("app.lang_pref.set_user_preferred_language", return_value=True)
+    def test_matching_turn_resets_streak(self, save) -> None:
         ctx: dict = {"preferred_lang": "ur", "lang": "en"}
-        self._turn(ctx)
         self._turn(ctx)
         ctx["lang"] = "ur"  # she writes Urdu again — streak resets
         self._turn(ctx)
         self.assertEqual(ctx["lang_divergence_count"], 0)
-        self.assertNotIn("lang_nudge_pending", ctx)
+        ctx["lang"] = "en"  # one English turn after the reset — still one short
+        self._turn(ctx)
+        save.assert_not_called()
 
-    @patch("app.lang_pref._nudge_allowed_by_cooldown", return_value=False)
-    def test_cooldown_blocks_nudge(self, _cool) -> None:
-        ctx: dict = {"preferred_lang": "ur", "lang": "en"}
-        for _ in range(4):
-            out = self._turn(ctx)
-        self.assertEqual(out, "Hi!")
-        self.assertFalse(ctx.get("lang_nudge_pending"))
+    @patch("app.lang_pref.set_user_preferred_language", return_value=True)
+    def test_guest_auto_switch_persists_and_stashes(self, save) -> None:
+        # Guests have a users row too (handle_new_user) — the switch persists
+        # there AND stashes guest_locale for a same-session login into an
+        # existing account.
+        ctx: dict = {"preferred_lang": "en", "lang": "es"}
+        self._turn(ctx, user_id="anon-1", is_anonymous=True)
+        out = self._turn(ctx, user_id="anon-1", is_anonymous=True)
+        save.assert_called_once_with("anon-1", "es")
+        self.assertIn(t("lang.guest_confirm", "es"), out)
+        self.assertEqual(ctx["preferred_lang"], "es")
+        self.assertEqual(ctx["guest_locale"], "es")
 
-    @patch("app.lang_pref._mark_nudged")
-    @patch("app.lang_pref._nudge_allowed_by_cooldown", return_value=True)
-    def test_ignored_offer_never_reasks_this_session(self, _cool, _mark) -> None:
+    @patch("app.lang_pref.set_user_preferred_language", return_value=False)
+    def test_failed_save_leaves_preference_alone(self, save) -> None:
         ctx: dict = {"preferred_lang": "ur", "lang": "en"}
-        for _ in range(3):
-            self._turn(ctx)
-        self.assertEqual(ctx["lang_nudge_pending"], "en")
-        out = self._turn(ctx)  # next turn doesn't accept → offer dropped for good
+        self._turn(ctx)
+        out = self._turn(ctx)
+        self.assertEqual(out, "Hi!")  # no false "saved" confirm
+        self.assertEqual(ctx["preferred_lang"], "ur")
+
+    def test_legacy_pending_offer_drops(self) -> None:
+        # An ask-first nudge armed by a pre-auto-switch deploy, ignored this
+        # turn — dropped for good, never re-asked.
+        ctx: dict = {"preferred_lang": "ur", "lang": "ur", "lang_nudge_pending": "en"}
+        out = self._turn(ctx)
         self.assertEqual(out, "Hi!")
         self.assertIsNone(ctx["lang_nudge_pending"])
         self.assertTrue(ctx["lang_nudge_done"])
-        for _ in range(5):
-            out = self._turn(ctx)
-        self.assertEqual(out, "Hi!")  # keeps diverging — still no second ask
 
     @patch("app.lang_pref.set_user_preferred_language", return_value=True)
     def test_accept_persists_and_confirms(self, save) -> None:

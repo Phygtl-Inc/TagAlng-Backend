@@ -2758,5 +2758,97 @@ class TestCleanBlockLabel(unittest.TestCase):
         self.assertIn("Lake Nona — Area A", msg)
 
 
+class TestHelpReplyChips(unittest.TestCase):
+    """Help-lane replies carry tap-able chips for the options they name in prose
+    (the prose-offer-without-chips class) — stamped as turn-scoped policy_chips."""
+
+    @patch("app.orchestrator.llm.synthesizer_model", return_value="m")
+    @patch("app.orchestrator.llm.llm_configured", return_value=True)
+    def test_composer_returns_message_and_chips(self, *_mocks) -> None:
+        from app.discovery_route import _compose_help_reply
+
+        with patch(
+            "app.orchestrator.llm.llm_json",
+            return_value={
+                "message": "I can find neighbors like you or help you host a meet.",
+                "chips": [
+                    {"label": "Meet new friends", "send": "Find neighbors like me"},
+                    {"label": "Host a meet", "send": "Help me host a meet"},
+                    "not-a-dict",
+                    {"label": ""},
+                ],
+            },
+        ):
+            reply, chips, ai_authored = _compose_help_reply("what", "what can you do", None)
+        self.assertTrue(ai_authored)
+        self.assertIn("find neighbors", reply)
+        # Malformed rows dropped; send defaults preserved.
+        self.assertEqual(
+            chips,
+            [
+                {"label": "Meet new friends", "send": "Find neighbors like me"},
+                {"label": "Host a meet", "send": "Help me host a meet"},
+            ],
+        )
+
+    @patch("app.orchestrator.llm.llm_configured", return_value=False)
+    def test_composer_fallback_has_no_chips(self, *_mocks) -> None:
+        from app.discovery_route import _compose_help_reply
+
+        reply, chips, ai_authored = _compose_help_reply("what", "what can you do", None)
+        self.assertFalse(ai_authored)
+        self.assertTrue(reply)
+        self.assertEqual(chips, [])
+
+    _HELP_SLOTS = {
+        "linear_intent": "help.what_can_you_do",
+        "in_discovery": True,
+        "confidence": 0.9,
+    }
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_help_turn_stamps_policy_chips(self, mock_slots, _mock_ai) -> None:
+        mock_slots.return_value = dict(self._HELP_SLOTS)
+        chips = [{"label": "Meet new friends", "send": "Find neighbors like me"}]
+        with patch(
+            "app.discovery_route._compose_help_reply",
+            return_value=("Here's what I can do.", chips, True),
+        ):
+            result = handle_discovery_turn(
+                "what can you do",
+                session_ctx={"routing_phase": "listening"},
+                user_jwt="jwt",
+                phone_verified=True,
+                home_block_id="block-1",
+                is_anonymous=False,
+            )
+        self.assertIsNotNone(result)
+        _reply, ctx, _routing, _peers = result
+        self.assertEqual(ctx.get("policy_chips"), chips)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_help_turn_stamps_none_when_no_chips(self, mock_slots, _mock_ai) -> None:
+        # None (not absent/popped) so the session merge drops any stale chips.
+        mock_slots.return_value = dict(self._HELP_SLOTS)
+        with patch(
+            "app.discovery_route._compose_help_reply",
+            return_value=("Here's what I can do.", [], True),
+        ):
+            result = handle_discovery_turn(
+                "what can you do",
+                session_ctx={"routing_phase": "listening"},
+                user_jwt="jwt",
+                phone_verified=True,
+                home_block_id="block-1",
+                is_anonymous=False,
+            )
+        self.assertIsNotNone(result)
+        _reply, ctx, _routing, _peers = result
+        self.assertIn("policy_chips", ctx)
+        self.assertIsNone(ctx.get("policy_chips"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1908,9 +1908,14 @@ def _try_layer1_intent_turn(
             active_intent="help.what_can_you_do",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_capabilities")
-        reply, _ai_authored = _compose_help_reply(
+        reply, chips, _ai_authored = _compose_help_reply(
             "what", msg, _session_lang(session_ctx), history=history
         )
+        # The reply names options in prose ("meeting friends, or hosting?") — these are
+        # their tap-able counterparts. policy_chips is turn-scoped (cleared next turn) and
+        # already rendered by derive_ui_actions; taps route like typed messages. None (not
+        # pop) when absent — the session merge resurrects popped keys.
+        ctx["policy_chips"] = chips or None
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "help.who_are_you":
@@ -1922,9 +1927,10 @@ def _try_layer1_intent_turn(
             active_intent="help.who_are_you",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
-        reply, _ai_authored = _compose_help_reply(
+        reply, chips, _ai_authored = _compose_help_reply(
             "who", msg, _session_lang(session_ctx), history=history
         )
+        ctx["policy_chips"] = chips or None
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "tier.respond_nudge":
@@ -2080,21 +2086,24 @@ def _compose_help_reply(
     lang: str | None,
     *,
     history: list[dict[str, Any]] | None = None,
-) -> tuple[str, bool]:
+) -> tuple[str, list[dict[str, str]], bool]:
     """AI-authored "what can you do" / "who are you" — answers the user's actual phrasing
     in Lana's voice (and their language), grounded in the true capability list, instead of
     the same canned paragraph every time. Sees the recent turns so a skeptical follow-up
     ("how would I know you're useful?") gets engaged with instead of the same pitch
     reworded — the stateless version looped the tour four turns in a row. Returns
-    (reply, ai_authored); the canned line is the fallback and ai_authored=False tells the
-    caller to leave localization to main."""
+    (reply, chips, ai_authored); chips are the tap-able counterparts of the options the
+    reply itself names ("meeting new friends, or hosting?" with no pills was a dead end —
+    the prose-offer-without-chips class), rendered via ctx["policy_chips"]. The canned
+    line is the fallback (no chips) and ai_authored=False tells the caller to leave
+    localization to main."""
     fallback = HELP_WHO_ARE_YOU if kind == "who" else HELP_WHAT_CAN_YOU_DO
     try:
         from app.i18n import synth_language_directive
         from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
 
         if not llm_configured():
-            return fallback, False
+            return fallback, [], False
         ask = (
             "The user asked who you are. Introduce yourself briefly and warmly — "
             "include the privacy promise."
@@ -2123,22 +2132,41 @@ def _compose_help_reply(
                 "every capability. Never repeat a message you already sent in the recent "
                 "turns, even reworded. "
                 + ((lang_line + " ") if lang_line else "")
-                + 'Return JSON {"message": "..."}.'
+                + 'Return JSON {"message": "...", "chips": [{"label": "...", "send": "..."}]}. '
+                "chips (0-3) are tap-able quick replies mirroring the options your message "
+                "itself offers — one chip per option you name, none for options you don't. "
+                "label: short pill text (max 4 words) in the same language as your message. "
+                "send: the message a tap posts as the user — a short, concrete, "
+                "self-contained ask in plain English grounded ONLY in the true capabilities "
+                '(e.g. "Find neighbors like me", "What\'s happening nearby", '
+                '"Help me host a meet", "Pass along an item"). '
+                "If your message offers no options (e.g. you're answering doubt with one "
+                "thing to try), return one chip for that one thing, or []."
             ),
             user_payload=(
                 (f"Recent turns:\n{recent}\n\n" if recent else "")
                 + f"{ask}\nTheir exact words: {str(user_msg or '').strip()[:200]}"
             ),
-            max_tokens=160,
+            max_tokens=280,
             temperature=0.5,
         )
         msg = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        chips: list[dict[str, str]] = []
+        raw_chips = (data or {}).get("chips") if isinstance(data, dict) else None
+        if isinstance(raw_chips, list):
+            for c in raw_chips[:3]:
+                if not isinstance(c, dict):
+                    continue
+                label = str(c.get("label") or "").strip()[:40]
+                send = str(c.get("send") or "").strip()[:80] or label
+                if label:
+                    chips.append({"label": label, "send": send})
         if msg:
-            return msg, True
-        return fallback, False
+            return msg, chips, True
+        return fallback, [], False
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("help_reply_compose_failed")
-        return fallback, False
+        return fallback, [], False
 
 
 def _try_signal_lane_turn(

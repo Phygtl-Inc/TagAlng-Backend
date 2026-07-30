@@ -61,6 +61,7 @@ from app.i18n import (
     lang_from_accept_language,
     localize_labels,
     localize_text,
+    normalize_lang_code,
     session_lang,
 )
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
@@ -1127,6 +1128,7 @@ def create_lana_session(
                 event_draft=event_draft,
                 orchestrator=use_orch,
                 is_anonymous=auth.is_anonymous,
+                preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
                 **ob,
             )
 
@@ -1267,13 +1269,15 @@ def create_lana_session(
 
         if purpose == "lana":
             # The saved preference decides how the conversation STARTS — the
-            # opening greets in it. Guests have no saved row, so their device
-            # locale (Accept-Language — the same signal rendering the app's own
-            # UI in their language) is the preference; same fallback for a
-            # signed-in user who never saved one. Live detection owns every
-            # turn after.
-            pref = None if auth.is_anonymous else get_user_preferred_language(auth.user_id)
-            pref = pref or lang_from_accept_language(accept_language)
+            # opening greets in it. users.locale is read for guests too: every
+            # auth user (anonymous included) gets a users row via
+            # handle_new_user, and the PWA mirrors its UI locale onto it (the
+            # Settings toggle + the anonymous-session seed). The device locale
+            # (Accept-Language) is only the fallback for a row that was never
+            # seeded. Live detection owns every turn after.
+            pref = get_user_preferred_language(auth.user_id) or lang_from_accept_language(
+                accept_language
+            )
             if pref:
                 seed_session_language(session_ctx, pref)
                 effective_lang = session_lang(session_ctx)
@@ -1330,6 +1334,7 @@ def create_lana_session(
         event_draft=event_draft,
         orchestrator=use_orch,
         is_anonymous=auth.is_anonymous,
+        preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
         **ob,
     )
 
@@ -1377,11 +1382,23 @@ def _run_lana_message(
     # Sessions opened before any language signal (guest funnels: every turn a tap,
     # an email, an OTP) would ship deterministic replies in English forever — the
     # final-mile localizer has no language to render into. Seed once from the
-    # device locale; any AI verdict or saved preference already present wins.
+    # saved preference (users.locale — guests have a row too, mirrored from the
+    # app's UI locale), falling back to the device locale; any AI verdict or
+    # preference already present wins.
+    saved_pref = get_user_preferred_language(auth.user_id)
     if "lang" not in session_ctx_in and "preferred_lang" not in session_ctx_in:
-        device_lang = lang_from_accept_language(accept_language)
-        if device_lang:
-            seed_session_language(session_ctx_in, device_lang)
+        seed_lang = saved_pref or lang_from_accept_language(accept_language)
+        if seed_lang:
+            seed_session_language(session_ctx_in, seed_lang)
+    elif saved_pref and saved_pref != normalize_lang_code(session_ctx_in.get("preferred_lang")):
+        # users.locale changed OUTSIDE this session (the Settings toggle writes it
+        # directly, another session may have auto-switched it) — re-sync the
+        # session's notion of the default so the per-turn preferred_language echo
+        # and the divergence streak follow the user's explicit choice instead of
+        # flipping it back. Live detection (session lang) is deliberately left
+        # alone: the preference decides starts, speech decides continuation.
+        session_ctx_in["preferred_lang"] = saved_pref
+        session_ctx_in["lang_divergence_count"] = 0
     # Lingo §3.3/§4: the inferred household role + grammatical gender ride along on
     # every turn so composers can address the user correctly ("your grandkids",
     # bienvenido/bienvenida). Free — verify_auth already loaded the users row.
@@ -1769,6 +1786,7 @@ def _run_lana_message(
         assistant_message_id=assistant_msg_id,
         ready_to_complete=ready,
         ui=ui,
+        preferred_language=normalize_lang_code(merged.get("preferred_lang")),
         event_draft=event_draft,
         item_draft=item_draft,
         tip_draft=tip_draft,

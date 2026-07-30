@@ -402,6 +402,10 @@ class CreateSessionResponse(BaseModel):
     orchestrator: bool = False
     timing_ms: dict[str, int] | None = None
     is_anonymous: bool = False
+    # The session's saved/effective default language (users.locale, or the
+    # device-locale seed when nothing is saved) — the FE mirrors its UI locale
+    # to it when the code is one it supports (en/es/pt). None = no signal yet.
+    preferred_language: str | None = None
     phone_verified: bool = False
     home_block_assigned: bool = False
     onboarding_step: str | None = None
@@ -478,6 +482,9 @@ class SendMessageResponse(BaseModel):
     tip_draft: TipDraft | None = None
     look_draft: LookDraft | None = None
     routing: TurnRouting | None = None
+    # See CreateSessionResponse.preferred_language — echoed every turn so the FE
+    # can follow a mid-chat language switch (auto-persisted after 2 diverging turns).
+    preferred_language: str | None = None
     orchestrator: bool = False
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
