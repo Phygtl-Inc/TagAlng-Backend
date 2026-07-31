@@ -4,7 +4,6 @@ from typing import Any
 
 from app.lana_ui import normalize_bucket, parse_mapped_spans
 from app.models import ExtractedClaim, MappedSpan
-from app.orchestrator.json_util import parse_json_object
 
 EXTRACT_PROMPT = """You are an identity extraction model for a block-based neighborhood social app.
 
@@ -162,13 +161,12 @@ MUTUAL_CONCEPT_MARKERS = (
 
 
 def _vertex_client():
-    project = os.environ.get("GCP_VERTEX_PROJECT", "")
-    location = os.environ.get("GCP_VERTEX_LOCATION", "us-central1")
-    if not project:
-        raise RuntimeError("GCP_VERTEX_PROJECT not set")
-    from google import genai
+    """Delegating shim — kept because several modules import it by name. Returns
+    the single cached client so every Vertex call inherits gemini_http_options()
+    (timeout + transport retries) instead of building a fresh, unbounded client."""
+    from app.orchestrator.llm import _gemini_client
 
-    return genai.Client(vertexai=True, project=project, location=location)
+    return _gemini_client()
 
 
 def _parse_claims(data: Any) -> list[ExtractedClaim]:
@@ -339,9 +337,7 @@ def vertex_extract_claims_from_utterance(
     existing_labels: list[str] | None = None,
     recent_questions: list[str] | None = None,
 ) -> Any:
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
-    from google.genai import types
+    from app.orchestrator.llm import vertex_generate_json
 
     prompt = (
         INCREMENTAL_EXTRACT_PROMPT
@@ -349,15 +345,13 @@ def vertex_extract_claims_from_utterance(
         + _recent_questions_block(recent_questions)
         + message.strip()
     )
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-        ),
+    return vertex_generate_json(
+        model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+        system=None,
+        user_payload=prompt,
+        max_tokens=512,  # parity with the llm_json call in incremental_claims_from_utterance
+        temperature=0.2,
     )
-    return parse_json_object(response.text or "")
 
 
 def incremental_claims_from_utterance(
@@ -394,19 +388,15 @@ def incremental_claims_from_utterance(
 def vertex_extract_from_transcript(
     transcript: str,
 ) -> tuple[list[ExtractedClaim], str, str | None, list[MappedSpan]]:
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
-    from google.genai import types
+    from app.orchestrator.llm import vertex_generate_json
 
-    response = client.models.generate_content(
-        model=model,
-        contents=EXTRACT_PROMPT + transcript.strip(),
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-        ),
+    data = vertex_generate_json(
+        model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+        system=None,
+        user_payload=EXTRACT_PROMPT + transcript.strip(),
+        max_tokens=4096,  # parity with orchestrator/extract.py
+        temperature=0.2,
     )
-    data = parse_json_object(response.text or "")
     return parse_profile_extract_data(data)
 
 

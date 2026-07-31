@@ -270,23 +270,18 @@ def _generate(uncovered: str, asked: str, max_new: int) -> Any:
     except Exception:
         logger.exception("rapport-synth: orchestrator llm failed")
 
-    # Vertex Gemini fallback.
+    # Vertex Gemini fallback — same 512-token budget and timeout as the OpenAI
+    # call above, via llm.gemini_config().
     try:
-        from app.orchestrator.json_util import parse_json_object
-        from app.vertex_extract import _vertex_client
-        from google.genai import types
+        from app.orchestrator.llm import vertex_generate_json
 
-        client = _vertex_client()
-        model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
-        response = client.models.generate_content(
-            model=model,
-            contents=system + "\n\n" + user_payload,
-            config=types.GenerateContentConfig(
-                temperature=0.4,
-                response_mime_type="application/json",
-            ),
+        return vertex_generate_json(
+            model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+            system=system,
+            user_payload=user_payload,
+            max_tokens=512,
+            temperature=0.4,
         )
-        return parse_json_object(response.text or "")
     except Exception:
         logger.exception("rapport-synth: vertex fallback failed")
         return None

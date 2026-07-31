@@ -3,7 +3,6 @@ from typing import Any
 
 from app.lana_ui import merge_event_drafts, parse_event_draft
 from app.models import EventDraft, MappedSpan
-from app.orchestrator.json_util import parse_json_object
 
 EVENT_EXTRACT_PROMPT = """You are an event extraction model for TagAlng host flow.
 
@@ -44,13 +43,10 @@ Transcript:
 
 
 def _vertex_client():
-    project = os.environ.get("GCP_VERTEX_PROJECT", "")
-    location = os.environ.get("GCP_VERTEX_LOCATION", "us-central1")
-    if not project:
-        raise RuntimeError("GCP_VERTEX_PROJECT not set")
-    from google import genai
+    """Delegating shim — see app/vertex_extract.py::_vertex_client."""
+    from app.orchestrator.llm import _gemini_client
 
-    return genai.Client(vertexai=True, project=project, location=location)
+    return _gemini_client()
 
 
 def vertex_extract_event_from_transcript(
@@ -59,20 +55,16 @@ def vertex_extract_event_from_transcript(
     purpose_ids: list[str],
     previous_draft: dict[str, Any] | None = None,
 ) -> tuple[EventDraft, str, str | None, list[MappedSpan]]:
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
-    from google.genai import types
+    from app.orchestrator.llm import vertex_generate_json
 
     prompt = EVENT_EXTRACT_PROMPT.replace("{purpose_ids}", ", ".join(purpose_ids) or "see get_event_purposes")
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt + transcript.strip(),
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-        ),
+    data = vertex_generate_json(
+        model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+        system=None,
+        user_payload=prompt + transcript.strip(),
+        max_tokens=4096,  # parity with orchestrator/extract.py
+        temperature=0.2,
     )
-    data = parse_json_object(response.text or "")
     return parse_event_extract_data(data, purpose_ids=purpose_ids, previous_draft=previous_draft)
 
 
