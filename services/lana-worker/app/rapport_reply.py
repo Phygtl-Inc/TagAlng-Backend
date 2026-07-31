@@ -26,8 +26,8 @@ _ACTION_KINDS = frozenset(
 
 # G8: "Love that" is an indicative first-person preference — a self-disclosure
 # Lana cannot honestly make (SPEC_X3_HONESTY S-EN-1), and "Love it." is already
-# on SPEC_P1_LANGUAGE's banned-literal list for a different reason. A warm
-# acknowledgement of HER, not a statement about Lana.
+# on SPEC_P1_LANGUAGE's banned-literal list for a different reason. Acknowledge
+# HER; don't state a preference of your own.
 _FALLBACK_REPLY = "Got it — I've saved it to your profile. Tell me more anytime."
 
 CONCIERGE_PROMPT = """You are Lana, a warm neighborhood concierge in a block-based neighborhood app \
@@ -281,29 +281,20 @@ def rapport_concierge_reply(
 
 
 def _vertex_concierge_reply(user_payload: str) -> Any:
-    """Direct Vertex Gemini fallback when the orchestrator LLM isn't configured."""
-    from app.orchestrator.json_util import parse_json_object
-    from app.vertex_extract import _vertex_client
-
+    """Direct Vertex Gemini fallback when the orchestrator LLM isn't configured.
+    Same token budget (512) and same timeout the OpenAI path uses — see
+    llm.gemini_config()."""
     from app.context import self_disclosure_rule
+    from app.orchestrator.llm import vertex_generate_json
 
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
-    from google.genai import types
-
-    response = client.models.generate_content(
-        model=model,
+    return vertex_generate_json(
+        model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
         # SPEC_X3_HONESTY F07: the E-FALLBACK arm forces the Vertex path, and
         # "the persona rule and the guardrail may not be applied identically on
         # both providers" — a delta between arms is a finding in its own right.
         # Same rule, same place in the prompt, both providers.
-        contents=(
-            CONCIERGE_PROMPT + "\n\n---\n\n" + self_disclosure_rule()
-            + "\n\n" + user_payload
-        ),
-        config=types.GenerateContentConfig(
-            temperature=0.5,
-            response_mime_type="application/json",
-        ),
+        system=CONCIERGE_PROMPT + "\n\n---\n\n" + self_disclosure_rule(),
+        user_payload=user_payload,
+        max_tokens=512,  # parity with the llm_json call above
+        temperature=0.5,
     )
-    return parse_json_object(response.text or "")
