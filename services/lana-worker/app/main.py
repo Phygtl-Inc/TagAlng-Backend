@@ -1515,6 +1515,13 @@ def _run_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
             orch_used = bool(session_ctx.pop("_orchestrator_turn", False))
+            # A grounding auto-dispatch stashed its community-save announcement
+            # to ride ahead of the dispatched engine's reply — one bubble:
+            # "Life Time is saved to your communities" + the host flow's ask.
+            _preamble = str(session_ctx.get("_turn_preamble") or "").strip()
+            if _preamble:
+                reply = f"{_preamble}\n\n{reply}" if str(reply or "").strip() else _preamble
+            session_ctx["_turn_preamble"] = None  # None, not pop — the merge resurrects popped keys
             # Language preference: persist an accepted/requested default-language
             # change, and offer the switch once when the observed language keeps
             # diverging from the saved preference.

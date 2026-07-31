@@ -281,6 +281,68 @@ class TestGroundAndConfirmAnnounces(unittest.TestCase):
         self.assertIsNone(result["offer"])
 
 
+class TestGroundAndConfirmPendingAction(unittest.TestCase):
+    """Grounding in service of an action the user ALREADY asked for (policy
+    stamped pending_action): never re-offer their own request — announce the
+    save and hand back an auto-dispatch offer with the place pre-filled
+    (QA 2026-07-30, the squash/Life Time loop)."""
+
+    def _run(self, pending_action: str, others: int = 0, session_ctx=None):
+        from app.circles_flow import ground_and_confirm
+
+        with patch(
+            "app.circles_flow._own_affiliation",
+            return_value={"id": "a1", "circle_key": "squash_group"},
+        ), patch(
+            "app.circles_flow.ground_affiliation",
+            return_value={
+                "affiliation_id": "a1",
+                "place_id": "p1",
+                "place_name": "Life Time",
+                "status": "confirmed",
+            },
+        ), patch(
+            "app.circles_flow._place_co_member_count", return_value=others
+        ), patch(
+            "app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK
+        ) as compose:
+            result = ground_and_confirm(
+                "u1", "a1", "gp1",
+                session_ctx=session_ctx if session_ctx is not None else {},
+                pending_action=pending_action,
+            )
+            return result, compose.call_args.kwargs
+
+    def test_host_intent_dispatches_with_place_prefilled(self) -> None:
+        ctx: dict = {}
+        result, kwargs = self._run("host_meet", session_ctx=ctx)
+        offer = result["offer"]
+        self.assertTrue(offer["auto"])
+        self.assertEqual(offer["kind"], "host_meet")
+        self.assertIn("Life Time", offer["send"])
+        self.assertIn("squash group", offer["send"])
+        self.assertTrue(result["grounded"])
+        self.assertIsNone(result["pending"])
+        # The save is still announced (never silent) but nothing is re-offered.
+        self.assertIn("saved to your communities", result["reply"])
+        self.assertNotIn("?", kwargs["goal"].split(" — ")[0])
+        self.assertTrue(ctx["_grounding_offer_done"])
+
+    def test_host_intent_wins_over_intro_offer(self) -> None:
+        # Co-members at the place would normally flip to the intro offer — but
+        # the user asked to organize, so organizing wins.
+        result, _ = self._run("host_meet", others=3)
+        self.assertEqual(result["offer"]["kind"], "host_meet")
+        self.assertTrue(result["offer"]["auto"])
+
+    def test_find_neighbors_intent_dispatches(self) -> None:
+        result, _ = self._run("find_neighbors")
+        offer = result["offer"]
+        self.assertTrue(offer["auto"])
+        self.assertEqual(offer["kind"], "find_neighbors")
+        self.assertIn("squash group", offer["send"])
+
+
 class TestHandleGroundingConfirmation(unittest.TestCase):
     STATE = {
         "affiliation_id": "a1",
@@ -295,7 +357,32 @@ class TestHandleGroundingConfirmation(unittest.TestCase):
     def test_confirm_chip_grounds(self, gac) -> None:
         result = handle_grounding_confirmation("u1", self.STATE, "It's OrangeTheory Narcoossee")
         self.assertTrue(result["grounded"])
-        gac.assert_called_once_with("u1", "a1", "gp1", session_ctx=None)
+        gac.assert_called_once_with(
+            "u1", "a1", "gp1", session_ctx=None, pending_action=None
+        )
+
+    @patch("app.circles_flow.ground_and_confirm",
+           return_value={"reply": "Locked in", "options": [], "pending": None, "grounded": True})
+    def test_confirm_chip_forwards_pending_action(self, gac) -> None:
+        state = {**self.STATE, "pending_action": "host_meet"}
+        handle_grounding_confirmation("u1", state, "It's OrangeTheory Narcoossee")
+        gac.assert_called_once_with(
+            "u1", "a1", "gp1", session_ctx=None, pending_action="host_meet"
+        )
+
+    @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
+    @patch("app.circles_flow._home_block_id", return_value="b1")
+    @patch("app.circles_flow.ground_options",
+           return_value=[{"name": "LA Fitness", "label": "LA Fitness",
+                          "send": "It's LA Fitness", "google_place_id": "gp2"}])
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_key": "gym", "place_ref": None})
+    def test_correction_keeps_pending_action_armed(self, _own, _go, _blk, _cr) -> None:
+        # A re-search turn must not drop the live intent — the eventual tap
+        # still has to dispatch it.
+        state = {**self.STATE, "pending_action": "host_meet"}
+        result = handle_grounding_confirmation("u1", state, "no, the LA Fitness one")
+        self.assertEqual(result["pending"]["pending_action"], "host_meet")
 
     @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
     @patch("app.circles_flow.note_ungrounded_detail")

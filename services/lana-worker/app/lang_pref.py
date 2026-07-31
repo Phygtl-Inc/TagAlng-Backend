@@ -471,9 +471,11 @@ def language_preference_post_turn(
                 # identity claim so it becomes matchable, not just a locale.
                 remember_language_claim_async(user_id, new_pref, user_message)
                 confirm = _compose_pref_saved(new_pref, new_pref)
-                # The synthesizer already answered the turn conversationally;
-                # the deterministic confirm states the SAVE actually happened.
-                return f"{reply}\n\n{confirm}" if reply else confirm
+                # Receipt FIRST, conversational reply second — the turn's reply
+                # often ends on a question whose chips render right below the
+                # bubble; appending the receipt after it buried the ask and read
+                # as a subject change (QA 2026-07-30, the squash-offer turn).
+                return f"{confirm}\n\n{reply}" if reply else confirm
             return reply
 
         # A rapport-concierge language offer stays live for a few turns (the accept is
@@ -514,7 +516,8 @@ def language_preference_post_turn(
                     confirm = _compose_guest_confirm(observed)
                 else:
                     confirm = _compose_pref_saved(observed, observed)
-                return f"{reply}\n\n{confirm}" if reply else confirm
+                # Receipt first — see the explicit-accept branch above.
+                return f"{confirm}\n\n{reply}" if reply else confirm
 
         if is_anonymous or not user_id:
             # Watch-and-learn claims and the guest-locale carry below are

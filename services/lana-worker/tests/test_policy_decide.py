@@ -92,6 +92,32 @@ class TestNextActionParse(unittest.TestCase):
         self.assertEqual(routing["outcome"], "decide_turn")
         self.assertEqual(routing["why"], "low signal")
 
+    def test_pending_action_kept_on_ground_place(self) -> None:
+        action = parse_next_action(
+            {
+                "kind": "ground_place",
+                "utterance": "Which club do they play at?",
+                "pending_action": "host_meet",
+            }
+        )
+        assert action is not None
+        self.assertEqual(action.pending_action, "host_meet")
+        self.assertEqual(action.routing_dict()["pending_action"], "host_meet")
+
+    def test_pending_action_dropped_on_other_kinds_and_noise(self) -> None:
+        # Only a grounding ask may carry a live intent…
+        action = parse_next_action(
+            {"kind": "bridge_offer", "utterance": "hi", "pending_action": "host_meet"}
+        )
+        assert action is not None
+        self.assertIsNone(action.pending_action)
+        # …and only the dispatchable kinds count.
+        action = parse_next_action(
+            {"kind": "ground_place", "utterance": "which?", "pending_action": "explode"}
+        )
+        assert action is not None
+        self.assertIsNone(action.pending_action)
+
 
 class TestDeferBookkeeping(unittest.TestCase):
     def test_capture_defer_parks_goal(self) -> None:

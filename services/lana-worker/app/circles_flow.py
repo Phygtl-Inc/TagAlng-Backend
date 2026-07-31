@@ -654,6 +654,7 @@ def ground_and_confirm(
     google_place_id: str,
     *,
     session_ctx: dict[str, Any] | None = None,
+    pending_action: str | None = None,
 ) -> dict[str, Any]:
     """Ground the affiliation, then ACKNOWLEDGE → OFFER (the rapport-bridge shape,
     LANA_RAPPORT_BRIDGE_SPEC_v1 §1/§3): one warm confirm plus exactly ONE
@@ -704,6 +705,44 @@ def ground_and_confirm(
     )
     facts = [f"The place: {place_name}.", saved_fact]
     fallback = f"Done — {place_name} is saved to your communities now."
+
+    if pending_action in ("host_meet", "find_neighbors"):
+        # The grounding ran in service of an action the user ALREADY asked for
+        # ("organize a meet for my squash group" → which club? → tap). The
+        # ACKNOWLEDGE→OFFER shape would re-ask their own request here (QA
+        # 2026-07-30, the squash/Life Time loop) — so the reply only announces
+        # the community save (never silent, per the 2026-07-28 product rule)
+        # and the caller dispatches the action itself, place pre-filled.
+        if session_ctx is not None:
+            session_ctx["_grounding_offer_done"] = True
+        if pending_action == "find_neighbors":
+            send = f"connect me with neighbors into {topic or place_name}"
+        else:
+            send = f"help me host a {topic or 'get-together'} meet at {place_name}"
+        reply = _compose_grounding_reply(
+            goal=(
+                "Tell them their community at this place is saved on their "
+                "profile now — ONE short warm sentence, no question and no "
+                "offer (you are about to help with what they asked for next). "
+                "Never 'on my radar' / 'noted in my system'."
+            ),
+            facts=facts,
+            fallback=fallback,
+            session_ctx=session_ctx,
+        )
+        return {
+            "reply": reply,
+            "options": [],
+            "pending": None,
+            "grounded": True,
+            "offer": {
+                "kind": pending_action,
+                "label": "",
+                "send": send,
+                "topic": topic,
+                "auto": True,
+            },
+        }
 
     if session_ctx is not None and not session_ctx.get("_grounding_offer_done"):
         others = _place_co_member_count(place_id, user_id)
@@ -882,12 +921,20 @@ def handle_grounding_confirmation(
     affiliation_id = str(state.get("affiliation_id") or "")
     candidates = state.get("candidates") if isinstance(state.get("candidates"), list) else []
     attempts = int(state.get("attempts") or 1)
+    # A live action this grounding serves (stamped by the policy's ground_place
+    # decision) — carried so the confirmed place dispatches it instead of
+    # re-offering it.
+    pending_action = str(state.get("pending_action") or "").strip() or None
     msg = str(message or "").strip()
 
     matched = match_grounding_candidate(candidates, msg)
     if matched:
         return ground_and_confirm(
-            user_id, affiliation_id, str(matched["google_place_id"]), session_ctx=session_ctx
+            user_id,
+            affiliation_id,
+            str(matched["google_place_id"]),
+            session_ctx=session_ctx,
+            pending_action=pending_action,
         )
 
     if abandon or attempts >= 3:
@@ -948,6 +995,7 @@ def handle_grounding_confirmation(
             "candidates": fresh,
             "answer_text": str(state.get("answer_text") or msg)[:120],
             "attempts": attempts + 1,
+            "pending_action": pending_action,
         },
         "grounded": False,
     }

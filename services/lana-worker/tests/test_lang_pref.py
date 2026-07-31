@@ -96,6 +96,9 @@ class TestPostTurnAutoSwitch(unittest.TestCase):
         out2 = self._turn(ctx)  # turn 2: the preference follows the user
         save.assert_called_once_with("u1", "en")
         self.assertIn(t("lang.pref_saved", "en", lang_name="English"), out2)
+        # Receipt rides ahead of the reply so a trailing question stays last.
+        self.assertTrue(out2.startswith(t("lang.pref_saved", "en", lang_name="English")))
+        self.assertTrue(out2.endswith("Hi!"))
         self.assertEqual(ctx["preferred_lang"], "en")
         self.assertEqual(ctx["lang_divergence_count"], 0)
         out3 = self._turn(ctx)  # preference now matches — no re-save, no spam
@@ -156,6 +159,11 @@ class TestPostTurnAutoSwitch(unittest.TestCase):
         out = self._turn(ctx, msg=msg)
         save.assert_called_once_with("u1", "en")
         self.assertIn(t("lang.pref_saved", "en", lang_name="English"), out)
+        # Receipt FIRST, conversational reply last — the reply often ends on a
+        # question whose chips render below the bubble; the receipt must never
+        # bury it (QA 2026-07-30).
+        self.assertTrue(out.startswith(t("lang.pref_saved", "en", lang_name="English")))
+        self.assertTrue(out.endswith("Hi!"))
         self.assertEqual(ctx["preferred_lang"], "en")
         self.assertIsNone(ctx["lang_nudge_pending"])
         self.assertTrue(ctx["lang_nudge_done"])

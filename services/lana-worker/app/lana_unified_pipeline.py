@@ -174,6 +174,10 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
             "candidates": candidates,
             "answer_text": "",
             "attempts": 1,
+            # The action the user already asked for that this grounding serves
+            # (policy-stamped, e.g. host_meet) — the confirmed place then
+            # dispatches it directly instead of re-offering it.
+            "pending_action": getattr(action, "pending_action", None),
         }
         session_ctx["rapport_followup_question"] = str(
             getattr(action, "utterance", "") or ""
@@ -182,8 +186,9 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
         session_ctx["rapport_pending_action"] = None
         action.chips = chips
         logging.getLogger(__name__).info(
-            "ground_place_wired aff=%s key=%s candidates=%d",
+            "ground_place_wired aff=%s key=%s candidates=%d pending_action=%s",
             aff.get("id"), aff.get("circle_key"), len(candidates),
+            getattr(action, "pending_action", None),
         )
     except Exception:  # noqa: BLE001 — wiring is an upgrade; the ask still goes out
         logging.getLogger(__name__).exception("ground_place_wire_failed")
@@ -1140,7 +1145,44 @@ def run_lana_unified_pipeline(
                     session_ctx=session_ctx,
                     abandon=abandon,
                 )
-                return _grounding_turn_result(session_ctx, result, timer)
+                auto_offer = (
+                    result.get("offer") if isinstance(result.get("offer"), dict) else None
+                )
+                auto_send = str((auto_offer or {}).get("send") or "").strip()
+                if (
+                    result.get("grounded")
+                    and auto_offer is not None
+                    and auto_offer.get("auto")
+                    and auto_send
+                ):
+                    # The grounding served an action the user ALREADY asked for
+                    # (policy stamped pending_action on the ground_place turn) —
+                    # never re-offer their own request: dispatch it now with the
+                    # place pre-filled, exactly like an offer accept, and carry
+                    # the community-save announcement as a preamble to the
+                    # engine's reply (one bubble, no extra confirm loop).
+                    forced_slots = _forced_slots_for_kind(
+                        str(auto_offer.get("kind") or ""), auto_send, auto_offer,
+                        session_ctx,
+                        home_block_id=home_block_id, phone_verified=phone_verified,
+                        history=history, timer=timer,
+                    )
+                    if forced_slots is not None:
+                        session_ctx["_discovery_slots"] = forced_slots
+                        session_ctx["_discovery_slots_for"] = auto_send
+                    logging.getLogger(__name__).info(
+                        "grounding_auto_dispatch kind=%s send=%r forced=%s",
+                        auto_offer.get("kind"), auto_send, forced_slots is not None,
+                    )
+                    _reset_rapport_state(session_ctx)
+                    session_ctx["_turn_preamble"] = (
+                        str(result.get("reply") or "").strip() or None
+                    )
+                    rapport_handoff_send = auto_send
+                    user_message = auto_send
+                    rapport = None  # fall through to the discovery gates below
+                else:
+                    return _grounding_turn_result(session_ctx, result, timer)
         elif session_ctx.get("rapport_offer_pending"):
             # She's responding to a pending app-move offer ("Want to meet other park moms?"). Decide
             # accept / decline / pivot, then DISPATCH the concierge's stored action ourselves on accept
@@ -1702,6 +1744,14 @@ def run_lana_unified_pipeline(
             str(user_message or "").strip() in (session_ctx.get("_offered_chip_msgs") or [])
             and str(user_message or "").strip()
             not in (session_ctx.get("policy_chip_msgs") or [])
+        )
+        # A dispatched offer/grounding action carries forced slots for exactly
+        # this message — a committed engine command, never the policy's turn.
+        and not (
+            isinstance(session_ctx.get("_discovery_slots"), dict)
+            and session_ctx["_discovery_slots"].get("_forced_kind")
+            and str(session_ctx.get("_discovery_slots_for") or "")
+            == str(user_message or "").strip()
         )
     ):
         from app.policy.decide import apply_defer, audit_decision, decide_turn, note_ask_streak
