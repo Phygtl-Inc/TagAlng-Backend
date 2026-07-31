@@ -122,7 +122,19 @@ from app.models import (
     TurnRouting,
 )
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
-from app.orchestrator.llm import llm_configured, openai_configured, provider, router_model, synthesizer_model, vertex_configured
+from app.orchestrator.llm import (
+    _fallback_target,
+    _openai_max_retries,
+    _openai_timeout_sec,
+    _vertex_timeout_sec,
+    fallback_enabled,
+    llm_configured,
+    openai_configured,
+    provider,
+    router_model,
+    synthesizer_model,
+    vertex_configured,
+)
 from app.orchestrator.extract import (
     _extract_model as orchestrator_extract_model,
     claude_extract_event_from_transcript,
@@ -187,7 +199,7 @@ if not any(getattr(h, "_lana_turn_handler", False) for h in _app_logger.handlers
     _app_logger.addHandler(_turn_handler)
     _app_logger.propagate = False
 
-app = FastAPI(title="TagAlng lana-worker", version="0.5.4")
+app = FastAPI(title="TagAlng lana-worker", version="0.5.5")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -1015,7 +1027,7 @@ def _bearer_token(authorization: str | None) -> str:
 def root():
     return {
         "service": "tagalng-lana-worker",
-        "version": "0.5.3",
+        "version": "0.5.5",  # keep in sync with FastAPI(version=...) above
         "orchestrator": _use_orchestrator(),
         "endpoints": {
             "health": "GET /health",
@@ -1052,6 +1064,11 @@ def health():
             if _use_orchestrator() and llm_configured()
             else os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
         ),
+        "fallback_enabled": fallback_enabled(),
+        "fallback_target": _fallback_target(provider()),
+        "openai_timeout_sec": _openai_timeout_sec(),
+        "vertex_timeout_sec": _vertex_timeout_sec(),
+        "openai_max_retries": _openai_max_retries(),
     }
 
 

@@ -462,26 +462,9 @@ def _call_profile_lana(
     attempts_out: list[int] | None = None,
 ) -> dict[str, Any]:
     from app.context import build_profile_system_prompt
-    from app.orchestrator.json_util import parse_json_object
-
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_LANA_MODEL", os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"))
-    from google.genai import types
+    from app.orchestrator.llm import vertex_generate_json
 
     system = build_profile_system_prompt() + "\n\n---\n\n" + PROFILE_TURN_SUFFIX
-
-    def _generate(user: str) -> str:
-        response = client.models.generate_content(
-            model=model,
-            contents=user,
-            config=types.GenerateContentConfig(
-                temperature=0.45,
-                max_output_tokens=PROFILE_MAX_OUTPUT_TOKENS,
-                response_mime_type="application/json",
-                system_instruction=system,
-            ),
-        )
-        return response.text or ""
 
     _RETRY_SUFFIX = (
         "\n\nYour previous reply was invalid or truncated. "
@@ -489,20 +472,24 @@ def _call_profile_lana(
         "assistant_message: max 2 short sentences, under 240 characters, must end with . or ?"
     )
 
-    attempts = 1
-    text = _generate(payload)
-    try:
-        data = parse_json_object(text)
-    except (json.JSONDecodeError, ValueError):
+    def _call(user: str, box: list[int] | None) -> dict[str, Any]:
+        return vertex_generate_json(
+            system=system,
+            user_payload=user,
+            max_tokens=PROFILE_MAX_OUTPUT_TOKENS,
+            temperature=0.45,
+            retry_suffix=_RETRY_SUFFIX,
+            attempts_out=box,
+        )
+
+    box: list[int] = []
+    data = _call(payload, box)
+    attempts = (box or [1])[0]
+    # A well-formed but TRUNCATED message still needs the re-ask — that check is
+    # specific to profile intake, so it stays here rather than in the shared helper.
+    if attempts == 1 and assistant_message_looks_truncated(str(data.get("assistant_message", ""))):
         attempts = 2
-        text = _generate(payload + _RETRY_SUFFIX)
-        data = parse_json_object(text)
-    else:
-        msg = str(data.get("assistant_message", ""))
-        if assistant_message_looks_truncated(msg):
-            attempts = 2
-            text = _generate(payload + _RETRY_SUFFIX)
-            data = parse_json_object(text)
+        data = _call(payload + _RETRY_SUFFIX, None)
 
     if attempts_out is not None:
         attempts_out[:] = [attempts]

@@ -130,7 +130,6 @@ def parse_entities(data: Any) -> list[ExtractedEntity]:
 
 def extract_entities_from_message(message: str) -> list[ExtractedEntity]:
     """Run the entity extractor via orchestrator LLM when configured, else Vertex Flash."""
-    from app.orchestrator.json_util import parse_json_object
 
     text = (message or "").strip()
     try:
@@ -148,23 +147,22 @@ def extract_entities_from_message(message: str) -> list[ExtractedEntity]:
     except Exception:
         logger.exception("latent_entity_extract_llm_failed")
 
-    # Fallback: direct Vertex Flash call (same model the claim extractor falls back to).
+    # Fallback: direct Vertex Flash call (same model the claim extractor falls back
+    # to), with the same 512-token budget and timeout as the OpenAI call above.
     try:
         import os
 
-        from app.vertex_extract import _vertex_client
-        from google.genai import types
+        from app.orchestrator.llm import vertex_generate_json
 
-        client = _vertex_client()
-        model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
-        response = client.models.generate_content(
-            model=model,
-            contents=LATENT_EXTRACT_PROMPT + text,
-            config=types.GenerateContentConfig(
-                temperature=0.2, response_mime_type="application/json"
-            ),
+        return parse_entities(
+            vertex_generate_json(
+                model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+                system=None,
+                user_payload=LATENT_EXTRACT_PROMPT + text,
+                max_tokens=512,
+                temperature=0.2,
+            )
         )
-        return parse_entities(parse_json_object(response.text or ""))
     except Exception:
         logger.exception("latent_entity_extract_vertex_failed")
         return []

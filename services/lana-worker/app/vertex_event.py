@@ -11,7 +11,6 @@ from app.lana_ui import (
     parse_event_draft,
     parse_event_turn_ui,
 )
-from app.orchestrator.json_util import parse_json_object
 from app.turn_timing import TurnTimer
 
 EVENT_MAX_OUTPUT_TOKENS = 1024
@@ -282,38 +281,19 @@ def _call_event_lana(
             attempts_out[:] = attempts_box or [1]
         return data
 
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_LANA_MODEL", os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"))
-    from google.genai import types
+    from app.orchestrator.llm import vertex_generate_json
 
-    def _generate(user: str) -> str:
-        response = client.models.generate_content(
-            model=model,
-            contents=user,
-            config=types.GenerateContentConfig(
-                temperature=0.45,
-                max_output_tokens=EVENT_MAX_OUTPUT_TOKENS,
-                response_mime_type="application/json",
-                system_instruction=system,
-            ),
-        )
-        return response.text or ""
-
-    attempts = 1
-    text = _generate(payload)
-    try:
-        data = parse_json_object(text)
-    except (json.JSONDecodeError, ValueError):
-        attempts = 2
-        text = _generate(
-            payload
-            + "\n\nYour previous reply was invalid JSON. "
+    return vertex_generate_json(
+        system=system,
+        user_payload=payload,
+        max_tokens=EVENT_MAX_OUTPUT_TOKENS,
+        temperature=0.45,
+        retry_suffix=(
+            "\n\nYour previous reply was invalid JSON. "
             "Return ONE compact JSON object with event_draft and assistant_message."
-        )
-        data = parse_json_object(text)
-    if attempts_out is not None:
-        attempts_out[:] = [attempts]
-    return data
+        ),
+        attempts_out=attempts_out,
+    )
 
 
 def _event_opening_payload(user_context_block: str, host_name: str | None) -> str:
