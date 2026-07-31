@@ -20,6 +20,7 @@ import os
 import sys
 
 from app.auth import service_client
+from app.capability_embed import capability_embedding_text
 
 
 def _vertex_embed(text: str, dim: int = 768) -> list[float]:
@@ -45,12 +46,16 @@ def _vertex_embed(text: str, dim: int = 768) -> list[float]:
 
 
 def _embedding_text(row: dict) -> str:
-    """What we embed: name + description + triggers, so synonyms land near the capability."""
-    parts = [row.get("capability_name") or "", row.get("description") or ""]
-    triggers = row.get("entity_triggers") or []
-    if triggers:
-        parts.append(", ".join(triggers))
-    return " — ".join(p for p in parts if p)
+    """What we embed: name + description + triggers, so synonyms land near the capability.
+
+    Shared with the worker's runtime self-heal via app.capability_embed — the two MUST
+    produce identical text or the vector space splits.
+    """
+    return capability_embedding_text(
+        capability_name=row.get("capability_name"),
+        description=row.get("description"),
+        entity_triggers=row.get("entity_triggers"),
+    )
 
 
 def main() -> int:

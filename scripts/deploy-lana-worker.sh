@@ -78,6 +78,18 @@ else
 fi
 echo "Vertex SA: $SA (shared with identity-worker)"
 
+# Concept linking is order-dependent: enabling it against an un-embedded identity_concepts
+# catalog makes every new claim mint a duplicate concept instead of reusing one. There is no
+# way to check the target DB from here, so state the precondition loudly.
+if [[ "${IDENTITY_CONCEPT_LINK_ENABLED:-0}" =~ ^(1|true|yes|on|TRUE|YES|ON)$ ]]; then
+  echo "Concept links: ON (top_k=${LANA_CONCEPT_TOP_K:-5} min_sim=${LANA_CONCEPT_MIN_SIM:-0.75})"
+  echo "  ⚠ Precondition: migrations through 20260918120000_identity_concepts_embedding_repair"
+  echo "    must already be applied to this environment (./scripts/db-push.sh <env> --list)."
+  echo "    See docs/prs/PR11_embedding_backfill.md — order is load-bearing."
+else
+  echo "Concept links: off (IDENTITY_CONCEPT_LINK_ENABLED unset/0)"
+fi
+
 gcloud config set project "$PROJECT" >/dev/null
 
 gcloud services enable \
@@ -118,6 +130,9 @@ OPENAI_SYNTH_MODEL: "${OPENAI_SYNTH}"
 OPENAI_TIMEOUT_SEC: "${OPENAI_TIMEOUT_SEC:-15}"
 LANA_DECIDE_TURN: "${LANA_DECIDE_TURN:-off}"
 LANA_ZIP_UNLOCK_GATE: "${LANA_ZIP_UNLOCK_GATE:-soft}"
+IDENTITY_CONCEPT_LINK_ENABLED: "${IDENTITY_CONCEPT_LINK_ENABLED:-0}"
+LANA_CONCEPT_TOP_K: "${LANA_CONCEPT_TOP_K:-5}"
+LANA_CONCEPT_MIN_SIM: "${LANA_CONCEPT_MIN_SIM:-0.75}"
 LANA_DISCOVERY_MODEL: "${LANA_DISCOVERY_MODEL:-}"
 CORS_ALLOW_ORIGINS: "${CORS}"
 GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY:-}"
