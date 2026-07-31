@@ -198,8 +198,8 @@ def hosting_open_actions(*, matches_nearby: int = 0) -> list[dict[str, Any]]:
         ),
         _action(
             action_id="hosting_send",
-            label="Send to a mom",
-            message="send to a mom",
+            label="Send to a parent",
+            message="send to a parent",
             style="secondary",
         ),
     ]
@@ -216,8 +216,8 @@ def tip_pass_actions() -> list[dict[str, Any]]:
         ),
         _action(
             action_id="tip_send_mom",
-            label="Send to a mom",
-            message="send to a mom",
+            label="Send to a parent",
+            message="send to a parent",
             style="secondary",
         ),
     ]
@@ -228,7 +228,7 @@ def signal_saved_actions() -> list[dict[str, Any]]:
     return [
         _action(
             action_id="signal_show_block_log",
-            label="Show my block log",
+            label="Show my neighborhood log",
             message="show my block log",
             style="primary",
         ),
@@ -256,7 +256,7 @@ def rec_widen_actions(noun: str) -> list[dict[str, Any]]:
         ),
         _action(
             action_id="signal_show_block_log",
-            label="Show my block log",
+            label="Show my neighborhood log",
             message="show my block log",
             style="secondary",
         ),
@@ -330,6 +330,27 @@ def activity_browse_actions(ctx: dict[str, Any] | None = None) -> list[dict[str,
             style="secondary",
         )
         for label in labels[:4]
+    ]
+
+
+def peer_seek_offer_actions() -> list[dict[str, Any]]:
+    """Pills under an empty peers search — mirror of the browse lane's seek offer.
+    Tapping posts the message; discovery_route._try_peer_seek_offer_reply_turn reads
+    it next turn (notify → save a seek signal; widen → drop the filter and show
+    neighbors nearby). Labels must match what format_attr_peers_reply promises."""
+    return [
+        _action(
+            action_id="peer_seek_notify",
+            label="Yes, notify me",
+            message="Yes, notify me when someone like that joins",
+            style="primary",
+        ),
+        _action(
+            action_id="peer_seek_widen",
+            label="Show everyone nearby",
+            message="Show everyone nearby",
+            style="secondary",
+        ),
     ]
 
 
@@ -410,6 +431,32 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
         chips = clarify_chip_actions([str(o) for o in clarify_opts])
         if chips:
             return chips
+
+    # decide_turn policy chips — label + send are policy-authored (lexicon-enforced
+    # upstream by lingo_guard). Render regardless of ui_intent, same as clarify.
+    policy_chips = ctx.get("policy_chips")
+    if isinstance(policy_chips, list) and policy_chips:
+        rows = []
+        for i, c in enumerate(policy_chips[:3]):
+            label = str((c or {}).get("label") or "").strip() if isinstance(c, dict) else ""
+            if not label:
+                continue
+            send = str(c.get("send") or label).strip()
+            rows.append(
+                _action(
+                    action_id=f"policy_{i}",
+                    label=label,
+                    message=send,
+                    style="primary" if i == 0 else "secondary",
+                )
+            )
+        if rows:
+            return rows
+
+    # Empty peers search — the reply offers "notify me / widen"; these pills ARE those
+    # options. Renders on ui_intent chat (zero matches never reach show_peer_preview).
+    if ctx.get("peer_seek_offer"):
+        return peer_seek_offer_actions()
 
     # Concierge reply to a rapport tile answer — suggested answers or one action chip.
     # Also render regardless of ui_intent (the turn is a plain "chat" reply).

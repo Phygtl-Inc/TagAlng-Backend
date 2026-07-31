@@ -107,7 +107,8 @@ def compose_match_reason(row: dict[str, Any]) -> tuple[str | None, list[str]]:
 
 def enrich_peer_match_row(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
-    if out.get("similarity_score") is None:
+    scored = out.get("similarity_score") is not None
+    if not scored and not out.get("onion_match"):
         # Unscored row (block-preview fallback): a neighbor, not a match — never
         # dress it up with stars/badges or claim an affinity we didn't compute.
         out["match_stars"] = None
@@ -115,9 +116,6 @@ def enrich_peer_match_row(row: dict[str, Any]) -> dict[str, Any]:
         out["match_badge"] = None
         out["trait_tags"] = []
         return out
-    score = _score_value(out)
-    stars = score_to_stars(score)
-    band = match_band(score)
     raw_shared = out.get("shared_labels")
     shared_count = len(
         _clean_tags([str(s) for s in raw_shared], max_tags=10)
@@ -126,9 +124,19 @@ def enrich_peer_match_row(row: dict[str, Any]) -> dict[str, Any]:
     )
     if not shared_count and bool(out.get("has_exact_concept_match")):
         shared_count = 1  # legacy rows without shared_labels: the best pair is exact
+    if scored:
+        score = _score_value(out)
+        stars = score_to_stars(score)
+        band = match_band(score)
+    else:
+        # Onion-proven row (same place / exact shared concepts, no cosine was
+        # computed): the badge rides the proven-shared ladder alone; stars and
+        # band stay None — we never invent a similarity we didn't compute.
+        stars = None
+        band = None
     out["match_stars"] = stars
     out["match_band"] = band
-    out["match_badge"] = match_badge(band, stars, shared_count=shared_count)
+    out["match_badge"] = match_badge(band or "weak", stars or 0, shared_count=shared_count)
     out["shared_count"] = shared_count
     display_label, tags = compose_match_reason(out)
     if display_label:
@@ -201,7 +209,7 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
     if partial:
         parts.append(f"{partial} partial")
     if unscored:
-        parts.append(f"{unscored} neighbor{'s' if unscored != 1 else ''} on your block")
+        parts.append(f"{unscored} neighbor{'s' if unscored != 1 else ''} near you")
     if not parts:
         parts.append(f"{len(rows)} neighbor{'s' if len(rows) != 1 else ''}")
     status_label = " · ".join(parts)

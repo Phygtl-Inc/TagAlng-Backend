@@ -30,19 +30,20 @@ from app.layer1_intents import (
     slots_linear_intent,
 )
 from app.local_signals import fetch_my_block_log
+from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 from app.vec_util import to_pgvector
 
 HELP_WHAT_CAN_YOU_DO = (
-    "I'm Lana — your block concierge. I can help you find neighbors like you, "
+    "I'm Lana — your neighborhood concierge. I can help you find neighbors like you, "
     "swap or borrow items, meet for playgroups, share local tips, host small gatherings, "
     "and make warm introductions when you're ready. What would you like to start with?"
 )
 
 HELP_WHO_ARE_YOU = (
     "I'm Lana — your local concierge for TagAlng. I remember who you are, "
-    "what's happening on your block, and I help connect you with neighbors at your pace. "
-    "Nothing leaves your block without you saying so."
+    "what's happening near you, and I help connect you with neighbors at your pace. "
+    "Nothing leaves your neighborhood without you saying so."
 )
 
 _BUCKET_ORDER = (
@@ -103,7 +104,7 @@ def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
     else:
         lines.append("Here's what I know about you so far:")
     if block:
-        lines.append(f"Home block: {block}.")
+        lines.append(f"Home area: {block}.")
     if summary:
         lines.append(summary)
     elif claims:
@@ -140,6 +141,9 @@ def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
 
 
 def stamp_identity_profile_ctx(ctx: dict[str, Any], dashboard: dict[str, Any]) -> None:
+    # Payload only — never sets active_intent. The claims card renders solely when
+    # the handler itself routed the turn as identity.show_my_profile (an explicit
+    # "show my claims" ask), so stamping this on any other turn stays invisible.
     claims = dashboard.get("claims") if isinstance(dashboard.get("claims"), list) else []
     profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
     sorted_claims = _sort_claims_for_display([c for c in claims if isinstance(c, dict)])
@@ -149,7 +153,6 @@ def stamp_identity_profile_ctx(ctx: dict[str, Any], dashboard: dict[str, Any]) -
         "claims": sorted_claims,
         "stats": dashboard.get("stats") if isinstance(dashboard.get("stats"), dict) else {},
     }
-    ctx["active_intent"] = "identity.show_my_profile"
 
 
 def format_block_summary_reply(
@@ -164,29 +167,59 @@ def format_block_summary_reply(
     if browse_mode:
         sig_bit = (
             f"{active_signal_count} neighbor ask{'s' if active_signal_count != 1 else ''} "
-            f"or offer{'s' if active_signal_count != 1 else ''} active on your block right now "
+            f"or offer{'s' if active_signal_count != 1 else ''} active near you right now "
             "(swaps, meetups, tips)."
             if active_signal_count > 0
-            else "No public neighbor asks or offers on your block right now."
+            else "No public neighbor asks or offers near you right now."
         )
-        return (
-            f"On {block_name}: {sig_bit} "
-            "I can't list every neighbor's post yet — that's coming. "
-            "Say **show my block log** for matches tied to *your* posts, "
-            "or tell me what you're looking for or offering."
+        return compose_reply(
+            goal=(
+                "Give the user a quick pulse of their neighborhood: how many public "
+                "neighbor asks or offers (swaps, meetups, tips) are active right now, "
+                "note honestly that you can't list every neighbor's post yet, and "
+                "point them to 'show my neighborhood log' for matches tied to their "
+                "own posts — or invite them to say what they're looking for or offering."
+            ),
+            facts=[
+                f"Area name: {block_name}",
+                f"Active public neighbor asks/offers right now: {active_signal_count}",
+            ],
+            fallback=(
+                f"On {block_name}: {sig_bit} "
+                "I can't list every neighbor's post yet — that's coming. "
+                "Say **show my neighborhood log** for matches tied to *your* posts, "
+                "or tell me what you're looking for or offering."
+            ),
+            max_sentences=3,
         )
     state_bit = ""
     if block_state and block_state not in ("live", "unknown"):
-        state_bit = f" Block status: {block_state.replace('_', ' ')}."
+        state_bit = f" Area status: {block_state.replace('_', ' ')}."
     match_bit = ""
     if match_count > 0:
-        match_bit = f" You have {match_count} potential match{'es' if match_count != 1 else ''} in your block log."
+        match_bit = f" You have {match_count} potential match{'es' if match_count != 1 else ''} in your neighborhood log."
     elif neighbor_count > 0:
-        match_bit = " Your block log is quiet — ask for something or offer to help neighbors and matches will land here."
-    return (
-        f"On {block_name}: about {neighbor_count} neighbor{'s' if neighbor_count != 1 else ''} "
-        f"on your block right now.{state_bit}{match_bit} "
-        "Want to find people, post a swap, or see your block log?"
+        match_bit = " Your neighborhood log is quiet — ask for something or offer to help neighbors and matches will land here."
+    facts = [
+        f"Area name: {block_name}",
+        f"Neighbors around right now: about {neighbor_count}",
+        f"Potential matches in their neighborhood log: {match_count}",
+    ]
+    if state_bit:
+        facts.append(f"Area status: {block_state.replace('_', ' ')}")
+    return compose_reply(
+        goal=(
+            "Summarize the user's neighborhood — how many neighbors are around and "
+            "any potential matches waiting in their neighborhood log — then invite "
+            "them to find people, post a swap, or see their neighborhood log."
+        ),
+        facts=facts,
+        fallback=(
+            f"On {block_name}: about {neighbor_count} neighbor{'s' if neighbor_count != 1 else ''} "
+            f"near you right now.{state_bit}{match_bit} "
+            "Want to find people, post a swap, or see your neighborhood log?"
+        ),
+        max_sentences=3,
     )
 
 
@@ -211,7 +244,7 @@ def fetch_block_summary(user_jwt: str, *, block_id: str | None = None) -> dict[s
         if isinstance(raw, dict):
             return {
                 "block_id": raw.get("block_id") or block_id,
-                "block_name": str(raw.get("block_name") or "your block"),
+                "block_name": str(raw.get("block_name") or "your area"),
                 "block_state": raw.get("block_state"),
                 "neighbor_count": int(raw.get("neighbor_count") or 0),
                 "match_count": int(raw.get("active_match_count") or 0),
@@ -222,7 +255,7 @@ def fetch_block_summary(user_jwt: str, *, block_id: str | None = None) -> dict[s
     profile_raw = call_rpc(user_jwt, "get_my_profile", {})
     profile = profile_raw if isinstance(profile_raw, dict) else {}
     bid = block_id or profile.get("home_block_id")
-    block_name = str(profile.get("block_display_name") or profile.get("home_zip") or "your block")
+    block_name = str(profile.get("block_display_name") or profile.get("home_zip") or "your area")
     block_state = str(profile.get("block_state") or "").strip() or None
     neighbor_count = _count_neighbors_on_block(str(bid)) if bid else 0
     match_count = 0
@@ -504,13 +537,13 @@ def format_peer_profile_reply(
             continue
         seen.add(key)
         labels.append(label)
-    lines = [f"Here's what {nick} has shared publicly on your block:"]
+    lines = [f"Here's what {nick} has shared publicly with neighbors:"]
     if labels:
         lines.append(" · ".join(labels[:12]))
     else:
         lines.append("No public identity threads saved yet.")
     if match_label:
-        lines.append(f"In your match preview they appeared as: {match_label}.")
+        lines.append(f"In your preview they appeared as: {match_label}.")
     shared = int(profile.get("shared_claim_count") or 0)
     if shared:
         lines.append(
@@ -536,24 +569,44 @@ def format_peer_match_explanation(
         except (TypeError, ValueError):
             pct = ""
     parts: list[str] = []
+    facts: list[str] = [f"Neighbor: {nick}", f'Their preview headline: "{label}"']
     if pct:
         parts.append(
             f"The {pct} on {nick} is similarity between your saved identity threads and "
             f"theirs in our embedding match — not a quiz score."
         )
+        facts.append(
+            f"The {pct} is embedding similarity between the user's saved identity "
+            "threads and theirs — not a quiz score"
+        )
     parts.append(f"The preview headline for them is \"{label}\".")
     if concept:
         parts.append(f"Strongest overlapping concept: {concept}.")
+        facts.append(f"Strongest overlapping concept: {concept}")
     if peer.get("has_exact_concept_match"):
         parts.append("They share at least one exact public claim with you.")
+        facts.append("They share at least one exact public claim with the user")
     elif pct:
         parts.append(
-            "It's overlap across several threads — the label summarizes the top match, "
-            "not every trait they have."
+            "It's overlap across several threads — the label summarizes the strongest "
+            "overlap, not every trait they have."
+        )
+        facts.append(
+            "The label summarizes the strongest overlap across several threads, "
+            "not every trait they have"
         )
     if identity_snippet:
         parts.append(f"Your last matching ask was: {identity_snippet[:120]}.")
-    return " ".join(parts)
+        facts.append(f"The user's last matching ask: {identity_snippet[:120]}")
+    return compose_reply(
+        goal=(
+            "Explain honestly what the similarity shown on this neighbor means — "
+            "grounded only in the facts, no invented traits or scores."
+        ),
+        facts=facts,
+        fallback=" ".join(parts),
+        max_sentences=3,
+    )
 
 
 def format_match_list_explanation(
@@ -562,9 +615,17 @@ def format_match_list_explanation(
     identity_snippet: str | None = None,
 ) -> str:
     if not peers:
-        return (
-            "I don't have neighbor matches loaded — say find people like me first, "
-            "then ask about a specific match."
+        return compose_reply(
+            goal=(
+                "The user asked about their matched neighbors but none are loaded. "
+                "Tell them to say 'find people like me' first, then ask about a "
+                "specific neighbor."
+            ),
+            fallback=(
+                "I don't have matched neighbors loaded — say find people like me first, "
+                "then ask about a specific neighbor."
+            ),
+            cache=True,
         )
     if len(peers) == 1:
         return format_peer_match_explanation(peers[0], identity_snippet=identity_snippet)
@@ -596,7 +657,7 @@ def format_peer_detail_reply(
     *,
     index: int | None = None,
 ) -> str:
-    label = str(peer.get("matching_peer_label") or "shared interests on your block").strip()
+    label = str(peer.get("matching_peer_label") or "shared interests near you").strip()
     nick = str(peer.get("nickname") or "").strip()
     preview = bool(peer.get("preview", True))
     idx_label = f"Neighbor {(index or 0) + 1}" if index is not None else "This neighbor"
@@ -608,9 +669,21 @@ def format_peer_detail_reply(
             pct = f" (~{int(float(score) * 100)}% match)"
         except (TypeError, ValueError):
             pct = ""
-    return (
-        f"{who} — {label}{pct}. "
-        "Want me to introduce you? Say the neighbor number or ask for an intro."
+    return compose_reply(
+        goal=(
+            "Describe this one neighbor to the user — who they are and what they "
+            "have in common — then offer to introduce them (they can say the "
+            "neighbor number or ask for an intro)."
+        ),
+        facts=[
+            f"Neighbor: {who}",
+            f"What they have in common: {label}",
+        ]
+        + ([f"Similarity: {pct.strip()}"] if pct else []),
+        fallback=(
+            f"{who} — {label}{pct}. "
+            "Want me to introduce you? Say the neighbor number or ask for an intro."
+        ),
     )
 
 
@@ -622,27 +695,81 @@ def format_attr_peers_reply(
 ) -> str:
     if not peers:
         if partial_summary:
-            return (
-                f"No one on your block matches all of \"{filter_text}\" yet. "
-                f"{partial_summary}"
+            return compose_reply(
+                goal=(
+                    "Tell the user gently that no neighbor nearby matches everything "
+                    "they asked for yet, and share the partial matches that do exist "
+                    "exactly as given. Then offer the two real options: you can "
+                    "notify them the moment a full match joins (the pill under your "
+                    "message says 'Yes, notify me'), or widen the search — show "
+                    "neighbors nearby even without that exact match (the pill says "
+                    "'Show everyone nearby')."
+                ),
+                facts=[
+                    f'What they searched for: "{filter_text}"',
+                    f"Partial matches: {partial_summary}",
+                ],
+                fallback=(
+                    f"No one near you matches all of \"{filter_text}\" yet. "
+                    f"{partial_summary} I can notify you when a full match joins — "
+                    "or widen the search and show everyone nearby."
+                ),
             )
         # Search-first, then offer the broadcast — mirrors the empty activities lane.
-        return (
-            f"I don't see neighbors matching \"{filter_text}\" on your block yet. "
-            "Want me to keep an ear out and text you when one joins — or try a broader description?"
+        # Both options must survive in the copy because the pills under this message
+        # say exactly that (ui_actions.peer_seek_offer_actions); the tap is read by
+        # discovery_route._try_peer_seek_offer_reply_turn.
+        return compose_reply(
+            goal=(
+                "Tell the user you don't see neighbors matching their search nearby "
+                "yet. Offer the two real options: you can keep listening and notify "
+                "them the moment a matching neighbor joins (the pill under your "
+                "message says 'Yes, notify me'), or you can widen the search — "
+                "meaning you drop their specific filter and show neighbors nearby "
+                "anyway (the pill says 'Show everyone nearby'). Never invent or "
+                "promise neighbors who don't exist."
+            ),
+            facts=[f'What they searched for: "{filter_text}"'],
+            fallback=(
+                f"I don't see neighbors matching \"{filter_text}\" near you yet. "
+                "I can notify you the moment someone like that joins — or widen the "
+                "search and show everyone nearby."
+            ),
         )
     # The cards carry names + shared traits — the text stays to the count + next step.
     n = len(peers)
     if all(p.get("semantic_match") for p in peers if isinstance(p, dict)):
         # Meaning-based hits: stay truthful — nobody literally lists the user's word,
         # the cards show the actual claims that came close.
-        return (
-            f"No one lists \"{filter_text}\" word-for-word, but {n} neighbor{'s' if n != 1 else ''} "
-            "come close — here's what they've shared. Want me to introduce you to any of them?"
+        return compose_reply(
+            goal=(
+                "Stay truthful: no neighbor literally lists the user's exact word, "
+                "but some come close on meaning — the cards below show what they've "
+                "actually shared. Offer to introduce the user to any of them."
+            ),
+            facts=[
+                f'What they searched for: "{filter_text}"',
+                f"Neighbors who come close on meaning (not word-for-word): {n}",
+            ],
+            fallback=(
+                f"No one lists \"{filter_text}\" word-for-word, but {n} neighbor{'s' if n != 1 else ''} "
+                "come close — here's what they've shared. Want me to introduce you to any of them?"
+            ),
         )
-    return (
-        f"I found {n} neighbor{'s' if n != 1 else ''} matching \"{filter_text}\" — "
-        "here's what you have in common. Want me to introduce you to any of them?"
+    return compose_reply(
+        goal=(
+            "Tell the user how many neighbors matched their search — the cards "
+            "below show what they have in common — and offer to introduce them "
+            "to any of the neighbors."
+        ),
+        facts=[
+            f'What they searched for: "{filter_text}"',
+            f"Neighbors found: {n}",
+        ],
+        fallback=(
+            f"I found {n} neighbor{'s' if n != 1 else ''} matching \"{filter_text}\" — "
+            "here's what you have in common. Want me to introduce you to any of them?"
+        ),
     )
 
 
@@ -659,10 +786,31 @@ def handle_notification_prefs(user_jwt: str, message: str) -> tuple[str, str]:
     except HTTPException:
         pass
     if pref == "off":
-        return "Done — I won't text you unless you ask.", pref
+        return compose_reply(
+            goal=(
+                "Confirm text notifications are now off — you won't text the user "
+                "unless they ask."
+            ),
+            fallback="Done — I won't text you unless you ask.",
+            cache=True,
+        ), pref
     if pref == "quiet":
-        return "Got it — I'll only text for important matches.", pref
-    return "You're back on normal updates — I'll text when there's a good match.", pref
+        return compose_reply(
+            goal=(
+                "Confirm the user is on quiet mode — you'll only text them for "
+                "important matches."
+            ),
+            fallback="Got it — I'll only text for important matches.",
+            cache=True,
+        ), pref
+    return compose_reply(
+        goal=(
+            "Confirm the user is back on normal update texts — you'll text when "
+            "there's a good match."
+        ),
+        fallback="You're back on normal updates — I'll text when there's a good match.",
+        cache=True,
+    ), pref
 
 
 class IdentityPersistResult:
@@ -763,10 +911,19 @@ def persist_identity_from_message(
 def handle_change_name(user_id: str | None, message: str) -> tuple[str, str | None]:
     nick = extract_display_name_reply(message)
     if not nick:
-        return "What should I call you? Just your first name is fine.", None
+        return compose_reply(
+            goal="Ask what the user would like to be called — first name is fine.",
+            fallback="What should I call you? Just your first name is fine.",
+            cache=True,
+        ), None
     if user_id:
         persist_profile_patch(user_id, {"nickname": nick})
-    return f"Done — I'll call you {nick} from here.", nick
+    return compose_reply(
+        goal="Confirm you'll call the user by their new name from here on.",
+        facts=[f"Their new name: {nick}"],
+        fallback=f"Done — I'll call you {nick} from here.",
+        max_sentences=1,
+    ), nick
 
 
 def linear_intent_label(linear_intent: str) -> str:

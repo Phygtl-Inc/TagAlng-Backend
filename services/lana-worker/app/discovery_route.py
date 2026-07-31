@@ -23,6 +23,7 @@ from app.db import (
 )
 from app.orchestrator.guardrails import utterance_is_unsafe
 from app.out_of_scope_reply import author_out_of_scope_reply
+from app.reply_compose import compose_reply
 from app.claim_search import (
     attr_display_filter,
     heritage_terms_in_text,
@@ -323,7 +324,7 @@ def fetch_neighbors_on_block_by_nickname(
                     "nickname": nick,
                     "avatar_url": None,
                     "similarity_score": None,
-                    "matching_peer_label": "on your block",
+                    "matching_peer_label": "near you",
                     "matching_peer_concept": None,
                     "has_exact_concept_match": False,
                     "preview": False,
@@ -464,7 +465,67 @@ def _fetch_verified_peer_matches(
         kick_claim_embedding_backfill(user_id=user_id, block_id=block_id)
     except Exception:
         pass
-    return fetch_peer_matches(user_jwt, limit=limit)
+    peers = fetch_peer_matches(user_jwt, limit=limit)
+    # Circles §C: fold onion-scored circle overlap into the list — proven
+    # same-place peers join (and outrank) pure-cosine fits. Fail-open: the
+    # onion must never cost a user the matches they already had.
+    try:
+        from app.onion_blend import blend_onion_matches
+
+        return blend_onion_matches(peers, user_id=user_id, limit=limit)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("onion_blend_failed")
+        return peers
+
+
+def _zip_gate_peers_turn(
+    ctx_base: dict[str, Any],
+    *,
+    user_id: str | None,
+    block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Circles §D.2, hard mode only: peer introductions need an OPEN area — in a
+    3-person ZIP the matches are junk-quality and privacy-risky. Returns the
+    seed-forward turn (exemplar #7: honest + host pill, never a dead end) when
+    gated, None to proceed. Default mode is 'soft', which never blocks peers;
+    creation paths (host/share/invite) must never call this."""
+    try:
+        from app.zip_unlock import discovery_zip_gate, gate_framing_facts
+
+        frame = discovery_zip_gate(user_id, surface="peers")
+    except Exception:  # noqa: BLE001 — a gating error must fail OPEN
+        logging.getLogger(__name__).exception("peers_zip_gate_failed")
+        return None
+    if not frame or not frame.get("blocked"):
+        return None
+    from app.reply_compose import compose_reply
+
+    reply = compose_reply(
+        goal=(
+            "They asked to meet people nearby, but their area is still coming alive, "
+            "so introductions aren't available quite yet. Say that honestly, then turn "
+            "it forward: they don't have to wait — setting something up themselves "
+            "(the pill below says 'Host a meet') is exactly what brings their area to "
+            "life. Warm, zero guilt, max 2 sentences, never the word waitlist."
+        ),
+        facts=gate_framing_facts(frame),
+        fallback=(
+            "Your area is still coming alive, so I can't set up introductions just "
+            "yet — but you don't have to wait. Want to host something and bring "
+            "your people in?"
+        ),
+        session_ctx=ctx_base,
+    )
+    ctx = _routing_ctx(
+        ctx_base,
+        phase="listening",
+        active_intent=INTENT_FIND_PEERS,
+        preview_block_id=block_id,
+    )
+    ctx["suggestions"] = ["Host a meet"]
+    ctx.pop("activity_previews", None)
+    ctx["last_routing"] = _discovery_routing_stub("listening", "zip_gate_peers")
+    return reply, ctx, ctx["last_routing"], []
 
 
 def _preview_peers_with_ids(
@@ -474,6 +535,7 @@ def _preview_peers_with_ids(
     block_id: str,
     phone_verified: bool,
     home_block_id: str | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     stored = session_ctx.get("peer_matches")
     if isinstance(stored, list) and stored:
@@ -493,8 +555,10 @@ def _preview_peers_with_ids(
                 return peers
         except Exception:
             pass
-        return fetch_preview_peers_on_block(block_id, limit=5, include_peer_ids=True)
-    return fetch_preview_peers_on_block(block_id, limit=3)
+        return fetch_preview_peers_on_block(
+            block_id, limit=5, include_peer_ids=True, exclude_user_id=user_id
+        )
+    return fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
 
 
 def _message_names_shown_peer(msg: str, peers: list[dict[str, Any]]) -> bool:
@@ -551,6 +615,7 @@ def _try_neighbor_intro_turn(
         block_id=block_id,
         phone_verified=phone_verified,
         home_block_id=ctx_base.get("home_block_id"),
+        user_id=user_id,
     )
     intro_source = str((slots or {}).get("intro_source") or "").strip().lower()
     if intro_source == "peer_preview" or slots_picking_shown_peer(slots, session_ctx):
@@ -621,8 +686,17 @@ def _try_neighbor_intro_turn(
                     peers,
                 )
             return (
-                "I'm still loading named matches for your block — say your first name, "
-                "or tell me which neighbor (e.g. first one or Neighbor 1).",
+                compose_reply(
+                    goal=(
+                        "The user wants an intro but named peer matches are still "
+                        "loading. Ask them to say their first name, or to pick a "
+                        "neighbor by position (e.g. 'first one' or 'Neighbor 1')."
+                    ),
+                    fallback=(
+                        "I'm still loading named matches near you — say your first name, "
+                        "or tell me which neighbor (e.g. first one or Neighbor 1)."
+                    ),
+                ),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_PREVIEW,
@@ -692,14 +766,14 @@ def _try_neighbor_intro_turn(
                 _give = (
                     f"{_reason} — take a peek when you have a sec."
                     if _reason
-                    else "A neighbor on your block wants to connect — take a peek."
+                    else "A neighbor near you wants to connect — take a peek."
                 )
                 _notify_user(
                     _cand,
                     title="A neighbor wants to connect 🤝",
                     body=_give,
                     url="/chat",
-                    email_subject="A neighbor on your block wants to connect",
+                    email_subject="A neighbor near you wants to connect",
                     email_html=_email_html(
                         "A neighbor wants to connect",
                         _give,
@@ -896,12 +970,6 @@ def _try_pending_heritage_turn(
             phase=phase or "listening",
             active_intent="identity.add_claim",
         )
-        if phone_verified:
-            try:
-                dashboard = fetch_identity_dashboard(user_jwt)
-                stamp_identity_profile_ctx(ctx, dashboard)
-            except HTTPException:
-                pass
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "heritage_confirmed")
         return reply, ctx, ctx["last_routing"], []
 
@@ -1360,6 +1428,7 @@ def _try_layer1_intent_turn(
             block_id=block_id or "",
             phone_verified=phone_verified,
             home_block_id=home_block_id,
+            user_id=user_id,
         )
         peer_hint = str(slots.get("peer_name") or "").strip() or msg
         selected = pick_peer_for_intro(peers, msg=peer_hint) if peers else None
@@ -1399,9 +1468,21 @@ def _try_layer1_intent_turn(
                 ]
                 known = [n for n in known if n]
                 hint = f" Identity matches: {', '.join(known[:5])}." if known else ""
-                reply = (
-                    f"I don't see anyone named {named.title()} on your block.{hint} "
-                    "They might use a different display name or be on another block."
+                reply = compose_reply(
+                    goal=(
+                        "Tell the user gently that nobody by the name they gave shows "
+                        "up nearby, mention the known display names if any were given "
+                        "as facts, and note the person might use a different display "
+                        "name or live in a different area."
+                    ),
+                    facts=[
+                        f"The user asked about someone named {named.title()}",
+                        f"Known display names nearby: {hint.strip() or '(none)'}",
+                    ],
+                    fallback=(
+                        f"I don't see anyone named {named.title()} near you.{hint} "
+                        "They might use a different display name or be in another area."
+                    ),
                 )
             else:
                 reply = "Which neighbor — say their name or a number from the list?"
@@ -1513,19 +1594,20 @@ def _try_layer1_intent_turn(
                 session_ctx=session_ctx,
                 ctx=ctx,
             )
-        if res.total > 0 and phone_verified:
-            try:
-                dashboard = fetch_identity_dashboard(user_jwt)
-                stamp_identity_profile_ctx(ctx, dashboard)
-            except HTTPException:
-                pass
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "extract_identity_claims")
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "discovery.block_log":
         if not phone_verified:
             return (
-                "Verify your email first — then I can show your block log.",
+                compose_reply(
+                    goal=(
+                        "The user asked to see the neighborhood log but must verify "
+                        "their email first. Ask them warmly to verify, then you can "
+                        "show what neighbors are asking for and offering."
+                    ),
+                    fallback="Verify your email first — then I can show your neighborhood log.",
+                ),
                 _routing_ctx(
                     ctx_base,
                     phase=phase or "listening",
@@ -1545,7 +1627,18 @@ def _try_layer1_intent_turn(
                 or "25006" in detail
             ):
                 return (
-                    "Your block log isn't available yet — we're still rolling it out on this environment.",
+                    compose_reply(
+                        goal=(
+                            "The neighborhood log feature isn't available in this "
+                            "environment yet. Say so warmly, point forward (it's "
+                            "coming), never a bare error."
+                        ),
+                        fallback=(
+                            "Your neighborhood log isn't available quite yet — "
+                            "I'll have it for you soon."
+                        ),
+                        cache=True,
+                    ),
                     _routing_ctx(
                         ctx_base,
                         phase=phase or "listening",
@@ -1624,7 +1717,18 @@ def _try_layer1_intent_turn(
                     )
         if not block_id and not phone_verified:
             return (
-                "What ZIP are you in? Once I know your block I can summarize what's happening nearby.",
+                compose_reply(
+                    goal=(
+                        "The user wants a summary of what's happening nearby but "
+                        "hasn't shared a ZIP yet. Ask for their 5-digit ZIP so you "
+                        "can look at their area."
+                    ),
+                    user_message=msg,
+                    fallback=(
+                        "What ZIP are you in? Once I know your area I can "
+                        "summarize what's happening nearby."
+                    ),
+                ),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_ZIP,
@@ -1635,7 +1739,7 @@ def _try_layer1_intent_turn(
             )
         summary = fetch_block_summary(user_jwt, block_id=block_id)
         reply = format_block_summary_reply(
-            block_name=str(summary.get("block_name") or "your block"),
+            block_name=str(summary.get("block_name") or "your area"),
             neighbor_count=int(summary.get("neighbor_count") or 0),
             match_count=int(summary.get("match_count") or 0),
             block_state=summary.get("block_state"),
@@ -1644,7 +1748,7 @@ def _try_layer1_intent_turn(
         )
         sig_n = int(summary.get("active_signal_count") or 0)
         if sig_n > 0 and not is_block_activity_browse(msg):
-            reply += f" {sig_n} neighbor ask{'s' if sig_n != 1 else ''} or offer{'s' if sig_n != 1 else ''} active on your block."
+            reply += f" {sig_n} neighbor ask{'s' if sig_n != 1 else ''} or offer{'s' if sig_n != 1 else ''} active near you."
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or PHASE_PREVIEW,
@@ -1665,7 +1769,18 @@ def _try_layer1_intent_turn(
         if is_profile_acknowledgment(msg):
             ctx["last_routing"] = _discovery_routing_stub(phase or PHASE_PREVIEW, "profile_ack")
             return (
-                "Perfect — I've got you. Want neighbors like you, to post a swap, or your block log?",
+                compose_reply(
+                    goal=(
+                        "The user just confirmed their profile is complete. "
+                        "Acknowledge warmly and offer the three next steps: meet "
+                        "neighbors like them, post a swap, or see the neighborhood log."
+                    ),
+                    fallback=(
+                        "Perfect — I've got you. Want neighbors like you, to post "
+                        "a swap, or your neighborhood log?"
+                    ),
+                    cache=True,
+                ),
                 ctx,
                 ctx["last_routing"],
                 [],
@@ -1721,9 +1836,10 @@ def _try_layer1_intent_turn(
                 user_jwt,
                 parse_claim_filters(filter_text, slots),
             )
+        display_filter = attr_display_filter(filter_text, slots)
         reply = format_attr_peers_reply(
             peers,
-            filter_text=attr_display_filter(filter_text, slots),
+            filter_text=display_filter,
             partial_summary=partial_summary,
         )
         peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
@@ -1737,6 +1853,8 @@ def _try_layer1_intent_turn(
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
         ctx["skip_claims_background_extract"] = True
         ctx.pop("activity_previews", None)
+        if not peers:
+            _stamp_peer_seek_offer(ctx, display_filter)
         return reply, ctx, ctx["last_routing"], peer_rows
 
     if linear == "settings.change_zip":
@@ -1790,10 +1908,14 @@ def _try_layer1_intent_turn(
             active_intent="help.what_can_you_do",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_capabilities")
-        reply, ai_authored = _compose_help_reply("what", msg, _session_lang(session_ctx))
-        if ai_authored:
-            # Composed under the language directive — skip the final-mile re-render.
-            ctx["_reply_localized"] = True
+        reply, chips, _ai_authored = _compose_help_reply(
+            "what", msg, _session_lang(session_ctx), history=history
+        )
+        # The reply names options in prose ("meeting friends, or hosting?") — these are
+        # their tap-able counterparts. policy_chips is turn-scoped (cleared next turn) and
+        # already rendered by derive_ui_actions; taps route like typed messages. None (not
+        # pop) when absent — the session merge resurrects popped keys.
+        ctx["policy_chips"] = chips or None
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "help.who_are_you":
@@ -1805,9 +1927,10 @@ def _try_layer1_intent_turn(
             active_intent="help.who_are_you",
         )
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "help_who_are_you")
-        reply, ai_authored = _compose_help_reply("who", msg, _session_lang(session_ctx))
-        if ai_authored:
-            ctx["_reply_localized"] = True
+        reply, chips, _ai_authored = _compose_help_reply(
+            "who", msg, _session_lang(session_ctx), history=history
+        )
+        ctx["policy_chips"] = chips or None
         return reply, ctx, ctx["last_routing"], []
 
     if linear == "tier.respond_nudge":
@@ -1853,9 +1976,17 @@ def save_pending_signal_ask(
         session_ctx["signal_pending"] = None
         return None
     if not block_id:
-        return (
-            f"Welcome back! I still have your ask — {detail[:120]}. "
-            "What ZIP are you in so I can post it to your block?"
+        return compose_reply(
+            goal=(
+                "The user just came back and you still have their saved ask, but "
+                "you need their 5-digit ZIP before you can post it for neighbors. "
+                "Welcome them back, remind them of the ask, and ask for the ZIP."
+            ),
+            facts=[f"Their pending ask: {_ask_excerpt(detail)}"],
+            fallback=(
+                f"Welcome back! I still have your ask — {_ask_excerpt(detail)}. "
+                "What ZIP are you in so I can post it for neighbors nearby?"
+            ),
         )
     session_ctx["signal_pending"] = None
     try:
@@ -1870,9 +2001,17 @@ def save_pending_signal_ask(
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("save_pending_signal_ask_failed")
         return None
-    return (
-        f"Welcome back! ✅ I've posted your ask to your block — {detail[:120]} — "
-        "and I'll ping you the moment a neighbor responds."
+    return compose_reply(
+        goal=(
+            "The user just came back and you successfully posted their saved ask "
+            "for neighbors nearby. Welcome them back, confirm exactly what was "
+            "posted, and promise to ping them the moment a neighbor responds."
+        ),
+        facts=[f"The ask you just posted: {_ask_excerpt(detail)}"],
+        fallback=(
+            f"Welcome back! ✅ I've posted your ask for neighbors nearby — {_ask_excerpt(detail)} — "
+            "and I'll ping you the moment a neighbor responds."
+        ),
     )
 
 
@@ -1883,7 +2022,7 @@ def _compose_verify_gate_ask(user_msg: str) -> str:
     request ("can you recommend me a babysitter" → demand for email with zero empathy).
     Static friendly fallback when no LLM is configured."""
     fallback = (
-        "Happy to help with that! To save your ask and share it with your block I just "
+        "Happy to help with that! To save your ask and share it with neighbors nearby I just "
         "need to verify you first — what's your email?"
     )
     try:
@@ -1895,7 +2034,7 @@ def _compose_verify_gate_ask(user_msg: str) -> str:
             model=synthesizer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. The user asked for something "
-                "you CAN do — you'll save their ask to their neighborhood block and ping "
+                "you CAN do — you'll save their ask for neighbors nearby and ping "
                 "them when a neighbor responds — but they aren't verified yet, and you need "
                 "their email before you can post anything. Write ONE short chat message "
                 "(max 2 sentences): first acknowledge specifically what they asked for and "
@@ -1927,25 +2066,61 @@ _HELP_FACTS = (
 )
 
 
-def _compose_help_reply(kind: str, user_msg: str, lang: str | None) -> tuple[str, bool]:
+def _help_recent_turns(history: list[dict[str, Any]] | None, *, limit: int = 6) -> str:
+    """Compact transcript of the last few turns for the help composer — so it can see
+    it already pitched capabilities and stop re-pitching."""
+    lines: list[str] = []
+    for turn in (history or [])[-limit:]:
+        if not isinstance(turn, dict):
+            continue
+        role = "Lana" if str(turn.get("role") or "") == "assistant" else "User"
+        text = str(turn.get("content") or "").strip().replace("\n", " ")
+        if text:
+            lines.append(f"{role}: {text[:200]}")
+    return "\n".join(lines)
+
+
+def _compose_help_reply(
+    kind: str,
+    user_msg: str,
+    lang: str | None,
+    *,
+    history: list[dict[str, Any]] | None = None,
+) -> tuple[str, list[dict[str, str]], bool]:
     """AI-authored "what can you do" / "who are you" — answers the user's actual phrasing
     in Lana's voice (and their language), grounded in the true capability list, instead of
-    the same canned paragraph every time. Returns (reply, ai_authored); the canned line is
-    the fallback and ai_authored=False tells the caller to leave localization to main."""
+    the same canned paragraph every time. Sees the recent turns so a skeptical follow-up
+    ("how would I know you're useful?") gets engaged with instead of the same pitch
+    reworded — the stateless version looped the tour four turns in a row. Returns
+    (reply, chips, ai_authored); chips are the tap-able counterparts of the options the
+    reply itself names ("meeting new friends, or hosting?" with no pills was a dead end —
+    the prose-offer-without-chips class), rendered via ctx["policy_chips"]. The canned
+    line is the fallback (no chips) and ai_authored=False tells the caller to leave
+    localization to main."""
     fallback = HELP_WHO_ARE_YOU if kind == "who" else HELP_WHAT_CAN_YOU_DO
     try:
         from app.i18n import synth_language_directive
         from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
 
         if not llm_configured():
-            return fallback, False
+            return fallback, [], False
         ask = (
             "The user asked who you are. Introduce yourself briefly and warmly — "
             "include the privacy promise."
             if kind == "who"
-            else "The user asked what you can do. Give a quick concrete tour in your own "
-            "words and end by asking what they'd like to start with."
+            else "The user is asking about what you can do or whether you're useful. "
+            "Answer their ACTUAL question. If this is their first capabilities ask, give a "
+            "quick concrete tour in your own words and end by asking what they'd like to "
+            "start with. But read the recent turns: if you already pitched your "
+            "capabilities and they're pushing back, doubting your usefulness, or mocking "
+            "you, do NOT repeat the pitch in new words — that's what's frustrating them. "
+            "Instead acknowledge the doubt plainly, own that a list of promises isn't "
+            "proof, and offer ONE specific thing they can try right now to see for "
+            "themselves (e.g. ask what's happening on their block, or name an interest "
+            "and you'll find a neighbor who shares it). Never be defensive about insults; "
+            "stay warm and answer the substance."
         )
+        recent = _help_recent_turns(history)
         lang_line = synth_language_directive(lang) if lang else None
         data = llm_json(
             model=synthesizer_model(),
@@ -1954,21 +2129,44 @@ def _compose_help_reply(kind: str, user_msg: str, lang: str | None) -> tuple[str
                 + _HELP_FACTS
                 + " Write ONE short chat message (2-3 sentences, no bullet lists) that "
                 "answers the user's actual question — mirror their wording, don't dump "
-                "every capability. "
+                "every capability. Never repeat a message you already sent in the recent "
+                "turns, even reworded. "
                 + ((lang_line + " ") if lang_line else "")
-                + 'Return JSON {"message": "..."}.'
+                + 'Return JSON {"message": "...", "chips": [{"label": "...", "send": "..."}]}. '
+                "chips (0-3) are tap-able quick replies mirroring the options your message "
+                "itself offers — one chip per option you name, none for options you don't. "
+                "label: short pill text (max 4 words) in the same language as your message. "
+                "send: the message a tap posts as the user — a short, concrete, "
+                "self-contained ask in plain English grounded ONLY in the true capabilities "
+                '(e.g. "Find neighbors like me", "What\'s happening nearby", '
+                '"Help me host a meet", "Pass along an item"). '
+                "If your message offers no options (e.g. you're answering doubt with one "
+                "thing to try), return one chip for that one thing, or []."
             ),
-            user_payload=f"{ask}\nTheir exact words: {str(user_msg or '').strip()[:200]}",
-            max_tokens=160,
+            user_payload=(
+                (f"Recent turns:\n{recent}\n\n" if recent else "")
+                + f"{ask}\nTheir exact words: {str(user_msg or '').strip()[:200]}"
+            ),
+            max_tokens=280,
             temperature=0.5,
         )
         msg = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        chips: list[dict[str, str]] = []
+        raw_chips = (data or {}).get("chips") if isinstance(data, dict) else None
+        if isinstance(raw_chips, list):
+            for c in raw_chips[:3]:
+                if not isinstance(c, dict):
+                    continue
+                label = str(c.get("label") or "").strip()[:40]
+                send = str(c.get("send") or "").strip()[:80] or label
+                if label:
+                    chips.append({"label": label, "send": send})
         if msg:
-            return msg, True
-        return fallback, False
+            return msg, chips, True
+        return fallback, [], False
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("help_reply_compose_failed")
-        return fallback, False
+        return fallback, [], False
 
 
 def _try_signal_lane_turn(
@@ -2084,7 +2282,17 @@ def _try_signal_lane_turn(
                 ctx_base["preview_block_id"] = block_id
         if not resolve_block_id(ctx_base, home_block_id):
             return (
-                "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+                compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before their ask can be "
+                    "saved for neighbors nearby. Ask for it warmly."
+                ),
+                fallback=(
+                    "What ZIP are you in? Once I know your area I can save "
+                    "that for neighbors nearby."
+                ),
+                cache=True,
+            ),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_ZIP,
@@ -2234,7 +2442,7 @@ def _try_peer_trait_question_turn(
         else:
             reply = (
                 f"I don't see that heritage on {who}'s preview ({label}). "
-                "Want me to search your block for Brazilian moms?"
+                "Want me to search nearby for that?"
             )
     elif asked_mom:
         if re.search(r"\b(?:mom|mother|mama|mums?)\b", label, re.I):
@@ -2254,6 +2462,122 @@ def _try_peer_trait_question_turn(
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "peer_trait_question")
     ctx.pop("activity_previews", None)
     return reply, ctx, ctx["last_routing"], ctx["peer_matches"]
+
+
+# Tap replies to the empty-peers seek offer (pills in ui_actions.peer_seek_offer_actions).
+# Vocabulary mirrors activity_browse's accept/widen so typed replies work too; matching is
+# capped to short messages so a long unrelated sentence containing "yes" is never swallowed.
+_PEER_SEEK_ACCEPT_RE = re.compile(
+    r"\b(yes|yeah|yep|yup|sure|ok(?:ay)?|please|do it|go ahead|sounds good|listen|"
+    r"text me|notify me|let me know)\b",
+    re.IGNORECASE,
+)
+_PEER_SEEK_WIDEN_RE = re.compile(
+    r"\b(widen|broaden|wider|expand|everyone|show all|everything|anyone nearby)\b",
+    re.IGNORECASE,
+)
+_PEER_SEEK_TAP_MAX_LEN = 60
+
+
+def _stamp_peer_seek_offer(ctx: dict[str, Any], display_filter: str) -> None:
+    """Arm the one-turn 'notify me / widen' offer under an empty peers search.
+    peer_seek_offer renders the pills (turn-scoped surface); the _pending copy is
+    what the NEXT turn reads to interpret the tap (cleared with None, never pop)."""
+    ctx["peer_seek_offer"] = {"filter": display_filter}
+    ctx["peer_seek_offer_pending"] = {"filter": display_filter}
+
+
+def _try_peer_seek_offer_reply_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    user_id: str | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Reply to the offer under an empty peers search. The offer is one-turn:
+    whatever comes next consumes it. Accept → save a seek signal so the "I'll
+    notify you" promise is real (same machinery as the browse lane's 'listen for
+    me'); widen → drop the attr filter and show neighbors nearby on their own
+    claims; anything else → disarm and fall through to normal routing."""
+    pending = session_ctx.get("peer_seek_offer_pending")
+    if not isinstance(pending, dict):
+        return None
+    # None, not pop — the session-ctx merge resurrects popped keys.
+    session_ctx["peer_seek_offer_pending"] = None
+    msg_s = str(msg or "").strip()
+    if len(msg_s) > _PEER_SEEK_TAP_MAX_LEN:
+        return None
+    widen = bool(_PEER_SEEK_WIDEN_RE.search(msg_s))
+    accept = bool(_PEER_SEEK_ACCEPT_RE.search(msg_s)) and not widen
+    if not accept and not widen:
+        return None
+    filter_text = str(pending.get("filter") or "").strip()
+    block_id = _resolve_block_id_for_turn(
+        session_ctx=session_ctx,
+        home_block_id=home_block_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+    )
+
+    if accept:
+        from app.look_meet import start_meet_seek_from_interest
+
+        zip_code = (
+            str(session_ctx.get("zip") or session_ctx.get("zip_code") or "").strip() or None
+        )
+        reply = start_meet_seek_from_interest(
+            interest=filter_text or "neighbors like you",
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            block_id=block_id,
+            zip_code=zip_code,
+        )
+        ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
+        # _routing_ctx cleared the turn surfaces — re-stamp the saved-card flag the
+        # seek helper just set so the FE still shows the confirmation card.
+        ctx["look_meet_saved_now"] = session_ctx.get("look_meet_saved_now")
+        ctx["peer_seek_offer_pending"] = None
+        ctx["last_routing"] = _discovery_routing_stub("listening", "peer_seek_saved")
+        return reply, ctx, ctx["last_routing"], []
+
+    # Widen: the filter is gone — show neighbors nearby (their own claim match first,
+    # block preview as fallback), exactly what the pill label promised.
+    peers: list[dict[str, Any]] = []
+    if block_id:
+        try:
+            peers = _fetch_verified_peer_matches(
+                user_jwt, user_id=user_id, block_id=block_id, limit=5
+            )
+        except Exception:  # noqa: BLE001
+            peers = []
+    if peers:
+        reply = format_peer_matches(peers)
+    else:
+        if block_id:
+            peers = fetch_preview_peers_on_block(
+                block_id,
+                limit=3,
+                include_peer_ids=phone_verified,
+                exclude_user_id=user_id,
+            )
+        from app.i18n import session_lang as _session_lang
+
+        reply = format_preview_message(
+            peers,
+            session_ctx.get("preview_block_label"),
+            phone_verified=phone_verified,
+            lang=_session_lang(session_ctx),
+        )
+    ctx = _routing_ctx(
+        session_ctx,
+        phase=PHASE_PREVIEW,
+        preview_block_id=block_id,
+    )
+    ctx["peer_seek_offer_pending"] = None
+    ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "peer_seek_widened")
+    return reply, ctx, ctx["last_routing"], peers
 
 
 def _try_attr_refine_turn(
@@ -2302,9 +2626,10 @@ def _try_attr_refine_turn(
             user_jwt,
             parse_claim_filters(filter_text, slots),
         )
+    display_filter = attr_display_filter(filter_text, slots)
     reply = format_attr_peers_reply(
         peers,
-        filter_text=attr_display_filter(filter_text, slots),
+        filter_text=display_filter,
         partial_summary=partial_summary,
     )
     peer_rows = peers_to_match_rows(peers, phone_verified=phone_verified)
@@ -2318,6 +2643,8 @@ def _try_attr_refine_turn(
     ctx["peer_matches"] = peer_rows
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
     ctx.pop("activity_previews", None)
+    if not peers:
+        _stamp_peer_seek_offer(ctx, display_filter)
     return reply, ctx, ctx["last_routing"], peer_rows
 
 
@@ -2330,6 +2657,7 @@ def _try_peer_detail_turn(
     phone_verified: bool,
     home_block_id: str | None,
     phase: str,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     if not looks_like_peer_drilldown(msg):
         return None
@@ -2350,6 +2678,7 @@ def _try_peer_detail_turn(
         block_id=block_id,
         phone_verified=phone_verified,
         home_block_id=home_block_id,
+        user_id=user_id,
     )
     if not peers:
         return (
@@ -2563,12 +2892,12 @@ def _tip_seek_fallback_reply(
         if reason_widen:
             return (
                 f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}). "
-                "Your ask is still posted to the block, so I'll ping you the moment a neighbor "
+                "Your ask is still posted for neighbors, so I'll ping you the moment a neighbor "
                 "recommends one."
             )
         return (
             f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
-            f"{_TIP_VOUCH}). I've also posted your ask to the block — I'll ping you the moment "
+            f"{_TIP_VOUCH}). I've also posted your ask for neighbors — I'll ping you the moment "
             "a neighbor recommends one."
         )
 
@@ -2654,7 +2983,7 @@ def _tip_seek_fallback_reply(
         reframe = chosen.get("reframe") or f"Focused on {chosen.get('label', 'a good fit').lower()} spots."
         return (
             f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}), "
-            "and I've posted your ask to the block — I'll ping you the moment a neighbor "
+            "and I've posted your ask for neighbors — I'll ping you the moment a neighbor "
             "recommends one. Want me to widen the search?"
         )
 
@@ -2670,7 +2999,7 @@ def _tip_seek_fallback_reply(
     label = str(chosen.get("label") or "").strip().lower() or "matching"
     return (
         f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
-        f"({_TIP_VOUCH}). Your ask is posted to the block — I'll ping you the moment a "
+        f"({_TIP_VOUCH}). Your ask is posted for neighbors — I'll ping you the moment a "
         "neighbor recommends one."
     )
 
@@ -2709,7 +3038,15 @@ def _try_save_signal_turn(
         return None
     if not detail:
         return (
-            "Tell me a bit more — what are you looking for or offering on your block?",
+            compose_reply(
+                goal=(
+                    "The user wants to post an ask or offer for neighbors but "
+                    "hasn't said what it is. Ask for a bit more detail — what "
+                    "they're looking for or offering."
+                ),
+                user_message=msg,
+                fallback="Tell me a bit more — what are you looking for or offering?",
+            ),
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
             _discovery_routing_stub(phase or "listening", "save_signal_need_detail"),
             [],
@@ -2730,7 +3067,17 @@ def _try_save_signal_turn(
     block_id = resolve_block_id(session_ctx, home_block_id)
     if not block_id:
         return (
-            "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+            compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before their ask can be "
+                    "saved for neighbors nearby. Ask for it warmly."
+                ),
+                fallback=(
+                    "What ZIP are you in? Once I know your area I can save "
+                    "that for neighbors nearby."
+                ),
+                cache=True,
+            ),
             _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
             _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
             [],
@@ -2749,7 +3096,17 @@ def _try_save_signal_turn(
         detail_err = str(exc.detail or "").lower()
         if "block_required" in detail_err:
             return (
-                "What ZIP are you in? Once I know your block I can save that for neighbors nearby.",
+                compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before their ask can be "
+                    "saved for neighbors nearby. Ask for it warmly."
+                ),
+                fallback=(
+                    "What ZIP are you in? Once I know your area I can save "
+                    "that for neighbors nearby."
+                ),
+                cache=True,
+            ),
                 _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent),
                 _discovery_routing_stub(PHASE_NEED_ZIP, "save_signal_need_zip"),
                 [],
@@ -2813,10 +3170,86 @@ def _try_save_signal_turn(
         )
         if _tip_reply:
             reply = _tip_reply
+    # Item need/offer with no neighbor match → the create+invite bridge, never
+    # the canned "I've noted…" close (bridge spec §2 rule 3 / §7).
+    if intent in ("swap_seek", "swap_offer") and matches_shown <= 0:
+        _bridge_reply = _compose_item_need_bridge(
+            ctx=ctx, intent=intent, detail=detail, session_ctx=session_ctx, msg=msg
+        )
+        if _bridge_reply:
+            reply = _bridge_reply
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "save_local_signal")
     ctx.pop("activity_previews", None)
     clear_signal_draft(ctx)
     return reply, ctx, ctx["last_routing"], []
+
+
+def _compose_item_need_bridge(
+    *,
+    ctx: dict[str, Any],
+    intent: str,
+    detail: str,
+    session_ctx: dict[str, Any],
+    msg: str,
+) -> str | None:
+    """Bridge-shaped close for an item need/offer with zero neighbor matches
+    (LANA_RAPPORT_BRIDGE_SPEC_v1 §2 rule 3). The canned "Got it — I've noted
+    you're looking for…" close is §7 mechanic-talk and its "Show my neighborhood
+    log" chip dead-ends on an empty log (QA 2026-07-30, the rain-boots case).
+
+    The signal IS saved and matching keeps running — say that truthfully — then
+    end on ONE create+invite offer: a small swap meetup they can share with
+    neighbors they invite. Arms the same offer rails as the grounding bridge
+    (rapport_pending_action), so a chip tap or a typed "sure" dispatches the
+    host flow deterministically and a decline closes warmly."""
+    what = str(detail or "").strip()
+    if not what:
+        return None
+    from app.reply_compose import compose_reply
+
+    seeking = intent == "swap_seek"
+    label = "Set up a swap meetup"
+    send = f"help me host a swap meetup for {what[:80]}"
+    reply = compose_reply(
+        goal=(
+            (
+                "They asked their neighbors for something"
+                if seeking
+                else "They offered their neighbors something"
+            )
+            + " and no neighbor matches it yet. Acknowledge warmly in one "
+            "sentence — you'll text them the moment a neighbor matches (that is "
+            "true; never 'noted' / 'saved to my system' / 'on my radar' "
+            "phrasing). Then offer ONE next step: they don't have to wait — "
+            "they could set up a small swap meetup and share it with neighbors "
+            "they know; that's how a quiet area comes alive. End on the offer "
+            "question — the chip below your message is the tap."
+        ),
+        facts=[
+            f'What they {"need" if seeking else "have"}: "{what[:120]}"',
+            "Their ask is live and matching keeps running — you WILL text them "
+            "when a neighbor matches. Zero matches exist right now.",
+            "The offer: set up a small swap meetup they can share with "
+            "neighbors they invite.",
+        ],
+        fallback=(
+            f"I'll text you the moment a neighbor matches on {what}. You don't "
+            "have to wait, though — want to set up a little swap meetup you can "
+            "share with neighbors you know?"
+        ),
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+    ctx["rapport_active"] = True
+    ctx["rapport_offer_pending"] = True
+    ctx["rapport_pending_action"] = {
+        "kind": "host_meet",
+        "label": label,
+        "send": send,
+        "topic": f"swap meetup — {what[:60]}",
+    }
+    ctx["rapport_reply"] = {"options": [], "action": {"label": label, "send": send}}
+    return reply
 
 
 def _try_hosting_cta_turn(
@@ -2877,6 +3310,7 @@ def _history_recent_block_log(history: list[dict[str, Any]] | None) -> bool:
             phrase in text
             for phrase in (
                 "block log",
+                "neighborhood log",
                 "neighbor match",
                 "active match",
                 "i've noted you're looking",
@@ -3146,7 +3580,7 @@ def _try_block_log_intro_turn(
 
     peer = block_log_peer_from_entry(normalize_block_log_row(row))
     summary = block_log_match_summary(row)
-    match_reason = summary or "Swap match on your block."
+    match_reason = summary or "Swap match near you."
     if summary and not summary.lower().startswith("they"):
         match_reason = f"Swap match — {summary}"
 
@@ -3278,9 +3712,21 @@ def _try_block_log_nudge_turn(
     stamp_block_log_ctx(ctx, swap_entries)
     _clear_peer_surface(ctx)
     bit = f" — {summary}" if summary else ""
-    reply = (
-        f"I nudged {nick}{bit}. If they're interested, they'll get a notification "
-        "and can reply in Lana. Say show my block log to see all swap matches."
+    reply = compose_reply(
+        goal=(
+            "You just nudged a neighbor about a swap on the user's behalf. "
+            "Confirm it warmly: the neighbor gets a notification and can reply "
+            "here, and the user can say 'show my neighborhood log' to see all "
+            "their swap matches."
+        ),
+        facts=[
+            f"The neighbor you nudged: {nick}",
+            f"Why they matched: {bit.strip(' —') or '(no summary)'}",
+        ],
+        fallback=(
+            f"I nudged {nick}{bit}. If they're interested, they'll get a notification "
+            "and can reply in Lana. Say show my neighborhood log to see all swap matches."
+        ),
     )
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "block_log_nudge")
     return reply, ctx, ctx["last_routing"], []
@@ -3363,9 +3809,17 @@ def _try_meta_chat_turn(
     )
     _clear_peer_surface(ctx)
     ctx.pop("activity_previews", None)
-    reply = (
-        "I'm Lana — your block neighbor assistant. I can help you find people, "
-        "borrow or swap gear, get local tips, or plan meetups. What would you like?"
+    reply = compose_reply(
+        goal=(
+            "Introduce yourself: you're Lana, the user's local concierge. You "
+            "can help them find people nearby, borrow or swap gear, get local "
+            "tips, or plan meetups. Ask what they'd like."
+        ),
+        fallback=(
+            "I'm Lana — your local concierge. I can help you find people, "
+            "borrow or swap gear, get local tips, or plan meetups. What would you like?"
+        ),
+        cache=True,
     )
     ctx["last_routing"] = _discovery_routing_stub(phase or PHASE_PREVIEW, "meta_chat")
     return reply, ctx, ctx["last_routing"], []
@@ -3419,7 +3873,14 @@ def _try_show_block_log_turn(
     ctx_base = dict(session_ctx)
     if not phone_verified:
         return (
-            "Verify your email first — then I can show your block log.",
+            compose_reply(
+                goal=(
+                    "The user asked to see the neighborhood log but must verify "
+                    "their email first. Ask them warmly to verify, then you can "
+                    "show what neighbors are asking for and offering."
+                ),
+                fallback="Verify your email first — then I can show your neighborhood log.",
+            ),
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
             _discovery_routing_stub(phase or "listening", "block_log_need_verify"),
             [],
@@ -3436,7 +3897,18 @@ def _try_show_block_log_turn(
             or "25006" in detail
         ):
             return (
-                "Your block log isn't available yet — we're still rolling it out on this environment.",
+                compose_reply(
+                    goal=(
+                        "The neighborhood log feature isn't available in this "
+                        "environment yet. Say so warmly, point forward (it's "
+                        "coming), never a bare error."
+                    ),
+                    fallback=(
+                        "Your neighborhood log isn't available quite yet — "
+                        "I'll have it for you soon."
+                    ),
+                    cache=True,
+                ),
                 _routing_ctx(ctx_base, phase=phase or "listening", active_intent=INTENT_SHOW_BLOCK_LOG),
                 _discovery_routing_stub(phase or "listening", "block_log_unavailable"),
                 [],
@@ -3698,6 +4170,28 @@ def _declines_to_answer(msg: str) -> bool:
     return bool(_DECLINE_INPUT_RE.search(str(msg or "").strip())) or is_signal_cancel(msg)
 
 
+def _zip_ask_declined(slots: dict[str, Any] | None, msg: str) -> bool:
+    """Should the need-ZIP gate off-ramp instead of re-asking?
+
+    AI-authoritative: the classifier's declined_slot='zip' verdict fires the
+    off-ramp regardless of goal — it reads "no ZIP right now, but still find me
+    people" by meaning, where goal stays peers. The decline regex is the
+    fallback-only backstop and stays suppressed while the AI reports an active
+    discovery goal ("find me people, stop asking questions" is frustration,
+    not a refusal to proceed)."""
+    if str((slots or {}).get("declined_slot") or "") == "zip":
+        return True
+    goal = str((slots or {}).get("goal") or "")
+    return _declines_to_answer(msg) and goal not in (
+        "peers",
+        "activities",
+        "both",
+        "continue",
+        "save_signal",
+        "verify",
+    )
+
+
 def _host_via_orchestrator() -> bool:
     """Hosting a full event runs through the orchestrator (OpenAI) in-chat, not the
     lightweight host_meet signal. Falls back to the signal lane when orchestrator off."""
@@ -3713,7 +4207,7 @@ def _host_via_orchestrator() -> bool:
 # description ("weekday playground meet with kids") is never mistaken for a pivot.
 _HOST_PIVOT_RE = re.compile(
     r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow my (?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b",
+    r"\bshow my (?:block log|neighborhood log|intros)\b|\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b",
     re.I,
 )
 # Backstop so a verified user can never be trapped in host mode.
@@ -3823,6 +4317,22 @@ def _is_host_answer(
     return not _host_confident_foreign(slots)
 
 
+def _is_host_cta_turn(msg: str, session_ctx: dict[str, Any]) -> bool:
+    """Is this turn a tap on the host review/setup/confirm card's OWN buttons ("Looks
+    good", "Let me tweak", "Drop the meet up")? The FE sends those labels as plain chat
+    text, and "drop the meet up" reliably reads to the classifier as an ABANDON — "drop"
+    means cancel in plain English, publish in ours. Mirror of the seed-turn rule: a
+    button's own payload is an explicit choice, never re-classified out of the lane whose
+    card is on screen. A hard cancel word ("drop it", "cancel") still wins and backs out."""
+    from app.lana_unified_pipeline import _is_host_confirm, _is_host_drop, _is_host_tweak
+
+    return (
+        str(session_ctx.get("host_stage") or "") in ("review", "setup", "confirm")
+        and (_is_host_confirm(msg) or _is_host_drop(msg) or _is_host_tweak(msg))
+        and not is_signal_cancel(msg)
+    )
+
+
 def _release_host_mode(session_ctx: dict[str, Any]) -> None:
     """Exit the sticky event-host flow and drop the in-progress draft, so a later
     'host an event' starts clean instead of resuming this abandoned one. Keys are set
@@ -3917,7 +4427,7 @@ def invalid_zip_hint(text: str) -> str | None:
     if len(digits) != 5:
         return (
             "I need a 5-digit US ZIP code only (e.g. 32827), not a longer number. "
-            "Which ZIP is your block?"
+            "Which ZIP are you in?"
         )
     return None
 
@@ -4316,6 +4826,12 @@ def _routing_ctx(
         "active_intent": active_intent,
         "routing_phase": phase,
     }
+    if phase == PHASE_NEED_ZIP:
+        # The ZIP ask happened — remembered for the whole session, because the
+        # decline off-ramp resets routing_phase to "listening" and every later
+        # ask would otherwise count as a "first ask" and replay the canned line
+        # verbatim (the broken-record loop). See the need-ZIP gate.
+        out["zip_asked"] = True
     clear_turn_surfaces(out)
     out.update(extra)
     return out
@@ -4458,6 +4974,7 @@ def fetch_preview_peers_on_block(
     *,
     limit: int = 3,
     include_peer_ids: bool = False,
+    exclude_user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Anonymous-safe preview by default; verified users may get peer_user_id for intros.
 
@@ -4465,16 +4982,21 @@ def fetch_preview_peers_on_block(
     "On your block" so nothing downstream can present a peer's own claim as an
     affinity the caller supposedly shares (similarity_score None keeps them
     unscored through enrich_peer_match_row: no stars, no badge, no trait chips).
+
+    exclude_user_id keeps the caller out of their own neighbor list (their block +
+    nickname are persisted earlier in the same turn, so without it a fresh signup
+    is shown — and counted — as their own neighbor).
     """
     try:
         sb = service_client()
-        users = (
+        q = (
             sb.table("users")
             .select("id, nickname")
             .eq("home_block_id", block_id)
-            .limit(15)
-            .execute()
         )
+        if exclude_user_id:
+            q = q.neq("id", str(exclude_user_id))
+        users = q.limit(15).execute()
         rows = users.data or []
         out: list[dict[str, Any]] = []
         for u in rows[:limit]:
@@ -4488,7 +5010,7 @@ def fetch_preview_peers_on_block(
                     "nickname": nick if include_peer_ids else None,
                     "avatar_url": None,
                     "similarity_score": None,
-                    "matching_peer_label": "On your block",
+                    "matching_peer_label": "Near you",
                     "matching_peer_concept": None,
                     "has_exact_concept_match": False,
                     "preview": not include_peer_ids,
@@ -4601,6 +5123,33 @@ def fetch_preview_events_on_block(
         return []
 
 
+def _ask_excerpt(detail: str, limit: int = 120) -> str:
+    """Echo of a saved ask, cut at a word boundary with an ellipsis. The hard
+    ``[:120]`` slice ended confirmations mid-word ("…toddler-friendly activities
+    for'") — and the composer quotes the excerpt verbatim, so it must read whole."""
+    s = " ".join(str(detail or "").split())
+    if len(s) <= limit:
+        return s
+    cut = s[:limit].rsplit(" ", 1)[0].rstrip(",;:—–-")
+    return f"{cut}…"
+
+
+_PLACEHOLDER_LABEL_RE = re.compile(r"\s*\(placeholder\)", re.IGNORECASE)
+_BLOCK_WORD_LABEL_RE = re.compile(r"\bblocks?\b", re.IGNORECASE)
+
+
+def clean_block_label(label: str | None) -> str | None:
+    """The phase1 seed blocks shipped with '(placeholder)' in display_name and that
+    leaked verbatim into replies ("near Lake Nona — Block A (placeholder)"). The
+    data is renamed by migrations 20260912/20260915; this keeps any stale row or
+    stashed session label from ever reaching copy. "Block" is also swapped here:
+    it's lingo-banned, and a label carrying it trips the final-mile guard whose
+    rewrite garbles the whole sentence."""
+    s = _PLACEHOLDER_LABEL_RE.sub("", str(label or ""))
+    s = _BLOCK_WORD_LABEL_RE.sub("Area", s).strip().strip("—–-").strip()
+    return s or None
+
+
 def format_activities_message(
     events: list[dict[str, Any]],
     block_label: str | None,
@@ -4610,7 +5159,7 @@ def format_activities_message(
 ) -> str:
     from app.i18n import t
 
-    where = block_label or "your block"
+    where = clean_block_label(block_label) or "your area"
     if not events:
         return t("discovery.activities_empty", lang, where=where)
     # The FE renders these same events as a card list (activity_previews) right under this
@@ -4651,12 +5200,29 @@ def _verify_gate_reply(
     ctx_base: dict[str, Any],
     block_id: str,
     event_label: str | None = None,
+    origin: str = "peers",
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """origin records WHY signup started: 'peers' (gated mid-funnel — resume the
+    preview after verify) vs 'direct' (they just asked for an account — end at a
+    neutral welcome, never an unrequested neighbors list)."""
     from app.i18n import session_lang as _session_lang, t as _t
 
     _lang = _session_lang(session_ctx)
     if event_label:
         reply = _t("discovery.verify_gate_event", _lang, event=event_label)
+    elif origin == "direct":
+        # AI-authored (final-mile localizer renders the session language);
+        # the i18n line is the no-LLM fallback only.
+        reply = compose_offscript_reply(
+            goal=(
+                "The user asked to create an account. Kick off signup warmly: "
+                "you need their email address to send a verification code. Ask "
+                "for the email — one short line, and do NOT mention neighbors "
+                "or matches; they only asked to sign up."
+            ),
+            facts=["Signing up sends a 6-digit verification code to their email"],
+            fallback=_t("discovery.verify_gate_direct", _lang),
+        )
     else:
         reply = _t("discovery.verify_gate_neighbors", _lang)
     ctx = _routing_ctx(
@@ -4666,6 +5232,7 @@ def _verify_gate_reply(
     )
     ctx["requires_phone_verification"] = True
     ctx["peer_matches"] = []
+    ctx["signup_origin"] = origin
     return (
         reply,
         ctx,
@@ -4683,7 +5250,7 @@ def format_preview_message(
 ) -> str:
     from app.i18n import t
 
-    where = block_label or "your block"
+    where = clean_block_label(block_label) or "your area"
     if not peers:
         return t("discovery.peers_empty", lang, where=where)
     if len(peers) == 1:
@@ -4930,7 +5497,7 @@ def _ask_browse_or_meet(
     ctx["suggestions"] = opts
     ctx["clarify_options"] = opts
     q = (question or "").strip() or (
-        "Happy to help! Want me to show what's already happening on your block, or set you "
+        "Happy to help! Want me to show what's already happening near you, or set you "
         "up with a meet so I can match you with neighbors who want the same?"
     )
     return (
@@ -5029,7 +5596,7 @@ def _acknowledge_out_of_scope_close(
     reply = author_out_of_scope_reply(
         mode="close", user_msg=user_msg, subject=subject,
     ) or (
-        "Totally understand — no worries at all! I'm right here on your block whenever you "
+        "Totally understand — no worries at all! I'm right here whenever you "
         "want to meet neighbors or see what's happening nearby."
     )
     return (
@@ -5065,13 +5632,13 @@ def _ask_out_of_scope(
         thing = (detail or "").strip()
         if thing:
             q = (
-                f"Ooh, {thing}! Do you want to get neighbors together for that on your block, "
+                f"Ooh, {thing}! Do you want to get neighbors together for that nearby, "
                 f"or are you asking me to order/handle it for you?"
             )
         else:
             q = (
-                "Just so I get this right — do you want to get neighbors together for that on "
-                "your block, or are you asking me to handle it for you directly?"
+                "Just so I get this right — do you want to get neighbors together for that "
+                "nearby, or are you asking me to handle it for you directly?"
             )
     ctx["suggestions"] = opts or ["Get neighbors together", "Just handle it for me"]
     ctx["clarify_options"] = ctx["suggestions"]
@@ -5143,7 +5710,7 @@ def _decline_out_of_scope(
         mode="decline", user_msg=msg, subject=what,
     ) or (
         f"Ah, {what} isn't something I can do yet — I'm here to connect you with neighbors "
-        "on your block: finding people, local activities, swapping things, and sharing tips. "
+        "near you: finding people, local activities, swapping things, and sharing tips. "
         "I've noted your request though, and we'll let you know if we add it! "
         "In the meantime, want to meet some neighbors or see what's happening nearby?"
     )
@@ -5159,7 +5726,7 @@ def _decline_out_of_scope(
 _MEDICAL_SAFETY_FALLBACK = (
     "I'm not able to give medical advice, and for something like this it's best to contact a "
     "doctor or a nurse line right away — if it's severe or an emergency, call 911. What I can "
-    "do is find a doctor or pediatrician recommendation from your block — want me to?"
+    "do is find a doctor or pediatrician recommendation from neighbors nearby — want me to?"
 )
 
 
@@ -5517,6 +6084,10 @@ def handle_discovery_turn(
         # flow on turn 1 (the look_meet seed bug, mirrored). The entry is an explicit choice;
         # never release on turn 0 — run the flow. Later turns re-decide intent normally.
         seed_turn = int(session_ctx.get("event_host_turns") or 0) == 0 and not host_verifying
+        # CTA turn: the review/setup/confirm card's own button labels are explicit
+        # choices — never re-classified out of the lane (the "Drop the meet up" tap used
+        # to read as an abandon, wiping the finished draft; see _is_host_cta_turn).
+        cta_turn = _is_host_cta_turn(msg, session_ctx)
         # Back out when the AI reads the turn as an abandon ("I dont wanna host anything" — no
         # replacement), on a hard cancel word, or on a pivot to another lane. No keyword
         # matching for the back-out — the AI's `abandon` flag is what decides it.
@@ -5524,7 +6095,7 @@ def handle_discovery_turn(
         # turns (an email address, a 6-digit code) reliably read as a "foreign" intent to the
         # classifier and would spuriously release host mode — wiping the draft + host_publish_pending
         # before the signup handler can stash/publish it (the "logged in but no event" bug).
-        wants_out = not seed_turn and not host_verifying and (
+        wants_out = not seed_turn and not host_verifying and not cta_turn and (
             bool(slots.get("abandon")) or is_signal_cancel(msg) or pivoted_away
         )
         if wants_out:
@@ -5534,8 +6105,18 @@ def handle_discovery_turn(
             # back-out gets an explicit acknowledgement, not a silent topic switch.
             if not pivoted_away:
                 return (
-                    "No worries — we don't have to set up an event. Want to find neighbors, "
-                    "see what's happening on your block, or something else?",
+                    compose_reply(
+                        goal=(
+                            "The user backed out of setting up an event. Acknowledge "
+                            "warmly (no pressure), and offer next steps: find "
+                            "neighbors, see what's happening nearby, or something else."
+                        ),
+                        fallback=(
+                            "No worries — we don't have to set up an event. Want to find neighbors, "
+                            "see what's happening nearby, or something else?"
+                        ),
+                        cache=True,
+                    ),
                     _routing_ctx(session_ctx, phase="listening", active_intent="none"),
                     _discovery_routing_stub("listening"),
                     [],
@@ -5603,9 +6184,18 @@ def handle_discovery_turn(
                         block_id=block_id,
                         zip_code=str(session_ctx.get("zip") or "") or None,
                     )
-                    reply = (
-                        "✅ You're verified! I've posted your ask to your block — "
-                        f"{p_detail[:120]} — and I'll ping you the moment a neighbor responds."
+                    reply = compose_reply(
+                        goal=(
+                            "The user just verified their email and you immediately "
+                            "posted their saved ask for neighbors nearby. Celebrate "
+                            "the verification, confirm exactly what was posted, and "
+                            "promise to ping them when a neighbor responds."
+                        ),
+                        facts=[f"The ask you just posted: {_ask_excerpt(p_detail)}"],
+                        fallback=(
+                            "✅ You're verified! I've posted your ask for neighbors nearby — "
+                            f"{_ask_excerpt(p_detail)} — and I'll ping you the moment a neighbor responds."
+                        ),
                     )
                     ctx = _routing_ctx(
                         session_ctx, phase="listening", active_intent=INTENT_SAVE_SIGNAL
@@ -5623,8 +6213,21 @@ def handle_discovery_turn(
                     session_ctx, phase=PHASE_NEED_ZIP, active_intent=INTENT_SAVE_SIGNAL
                 )
                 return (
-                    "You're verified! What ZIP are you in? Once I know your block "
-                    "I'll post your ask to neighbors nearby.",
+                    compose_reply(
+                        goal=(
+                            "The user just verified their email; you still need their "
+                            "5-digit ZIP before their saved ask can be posted for "
+                            "neighbors nearby. Celebrate briefly and ask for the ZIP. "
+                            "If their message this turn is something else (their first "
+                            "name, a question), acknowledge it first — never repeat a "
+                            "previous ask verbatim."
+                        ),
+                        user_message=msg,
+                        fallback=(
+                            "You're verified! What ZIP are you in? Once I know your area "
+                            "I'll post your ask to neighbors nearby."
+                        ),
+                    ),
                     ctx,
                     _discovery_routing_stub(PHASE_NEED_ZIP, "signal_pending_need_zip"),
                     [],
@@ -6021,6 +6624,7 @@ def handle_discovery_turn(
         # auto-publishes it (see the post-verify host block above). Don't route them into the
         # find-peers name/identity funnel, and tell them their event is about to go up.
         host_publishing = bool(session_ctx.get("host_publish_pending"))
+        direct_signup = str(session_ctx.get("signup_origin") or "") == "direct"
         ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=email)
         if not host_publishing:
             ctx["pending_post_verify"] = True
@@ -6032,14 +6636,21 @@ def handle_discovery_turn(
             token=otp,
             verify_type="email_change",
         )
-        reply = (
-            "Perfect — verifying you now. One moment and I'll post your event to the block."
-            if host_publishing
-            else (
+        if host_publishing:
+            reply = (
+                "Perfect — verifying you now. One moment and I'll post your event for neighbors."
+            )
+        elif direct_signup:
+            # Direct account ask: never pre-promise a neighbors list they didn't request.
+            reply = (
+                "Perfect — verifying you now. Once you're verified, tell me your first name "
+                "and you're all set."
+            )
+        else:
+            reply = (
                 "Perfect — verifying you now. Once you're verified, tell me your first name "
                 "and I'll show neighbors you can connect with."
             )
-        )
         return (
             reply,
             ctx,
@@ -6217,6 +6828,23 @@ def handle_discovery_turn(
 
     if discovery_ai_enabled() and slots:
         enriched_slots = enrich_slots(dict(slots), msg=msg)
+
+        # Tap on the empty-peers seek offer ("Yes, notify me" / "Show everyone nearby")
+        # — read it BEFORE the signal lane so the accept can't be captured as a fresh
+        # signal; a non-tap reply just disarms the offer and falls through.
+        seek_offer_turn = _try_peer_seek_offer_reply_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            user_id=user_id,
+        )
+        if seek_offer_turn is not None:
+            reply, ctx, routing, peers = seek_offer_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
         signal_turn = _try_signal_lane_turn(
             msg=msg,
             slots=enriched_slots,
@@ -6310,6 +6938,7 @@ def handle_discovery_turn(
             phone_verified=phone_verified,
             home_block_id=home_block_id,
             phase=phase,
+            user_id=user_id,
         )
         if peer_detail_turn is not None:
             reply, ctx, routing, peers = peer_detail_turn
@@ -6581,31 +7210,56 @@ def handle_discovery_turn(
                 _discovery_routing_stub("listening", "zip_out_of_coverage"),
                 [],
             )
-        # Off-ramp: user is declining the ZIP — don't re-prompt the same question forever.
-        # Skip the off-ramp when the AI says they still want discovery (e.g. "find me
-        # people, stop asking questions" is frustration, not a refusal to proceed).
-        _decline_goal = str((slots or {}).get("goal") or "")
-        if _declines_to_answer(msg) and _decline_goal not in (
-            "peers",
-            "activities",
-            "both",
-            "continue",
-            "save_signal",
-            "verify",
-        ):
+        # Off-ramp: user is declining the ZIP — don't re-prompt the same question
+        # forever (see _zip_ask_declined for the AI-signal vs regex-backstop split).
+        if _zip_ask_declined(slots, msg):
             off = _routing_ctx(session_ctx, phase="listening", active_intent="none")
             off["discovery_goal"] = None
             return (
-                "No problem — we can skip that for now. Tell me what you're looking for, "
-                "or share your ZIP whenever you're ready and I'll find your block.",
+                compose_reply(
+                    goal=(
+                        "The user declined to share their ZIP. Respect it — no "
+                        "pressure, and don't ask again. Be honest that you can't "
+                        "see who or what's nearby without a general area, say "
+                        "they can share it whenever they're ready, and invite "
+                        "them to tell you what they're looking for meanwhile."
+                    ),
+                    user_message=msg,
+                    fallback=(
+                        "No problem — we can skip that for now. Tell me what you're looking for, "
+                        "or share your ZIP whenever you're ready and I'll find your area."
+                    ),
+                ),
                 off,
                 _discovery_routing_stub("listening", "zip_declined"),
                 [],
             )
         zip_hint = invalid_zip_hint(msg)
         zip_goal = str(ctx_base.get("discovery_goal") or effective_goal or "peers")
+        # Re-asks never repeat verbatim: once Lana has asked for the ZIP at any
+        # point this session (zip_asked survives the decline off-ramp's phase
+        # reset), the ask is composed against what the user just said instead of
+        # replaying the same canned line — the loop that made her read as a
+        # broken record. Only the very first ask stays the canned t() string.
+        _zip_ask = zip_hint or _zip_prompt(zip_goal, _lang)
+        if not zip_hint and (
+            str(phase or "") == PHASE_NEED_ZIP or session_ctx.get("zip_asked")
+        ):
+            _zip_ask = compose_reply(
+                goal=(
+                    "You already asked for their ZIP earlier and they replied "
+                    "with something else (not a ZIP, not a refusal). Respond to "
+                    "what they actually said first — if they asked a question "
+                    "(e.g. what a block is, or why you need the ZIP), answer it "
+                    "honestly and warmly — then explain you need a 5-digit US "
+                    "ZIP (e.g. 32827) to look around their area, and ask once "
+                    "more — gently, never robotic."
+                ),
+                user_message=msg,
+                fallback=_zip_ask,
+            )
         return (
-            zip_hint or _zip_prompt(zip_goal, _lang),
+            _zip_ask,
             _routing_ctx(
                 session_ctx,
                 phase=PHASE_NEED_ZIP,
@@ -6623,10 +7277,22 @@ def handle_discovery_turn(
     if not phone_verified and session_ctx.get("pending_signup_gate"):
         session_ctx.pop("pending_signup_gate", None)
         ctx_base.pop("pending_signup_gate", None)
+        # Direct account ask vs verify-gated mid-peers-funnel: someone already in
+        # the peers funnel told Lana who they are (identity_snippet) — resuming the
+        # preview after verify is a genuine flow resume. Someone who just said
+        # "sign up" gets an account, not an unrequested neighbors list.
+        _had_identity = bool(
+            str(
+                session_ctx.get("identity_snippet")
+                or ctx_base.get("identity_snippet")
+                or ""
+            ).strip()
+        )
         return _verify_gate_reply(
             session_ctx=session_ctx,
             ctx_base=ctx_base,
             block_id=block_id,
+            origin="peers" if _had_identity else "direct",
         )
 
     # Slot: identity snippet (Flash — not chat history heuristics)
@@ -6646,7 +7312,7 @@ def handle_discovery_turn(
     block_label = str(
         ctx_base.get("preview_block_label")
         or session_ctx.get("preview_block_label")
-        or "your block"
+        or "your area"
     )
 
     if goal == "activities":
@@ -6666,7 +7332,14 @@ def handle_discovery_turn(
             ctx_base["identity_snippet"] = seeded
             effective_snippet = seeded
 
-    if not effective_snippet:
+    _direct_signup_pending = (
+        str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
+        == "direct"
+        and (ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME)
+    )
+    if not effective_snippet and not _direct_signup_pending:
+        # Direct signups skip the identity interrogation too — they asked for an
+        # account, not matches; the post-verify branch below ends at a welcome.
         in_funnel = phase in _FUNNEL_PHASES or block_just_resolved
         if not in_funnel:
             if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
@@ -6812,6 +7485,10 @@ def handle_discovery_turn(
                 _discovery_routing_stub(PHASE_NEED_IDENTITY),
                 [],
             )
+        direct_signup = (
+            str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
+            == "direct"
+        )
         if not phone_verified:
             nick = str(
                 (ctx_base.get("display_name_saved") and extract_display_name_reply(msg))
@@ -6819,8 +7496,13 @@ def handle_discovery_turn(
                 or ""
             ).strip()
             lead = f"Got it{', ' + nick if nick else ''}! "
+            tail = (
+                "Finishing verification — send one more message and you're all set."
+                if direct_signup
+                else "Finishing verification — send one more message and I'll show your matches."
+            )
             return (
-                f"{lead}Finishing verification — send one more message and I'll show your matches.",
+                f"{lead}{tail}",
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_PREVIEW,
@@ -6832,6 +7514,41 @@ def handle_discovery_turn(
                 [],
             )
         _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+        if direct_signup:
+            # They asked for an account, not for matches — end at a neutral welcome
+            # (the FE home state), never an unrequested neighbors list. Intent gets
+            # re-decided on their next message.
+            nick = str(
+                extract_display_name_reply(msg)
+                or extract_nickname_from_message(msg)
+                or ""
+            ).strip()
+            reply = compose_offscript_reply(
+                goal=(
+                    "The user just created their account and verified their email — "
+                    "signup is complete. Welcome them warmly (by first name if known), "
+                    "briefly mention what you can do — find people or things to do "
+                    "nearby, or help them set up something of their own — and ask what "
+                    "they'd like. One short friendly message, no pressure."
+                ),
+                facts=(
+                    [f"Their first name is {nick}"] if nick else ["Their name was saved earlier"]
+                ),
+                fallback=(
+                    f"You're all set{', ' + nick if nick else ''}! I can help you find "
+                    "people or things to do nearby — or set up something of your own. "
+                    "What sounds good?"
+                ),
+            )
+            ctx = _routing_ctx(ctx_base, phase="listening", active_intent="none")
+            # None, not pop — the session-ctx merge resurrects popped keys.
+            ctx["pending_post_verify"] = None
+            ctx["signup_origin"] = None
+            ctx["activity_previews"] = None
+            return reply, ctx, _discovery_routing_stub("listening"), []
+        gated = _zip_gate_peers_turn(ctx_base, user_id=user_id, block_id=block_id)
+        if gated is not None:
+            return gated
         try:
             peers = _fetch_verified_peer_matches(
                 user_jwt, user_id=user_id, block_id=block_id, limit=5
@@ -6843,6 +7560,7 @@ def handle_discovery_turn(
                 block_id,
                 limit=3,
                 include_peer_ids=phone_verified,
+                exclude_user_id=user_id,
             )
             from app.i18n import session_lang as _session_lang
 
@@ -6909,7 +7627,7 @@ def handle_discovery_turn(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
                 return reply, ctx, ctx["last_routing"], peers
-        peers = fetch_preview_peers_on_block(block_id, limit=3)
+        peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
         from app.i18n import session_lang as _session_lang
 
         reply = format_preview_message(
@@ -6938,6 +7656,9 @@ def handle_discovery_turn(
     if phase != PHASE_PREVIEW or wants_peers or wants_more_peer_detail(msg):
         if _peer_find_turn_blocked(slots, msg=msg, session_ctx=session_ctx, history=history):
             return None
+        gated = _zip_gate_peers_turn(ctx_base, user_id=user_id, block_id=block_id)
+        if gated is not None:
+            return gated
         effective_home = home_block_id or _try_assign_home_block(
             user_jwt, session_ctx=ctx_base, home_block_id=home_block_id
         )
@@ -6968,7 +7689,7 @@ def handle_discovery_turn(
                 return reply, ctx, ctx["last_routing"], peers
 
         if wants_peers or phase != PHASE_PREVIEW:
-            peers = fetch_preview_peers_on_block(block_id, limit=3)
+            peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
             from app.i18n import session_lang as _session_lang
 
             reply = format_preview_message(

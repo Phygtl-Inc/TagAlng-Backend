@@ -124,7 +124,7 @@ begin
     canonical_example_quote, canonical_embedding
   ) values (
     p_concept, p_label, p_bucket,
-    coalesce(p_synonyms, '{}'::text[])[1:20],
+    (coalesce(p_synonyms, '{}'::text[]))[1:20],
     p_canonical_example_quote, p_canonical_embedding
   )
   on conflict (concept) do nothing
@@ -165,7 +165,7 @@ create or replace function public.match_concepts_by_embedding(
 language sql
 stable
 security definer
-set search_path = public
+set search_path = pg_catalog, public, extensions
 as $$
   select
     ic.id,

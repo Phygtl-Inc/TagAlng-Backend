@@ -40,7 +40,8 @@ _CANCEL_RE = re.compile(
 # answer ("family", "all moms welcome") is never mistaken for a pivot.
 _PIVOT_OUT_RE = re.compile(
     r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow (?:my )?(?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b",
+    r"\bshow (?:my )?(?:(?:block|neighborhood) log|intros)\b|"
+    r"\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b",
     re.IGNORECASE,
 )
 
@@ -265,11 +266,11 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
         facts = [
             f"The user is looking for: {interest or '(anything nearby)'}",
             (
-                f"Neighbors have {count} upcoming activities across TagAlng blocks right now"
+                f"Neighbors have {count} upcoming activities across neighborhoods right now"
                 if count
                 else "You don't know yet how many activities are coming up"
             ),
-            "You don't know the user's block yet; activities are grouped per neighborhood block",
+            "You don't know the user's neighborhood yet; activities are grouped per neighborhood",
             "You only need a 5-digit US ZIP code — never a street address",
         ]
         if user_reply:
@@ -286,8 +287,9 @@ def _compose_zip_ask(interest: str, *, user_reply: str = "", lang: str | None = 
             system=(
                 "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
                 "(max 2 sentences) asking for the user's ZIP code so you can show the "
-                "activities on their block. Ground it ONLY in the facts given — never "
-                "invent events or claim something is near them. "
+                "activities happening near them. Say 'near you' / 'your area' — NEVER the "
+                "word 'block' (backstage vocabulary). Ground it ONLY in the facts given — "
+                "never invent events or claim something is near them. "
                 + (f"{lang_line} " if lang_line else "")
                 + 'Return JSON {"message": "..."}.'
             ),
@@ -346,8 +348,80 @@ def _compose_out_of_coverage(zip5: str, *, user_msg: str = "", lang: str | None 
         return fallback
 
 
+def _zip_gate_frame(user_id: str | None) -> dict[str, Any] | None:
+    """Area-not-open framing facts for EMPTY browse states (§D.2 soft gate).
+    Never consulted when real events matched — supply is never hidden."""
+    try:
+        from app.zip_unlock import discovery_zip_gate
+
+        return discovery_zip_gate(user_id, surface="browse")
+    except Exception:  # noqa: BLE001 — framing is an upgrade, never a blocker
+        logging.getLogger(__name__).exception("browse_zip_gate_failed")
+        return None
+
+
+def _compose_area_warming_empty(
+    msg: str, frame: dict[str, Any], session_ctx: dict[str, Any]
+) -> str:
+    """Generic browse in a not-yet-open area with zero events: the honest state plus
+    the seed-forward move (policy exemplar #7) — never a bare "nothing found"."""
+    from app.reply_compose import compose_reply
+    from app.zip_unlock import gate_framing_facts
+
+    return compose_reply(
+        goal=(
+            "Their area has no upcoming activities yet AND is still coming alive. "
+            "Tell them that honestly, then turn it forward: they don't have to wait — "
+            "hosting something (the pill below says 'Host a meet') is how their area "
+            "wakes up. Warm, zero guilt, max 2 sentences."
+        ),
+        facts=gate_framing_facts(frame),
+        fallback=(
+            "Nothing on the calendar near you just yet — your area is still coming "
+            "alive. Want to host something and get it started?"
+        ),
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+
+
+def _compose_area_gated_browse(
+    msg: str, frame: dict[str, Any], session_ctx: dict[str, Any]
+) -> str:
+    """Pre-open area asked to browse others' events (§D.2 hard gate, bridge-spec
+    alignment 2026-07-30): the area is still waking up, so nothing is listed —
+    turn it forward to hosting. Copy must stay honest: never claim the calendar
+    is empty (supply may exist; it is gated), and never blame the user."""
+    from app.reply_compose import compose_reply
+    from app.zip_unlock import gate_framing_facts
+
+    return compose_reply(
+        goal=(
+            "Their area hasn't opened up yet, so you can't show them what other "
+            "neighbors are hosting — say that honestly (their area is still "
+            "waking up; never claim nothing is happening, never blame them). "
+            "Then turn it forward: they don't have to wait — they can host "
+            "something and share it with their own people (the pill below says "
+            "'Host a meet'), which is exactly what brings their area to life. "
+            "Warm, zero guilt, max 2 sentences."
+        ),
+        facts=gate_framing_facts(frame),
+        fallback=(
+            "Your area is still waking up, so I can't show what neighbors are "
+            "hosting quite yet. You don't have to wait, though — want to host "
+            "something and bring your people in?"
+        ),
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+
+
 def _compose_empty_seek_offer(
-    interest: str, *, user_msg: str = "", lang: str | None = None
+    interest: str,
+    *,
+    user_msg: str = "",
+    lang: str | None = None,
+    area_facts: list[str] | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -385,6 +459,11 @@ def _compose_empty_seek_offer(
                 "words naturally (if they shared a taste or excitement, react to it warmly "
                 "first) instead of a robotic no-results template."
             )
+        if area_facts:
+            # §D.2 soft gate: their area isn't open yet — weave in ONE honest line of
+            # that context so the empty result reads as "area still waking up", not
+            # "the app is dead". Both pills above must still survive in the copy.
+            facts.extend(area_facts)
         from app.i18n import synth_language_directive
 
         lang_line = synth_language_directive(lang) if lang else None
@@ -485,7 +564,12 @@ def _filter_events_by_query(
                     'JSON {"match_indices":[ints], "label":"short phrase"}: indices of '
                     "events satisfying EVERY constraint the request expresses (a date query "
                     "must match the event's date; a time-of-day query the start time; a "
-                    "host query the host). label "
+                    "host query the host). When the request names an activity, interest or "
+                    "kind of people ('runners', 'cricket', 'meet other gamers'), the TOPIC "
+                    "is a hard constraint too: only events that are genuinely that kind of "
+                    "activity match — a matching date or time of day alone NEVER qualifies "
+                    "an unrelated event (a coffee catch-up is not a match for 'runners', "
+                    "even at the right hour). label "
                     "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
                     "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
                     "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "
@@ -595,9 +679,18 @@ def run_activity_browse_turn(
     turns = int(session_ctx.get("browse_turns") or 0) + 1
     session_ctx["browse_turns"] = turns
     if _CANCEL_RE.search(msg) or turns > _BROWSE_TURN_CAP:
+        from app.reply_compose import compose_reply
+
         reset_activity_browse_state(session_ctx)
         session_ctx["routing_phase"] = "listening"
-        return "No problem — we can look another time. What else can I help with?"
+        return compose_reply(
+            goal=(
+                "The user cancelled the activity browse (or it ran long). Close "
+                "warmly with zero pressure and invite them to ask for anything else."
+            ),
+            fallback="No problem — we can look another time. What else can I help with?",
+            cache=True,
+        )
 
     # ── Seed turn: the "A meet or playgroup" CTA entered with a generic payload; don't mine
     #    it as an interest — drop it so P1 asks fresh (mirrors look_meet_skip_seed). ──
@@ -793,6 +886,22 @@ def run_activity_browse_turn(
     # filter as a cheap pre-narrow when the word appears verbatim.
     weekend_only = bool(re.search(r"\bweekend\b", interest, re.I) or re.search(r"\bweekend\b", msg, re.I))
     events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
+
+    # §D.2 hard gate (bridge-spec alignment 2026-07-30): while the user's area is
+    # not open, others' events are never listed — the pre-open move is hosting +
+    # bringing your own people in. Checked BEFORE the filter so gated supply
+    # can't leak through a topical match (QA: a lone coffee event answered
+    # "meet other runners" in a waitlist ZIP).
+    gate = _zip_gate_frame(user_id)
+    if gate and gate.get("blocked"):
+        draft["_seek_offer"] = None
+        draft["suggestions"] = ["Host a meet"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["activity_previews"] = []
+        session_ctx["routing_phase"] = "listening"
+        return _compose_area_gated_browse(msg, gate, session_ctx)
+
     matched, label = _filter_events_by_query(events, interest)
 
     from app.discovery_route import activity_previews_from_events
@@ -813,7 +922,27 @@ def run_activity_browse_turn(
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
         session_ctx["routing_phase"] = "listening"
-        return _compose_empty_seek_offer(short, user_msg=msg, lang=lang)
+        frame = _zip_gate_frame(user_id)
+        area_facts = None
+        if frame:
+            from app.zip_unlock import gate_framing_facts
+
+            area_facts = gate_framing_facts(frame)
+        return _compose_empty_seek_offer(short, user_msg=msg, lang=lang, area_facts=area_facts)
+
+    # Generic browse ("what's happening?") with a zero-event calendar in an area that
+    # isn't open yet: the seed-forward framing instead of a bare "nothing found".
+    # Real events always render below — this branch only fires when there are none.
+    if not matched and not interest:
+        frame = _zip_gate_frame(user_id)
+        if frame:
+            draft["_seek_offer"] = None
+            draft["suggestions"] = ["Host a meet"]
+            session_ctx["browse_draft"] = draft
+            session_ctx["activity_browse_active"] = True
+            session_ctx["activity_previews"] = []
+            session_ctx["routing_phase"] = "listening"
+            return _compose_area_warming_empty(msg, frame, session_ctx)
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)

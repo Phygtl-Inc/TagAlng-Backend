@@ -40,6 +40,11 @@ are writing in.
      message** ("let's change the title", "a different time", "I want another spot") — any of
      "title", "when", "place". When they DID give the new value ("change the title to Pasta
      Night"), extract the value into its field instead and leave redo empty. [] when none.
+   - publish: true ONLY when their latest message clearly asks to POST the event now, as-is
+     ("post it", "publish", "publícalo", "pode postar", "go ahead, put it up") — in whatever
+     language. false while they're still editing, asking a question, or hesitating. NOTE: in
+     this product "drop it" / "drop the meet up" means PUBLISH (drop it on the block), never
+     cancel. A cancel/abandon is NOT publish — leave publish false for those.
 
    When redo is non-empty, the reply should ask what the new value should be (they can also
    set it on the card below).
@@ -50,12 +55,12 @@ are writing in.
      you to coordinate availability, suggest they pick a time and you'll post it so neighbors RSVP.
    - If they ask for advice (how many, where, what time), give a concrete suggestion.
    - Never invent a name, date, or place they didn't give. Don't repeat yourself mechanically.
-   - Warm and natural, mom-to-mom, under ~55 words. No markdown headers or lists.
+   - Warm and natural, neighbor-to-neighbor, under ~55 words. No markdown headers or lists.
 
 Return ONE JSON object:
 {"title": <string|null>, "place": <string|null>, "capacity": <int|null>,
  "auto_approve": <bool|null>, "allow_share": <bool|null>,
- "redo": ["title"|"when"|"place", ...], "reply": <string>}"""
+ "redo": ["title"|"when"|"place", ...], "publish": <bool>, "reply": <string>}"""
 
 
 def host_turn_brain(
@@ -106,6 +111,7 @@ def host_turn_brain(
             "auto_approve": None,
             "allow_share": None,
             "redo": [],
+            "publish": data.get("publish") is True,
         }
         raw_redo = data.get("redo")
         if isinstance(raw_redo, list):

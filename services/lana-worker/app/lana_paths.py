@@ -55,6 +55,23 @@ def rec_personalize_enabled() -> bool:
     return _llm_ready()
 
 
+def decide_turn_mode() -> str:
+    """Unified conversational policy (decide_turn) rollout knob.
+
+      off    — DEFAULT. Legacy decisioning only.
+      shadow — legacy path answers; decide_turn runs on a daemon thread and logs
+               its would-be decision to lana_audit_log (event decide_turn_shadow)
+               for the cutover diff. Zero user-visible change.
+      on     — decide_turn answers conversational turns for verified users;
+               handoff / any failure falls through to the legacy path untouched.
+
+    Requires LLM ready in shadow/on (silently off otherwise)."""
+    mode = os.environ.get("LANA_DECIDE_TURN", "off").strip().lower()
+    if mode in ("shadow", "on") and _llm_ready():
+        return mode
+    return "off"
+
+
 def unified_rules_first_enabled() -> bool:
     """Run discovery/auth gates before orchestrator on unified lana turns."""
     flag = os.environ.get("LANA_UNIFIED_RULES_FIRST", "1").strip().lower()

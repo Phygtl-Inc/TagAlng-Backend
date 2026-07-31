@@ -87,6 +87,12 @@ _SYSTEM = (
     "'I just want to know if you can help with my taxes', 'so you can't do it?' — is meta → goal=chat. It is "
     "NOT a fresh request to perform X and NOT a restatement of an errand to decline; the user is asking what "
     "Lana can do, so answer the question (don't re-log or refuse it as a new out_of_scope demand). "
+    "A QUESTION about how the PRODUCT works or why Lana needs something — 'what is a block?', "
+    "'why do you need my ZIP?', 'why are you asking for my block/area?', 'what do you do with my number?', "
+    "'how does this work?' — is meta → goal=chat, in_discovery=false, at ANY routing_phase, even while "
+    "Lana is waiting on a ZIP or identity answer. The words block/ZIP/area inside a QUESTION about the "
+    "product are NOT a discovery request and NOT a funnel answer — answer the question; only an actual "
+    "request to find/see people or events (or a supplied ZIP) continues the funnel. "
     "identity_snippet = self-description for matching from the latest message OR synthesized from RECENT TURNS "
     "when routing_phase=need_identity, when the latest message is ZIP-only, or when goal=peers and RECENT TURNS "
     "already describe the user (include short answers like 'toddlers', 'parents' when synthesizing). "
@@ -274,6 +280,14 @@ _SYSTEM = (
     "are closing the thread: 'I understand, I'll look elsewhere', 'no worries, I'll handle it myself', "
     "'that's ok, thanks anyway', 'never mind then', 'I'll ask someone else'. A polite acknowledgement "
     "that ends the request is an abandon, not a fresh out_of_scope ask to log again. "
+    "declined_slot (separate field, any goal) = the user is refusing to PROVIDE the specific piece of "
+    "info Lana just asked for — their ZIP, an identity line, or a display name — WITHOUT quitting the "
+    "overall goal (quitting entirely is abandon, not this). 'I don't want to enter my ZIP right now', "
+    "'I'd rather not share my zip', 'no zip from me', 'I'm not comfortable giving that' (when Lana just "
+    "asked for it) → declined_slot='zip'/'identity'/'display_name' matching what was asked; abandon=false; "
+    "keep goal as whatever they still want (often continue or peers). A QUESTION about why you need it "
+    "('why do you need my zip?') is not a decline — answer it (declined_slot=null). null when no ask is "
+    "being refused. "
     "When goal=profile_photo set profile_photo_action: start (wants upload), accept (yes after Lana suggested), "
     "done (finished uploading), skip (cancel/not now), none. "
     "When routing_phase=await_profile_photo map the latest message to the right profile_photo_action. "
@@ -326,6 +340,16 @@ _SYSTEM = (
     "'I like playing in competitions') is the user telling you about THEMSELVES → "
     "identity.add_claim (goal=chat), NEVER find_activities — even mid-browse; only an ask to "
     "SEE/FIND what exists makes it a search. "
+    "The SAME rule covers a HABIT/ROUTINE statement: first-person present-habitual with NO ask "
+    "('I go to the gym on weekends', 'I do a spin class every Tuesday', 'we swim on Sundays', "
+    "'I run every morning') is the user describing their OWN routine → identity.add_claim "
+    "(goal=chat). A day/time word inside it ('weekend', 'Tuesdays', 'mornings') describes THEIR "
+    "rhythm, NOT a browse window — do not let 'weekend' pull a routine statement into "
+    "find_activities or looking.meet. WORKED EXAMPLE: 'i goto gym on weekend' → "
+    "identity.add_claim, goal=chat — NOT find_activities, NOT looking.meet; the reply may then "
+    "OFFER a browse ('want me to find gym meets nearby?') as a chip — offering is the reply's "
+    "job, never the router's. It becomes a search/meet ONLY when they ASK for one ('any gym "
+    "buddies around?', 'what's happening this weekend'). "
     "host_meet (sharing.host) is ONLY when the user is the ORGANIZER bringing others together "
     "(I want to host/throw/set up/organize/plan/create ...). They INVITE others; they do not ask to be "
     "shown what exists. When genuinely ambiguous between attending and organizing (a bare 'a party this "
@@ -467,10 +491,17 @@ _SYSTEM = (
     "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
     "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes "
     "(change my name, call me X, my name is X). "
-    "Use help.what_can_you_do for help/what can you do; help.who_are_you for who are you. "
+    "Use help.what_can_you_do for help/what can you do — INCLUDING skepticism or challenge "
+    "about Lana's usefulness, value, or intelligence ('how would I know you're useful', "
+    "'that is not useful', 'why would I need you', 'are you dumb', 'do you even work') — "
+    "doubting Lana IS a capabilities conversation, not chat and not system.unsafe. "
+    "help.who_are_you for who are you. "
     "LANGUAGE — set lang to the ISO 639-1 code of the language the LATEST USER MESSAGE is written "
     "in ('en', 'es', 'pt', 'ur', 'hi', ...), whatever language that is. Report what you SEE: a full "
     "sentence in English after non-English turns IS lang='en' (users code-switch; Lana follows). "
+    "SCRIPT IS NOT LANGUAGE: romanized text is still its language — Roman Urdu/Hindi in Latin "
+    "letters ('bht achy, or kuch?', 'kya haal hai', 'theek hai yaar') is lang='ur'/'hi', NOT 'en'. "
+    "English requires English WORDS, not just the Latin alphabet. "
     "When the message is too short or language-ambiguous to tell (a ZIP code, a name, a number, "
     "'ok', an emoji, a chip label), set lang=null — never guess from history. "
     "Use settings.change_language (goal=chat) when the user wants a language as their DEFAULT / "
@@ -490,7 +521,11 @@ _SYSTEM = (
     "while Lana works on this turn. label ≤ 6 words, no trailing ellipsis/period; detail = one "
     "short supporting phrase ≤ 12 words. Ground it in the USER'S OWN ask — name their thing "
     "('Finding FIFA neighbors', 'Setting up your coffee morning', 'Saving your rain-boots ask'), "
-    "never a generic 'Processing request'. Write it in the language of the latest user message. "
+    "never a generic 'Processing request'. Write it in the SAME LANGUAGE you set in lang — an Urdu "
+    "turn gets an Urdu progress line ('Aap ke parosi dhoond rahi hoon'), Spanish gets Spanish "
+    "('Buscando vecinos futboleros'); romanized Urdu/Hindi input gets a romanized line back. When "
+    "lang is null (message too short to tell), write it in conversation_lang from the context "
+    "block — English ONLY when the conversation is actually in English. "
     "TRUTHFUL ONLY: describe what this turn actually does (understanding the message, searching "
     "neighbors/events/places, saving their ask, setting up their event, writing back) — never "
     "promise results or claim an action not taken. Warm, concrete, Lana's voice, no exclamation marks."
@@ -551,6 +586,7 @@ def _empty_slots() -> dict[str, Any]:
         "clarify_options": [],
         "unsafe_kind": None,
         "abandon": False,
+        "declined_slot": None,
         "lang": None,
         "set_preferred_lang": None,
         "confidence": 0.0,
@@ -695,6 +731,9 @@ def ai_parse_discovery_turn(
         photo_action = str(raw.get("profile_photo_action") or "none").lower()
         if photo_action not in ("start", "accept", "skip", "done", "none"):
             photo_action = "none"
+        declined_slot_s = str(raw.get("declined_slot") or "").strip().lower() or None
+        if declined_slot_s not in ("zip", "identity", "display_name"):
+            declined_slot_s = None
         zip_val = raw.get("zip")
         zip_s = str(zip_val).strip() if zip_val else None
         if zip_s:
@@ -757,6 +796,7 @@ def ai_parse_discovery_turn(
             "clarify_options": clarify_options,
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
+            "declined_slot": declined_slot_s,
             "confidence": float(raw.get("confidence", 0.0)),
             # AI-authored thinking-status stage, streamed live to the client.
             "progress": normalize_progress(raw.get("progress"), max_stages=1),
@@ -782,7 +822,12 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "naming WHERE/WHAT they do it describes THEMSELVES, it does not ask you to find one "
             "('I usually run alone', 'idk', 'both', 'yes please' likewise). Only an explicit REQUEST "
             "to FIND/SHOW/RECOMMEND/HOST/GET something ('find me a cricket ground', 'any grounds "
-            "nearby?', 'recommend a cafe') is a PIVOT — classify it fresh so it leaves rapport"
+            "nearby?', 'recommend a cafe') is a PIVOT — classify it fresh so it leaves rapport. "
+            "EXCEPTION: when Lana's pending question offered candidate options (place chips) and "
+            "the reply REJECTS them without naming an alternative ('none of these', 'neither', "
+            "'nope, not those', 'it's not any of them'), that is abandon=true — they are declining "
+            "the options, not answering with one. A reply that rejects them but NAMES a different "
+            "place ('no, it's the one by Publix') is a normal answer (goal=chat, abandon=false)"
         )
     if session_ctx.get("look_meet_active"):
         return (
@@ -797,7 +842,15 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "a tip_seek PIVOT (a place is not an event) — classify it fresh, do not keep it in browse"
         )
     if session_ctx.get("event_host_active"):
-        return "event_host — helping the user CREATE/host an event of their own"
+        return (
+            "event_host — helping the user CREATE/host an event of their own. The host card's "
+            "buttons arrive as plain chat text: 'Looks good' (approve), 'Let me tweak' (edit), "
+            "and 'Drop the meet up' / 'drop it' — which in this product means PUBLISH the event "
+            "on the block, NEVER cancel. A drop/publish turn is goal=continue with abandon "
+            "omitted, and its progress line must describe POSTING the event ('Posting your meet "
+            "up'), never cancelling it. Only an explicit back-out ('cancel', 'forget it', "
+            "'don't post it') is an abandon"
+        )
     return "none"
 
 
@@ -823,6 +876,9 @@ def _discovery_slot_payload(
         if isinstance(offers, list):
             lang_pref_offer = " or ".join(str(o) for o in offers if str(o or "").strip())
     lang_pref_offer = lang_pref_offer or "none"
+    # The session's current language (AI-detected on prior turns) — the progress
+    # line's fallback when the latest message is too short to carry a language.
+    conversation_lang = str(sc.get("lang") or "").strip().lower() or "en"
     return (
         f"routing_phase: {routing_phase or 'listening'}\n"
         f"has_block: {has_block}\n"
@@ -831,11 +887,18 @@ def _discovery_slot_payload(
         f"has_profile_photo: {has_profile_photo}\n"
         f"session_active_intent: {active_intent}\n"
         f"active_capture: {active_capture}\n"
-        f"lang_pref_offer: {lang_pref_offer}\n\n"
+        f"lang_pref_offer: {lang_pref_offer}\n"
+        f"conversation_lang: {conversation_lang}\n\n"
         "RECENT TURNS:\n"
         f"{_format_history(history)}\n\n"
         f"LATEST USER MESSAGE:\n{text}\n\n"
-        "Return JSON:\n"
+        "Return JSON. SPARSE OUTPUT — the schema below lists every POSSIBLE key; your reply "
+        "must OMIT every key whose value would be null, false, \"none\", or [] (omitted = that "
+        "default; the reader treats missing keys exactly as null/false/none). ALWAYS include: "
+        "linear_intent, goal, confidence, lang, progress. Include in_discovery only when true, "
+        "abandon only when true, clarify/clarify_question/clarify_options only when clarifying. "
+        "Shorter replies are faster for the user — never echo a key just because the schema "
+        "shows it.\n"
         "{\n"
         '  "linear_intent": "<Layer 1 intent id or null>",\n'
         '  "in_discovery": true|false,\n'
@@ -861,7 +924,12 @@ def _discovery_slot_payload(
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "abandon": true|false,\n'
-        '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous",\n'
+        '  "declined_slot": "zip"|"identity"|"display_name"|null,\n'
+        '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous. '
+        "Judge by words not script (a language typed in Latin letters is still that language). Report a language DIFFERENT "
+        "from conversation_lang only on a genuine switch — the person now writing sentences in another language. Bare app "
+        "commands or borrowed words inside an established conversation (signup, login, ok, cancel, yes — normal "
+        'code-switching) are NOT a switch: return null and let conversation_lang stand",\n'
         '  "set_preferred_lang": "ISO code ONLY when the user wants that language as their default (settings.change_language), else null",\n'
         '  "confidence": 0.0-1.0,\n'
         '  "progress": [{"label": "thinking-status line ≤6 words, grounded in the user\'s ask", '

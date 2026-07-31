@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 from app.ui_actions import attach_intro_row_actions
 
@@ -82,9 +83,17 @@ def _expires_label(expires_at: Any) -> str:
 
 def format_intros_list_reply(intros: list[dict[str, Any]]) -> str:
     if not intros:
-        return (
-            "You don't have any pending intros right now. When I introduce you to a neighbor "
-            "or someone introduces you, they'll show up here until they respond."
+        return compose_reply(
+            goal=(
+                "Tell the user they have no pending intros right now, and that when "
+                "you introduce them to a neighbor (or someone introduces them), "
+                "intros will show up here until they respond."
+            ),
+            fallback=(
+                "You don't have any pending intros right now. When I introduce you to a neighbor "
+                "or someone introduces you, they'll show up here until they respond."
+            ),
+            cache=True,
         )
 
     lines = [f"You have {len(intros)} pending intro{'s' if len(intros) != 1 else ''}:"]
@@ -256,25 +265,65 @@ def format_duplicate_intro_reply(
         direction = str(row.get("direction") or "")
         reason = str(row.get("match_reason") or "").strip()
         if direction == "received":
-            reply = (
+            fallback = (
                 f"{nick} already introduced you — it's waiting on you to respond. "
                 "Tap below to accept or pass."
             )
+            goal = (
+                "Tell the user this neighbor already introduced themselves and the "
+                "intro is waiting on the user to respond — point them to the "
+                "accept/pass buttons below, and mention what you matched them on "
+                "if a reason is given."
+            )
         else:
-            reply = f"You already sent an intro to {nick} — give them a little time to respond."
+            fallback = f"You already sent an intro to {nick} — give them a little time to respond."
+            goal = (
+                "Tell the user they already sent an intro to this neighbor and "
+                "should give them a little time to respond; mention what you "
+                "matched them on if a reason is given."
+            )
         if reason:
-            reply += f" I matched you on: {reason}."
-        return reply
+            fallback += f" I matched you on: {reason}."
+        return compose_reply(
+            goal=goal,
+            facts=[f"The neighbor: {nick}"]
+            + ([f"What they were matched on: {reason}"] if reason else []),
+            fallback=fallback,
+        )
     attempt = str(attempt_summary or "").strip()
     if attempt:
-        return (
-            f"You already nudged {nick} in the last 30 days"
-            f" (your last intro wasn't about this match: {attempt}). "
-            "Pick another block-log row — e.g. introduce me to #2 — or say show my intros."
+        return compose_reply(
+            goal=(
+                "Tell the user they already nudged this neighbor in the last 30 "
+                "days about something else, so they should pick another "
+                "neighborhood log match (e.g. say 'introduce me to #2') or say "
+                "'show my intros'."
+            ),
+            facts=[
+                f"The neighbor: {nick}",
+                f"Their last intro to them was about: {attempt}",
+            ],
+            fallback=(
+                f"You already nudged {nick} in the last 30 days"
+                f" (your last intro wasn't about this match: {attempt}). "
+                "Pick another neighborhood log match — e.g. introduce me to #2 — or say show my intros."
+            ),
+            max_sentences=3,
         )
-    return (
-        f"There's already a recent intro between you and {nick} in the last 30 days. "
-        "Your inbox only shows pending intros — if it's empty, that one was likely "
-        "accepted, expired, or declined. Say show my intros to check, or pick another "
-        "block-log match (e.g. introduce me to #2)."
+    return compose_reply(
+        goal=(
+            "Tell the user there's already a recent intro between them and this "
+            "neighbor in the last 30 days; the inbox only shows pending intros, so "
+            "if it's empty that intro was likely accepted, expired, or declined. "
+            "Suggest saying 'show my intros' to check, or picking another "
+            "neighborhood log match (e.g. 'introduce me to #2')."
+        ),
+        facts=[f"The neighbor: {nick}"],
+        fallback=(
+            f"There's already a recent intro between you and {nick} in the last 30 days. "
+            "Your inbox only shows pending intros — if it's empty, that one was likely "
+            "accepted, expired, or declined. Say show my intros to check, or pick another "
+            "neighborhood log match (e.g. introduce me to #2)."
+        ),
+        max_sentences=3,
     )

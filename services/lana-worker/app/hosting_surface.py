@@ -55,7 +55,7 @@ def _who_label_from_detail(detail: str) -> str | None:
     if m:
         return str(m.group(1) or "").strip()[:80] or None
     if _MOM_AUDIENCE_RE.search(str(detail or "")):
-        return "Moms on your block"
+        return "Parents near you"
     return None
 
 
@@ -76,7 +76,7 @@ def _who_label_from_ctx(ctx: dict[str, Any]) -> str:
                     bits.append(label)
             if bits:
                 return " · ".join(bits[:3])[:80]
-    return "Neighbors on your block"
+    return "Neighbors near you"
 
 
 def trait_tags_from_hosting(
@@ -91,7 +91,7 @@ def trait_tags_from_hosting(
         bit = str(part or "").strip()
         if not bit or len(bit) < 2:
             continue
-        if bit.lower() in {"your meetup", "neighbors on your block"}:
+        if bit.lower() in {"your meetup", "neighbors on your block", "neighbors near you"}:
             continue
         if bit not in out:
             out.append(bit)
@@ -123,9 +123,9 @@ def build_hosting_draft(
     )
     nearby = max(0, int(matches_created or 0))
     if nearby > 0:
-        outreach = f"I'll text the {nearby} closest fit{'s' if nearby != 1 else ''} on your block."
+        outreach = f"I'll text the {nearby} closest fit{'s' if nearby != 1 else ''} near you."
     else:
-        outreach = "I'll let neighbors on your block know when there's a fit."
+        outreach = "I'll let neighbors nearby know when there's a fit."
     return {
         "title": title,
         "headline": f"Heard you — {title.rstrip('.')}.",

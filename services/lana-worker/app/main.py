@@ -23,6 +23,7 @@ from app.context import (
     format_user_context,
     load_event_draft_context,
     load_user_context,
+    set_address_context,
 )
 from app.event_context import host_display_name
 from app.db import (
@@ -55,7 +56,14 @@ from app.profile_intake import (
 from app.turn_timing import TurnTimer
 from app.event_publish import publish_event
 from app.guest_intake import lana_profile_guest_turn
-from app.i18n import localize_labels, localize_text, session_lang
+from app.i18n import (
+    finalize_reply_language,
+    lang_from_accept_language,
+    localize_labels,
+    localize_text,
+    normalize_lang_code,
+    session_lang,
+)
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lang_pref import (
     get_user_preferred_language,
@@ -78,6 +86,7 @@ from app.models import (
     CreateSessionResponse,
     DiscoverySurfacePayload,
     DiscoveryWeakPeerRow,
+    EventCancelHookRequest,
     EventDecisionHookRequest,
     EventDraft,
     EventJoinHookRequest,
@@ -89,6 +98,7 @@ from app.models import (
     PlaceSearchRequest,
     PlaceSearchResponse,
     ProfilePhotoUploadResponse,
+    ReverseGeocodeRequest,
     SignalPhotoUploadResponse,
     TipDraft,
     ExtractedClaim,
@@ -114,6 +124,7 @@ from app.models import (
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
 from app.orchestrator.llm import llm_configured, openai_configured, provider, router_model, synthesizer_model, vertex_configured
 from app.orchestrator.extract import (
+    _extract_model as orchestrator_extract_model,
     claude_extract_event_from_transcript,
     claude_extract_profile_from_transcript,
 )
@@ -129,6 +140,7 @@ from app.claims_persist import (
     user_needs_display_name,
 )
 from app.rapport_synth import ensure_gap_buffer as rapport_ensure_gap_buffer
+from app.reply_compose import compose_reply
 from app.profile_photo import upload_profile_photo_bytes
 from app.signal_photo import upload_signal_photo_bytes
 from app.ui_actions import derive_ui_actions
@@ -1034,8 +1046,9 @@ def health():
             "VERTEX_LANA_MODEL",
             os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
         ),
+        # Report what the /complete path ACTUALLY calls, not what we hope it calls.
         "extract_model": (
-            synthesizer_model()
+            orchestrator_extract_model()
             if _use_orchestrator() and llm_configured()
             else os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
         ),
@@ -1060,6 +1073,7 @@ def _profile_context_pack(
 def create_lana_session(
     body: CreateSessionRequest,
     authorization: str | None = Header(default=None),
+    accept_language: str | None = Header(default=None),
 ):
     _vertex_required()
     auth = verify_auth(authorization)
@@ -1116,6 +1130,7 @@ def create_lana_session(
                 event_draft=event_draft,
                 orchestrator=use_orch,
                 is_anonymous=auth.is_anonymous,
+                preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
                 **ob,
             )
 
@@ -1152,9 +1167,18 @@ def create_lana_session(
                     "unified_mode": True,
                 }
                 _rec_title = str(recovered["event_draft"].get("title") or "your event")
-                opening = (
-                    f"Welcome back! I still have **{_rec_title}** ready to go — "
-                    "send a message and I'll post it to your block."
+                opening = compose_reply(
+                    goal=(
+                        "The user just logged in and you still have the event they "
+                        "built before logging in, ready to post. Welcome them back "
+                        "and tell them to send any message so you can post it for "
+                        "their neighbors."
+                    ),
+                    facts=[f"The recovered event's name: {_rec_title}"],
+                    fallback=(
+                        f"Welcome back! I still have **{_rec_title}** ready to go — "
+                        "send a message and I'll post it for your neighbors."
+                    ),
                 )
                 status = "continue"
                 ui_raw = None
@@ -1245,10 +1269,17 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
-        if purpose == "lana" and not auth.is_anonymous:
+        if purpose == "lana":
             # The saved preference decides how the conversation STARTS — the
-            # opening greets in it. Live detection owns every turn after.
-            pref = get_user_preferred_language(auth.user_id)
+            # opening greets in it. users.locale is read for guests too: every
+            # auth user (anonymous included) gets a users row via
+            # handle_new_user, and the PWA mirrors its UI locale onto it (the
+            # Settings toggle + the anonymous-session seed). The device locale
+            # (Accept-Language) is only the fallback for a row that was never
+            # seeded. Live detection owns every turn after.
+            pref = get_user_preferred_language(auth.user_id) or lang_from_accept_language(
+                accept_language
+            )
             if pref:
                 seed_session_language(session_ctx, pref)
                 effective_lang = session_lang(session_ctx)
@@ -1305,6 +1336,7 @@ def create_lana_session(
         event_draft=event_draft,
         orchestrator=use_orch,
         is_anonymous=auth.is_anonymous,
+        preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
         **ob,
     )
 
@@ -1315,6 +1347,7 @@ def _run_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None,
     emit: Callable[[str, str | None], None] | None = None,
+    accept_language: str | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
@@ -1348,6 +1381,35 @@ def _run_lana_message(
         history = list_messages(session_id)
 
     session_ctx_in = dict(session.get("context") or {})
+    # Sessions opened before any language signal (guest funnels: every turn a tap,
+    # an email, an OTP) would ship deterministic replies in English forever — the
+    # final-mile localizer has no language to render into. Seed once from the
+    # saved preference (users.locale — guests have a row too, mirrored from the
+    # app's UI locale), falling back to the device locale; any AI verdict or
+    # preference already present wins.
+    saved_pref = get_user_preferred_language(auth.user_id)
+    if "lang" not in session_ctx_in and "preferred_lang" not in session_ctx_in:
+        seed_lang = saved_pref or lang_from_accept_language(accept_language)
+        if seed_lang:
+            seed_session_language(session_ctx_in, seed_lang)
+    elif saved_pref and saved_pref != normalize_lang_code(session_ctx_in.get("preferred_lang")):
+        # users.locale changed OUTSIDE this session (the Settings toggle writes it
+        # directly, another session may have auto-switched it) — re-sync the
+        # session's notion of the default so the per-turn preferred_language echo
+        # and the divergence streak follow the user's explicit choice instead of
+        # flipping it back. Live detection (session lang) is deliberately left
+        # alone: the preference decides starts, speech decides continuation.
+        session_ctx_in["preferred_lang"] = saved_pref
+        session_ctx_in["lang_divergence_count"] = 0
+    # Lingo §3.3/§4: the inferred household role + grammatical gender ride along on
+    # every turn so composers can address the user correctly ("your grandkids",
+    # bienvenido/bienvenida). Free — verify_auth already loaded the users row.
+    # Re-stamped (None clears) each turn so a role extracted mid-conversation
+    # reaches copy from the very next turn. set_address_context feeds every prompt
+    # built through lingo_constitution() for the rest of this request.
+    session_ctx_in["user_role"] = auth.role
+    session_ctx_in["user_grammatical_gender"] = auth.grammatical_gender
+    set_address_context(auth.role, auth.grammatical_gender)
     if purpose in ("lana", "profile_intake"):
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
@@ -1455,6 +1517,13 @@ def _run_lana_message(
             )
             timing_ms = session_ctx.pop("timing_ms", None)
             orch_used = bool(session_ctx.pop("_orchestrator_turn", False))
+            # A grounding auto-dispatch stashed its community-save announcement
+            # to ride ahead of the dispatched engine's reply — one bubble:
+            # "Life Time is saved to your communities" + the host flow's ask.
+            _preamble = str(session_ctx.get("_turn_preamble") or "").strip()
+            if _preamble:
+                reply = f"{_preamble}\n\n{reply}" if str(reply or "").strip() else _preamble
+            session_ctx["_turn_preamble"] = None  # None, not pop — the merge resurrects popped keys
             # Language preference: persist an accepted/requested default-language
             # change, and offer the switch once when the observed language keeps
             # diverging from the saved preference.
@@ -1507,17 +1576,38 @@ def _run_lana_message(
             timing_ms = timer.to_dict()
             orch_used = False
 
-        # Final-mile localization: deterministic replies (and LLM composes that
-        # run without a language directive) are authored in English. Render the
-        # reply in the session language here — one choke point instead of a
-        # per-string fix across every flow. The synthesizer marks its replies
-        # already-localized, so the main conversational path never pays a
-        # second model call. Pop unconditionally so the flag never persists.
-        _already_localized = bool(session_ctx.pop("_reply_localized", False))
-        _reply_lang = session_lang(session_ctx)
-        if _reply_lang and reply and not _already_localized:
-            with timer.stage("localize_reply"):
-                reply = localize_text(reply, _reply_lang)
+        # Final-mile localization: EVERY reply renders into the session
+        # language at this one choke point — composer opt-outs are gone. The
+        # old `_reply_localized` stamp let a composer vouch for text nobody
+        # verified, and mixed English/Spanish replies shipped (QA 2026-07-30).
+        with timer.stage("localize_reply"):
+            reply = finalize_reply_language(reply, session_ctx)
+
+        # Final-mile lingo guard: EVERY reply from every composer passes here, so
+        # this one check makes the constitution's banned lexicon unshippable —
+        # regardless of which inline prompt forgot the rules (the leaks all came
+        # from composers that never append the constitution). Regex-only on clean
+        # turns (~0ms); one rewrite call only on a violation. After localization
+        # on purpose: the banned lexicon includes the es/pt forms, and the
+        # rewriter keeps the reply's language. LANA_LINGO_GUARD=0 disables.
+        if reply and os.environ.get("LANA_LINGO_GUARD", "1").strip().lower() not in (
+            "0", "false", "off"
+        ):
+            try:
+                from app.lingo_guard import enforce as _lingo_enforce
+                from app.lingo_guard import find_violations as _lingo_hits
+
+                if _lingo_hits(reply):
+                    with timer.stage("lingo_guard"):
+                        _guard = _lingo_enforce(reply)
+                    reply = _guard.text
+                    _LOG.warning(
+                        "lingo_guard_final_mile hits=%s rewritten=%s naive=%s",
+                        _guard.hits, _guard.rewritten, _guard.naive_fallback,
+                    )
+                    session_ctx["_lingo_guard_result"] = _guard.audit_dict()
+            except Exception:  # noqa: BLE001 — the guard must never break a turn
+                _LOG.exception("lingo_guard_final_mile_failed")
 
         # These two writes hit different tables (lana_messages insert vs
         # lana_sessions update) and don't depend on each other, so run them
@@ -1596,6 +1686,13 @@ def _run_lana_message(
             auth.home_block_id,
             body.message.strip(),
         )
+    # Rolling conversation summary (memory hygiene) — folds turns older than the
+    # recent window into lana_sessions.context.rolling_summary for decide_turn.
+    # The len gate keeps short sessions free; the task re-checks its own stride.
+    if purpose == "lana" and len(history) >= 28:
+        from app.policy.summary import maybe_update_rolling_summary
+
+        background_tasks.add_task(maybe_update_rolling_summary, session_id, auth.user_id)
 
     # Message count for the debug log below — computed in memory instead of
     # re-fetching the whole thread from Supabase. `history` already holds every
@@ -1673,12 +1770,12 @@ def _run_lana_message(
             notify_user(
                 auth.user_id,
                 title="Your meet is live 🎉",
-                body=f"“{_etitle}” is posted to your block — I’ll tell you when neighbors ask to join.",
+                body=f"“{_etitle}” is posted in your area — I’ll tell you when neighbors ask to join.",
                 url=f"/meet/{_eid}",
                 email_subject=f"Your meet “{_etitle}” is live",
                 email_html=email_html(
                     "Your meet is live 🎉",
-                    f"“{_etitle}” is now posted to your block. I’ll let you know as neighbors ask to join.",
+                    f"“{_etitle}” is now posted in your area. I’ll let you know as neighbors ask to join.",
                     cta_label="Open the meet",
                     cta_path=f"/meet/{_eid}",
                 ),
@@ -1698,6 +1795,7 @@ def _run_lana_message(
         assistant_message_id=assistant_msg_id,
         ready_to_complete=ready,
         ui=ui,
+        preferred_language=normalize_lang_code(merged.get("preferred_lang")),
         event_draft=event_draft,
         item_draft=item_draft,
         tip_draft=tip_draft,
@@ -1715,9 +1813,13 @@ def send_lana_message(
     body: SendMessageRequest,
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
+    accept_language: str | None = Header(default=None),
 ):
     """Blocking turn — returns the full SendMessageResponse as one JSON body."""
-    return _run_lana_message(session_id, body, background_tasks, authorization)
+    return _run_lana_message(
+        session_id, body, background_tasks, authorization,
+        accept_language=accept_language,
+    )
 
 
 def _sse_frame(obj: Any) -> str:
@@ -1730,6 +1832,7 @@ def stream_lana_message(
     body: SendMessageRequest,
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
+    accept_language: str | None = Header(default=None),
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
@@ -1752,7 +1855,8 @@ def stream_lana_message(
     def worker() -> None:
         try:
             resp = _run_lana_message(
-                session_id, body, background_tasks, authorization, emit=emit
+                session_id, body, background_tasks, authorization, emit=emit,
+                accept_language=accept_language,
             )
             events.put(("result", resp))
         except HTTPException as exc:
@@ -2104,6 +2208,72 @@ def hook_event_decision(
     return {"ok": True}
 
 
+@app.post("/hooks/event-cancel")
+def hook_event_cancel(
+    body: EventCancelHookRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Called by the HOST's client right after cancel_event. Fans out push + email to the
+    going roster so the FE's "I let everyone know" / per-attendee "Notified" is truthful.
+    The in-app group-chat system message is posted by cancel_event itself; this hook only
+    handles device/email delivery. Host ownership + cancelled status are re-checked here."""
+    auth = verify_auth(authorization)
+    from app.auth import service_client
+
+    sb = service_client()
+    if sb is None:
+        return {"ok": False}
+    try:
+        ev = (
+            sb.table("events")
+            .select("title,host_id,status")
+            .eq("id", body.event_id)
+            .single()
+            .execute()
+            .data
+            or {}
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+    if ev.get("host_id") != auth.user_id:  # only the host may trigger this
+        return {"ok": False}
+    if ev.get("status") != "cancelled":  # cancel_event must have run first
+        return {"ok": False}
+
+    title = ev.get("title") or "a meet"
+    eid = body.event_id
+    try:
+        rows = (
+            sb.table("event_requests")
+            .select("requester_id")
+            .eq("event_id", eid)
+            .in_("status", ["approved", "attended"])
+            .eq("rsvp_status", "going")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+
+    roster = {r.get("requester_id") for r in rows} - {None, auth.user_id}
+    for uid in roster:
+        notify_user(
+            uid,
+            title=f"“{title}” was cancelled",
+            body="The host cancelled this meet. Sorry — hopefully next time.",
+            url=f"/meet/{eid}",
+            email_subject=f"Cancelled: “{title}”",
+            email_html=email_html(
+                f"“{title}” was cancelled",
+                "The host had to call this one off. Keep an eye out — "
+                "something new is usually around the corner.",
+                "See what’s nearby", "/",
+            ),
+        )
+    return {"ok": True, "notified": len(roster)}
+
+
 @app.post("/lana/places/search", response_model=PlaceSearchResponse)
 def search_places_endpoint(
     body: PlaceSearchRequest,
@@ -2118,6 +2288,308 @@ def search_places_endpoint(
 
     rows = search_places(query=body.q, block_id=auth.home_block_id, user_id=auth.user_id)
     return PlaceSearchResponse(results=[PlaceResult(**r) for r in rows])
+
+
+@app.post("/lana/places/reverse-geocode", response_model=PlaceSearchResponse)
+def reverse_geocode_endpoint(
+    body: ReverseGeocodeRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Name a bare device pin ("Use my current location") — lat/lng in, at most one
+    PlaceResult out with a human label + address (issue #42). The result echoes the
+    CALLER's coordinates: the device pin stays authoritative, this only names it.
+    Server-side proxy like /lana/places/search; [] when the key isn't configured."""
+    verify_auth(authorization)
+    from app.places import reverse_geocode
+
+    row = reverse_geocode(body.lat, body.lng)
+    return PlaceSearchResponse(results=[PlaceResult(**row)] if row else [])
+
+
+# ── Circles (§A/§G · Place Profile §3) ────────────────────────────────────────
+# The user's real-world communities, optionally grounded to a canonical places row.
+# POST-only (same service-worker reason as the rapport/places endpoints). The word
+# "circle" is internal-only (§A.4 M7) — surfaces name the place, never the term.
+
+
+class CirclesListBody(_BaseModel):
+    pass
+
+
+class CircleAddBody(_BaseModel):
+    circle_type: str
+    detail: str | None = None
+    google_place_id: str | None = None
+
+
+class CircleUpdateBody(_BaseModel):
+    affiliation_id: str
+    detail: str | None = None
+
+
+class CircleRemoveBody(_BaseModel):
+    affiliation_id: str
+
+
+class CircleGroundOptionsBody(_BaseModel):
+    affiliation_id: str
+    # "search for another" free text; defaults to the user's own captured phrase.
+    query: str | None = None
+
+
+class CircleGroundBody(_BaseModel):
+    affiliation_id: str
+    # The tapped option. Only the id crosses the wire — name/geo/address are fetched
+    # server-side from Google (places.place_details), never taken from the client.
+    google_place_id: str
+
+
+@app.post("/lana/circles/mine")
+def post_circles_mine(
+    body: CirclesListBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import list_my_circles
+
+    return {"circles": list_my_circles(auth.user_id)}
+
+
+@app.post("/lana/circles/add")
+def post_circles_add(
+    body: CircleAddBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import add_circle
+
+    try:
+        result = add_circle(
+            auth.user_id,
+            circle_type=(body.circle_type or "").strip().lower(),
+            detail=body.detail,
+            google_place_id=(body.google_place_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    amplitude_track(
+        "circle_added",
+        user_id=auth.user_id,
+        event_properties={"circle_type": body.circle_type, "grounded": bool(body.google_place_id)},
+    )
+    return result
+
+
+@app.post("/lana/circles/update")
+def post_circles_update(
+    body: CircleUpdateBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import update_circle
+
+    try:
+        update_circle(auth.user_id, body.affiliation_id, detail=body.detail)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/lana/circles/remove")
+def post_circles_remove(
+    body: CircleRemoveBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circles_flow import remove_circle
+
+    try:
+        remove_circle(auth.user_id, body.affiliation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    amplitude_track(
+        "circle_removed",
+        user_id=auth.user_id,
+        event_properties={"affiliation_id": body.affiliation_id},
+    )
+    return {"ok": True}
+
+
+@app.post("/lana/circles/ground-options")
+def post_circles_ground_options(
+    body: CircleGroundOptionsBody,
+    authorization: str | None = Header(default=None),
+):
+    """2-3 real nearby places for the "which spot — X, or somewhere else?" chips,
+    biased to the caller's block (server-side Google proxy, same as /lana/places)."""
+    auth = verify_auth(authorization)
+    from app.circles_flow import _own_affiliation, ground_options
+
+    affiliation = _own_affiliation(auth.user_id, body.affiliation_id)
+    if not affiliation:
+        raise HTTPException(status_code=404, detail="affiliation_not_found")
+    options = ground_options(
+        auth.user_id, affiliation, block_id=auth.home_block_id, query=body.query
+    )
+    return {"affiliation_id": body.affiliation_id, "options": options}
+
+
+@app.post("/lana/circles/ground")
+def post_circles_ground(
+    body: CircleGroundBody,
+    authorization: str | None = Header(default=None),
+):
+    """Pin an affiliation to its canonical place and confirm it. Also flushes any
+    pre-grounding feature notes onto the place and queues the §4.3 enrichment
+    question ("What do you enjoy most at {place}?") on the rapport tile."""
+    auth = verify_auth(authorization)
+    from app.circles_flow import ground_affiliation
+
+    try:
+        result = ground_affiliation(auth.user_id, body.affiliation_id, body.google_place_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail == "affiliation_not_found" else 502
+        raise HTTPException(status_code=status, detail=detail) from exc
+    amplitude_track(
+        "circle_grounded",
+        user_id=auth.user_id,
+        event_properties={
+            "affiliation_id": body.affiliation_id,
+            "place_id": result.get("place_id"),
+        },
+    )
+    return result
+
+
+# ── Invites + ZIP unlock (§A.2 · §D · §E) ─────────────────────────────────────
+# Invite ≠ membership: redeem records growth only; a circle row appears only when
+# the joiner self-confirms her own community (generic prompt, never the inviter's
+# place). Unlock state gates consumption of others' supply — never creation.
+
+
+class InviteMintBody(_BaseModel):
+    # Optional label: which of the caller's circles this link is for.
+    circle_key: str | None = None
+
+
+class InviteRedeemBody(_BaseModel):
+    token: str
+
+
+class InviteSelfConfirmBody(_BaseModel):
+    token: str
+    circle_type: str
+    detail: str | None = None
+
+
+class AreaProgressBody(_BaseModel):
+    zip: str | None = None
+
+
+@app.post("/lana/invites/mint")
+def post_invites_mint(
+    body: InviteMintBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circle_invites import mint_invite
+
+    try:
+        result = mint_invite(
+            auth.user_id, circle_key=(body.circle_key if body else None)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    amplitude_track(
+        "circle_invite_minted",
+        user_id=auth.user_id,
+        event_properties={"labeled": bool(body.circle_key if body else None)},
+    )
+    return result
+
+
+@app.post("/lana/invites/redeem")
+def post_invites_redeem(
+    body: InviteRedeemBody,
+    authorization: str | None = Header(default=None),
+):
+    auth = verify_auth(authorization)
+    from app.circle_invites import redeem_invite
+
+    try:
+        result = redeem_invite(auth.user_id, body.token)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 429 if detail == "invite_rate_limited" else 404
+        raise HTTPException(status_code=status, detail=detail) from exc
+    amplitude_track(
+        "circle_invite_redeemed",
+        user_id=auth.user_id,
+        event_properties={"confirm_prompt": result.get("confirm_prompt")},
+    )
+    return result
+
+
+@app.post("/lana/invites/self-confirm")
+def post_invites_self_confirm(
+    body: InviteSelfConfirmBody,
+    authorization: str | None = Header(default=None),
+):
+    """The joiner's yes to "are you part of a <type> community nearby?" — writes
+    her own (ungrounded) affiliation. Grounding her own place then runs through
+    /lana/circles/ground-options → /ground, which is what confirms it."""
+    auth = verify_auth(authorization)
+    from app.circle_invites import self_confirm
+
+    try:
+        result = self_confirm(
+            auth.user_id,
+            body.token,
+            circle_type=(body.circle_type or "").strip().lower(),
+            detail=body.detail,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail == "invite_not_found" else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    return result
+
+
+class EventInviteSuggestionsBody(_BaseModel):
+    event_id: str
+
+
+@app.post("/lana/events/invite-suggestions")
+def post_event_invite_suggestions(
+    body: EventInviteSuggestionsBody,
+    authorization: str | None = Header(default=None),
+):
+    """"N people already go here — invite them?" (Place Profile §5.2): confirmed
+    members of the event's anchored place, host-only, first names only."""
+    auth = verify_auth(authorization)
+    from app.event_place import invite_suggestions
+
+    try:
+        return invite_suggestions(auth.user_id, body.event_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 403 if detail == "not_event_host" else 404
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.post("/lana/area/progress")
+def post_area_progress(
+    body: AreaProgressBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Warm goal-gradient status for the caller's area (§E.2): state + count/threshold
+    + founding eligibility. Recounts on read (read-repair), so it is also the
+    transition trigger alongside redeem — no cron at pilot scale."""
+    auth = verify_auth(authorization)
+    from app.zip_unlock import area_progress
+
+    return area_progress(auth.user_id, (body.zip if body else None))
 
 
 @app.post("/lana/sessions/{session_id}/complete", response_model=CompleteSessionResponse)
@@ -2245,9 +2717,17 @@ def _complete_event_draft(
             published = True
         except HTTPException as exc:
             if exc.detail == "phone_not_verified":
-                closing = (
-                    "Your event draft is ready — verify your email in settings, "
-                    "then publish from the form or call complete again."
+                closing = compose_reply(
+                    goal=(
+                        "The user's event draft is finished but publishing needs a "
+                        "verified email. Tell them the draft is ready and to verify "
+                        "their email in settings, then publish again."
+                    ),
+                    fallback=(
+                        "Your event draft is ready — verify your email in settings, "
+                        "then publish from the form or call complete again."
+                    ),
+                    cache=True,
                 )
             else:
                 raise
@@ -2377,6 +2857,11 @@ def post_rapport_next_ask(
     # POST (not GET): the PWA service worker breaks cross-origin GETs to the worker but
     # lets POSTs through — same reason the chat/places calls are POST.
     auth = verify_auth(authorization)
+    # Guests (anonymous auth) never get the "By the way…" tile — profile-deepening
+    # questions are for committed accounts. Their claims still accrue in chat and
+    # carry over on verify (same user_id), so nothing is lost by waiting.
+    if auth.is_anonymous:
+        return {"ask": None}
     surface = (body.surface if body else "homescreen") or "homescreen"
     cycle = bool(body.cycle) if body else False
     return {"ask": rapport_next_ask(auth.user_id, surface, cycle=cycle)}
@@ -2390,6 +2875,49 @@ def post_rapport_record_answer(
 ):
     auth = verify_auth(authorization)
     text = (body.text or "").strip()
+
+    # Circles: a place-grounding gap's answer is a place NAME, not an identity fact —
+    # skip the claims extractor. A tapped chip (or typed candidate name) grounds the
+    # affiliation outright; free text is kept as detail on it. The conversational
+    # confirm-chips flow lives on the chat path (lana_unified_pipeline) — this
+    # endpoint just never lets a grounding answer decay into a junk claim.
+    from app.rapport_gaps import get_gap_row
+
+    gap_row = get_gap_row(body.gap_row_id)
+    if gap_row and gap_row.get("affiliation_ref"):
+        from app.circles_flow import (
+            ground_and_confirm,
+            match_grounding_candidate,
+            note_ungrounded_detail,
+        )
+
+        affiliation_id = str(gap_row["affiliation_ref"])
+        grounded = False
+        stored = gap_row.get("grounding_options")
+        tapped = match_grounding_candidate(
+            stored if isinstance(stored, list) else None, text
+        )
+        if tapped:
+            grounded = bool(
+                ground_and_confirm(
+                    auth.user_id, affiliation_id, str(tapped["google_place_id"])
+                ).get("grounded")
+            )
+        elif text:
+            note_ungrounded_detail(auth.user_id, affiliation_id, text)
+        rapport_mark_answered(body.gap_row_id)
+        background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
+        amplitude_track(
+            "rapport_gap_answered",
+            user_id=auth.user_id,
+            event_properties={
+                "gap_row_id": body.gap_row_id,
+                "kind": "place_grounding",
+                "grounded": grounded,
+            },
+        )
+        return {"ok": True, "grounded": grounded}
+
     claim_id: str | None = None
     saved = 0
     if text:
@@ -2405,6 +2933,12 @@ def post_rapport_record_answer(
         # privacy case). Trust that judgment rather than storing a non-answer as a claim.
         if saved > 0:
             claim_id = latest_claim_id(auth.user_id)
+            # Circles §4.3: a place-enrichment gap tags the claim its answer produced,
+            # so "the Saturday long runs" is attributable to that gym. Best-effort.
+            if claim_id:
+                from app.circles_flow import tag_claim_place_from_gap
+
+                tag_claim_place_from_gap(body.gap_row_id, claim_id)
     # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
     rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
     # Refill the reserve so the "By the way…" tile always has a fresh, non-repeat question queued

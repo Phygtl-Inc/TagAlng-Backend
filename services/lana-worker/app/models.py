@@ -305,6 +305,14 @@ class PlaceSearchRequest(BaseModel):
     q: str
 
 
+class ReverseGeocodeRequest(BaseModel):
+    """A bare device pin ("Use my current location") to resolve into a name/address
+    (issue #42). The coordinates themselves stay authoritative for the event pin."""
+
+    lat: float
+    lng: float
+
+
 class EventVenueRequest(BaseModel):
     """The exact place the host picked from search — stamped onto the session's event
     draft so publish stores the precise pin (not a re-geocoded name)."""
@@ -349,6 +357,12 @@ class EventDecisionHookRequest(BaseModel):
     request_id: str
 
 
+class EventCancelHookRequest(BaseModel):
+    """FE calls this right after cancel_event so the going roster gets push + email."""
+
+    event_id: str
+
+
 class PlaceResult(BaseModel):
     name: str
     address: str = ""
@@ -388,6 +402,10 @@ class CreateSessionResponse(BaseModel):
     orchestrator: bool = False
     timing_ms: dict[str, int] | None = None
     is_anonymous: bool = False
+    # The session's saved/effective default language (users.locale, or the
+    # device-locale seed when nothing is saved) — the FE mirrors its UI locale
+    # to it when the code is one it supports (en/es/pt). None = no signal yet.
+    preferred_language: str | None = None
     phone_verified: bool = False
     home_block_assigned: bool = False
     onboarding_step: str | None = None
@@ -464,6 +482,9 @@ class SendMessageResponse(BaseModel):
     tip_draft: TipDraft | None = None
     look_draft: LookDraft | None = None
     routing: TurnRouting | None = None
+    # See CreateSessionResponse.preferred_language — echoed every turn so the FE
+    # can follow a mid-chat language switch (auto-persisted after 2 diverging turns).
+    preferred_language: str | None = None
     orchestrator: bool = False
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None

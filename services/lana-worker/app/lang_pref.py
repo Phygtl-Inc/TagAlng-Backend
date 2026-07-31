@@ -1,21 +1,26 @@
-"""User language preference — seed, persist, and the divergence nudge.
+"""User language preference — seed, persist, and the divergence auto-switch.
 
-The model (product decision, 2026-07-11):
-- ``users.preferred_language`` decides how a conversation STARTS (the opening
-  message); live per-turn detection (the classifier's ``lang`` verdict) decides
-  how it CONTINUES. The DB stays English-canonical throughout.
-- When the observed language keeps diverging from the saved preference for
-  ``_DIVERGENCE_TURNS`` consecutive turns, Lana offers ONCE to switch the
-  preference — never every turn (that's irritating), at most once per session,
-  with a cross-session cooldown (``users.lang_nudge_at``).
-- The offer and the saved-confirmation are AI-authored in Lana's voice from
-  the true facts (which language she's seeing, what the setting says) — the
-  ``t()`` strings are only the LLM-down fallback.
+The model (product decision 2026-07-11, amended 2026-07-30):
+- ``users.locale`` decides how a conversation STARTS (the opening message);
+  live per-turn detection (the classifier's ``lang`` verdict) decides how it
+  CONTINUES. The DB stays English-canonical throughout.
+- When the observed language diverges from the saved preference for
+  ``_AUTO_SWITCH_TURNS`` consecutive turns, the preference FOLLOWS the user:
+  ``users.locale`` is updated silently-but-announced (one short confirm line).
+  This replaced the ask-first nudge — the FE now mirrors its UI locale to the
+  value echoed on every response (``preferred_language``), so the whole app
+  follows the language the user actually speaks. The 2-turn streak keeps a
+  one-off pasted phrase from flipping anything: a confident verdict back in
+  the old language resets the count.
+- The confirmation copy is AI-authored in Lana's voice from the true facts —
+  the ``t()`` strings are only the LLM-down fallback.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+import threading
 from typing import Any
 
 from app.auth import service_client
@@ -23,11 +28,9 @@ from app.i18n import lang_display_name, normalize_lang_code, t
 
 _LOG = logging.getLogger(__name__)
 
-# Consecutive turns the observed language must diverge from the preference
-# before Lana offers to switch it.
-_DIVERGENCE_TURNS = 3
-# Days before the nudge may be offered again in a later session.
-_NUDGE_COOLDOWN_DAYS = 14
+# Consecutive turns the observed language must diverge from the saved
+# preference before the preference auto-switches to follow it.
+_AUTO_SWITCH_TURNS = 2
 
 
 # ── users table ──────────────────────────────────────────────────────────────
@@ -72,41 +75,6 @@ def set_user_preferred_language(user_id: str, lang: str) -> bool:
     except Exception:  # noqa: BLE001 — tile i18n must never block saving the preference
         _LOG.exception("lang_pref_gap_rerender_kickoff_failed")
     return True
-
-
-def _nudge_allowed_by_cooldown(user_id: str) -> bool:
-    """True when the cross-session cooldown has passed (or never nudged)."""
-    try:
-        from datetime import datetime, timedelta, timezone
-
-        row = (
-            service_client()
-            .table("users")
-            .select("lang_nudge_at")
-            .eq("id", user_id)
-            .limit(1)
-            .execute()
-        )
-        data = row.data[0] if row.data else {}
-        raw = data.get("lang_nudge_at")
-        if not raw:
-            return True
-        last = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        return datetime.now(timezone.utc) - last > timedelta(days=_NUDGE_COOLDOWN_DAYS)
-    except Exception:  # noqa: BLE001
-        _LOG.exception("lang_nudge_cooldown_read_failed")
-        return False  # fail closed — a missed nudge is better than a nagging one
-
-
-def _mark_nudged(user_id: str) -> None:
-    try:
-        from datetime import datetime, timezone
-
-        service_client().table("users").update(
-            {"lang_nudge_at": datetime.now(timezone.utc).isoformat()}
-        ).eq("id", user_id).execute()
-    except Exception:  # noqa: BLE001
-        _LOG.exception("lang_nudge_mark_failed")
 
 
 # ── session seeding ──────────────────────────────────────────────────────────
@@ -155,24 +123,6 @@ def _compose(system_goal: str, facts: list[str], fallback: str, lang: str | None
         return fallback
 
 
-def _compose_nudge_offer(observed: str, preferred: str) -> str:
-    new_name = lang_display_name(observed)
-    old_name = lang_display_name(preferred)
-    return _compose(
-        "Casually offer — as a by-the-way, not a demand — to switch the user's "
-        "default app language, since they keep writing in a different language "
-        "than their setting. Make clear it's optional and nothing changes if "
-        "they say no.",
-        [
-            f"The user's saved app language is {old_name}",
-            f"For the last few messages they have been writing in {new_name}",
-            f"You are offering to make {new_name} their default",
-        ],
-        t("lang.nudge_offer", observed, new_name=new_name, old_name=old_name),
-        observed,
-    )
-
-
 def _compose_pref_saved(new_pref: str, reply_lang: str | None) -> str:
     lang_name = lang_display_name(new_pref)
     return _compose(
@@ -198,6 +148,247 @@ def _compose_guest_confirm(new_pref: str) -> str:
     )
 
 
+# ── identity claim from an accepted language ─────────────────────────────────
+
+# The extractor stores languages spoken as ONE thread under this slug
+# (vertex prompt: 'speak 7 languages' → concept "multilingual").
+_LANGUAGE_THREAD_CONCEPT = "multilingual"
+# Older/free-form language threads the extractor may have slugged differently.
+_LANGUAGE_THREAD_HINT_RE = re.compile(r"\b(?:speak\w*|language\w*|lingual|polyglot)\b", re.I)
+# Unconfirmed watch-and-learn rows (below) live under their own per-language slug so
+# their confidence can ramp independently of the confirmed multilingual thread.
+_OBSERVED_CONCEPT_PREFIX = "lang_observed_"
+
+
+def _remember_language_claim(user_id: str, lang: str, source_quote: str | None) -> None:
+    """Persist "speaks <language>" as an identity claim when the user ASKS for that
+    language as their default — the same statement we already trust enough to flip
+    their whole app language. Without this the fact never reached the profile: Lana
+    would happily chat in German yet the user could never match on it unless they
+    separately said "I speak German". Deterministic enrich, never clobber: an
+    existing languages thread keeps its extractor-authored label and gains the new
+    language in synonyms + details; a missing thread is created under the
+    extractor's own slug so a later tile answer merges into it. English is skipped
+    (the default — no matching signal), as is a language already on the thread."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    name = lang_display_name(code)
+    if not name or name.lower() == code:
+        return  # no display name for this code — never persist "Speaks xx"
+    try:
+        from app.claims_persist import upsert_claims
+        from app.models import ExtractedClaim
+
+        rows = (
+            service_client()
+            .table("user_identity_claims")
+            .select("concept, label, synonyms, details")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(40)
+            .execute()
+        ).data or []
+        thread: dict[str, Any] | None = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            concept = str(row.get("concept") or "").strip()
+            label = str(row.get("label") or "").strip()
+            if concept.lower().startswith(_OBSERVED_CONCEPT_PREFIX):
+                continue  # watch-and-learn rows are not the confirmed thread
+            if concept.lower() == _LANGUAGE_THREAD_CONCEPT or _LANGUAGE_THREAD_HINT_RE.search(
+                f"{concept.replace('_', ' ')} {label}"
+            ):
+                thread = row
+                break
+        if thread is not None:
+            blob = " ".join(
+                [
+                    str(thread.get("label") or ""),
+                    " ".join(str(s) for s in (thread.get("synonyms") or [])),
+                    " ".join(str(d) for d in (thread.get("details") or [])),
+                ]
+            )
+            if re.search(rf"\b{re.escape(name)}\b", blob, re.I):
+                # Already confirmed — retire any leftover watch-and-learn row so
+                # the profile never shows the language twice.
+                _dismiss_observed_language_row(user_id, code)
+                return
+        claim = ExtractedClaim(
+            concept=str(thread.get("concept")) if thread else _LANGUAGE_THREAD_CONCEPT,
+            # The upsert merge keeps the INCOMING label — hand back the stored one
+            # so this deterministic write never clobbers the extractor's phrasing
+            # ("Speaks Urdu and English" must not collapse to "Speaks German").
+            label=str(thread.get("label")) if thread else f"Speaks {name}",
+            confidence=1.0,
+            synonyms=[name],
+            details=[f"Speaks {name}"] if thread else [],
+            source_quote=(source_quote or "").strip()[:120] or f"Asked Lana to chat in {name}",
+            bucket="interest",
+        )
+        upsert_claims(user_id, [claim])
+        # An explicit statement supersedes the low-surety observed row (if any).
+        _dismiss_observed_language_row(user_id, code)
+    except Exception:  # noqa: BLE001 — remembering is best-effort, never the turn's problem
+        _LOG.exception("language_claim_upsert_failed")
+
+
+def remember_language_claim_async(
+    user_id: str, lang: str, source_quote: str | None = None
+) -> None:
+    """Fire-and-forget ``_remember_language_claim`` — callers sit on the reply path
+    and the write embeds the claim (a model call)."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    threading.Thread(
+        target=_remember_language_claim,
+        args=(user_id, code, source_quote),
+        daemon=True,
+        name="lang-claim",
+    ).start()
+
+
+# ── watch-and-learn: implicit language observation ───────────────────────────
+#
+# Speaking a language IS evidence of speaking it — but one message could be a
+# pasted quote or a one-off "gracias". So merely WRITING in a language earns a
+# low-surety claim that ramps toward certainty, instead of the all-or-nothing
+# model where only an explicit statement/accept ever reached the profile:
+# after a couple of turns in the language a per-language observed row is
+# created at the persist floor, every later batch of turns re-corroborates it
+# (upsert's +CORROBORATION_CONFIDENCE_BUMP walk), and once it would cross
+# _OBS_GRADUATE_CONFIDENCE it graduates onto the confirmed multilingual thread
+# and the observed row is retired. An explicit "let's talk German" at any
+# point short-circuits the ramp the same way (see _remember_language_claim).
+
+# Turns in a language within a session before the first low-surety write.
+_OBS_FIRST_WRITE_TURNS = 2
+# Additional turns between re-corroborations within the same session.
+_OBS_CORROBORATE_EVERY = 4
+# Observed-row confidence at (or beyond) which the language counts as proven.
+_OBS_GRADUATE_CONFIDENCE = 0.9
+
+
+def _observed_claims_enabled() -> bool:
+    import os
+
+    return os.environ.get("LANA_LANG_OBSERVED_CLAIMS", "on").strip().lower() not in (
+        "0",
+        "off",
+        "false",
+        "no",
+    )
+
+
+def _dismiss_observed_language_row(user_id: str, code: str) -> None:
+    """Retire the watch-and-learn row for a language (confirmed or superseded)."""
+    try:
+        from datetime import datetime, timezone
+
+        service_client().table("user_identity_claims").update(
+            {"dismissed_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("user_id", user_id).eq(
+            "concept", f"{_OBSERVED_CONCEPT_PREFIX}{code}"
+        ).is_("dismissed_at", "null").execute()
+    except Exception:  # noqa: BLE001
+        _LOG.exception("observed_language_dismiss_failed")
+
+
+def _record_language_observation(user_id: str, lang: str, source_quote: str | None) -> None:
+    """One corroboration step of the ramp described above. Best-effort."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    name = lang_display_name(code)
+    if not name or name.lower() == code:
+        return  # no display name — never persist "Speaks xx"
+    try:
+        from app.claims_persist import (
+            CORROBORATION_CONFIDENCE_BUMP,
+            MIN_CLAIM_CONFIDENCE,
+            upsert_claims,
+        )
+        from app.models import ExtractedClaim
+
+        observed_concept = f"{_OBSERVED_CONCEPT_PREFIX}{code}"
+        rows = (
+            service_client()
+            .table("user_identity_claims")
+            .select("concept, label, synonyms, details, confidence")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(40)
+            .execute()
+        ).data or []
+        observed_row: dict[str, Any] | None = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            concept = str(row.get("concept") or "").strip().lower()
+            label = str(row.get("label") or "").strip()
+            if concept == observed_concept:
+                observed_row = row
+                continue
+            if concept == _LANGUAGE_THREAD_CONCEPT or _LANGUAGE_THREAD_HINT_RE.search(
+                f"{concept.replace('_', ' ')} {label}"
+            ):
+                blob = " ".join(
+                    [
+                        label,
+                        " ".join(str(s) for s in (row.get("synonyms") or [])),
+                        " ".join(str(d) for d in (row.get("details") or [])),
+                    ]
+                )
+                if re.search(rf"\b{re.escape(name)}\b", blob, re.I):
+                    # Already proven on the confirmed thread — nothing to ramp;
+                    # self-heal a leftover observed row.
+                    _dismiss_observed_language_row(user_id, code)
+                    return
+        if observed_row is not None:
+            try:
+                old_conf = float(observed_row.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                old_conf = 0.0
+            if old_conf + CORROBORATION_CONFIDENCE_BUMP >= _OBS_GRADUATE_CONFIDENCE:
+                # Sure enough now — promote onto the confirmed thread and retire
+                # the watch-and-learn row (the promote also dismisses it).
+                _remember_language_claim(user_id, code, source_quote)
+                return
+        quote = (source_quote or "").strip()[:120] or f"Has been chatting with Lana in {name}"
+        claim = ExtractedClaim(
+            concept=observed_concept,
+            label=f"Speaks {name}",
+            # New row lands at the persist floor (low surety); an existing row
+            # takes upsert's corroboration bump instead (max(old, new) + bump).
+            confidence=MIN_CLAIM_CONFIDENCE,
+            synonyms=[name],
+            details=[],
+            source_quote=quote,
+            bucket="interest",
+        )
+        upsert_claims(user_id, [claim])
+    except Exception:  # noqa: BLE001 — observing is best-effort, never the turn's problem
+        _LOG.exception("language_observation_upsert_failed")
+
+
+def record_language_observation_async(
+    user_id: str, lang: str, source_quote: str | None = None
+) -> None:
+    """Fire-and-forget ``_record_language_observation`` — callers sit on the reply
+    path and the write embeds the claim (a model call)."""
+    code = normalize_lang_code(lang)
+    if not user_id or not code or code == "en":
+        return
+    threading.Thread(
+        target=_record_language_observation,
+        args=(user_id, code, source_quote),
+        daemon=True,
+        name="lang-observe",
+    ).start()
+
+
 # ── post-turn hook ───────────────────────────────────────────────────────────
 
 def language_preference_post_turn(
@@ -211,19 +402,20 @@ def language_preference_post_turn(
     """Runs once after the pipeline reply is composed. Two jobs:
 
     1. Apply a ``set_preferred_lang`` classifier verdict (an explicit "make
-       Urdu my default" or an accept of the pending nudge) — persist it and
+       Urdu my default" or an accept of a language offer) — persist it and
        confirm deterministically.
-    2. Track preference↔observed divergence and append the one-time nudge
-       offer when it has held for ``_DIVERGENCE_TURNS`` turns.
+    2. Track preference↔observed divergence and auto-switch the saved
+       preference once it has held for ``_AUTO_SWITCH_TURNS`` turns — the
+       default follows the language the user actually speaks (announced in
+       one short line, never silently).
 
-    Anonymous guests have no users row, so nothing persists for them — but the
-    session-level accept still works: the offer they said yes to flips the
-    session language and clears the offer state. Before this, a guest accept
-    was a full no-op (nothing saved, the armed offer never expired because the
-    TTL decrement lives here too), so every "sí, hablemos en español" produced
-    another warm ack forever — the endless language loop in the signup chats.
-    The accepted code is stashed as ``guest_locale`` and written to the users
-    row on the first post-signup turn of the same session."""
+    Anonymous guests have a users row too (handle_new_user fires for anonymous
+    sign-ins, and the PWA mirrors its UI locale onto it), so both jobs persist
+    for them as well. The explicit guest accept additionally stashes the code
+    as ``guest_locale`` so it survives a same-session login into an EXISTING
+    account (a different users row): it's written there on the first
+    post-login turn. Signup-by-linking keeps the same row, so the direct
+    write already covers it."""
     try:
         slots = session_ctx.get("_discovery_slots")
         slots_for = str(session_ctx.get("_discovery_slots_for") or "")
@@ -234,16 +426,21 @@ def language_preference_post_turn(
         nudge_pending = normalize_lang_code(session_ctx.get("lang_nudge_pending"))
 
         if new_pref and (is_anonymous or not user_id):
-            # Session-only accept for guests: speak the language now, remember
-            # it for signup, and disarm the offer so it can't loop. No DB row
-            # to write. The FIRST accept gets an explicit confirm PREPENDED to
-            # the turn's reply — on funnel turns the reply is a deterministic
-            # step question, so without the confirm the accept lands silently
-            # and the user keeps repeating it (QA 2026-07-23, transcript #3).
-            # Repeats stay silent: the funnel question alone re-anchors.
+            # Guest accept: speak the language now, persist it on the guest's
+            # own users row (anonymous sign-ins get one too — the FE mirrors
+            # its UI locale from the echoed value), stash it for a
+            # same-session login into an existing account, and disarm the
+            # offer so it can't loop. The FIRST accept gets an explicit
+            # confirm PREPENDED to the turn's reply — on funnel turns the
+            # reply is a deterministic step question, so without the confirm
+            # the accept lands silently and the user keeps repeating it
+            # (QA 2026-07-23, transcript #3). Repeats stay silent: the funnel
+            # question alone re-anchors.
             already_settled = (
                 normalize_lang_code(session_ctx.get("guest_locale")) == new_pref
             )
+            if user_id:
+                set_user_preferred_language(user_id, new_pref)
             session_ctx["preferred_lang"] = new_pref
             session_ctx["lang"] = new_pref
             session_ctx["guest_locale"] = new_pref
@@ -270,10 +467,15 @@ def language_preference_post_turn(
                 # typed in the OLD language ("lets talk in urdu" is English), so the
                 # session flips to the new preference rather than mirroring the accept.
                 session_ctx["lang"] = new_pref
+                # Asking for a language IS stating you speak it — remember it as an
+                # identity claim so it becomes matchable, not just a locale.
+                remember_language_claim_async(user_id, new_pref, user_message)
                 confirm = _compose_pref_saved(new_pref, new_pref)
-                # The synthesizer already answered the turn conversationally;
-                # the deterministic confirm states the SAVE actually happened.
-                return f"{reply}\n\n{confirm}" if reply else confirm
+                # Receipt FIRST, conversational reply second — the turn's reply
+                # often ends on a question whose chips render right below the
+                # bubble; appending the receipt after it buried the ask and read
+                # as a subject change (QA 2026-07-30, the squash-offer turn).
+                return f"{confirm}\n\n{reply}" if reply else confirm
             return reply
 
         # A rapport-concierge language offer stays live for a few turns (the accept is
@@ -288,10 +490,55 @@ def language_preference_post_turn(
             else:
                 session_ctx["lang_offer_ttl"] = ttl
 
+        # ── divergence auto-switch (signed-in AND guests — both have a users row) ──
+        # Sustained speech in another language IS the preference: after
+        # _AUTO_SWITCH_TURNS consecutive turns whose session language differs from
+        # the saved default, users.locale follows the user and the switch is
+        # announced in one short line. The FE mirrors its UI locale to the value
+        # echoed on every response, so the whole app flips with it (when the
+        # language is one the FE ships). A one-off pasted phrase can't trigger
+        # this: a confident verdict back in the old language resets the streak.
+        if user_id:
+            preferred = normalize_lang_code(session_ctx.get("preferred_lang")) or "en"
+            count = int(session_ctx.get("lang_divergence_count") or 0)
+            count = count + 1 if observed != preferred else 0
+            session_ctx["lang_divergence_count"] = count
+            if count >= _AUTO_SWITCH_TURNS and set_user_preferred_language(
+                user_id, observed
+            ):
+                session_ctx["preferred_lang"] = observed
+                session_ctx["lang_divergence_count"] = 0
+                session_ctx["lang_nudge_pending"] = None
+                if is_anonymous:
+                    # Stash for a same-session login into an EXISTING account
+                    # (different users row) — mirrors the explicit guest accept.
+                    session_ctx["guest_locale"] = observed
+                    confirm = _compose_guest_confirm(observed)
+                else:
+                    confirm = _compose_pref_saved(observed, observed)
+                # Receipt first — see the explicit-accept branch above.
+                return f"{confirm}\n\n{reply}" if reply else confirm
+
         if is_anonymous or not user_id:
-            # No users row — the divergence nudge and preference persistence
-            # below need one. Session mirroring already happened upstream.
+            # Watch-and-learn claims and the guest-locale carry below are
+            # signed-in concerns. Session mirroring already happened upstream.
             return reply
+
+        # Watch-and-learn: turns spoken in a non-English language accumulate as
+        # a low-surety identity claim that ramps with corroboration (see
+        # _record_language_observation). Counted per session; the write itself
+        # is async and self-skips languages already proven on the profile.
+        if observed != "en" and _observed_claims_enabled():
+            counts_raw = session_ctx.get("lang_obs_counts")
+            counts = dict(counts_raw) if isinstance(counts_raw, dict) else {}
+            seen = int(counts.get(observed) or 0) + 1
+            counts[observed] = seen
+            session_ctx["lang_obs_counts"] = counts
+            if seen == _OBS_FIRST_WRITE_TURNS or (
+                seen > _OBS_FIRST_WRITE_TURNS
+                and (seen - _OBS_FIRST_WRITE_TURNS) % _OBS_CORROBORATE_EVERY == 0
+            ):
+                record_language_observation_async(user_id, observed, user_message)
 
         # A language accepted while still a guest, carried across signup in the
         # same session: persist it onto the fresh account once, unless the user
@@ -299,34 +546,20 @@ def language_preference_post_turn(
         guest_locale = normalize_lang_code(session_ctx.get("guest_locale"))
         if guest_locale:
             session_ctx["guest_locale"] = None
+            # The guest accepted this language pre-signup — now that a users row
+            # exists, remember the claim regardless of whether the locale write
+            # below is skipped (a self-chosen pref doesn't unsay "I speak X").
+            remember_language_claim_async(user_id, guest_locale)
             saved = get_user_preferred_language(user_id)
             if guest_locale != saved and saved in (None, "en"):
                 set_user_preferred_language(user_id, guest_locale)
                 session_ctx["preferred_lang"] = guest_locale
 
         if nudge_pending:
-            # Offer was out and this turn didn't accept it — a decline or a
-            # topic change either way. Drop it for good this session.
+            # A pre-auto-switch offer still armed in an in-flight session and
+            # this turn didn't accept it — drop it for good this session.
             session_ctx["lang_nudge_pending"] = None
             session_ctx["lang_nudge_done"] = True
-            return reply
-
-        preferred = normalize_lang_code(session_ctx.get("preferred_lang"))
-        if not preferred:
-            return reply
-        count = int(session_ctx.get("lang_divergence_count") or 0)
-        count = count + 1 if observed != preferred else 0
-        session_ctx["lang_divergence_count"] = count
-        if (
-            count >= _DIVERGENCE_TURNS
-            and not session_ctx.get("lang_nudge_done")
-            and _nudge_allowed_by_cooldown(user_id)
-        ):
-            session_ctx["lang_nudge_pending"] = observed
-            session_ctx["lang_divergence_count"] = 0
-            _mark_nudged(user_id)
-            offer = _compose_nudge_offer(observed, preferred)
-            return f"{reply}\n\n{offer}" if reply else offer
         return reply
     except Exception:  # noqa: BLE001
         _LOG.exception("language_preference_post_turn_failed")

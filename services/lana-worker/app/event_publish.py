@@ -253,4 +253,14 @@ def publish_event(
     event_id = res.json()
     if not event_id:
         raise HTTPException(status_code=502, detail="create_event_empty_id")
+    # Anchor the event to its canonical place (Place Profile §2.4) — dual-write next
+    # to the legacy place_id string. Background: publish never waits on Google.
+    try:
+        from app.event_place import stamp_event_place_async
+
+        stamp_event_place_async(str(event_id), fields.get("place_id"), user_id)
+    except Exception:  # noqa: BLE001 - anchoring must never block publishing
+        import logging
+
+        logging.getLogger(__name__).exception("event_place_stamp_kickoff_failed")
     return str(event_id)

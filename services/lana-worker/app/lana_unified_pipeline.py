@@ -9,10 +9,11 @@ from typing import Any
 from app.discovery_route import handle_discovery_turn, looks_like_logout
 from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
-from app.lana_paths import unified_rules_first_enabled
+from app.lana_paths import decide_turn_mode, unified_rules_first_enabled
 from app.loop_guard import discovery_reply_is_stuck, reset_sticky_discovery_state
 from app.orchestrator.pipeline import run_turn
 from app.orchestrator.progress import READING
+from app.reply_compose import compose_reply
 from app.turn_surfaces import clear_turn_surfaces
 from app.turn_timing import TurnTimer
 
@@ -116,6 +117,83 @@ def _forced_slots_for_kind(
     return slots
 
 
+def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[str, Any]) -> None:
+    """Connect a policy `ground_place` decision to the REAL grounding rails.
+
+    The policy LLM authors the question but its chips are fiction — it has no
+    Places tool, so a tap like "It's the main rec center" used to land as plain
+    text with nothing armed, and the turn after dead-ended (QA 2026-07-30, the
+    squash case). Here we resolve the affiliation the ask is about, run the same
+    Places search the tile flow uses, replace the invented chips with real
+    candidates, and arm rapport_grounding — so the next turn's tap or free text
+    flows into handle_grounding_confirmation → ground_and_confirm, which ends on
+    the bridge offer (intro when co-members exist, create+invite otherwise).
+
+    No resolvable affiliation (capture hasn't landed yet, or the goal is
+    ambiguous) → the chips are still stripped (never ship invented places) and
+    the question goes out free-text; the ungrounded-circle goal resurfaces once
+    capture lands. Empty Places results still arm the pending state with zero
+    candidates — the user's ANSWER then drives the search (the existing
+    re-search path in handle_grounding_confirmation)."""
+    if getattr(action, "kind", None) != "ground_place":
+        return
+    action.chips = []
+    try:
+        from app.auth import service_client
+        from app.circles_flow import _chip, _home_block_id, ground_options
+
+        key = ""
+        gid = str(getattr(action, "goal_id", None) or "")
+        if gid.startswith("circle:"):
+            key = gid.split(":", 1)[1].strip()
+        q = (
+            service_client()
+            .table("circle_affiliations")
+            .select("id, circle_type, circle_key, detail, status, place_ref")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .is_("place_ref", "null")
+        )
+        if key:
+            q = q.eq("circle_key", key)
+        rows = [
+            r for r in (q.order("created_at", desc=True).limit(2).execute().data or [])
+            if isinstance(r, dict)
+        ]
+        if not rows or (not key and len(rows) > 1):
+            return  # not captured yet / ambiguous — leave a free-text ask
+        aff = rows[0]
+        options = ground_options(
+            user_id, aff, block_id=_home_block_id(user_id), query=None
+        )
+        candidates = [{**_chip(o), "name": o.get("name")} for o in options]
+        chips = [{"label": c["label"], "send": c["send"]} for c in candidates]
+        session_ctx["rapport_active"] = True
+        session_ctx["rapport_grounding"] = {
+            "affiliation_id": str(aff.get("id") or ""),
+            "candidates": candidates,
+            "answer_text": "",
+            "attempts": 1,
+            # The action the user already asked for that this grounding serves
+            # (policy-stamped, e.g. host_meet) — the confirmed place then
+            # dispatches it directly instead of re-offering it.
+            "pending_action": getattr(action, "pending_action", None),
+        }
+        session_ctx["rapport_followup_question"] = str(
+            getattr(action, "utterance", "") or ""
+        )
+        session_ctx["rapport_offer_pending"] = False
+        session_ctx["rapport_pending_action"] = None
+        action.chips = chips
+        logging.getLogger(__name__).info(
+            "ground_place_wired aff=%s key=%s candidates=%d pending_action=%s",
+            aff.get("id"), aff.get("circle_key"), len(candidates),
+            getattr(action, "pending_action", None),
+        )
+    except Exception:  # noqa: BLE001 — wiring is an upgrade; the ask still goes out
+        logging.getLogger(__name__).exception("ground_place_wire_failed")
+
+
 def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
     """Drop the concierge follow-up capture so the turn falls through to normal routing. Set to
     None (not popped) so the {**old, **new} session merge clears them instead of keeping a stale
@@ -123,9 +201,128 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
     for k in (
         "rapport_active", "rapport_answer",
         "rapport_followup_question", "rapport_followup_count", "rapport_reply",
-        "rapport_offer_pending", "rapport_pending_action",
+        "rapport_offer_pending", "rapport_pending_action", "rapport_grounding",
     ):
         session_ctx[k] = None
+
+
+def _policy_rapport_reply(
+    *,
+    user_id: str,
+    session_id: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_message: str,
+    timer: Any,
+    rapport_question: str | None = None,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], Any] | None:
+    """Divert a rapport-thread answer's REPLY to the unified policy (decide_turn).
+
+    The rapport branch's bookkeeping (claim saved, gap closed) has already run by
+    the time this is called — the policy only authors what Lana says back, so one
+    voice (acknowledge → bridge → offer) owns every conversational turn instead of
+    the mini-model concierge. Guests included on purpose: a rapport answer is
+    exactly the conversational turn the policy exists for, and its chips route
+    through the normal pipeline next turn. Returns None — caller falls through to
+    the concierge fallback — when the policy is off, hands off, or fails.
+
+    QA 2026-07-29: the concierge answered these turns with the bridge policy
+    bypassed entirely — "English is my language of choice" got a hallucinated
+    "explore language learning" close instead of an app-move.
+    """
+    if decide_turn_mode() != "on":
+        return None
+    if session_ctx.get("event_host_active") or session_ctx.get("pending_confirmation"):
+        return None
+    from app.policy.decide import (
+        apply_defer, ask_streak, audit_decision, decide_turn, note_ask_streak,
+    )
+
+    # The message being answered IS a rapport ask (the tile/thread question),
+    # which the streak stamp never saw — count it so the policy knows it's
+    # already one personal question deep before asking another.
+    session_ctx["policy_ask_streak"] = max(ask_streak(session_ctx), 1)
+    with timer.stage("decide_turn"):
+        action = decide_turn(
+            user_id=user_id, session_ctx=session_ctx,
+            history=history, user_message=user_message,
+            # The tile question lives on the home screen, not in chat history —
+            # without it the policy can't tell which ask this message answers.
+            answering_question=rapport_question,
+        )
+    if action is None or action.kind == "handoff":
+        return None
+    apply_defer(session_ctx, action)
+    note_ask_streak(session_ctx, action)
+    audit_decision(
+        session_id=session_id, user_id=user_id,
+        user_message=user_message, action=action, shadow=False,
+    )
+    # The policy owns the thread from here — clear the rapport capture
+    # (None, never popped) so the merge can't resurrect it next turn.
+    _reset_rapport_state(session_ctx)
+    # A ground_place ask must be backed by real place candidates + armed state,
+    # or the answer turn dead-ends (re-arms AFTER the reset above, on purpose).
+    _wire_ground_place_action(action, user_id=user_id, session_ctx=session_ctx)
+    session_ctx["policy_chips"] = action.chips or None
+    session_ctx["policy_chip_msgs"] = [c["send"] for c in action.chips] or None
+    session_ctx["last_routing"] = action.routing_dict()
+    session_ctx["_orchestrator_turn"] = False
+    session_ctx["timing_ms"] = timer.to_dict()
+    reply = sanitize_assistant_message(action.utterance)
+    ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+    return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+
+def _grounding_turn_result(
+    session_ctx: dict[str, Any], result: dict[str, Any], timer: Any
+) -> tuple[str, str, dict[str, Any], dict[str, Any], None]:
+    """Package a circles place-grounding turn (circles_flow.handle_grounding_answer /
+    _confirmation) as the rapport block's return. Chips pending keeps the capture armed
+    so the next reply routes back here; a closed thread clears every rapport key with
+    None (never popped — the session merge resurrects popped keys)."""
+    ctx = dict(session_ctx)
+    ctx["rapport_answer"] = None
+    reply = sanitize_assistant_message(str(result.get("reply") or ""))
+    pending = result.get("pending")
+    options = result.get("options") or []
+    offer = result.get("offer")
+    if isinstance(pending, dict):
+        ctx["rapport_active"] = True
+        ctx["rapport_grounding"] = pending
+        ctx["rapport_reply"] = {"options": options, "action": None}
+        ctx["rapport_followup_question"] = reply
+        ctx["rapport_offer_pending"] = False
+        ctx["rapport_pending_action"] = None
+    elif isinstance(offer, dict) and str(offer.get("send") or "").strip():
+        # Grounding closed WITH a bridge offer (rapport-bridge shape): arm the
+        # existing offer rails so a chip tap or a typed "sure" dispatches the
+        # stored action deterministically, and a decline closes warmly — the
+        # same accept/decline/pivot branch every concierge offer already uses.
+        _reset_rapport_state(ctx)
+        ctx["rapport_active"] = True
+        ctx["rapport_offer_pending"] = True
+        ctx["rapport_pending_action"] = {
+            "kind": str(offer.get("kind") or ""),
+            "label": str(offer.get("label") or ""),
+            "send": str(offer.get("send") or ""),
+            "topic": str(offer.get("topic") or ""),
+        }
+        ctx["rapport_reply"] = {
+            "options": [],
+            "action": {"label": offer.get("label"), "send": offer.get("send")},
+        }
+    else:
+        _reset_rapport_state(ctx)
+    ctx["_orchestrator_turn"] = False
+    ctx["timing_ms"] = timer.to_dict()
+    ctx["last_routing"] = {
+        "outcome": "circle_grounding",
+        "intent_class": "identity",
+        "tool_called": "ground_circle_affiliation" if result.get("grounded") else None,
+    }
+    ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+    return reply, "continue", ctx, ui, None
 
 
 # Coarse "family" of an app-move so we can tell a genuine PIVOT (offer running moms → she asks for a
@@ -255,18 +452,42 @@ def _publish_failure_reply(error: str | None, title: str) -> str:
     name = f"**{title}**" if title else "your event"
     detail = (error or "").lower()
     if "phone_not_verified" in detail or ":403" in detail or "not_authenticated" in detail:
-        return (
-            f"{name} is all set, but I can't post it until your account is verified. "
-            "Verify your email and I'll publish it right away."
+        return compose_reply(
+            goal=(
+                "The host's event is fully drafted but posting was rejected because "
+                "their account isn't verified yet. Reassure them the event is ready "
+                "and ask them to verify their email so you can publish it."
+            ),
+            facts=[f"The event: {name}"],
+            fallback=(
+                f"{name} is all set, but I can't post it until your account is verified. "
+                "Verify your email and I'll publish it right away."
+            ),
         )
     if "location" in detail or "venue" in detail:
-        return (
-            f"I have everything for {name} except a spot I can place on the map. "
-            "Pick a place or share an address and I'll post it."
+        return compose_reply(
+            goal=(
+                "The host's event couldn't post because its spot can't be placed on "
+                "the map. Ask them to pick a place or share an address so you can "
+                "post it."
+            ),
+            facts=[f"The event: {name}"],
+            fallback=(
+                f"I have everything for {name} except a spot I can place on the map. "
+                "Pick a place or share an address and I'll post it."
+            ),
         )
-    return (
-        f"I hit a snag posting {name} just now — give it another try in a moment "
-        "and I'll get it up."
+    return compose_reply(
+        goal=(
+            "Posting the host's event just failed for a temporary reason. Own the "
+            "hiccup honestly and ask them to try again in a moment — never fake "
+            "success."
+        ),
+        facts=[f"The event: {name}"],
+        fallback=(
+            f"I hit a snag posting {name} just now — give it another try in a moment "
+            "and I'll get it up."
+        ),
     )
 
 
@@ -293,7 +514,7 @@ def _when_suggestions() -> list[str]:
 _AFTERNOON_SUGGESTIONS = ["12 PM", "1 PM", "2 PM", "3 PM"]
 _MORNING_SUGGESTIONS = ["8 AM", "9 AM", "10 AM", "11 AM"]
 _EVENING_SUGGESTIONS = ["5 PM", "6 PM", "7 PM"]
-_PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere on the block"]
+_PLACE_SUGGESTIONS = ["The playground", "The park", "My place", "Somewhere nearby"]
 # Sentinel suggestion — the FE swaps this chip for a Google place-search field.
 _SEARCH_PLACE_OPTION = "🔍 Search a place"
 
@@ -307,6 +528,9 @@ _GENERIC_PLACES = {
     "the park", "park", "the playground", "playground", "the pool", "the clubhouse",
     "the community center", "community center", "the courtyard", "the lobby",
     "the block", "on the block", "somewhere on the block", "my block", "the green",
+    # The chip label was lexicon-scrubbed to "Somewhere nearby" (chips post their label
+    # back) — accept it alongside the old phrasing, never instead of it.
+    "somewhere nearby", "nearby",
 }
 
 
@@ -432,7 +656,7 @@ def _host_fallback_nudge(need: list[str]) -> str:
     """Deterministic safety net ONLY for when the LLM host-turn brain is unavailable — never the
     primary path. Kept minimal so a degraded turn still moves forward instead of dead-ending."""
     if not need:
-        return "That's everything — tap **Looks good** and I'll drop it on your block."
+        return "That's everything — tap **Looks good** and I'll post it for your neighbors."
     return f"Just need {' · '.join(need)} — tell me and I'll add it, or fill it in below."
 
 
@@ -738,7 +962,7 @@ def _inject_event_quick_replies(
 
 def _event_published_reply(reply: str, draft: dict[str, Any]) -> str:
     title = str((draft or {}).get("title") or "your event").strip() or "your event"
-    note = f"🎉 Done — **{title}** is live on your block. Neighbors who match can RSVP now."
+    note = f"🎉 Done — **{title}** is live in your area. Neighbors who match can RSVP now."
     base = str(reply or "").strip()
     # The orchestrator wrote `base` without knowing we'd publish this turn. If it's
     # still asking for a detail ("…where will the jog start?"), keeping it contradicts
@@ -820,7 +1044,7 @@ def run_lana_unified_pipeline(
             # Rapport concierge capture releases on logout too — same universal exit, one path.
             "rapport_active", "rapport_answer", "rapport_followup_question",
             "rapport_followup_count", "rapport_reply", "rapport_offer_pending",
-            "rapport_pending_action",
+            "rapport_pending_action", "rapport_grounding",
         ):
             session_ctx[_k] = None
 
@@ -875,11 +1099,91 @@ def run_lana_unified_pipeline(
     # owns (active_capture=rapport): re-classify the turn and RELEASE to normal routing on any pivot,
     # abandon, or unsafe (logout is caught above). Only a genuine getting-to-know-you answer
     # ("I usually run alone", "idk", "yes") stays and gets a concierge reply. The seed turn (first
-    # tile answer, rapport_answer set) never re-classifies — it always seeds the flow.
+    # tile answer, rapport_answer set) never re-classifies — it always seeds the flow. (One
+    # exception: a place-GROUNDING seed classifies unmatched free text once, below — its answer
+    # feeds a Places search, so a decline/pivot must be caught before it becomes a query.)
     if not isinstance(rapport, dict) and session_ctx.get("rapport_active"):
         from app.discovery_slots import discovery_slots_for_turn
 
-        if session_ctx.get("rapport_offer_pending"):
+        grounding = session_ctx.get("rapport_grounding")
+        if isinstance(grounding, dict):
+            # Place-grounding chips are pending ("is that OrangeTheory on Narcoossee?").
+            # A chip tap / named candidate confirms deterministically — never re-classified
+            # (same principle as the offer-chip dispatch below). Anything else classifies
+            # once: abandon → close warmly keeping their words; a confident pivot to a
+            # real request → release to normal routing; else one more search with their text.
+            from app.circles_flow import (
+                handle_grounding_confirmation,
+                match_grounding_candidate,
+            )
+
+            matched = match_grounding_candidate(grounding.get("candidates"), user_message)
+            abandon = False
+            release = False
+            if not matched:
+                rap_slots = discovery_slots_for_turn(
+                    session_ctx,
+                    user_message,
+                    routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+                    history=history,
+                    has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+                    has_identity=bool(session_ctx.get("identity_snippet")),
+                    phone_verified=phone_verified,
+                    timer=timer,
+                )
+                abandon = bool(isinstance(rap_slots, dict) and rap_slots.get("abandon"))
+                release = not abandon and _rapport_should_release(
+                    user_message, session_ctx, rap_slots
+                )
+            if release:
+                _reset_rapport_state(session_ctx)  # normal routing owns the turn (slots cached)
+            else:
+                result = handle_grounding_confirmation(
+                    user_id,
+                    grounding,
+                    user_message,
+                    session_ctx=session_ctx,
+                    abandon=abandon,
+                )
+                auto_offer = (
+                    result.get("offer") if isinstance(result.get("offer"), dict) else None
+                )
+                auto_send = str((auto_offer or {}).get("send") or "").strip()
+                if (
+                    result.get("grounded")
+                    and auto_offer is not None
+                    and auto_offer.get("auto")
+                    and auto_send
+                ):
+                    # The grounding served an action the user ALREADY asked for
+                    # (policy stamped pending_action on the ground_place turn) —
+                    # never re-offer their own request: dispatch it now with the
+                    # place pre-filled, exactly like an offer accept, and carry
+                    # the community-save announcement as a preamble to the
+                    # engine's reply (one bubble, no extra confirm loop).
+                    forced_slots = _forced_slots_for_kind(
+                        str(auto_offer.get("kind") or ""), auto_send, auto_offer,
+                        session_ctx,
+                        home_block_id=home_block_id, phone_verified=phone_verified,
+                        history=history, timer=timer,
+                    )
+                    if forced_slots is not None:
+                        session_ctx["_discovery_slots"] = forced_slots
+                        session_ctx["_discovery_slots_for"] = auto_send
+                    logging.getLogger(__name__).info(
+                        "grounding_auto_dispatch kind=%s send=%r forced=%s",
+                        auto_offer.get("kind"), auto_send, forced_slots is not None,
+                    )
+                    _reset_rapport_state(session_ctx)
+                    session_ctx["_turn_preamble"] = (
+                        str(result.get("reply") or "").strip() or None
+                    )
+                    rapport_handoff_send = auto_send
+                    user_message = auto_send
+                    rapport = None  # fall through to the discovery gates below
+                else:
+                    return _grounding_turn_result(session_ctx, result, timer)
+        elif session_ctx.get("rapport_offer_pending"):
             # She's responding to a pending app-move offer ("Want to meet other park moms?"). Decide
             # accept / decline / pivot, then DISPATCH the concierge's stored action ourselves on accept
             # — deterministically, whether she TAPPED the chip or typed "sure"/"yes". We never re-hand
@@ -963,6 +1267,91 @@ def run_lana_unified_pipeline(
             else:
                 followup_q = str(session_ctx.get("rapport_followup_question") or "").strip()
                 rapport = {"gap_row_id": None, "question": followup_q or None}
+    # Circles: a place-grounding question ("which spot is it?") owns its seed turn — the
+    # answer is a place NAME to resolve against the map, not an identity fact for the claims
+    # extractor. Handled BEFORE the concierge block so a pivot can fall through to normal
+    # routing. A tile-chip tap grounds deterministically (never re-classified); any other
+    # text classifies ONCE with the tile question as context — the same three arms as the
+    # pending-chips turn above: abandon ("none of these") closes warmly, a confident pivot
+    # to a real request ("show me events") releases with the gap left open to re-ask later,
+    # and only a genuine place answer drives the Places search.
+    if isinstance(rapport, dict) and str(rapport.get("gap_row_id") or "").strip():
+        grounding_gap_id = str(rapport.get("gap_row_id")).strip()
+        grounding_gap = None
+        try:
+            from app.rapport_gaps import get_gap_row
+
+            candidate_row = get_gap_row(grounding_gap_id)
+            if candidate_row and candidate_row.get("affiliation_ref"):
+                grounding_gap = candidate_row
+        except Exception:  # noqa: BLE001 — fall back to the normal concierge path
+            logging.getLogger(__name__).exception("rapport_grounding_lookup_failed")
+        if grounding_gap:
+            from app.circles_flow import (
+                handle_grounding_answer,
+                match_grounding_candidate,
+            )
+            from app.discovery_slots import discovery_slots_for_turn
+
+            stored_opts = grounding_gap.get("grounding_options")
+            tapped = match_grounding_candidate(
+                stored_opts if isinstance(stored_opts, list) else None, user_message
+            )
+            abandon = False
+            release = False
+            if not tapped:
+                # The seed turn has no rapport_* ctx yet — stamp the tile's ask (plus
+                # the spots its chips offered) as the pending question so the
+                # classifier doesn't judge "none of these" context-blind. Every exit
+                # (_grounding_turn_result / the reset below) normalizes these keys.
+                tile_q = str(rapport.get("question") or "").strip()
+                if tile_q:
+                    opt_names = ", ".join(
+                        str(o.get("name") or "").strip()
+                        for o in (stored_opts if isinstance(stored_opts, list) else [])
+                        if isinstance(o, dict) and str(o.get("name") or "").strip()
+                    )
+                    session_ctx["rapport_active"] = True
+                    session_ctx["rapport_followup_question"] = (
+                        f"{tile_q} (offered place options: {opt_names})"
+                        if opt_names else tile_q
+                    )
+                rap_slots = discovery_slots_for_turn(
+                    session_ctx,
+                    user_message,
+                    routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+                    history=history,
+                    has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+                    has_identity=bool(session_ctx.get("identity_snippet")),
+                    phone_verified=phone_verified,
+                    timer=timer,
+                )
+                abandon = bool(isinstance(rap_slots, dict) and rap_slots.get("abandon"))
+                release = not abandon and _rapport_should_release(
+                    user_message, session_ctx, rap_slots
+                )
+            if release:
+                # Their real request drives normal routing (slots cached). The gap
+                # stays OPEN — they ignored the ask rather than engaging it, so the
+                # tile may try again later.
+                _reset_rapport_state(session_ctx)
+                rapport = None
+            else:
+                from app.rapport_gaps import mark_answered
+
+                try:
+                    mark_answered(grounding_gap_id)
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception("rapport_grounding_close_failed")
+                result = handle_grounding_answer(
+                    user_id,
+                    grounding_gap,
+                    user_message,
+                    session_ctx=session_ctx,
+                    abandon=abandon,
+                )
+                return _grounding_turn_result(session_ctx, result, timer)
+
     if isinstance(rapport, dict):
         from app.claims_persist import (
             latest_claim_id,
@@ -973,6 +1362,7 @@ def run_lana_unified_pipeline(
 
         gap_row_id = str(rapport.get("gap_row_id") or "").strip()
         question = str(rapport.get("question") or "").strip()
+
         claim_id: str | None = None
         saved_any = False
         saved_label: str | None = None
@@ -991,6 +1381,18 @@ def run_lana_unified_pipeline(
                 mark_answered(gap_row_id, answer_claim_id=claim_id)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("rapport_answer_close_gap_failed")
+        # ONE VOICE owns the reply: with the unified policy live, the answer to a
+        # rapport-thread turn comes from decide_turn (acknowledge → bridge → offer) —
+        # the bookkeeping above (claim saved, gap closed) already happened, so the
+        # policy only has to talk. The concierge below stays as the fallback voice
+        # (policy off, handoff, or any failure) so this turn can never go silent.
+        policy_turn = _policy_rapport_reply(
+            user_id=user_id, session_id=session_id, session_ctx=session_ctx,
+            history=history, user_message=user_message, timer=timer,
+            rapport_question=question or None,
+        )
+        if policy_turn is not None:
+            return policy_turn
         # A tile answer is NOT fresh onboarding — reply via the concierge engine, which
         # acknowledges HER actual answer and asks one grounded follow-up (with tappable
         # chips). Never the heritage-first profile-intake engine, which re-asks covered
@@ -1034,12 +1436,7 @@ def run_lana_unified_pipeline(
             )
             rapport_handoff_send = action_send
             user_message = action_send
-            for _k in (
-                "rapport_active", "rapport_answer", "rapport_followup_question",
-                "rapport_followup_count", "rapport_reply", "rapport_offer_pending",
-                "rapport_pending_action",
-            ):
-                session_ctx.pop(_k, None)
+            _reset_rapport_state(session_ctx)
             # Route by the concierge's SEMANTIC decision (kind), not by re-classifying the noun:
             # force the intent to match the chosen kind and prime the slot cache the discovery
             # gates below reuse. This is what keeps "find me a playground" in the places lane
@@ -1070,7 +1467,12 @@ def run_lana_unified_pipeline(
             # request still releases via _rapport_should_release above; tapping an offer chip posts a
             # topic-named request that routes for real. The count backstops runaway qualifying.
             ctx = dict(session_ctx)
-            ctx.pop("rapport_answer", None)
+            # A concierge turn supersedes the seed answer and any pending grounding chips
+            # (e.g. she left them hanging and answered a NEW tile question) — cleared with
+            # None, never popped, or the session merge would resurrect them and hijack the
+            # next reply.
+            ctx["rapport_answer"] = None
+            ctx["rapport_grounding"] = None
             reply = sanitize_assistant_message(str(concierge.get("reply") or ""))
             options = concierge.get("options")
             # A language-switch offer arms the classifier's lang_pref_offer context for the
@@ -1100,12 +1502,11 @@ def run_lana_unified_pipeline(
                 ctx["rapport_followup_count"] = prior_followups + 1
                 ctx["rapport_offer_pending"] = False
             else:
-                ctx.pop("rapport_reply", None)
-                ctx.pop("rapport_active", None)
-                ctx.pop("rapport_followup_question", None)
-                ctx.pop("rapport_followup_count", None)
-                ctx.pop("rapport_offer_pending", None)
-                ctx.pop("rapport_pending_action", None)
+                # A warm close ends the capture — cleared with None via the shared reset,
+                # never popped: a popped key resurrects from the stored ctx on merge, which
+                # kept the previous turn's chips (e.g. a language offer's accept/keep pair)
+                # rendering under the close AND the capture armed forever.
+                _reset_rapport_state(ctx)
             ctx["_orchestrator_turn"] = False
             ctx["timing_ms"] = timer.to_dict()
             ctx["last_routing"] = {
@@ -1294,6 +1695,88 @@ def run_lana_unified_pipeline(
                 "intent_class": "discovery",
                 "tool_called": None,
             }
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+    def _utterance_is_unsafe_backstop(msg: str) -> bool:
+        try:
+            from app.orchestrator.guardrails import utterance_is_unsafe
+
+            # utterance_is_unsafe returns (matched, kind) — returning the raw
+            # tuple here made this ALWAYS truthy ((False, None) is truthy), so
+            # the policy gate silently skipped decide_turn on EVERY typed chat
+            # turn and legacy paths answered instead (found 2026-07-30, the
+            # bridge QA: none of the policy behavior ever showed in chat).
+            matched, _kind = utterance_is_unsafe(msg)
+            return bool(matched)
+        except Exception:  # noqa: BLE001 — a broken import must fail SAFE (skip policy)
+            return True
+
+    # ── Unified conversational policy (decide_turn, engineering doc §C.1) ──────
+    # LANA_DECIDE_TURN: off (default) | shadow | on. Shadow logs the policy's
+    # would-be decision to lana_audit_log on a daemon thread while the legacy
+    # path answers — the cutover diff. On answers conversational turns directly;
+    # `handoff` and every failure fall through to the legacy engines below, so
+    # action flows (search, host, auth, signals) keep their proven paths.
+    _decide_mode = decide_turn_mode()
+    if _decide_mode == "shadow":
+        try:
+            from app.policy.decide import run_shadow
+
+            run_shadow(
+                user_id=user_id, session_id=session_id,
+                session_ctx=session_ctx, history=history, user_message=user_message,
+            )
+        except Exception:  # noqa: BLE001 — shadow is observability, never a blocker
+            logging.getLogger(__name__).exception("decide_shadow_spawn_failed")
+    elif (
+        _decide_mode == "on"
+        and phone_verified
+        and str(session_ctx.get("routing_phase") or "") in ("", "listening")
+        and not session_ctx.get("event_host_active")
+        and not session_ctx.get("pending_confirmation")
+        # Regex unsafe backstop stays ahead of the policy — safety turns belong
+        # to the legacy rails (the policy prompt also hands them off, belt+braces).
+        and not _utterance_is_unsafe_backstop(user_message)
+        # A tapped LEGACY chip is an engine command ("Widen the search") — never
+        # the policy's turn. Taps on the policy's own chips stay with the policy.
+        and not (
+            str(user_message or "").strip() in (session_ctx.get("_offered_chip_msgs") or [])
+            and str(user_message or "").strip()
+            not in (session_ctx.get("policy_chip_msgs") or [])
+        )
+        # A dispatched offer/grounding action carries forced slots for exactly
+        # this message — a committed engine command, never the policy's turn.
+        and not (
+            isinstance(session_ctx.get("_discovery_slots"), dict)
+            and session_ctx["_discovery_slots"].get("_forced_kind")
+            and str(session_ctx.get("_discovery_slots_for") or "")
+            == str(user_message or "").strip()
+        )
+    ):
+        from app.policy.decide import apply_defer, audit_decision, decide_turn, note_ask_streak
+
+        with timer.stage("decide_turn"):
+            _action = decide_turn(
+                user_id=user_id, session_ctx=session_ctx,
+                history=history, user_message=user_message,
+            )
+        if _action is not None and _action.kind != "handoff":
+            apply_defer(session_ctx, _action)
+            note_ask_streak(session_ctx, _action)
+            audit_decision(
+                session_id=session_id, user_id=user_id,
+                user_message=user_message, action=_action, shadow=False,
+            )
+            # A ground_place ask must be backed by real place candidates + armed
+            # grounding state, or the answer turn dead-ends (QA 2026-07-30).
+            _wire_ground_place_action(_action, user_id=user_id, session_ctx=session_ctx)
+            session_ctx["policy_chips"] = _action.chips or None
+            session_ctx["policy_chip_msgs"] = [c["send"] for c in _action.chips] or None
+            session_ctx["last_routing"] = _action.routing_dict()
+            session_ctx["_orchestrator_turn"] = False
+            session_ctx["timing_ms"] = timer.to_dict()
+            reply = sanitize_assistant_message(_action.utterance)
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
@@ -1606,8 +2089,14 @@ def run_lana_unified_pipeline(
             # A named venue ("KFC", "Foxtail Coffee") is only resolvable once the host has
             # picked the exact place (place_id) — otherwise publish would blind-geocode the
             # name to *some* matching spot. Block-local answers ("my place", "the park")
-            # need no pin; they resolve to the host's block.
-            has_pin = bool(str(ed.get("place_id") or "").strip())
+            # need no pin; they resolve to the host's block. Raw coordinates count as a
+            # pin too: "Use my current location" sends lat/lng with NO place_id, and
+            # without this arm the auto-resolve below Google-searched the literal name
+            # "My current location" biased to the home block and re-pinned the event
+            # there (the Lake Nona mispin) — the device coordinates are authoritative.
+            has_pin = bool(str(ed.get("place_id") or "").strip()) or (
+                ed.get("venue_lat") is not None and ed.get("venue_lng") is not None
+            )
             # Auto-pin a tapped nearby suggestion. Those chips are real Google places we
             # surfaced WITH a pin (place_id/lat/lng), but the chip only sends its NAME, so
             # the extractor leaves it unpinned and the host gets bounced into "Which X
@@ -1717,9 +2206,18 @@ def run_lana_unified_pipeline(
                 ed["suggestions"] = []
                 if blockers_done:
                     turn_ctx["host_stage"] = "review"
-                    reply = (
-                        f"Here's your meet — **{_title}**. Take a look: tap **Looks good** "
-                        "to set it up, or **Let me tweak** to change anything."
+                    reply = compose_reply(
+                        goal=(
+                            "The host's meet is drafted and shown on a review card. "
+                            "Present it and tell them to tap **Looks good** to set it "
+                            "up, or **Let me tweak** to change anything (mention both "
+                            "buttons by those exact names)."
+                        ),
+                        facts=[f"The drafted meet's name: {_title}"],
+                        fallback=(
+                            f"Here's your meet — **{_title}**. Take a look: tap **Looks good** "
+                            "to set it up, or **Let me tweak** to change anything."
+                        ),
                     )
                 else:
                     _ensure_setup_config(
@@ -1727,9 +2225,18 @@ def run_lana_unified_pipeline(
                     )
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
-                    reply = (
-                        "Let's set it up! Add a name, a date & time, and a place below — or "
-                        "just tell me here and I'll fill them in."
+                    reply = compose_reply(
+                        goal=(
+                            "The host is starting to set up a meet and a setup card is "
+                            "shown below your message. Invite them to add a name, a "
+                            "date & time, and a place in the card below — or to just "
+                            "tell you here so you fill them in."
+                        ),
+                        fallback=(
+                            "Let's set it up! Add a name, a date & time, and a place below — or "
+                            "just tell me here and I'll fill them in."
+                        ),
+                        cache=True,
                     )
             elif stage == "review":
                 if _is_host_confirm(user_message) or _is_host_drop(user_message):
@@ -1739,18 +2246,42 @@ def run_lana_unified_pipeline(
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
-                    reply = (
-                        "Quick set-up — set capacity, sharing, approval, and what to "
-                        "bring, then drop it on your block."
+                    reply = compose_reply(
+                        goal=(
+                            "The host approved their meet's review and a quick-setup "
+                            "card is shown below. Tell them to set capacity, sharing, "
+                            "approval, and what to bring there, then drop the meet for "
+                            "their neighbors."
+                        ),
+                        fallback=(
+                            "Quick set-up — set capacity, sharing, approval, and what to "
+                            "bring, then drop it for your neighbors."
+                        ),
+                        cache=True,
                     )
                 else:
                     # A free-text edit was already merged into the draft above; stay in review.
                     turn_ctx["host_stage"] = "review"
                     ed["suggestions"] = []
                     reply = (
-                        f"Sure — tell me what to change about **{_title}**."
+                        compose_reply(
+                            goal=(
+                                "The host asked to tweak their drafted meet. Invite them "
+                                "to say what to change about it."
+                            ),
+                            facts=[f"The meet's name: {_title}"],
+                            fallback=f"Sure — tell me what to change about **{_title}**.",
+                        )
                         if _is_host_tweak(user_message)
-                        else f"Updated **{_title}** — does this look right?"
+                        else compose_reply(
+                            goal=(
+                                "You just applied the host's edit to their drafted meet "
+                                "(the updated card is shown). Confirm the update and ask "
+                                "if it looks right now."
+                            ),
+                            facts=[f"The meet's name: {_title}"],
+                            fallback=f"Updated **{_title}** — does this look right?",
+                        )
                     )
             elif stage == "setup":
                 if (_is_host_confirm(user_message) or _is_host_drop(user_message)) and blockers_done:
@@ -1770,8 +2301,17 @@ def run_lana_unified_pipeline(
                             ed["description"] = _sugg["description"]
                     turn_ctx["host_stage"] = "confirm"
                     ed["suggestions"] = []
-                    reply = (
-                        f"It's all set — **{_title}**. One last look, then drop it on the block."
+                    reply = compose_reply(
+                        goal=(
+                            "The host finished their meet's setup and the final confirm "
+                            "card is shown. Tell them it's all set — one last look, then "
+                            "they can drop it for their neighbors."
+                        ),
+                        facts=[f"The meet's name: {_title}"],
+                        fallback=(
+                            f"It's all set — **{_title}**. One last look, then drop it "
+                            "for your neighbors."
+                        ),
                     )
                 elif _is_host_confirm(user_message) or _is_host_drop(user_message):
                     # Carousel submitted but a blocker is still missing — hold in setup and
@@ -1779,7 +2319,15 @@ def run_lana_unified_pipeline(
                     need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
-                    reply = "I just need " + " · ".join(need) + " to post it."
+                    reply = compose_reply(
+                        goal=(
+                            "The host tried to post their meet but a required detail is "
+                            "still missing. Tell them exactly which detail(s) you still "
+                            "need before it can post — only the ones in the facts."
+                        ),
+                        facts=[f"Still missing: {', '.join(need)}"],
+                        fallback="I just need " + " · ".join(need) + " to post it.",
+                    )
                 elif _norm_cta(user_message) in ("continue setting up", "continue setup"):
                     # The FE "Continue setting up" button — a deterministic tap that brings the
                     # setup carousel back (host_aside stays off so the card shows, not an aside).
@@ -1815,7 +2363,50 @@ def run_lana_unified_pipeline(
                     else:
                         reply = _host_fallback_nudge(need)
             else:  # stage == "confirm" → publish when the host drops it
-                if (_is_host_drop(user_message) or _is_host_confirm(user_message)) and not phone_verified:
+                # Two ways to say "post it": the confirm card's CTA (the FE always sends
+                # its canonical English payload — "Drop the meet up" — whatever locale the
+                # label is rendered in), and the same ask TYPED free-form in any language
+                # ("publícalo", "pode postar"). The CTA matchers catch the first; the host
+                # brain's `publish` read catches the second — an AI signal, not a word list.
+                drop_asked = _is_host_drop(user_message) or _is_host_confirm(user_message)
+                brain = None
+                if not drop_asked:
+                    # Free text at confirm — an inline edit, a redo ask, a question, or a
+                    # publish ask in the host's own words. The brain reads it in any
+                    # phrasing: corrections land last-write-wins, and a slot asked to
+                    # change WITHOUT its new value ("I want a different spot") comes back
+                    # in redo and clears here.
+                    ed["suggestions"] = []
+                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
+                    from app.host_turn import host_turn_brain
+
+                    with timer.stage("llm_host_turn"):
+                        brain = host_turn_brain(
+                            history=history,
+                            user_message=user_message,
+                            draft=ed,
+                            needed=need,
+                        )
+                    if brain:
+                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
+                    # Re-derive the blockers AFTER the brain applied edits/redos — the
+                    # locals above predate them (and the router's clear_fields path may
+                    # have already blanked a slot before the stage machine ran).
+                    _title = str(ed.get("title") or "").strip()
+                    wd = turn_ctx.get("event_when_date")
+                    wt = turn_ctx.get("event_when_time")
+                    venue_resolvable = bool(str(ed.get("venue_name") or "").strip())
+                    # Honor the AI's publish read only while the draft is still complete —
+                    # a turn that also cleared a blocker must route back to setup instead.
+                    drop_asked = bool(
+                        brain
+                        and brain.get("publish")
+                        and _title
+                        and wd
+                        and wt
+                        and venue_resolvable
+                    )
+                if drop_asked and not phone_verified:
                     # Guest dropping the meet: DON'T attempt create_event first — it would
                     # 403 (auto_publish_event_failed: create_event_failed:403). Gate on auth
                     # up front: ask to sign up / log in and mark the finished draft
@@ -1826,16 +2417,33 @@ def run_lana_unified_pipeline(
                     turn_ctx["host_publish_pending"] = True
                     if not session_ctx.get("host_publish_pending"):
                         turn_ctx["routing_phase"] = "await_signup_phone"
-                        reply = (
-                            f"Perfect — **{_title or 'your event'}** is all set! "
-                            "To post it I just need to verify your email — what's your email?"
+                        reply = compose_reply(
+                            goal=(
+                                "The guest host's meet is fully set, but posting it "
+                                "needs a verified email. Celebrate that it's ready, "
+                                "then ask for their email so you can verify and post "
+                                "it."
+                            ),
+                            facts=[f"The meet's name: {_title or 'your event'}"],
+                            fallback=(
+                                f"Perfect — **{_title or 'your event'}** is all set! "
+                                "To post it I just need to verify your email — what's your email?"
+                            ),
                         )
                     else:
-                        reply = (
-                            "Finishing verification — send one more message and I'll "
-                            f"post **{_title or 'your event'}** right away."
+                        reply = compose_reply(
+                            goal=(
+                                "The host is mid email-verification with their finished "
+                                "meet waiting. Tell them to send one more message once "
+                                "verified and you'll post it right away."
+                            ),
+                            facts=[f"The meet's name: {_title or 'your event'}"],
+                            fallback=(
+                                "Finishing verification — send one more message and I'll "
+                                f"post **{_title or 'your event'}** right away."
+                            ),
                         )
-                elif _is_host_drop(user_message) or _is_host_confirm(user_message):
+                elif drop_asked:
                     event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
                     if event_id:
                         turn_ctx["event_id"] = event_id
@@ -1868,14 +2476,32 @@ def run_lana_unified_pipeline(
                             turn_ctx["host_publish_pending"] = True
                             if not session_ctx.get("host_publish_pending"):
                                 turn_ctx["routing_phase"] = "await_signup_phone"
-                                reply = (
-                                    f"Perfect — **{_title or 'your event'}** is all set! "
-                                    "To post it I just need to verify your email — what's your email?"
+                                reply = compose_reply(
+                                    goal=(
+                                        "The guest host's meet is fully set, but "
+                                        "posting it needs a verified email. Celebrate "
+                                        "that it's ready, then ask for their email so "
+                                        "you can verify and post it."
+                                    ),
+                                    facts=[f"The meet's name: {_title or 'your event'}"],
+                                    fallback=(
+                                        f"Perfect — **{_title or 'your event'}** is all set! "
+                                        "To post it I just need to verify your email — what's your email?"
+                                    ),
                                 )
                             else:
-                                reply = (
-                                    "Finishing verification — send one more message and I'll "
-                                    f"post **{_title or 'your event'}** right away."
+                                reply = compose_reply(
+                                    goal=(
+                                        "The host is mid email-verification with their "
+                                        "finished meet waiting. Tell them to send one "
+                                        "more message once verified and you'll post it "
+                                        "right away."
+                                    ),
+                                    facts=[f"The meet's name: {_title or 'your event'}"],
+                                    fallback=(
+                                        "Finishing verification — send one more message and I'll "
+                                        f"post **{_title or 'your event'}** right away."
+                                    ),
                                 )
                         else:
                             if "location" in detail or "venue" in detail:
@@ -1886,33 +2512,10 @@ def run_lana_unified_pipeline(
                                 ed.pop("venue_name", None)
                             reply = _publish_failure_reply(publish_error, _title)
                 else:
-                    # Free text at confirm — an inline edit, a redo ask, or a question. The
-                    # brain reads it in any phrasing: corrections land last-write-wins, and a
-                    # slot asked to change WITHOUT its new value ("I want a different spot")
-                    # comes back in redo and clears here. A draft still complete afterwards
-                    # holds at confirm; a cleared blocker falls back to the setup carousel —
-                    # the confirm card has no pickers, so holding would strand the host with
-                    # a hole they can't fill.
-                    ed["suggestions"] = []
-                    need = _host_blockers_needed(_title, wd, wt, venue_resolvable)
-                    from app.host_turn import host_turn_brain
-
-                    with timer.stage("llm_host_turn"):
-                        brain = host_turn_brain(
-                            history=history,
-                            user_message=user_message,
-                            draft=ed,
-                            needed=need,
-                        )
-                    if brain:
-                        _apply_host_brain(brain, ed, turn_ctx, session_ctx, settings)
-                    # Re-derive the blockers AFTER the brain applied edits/redos — the locals
-                    # above predate them (and the router's clear_fields path may have already
-                    # blanked a slot before the stage machine ran).
-                    _title = str(ed.get("title") or "").strip()
-                    wd = turn_ctx.get("event_when_date")
-                    wt = turn_ctx.get("event_when_time")
-                    venue_resolvable = bool(str(ed.get("venue_name") or "").strip())
+                    # Free text that wasn't a publish ask (brain already ran + applied
+                    # above). A draft still complete afterwards holds at confirm; a cleared
+                    # blocker falls back to the setup carousel — the confirm card has no
+                    # pickers, so holding would strand the host with a hole they can't fill.
                     if _title and wd and wt and venue_resolvable:
                         turn_ctx["host_stage"] = "confirm"
                         reply = (

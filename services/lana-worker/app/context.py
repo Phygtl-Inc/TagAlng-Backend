@@ -1,5 +1,6 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -21,18 +22,79 @@ def load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
+# LANA_LINGO §3.3/§4: the current turn's inferred household role + grammatical
+# gender. Request-scoped contextvars (each request runs in its own context copy),
+# set once per turn in main.py — so every prompt built through lingo_constitution()
+# picks them up without threading a parameter through ~50 composer call sites.
+_USER_ROLE: ContextVar[str | None] = ContextVar("lana_user_role", default=None)
+_USER_GRAM_GENDER: ContextVar[str | None] = ContextVar(
+    "lana_user_gram_gender", default=None
+)
+
+# How each role sharpens address (§3.3). Unlisted/unknown roles stay neutral.
+_ROLE_FRAMING = {
+    "parent": 'their family is "your kids" / "your family"',
+    "expecting": 'be gentle — the baby is not here yet; say "when the baby comes"',
+    "grandparent": 'their family is "your grandkids", never "your kids"',
+    "caregiver": (
+        'they care for someone else\'s family — say "the family you care for" / '
+        '"the little one you care for", never a parent label'
+    ),
+    "guardian": 'say "your family" / "the kids in your care"',
+    "relative": 'say "your family" (nieces, nephews — as they said it), never a parent label',
+}
+
+
+def set_address_context(
+    role: str | None, grammatical_gender: str | None
+) -> None:
+    """Stamp the turn's role/gender for prompt building. None = unspecified."""
+    _USER_ROLE.set(str(role or "").strip().lower() or None)
+    _USER_GRAM_GENDER.set(str(grammatical_gender or "").strip().lower() or None)
+
+
+def address_guidance() -> str:
+    """Per-user address lines appended to the constitution ("" when nothing is
+    known — the constitution's neutral rules already cover that case)."""
+    role = _USER_ROLE.get() or ""
+    gender = _USER_GRAM_GENDER.get() or ""
+    lines: list[str] = []
+    if role in _ROLE_FRAMING:
+        lines.append(
+            f"USER CONTEXT — household role: {role}; {_ROLE_FRAMING[role]}. "
+            "Role sharpens warmth only — never announce it or attach it to them as a label."
+        )
+    if gender in ("feminine", "masculine"):
+        lines.append(
+            f"USER CONTEXT — grammatical gender: {gender}; in gendered languages "
+            "(es/pt/…) conjugate greetings and adjectives to agree."
+        )
+    return "\n".join(lines)
+
+
+def lingo_constitution() -> str:
+    """LANA_LINGO §2/§14.1: the hard word rules every user-facing composer obeys
+    (never "mom"/"block"/"circle" in-app, role/gender-aware address, locked
+    outcome verbs). Appended to every system prompt that authors user copy —
+    extractors and classifiers don't need it. Carries the current user's role/
+    gender address guidance when main.py stamped it for this turn."""
+    base = load_prompt("lana_lingo_constitution.md")
+    extra = address_guidance()
+    return f"{base}\n\n{extra}" if extra else base
+
+
 def build_system_prompt() -> str:
     product = load_prompt("tagalng_product.md")
     persona = load_prompt("lana_persona.md")
-    return f"{product}\n\n---\n\n{persona}"
+    return f"{product}\n\n---\n\n{persona}\n\n---\n\n{lingo_constitution()}"
 
 
 def build_event_host_system_prompt() -> str:
-    return load_prompt("lana_event_host.md")
+    return load_prompt("lana_event_host.md") + "\n\n---\n\n" + lingo_constitution()
 
 
 def build_profile_system_prompt() -> str:
-    return load_prompt("lana_profile_intake.md")
+    return load_prompt("lana_profile_intake.md") + "\n\n---\n\n" + lingo_constitution()
 
 
 def format_event_draft_context(ctx: dict[str, Any]) -> str:
@@ -290,9 +352,12 @@ def format_user_context(ctx: dict[str, Any], purpose: str) -> str:
     if not net.get("has_block"):
         lines.append("- Block network: home block not assigned yet")
     else:
-        name = net.get("block_display_name") or ctx.get("home_block_id") or "your block"
+        name = net.get("block_display_name") or ctx.get("home_block_id") or "your area"
         mc = net.get("member_count", 0)
-        lines.append(f"- Block network ({name}): {mc} other member(s) on this block")
+        lines.append(
+            f"- Neighborhood ({name}): {mc} other member(s) nearby"
+            " (backstage unit: block — never say 'block' to the user)"
+        )
         for ev in (net.get("upcoming_events") or [])[:3]:
             title = ev.get("title") or "Event"
             when = ev.get("starts_at") or ""
@@ -324,7 +389,7 @@ def format_user_context(ctx: dict[str, Any], purpose: str) -> str:
                     f"  · {nick}{id_hint}: ~{pct} match via «{lbl}»{exact} · tier={tier}"
                 )
         lines.append(
-            "- Agent rule: you may mention that neighbors or activities exist on the block; "
+            "- Agent rule: you may mention that neighbors or activities exist nearby; "
             "do not invent names or events beyond this list."
         )
 

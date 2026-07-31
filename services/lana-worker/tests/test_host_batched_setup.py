@@ -342,5 +342,40 @@ class TestRecoverWhenFromDraft(unittest.TestCase):
         self.assertIsNone(wt)
 
 
+class TestHostCtaTurnGate(unittest.TestCase):
+    """The sticky-host release gate must never re-classify the host card's own button
+    payloads out of the lane — the "Drop the meet up" tap used to read as an ABANDON
+    (identity.edit_claim), releasing host mode and wiping the finished draft."""
+
+    def test_drop_tap_at_confirm_is_native(self) -> None:
+        from app.discovery_route import _is_host_cta_turn
+
+        ctx = {"host_stage": "confirm"}
+        self.assertTrue(_is_host_cta_turn("Drop the meet up", ctx))
+
+    def test_review_and_setup_ctas_are_native(self) -> None:
+        from app.discovery_route import _is_host_cta_turn
+
+        self.assertTrue(_is_host_cta_turn("Looks good", {"host_stage": "review"}))
+        self.assertTrue(_is_host_cta_turn("Looks good · next", {"host_stage": "setup"}))
+        self.assertTrue(_is_host_cta_turn("Let me tweak", {"host_stage": "review"}))
+
+    def test_hard_cancel_still_wins(self) -> None:
+        # "drop it" is the cancel idiom (_CANCEL_RE), not the publish CTA — backs out.
+        from app.discovery_route import _is_host_cta_turn
+
+        self.assertFalse(_is_host_cta_turn("drop it", {"host_stage": "confirm"}))
+        self.assertFalse(_is_host_cta_turn("cancel", {"host_stage": "confirm"}))
+
+    def test_free_text_and_early_stages_stay_ai_routed(self) -> None:
+        from app.discovery_route import _is_host_cta_turn
+
+        # Ordinary messages never match — the AI keeps owning intent for them.
+        self.assertFalse(_is_host_cta_turn("find me neighbors", {"host_stage": "confirm"}))
+        # Outside the carded stages there is no button on screen — no CTA capture.
+        self.assertFalse(_is_host_cta_turn("Drop the meet up", {}))
+        self.assertFalse(_is_host_cta_turn("Drop the meet up", {"host_stage": None}))
+
+
 if __name__ == "__main__":
     unittest.main()

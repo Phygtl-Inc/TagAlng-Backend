@@ -463,7 +463,7 @@ def run_pass_along_turn(
     tail = (
         f" {matches} neighbor{'s' if matches != 1 else ''} looking for this just got pinged."
         if matches
-        else " I'll ping anyone on your block who's looking for it."
+        else " I'll ping anyone near you who's looking for it."
     )
     # If they bundled several items in one message, offer the next instead of dropping it.
     queued = list(session_ctx.get("pass_along_other_items") or [])
@@ -479,4 +479,4 @@ def run_pass_along_turn(
             f" You also mentioned {names} — want to pass {that} along too? "
             "Just tell me about the next one."
         )
-    return f"🎉 Done — **{_summary(draft)}** is listed on your block.{tail}{extra}"
+    return f"🎉 Done — **{_summary(draft)}** is listed for your neighbors.{tail}{extra}"

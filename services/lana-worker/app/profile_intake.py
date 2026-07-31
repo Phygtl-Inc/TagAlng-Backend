@@ -7,6 +7,7 @@ from typing import Any
 
 from app.event_context import format_chat_history, host_display_name
 from app.lana_ui import parse_turn_ui
+from app.reply_compose import compose_reply
 from app.turn_timing import TurnTimer
 
 PROFILE_HISTORY_MAX = 8
@@ -72,7 +73,8 @@ Rules:
 PROFILE_OPENING = """
 The user just started profile intake. No prior chat.
 Welcome them to TagAlng on their block. In ONE message, greet them and ask:
-where their family heritage traces back to, and what they hope to find or do on the block.
+where their family heritage traces back to, and what they hope to find or do nearby
+(never say the word "block" to the user).
 
 Output ONLY valid JSON:
 {
@@ -199,13 +201,13 @@ def format_profile_intake_context(ctx: dict[str, Any]) -> str:
 
 GUEST_PROFILE_OPENING = (
     "So — who are you, right now? "
-    "Tell me your life stage and what you're hoping to find on the block. "
+    "Tell me your life stage and what you're hoping to find nearby. "
     "Already have an account? Just say log in."
 )
 
 
 def lana_profile_guest_opening() -> tuple[str, str, dict[str, Any], dict[str, Any]]:
-    """Instant opening for anonymous Meet-Lana flow (no LLM call)."""
+    """Opening for anonymous Meet-Lana flow (composed once per process, cached)."""
     ui: dict[str, Any] = {
         "bucket": "stage",
         "focus_phrase": None,
@@ -226,7 +228,17 @@ def lana_profile_guest_opening() -> tuple[str, str, dict[str, Any], dict[str, An
             "guest_fast_opening": True,
         },
     }
-    return GUEST_PROFILE_OPENING, "continue", ctx, ui
+    opening = compose_reply(
+        goal=(
+            "Open an anonymous guest chat. Ask who they are right now — their "
+            "life stage and what they're hoping to find nearby — and tell "
+            "existing users they can just say 'log in' (keep that phrase "
+            "verbatim). Do not ask for their name."
+        ),
+        fallback=GUEST_PROFILE_OPENING,
+        cache=True,
+    )
+    return opening, "continue", ctx, ui
 
 
 def assistant_message_looks_truncated(msg: str) -> bool:
@@ -414,11 +426,11 @@ def _parse_profile_turn(
         # asked up front on its own turn, so fall back to a neutral beat instead.
         guest_collects_name = guest_step in ("post_verify", "intro_declined")
         if gaps.get("needs_display_name") and guest_collects_name:
-            assistant_message = "Love that — what should neighbors call you on the block?"
+            assistant_message = "Love that — what should neighbors call you?"
         elif needs_kids_followup(history=history, ui=ui, topics_covered=covered):
             assistant_message = "Little ones at home, or mostly grown?"
         else:
-            assistant_message = "What do you hope to find or do on the block?"
+            assistant_message = "What do you hope to find or do nearby?"
     profile_patch = parse_profile_patch(data.get("profile_patch"))
     assistant_message, status = apply_profile_stop_rules(
         status,
@@ -503,7 +515,7 @@ def _profile_opening_payload(user_context_block: str, host_name: str | None) -> 
             f'The neighbor\'s name is "{host_name}". '
             f'assistant_message MUST open with a greeting that uses their name '
             f'(e.g. "Hi {host_name}! I\'m Lana — where does your family heritage trace back to, '
-            f'and what do you hope to find on the block?").'
+            f'and what do you hope to find nearby?").'
         )
     else:
         name_rule = "No name on file — use a warm generic greeting."

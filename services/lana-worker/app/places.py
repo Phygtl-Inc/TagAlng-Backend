@@ -198,3 +198,97 @@ def search_places(
         if len(out) >= limit:
             break
     return out
+
+
+_PLACE_DETAILS_URL = "https://places.googleapis.com/v1/places/"
+
+
+def place_details(google_place_id: str) -> dict[str, Any] | None:
+    """Authoritative place fields for a Google place id, fetched server-side.
+
+    Used by circle grounding (Circles §3): the client sends only the place id it
+    tapped — name/geo/address always come from Google here, never from the request
+    body, so a caller can't mint or rename a canonical place. Returns
+    {place_id, name, address, lat, lng, zip, types} or None on any failure."""
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    pid = str(google_place_id or "").strip()
+    if not api_key or not pid or "/" in pid:
+        return None
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            res = client.get(
+                _PLACE_DETAILS_URL + pid,
+                headers={
+                    "X-Goog-Api-Key": api_key,
+                    "X-Goog-FieldMask": (
+                        "id,displayName,formattedAddress,location,types,addressComponents"
+                    ),
+                },
+            )
+        data = res.json() if res.status_code == 200 else {}
+    except Exception:  # noqa: BLE001 - best-effort
+        _log.exception("place_details.request_failed place_id=%r", pid)
+        return None
+    if not isinstance(data, dict) or not data.get("id"):
+        _log.info("place_details.empty place_id=%r status=%s", pid, getattr(res, "status_code", "?"))
+        return None
+    name = str(((data.get("displayName") or {}).get("text")) or "").strip()
+    if not name:
+        return None
+    loc = data.get("location") or {}
+    zip_code = None
+    for comp in data.get("addressComponents") or []:
+        if "postal_code" in (comp.get("types") or []):
+            zip_code = str(comp.get("longText") or comp.get("shortText") or "").strip()[:5]
+            break
+    return {
+        "place_id": str(data.get("id")),
+        "name": name[:200],
+        "address": str(data.get("formattedAddress") or "").strip()[:300] or None,
+        "lat": loc.get("latitude"),
+        "lng": loc.get("longitude"),
+        "zip": zip_code if zip_code and zip_code.isdigit() and len(zip_code) == 5 else None,
+        "types": [str(t) for t in (data.get("types") or [])][:10],
+    }
+
+
+# Classic Geocoding API — reverse geocoding has no Places API (New) equivalent.
+_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+
+
+def reverse_geocode(lat: float, lng: float) -> dict[str, Any] | None:
+    """lat/lng → {name, address, place_id, lat, lng} for a bare device pin ("Use my
+    current location", issue #42). The returned lat/lng are the CALLER's coordinates,
+    not the geocode result's — the device pin stays authoritative; this only names it.
+    Best-effort: None on any failure or missing key (a nameless pin is still correct)."""
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        with httpx.Client(timeout=6.0) as client:
+            res = client.get(
+                _GEOCODE_URL,
+                params={
+                    "latlng": f"{float(lat)},{float(lng)}",
+                    "key": api_key,
+                    # Prefer a human-scale label over a plus-code or a whole city.
+                    "result_type": "street_address|premise|point_of_interest|neighborhood",
+                },
+            )
+        data = res.json() if res.status_code == 200 else {}
+    except Exception:  # noqa: BLE001
+        return None
+    results = data.get("results") or []
+    if not results:
+        return None
+    top = results[0] or {}
+    address = str(top.get("formatted_address") or "").strip()
+    if not address:
+        return None
+    return {
+        "name": address.split(",")[0].strip()[:120],
+        "address": address[:300],
+        "place_id": str(top.get("place_id") or "").strip() or None,
+        "lat": float(lat),
+        "lng": float(lng),
+    }

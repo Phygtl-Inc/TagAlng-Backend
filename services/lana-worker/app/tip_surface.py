@@ -84,10 +84,10 @@ def build_tip_draft(
     if nearby > 0:
         outreach = (
             f"I'll listen for {nearby} neighbor{'s' if nearby != 1 else ''} "
-            "on your block who might want this."
+            "near you who might want this."
         )
     else:
-        outreach = "I'll listen for moms on your block who need this."
+        outreach = "I'll listen for neighbors near you who need this."
     return {
         "title": title,
         "headline": f"Heard you — {title.rstrip('.')}.",

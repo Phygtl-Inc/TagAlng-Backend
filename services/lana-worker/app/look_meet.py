@@ -21,7 +21,7 @@ from app.i18n import session_lang, t
 
 _KIND_SUGGESTIONS = ["Playground meet", "Stroller walk", "Coffee & kids", "Library storytime"]
 _AFFINITY_QUESTION = "Anyone with a similar kid-stage matter?"
-_AFFINITY_OPTIONS = ["Same kid-stage", "Any toddler mom", "Open · all moms"]
+_AFFINITY_OPTIONS = ["Same kid-stage", "Any toddler parent", "Open to everyone"]
 _MAX_ENRICH = 2
 
 _CANCEL_RE = re.compile(
@@ -45,7 +45,8 @@ _LOOK_MEET_TURN_CAP = 12
 # Needs a find/show verb + a people noun so a meet answer ("all moms") is never a pivot.
 _PIVOT_OUT_RE = re.compile(
     r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow (?:my )?(?:block log|intros)\b|\bmy block log\b|\blog\s?out\b|\bsign out\b|"
+    r"\bshow (?:my )?(?:(?:block|neighborhood) log|intros)\b|"
+    r"\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b|"
     r"\b(?:host|create|throw|plan|organi[sz]e)\s+(?:an?\s+|my\s+)?(?:event|party|meetup|gathering)\b",
     re.IGNORECASE,
 )
@@ -211,9 +212,9 @@ def save_pending_meet_seek(
     session_ctx["look_meet_saved_now"] = True
     matches = int(saved.get("matches_created") or 0)
     tail = (
-        f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+        f" {matches} neighbor{'s' if matches != 1 else ''} wanting the same just matched!"
         if matches
-        else " I'll text you when another mom wants the same near you."
+        else " I'll text you when another neighbor wants the same near you."
     )
     return f"✅ You're in — I'm listening for a **{_summary(draft)}**.{tail}"
 
@@ -248,9 +249,9 @@ def start_meet_seek_from_interest(
     session_ctx["look_meet_saved_now"] = True
     matches = int(saved.get("matches_created") or 0)
     tail = (
-        f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+        f" {matches} neighbor{'s' if matches != 1 else ''} wanting the same just matched!"
         if matches
-        else " I'll text you when a mom wants the same near you."
+        else " I'll text you when a neighbor wants the same near you."
     )
     return f"✅ You're in — I'm listening for a **{_summary(draft)}**.{tail}"
 
@@ -395,6 +396,21 @@ def _affinity_tags(draft: dict[str, Any]) -> list[str]:
     return [a.replace(" ", "_")[:40]]
 
 
+def _jwt_sub(jwt: str | None) -> str | None:
+    """The JWT's `sub` (user id), decoded locally — no crypto: the token was
+    verified upstream this request; this is only for a read-side display gate."""
+    try:
+        import base64
+        import json as _json
+
+        payload = str(jwt or "").split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        sub = _json.loads(base64.urlsafe_b64decode(payload)).get("sub")
+        return str(sub) if sub else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _find_block_events(
     *, user_jwt: str, kind: str | None, zip_code: str | None, block_id: str | None, limit: int = 3
 ) -> list[dict[str, Any]]:
@@ -408,6 +424,19 @@ def _find_block_events(
     the session zip, so we fall back to the home block's centroid (every verified
     neighbour has a home_block_id) — that's what actually makes this fire.
     """
+    # §D.2 gate (bridge-spec alignment 2026-07-30): while the seeker's area is
+    # not open, others' events are never listed — pre-open, the product move is
+    # create+invite (the no-events reply already ends on "Start listening / send
+    # it to a neighbor you know"). Fail OPEN on any gating error.
+    try:
+        from app.zip_unlock import discovery_zip_gate
+
+        _sub = _jwt_sub(user_jwt)
+        _frame = discovery_zip_gate(_sub, surface="browse") if _sub else None
+        if _frame and _frame.get("blocked"):
+            return []
+    except Exception:  # noqa: BLE001 — a gate error must never hide the flow
+        pass
     args: dict[str, Any] = {"p_limit": 20}
     if zip_code:
         args["p_zip"] = zip_code
@@ -436,11 +465,15 @@ def _find_block_events(
         hay = (str(ev.get("title") or "") + " " + " ".join(ev.get("cohort_tags") or [])).lower()
         return sum(1 for w in keywords if w in hay)
 
-    ranked = sorted(
-        (e for e in rows if isinstance(e, dict) and e.get("id")),
-        key=relevance,
-        reverse=True,
-    )
+    candidates = [e for e in rows if isinstance(e, dict) and e.get("id")]
+    if keywords:
+        # Relevance floor (bridge spec §2): the seeker named what kind of meet they
+        # want — an unrelated event is NOT a match, and returning it here blocks the
+        # create+invite fall-through (QA 2026-07-30: "meet other runners" surfaced a
+        # coffee catch-up because top-N kept zero-relevance events). Nothing on-topic
+        # → return empty and let the seek/create path own the turn.
+        candidates = [e for e in candidates if relevance(e) > 0]
+    ranked = sorted(candidates, key=relevance, reverse=True)
     out: list[dict[str, Any]] = []
     for e in ranked[:limit]:
         out.append({
@@ -523,9 +556,9 @@ def run_look_meet_turn(
         session_ctx["look_draft"] = draft
         session_ctx["look_meet_saved_now"] = True
         tail = (
-            f" {matches} mom{'s' if matches != 1 else ''} wanting the same just matched!"
+            f" {matches} neighbor{'s' if matches != 1 else ''} wanting the same just matched!"
             if matches
-            else " I'll text you when another mom wants the same near you."
+            else " I'll text you when another neighbor wants the same near you."
         )
         return f"✅ Saved — I'm listening for a **{_summary(draft)}**.{tail}"
 
@@ -634,18 +667,18 @@ def run_look_meet_turn(
     # already-listening — sign-up comes first, then the seek is created.
     guest = not session_ctx.get("phone_verified")
     listen_promise = (
-        "**Start listening for me** — I'll get you signed up, then text you when a mom wants the same"
+        "**Start listening for me** — I'll get you signed up, then text you when a neighbor wants the same"
         if guest
-        else "**Start listening for me** and I'll text you when a mom wants the same"
+        else "**Start listening for me** and I'll text you when a neighbor wants the same"
     )
     if events:
         n = len(events)
         return (
             f"Here's what I've got — **{_summary(draft)}**. I also found {n} meet"
-            f"{'s' if n != 1 else ''} on your block you could join — take a look below, or "
+            f"{'s' if n != 1 else ''} near you that you could join — take a look below, or "
             f"{listen_promise}."
         )
     return (
         f"Here's what I've got — **{_summary(draft)}**. {listen_promise}, "
-        "or send it to a mom you know."
+        "or send it to a neighbor you know."
     )

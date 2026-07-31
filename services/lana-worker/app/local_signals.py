@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 
 from app.signal_capture import clear_signal_draft
@@ -279,7 +280,7 @@ def format_signal_saved_reply(
     entries: list[dict[str, Any]] | None = None,
 ) -> str:
     intent = str(result.get("intent") or "")
-    label = _INTENT_LABELS.get(intent, "on your block")
+    label = _INTENT_LABELS.get(intent, "posting nearby")
     matches = (
         int(matches_shown)
         if matches_shown is not None
@@ -287,7 +288,7 @@ def format_signal_saved_reply(
     )
     bit = f"Got it — I've noted you're {label}: {detail.strip()}."
     if matches > 0 and entries:
-        bit += f" I found {matches} neighbor match{'es' if matches != 1 else ''} on your block:"
+        bit += f" I found {matches} neighbor match{'es' if matches != 1 else ''} near you:"
         lines = [bit]
         for row in entries[:1]:
             nick = str(row.get("peer_preview_label") or "A neighbor").strip()
@@ -297,23 +298,31 @@ def format_signal_saved_reply(
             else:
                 lines.append(f"• {nick}")
         if len(entries) > 1:
-            lines.append(f"…and {len(entries) - 1} more in your block log.")
-        lines.append("Say show my block log for the full list.")
+            lines.append(f"…and {len(entries) - 1} more in your neighborhood log.")
+        lines.append("Say show my neighborhood log for the full list.")
         return "\n".join(lines)
     if matches > 0:
-        bit += f" I found {matches} match{'es' if matches != 1 else ''} on your block — check your block log."
+        bit += f" I found {matches} match{'es' if matches != 1 else ''} near you — check your neighborhood log."
     else:
-        bit += " I'll let you know when a neighbor on your block matches."
+        bit += " I'll let you know when a neighbor nearby matches."
     return bit
 
 
 def format_block_log_reply(entries: list[dict[str, Any]]) -> str:
     if not entries:
-        return (
-            "Your block log is quiet right now. When you ask for something or offer to help "
-            "neighbors, matches will show up here."
+        return compose_reply(
+            goal=(
+                "Tell the user their neighborhood log is quiet right now, and that "
+                "when they ask for something or offer to help neighbors, matches "
+                "will show up there."
+            ),
+            fallback=(
+                "Your neighborhood log is quiet right now. When you ask for something or offer to help "
+                "neighbors, matches will show up here."
+            ),
+            cache=True,
         )
-    lines = [f"You have {len(entries)} active match{'es' if len(entries) != 1 else ''} on your block:"]
+    lines = [f"You have {len(entries)} active match{'es' if len(entries) != 1 else ''} near you:"]
     for idx, row in enumerate(entries[:1], start=1):
         nick = str(row.get("peer_preview_label") or "A neighbor").strip()
         reason = block_log_match_summary(row)

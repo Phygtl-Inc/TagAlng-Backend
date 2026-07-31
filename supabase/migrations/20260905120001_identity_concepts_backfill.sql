@@ -54,15 +54,17 @@ from (
 join (
   select
     concept,
-    (
+    coalesce((
       -- Union synonyms across all rows for this concept, dedup, cap 20.
+      -- array_agg over zero rows (a concept whose claims all lack synonyms)
+      -- is NULL, and identity_concepts.synonyms is NOT NULL — default to {}.
       select array_agg(distinct s)
       from (
         select unnest(synonyms) as s
         from public.user_identity_claims u2
         where u2.concept = uic.concept
       ) x
-    )[1:20] as synonyms
+    )[1:20], '{}'::text[]) as synonyms
   from public.user_identity_claims uic
   group by concept
 ) agg on agg.concept = seed.concept

@@ -367,6 +367,15 @@ def ensure_gap_buffer(user_id: str, target: int = _BUFFER_TARGET) -> int:
     intended to run as a background task after a tile answer closes a gap."""
     if not user_id:
         return 0
+    # Grounding questions for ungrounded circle affiliations refill first (they carry
+    # real matcher value and are capped/idempotent inside); they count toward the
+    # buffer via the open-gap count below.
+    try:
+        from app.circles_flow import ensure_grounding_gaps
+
+        ensure_grounding_gaps(user_id)
+    except Exception:  # noqa: BLE001 — the claims synth must still run
+        logger.exception("rapport: grounding refill failed for %s", user_id)
     need = target - _open_gap_count(user_id)
     if need <= 0:
         return 0

@@ -786,6 +786,35 @@ def persist_profile_patch(user_id: str, patch: dict[str, str]) -> None:
     service_client().table("users").update(row).eq("id", user_id).execute()
 
 
+_ALLOWED_ROLES = frozenset(
+    {"parent", "expecting", "grandparent", "caregiver", "guardian", "relative"}
+)
+_ALLOWED_GRAM_GENDERS = frozenset({"feminine", "masculine"})
+
+
+def persist_role_gender(user_id: str, data: Any) -> None:
+    """users.role / users.grammatical_gender from the extractor's own verdict
+    (lingo constitution's role-aware address + gendered-language agreement).
+    Allow-listed values only; null never overwrites — a stated role can be
+    refined later ("my grandkids" after "my kids") but never silently erased."""
+    if not user_id or not isinstance(data, dict):
+        return
+    patch: dict[str, str] = {}
+    role = str(data.get("role") or "").strip().lower()
+    if role in _ALLOWED_ROLES:
+        patch["role"] = role
+    gender = str(data.get("grammatical_gender") or "").strip().lower()
+    if gender in _ALLOWED_GRAM_GENDERS:
+        patch["grammatical_gender"] = gender
+    if not patch:
+        return
+    try:
+        service_client().table("users").update(patch).eq("id", user_id).execute()
+    except Exception:
+        # Column may predate the 20260909 migration in an env — never break extraction.
+        logger.exception("persist_role_gender_failed for %s", user_id)
+
+
 def persist_kids_count(user_id: str, kids_count: int | None) -> None:
     """Store the stated number of children (count only — never name/age/school)."""
     if kids_count is None or not (1 <= kids_count <= 20):
@@ -1227,12 +1256,23 @@ def try_upsert_claims_from_message(
     except Exception:
         logger.exception("incremental_claim_extract_failed")
         return ClaimExtractResult(nickname=stated_nick)
+    # Circles Stage 1 (extract-and-park, §H.1): persist circle / place-feature candidates
+    # from the same extractor pass. Best-effort and additive — must never affect claims.
+    circles_captured = 0
+    try:
+        from app.circles_capture import run_circle_capture
+
+        circles_captured = int(run_circle_capture(user_id, data).get("circles") or 0)
+    except Exception:
+        logger.exception("circle_capture_failed")
     if nickname and not stated_nick:
         nickname = _normalize_nickname(nickname)
         persist_profile_patch(user_id, {"nickname": nickname})
         stated_nick = nickname
     # Kids count is private (count only) — persist regardless of whether other claims survive.
     persist_kids_count(user_id, kids_count)
+    # Role / grammatical gender are private address facts (never claims) — same rule.
+    persist_role_gender(user_id, data)
     if not claims:
         return ClaimExtractResult(
             nickname=stated_nick, kids_count=kids_count, followup_question=followup
@@ -1264,7 +1304,13 @@ def try_upsert_claims_from_message(
 
     saved = upsert_claims(user_id, claims)
     primary = max(claims, key=lambda c: c.confidence, default=None)
-    if allow_rapport_gap:
+    # A turn that captured a circle gives its tile slot to the GROUNDING question
+    # ("which spot is it?") instead of the extractor's follow-up — the two are about
+    # the same topic and would collide as near-twins on the tile. Nothing is lost:
+    # once grounded, the §4.3 enrichment asks the affinity question anyway, place-
+    # tagged ("What do you enjoy most at Book Club Bar?") — strictly better than the
+    # ungrounded version it replaces.
+    if allow_rapport_gap and not circles_captured:
         _open_rapport_gap(
             user_id,
             message_id,

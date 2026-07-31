@@ -16,15 +16,17 @@ the conversation, return ONE compact JSON object:
 {"title_suggestions": [...], "description": "...", "affinity": {"question": "...", "options": [...]}}
 
 - title_suggestions: 2-3 short, specific event titles tailored to THIS event — the
-  people, theme, or activity mentioned. e.g. a gathering of Brazilian moms →
-  ["Brazilian Moms Meetup","Brazil Heritage Mixer","Latina Moms Hangout"]; a toddler
+  people, theme, or activity mentioned. e.g. a gathering of Brazilian parents →
+  ["Brazilian Families Meetup","Brazil Heritage Mixer","Brazilian Neighbors Hangout"]; a toddler
   park meet → ["Toddler Park Playdate","Morning Playground Meetup"]. [] if too little is known.
 - description: ONE short warm sentence (<=120 chars) describing the meet for the event
-  card, e.g. "Saturday morning coffee — open to first-time Brazilian moms." "" if unknown.
+  card, e.g. "Saturday morning coffee — open to first-time Brazilian families." "" if unknown.
 - affinity: the single "who's it for?" question for THIS event, with 2-4 tappable options
-  tailored to it. e.g. Brazilian moms event → {"question":"Who's it for?","options":
-  ["Brazilian moms only","All Latina moms","Open to everyone"]}; generic playdate →
-  {"question":"Who's it for?","options":["Same kid-stage","Any toddler mom","Open · all moms"]}.
+  tailored to it. e.g. Brazilian heritage event → {"question":"Who's it for?","options":
+  ["Brazilian families","Portuguese-speaking neighbors","Open to everyone"]}; generic playdate →
+  {"question":"Who's it for?","options":["Same kid-stage","Any toddler parent","Open to everyone"]}.
+Use neutral audience nouns in every option and title — "parents", "neighbors", "families" —
+never gendered ones like "moms" or "dads".
 
 Tailor everything to the actual event. Never invent facts the conversation doesn't imply."""
 

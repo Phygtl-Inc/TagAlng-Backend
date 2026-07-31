@@ -199,6 +199,62 @@ class TestDiscoveryRouting(unittest.TestCase):
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_zip_ask_stamps_zip_asked_on_session(self, mock_slots, _mock_ai) -> None:
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.92,
+            "identity_snippet": None,
+        }
+        result = handle_discovery_turn(
+            "Hey I wanna meet new people",
+            session_ctx={"routing_phase": "listening"},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            history=[],
+        )
+        self.assertIsNotNone(result)
+        _, ctx, _, _ = result
+        self.assertTrue(ctx.get("zip_asked"))
+
+    @patch("app.discovery_route.compose_reply")
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_zip_reask_after_offramp_composes_against_message(
+        self, mock_slots, _mock_ai, mock_compose
+    ) -> None:
+        # Transcript bug (2026-07-23): the decline off-ramp resets routing_phase to
+        # "listening", so a later mis-routed question ("Why are u asking for my
+        # block") counted as a FIRST ask and replayed the canned ZIP line verbatim.
+        # With zip_asked remembered on the session, any later ask must be composed
+        # against what the user actually said — never the canned t() string.
+        mock_compose.return_value = "composed-zip-reask"
+        mock_slots.return_value = {
+            "goal": "peers",
+            "in_discovery": True,
+            "confidence": 0.9,
+            "identity_snippet": None,
+        }
+        result = handle_discovery_turn(
+            "Why are u asking for my block",
+            session_ctx={"routing_phase": "listening", "zip_asked": True},
+            user_jwt="jwt",
+            phone_verified=False,
+            home_block_id=None,
+            is_anonymous=True,
+            history=[],
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, _ = result
+        self.assertEqual(reply, "composed-zip-reask")
+        self.assertEqual(ctx["routing_phase"], PHASE_NEED_ZIP)
+        kwargs = mock_compose.call_args.kwargs
+        self.assertEqual(kwargs.get("user_message"), "Why are u asking for my block")
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
     @patch("app.discovery_route.fetch_preview_peers_on_block")
     @patch("app.discovery_route.fetch_blocks_for_zip")
     def test_late_find_uses_chat_history_for_identity(
@@ -2516,6 +2572,282 @@ class TestUpfrontDisplayNameGate(unittest.TestCase):
                 user_id="user-1", phase="listening", is_anonymous=False,
             )
         )
+
+
+class TestDirectSignupEnding(unittest.TestCase):
+    """A user who just asked for an account ends at a welcome, never an
+    unrequested neighbors list; gated (mid-peers-funnel) signups still resume
+    the preview."""
+
+    @patch("app.discovery_route.fetch_preview_peers_on_block")
+    @patch("app.discovery_route.fetch_peer_matches", return_value=[])
+    @patch("app.discovery_route._try_assign_home_block", return_value="block-1")
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    @patch("app.discovery_route.persist_profile_patch")
+    def test_direct_signup_name_turn_ends_at_welcome(
+        self, _persist, _needs_name, _assign, _match, mock_preview
+    ) -> None:
+        result = handle_discovery_turn(
+            "Asjid",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_DISPLAY_NAME,
+                "preview_block_id": "block-1",
+                "pending_post_verify": True,
+                "signup_origin": "direct",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id=None,
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        reply, ctx, _, peers = result
+        # Neutral welcome, not a peers preview.
+        mock_preview.assert_not_called()
+        self.assertEqual(peers, [])
+        self.assertNotIn("neighbor", reply.lower())
+        self.assertEqual(ctx["routing_phase"], "listening")
+        self.assertFalse(ctx.get("pending_post_verify"))
+        self.assertFalse(ctx.get("signup_origin"))
+
+    @patch("app.discovery_route.fetch_preview_peers_on_block", return_value=[])
+    @patch("app.discovery_route.fetch_peer_matches", return_value=[])
+    @patch("app.discovery_route._zip_gate_peers_turn", return_value=None)
+    @patch("app.discovery_route._try_assign_home_block", return_value="block-1")
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    @patch("app.discovery_route.persist_profile_patch")
+    def test_gated_signup_name_turn_still_previews(
+        self, _persist, _needs_name, _assign, _gate, _match, mock_preview
+    ) -> None:
+        result = handle_discovery_turn(
+            "Tom",
+            session_ctx={
+                "active_intent": "discovery.find_peers",
+                "routing_phase": PHASE_NEED_DISPLAY_NAME,
+                "preview_block_id": "block-1",
+                "identity_snippet": "dad, italian",
+                "pending_post_verify": True,
+                "signup_origin": "peers",
+            },
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id=None,
+            is_anonymous=False,
+            user_id="user-1",
+        )
+        self.assertIsNotNone(result)
+        _reply, ctx, _, _peers = result
+        mock_preview.assert_called_once()
+        self.assertEqual(
+            mock_preview.call_args.kwargs.get("exclude_user_id"), "user-1"
+        )
+        self.assertEqual(ctx["routing_phase"], PHASE_PREVIEW)
+
+    def test_verify_gate_direct_origin_marks_ctx(self) -> None:
+        from app.discovery_route import _verify_gate_reply
+
+        reply, ctx, _, _ = _verify_gate_reply(
+            session_ctx={},
+            ctx_base={},
+            block_id="block-1",
+            origin="direct",
+        )
+        self.assertEqual(ctx.get("signup_origin"), "direct")
+        self.assertNotIn("neighbor", reply.lower())
+
+    def test_verify_gate_default_origin_keeps_neighbors_copy(self) -> None:
+        from app.discovery_route import _verify_gate_reply
+
+        reply, ctx, _, _ = _verify_gate_reply(
+            session_ctx={},
+            ctx_base={},
+            block_id="block-1",
+        )
+        self.assertEqual(ctx.get("signup_origin"), "peers")
+        self.assertIn("neighbor", reply.lower())
+
+
+class TestPreviewPeersSelfExclusion(unittest.TestCase):
+    def test_caller_excluded_from_own_roster(self) -> None:
+        from app.discovery_route import fetch_preview_peers_on_block
+
+        class FakeQuery:
+            def __init__(self) -> None:
+                self.neq_calls: list[tuple[str, str]] = []
+
+            def select(self, *_a, **_k):
+                return self
+
+            def eq(self, *_a, **_k):
+                return self
+
+            def neq(self, col, val):
+                self.neq_calls.append((col, val))
+                return self
+
+            def limit(self, *_a, **_k):
+                return self
+
+            def execute(self):
+                class R:
+                    data = [{"id": "peer-2", "nickname": "Maria"}]
+
+                return R()
+
+        fake = FakeQuery()
+
+        class FakeClient:
+            def table(self, *_a, **_k):
+                return fake
+
+        with patch("app.discovery_route.service_client", return_value=FakeClient()):
+            rows = fetch_preview_peers_on_block(
+                "block-1", limit=3, include_peer_ids=True, exclude_user_id="me-1"
+            )
+        self.assertEqual(fake.neq_calls, [("id", "me-1")])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["nickname"], "Maria")
+
+
+class TestCleanBlockLabel(unittest.TestCase):
+    def test_placeholder_suffix_stripped(self) -> None:
+        from app.discovery_route import clean_block_label
+
+        self.assertEqual(
+            clean_block_label("Lake Nona — Block A (placeholder)"),
+            "Lake Nona — Area A",
+        )
+        self.assertEqual(clean_block_label("Block B (Placeholder)"), "Area B")
+        self.assertEqual(clean_block_label("Lake Nona"), "Lake Nona")
+        self.assertIsNone(clean_block_label("(placeholder)"))
+        self.assertIsNone(clean_block_label(None))
+
+    def test_banned_block_word_swapped(self) -> None:
+        # "Block" in a label trips the final-mile lingo guard, whose rewrite
+        # garbled the whole sentence ("your area A"). The label is swapped at the
+        # source instead.
+        from app.discovery_route import clean_block_label
+
+        self.assertEqual(clean_block_label("Lake Nona — Block A"), "Lake Nona — Area A")
+        self.assertEqual(clean_block_label("blocks 3-4"), "Area 3-4")
+
+    def test_ask_excerpt_cuts_at_word_boundary(self) -> None:
+        from app.discovery_route import _ask_excerpt
+
+        short = "Looking for toddler-friendly activities"
+        self.assertEqual(_ask_excerpt(short), short)
+        long = (
+            "Hello! I'm a nanny — the family I nanny for just moved to Lake Nona "
+            "and I'm looking for toddler-friendly activities for the little one I care for"
+        )
+        cut = _ask_excerpt(long)
+        self.assertLessEqual(len(cut), 121)
+        self.assertTrue(cut.endswith("…"))
+        # never ends mid-word: the char before the ellipsis closes a whole word
+        self.assertIn(cut[:-1].rsplit(" ", 1)[-1], long)
+
+    def test_preview_message_never_shows_placeholder(self) -> None:
+        msg = format_preview_message(
+            [{"nickname": "Maria"}],
+            "Lake Nona — Block A (placeholder)",
+            phone_verified=True,
+        )
+        self.assertNotIn("placeholder", msg.lower())
+        self.assertIn("Lake Nona — Area A", msg)
+
+
+class TestHelpReplyChips(unittest.TestCase):
+    """Help-lane replies carry tap-able chips for the options they name in prose
+    (the prose-offer-without-chips class) — stamped as turn-scoped policy_chips."""
+
+    @patch("app.orchestrator.llm.synthesizer_model", return_value="m")
+    @patch("app.orchestrator.llm.llm_configured", return_value=True)
+    def test_composer_returns_message_and_chips(self, *_mocks) -> None:
+        from app.discovery_route import _compose_help_reply
+
+        with patch(
+            "app.orchestrator.llm.llm_json",
+            return_value={
+                "message": "I can find neighbors like you or help you host a meet.",
+                "chips": [
+                    {"label": "Meet new friends", "send": "Find neighbors like me"},
+                    {"label": "Host a meet", "send": "Help me host a meet"},
+                    "not-a-dict",
+                    {"label": ""},
+                ],
+            },
+        ):
+            reply, chips, ai_authored = _compose_help_reply("what", "what can you do", None)
+        self.assertTrue(ai_authored)
+        self.assertIn("find neighbors", reply)
+        # Malformed rows dropped; send defaults preserved.
+        self.assertEqual(
+            chips,
+            [
+                {"label": "Meet new friends", "send": "Find neighbors like me"},
+                {"label": "Host a meet", "send": "Help me host a meet"},
+            ],
+        )
+
+    @patch("app.orchestrator.llm.llm_configured", return_value=False)
+    def test_composer_fallback_has_no_chips(self, *_mocks) -> None:
+        from app.discovery_route import _compose_help_reply
+
+        reply, chips, ai_authored = _compose_help_reply("what", "what can you do", None)
+        self.assertFalse(ai_authored)
+        self.assertTrue(reply)
+        self.assertEqual(chips, [])
+
+    _HELP_SLOTS = {
+        "linear_intent": "help.what_can_you_do",
+        "in_discovery": True,
+        "confidence": 0.9,
+    }
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_help_turn_stamps_policy_chips(self, mock_slots, _mock_ai) -> None:
+        mock_slots.return_value = dict(self._HELP_SLOTS)
+        chips = [{"label": "Meet new friends", "send": "Find neighbors like me"}]
+        with patch(
+            "app.discovery_route._compose_help_reply",
+            return_value=("Here's what I can do.", chips, True),
+        ):
+            result = handle_discovery_turn(
+                "what can you do",
+                session_ctx={"routing_phase": "listening"},
+                user_jwt="jwt",
+                phone_verified=True,
+                home_block_id="block-1",
+                is_anonymous=False,
+            )
+        self.assertIsNotNone(result)
+        _reply, ctx, _routing, _peers = result
+        self.assertEqual(ctx.get("policy_chips"), chips)
+
+    @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
+    @patch("app.discovery_route.discovery_slots_for_turn")
+    def test_help_turn_stamps_none_when_no_chips(self, mock_slots, _mock_ai) -> None:
+        # None (not absent/popped) so the session merge drops any stale chips.
+        mock_slots.return_value = dict(self._HELP_SLOTS)
+        with patch(
+            "app.discovery_route._compose_help_reply",
+            return_value=("Here's what I can do.", [], True),
+        ):
+            result = handle_discovery_turn(
+                "what can you do",
+                session_ctx={"routing_phase": "listening"},
+                user_jwt="jwt",
+                phone_verified=True,
+                home_block_id="block-1",
+                is_anonymous=False,
+            )
+        self.assertIsNotNone(result)
+        _reply, ctx, _routing, _peers = result
+        self.assertIn("policy_chips", ctx)
+        self.assertIsNone(ctx.get("policy_chips"))
 
 
 if __name__ == "__main__":

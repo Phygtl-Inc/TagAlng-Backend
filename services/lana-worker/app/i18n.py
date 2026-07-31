@@ -180,6 +180,41 @@ def normalize_lang_code(value: Any) -> str | None:
     return code if _LANG_CODE_RE.match(code) else None
 
 
+def lang_from_accept_language(header: str | None) -> str | None:
+    """Best language code from an Accept-Language header, or None.
+
+    The device locale already renders the app's own UI (buttons, labels), so it
+    is the natural seed for a session with no saved preference — otherwise a
+    guest whose typed turns are all taps / emails / OTP codes never gets a
+    language signal and every deterministic reply ships in English while the
+    surrounding UI speaks their language. Region subtags are dropped ("es-MX"
+    → "es"); live AI detection owns every turn after the seed."""
+    raw = str(header or "").strip()
+    if not raw:
+        return None
+    best: tuple[float, str] | None = None
+    for part in raw.split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        tag, _, params = piece.partition(";")
+        tag = tag.strip().lower()
+        if not tag or tag == "*":
+            continue
+        q = 1.0
+        params = params.strip()
+        if params.startswith("q="):
+            try:
+                q = float(params[2:])
+            except ValueError:
+                q = 0.0
+        if best is None or q > best[0]:  # earlier tags win ties
+            best = (q, tag)
+    if not best:
+        return None
+    return normalize_lang_code(best[1].split("-", 1)[0])
+
+
 def apply_ai_lang(session_ctx: dict[str, Any], lang: Any) -> None:
     """Apply the classifier's per-turn language verdict (AI-authoritative).
 
@@ -225,6 +260,24 @@ def localize_text(text: str, lang: str | None) -> str:
     return rendered or text
 
 
+def finalize_reply_language(reply: str, session_ctx: dict[str, Any] | None) -> str:
+    """Final-mile render of an outbound reply into the session language —
+    ALWAYS, with no composer opt-out. The retired ``_reply_localized`` flag
+    let a composer vouch that its text was in-language without anyone checking
+    the text, and mixed English/Spanish replies shipped (QA 2026-07-30: an
+    English promise line inside a Spanish tip-seek reply). Rendering
+    already-in-language text is a cheap same-language rewrite, so the opt-out
+    bought latency at the cost of correctness. The legacy flag is cleared with
+    None (never popped — the session merge resurrects popped keys) so stale
+    stamps can't linger in stored contexts."""
+    if isinstance(session_ctx, dict):
+        session_ctx["_reply_localized"] = None
+    lang = session_lang(session_ctx)
+    if not lang or not reply:
+        return reply
+    return localize_text(reply, lang)
+
+
 def localize_labels(labels: list[str], lang: str | None) -> list[str]:
     """AI-render short UI chip labels in the session language — ONE batched LLM
     call for all cache misses of the turn (never one call per chip). English /
@@ -257,7 +310,9 @@ def localize_labels(labels: list[str], lang: str | None) -> list[str]:
                 "You are Lana, a warm neighborhood concierge. Rewrite each short UI "
                 f"button label ENTIRELY in {label_name}. Keep each label SHORT (a "
                 "button, not a sentence — aim under 28 characters), same meaning, "
-                "keep proper nouns and anything quoted as-is. Return JSON "
+                "keep proper nouns and anything quoted as-is. Never mom/mamá/mamãe, "
+                "never cuadra/quadra or círculo; gender-neutral when the English is "
+                "neutral. Return JSON "
                 '{"labels": ["..."]} with EXACTLY one entry per input, same order.'
             ),
             user_payload="\n".join(f"- {lbl}" for _, lbl in misses),
@@ -302,6 +357,31 @@ _LANG_LABEL = {
     "ar": "Arabic",
     "fr": "French",
     "tl": "Tagalog",
+    "de": "German",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ru": "Russian",
+    "uk": "Ukrainian",
+    "pl": "Polish",
+    "nl": "Dutch",
+    "el": "Greek",
+    "tr": "Turkish",
+    "fa": "Farsi",
+    "he": "Hebrew",
+    "bn": "Bengali",
+    "pa": "Punjabi",
+    "gu": "Gujarati",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "th": "Thai",
+    "id": "Indonesian",
+    "sw": "Swahili",
+    "am": "Amharic",
+    "so": "Somali",
+    "ro": "Romanian",
+    "cs": "Czech",
+    "sv": "Swedish",
 }
 _REGISTER = {
     "es": 'use natural neutral "tú" — warm, neighborly, never stiff "usted" formality',
@@ -332,24 +412,24 @@ def synth_language_directive(lang: str) -> str | None:
 _STRINGS: dict[str, dict[str, str]] = {
     # discovery funnel — ZIP asks
     "discovery.ask_zip_peers": {
-        "en": "What ZIP code is your block? That helps me find neighbors near you.",
-        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? Así puedo encontrar vecinas cerca de ti.",
-        "pt": "Qual é o ZIP code do seu quarteirão? Assim consigo encontrar vizinhas perto de você.",
+        "en": "What's the ZIP code for your neighborhood? That helps me find neighbors near you.",
+        "es": "¿Cuál es el código postal (ZIP) de tu zona? Así puedo encontrar gente cerca de ti.",
+        "pt": "Qual é o ZIP code do seu bairro? Assim consigo encontrar pessoas perto de você.",
     },
     "discovery.ask_zip_activities": {
-        "en": "What ZIP code is your block? That helps me find activities near you.",
-        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? Así puedo encontrar actividades cerca de ti.",
-        "pt": "Qual é o ZIP code do seu quarteirão? Assim consigo encontrar atividades perto de você.",
+        "en": "What's the ZIP code for your neighborhood? That helps me find activities near you.",
+        "es": "¿Cuál es el código postal (ZIP) de tu zona? Así puedo encontrar actividades cerca de ti.",
+        "pt": "Qual é o ZIP code do seu bairro? Assim consigo encontrar atividades perto de você.",
     },
     "discovery.ask_zip_both": {
-        "en": "What ZIP code is your block? That helps me find neighbors and activities near you.",
-        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? Así puedo encontrar vecinas y actividades cerca de ti.",
-        "pt": "Qual é o ZIP code do seu quarteirão? Assim consigo encontrar vizinhas e atividades perto de você.",
+        "en": "What's the ZIP code for your neighborhood? That helps me find neighbors and activities near you.",
+        "es": "¿Cuál es el código postal (ZIP) de tu zona? Así puedo encontrar gente y actividades cerca de ti.",
+        "pt": "Qual é o ZIP code do seu bairro? Assim consigo encontrar pessoas e atividades perto de você.",
     },
     "discovery.ask_zip_short": {
-        "en": "What ZIP code is your block? (e.g. 32827)",
-        "es": "¿Cuál es el código postal (ZIP) de tu cuadra? (p. ej. 32827)",
-        "pt": "Qual é o ZIP code do seu quarteirão? (ex.: 32827)",
+        "en": "What's the ZIP code for your neighborhood? (e.g. 32827)",
+        "es": "¿Cuál es el código postal (ZIP) de tu zona? (p. ej. 32827)",
+        "pt": "Qual é o ZIP code do seu bairro? (ex.: 32827)",
     },
     "discovery.ask_identity_short": {
         "en": "Tell me one thing about you — life stage, heritage, or what you're looking for.",
@@ -365,17 +445,24 @@ _STRINGS: dict[str, dict[str, str]] = {
     # discovery — verify gates
     "discovery.verify_gate_neighbors": {
         "en": "I can see neighbors nearby — to show names and connect you, verify your email first. What's your email?",
-        "es": "Veo vecinas cerca — para mostrarte nombres y conectarte, primero verifica tu correo. ¿Cuál es tu email?",
-        "pt": "Estou vendo vizinhas por perto — para mostrar nomes e conectar você, primeiro verifique seu e-mail. Qual é o seu e-mail?",
+        "es": "Veo gente cerca — para mostrarte nombres y conectarte, primero verifica tu correo. ¿Cuál es tu email?",
+        "pt": "Estou vendo pessoas por perto — para mostrar nomes e conectar você, primeiro verifique seu e-mail. Qual é o seu e-mail?",
     },
     "discovery.verify_gate_event": {
         "en": "To join {event}, verify your email first — I'll send you a code. What's your email?",
         "es": "Para unirte a {event}, primero verifica tu correo — te envío un código. ¿Cuál es tu email?",
         "pt": "Para participar de {event}, primeiro verifique seu e-mail — eu te envio um código. Qual é o seu e-mail?",
     },
+    # Direct account ask ("sign up") — neutral copy, no neighbors promise: the
+    # post-verify turn ends at a welcome, not the peers preview.
+    "discovery.verify_gate_direct": {
+        "en": "Let's get you set up! What's your email? I'll send you a code to verify.",
+        "es": "¡Vamos a crear tu cuenta! ¿Cuál es tu correo? Te envío un código para verificar.",
+        "pt": "Vamos criar sua conta! Qual é o seu e-mail? Eu te envio um código para verificar.",
+    },
     # discovery — activities preview (the event list QA hit in Portuguese)
     "discovery.activities_empty": {
-        "en": "I don't see open activities on {where} in the next couple weeks yet. "
+        "en": "I don't see open activities around {where} in the next couple weeks yet. "
               "You can host something, or tell me what you're looking for.",
         "es": "Todavía no veo actividades abiertas en {where} para las próximas dos semanas. "
               "Puedes organizar algo tú, o cuéntame qué estás buscando.",
@@ -389,13 +476,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "discovery.activities_tail_verified": {
         "en": "Want to RSVP to one of these, or should I find neighbors like you?",
-        "es": "¿Quieres apuntarte a alguna, o busco vecinas como tú?",
-        "pt": "Quer confirmar presença em alguma, ou procuro vizinhas como você?",
+        "es": "¿Quieres apuntarte a alguna, o busco gente como tú?",
+        "pt": "Quer confirmar presença em alguma, ou procuro pessoas como você?",
     },
     "discovery.activities_tail_guest": {
         "en": "Verify your email to RSVP — or ask me to find neighbors like you.",
-        "es": "Verifica tu correo para apuntarte — o pídeme que busque vecinas como tú.",
-        "pt": "Verifique seu e-mail para confirmar presença — ou me peça para encontrar vizinhas como você.",
+        "es": "Verifica tu correo para apuntarte — o pídeme que busque gente como tú.",
+        "pt": "Verifique seu e-mail para confirmar presença — ou me peça para encontrar pessoas como você.",
     },
     # discovery — peer preview
     "discovery.peers_empty": {
@@ -408,23 +495,24 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "discovery.peers_header_one": {
         "en": "I found 1 neighbor near {where}:",
-        "es": "Encontré 1 vecina cerca de {where}:",
-        "pt": "Encontrei 1 vizinha perto de {where}:",
+        "es": "Encontré a 1 persona cerca de {where}:",
+        "pt": "Encontrei 1 pessoa perto de {where}:",
     },
     "discovery.peers_header_many": {
         "en": "I found {n} neighbors near {where}:",
-        "es": "Encontré {n} vecinas cerca de {where}:",
-        "pt": "Encontrei {n} vizinhas perto de {where}:",
+        "es": "Encontré a {n} personas cerca de {where}:",
+        "pt": "Encontrei {n} pessoas perto de {where}:",
     },
+    # Lingo rule 4: people are never "matches" — offer intros instead.
     "discovery.peers_tail_verified": {
-        "en": "Tell me more about you for sharper matches — or ask me to introduce you to someone.",
-        "es": "Cuéntame más de ti para afinar las coincidencias — o pídeme que te presente a alguien.",
-        "pt": "Me conta mais sobre você para eu afinar as combinações — ou peça para eu te apresentar a alguém.",
+        "en": "Tell me more about you for sharper intros — or ask me to introduce you to someone.",
+        "es": "Cuéntame más de ti para afinar las presentaciones — o pídeme que te presente a alguien.",
+        "pt": "Me conta mais sobre você para eu afinar as apresentações — ou peça para eu te apresentar a alguém.",
     },
     "discovery.peers_tail_guest": {
-        "en": "Verify your email to see names and connect — or tell me more about you for sharper matches.",
-        "es": "Verifica tu correo para ver nombres y conectar — o cuéntame más de ti para afinar las coincidencias.",
-        "pt": "Verifique seu e-mail para ver nomes e se conectar — ou me conta mais sobre você para afinar as combinações.",
+        "en": "Verify your email to see names and connect — or tell me more about you for sharper intros.",
+        "es": "Verifica tu correo para ver nombres y conectar — o cuéntame más de ti para afinar las presentaciones.",
+        "pt": "Verifique seu e-mail para ver nomes e se conectar — ou me conta mais sobre você para afinar as apresentações.",
     },
     # activity browse (the category prompt QA hit in Spanish)
     "browse.ask_interest": {
@@ -433,22 +521,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Adorei — que tipo de programa você está a fim?",
     },
     "browse.ask_zip": {
-        "en": "What's your ZIP code? Activities are grouped by block — 5 digits is all I "
+        "en": "What's your ZIP code? Activities are grouped by neighborhood — 5 digits is all I "
               "need to show what's happening around you.",
-        "es": "¿Cuál es tu código postal (ZIP)? Las actividades se agrupan por cuadra — con "
+        "es": "¿Cuál es tu código postal (ZIP)? Las actividades se agrupan por zona — con "
               "5 dígitos te muestro qué está pasando a tu alrededor.",
-        "pt": "Qual é o seu ZIP code? As atividades são agrupadas por quarteirão — com 5 "
+        "pt": "Qual é o seu ZIP code? As atividades são agrupadas por bairro — com 5 "
               "dígitos eu te mostro o que está rolando ao seu redor.",
     },
     "browse.ask_zip_retry": {
-        "en": "What's your ZIP so I can see what's on your block?",
-        "es": "¿Cuál es tu ZIP? Así veo qué hay en tu cuadra.",
-        "pt": "Qual é o seu ZIP? Assim vejo o que tem no seu quarteirão.",
+        "en": "What's your ZIP so I can see what's happening near you?",
+        "es": "¿Cuál es tu ZIP? Así veo qué hay cerca de ti.",
+        "pt": "Qual é o seu ZIP? Assim vejo o que tem perto de você.",
     },
     "browse.zip_no_block": {
-        "en": "I couldn't find a block for ZIP {zip}. Try another (e.g. 32827 for Lake Nona).",
-        "es": "No encontré una cuadra para el ZIP {zip}. Prueba con otro (p. ej. 32827 para Lake Nona).",
-        "pt": "Não encontrei um quarteirão para o ZIP {zip}. Tente outro (ex.: 32827 para Lake Nona).",
+        "en": "I couldn't find a neighborhood for ZIP {zip}. Try another (e.g. 32827 for Lake Nona).",
+        "es": "No encontré una zona para el ZIP {zip}. Prueba con otro (p. ej. 32827 para Lake Nona).",
+        "pt": "Não encontrei um bairro para o ZIP {zip}. Tente outro (ex.: 32827 para Lake Nona).",
     },
     # out-of-coverage: the ZIP is real (or can't be disproven) — Lana just isn't there yet.
     # Never "try another ZIP": remember it, record the demand, offer the launch text.
@@ -456,12 +544,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "I'm not live around {zip} just yet — you're one of the first from your "
               "area! I've saved your spot so I know where to open next. Want me to text "
               "you the moment I arrive?",
-        "es": "Todavía no estoy activa en la zona de {zip} — ¡eres de las primeras de tu "
-              "área! Guardé tu lugar para saber dónde abrir próximamente. ¿Quieres que te "
-              "escriba en cuanto llegue?",
-        "pt": "Ainda não estou ativa na região do {zip} — você é uma das primeiras da sua "
-              "área! Guardei seu lugar para eu saber onde abrir em seguida. Quer que eu te "
-              "avise assim que eu chegar?",
+        "es": "Todavía no estoy activa en la zona de {zip} — ¡eres de las primeras personas "
+              "de tu área! Guardé tu lugar para saber dónde abrir próximamente. ¿Quieres que "
+              "te escriba en cuanto llegue?",
+        "pt": "Ainda não estou ativa na região do {zip} — você é uma das primeiras pessoas "
+              "da sua área! Guardei seu lugar para eu saber onde abrir em seguida. Quer que "
+              "eu te avise assim que eu chegar?",
     },
     "zip.expansion_verify_gate": {
         "en": "Perfect — I just need a way to reach you. What's your email? (Already have "
@@ -488,45 +576,45 @@ _STRINGS: dict[str, dict[str, str]] = {
               "mais alguma coisa?",
     },
     "browse.empty_interest_offer": {
-        "en": "No **{interest}** activities on your block right now. Want me to keep an "
+        "en": "No **{interest}** activities near you right now. Want me to keep an "
               "ear out and text you the moment one pops up — or widen the search?",
-        "es": "No hay actividades de **{interest}** en tu cuadra ahora mismo. ¿Quieres que "
+        "es": "No hay actividades de **{interest}** cerca de ti ahora mismo. ¿Quieres que "
               "me quede atenta y te escriba en cuanto aparezca una — o amplío la búsqueda?",
-        "pt": "Não tem atividades de **{interest}** no seu quarteirão agora. Quer que eu "
+        "pt": "Não tem atividades de **{interest}** perto de você agora. Quer que eu "
               "fique de olho e te avise assim que aparecer uma — ou amplio a busca?",
     },
     "browse.empty_generic_offer": {
-        "en": "No matching activities on your block right now. Want me to keep an ear out "
+        "en": "No matching activities near you right now. Want me to keep an ear out "
               "and text you the moment one pops up — or widen the search?",
-        "es": "No hay actividades que encajen en tu cuadra ahora mismo. ¿Quieres que me "
+        "es": "No hay actividades que encajen cerca de ti ahora mismo. ¿Quieres que me "
               "quede atenta y te escriba en cuanto aparezca una — o amplío la búsqueda?",
-        "pt": "Não tem atividades assim no seu quarteirão agora. Quer que eu fique de olho "
+        "pt": "Não tem atividades assim perto de você agora. Quer que eu fique de olho "
               "e te avise assim que aparecer uma — ou amplio a busca?",
     },
     "browse.events_header": {
-        "en": "Here's what's coming up on your block.",
-        "es": "Esto es lo que viene en tu cuadra.",
-        "pt": "Olha o que vem por aí no seu quarteirão.",
+        "en": "Here's what's coming up near you.",
+        "es": "Esto es lo que viene cerca de ti.",
+        "pt": "Olha o que vem por aí perto de você.",
     },
     "browse.events_header_label": {
-        "en": "Here's what's coming up for {label} on your block.",
-        "es": "Esto es lo que viene de {label} en tu cuadra.",
-        "pt": "Olha o que vem por aí de {label} no seu quarteirão.",
+        "en": "Here's what's coming up for {label} near you.",
+        "es": "Esto es lo que viene de {label} cerca de ti.",
+        "pt": "Olha o que vem por aí de {label} perto de você.",
     },
     "browse.events_empty": {
-        "en": "Nothing on your block in the next couple weeks. Want me to widen it, "
+        "en": "Nothing near you in the next couple weeks. Want me to widen it, "
               "try another kind, or set up your own?",
-        "es": "No hay nada en tu cuadra en las próximas dos semanas. ¿Amplío la búsqueda, "
+        "es": "No hay nada cerca de ti en las próximas dos semanas. ¿Amplío la búsqueda, "
               "probamos otro tipo de plan, o armas el tuyo?",
-        "pt": "Nada no seu quarteirão nas próximas duas semanas. Quer que eu amplie a busca, "
+        "pt": "Nada perto de você nas próximas duas semanas. Quer que eu amplie a busca, "
               "tente outro tipo, ou você monta o seu?",
     },
     "browse.events_empty_label": {
-        "en": "No {label} ones on your block in the next couple weeks. Want me to widen it, "
+        "en": "No {label} ones near you in the next couple weeks. Want me to widen it, "
               "try another kind, or set up your own?",
-        "es": "No veo planes de {label} en tu cuadra en las próximas dos semanas. ¿Amplío la "
+        "es": "No veo planes de {label} cerca de ti en las próximas dos semanas. ¿Amplío la "
               "búsqueda, probamos otro tipo, o armas el tuyo?",
-        "pt": "Não vi nada de {label} no seu quarteirão nas próximas duas semanas. Amplio a "
+        "pt": "Não vi nada de {label} perto de você nas próximas duas semanas. Amplio a "
               "busca, tentamos outro tipo, ou você monta o seu?",
     },
     "browse.events_tail_verified": {
@@ -546,11 +634,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Adorei — que tipo de encontro ajudaria?",
     },
     "meet.verify_gate": {
-        "en": "Love it — to start listening and text you when a mom wants the same, I just need "
+        "en": "Love it — to start listening and text you when a neighbor wants the same, I just need "
               "to verify you. What's your email? (Already have an account? I'll log you right in.)",
-        "es": "Me encanta — para quedarme atenta y escribirte cuando una mamá busque lo mismo, "
+        "es": "Me encanta — para quedarme atenta y escribirte cuando alguien busque lo mismo, "
               "solo necesito verificarte. ¿Cuál es tu email? (¿Ya tienes cuenta? Te conecto enseguida.)",
-        "pt": "Adorei — para eu ficar de olho e te avisar quando uma mãe quiser o mesmo, só "
+        "pt": "Adorei — para eu ficar de olho e te avisar quando alguém quiser o mesmo, só "
               "preciso verificar você. Qual é o seu e-mail? (Já tem conta? Eu te conecto na hora.)",
     },
     # language preference nudge (asked at most once per session, cooldown across sessions)
@@ -616,6 +704,10 @@ def _ai_render(en_text: str, lang: str) -> str | None:
                 f"message ENTIRELY in {label} ({register}). Same meaning, same length, "
                 "same markdown (keep **bold** spans). Keep proper nouns, numbers, ZIP "
                 "codes, and anything a user typed exactly as-is. "
+                "Lexicon: never address anyone as mom/mamá/mamãe; never cuadra/quadra "
+                "for the area (say the equivalent of 'near you'/'your neighborhood'); "
+                "never círculo for a community. When the English is gender-neutral, "
+                "stay gender-neutral — rephrase rather than pick a gendered form. "
                 'Return JSON {"message": "..."}.'
             ),
             user_payload=en_text,

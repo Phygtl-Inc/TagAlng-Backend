@@ -31,6 +31,10 @@ _TIER_RANK = {"stranger": 0, "nudge": 1, "acquaintance": 2, "direct": 3, "irl_pe
 # HIGH-sensitivity gaps require at least this much warmth.
 _HIGH_MIN_RANK = _TIER_RANK["acquaintance"]
 
+# Circle-grounding cadence: at most one place-grounding ask (affiliation_ref set) per
+# this many tile questions, so they interleave with normal rapport instead of flooding.
+_DEFAULT_CIRCLE_EVERY_N = 3
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -176,15 +180,67 @@ def _build_candidates(
 
 
 def _backfill_from_claims(user_id: str) -> bool:
-    """Synthesize fresh gaps from the user's claims so the tile is never empty. Best-effort;
-    the LLM call is deferred-imported so it only loads when the plate is actually empty."""
+    """Synthesize fresh gaps so the tile is never empty: grounding questions for
+    ungrounded circle affiliations first (they carry real matcher value), then
+    follow-ups from the user's claims. Best-effort; LLM calls are deferred-imported
+    so they only load when the plate is actually empty."""
+    made = 0
+    try:
+        from app.circles_flow import ensure_grounding_gaps
+
+        made += ensure_grounding_gaps(user_id)
+    except Exception:
+        logger.exception("rapport: grounding backfill failed for %s", user_id)
     try:
         from app.rapport_synth import synthesize_gaps_from_claims
 
-        return synthesize_gaps_from_claims(user_id) > 0
+        made += synthesize_gaps_from_claims(user_id)
     except Exception:
         logger.exception("rapport: claim backfill failed for %s", user_id)
-        return False
+    return made > 0
+
+
+def _circle_asked_recently(user_id: str) -> bool:
+    """True when one of the last (N-1) served tile questions was a place-grounding ask —
+    the winner this round should then be a normal rapport question instead. Fails closed
+    (suppress) like the other cadence checks: a transient error must not over-ask."""
+    every_n = int(_env_float("LANA_RAPPORT_CIRCLE_EVERY_N", _DEFAULT_CIRCLE_EVERY_N))
+    lookback = max(0, every_n - 1)
+    if lookback == 0:
+        return False  # every_n <= 1 → no interleave restriction
+    try:
+        rows = (
+            service_client()
+            .table("rapport_gaps")
+            .select("affiliation_ref")
+            .eq("user_id", user_id)
+            .not_.is_("asked_at", "null")
+            .order("asked_at", desc=True)
+            .limit(lookback)
+            .execute()
+        ).data or []
+        return any(r.get("affiliation_ref") for r in rows)
+    except Exception:
+        logger.exception("rapport: circle-cadence check failed for %s", user_id)
+        return True
+
+
+def _with_grounding(user_id: str, row: dict[str, Any], ask: dict[str, Any]) -> dict[str, Any]:
+    """Attach the place chips to a grounding ask (fetched once, cached on the row).
+    A one-tap chip posts its google_place_id to /lana/circles/ground; free text
+    still flows through the normal answer path."""
+    if not row.get("affiliation_ref"):
+        return ask
+    try:
+        from app.circles_flow import grounding_payload_for_gap
+
+        ask.update(grounding_payload_for_gap(user_id, row))
+    except Exception:  # noqa: BLE001 — chips are an upgrade, never a blocker
+        logger.exception("rapport: grounding payload failed for %s", row.get("gap_row_id"))
+        ask.setdefault("kind", "place_grounding")
+        ask.setdefault("affiliation_id", str(row.get("affiliation_ref") or ""))
+        ask.setdefault("options", [])
+    return ask
 
 
 def _preferred_lang(user_id: str) -> str | None:
@@ -285,7 +341,9 @@ def next_ask(
         #    Works for dynamic semantic gaps too (get_gap returns None → _build tolerates it).
         pending = _pending_ask(user_id)
         if pending and not _pending_is_stale(pending):
-            return _build(pending, get_gap(pending["gap_id"]), lang)
+            return _with_grounding(
+                user_id, pending, _build(pending, get_gap(pending["gap_id"]), lang)
+            )
         if pending:
             # Rotation REPLACES the pending ask, so the new-ask cadence cap doesn't apply.
             # daily mode: a full window without an answer is a soft skip — sink its score.
@@ -334,6 +392,15 @@ def next_ask(
         pool.sort(key=lambda t: (-t[0], t[1]))
     score, _opened, row, gap = pool[0]
 
+    # Interleave, don't flood: when the winner is a place-grounding ask but one was
+    # already served within the last N-1 tile questions, hand this round to the best
+    # normal rapport gap. Suppress-only — with nothing else open, the grounding ask
+    # still runs (the tile never goes empty over a cadence rule).
+    if row.get("affiliation_ref") and _circle_asked_recently(user_id):
+        non_circle = [c for c in pool if not c[2].get("affiliation_ref")]
+        if non_circle:
+            score, _opened, row, gap = non_circle[0]
+
     try:
         service_client().table("rapport_gaps").update(
             {"status": "asked", "asked_at": _now().isoformat(), "updated_at": _now().isoformat()}
@@ -345,7 +412,12 @@ def next_ask(
     track(
         "rapport_gap_shown",
         user_id=user_id,
-        event_properties={"gap_id": row["gap_id"], "surface": surface, "score": round(score, 3)},
+        event_properties={
+            "gap_id": row["gap_id"],
+            "surface": surface,
+            "score": round(score, 3),
+            "kind": "place_grounding" if row.get("affiliation_ref") else "rapport",
+        },
     )
 
-    return _build(row, gap, lang)
+    return _with_grounding(user_id, row, _build(row, gap, lang))
