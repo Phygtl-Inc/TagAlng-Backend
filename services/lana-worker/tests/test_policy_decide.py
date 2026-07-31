@@ -183,6 +183,82 @@ class TestGoalNormalization(unittest.TestCase):
         self.assertEqual(goals[0]["kind"], "ungrounded_circle")
         self.assertTrue(goals[0]["context"]["deferred_earlier"])
 
+    def test_grounded_circle_becomes_an_offerable_goal(self) -> None:
+        """A pinned community must stay in the goal list as something to OFFER —
+        when it dropped out, a vague "I'm bored" got the capability catalog
+        instead of an offer (QA 2026-07-31)."""
+        from app.policy.goals import _circle_offer_goals
+
+        goals = _circle_offer_goals(
+            {
+                "circles": [
+                    {"key": "grandkids", "type": "family", "grounded": True,
+                     "confirmed": True, "place": "Lake Nona Park"},
+                    # ungrounded → the grounding ask owns it, not an offer
+                    {"key": "gym_friends", "type": "fitness", "grounded": False,
+                     "confirmed": True, "place": None},
+                    # suggested-but-unconfirmed → not a community yet
+                    {"key": "squash_group", "type": "sport", "grounded": True,
+                     "confirmed": False, "place": "Life Time"},
+                ]
+            }
+        )
+        self.assertEqual([g["id"] for g in goals], ["circle_offer:grandkids"])
+        goal = goals[0]
+        self.assertEqual(goal["kind"], "circle_offer")
+        # Their own word for the group, and the real place, both reach the policy.
+        self.assertIn("grandkids", goal["summary"])
+        self.assertIn("Lake Nona Park", goal["summary"])
+        # The accept-send must stand alone: the host engine re-reads it cold.
+        self.assertEqual(
+            goal["context"]["send"],
+            "help me host a get-together for my grandkids at Lake Nona Park",
+        )
+
+    def test_circle_offer_send_survives_a_missing_place_name(self) -> None:
+        from app.policy.goals import _circle_offer_goals
+
+        goals = _circle_offer_goals(
+            {"circles": [{"key": "squash_group", "grounded": True,
+                          "confirmed": True, "place": None}]}
+        )
+        self.assertEqual(
+            goals[0]["context"]["send"], "help me host a get-together for my squash group"
+        )
+        self.assertIsNone(goals[0]["context"]["place_name"])
+
+    def test_place_names_batches_one_read_and_tolerates_gaps(self) -> None:
+        from unittest.mock import patch
+
+        seen: dict = {}
+
+        class _Res:
+            data = [{"id": "p1", "name": "Lake Nona Park"}, {"id": "p2", "name": None}]
+
+        class _Table:
+            def select(self, *_a, **_k):
+                return self
+
+            def in_(self, _col, ids):
+                seen["ids"] = ids
+                return self
+
+            def execute(self):
+                return _Res()
+
+        class _Client:
+            def table(self, *_a, **_k):
+                return _Table()
+
+        rows = [{"place_ref": "p1"}, {"place_ref": "p2"}, {"place_ref": None}, {}]
+        with patch("app.policy.world.service_client", return_value=_Client()):
+            from app.policy.world import _place_names
+
+            names = _place_names(rows)
+        self.assertEqual(seen["ids"], ["p1", "p2"])  # one batched read, no None
+        self.assertEqual(names["p1"], "Lake Nona Park")
+        self.assertEqual(names["p2"], "")  # falsy → world_state maps it to None
+
     def test_capability_containment(self) -> None:
         from unittest.mock import patch
 

@@ -33,7 +33,8 @@
       "Bash(.venv/bin/pytest tests/test_policy_rapport_reply.py tests/test_rapport.py tests/test_policy_decide.py tests/test_claim_followup.py -q)",
       "Bash(.venv/bin/python -m pytest tests/test_policy_rapport_reply.py tests/test_policy_decide.py -q)",
       "Bash(git log *)",
-      "Bash(.venv/bin/python -m pytest \"tests/test_claim_followup.py::TestRapportCaptureContext::test_no_question_still_covers_bare_answers\" -q)"
+      "Bash(.venv/bin/python -m pytest \"tests/test_claim_followup.py::TestRapportCaptureContext::test_no_question_still_covers_bare_answers\" -q)",
+      "Bash(/Users/dev/Downloads/.venv_lana_worker/bin/python -m pytest tests -q)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations"

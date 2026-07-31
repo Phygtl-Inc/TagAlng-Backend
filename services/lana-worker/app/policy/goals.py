@@ -2,9 +2,10 @@
 list the policy arbitrates over (engineering doc §C.2).
 
 This is a consumption merge, not a schema merge: rapport_gaps,
-circle_affiliations (ungrounded), suggestion_queue, pending_signal_asks, and
-the available capabilities keep their own tables — they just arrive at the
-policy in one shape:
+circle_affiliations (ungrounded → ask which place; grounded → offer to organize
+something for it), suggestion_queue, pending_signal_asks, and the available
+capabilities keep their own tables — they just arrive at the policy in one
+shape:
 
     {id, kind, summary, value_hint, context}
 
@@ -81,6 +82,53 @@ def _grounding_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
                 "summary": f"user mentioned their {key.replace('_', ' ')} — the exact place is not known yet",
                 "value_hint": 0.6,
                 "context": {"circle_key": key, "circle_type": c.get("type")},
+            }
+        )
+        if len(out) >= _MAX_PER_QUEUE:
+            break
+    return out
+
+
+def _circle_offer_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
+    """Grounded communities the policy can offer to organize something FOR.
+
+    Ungrounded circles arrive above as `ungrounded_circle` (ask which place);
+    once pinned they used to leave the goal list entirely, so nothing
+    community-shaped remained to pursue and a vague "I'm bored" degraded into a
+    read-out of the capability catalog (QA 2026-07-31 — four features named,
+    three generic chips, no offer). Hosting and inviting are always available
+    (§D.2 — unlock gates consumption, never creation), so this goal is honest
+    even in a still-waking area. `send` is pre-written so a chip accepting the
+    offer is self-contained: the host engine re-reads it as a fresh message and
+    never saw the bubble it came from.
+    """
+    out: list[dict[str, Any]] = []
+    for c in world.get("circles") or []:
+        if not (c.get("grounded") and c.get("confirmed")):
+            continue
+        key = str(c.get("key") or "").strip()
+        if not key:
+            continue
+        # Their own word for the group, never a label we invented.
+        topic = key.replace("_", " ")
+        place = str(c.get("place") or "").strip()
+        where = f" at {place}" if place else ""
+        pinned = f", pinned to {place}" if place else ""
+        out.append(
+            {
+                "id": f"circle_offer:{key}",
+                "kind": "circle_offer",
+                "summary": (
+                    f"their {topic}{pinned} — a community of theirs you can offer to "
+                    "organize ONE specific get-together for"
+                ),
+                "value_hint": 0.7,
+                "context": {
+                    "circle_key": key,
+                    "circle_type": c.get("type"),
+                    "place_name": place or None,
+                    "send": f"help me host a get-together for my {topic}{where}",
+                },
             }
         )
         if len(out) >= _MAX_PER_QUEUE:
@@ -186,6 +234,7 @@ def candidate_goals(
     goals = (
         _rapport_goals(user_id)
         + _grounding_goals(world)
+        + _circle_offer_goals(world)
         + _offer_goals(user_id)
         + _pending_ask_goals(user_id)
         + _capability_goals(world)
