@@ -72,6 +72,29 @@ def address_guidance() -> str:
     return "\n".join(lines)
 
 
+def self_disclosure_rule() -> str:
+    """LANA_SELF_DISCLOSURE_STRATEGY_v1 §4 / gate G8: the C+D rule — Lana may
+    disclose her reasoning, her noticing and her limits, and may reciprocate with
+    aggregate neighborhood facts; she may never claim feelings, claim experiences
+    she hasn't had, express preferences about herself, or perform emotion.
+
+    Kept as its own loader rather than folded into the lingo constitution: they
+    are different concerns with different owners (lingo is vocabulary, this is
+    honesty), and SPEC_X3_HONESTY scores this one independently."""
+    return load_prompt("lana_self_disclosure.md")
+
+
+def voice_rules() -> str:
+    """Everything a composer that authors USER-FACING COPY must obey: the lingo
+    constitution (which words) plus the self-disclosure rule (what she may say
+    about herself). Extractors and classifiers need neither.
+
+    Every call site that previously appended lingo_constitution() should append
+    this instead — a composer that gets the word rules but not the honesty rule
+    is exactly the gap SPEC_X3_HONESTY EDGE-5 warns about."""
+    return f"{lingo_constitution()}\n\n---\n\n{self_disclosure_rule()}"
+
+
 def lingo_constitution() -> str:
     """LANA_LINGO §2/§14.1: the hard word rules every user-facing composer obeys
     (never "mom"/"block"/"circle" in-app, role/gender-aware address, locked
@@ -86,15 +109,15 @@ def lingo_constitution() -> str:
 def build_system_prompt() -> str:
     product = load_prompt("tagalng_product.md")
     persona = load_prompt("lana_persona.md")
-    return f"{product}\n\n---\n\n{persona}\n\n---\n\n{lingo_constitution()}"
+    return f"{product}\n\n---\n\n{persona}\n\n---\n\n{voice_rules()}"
 
 
 def build_event_host_system_prompt() -> str:
-    return load_prompt("lana_event_host.md") + "\n\n---\n\n" + lingo_constitution()
+    return load_prompt("lana_event_host.md") + "\n\n---\n\n" + voice_rules()
 
 
 def build_profile_system_prompt() -> str:
-    return load_prompt("lana_profile_intake.md") + "\n\n---\n\n" + lingo_constitution()
+    return load_prompt("lana_profile_intake.md") + "\n\n---\n\n" + voice_rules()
 
 
 def format_event_draft_context(ctx: dict[str, Any]) -> str:
