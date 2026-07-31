@@ -37,6 +37,12 @@ class NextAction:
     chips: list[dict[str, str]] = field(default_factory=list)
     goal_id: str | None = None
     defer_goal_id: str | None = None
+    # ground_place only: the action the user ALREADY requested that this
+    # grounding serves (e.g. "organize a meet for my squash group" needs the
+    # squash spot pinned first). The pipeline carries it into the armed
+    # grounding state so the confirmed place dispatches the action directly
+    # instead of re-offering it (QA 2026-07-30, the squash/Life Time loop).
+    pending_action: str | None = None
     why: str = ""
     guardrail: dict[str, Any] = field(default_factory=dict)
 
@@ -46,6 +52,7 @@ class NextAction:
             "kind": self.kind,
             "goal_id": self.goal_id,
             "defer_goal_id": self.defer_goal_id,
+            "pending_action": self.pending_action,
             "why": self.why,
         }
 
@@ -112,10 +119,16 @@ def parse_next_action(data: Any) -> NextAction | None:
                 chips.append({"label": label, "send": send})
     goal_id = str(data.get("goal_id") or "").strip() or None
     defer_goal_id = str(data.get("defer_goal_id") or "").strip() or None
+    pending_action = str(data.get("pending_action") or "").strip().lower() or None
+    # Only the dispatchable kinds count, and only on a grounding ask — anything
+    # else is model noise, dropped rather than trusted downstream.
+    if kind != "ground_place" or pending_action not in ("host_meet", "find_neighbors"):
+        pending_action = None
     why = str(data.get("why") or "").strip()[:300]
     return NextAction(
         kind=kind, utterance=utterance, chips=chips,
-        goal_id=goal_id, defer_goal_id=defer_goal_id, why=why,
+        goal_id=goal_id, defer_goal_id=defer_goal_id,
+        pending_action=pending_action, why=why,
     )
 
 
