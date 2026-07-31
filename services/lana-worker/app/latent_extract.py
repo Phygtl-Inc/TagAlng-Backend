@@ -32,6 +32,14 @@ _MIN_MATCH_SCORE = 0.45
 _SUGGESTION_TTL_DAYS = 30
 _SKIP_SHORT = frozenset({"ok", "okay", "yes", "no", "yep", "nope", "sure", "thanks", "thank you"})
 
+
+# Capability-catalog self-heal (see _kick_capability_catalog_selfheal). The catalog is 8
+# static reference rows, so the probe is rate-limited hard: at most one count query per
+# hour per process, and only from the empty-match path.
+_CATALOG_SELFHEAL_COOLDOWN_S = 3600.0
+_CATALOG_SELFHEAL_MAX_ROWS = 50
+_catalog_selfheal_at: float = 0.0
+
 LATENT_EXTRACT_PROMPT = """You extract latent signals from ONE user message in a TagAlng block chat \
 (a neighborhood app for local families). These are things the user MENTIONED but did not explicitly ask for — \
 activities, places, gear, needs, life events — that might map to something the app could help with.
@@ -206,6 +214,92 @@ def _insert_latent_signal(
     service_client().table("latent_signals").insert(row).execute()
 
 
+def _embed_capability_row(row: dict[str, Any]) -> list[float] | None:
+    """Embed one capability_index row with the SAME text the backfill script uses."""
+    from app.capability_embed import capability_embedding_text
+    from app.vertex_extract import vertex_embed
+
+    try:
+        text = capability_embedding_text(
+            capability_name=row.get("capability_name"),
+            description=row.get("description"),
+            entity_triggers=row.get("entity_triggers"),
+        )
+        return vertex_embed(text) if text else None
+    except Exception:
+        logger.exception("capability_embed_failed id=%s", row.get("capability_id"))
+        return None
+
+
+def _kick_capability_catalog_selfheal() -> None:
+    """Self-heal an un-embedded capability_index, in the background.
+
+    Why this exists: capability_index rows are seeded by migration with embedding=NULL
+    (pure SQL can't call the embedding model) and filled in by
+    scripts/backfill_capability_embeddings.py as a post-deploy step. When that step is
+    skipped for an environment, match_latent_capabilities' `embedding is not null` guard
+    drops every row, the matcher returns an empty set, and the failure is
+    indistinguishable from "no match" — no error, no log, no metric. That is exactly how
+    prod ran with zero suggestion_queue rows for a month.
+
+    Cheap by construction: only reachable from the empty-match path, and then at most
+    once per _CATALOG_SELFHEAL_COOLDOWN_S per process. Once the catalog is whole the
+    probe finds nothing and returns without embedding anything, so this is emphatically
+    NOT per-turn work. The reference catalog is 8 static rows, not user data.
+    """
+    import threading
+    import time
+
+    global _catalog_selfheal_at
+    now = time.time()
+    if now - _catalog_selfheal_at < _CATALOG_SELFHEAL_COOLDOWN_S:
+        return
+    # Stamp before the thread starts so concurrent turns can't stampede the probe.
+    _catalog_selfheal_at = now
+
+    def _run() -> None:
+        try:
+            sb = service_client()
+            rows = (
+                sb.table("capability_index")
+                .select("capability_id, capability_name, description, entity_triggers")
+                .is_("embedding", "null")
+                .eq("is_active", True)
+                .limit(_CATALOG_SELFHEAL_MAX_ROWS)
+                .execute()
+                .data
+                or []
+            )
+            if not rows:
+                # Healthy catalog — the empty match was a genuine no-match.
+                return
+            # Loud on purpose: this is the log line whose absence hid the outage.
+            logger.error(
+                "capability_index_unembedded rows=%d — semantic capability routing is "
+                "returning empty; self-healing now. Run "
+                "`python -m scripts.backfill_capability_embeddings` if this repeats.",
+                len(rows),
+            )
+            fixed = 0
+            for row in rows:
+                vec = _embed_capability_row(row)
+                if vec is None:
+                    continue
+                sb.table("capability_index").update({"embedding": vec}).eq(
+                    "capability_id", row["capability_id"]
+                ).execute()
+                fixed += 1
+            logger.warning(
+                "capability_index_selfheal fixed=%d/%d", fixed, len(rows)
+            )
+        except Exception:
+            logger.exception("capability_catalog_selfheal_failed")
+
+    threading.Thread(
+        target=_run, daemon=True, name="capability-catalog-selfheal"
+    ).start()
+
+
 def _queue_capability_matches(
     *,
     user_id: str,
@@ -230,6 +324,9 @@ def _queue_capability_matches(
 
     matches = resp.data or []
     if not matches:
+        # An empty set here is ambiguous: a real no-match, or a catalog with NULL
+        # embeddings that the RPC's guard filtered out entirely. Disambiguate.
+        _kick_capability_catalog_selfheal()
         return 0
 
     expires_at = (datetime.now(timezone.utc) + timedelta(days=_SUGGESTION_TTL_DAYS)).isoformat()
