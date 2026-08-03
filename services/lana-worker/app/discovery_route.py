@@ -56,6 +56,7 @@ from app.guest_capabilities import (
     wants_host_activity,
     wants_peer_find,
 )
+from app.peer_radius import fetch_peer_matches_within_radius
 from app.hosting_cta import (
     handle_hosting_open_turn,
     handle_hosting_send_mom_turn,
@@ -465,7 +466,12 @@ def _fetch_verified_peer_matches(
         kick_claim_embedding_backfill(user_id=user_id, block_id=block_id)
     except Exception:
         pass
-    peers = fetch_peer_matches(user_jwt, limit=limit)
+    # Radius beats block equality when LANA_PEER_RADIUS_MATCH is on — an
+    # adjacent-block neighbour 0.7 km away is a neighbour. None means the radius
+    # path declined (flag off / no user / RPC error); [] is a real "nobody near".
+    peers = fetch_peer_matches_within_radius(user_id, limit=limit)
+    if peers is None:
+        peers = fetch_peer_matches(user_jwt, limit=limit)
     # Circles §C: fold onion-scored circle overlap into the list — proven
     # same-place peers join (and outrank) pure-cosine fits. Fail-open: the
     # onion must never cost a user the matches they already had.
@@ -761,23 +767,30 @@ def _try_neighbor_intro_turn(
         if _cand:
             try:
                 from app.notifications import email_html as _email_html
+                from app.i18n import localize_text as _localize_text
+                from app.i18n import t as _t
                 from app.notifications import notify_user as _notify_user
+                from app.notifications import recipient_lang as _recipient_lang
 
+                _cl = _recipient_lang(_cand)
+                # _reason is Lana's own sentence about this pair, so it is
+                # AI-rendered rather than keyed; the generic line is a fixed
+                # string and stays in the catalog.
                 _give = (
-                    f"{_reason} — take a peek when you have a sec."
+                    _localize_text(f"{_reason} — take a peek when you have a sec.", _cl)
                     if _reason
-                    else "A neighbor near you wants to connect — take a peek."
+                    else _t("notify.intro.body_generic", _cl)
                 )
                 _notify_user(
                     _cand,
-                    title="A neighbor wants to connect 🤝",
+                    title=_t("notify.intro.title", _cl),
                     body=_give,
                     url="/chat",
-                    email_subject="A neighbor near you wants to connect",
+                    email_subject=_t("notify.intro.subject", _cl),
                     email_html=_email_html(
-                        "A neighbor wants to connect",
+                        _t("notify.intro.heading", _cl),
                         _give,
-                        cta_label="See who",
+                        cta_label=_t("notify.intro.cta", _cl),
                         cta_path="/chat",
                     ),
                 )

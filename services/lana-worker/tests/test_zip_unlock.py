@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.zip_unlock import area_progress, recount_zip
+from app.zip_unlock import _unlock_snapshot, area_progress, recount_zip
 
 
 def _rpc_result(data):
@@ -37,6 +37,17 @@ class TestRecountZip(unittest.TestCase):
         )
         recount_zip("32827")
         notify.assert_called_once_with("32827")
+
+    @patch("app.zip_unlock._notify_zip_opened_async")
+    @patch("app.zip_unlock.service_client")
+    def test_suppressed_transition_sends_nothing(self, sb, notify) -> None:
+        sb.return_value = _rpc_result(
+            {**_STATE, "state": "open", "count": 10, "opened": True}
+        )
+        state = recount_zip("32827", notify_on_open=False)
+        # The transition still happened — only the broadcast is withheld.
+        self.assertTrue(state["opened"])
+        notify.assert_not_called()
 
     @patch("app.zip_unlock._notify_zip_opened_async")
     @patch("app.zip_unlock.service_client")
@@ -109,6 +120,52 @@ class TestAreaProgress(unittest.TestCase):
         out = area_progress("u1")
         self.assertIsNone(out["state"])
         self.assertFalse(out["is_founding_eligible"])
+
+
+class TestReadPathsNeverBroadcast(unittest.TestCase):
+    """A read must never fan a push out to a whole ZIP, even on the transition.
+
+    These assert the *call*, not the effect: the guard is the notify_on_open=False
+    each read path passes, so reinstating the default is what has to fail here.
+    """
+
+    _OPENED = {**_STATE, "state": "open", "count": 10, "opened": True}
+
+    @patch("app.zip_unlock._has_confirmed_thing", return_value=True)
+    @patch("app.zip_unlock._notify_zip_opened_async")
+    @patch("app.zip_unlock.service_client")
+    @patch(
+        "app.zip_unlock._user_home_zip",
+        return_value={
+            "home_zip": "32827",
+            "founding_area": None,
+            "founding_earned_at": None,
+            "phone_verified_at": "2026-07-01T00:00:00Z",
+        },
+    )
+    def test_area_progress_read_sends_no_push(
+        self, _profile, sb, notify, _thing
+    ) -> None:
+        sb.return_value = _rpc_result(dict(self._OPENED))
+        out = area_progress("u1")
+        self.assertEqual(out["state"], "open")
+        notify.assert_not_called()
+
+    @patch("app.zip_unlock._notify_zip_opened_async")
+    @patch("app.zip_unlock.service_client")
+    def test_unlock_snapshot_read_repair_sends_no_push(self, sb, notify) -> None:
+        client = _rpc_result(dict(self._OPENED))
+        # No stored zip_unlock row -> _unlock_snapshot falls through to a recount.
+        client.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        sb.return_value = client
+        snap = _unlock_snapshot("32827")
+        self.assertEqual(snap["state"], "open")
+        notify.assert_not_called()
+
+    # The third call site (circle_invites.redeem_invite) is asserted where its
+    # harness already lives: tests/test_circle_invites.py.
 
 
 if __name__ == "__main__":

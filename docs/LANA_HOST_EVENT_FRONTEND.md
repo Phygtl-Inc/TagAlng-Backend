@@ -159,7 +159,9 @@ persist on the event and are now enforced at join time:
 
 - **"Anyone can join"** → joiners are **auto-approved** (no host queue) until capacity, then
   fall back to host approval.
-- **"Let attendees share"** → gates who sees the Share button on the meet page (host always).
+- **"Let attendees share"** → *intended to* gate who sees the Share button on the meet page
+  (host always). ⚠️ **Not enforced yet** — the setting is persisted but the meet page
+  renders Share unconditionally. Open FE task, see the linked §9.
 
 The FE consequences live on the **meet page**, not the host card — see
 **`LANA_EVENT_GROUP_CHAT_FRONTEND.md` §9** (re-read `my_request_status` after a join; gate

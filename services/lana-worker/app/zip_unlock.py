@@ -37,15 +37,22 @@ logger = logging.getLogger(__name__)
 # The original "supply is never hidden" soft-mode stance is retired for browse.
 _GATE_MODES = ("off", "soft", "hard")
 
-_OPEN_PUSH_TITLE = "Your neighborhood just came alive"
-_OPEN_PUSH_BODY = (
-    "Enough neighbors have joined — you can now discover meets, people, "
-    "and plans near you."
-)
+# The open-transition copy lives in the i18n catalog as notify.area_open.*
+# (2026-08-03) — it reaches up to 500 people who each read in their own
+# language, so it cannot be a module constant.
 
 
 def recount_zip(zip5: str, *, notify_on_open: bool = True) -> dict[str, Any] | None:
-    """Recount + transition one ZIP. Returns the state dict or None on failure."""
+    """Recount + transition one ZIP. Returns the state dict or None on failure.
+
+    notify_on_open gates ONLY the open-transition push fan-out — the recount, the
+    state write and the founding stamps happen in SQL regardless. Every caller
+    passes False today: a count that a *read* triggers must never broadcast to a
+    whole ZIP (2026-08-02 — `area_progress` served GET /lana/area/progress and
+    could push "your neighborhood just came alive" to up to 500 users with nobody
+    pressing anything). The announcement needs a deliberate owner; until one
+    exists, `opened` is consumed silently and the push never fires.
+    """
     z = str(zip5 or "").strip()
     if not z:
         return None
@@ -65,12 +72,13 @@ def _notify_zip_opened_async(zip5: str) -> None:
 
     def _run() -> None:
         try:
+            from app.i18n import t
             from app.notifications import send_push
 
             res = (
                 service_client()
                 .table("users")
-                .select("id")
+                .select("id, locale")
                 .eq("home_zip", zip5)
                 .not_.is_("phone_verified_at", "null")
                 .limit(500)
@@ -81,8 +89,16 @@ def _notify_zip_opened_async(zip5: str) -> None:
                 uid = str(row.get("id") or "")
                 if not uid:
                     continue
+                # locale rides along on the roster query — 500 recipients must
+                # never mean 500 extra lookups.
+                lang = (row.get("locale") or "").strip() or None
                 try:
-                    send_push(uid, title=_OPEN_PUSH_TITLE, body=_OPEN_PUSH_BODY, url="/")
+                    send_push(
+                        uid,
+                        title=t("notify.area_open.title", lang),
+                        body=t("notify.area_open.body", lang),
+                        url="/",
+                    )
                     sent += 1
                 except Exception:
                     logger.exception("zip_opened_push_failed user=%s", uid)
@@ -169,7 +185,7 @@ def _unlock_snapshot(zip5: str) -> dict[str, Any] | None:
             "count": row.get("verified_active_count"),
             "threshold": row.get("unlock_threshold"),
         }
-    state = recount_zip(z)
+    state = recount_zip(z, notify_on_open=False)
     return (
         {
             "zip5": state.get("zip5") or z,
@@ -251,7 +267,7 @@ def area_progress(user_id: str, zip5: str | None = None) -> dict[str, Any]:
     if not z:
         return {"state": None, "count": 0, "threshold": None, "zip5": None,
                 "is_founding_eligible": False, "founding_earned": False}
-    state = recount_zip(z) or {}
+    state = recount_zip(z, notify_on_open=False) or {}
     founding_earned = bool(profile.get("founding_earned_at"))
     eligible = founding_earned or (
         str(state.get("state") or "") in ("closed", "warming")

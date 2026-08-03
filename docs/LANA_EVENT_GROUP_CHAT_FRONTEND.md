@@ -263,21 +263,38 @@ Errors (`P0001`) unchanged + `not_verified`: `event_not_open`, `host_cannot_requ
 
 ### Attendee sharing — gate the Share button
 
+> ⚠️ **OPEN FE TASK — not implemented.** Corrected 2026-08-03. This section
+> previously said the gate was "already wired in `meet-view.tsx`" and pointed at a
+> helper `fetchEventSharePolicy` in `src/lib/events.ts`. Verified against the PWA:
+> **neither exists.** `meet-view.tsx` renders `ShareMeetDrawer` unconditionally, the
+> RPC has zero callers in the app, and `src/lib/events.ts` exports no such helper.
+> The host's "let attendees share" choice is persisted on the event and enforced
+> **nowhere** — every visitor sees the Share button on every meet.
+
 `allow_attendee_share` controls whether **anyone but the host** may surface the Share /
-invite affordance. New read RPC (granted to `anon` + `authenticated`):
+invite affordance. Read RPC (granted to `anon` + `authenticated`):
 
 ```ts
-// returns boolean; false for closed/unknown events or on error
-const allowed = await supabase.rpc('event_allows_attendee_share', { p_event_id });
+// Returns a real boolean in every case. Since 20260925120000 a cancelled,
+// completed, or unknown event returns FALSE — it previously returned null,
+// which made `allowed !== false` wrongly show Share on a cancelled meet.
+const { data: allowed } = await supabase.rpc('event_allows_attendee_share', {
+  p_event_id: eventId,
+});
 ```
 
-**Render rule (already wired in `meet-view.tsx`):**
+**Render rule to implement** in `src/app/(public)/meet/[id]/meet-view.tsx`, where
+`ShareMeetDrawer` is currently rendered with no condition:
 
 ```ts
-const canShare = isHost || attendeeShareAllowed;   // attendeeShareAllowed = the RPC result
-// show the Share button only when canShare
+const canShare = isHost || allowed === true;   // allowed = the RPC result
+// render ShareMeetDrawer only when canShare
 ```
+
+Prefer `=== true` over `!== false`. The RPC is now honest either way, but an explicit
+positive check also survives the network-error case, where `data` is `null`.
 
 - Host → always sees Share.
 - Everyone else → sees Share only when the host chose **"let attendees share."**
-- Helper `fetchEventSharePolicy(eventId)` in `src/lib/events.ts` wraps the RPC.
+- No wrapper helper exists yet; add one to `src/lib/events.ts` if more than one
+  surface needs it.

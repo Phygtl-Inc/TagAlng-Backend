@@ -1,3 +1,4 @@
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
@@ -5,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from app.auth import service_client
+
+logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -238,13 +241,28 @@ def _load_relationship_tiers(
 
 
 def _load_vector_peer_hints(user_id: str) -> list[dict[str, Any]]:
-    """Top peers on same block by claim embedding similarity (public claims only)."""
+    """Top nearby peers by claim embedding similarity (public claims only).
+
+    "Nearby" is a radius when LANA_PEER_RADIUS_MATCH is on, the caller's home
+    block otherwise. Fail-open both ways: the radius twin falling over drops
+    back to the block-scoped original rather than emptying the context pack.
+    """
+    from app.peer_radius import radius_match_enabled, radius_meters
+
+    base = "match_peers_by_claim_vectors_for_user"
+    args: dict[str, Any] = {"p_user_id": user_id, "p_limit": 5, "p_min_similarity": 0.70}
     try:
         sb = service_client()
-        res = sb.rpc(
-            "match_peers_by_claim_vectors_for_user",
-            {"p_user_id": user_id, "p_limit": 5, "p_min_similarity": 0.70},
-        ).execute()
+        if radius_match_enabled():
+            try:
+                res = sb.rpc(
+                    f"{base}_near", {**args, "p_radius_meters": radius_meters()}
+                ).execute()
+                rows = res.data or []
+                return rows if isinstance(rows, list) else []
+            except Exception:
+                logger.exception("peer_hints_radius_failed user=%s — block fallback", user_id)
+        res = sb.rpc(base, args).execute()
         rows = res.data or []
         return rows if isinstance(rows, list) else []
     except Exception:
