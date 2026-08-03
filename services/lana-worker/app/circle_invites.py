@@ -140,7 +140,7 @@ def redeem_invite(user_id: str, token: str) -> dict[str, Any]:
         if home_zip:
             from app.zip_unlock import recount_zip
 
-            recount_zip(home_zip)
+            recount_zip(home_zip, notify_on_open=False)
     except Exception:
         logger.exception("invite_attribution_failed user=%s", user_id)
 

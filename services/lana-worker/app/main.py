@@ -63,6 +63,7 @@ from app.i18n import (
     localize_text,
     normalize_lang_code,
     session_lang,
+    t,
 )
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lang_pref import (
@@ -174,7 +175,7 @@ from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
 from app.feedback import record_feedback as record_lana_feedback
-from app.notifications import email_html, notify_user
+from app.notifications import email_html, notify_user, recipient_lang, recipient_langs
 from app.rapport_gaps import (
     mark_answered as rapport_mark_answered,
     mute_gap as rapport_mute_gap,
@@ -1784,16 +1785,17 @@ def _run_lana_message(
             _etitle = (
                 getattr(event_draft, "title", None) or "your meet"
             ) if event_draft else "your meet"
+            _lang = recipient_lang(auth.user_id)
             notify_user(
                 auth.user_id,
-                title="Your meet is live 🎉",
-                body=f"“{_etitle}” is posted in your area — I’ll tell you when neighbors ask to join.",
+                title=t("notify.event_live.title", _lang),
+                body=t("notify.event_live.body", _lang, title=_etitle),
                 url=f"/meet/{_eid}",
-                email_subject=f"Your meet “{_etitle}” is live",
+                email_subject=t("notify.event_live.subject", _lang, title=_etitle),
                 email_html=email_html(
-                    "Your meet is live 🎉",
-                    f"“{_etitle}” is now posted in your area. I’ll let you know as neighbors ask to join.",
-                    cta_label="Open the meet",
+                    t("notify.event_live.title", _lang),
+                    t("notify.event_live.email_body", _lang, title=_etitle),
+                    cta_label=t("notify.event_live.cta", _lang),
                     cta_path=f"/meet/{_eid}",
                 ),
             )
@@ -2114,53 +2116,61 @@ def hook_event_join(
     # → host
     if host_id and host_id != auth.user_id:
         if auto:
+            _hl = recipient_lang(host_id)
             notify_user(
                 host_id,
-                title=f"{who} joined",
-                body=f"{who} just joined “{title}”.",
+                title=t("notify.joined_host.title", _hl, who=who),
+                body=t("notify.joined_host.body", _hl, who=who, title=title),
                 url=f"/meet/{eid}/requests",
-                email_subject=f"{who} joined “{title}”",
+                email_subject=t("notify.joined_host.subject", _hl, who=who, title=title),
                 email_html=email_html(
-                    f"{who} joined “{title}”", f"{who} is in — see everyone going.",
-                    "View attendees", f"/meet/{eid}/requests",
+                    t("notify.joined_host.subject", _hl, who=who, title=title),
+                    t("notify.joined_host.email_body", _hl, who=who),
+                    t("notify.joined_host.cta", _hl), f"/meet/{eid}/requests",
                 ),
             )
         else:
+            _hl = recipient_lang(host_id)
             notify_user(
                 host_id,
-                title="New join request",
-                body=f"{who} wants to join “{title}”.",
+                title=t("notify.join_request.title", _hl),
+                body=t("notify.join_request.body", _hl, who=who, title=title),
                 url=f"/meet/{eid}/requests",
-                email_subject=f"{who} wants to join “{title}”",
+                email_subject=t("notify.join_request.subject", _hl, who=who, title=title),
                 email_html=email_html(
-                    "New join request", f"{who} asked to join “{title}”. Approve or decline.",
-                    "Review request", f"/meet/{eid}/requests",
+                    t("notify.join_request.title", _hl),
+                    t("notify.join_request.email_body", _hl, who=who, title=title),
+                    t("notify.join_request.cta", _hl), f"/meet/{eid}/requests",
                 ),
             )
 
     # → joiner
     if auto:
+        _jl = recipient_lang(auth.user_id)
         notify_user(
             auth.user_id,
-            title="You’re in 🎉",
-            body=f"You joined “{title}”.",
+            title=t("notify.youre_in.title", _jl),
+            body=t("notify.youre_in.body_self", _jl, title=title),
             url=f"/meet/{eid}",
-            email_subject=f"You’re in: “{title}”",
+            email_subject=t("notify.youre_in.subject", _jl, title=title),
             email_html=email_html(
-                "You’re in 🎉", f"You joined “{title}”. See the details and group chat.",
-                "Open the meet", f"/meet/{eid}",
+                t("notify.youre_in.title", _jl),
+                t("notify.youre_in.email_self", _jl, title=title),
+                t("notify.event_live.cta", _jl), f"/meet/{eid}",
             ),
         )
     else:
+        _jl = recipient_lang(auth.user_id)
         notify_user(
             auth.user_id,
-            title="Request sent",
-            body=f"Your request to join “{title}” is in — the host will confirm.",
+            title=t("notify.request_sent.title", _jl),
+            body=t("notify.request_sent.body", _jl, title=title),
             url=f"/meet/{eid}",
-            email_subject=f"Request sent: “{title}”",
+            email_subject=t("notify.request_sent.subject", _jl, title=title),
             email_html=email_html(
-                "Request sent", f"Your request to join “{title}” is in. The host will confirm.",
-                "Open the meet", f"/meet/{eid}",
+                t("notify.request_sent.title", _jl),
+                t("notify.request_sent.email_body", _jl, title=title),
+                t("notify.event_live.cta", _jl), f"/meet/{eid}",
             ),
         )
     return {"ok": True}
@@ -2204,22 +2214,25 @@ def hook_event_decision(
         return {"ok": False}
     title = ev.get("title") or "a meet"
     if status == "approved":
+        _rl = recipient_lang(requester_id)
         notify_user(
             requester_id,
-            title="You’re in 🎉",
-            body=f"You’re approved for “{title}”.",
+            title=t("notify.youre_in.title", _rl),
+            body=t("notify.youre_in.body_approved", _rl, title=title),
             url=f"/meet/{eid}",
-            email_subject=f"You’re in: “{title}”",
+            email_subject=t("notify.youre_in.subject", _rl, title=title),
             email_html=email_html(
-                "You’re in 🎉", f"The host approved you for “{title}”. See the details and group chat.",
-                "Open the meet", f"/meet/{eid}",
+                t("notify.youre_in.title", _rl),
+                t("notify.youre_in.email_approved", _rl, title=title),
+                t("notify.event_live.cta", _rl), f"/meet/{eid}",
             ),
         )
     elif status == "declined":
+        _rl = recipient_lang(requester_id)
         notify_user(
             requester_id,
-            title=f"Update on “{title}”",
-            body="The host couldn’t fit you in this time.",
+            title=t("notify.declined.title", _rl, title=title),
+            body=t("notify.declined.body", _rl),
             url=f"/meet/{eid}",
         )
     return {"ok": True}
@@ -2274,18 +2287,21 @@ def hook_event_cancel(
         return {"ok": False}
 
     roster = {r.get("requester_id") for r in rows} - {None, auth.user_id}
+    # Each attendee reads in their OWN language, not the host's — one query for
+    # the whole roster, never a lookup per person.
+    langs = recipient_langs([str(u) for u in roster])
     for uid in roster:
+        lang = langs.get(str(uid))
         notify_user(
             uid,
-            title=f"“{title}” was cancelled",
-            body="The host cancelled this meet. Sorry — hopefully next time.",
+            title=t("notify.cancelled.title", lang, title=title),
+            body=t("notify.cancelled.body", lang),
             url=f"/meet/{eid}",
-            email_subject=f"Cancelled: “{title}”",
+            email_subject=t("notify.cancelled.subject", lang, title=title),
             email_html=email_html(
-                f"“{title}” was cancelled",
-                "The host had to call this one off. Keep an eye out — "
-                "something new is usually around the corner.",
-                "See what’s nearby", "/",
+                t("notify.cancelled.title", lang, title=title),
+                t("notify.cancelled.email_body", lang),
+                t("notify.cancelled.cta", lang), "/",
             ),
         )
     return {"ok": True, "notified": len(roster)}

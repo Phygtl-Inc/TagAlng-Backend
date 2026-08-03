@@ -8,6 +8,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+import logging
+
 from app.auth import service_client
 from app.claims_persist import (
     claim_from_pending,
@@ -31,6 +33,7 @@ from app.layer1_intents import (
 )
 from app.local_signals import fetch_my_block_log
 from app.reply_compose import compose_reply
+from app.peer_radius import radius_rpc
 from app.supabase_rpc import call_rpc
 from app.vec_util import to_pgvector
 
@@ -273,8 +276,28 @@ def fetch_block_summary(user_jwt: str, *, block_id: str | None = None) -> dict[s
     }
 
 
+def _call_peer_rpc(user_jwt: str, base: str, args: dict[str, Any]) -> Any:
+    """Dispatch a peer search, radius twin first when enabled.
+
+    Fail-open: a radius twin that errors falls back to the block-scoped
+    original, so a bad geo query degrades to today's behaviour rather than
+    returning nobody. An error from the ORIGINAL propagates — callers such as
+    _fetch_peers_by_claim_filters_rpc tell that case apart and must keep seeing it.
+    """
+    name, payload = radius_rpc(base, args)
+    if name == base:
+        return call_rpc(user_jwt, name, payload)
+    try:
+        return call_rpc(user_jwt, name, payload)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "peer_radius_rpc_failed rpc=%s — falling back to block scope", name
+        )
+        return call_rpc(user_jwt, base, args)
+
+
 def _fetch_peers_single_attr(user_jwt: str, token: str, *, limit: int = 20) -> list[dict[str, Any]]:
-    raw = call_rpc(
+    raw = _call_peer_rpc(
         user_jwt,
         "find_peers_by_attr_filter",
         {"p_filter_text": token, "p_limit": limit},
@@ -294,7 +317,7 @@ def _fetch_peers_by_claim_filters_rpc(
     if not payload:
         return []
     try:
-        raw = call_rpc(
+        raw = _call_peer_rpc(
             user_jwt,
             "find_peers_by_claim_filters",
             {"p_filters": payload, "p_limit": limit},
@@ -405,7 +428,7 @@ def _fetch_peers_semantic_single(
     if not literal:
         return []
     try:
-        raw = call_rpc(
+        raw = _call_peer_rpc(
             user_jwt,
             "find_peers_by_claim_semantic",
             {
