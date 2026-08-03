@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.circles_flow import (
+    _ESCAPE_SEND,
     ensure_grounding_gaps,
     handle_grounding_answer,
     handle_grounding_confirmation,
@@ -108,35 +109,282 @@ class TestGroundingQuestionLexicon(unittest.TestCase):
         self.assertEqual(q, "Which gym do you go to?")
 
 
-class TestGroundOptionsKeywordFallback(unittest.TestCase):
+class TestGroundOptionsNameGate(unittest.TestCase):
+    """The user's own name for the place decides what may be offered (2026-08-03:
+    "Fitness CF" was answered with Crunch / EoS / Lake Nona Performance Club)."""
+
     @patch("app.places.search_places")
-    def test_sentence_phrase_falls_back_to_type_keyword(self, sp) -> None:
-        # "We go to church on sundays" matches nothing; retry uses the faith keyword.
+    def test_no_name_searches_keyword_only_and_flags_suggestions(self, sp) -> None:
+        # They named only the activity ("we go to church on sundays"), so there is
+        # nothing to name-match: one keyword search, offered as suggestions.
         from app.circles_flow import ground_options
 
-        sp.side_effect = [
-            [],
-            [{"name": "First Baptist", "address": "1 Main St", "place_id": "gp1"}],
+        sp.return_value = [{"name": "First Baptist", "address": "1 Main St", "place_id": "gp1"}]
+        got = ground_options(
+            "u1",
+            {"circle_type": "faith", "detail": "We go to church on sundays", "place_name": ""},
+            block_id=None,
+        )
+        self.assertEqual(sp.call_count, 1)
+        self.assertEqual(sp.call_args.kwargs["query"], "church mosque synagogue temple")
+        self.assertEqual(got[0]["google_place_id"], "gp1")
+        self.assertTrue(got[0]["suggested"])
+
+    @patch("app.places.search_places")
+    def test_named_place_drops_results_that_lack_the_name(self, sp) -> None:
+        from app.circles_flow import ground_options
+
+        others = [
+            {"name": "Crunch Fitness - Lake Nona", "address": "a", "place_id": "gp1"},
+            {"name": "EoS Fitness", "address": "b", "place_id": "gp2"},
+        ]
+        # Block-biased search, then the widened retry — neither carries the name.
+        sp.side_effect = [list(others), list(others), []]
+        got = ground_options(
+            "u1",
+            {"circle_type": "fitness", "detail": "gym at Fitness CF", "place_name": "Fitness CF"},
+            block_id="b1",
+        )
+        self.assertEqual(sp.call_args_list[0].kwargs["query"], "Fitness CF")
+        self.assertGreater(sp.call_args_list[1].kwargs["radius"], 16000.0)
+        # Falls through to keyword suggestions — flagged, never called a match.
+        self.assertTrue(all(o["suggested"] for o in got))
+
+    @patch("app.places.search_places")
+    def test_named_place_kept_when_the_name_is_there(self, sp) -> None:
+        from app.circles_flow import ground_options
+
+        sp.return_value = [
+            {"name": "Fitness CF Lake Nona", "address": "a", "place_id": "gp9"},
+            {"name": "Crunch Fitness", "address": "b", "place_id": "gp1"},
         ]
         got = ground_options(
             "u1",
-            {"circle_type": "faith", "detail": "We go to church on sundays"},
-            block_id=None,
+            {"circle_type": "fitness", "detail": "Fitness CF", "place_name": "Fitness CF"},
+            block_id="b1",
         )
-        self.assertEqual(got[0]["google_place_id"], "gp1")
-        self.assertEqual(sp.call_args_list[0].kwargs["query"], "We go to church on sundays")
-        self.assertEqual(
-            sp.call_args_list[1].kwargs["query"], "church mosque synagogue temple"
-        )
+        self.assertEqual([o["google_place_id"] for o in got], ["gp9"])
+        self.assertFalse(got[0]["suggested"])
+        self.assertEqual(sp.call_count, 1)
 
     @patch("app.places.search_places")
-    def test_no_retry_when_phrase_hits(self, sp) -> None:
+    def test_widened_retry_finds_the_named_place_a_town_over(self, sp) -> None:
         from app.circles_flow import ground_options
 
-        sp.return_value = [{"name": "OrangeTheory", "address": "2 Elm", "place_id": "gp2"}]
-        got = ground_options("u1", {"circle_type": "fitness", "detail": "my gym"}, block_id=None)
-        self.assertEqual(len(got), 1)
-        self.assertEqual(sp.call_count, 1)
+        sp.side_effect = [
+            [{"name": "Crunch Fitness", "address": "a", "place_id": "gp1"}],
+            [{"name": "Fitness CF Kissimmee", "address": "c", "place_id": "gp7"}],
+        ]
+        got = ground_options(
+            "u1",
+            {"circle_type": "fitness", "detail": "Fitness CF", "place_name": "Fitness CF"},
+            block_id="b1",
+        )
+        self.assertEqual([o["google_place_id"] for o in got], ["gp7"])
+
+    @patch("app.places.search_places")
+    def test_typed_search_never_falls_back_to_nearby_spots(self, sp) -> None:
+        from app.circles_flow import ground_options
+
+        sp.return_value = [{"name": "Crunch Fitness", "address": "a", "place_id": "gp1"}]
+        got = ground_options(
+            "u1",
+            {"circle_type": "fitness", "detail": "my gym", "place_name": ""},
+            block_id="b1",
+            query="Fitness CF",
+        )
+        self.assertEqual(got, [])
+
+
+class TestResolvePlaceName(unittest.TestCase):
+    """Rows captured before place_name existed get it resolved from their own
+    phrase, once, by the model that already reads these sentences."""
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.orchestrator.llm.llm_json", return_value={"place_name": "Fitness CF"})
+    @patch("app.orchestrator.llm.router_model", return_value="m")
+    @patch("app.orchestrator.llm.llm_configured", return_value=True)
+    def test_resolves_and_persists(self, _cfg, _rm, llm, sb) -> None:
+        from app.circles_flow import _resolve_place_name
+
+        aff = {"id": "a1", "detail": "I go to the gym at Fitness CF; has_sauna=true"}
+        self.assertEqual(_resolve_place_name("u1", aff), "Fitness CF")
+        # The parked feature note never reaches the model.
+        self.assertNotIn("has_sauna", llm.call_args.kwargs["user_payload"])
+        self.assertEqual(
+            sb.return_value.table.return_value.update.call_args[0][0], {"place_name": "Fitness CF"}
+        )
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.orchestrator.llm.llm_json", return_value={"place_name": None})
+    @patch("app.orchestrator.llm.router_model", return_value="m")
+    @patch("app.orchestrator.llm.llm_configured", return_value=True)
+    def test_activity_only_persists_the_empty_answer(self, _cfg, _rm, _llm, sb) -> None:
+        from app.circles_flow import _resolve_place_name
+
+        aff = {"id": "a1", "detail": "I go to the gym every weekend"}
+        self.assertEqual(_resolve_place_name("u1", aff), "")
+        # '' is a real answer ("they named no venue") — stored so we never re-ask.
+        self.assertEqual(
+            sb.return_value.table.return_value.update.call_args[0][0], {"place_name": ""}
+        )
+
+    def test_stored_value_short_circuits(self) -> None:
+        from app.circles_flow import _resolve_place_name
+
+        self.assertEqual(
+            _resolve_place_name("u1", {"id": "a1", "place_name": "St. Luke's"}), "St. Luke's"
+        )
+
+
+class TestNameHit(unittest.TestCase):
+    def test_the_screenshot_case(self) -> None:
+        from app.circles_flow import _name_hit
+
+        self.assertFalse(_name_hit("Fitness CF", "Crunch Fitness - Lake Nona"))
+        self.assertFalse(_name_hit("Fitness CF", "EōS Fitness"))
+        self.assertFalse(_name_hit("Fitness CF", "Lake Nona Performance Club"))
+        self.assertTrue(_name_hit("Fitness CF", "Fitness CF Lake Nona"))
+
+    def test_accents_and_punctuation_fold(self) -> None:
+        from app.circles_flow import _name_hit
+
+        self.assertTrue(_name_hit("eos fitness", "EōS Fitness!"))
+        self.assertTrue(_name_hit("orangetheory", "OrangeTheory Narcoossee"))
+        self.assertTrue(_name_hit("St. Luke's", "St Lukes Church"))
+
+    def test_too_short_never_hits(self) -> None:
+        from app.circles_flow import _name_hit
+
+        self.assertFalse(_name_hit("Y", "YMCA Lake Nona"))
+
+
+class TestOfferedListsAlwaysHaveAWayOut(unittest.TestCase):
+    """A wrong list must never be a dead end — the tile's only affordance is these
+    chips, so one of them has to say "not these" (2026-08-03)."""
+
+    def test_escape_chip_appended_but_never_grounds(self) -> None:
+        from app.circles_flow import _ESCAPE_SEND, _with_escape, match_grounding_candidate
+
+        chips = _with_escape([{"label": "A gym", "send": "It's A gym", "google_place_id": "gp1"}])
+        self.assertEqual(chips[-1]["send"], _ESCAPE_SEND)
+        self.assertIsNone(chips[-1]["google_place_id"])
+        # It can never be mistaken for a place the user picked.
+        self.assertIsNone(match_grounding_candidate(chips, _ESCAPE_SEND))
+
+    def test_no_escape_on_an_empty_list(self) -> None:
+        from app.circles_flow import _with_escape
+
+        self.assertEqual(_with_escape([]), [])
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.circles_flow._home_block_id", return_value="b1")
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "place_name": "Fitness CF",
+                         "detail": "gym at Fitness CF; has_sauna=true"})
+    @patch("app.circles_flow.ground_options", return_value=[])
+    def test_payload_names_the_kind_and_their_own_words(self, _go, _own, _blk, _sb) -> None:
+        # The card needs the category for its glyph and their phrase for the noun
+        # ("your gym") — FE ask #1, issues #63.
+        from app.circles_flow import grounding_payload_for_gap
+
+        payload = grounding_payload_for_gap(
+            "u1", {"gap_row_id": "g1", "affiliation_ref": "a1", "grounding_options": None}
+        )
+        self.assertEqual(payload["circle_type"], "fitness")
+        self.assertEqual(payload["detail"], "gym at Fitness CF")  # feature note stripped
+        self.assertEqual(payload["place_name"], "Fitness CF")
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.circles_flow._own_affiliation", return_value={"id": "a1"})
+    def test_payload_omits_what_the_affiliation_lacks(self, _own, _sb) -> None:
+        # Absent values must simply be absent — the card falls back to its neutral pin.
+        from app.circles_flow import grounding_payload_for_gap
+
+        payload = grounding_payload_for_gap(
+            "u1", {"gap_row_id": "g1", "affiliation_ref": "a1", "grounding_options": []}
+        )
+        self.assertNotIn("circle_type", payload)
+        self.assertNotIn("detail", payload)
+        self.assertNotIn("place_name", payload)
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.circles_flow._home_block_id", return_value="b1")
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "place_name": "Fitness CF"})
+    @patch("app.circles_flow.ground_options",
+           return_value=[{"name": "Fitness CF Lake Nona", "address": "a",
+                          "google_place_id": "gp9", "suggested": False}])
+    def test_tile_offers_matches_without_an_escape_chip(self, _go, _own, _blk, _sb) -> None:
+        # PlaceGroundingCard ships its own "Search another" + skip, and renders
+        # every option as a place tile — an id-less escape chip would look like one.
+        from app.circles_flow import _ESCAPE_SEND, grounding_payload_for_gap
+
+        payload = grounding_payload_for_gap(
+            "u1", {"gap_row_id": "g1", "affiliation_ref": "a1", "grounding_options": None}
+        )
+        sends = [o["send"] for o in payload["options"]]
+        self.assertEqual(sends, ["It's Fitness CF Lake Nona"])
+        self.assertNotIn(_ESCAPE_SEND, sends)
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.circles_flow._home_block_id", return_value="b1")
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "place_name": "Fitness CF"})
+    @patch("app.circles_flow.ground_options",
+           return_value=[{"name": "Crunch Fitness", "address": "a", "google_place_id": "gp1",
+                          "suggested": True, "unmatched_name": "Fitness CF"},
+                         {"name": "EoS Fitness", "address": "b", "google_place_id": "gp2",
+                          "suggested": True, "unmatched_name": "Fitness CF"}])
+    def test_tile_drops_consolations_for_a_name_it_couldnt_find(
+        self, _go, _own, _blk, _sb
+    ) -> None:
+        # The card's question names the place; tiles that don't bear that name are
+        # the whole bug. Zero options opens its own search box instead.
+        from app.circles_flow import grounding_payload_for_gap
+
+        payload = grounding_payload_for_gap(
+            "u1", {"gap_row_id": "g1", "affiliation_ref": "a1", "grounding_options": None}
+        )
+        self.assertEqual(payload["options"], [])
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.circles_flow._home_block_id", return_value="b1")
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "place_name": ""})
+    @patch("app.circles_flow.ground_options",
+           return_value=[{"name": "Crunch Fitness", "address": "a",
+                          "google_place_id": "gp1", "suggested": True},
+                         {"name": "EoS Fitness", "address": "b",
+                          "google_place_id": "gp2", "suggested": True}])
+    def test_tile_still_offers_a_choice_for_an_unnamed_circle(
+        self, _go, _own, _blk, _sb
+    ) -> None:
+        # "Which gym do you go to?" answered with two nearby gyms is a choice, not
+        # a claim — this is what the pick-one grid is for.
+        from app.circles_flow import grounding_payload_for_gap
+
+        payload = grounding_payload_for_gap(
+            "u1", {"gap_row_id": "g1", "affiliation_ref": "a1", "grounding_options": None}
+        )
+        self.assertEqual(len(payload["options"]), 2)
+
+    @patch("app.circles_flow.service_client")
+    @patch("app.circles_flow._home_block_id", return_value="b1")
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "place_name": ""})
+    @patch("app.circles_flow.ground_options",
+           return_value=[{"name": "Crunch Fitness", "address": "a",
+                          "google_place_id": "gp1", "suggested": True}])
+    def test_tile_drops_a_lone_suggestion(self, _go, _own, _blk, _sb) -> None:
+        # A single option renders as "the place she mentioned — pin it?", which a
+        # guess must never claim.
+        from app.circles_flow import grounding_payload_for_gap
+
+        payload = grounding_payload_for_gap(
+            "u1", {"gap_row_id": "g1", "affiliation_ref": "a1", "grounding_options": None}
+        )
+        self.assertEqual(payload["options"], [])
 
 
 class TestMatchGroundingCandidate(unittest.TestCase):
@@ -193,12 +441,66 @@ class TestHandleGroundingAnswer(unittest.TestCase):
         self.assertEqual(result["pending"]["candidates"][0]["google_place_id"], "gp1")
         self.assertEqual(result["options"][0]["send"], "It's OrangeTheory Narcoossee")
 
+    @patch("app.circles_flow._compose_grounding_reply")
+    @patch("app.circles_flow._home_block_id", return_value=None)
+    @patch("app.circles_flow.ground_options",
+           return_value=[{"name": "Crunch Fitness", "address": "1 Elm",
+                          "google_place_id": "gp1", "suggested": True,
+                          "unmatched_name": "Fitness CF"}])
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "detail": "Fitness CF",
+                         "place_ref": None})
+    def test_consolations_are_never_presented_as_matches(self, _own, _go, _blk, cr) -> None:
+        # The screenshot bug: three unrelated gyms offered as if they were the
+        # user's own. Nearby same-kind places may still be OFFERED, but the reply
+        # has to lead with not having found theirs, by name.
+        cr.side_effect = _ECHO_FALLBACK
+        gap = {**self.GAP, "grounding_options": None}
+        result = handle_grounding_answer("u1", gap, "Fitness CF")
+        goal = cr.call_args.kwargs["goal"]
+        self.assertIn("could NOT find", goal)
+        self.assertIn("never call them matches", goal)
+        self.assertIn("Fitness CF", result["reply"])
+        # Still offered, still escapable.
+        self.assertEqual(result["options"][0]["send"], "It's Crunch Fitness")
+        self.assertEqual(result["options"][-1]["send"], _ESCAPE_SEND)
+
+    @patch("app.circles_flow._compose_grounding_reply")
+    @patch("app.circles_flow._home_block_id", return_value=None)
+    @patch("app.circles_flow.ground_options",
+           return_value=[{"name": "Crunch Fitness", "address": "1 Elm",
+                          "google_place_id": "gp1", "suggested": True}])
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "detail": "my gym",
+                         "place_ref": None})
+    def test_plain_suggestions_dont_claim_a_failed_search(self, _own, _go, _blk, cr) -> None:
+        # They never named a venue, so nothing failed — asking which one it is is
+        # honest, and claiming "I couldn't find it" would be invented.
+        cr.side_effect = _ECHO_FALLBACK
+        gap = {**self.GAP, "grounding_options": None}
+        result = handle_grounding_answer("u1", gap, "the gym near the school")
+        goal = cr.call_args.kwargs["goal"]
+        self.assertIn("haven't named their spot", goal)
+        self.assertNotIn("couldn't find", result["reply"])
+
+    @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "circle_key": "gym",
+                         "place_ref": None})
+    def test_escape_tap_asks_what_its_called(self, _own, _cr) -> None:
+        result = handle_grounding_answer("u1", self.GAP, _ESCAPE_SEND)
+        # Thread stays open with a clean slate — their next words drive the search.
+        self.assertEqual(result["pending"]["candidates"], [])
+        self.assertEqual(result["options"], [])
+        self.assertFalse(result["grounded"])
+
     @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
     @patch("app.circles_flow.note_ungrounded_detail")
     @patch("app.circles_flow._home_block_id", return_value=None)
     @patch("app.circles_flow.ground_options", return_value=[])
     @patch("app.circles_flow._own_affiliation",
-           return_value={"id": "a1", "circle_type": "fitness", "detail": "my gym", "place_ref": None})
+           return_value={"id": "a1", "circle_type": "fitness", "circle_key": "gym",
+                         "detail": "my gym", "place_ref": None})
     def test_unmatchable_answer_kept_as_detail(self, _own, _go, _blk, note, _cr) -> None:
         gap = {**self.GAP, "grounding_options": None}
         result = handle_grounding_answer("u1", gap, "the little studio by Publix")
@@ -209,7 +511,10 @@ class TestHandleGroundingAnswer(unittest.TestCase):
     @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
     @patch("app.circles_flow.note_ungrounded_detail")
     @patch("app.circles_flow.ground_options")
-    def test_abandon_never_searches_or_keeps_detail(self, go, note, _cr) -> None:
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "circle_key": "gym",
+                         "place_ref": None})
+    def test_abandon_never_searches_or_keeps_detail(self, _own, go, note, _cr) -> None:
         # "none of these" fed to Places search returns arbitrary nearby spots —
         # the abandon verdict must close the thread without a search and without
         # storing the rejection as detail.
@@ -386,10 +691,43 @@ class TestHandleGroundingConfirmation(unittest.TestCase):
 
     @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
     @patch("app.circles_flow.note_ungrounded_detail")
-    def test_abandon_keeps_their_words_and_closes(self, note, _cr) -> None:
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "circle_key": "gym",
+                         "place_ref": None})
+    def test_abandon_keeps_their_words_and_closes(self, _own, note, _cr) -> None:
         result = handle_grounding_confirmation("u1", self.STATE, "neither", abandon=True)
         self.assertIsNone(result["pending"])
         note.assert_called_once_with("u1", "a1", "orange theory")
+
+    @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
+    @patch("app.circles_flow.note_ungrounded_detail")
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "circle_key": "gym",
+                         "place_ref": None})
+    def test_unpinned_close_still_offers_to_look_for_people(self, _own, _note, _cr) -> None:
+        # No pin, but the community is known — the thread ends on an offer to look,
+        # not a dead end (2026-08-03). It must not claim anyone is there.
+        ctx: dict = {}
+        result = handle_grounding_confirmation(
+            "u1", self.STATE, "neither", session_ctx=ctx, abandon=True
+        )
+        offer = result["offer"]
+        self.assertEqual(offer["kind"], "find_neighbors")
+        self.assertIn("gym", offer["send"])
+        self.assertTrue(ctx["_grounding_offer_done"])
+
+    @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "circle_key": "gym",
+                         "place_ref": None})
+    def test_escape_chip_asks_for_the_name_instead_of_closing(self, _own, _cr) -> None:
+        from app.circles_flow import _ESCAPE_SEND
+
+        result = handle_grounding_confirmation("u1", self.STATE, _ESCAPE_SEND)
+        self.assertEqual(result["pending"]["attempts"], 2)
+        # Candidates cleared so their next words drive a fresh search.
+        self.assertEqual(result["pending"]["candidates"], [])
+        self.assertIsNone(result.get("offer"))
 
     @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
     @patch("app.circles_flow._home_block_id", return_value=None)
@@ -404,7 +742,10 @@ class TestHandleGroundingConfirmation(unittest.TestCase):
 
     @patch("app.circles_flow._compose_grounding_reply", side_effect=_ECHO_FALLBACK)
     @patch("app.circles_flow.note_ungrounded_detail")
-    def test_worn_out_after_three_attempts(self, note, _cr) -> None:
+    @patch("app.circles_flow._own_affiliation",
+           return_value={"id": "a1", "circle_type": "fitness", "circle_key": "gym",
+                         "place_ref": None})
+    def test_worn_out_after_three_attempts(self, _own, note, _cr) -> None:
         state = {**self.STATE, "attempts": 3}
         result = handle_grounding_confirmation("u1", state, "some other gym")
         self.assertIsNone(result["pending"])

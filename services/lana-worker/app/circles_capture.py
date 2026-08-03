@@ -57,6 +57,11 @@ class CircleCandidate:
     circle_key: str
     raw_phrase: str
     confidence: float = 0.6
+    # The venue name the user actually SAID ("Fitness CF"), "" when they named only
+    # the activity ("my gym"). Grounding searches THIS, never the whole phrase —
+    # a sentence matches no place, and the type-keyword fallback then offered
+    # arbitrary nearby spots as if they were the user's own (2026-08-03).
+    place_name: str = ""
 
 
 @dataclass
@@ -108,6 +113,7 @@ def parse_circle_candidates(data: Any) -> list[CircleCandidate]:
                 circle_key=key,
                 raw_phrase=phrase or key.replace("_", " "),
                 confidence=conf,
+                place_name=str(item.get("place_name") or "").strip()[:120],
             )
         )
     return out[:_MAX_CANDIDATES]
@@ -160,7 +166,7 @@ def _embed_circle(cand: CircleCandidate) -> list[float] | None:
 def _fetch_affiliation(sb: Any, user_id: str, circle_key: str) -> dict[str, Any] | None:
     res = (
         sb.table("circle_affiliations")
-        .select("id, confidence, detail, status, place_ref, circle_type")
+        .select("id, confidence, detail, status, place_ref, circle_type, place_name")
         .eq("user_id", user_id)
         .eq("circle_key", circle_key)
         .is_("dismissed_at", "null")
@@ -188,13 +194,20 @@ def persist_circle_candidates(user_id: str, candidates: list[CircleCandidate]) -
                     old_conf = float(existing.get("confidence") or 0.0)
                 except (TypeError, ValueError):
                     old_conf = 0.0
-                sb.table("circle_affiliations").update(
-                    {
-                        "confidence": min(
-                            1.0, max(old_conf, cand.confidence) + _CORROBORATION_BUMP
-                        )
-                    }
-                ).eq("id", existing["id"]).execute()
+                patch: dict[str, Any] = {
+                    "confidence": min(
+                        1.0, max(old_conf, cand.confidence) + _CORROBORATION_BUMP
+                    )
+                }
+                # "I go to the gym" first, "it's Fitness CF" later — a mention that
+                # finally names the venue fills the blank so grounding can search
+                # it. Never overwrites a name we already have (they'd correct it
+                # through grounding, not through a passing re-mention).
+                if cand.place_name and not str(existing.get("place_name") or "").strip():
+                    patch["place_name"] = cand.place_name
+                sb.table("circle_affiliations").update(patch).eq(
+                    "id", existing["id"]
+                ).execute()
             else:
                 row: dict[str, Any] = {
                     "user_id": user_id,
@@ -205,6 +218,8 @@ def persist_circle_candidates(user_id: str, candidates: list[CircleCandidate]) -
                     "confidence": cand.confidence,
                     "detail": cand.raw_phrase[:_DETAIL_MAX],
                 }
+                if cand.place_name:
+                    row["place_name"] = cand.place_name
                 embedding = _embed_circle(cand)
                 if embedding is not None:
                     row["embedding"] = embedding

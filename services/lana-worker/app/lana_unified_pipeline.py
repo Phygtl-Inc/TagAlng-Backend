@@ -140,7 +140,7 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
     action.chips = []
     try:
         from app.auth import service_client
-        from app.circles_flow import _chip, _home_block_id, ground_options
+        from app.circles_flow import _chip, _home_block_id, _with_escape, ground_options
 
         key = ""
         gid = str(getattr(action, "goal_id", None) or "")
@@ -149,7 +149,7 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
         q = (
             service_client()
             .table("circle_affiliations")
-            .select("id, circle_type, circle_key, detail, status, place_ref")
+            .select("id, circle_type, circle_key, detail, status, place_ref, place_name")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .is_("place_ref", "null")
@@ -167,7 +167,11 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
             user_id, aff, block_id=_home_block_id(user_id), query=None
         )
         candidates = [{**_chip(o), "name": o.get("name")} for o in options]
-        chips = [{"label": c["label"], "send": c["send"]} for c in candidates]
+        # Escape hatch rides along as a chip but never as a candidate — a wrong
+        # list must always have a way out (2026-08-03).
+        chips = [
+            {"label": c["label"], "send": c["send"]} for c in _with_escape(candidates)
+        ]
         session_ctx["rapport_active"] = True
         session_ctx["rapport_grounding"] = {
             "affiliation_id": str(aff.get("id") or ""),
@@ -1149,18 +1153,16 @@ def run_lana_unified_pipeline(
                     result.get("offer") if isinstance(result.get("offer"), dict) else None
                 )
                 auto_send = str((auto_offer or {}).get("send") or "").strip()
-                if (
-                    result.get("grounded")
-                    and auto_offer is not None
-                    and auto_offer.get("auto")
-                    and auto_send
-                ):
+                if auto_offer is not None and auto_offer.get("auto") and auto_send:
                     # The grounding served an action the user ALREADY asked for
                     # (policy stamped pending_action on the ground_place turn) —
                     # never re-offer their own request: dispatch it now with the
                     # place pre-filled, exactly like an offer accept, and carry
                     # the community-save announcement as a preamble to the
                     # engine's reply (one bubble, no extra confirm loop).
+                    # Not gated on `grounded`: when the place could NOT be pinned
+                    # the request still stands, and it dispatches place-less
+                    # rather than dying with the grounding (2026-08-03).
                     forced_slots = _forced_slots_for_kind(
                         str(auto_offer.get("kind") or ""), auto_send, auto_offer,
                         session_ctx,

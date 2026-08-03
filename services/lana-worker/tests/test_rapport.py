@@ -86,11 +86,12 @@ class _Supabase:
         return _Query("__rpc__", self.store)
 
 
-def _store(claims=None, gaps=None):
+def _store(claims=None, gaps=None, places=None):
     return {
         "selects": {
             "user_identity_claims": claims or [],
             "rapport_gaps": gaps or [],
+            "places": places or [],
         },
         "inserts": [],
         "updates": [],
@@ -259,6 +260,25 @@ class TestRanker(unittest.TestCase):
         }
         base.update(over)
         return base
+
+    def test_place_gap_names_its_place(self):
+        # "What do you enjoy at {place}?" ships the place so the card can show it as
+        # an eyebrow, instead of the client parsing the AI-authored why_frame
+        # (FE ask #2, issues #63).
+        row = self._row("deepen:orangetheory", place_ref="p1")
+        with patch.object(
+            rapport_ranker, "service_client",
+            return_value=_Supabase(_store(gaps=[], places=[
+                {"id": "p1", "name": "OrangeTheory Narcoossee", "place_type": "fitness"}
+            ])),
+        ):
+            built = rapport_ranker._place_extras(row)
+        self.assertEqual(built["kind"], "place_affinity")
+        self.assertEqual(built["place_name"], "OrangeTheory Narcoossee")
+        self.assertEqual(built["place_type"], "fitness")
+
+    def test_gap_without_a_place_adds_nothing(self):
+        self.assertEqual(rapport_ranker._place_extras(self._row("free_windows")), {})
 
     def test_freq_cap_returns_none(self):
         ask, _s, _t = self._run([self._row("activity_social_pref")], recently_asked=True)

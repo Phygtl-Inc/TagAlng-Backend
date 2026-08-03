@@ -150,12 +150,14 @@ def search_places(
     user_id: str | None = None, limit: int = 6,
     included_type: str | None = None, strict_type: bool = False,
     min_rating: float | None = None, price_levels: list[str] | None = None,
-    attr_fields: list[str] | None = None,
+    attr_fields: list[str] | None = None, radius: float = 16000.0,
 ) -> list[dict[str, Any]]:
     """Free-text place search (Google Places API New), biased to the block. Returns
     [{name, address, place_id, lat, lng, rating, attrs}], or [] with no key / no results —
     the exact place the host picks, so publish stores a precise, navigable pin.
 
+    `radius` widens the location bias (metres) for the rare search that must reach
+    past the neighbourhood — a named venue the user gave us that sits a town over.
     `included_type`/`strict_type`/`min_rating`/`price_levels` are server-side narrowers.
     `attr_fields` (e.g. ['goodForChildren','servesVegetarianFood']) are per-place booleans
     added to the FieldMask and returned under `attrs` so the caller can VERIFY a claim
@@ -172,7 +174,7 @@ def search_places(
     fields.extend(f"places.{a}" for a in attrs)
     places = _places_search_text(
         query=query, zip_code=zip_code, block_id=block_id, user_id=user_id,
-        field_mask=",".join(fields), limit=limit, radius=16000.0,
+        field_mask=",".join(fields), limit=limit, radius=radius,
         included_type=included_type, strict_type=strict_type,
         min_rating=min_rating, price_levels=price_levels,
     )
