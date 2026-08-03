@@ -139,7 +139,7 @@ def _build(
                 )
             except Exception:  # noqa: BLE001 — self-heal is best-effort
                 logger.exception("rapport: i18n self-heal kickoff failed")
-    return {
+    built = {
         "gap_row_id": row["gap_row_id"],
         "gap_id": row["gap_id"],
         "parent_bucket": row["parent_bucket"],
@@ -148,6 +148,40 @@ def _build(
         "sensitivity_tier": gap.get("sensitivity_tier", "LOW"),
         "chip_color_token": f"--d-{row['parent_bucket']}",
     }
+    built.update(_place_extras(row))
+    return built
+
+
+def _place_extras(row: dict[str, Any]) -> dict[str, Any]:
+    """Name the pinned place a §4.3 enrichment ask is about ("what do you enjoy at
+    {place}?"), so the card can show it as an eyebrow instead of the client trying
+    to parse it out of the AI-authored why_frame (FE ask #2, issues #63).
+
+    Absent-safe: a gap with no place_ref, or a place row that has gone away, adds
+    nothing and the ask serves exactly as before."""
+    place_ref = str(row.get("place_ref") or "")
+    if not place_ref:
+        return {}
+    try:
+        res = (
+            service_client()
+            .table("places")
+            .select("name, place_type")
+            .eq("id", place_ref)
+            .limit(1)
+            .execute()
+        )
+        place = (res.data or [{}])[0] or {}
+    except Exception:
+        logger.exception("rapport: place lookup failed for gap %s", row.get("gap_row_id"))
+        return {}
+    name = str(place.get("name") or "").strip()
+    if not name:
+        return {}
+    extras: dict[str, Any] = {"kind": "place_affinity", "place_name": name}
+    if place.get("place_type"):
+        extras["place_type"] = str(place["place_type"])
+    return extras
 
 
 def _load_open_rows(user_id: str) -> list[dict[str, Any]]:

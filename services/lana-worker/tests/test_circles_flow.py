@@ -119,6 +119,27 @@ class TestGroundAffiliation(unittest.TestCase):
         self.assertEqual(patch_row, {"place_ref": "p1", "status": "confirmed"})
         self.assertEqual(open_gap.call_args.kwargs.get("place_ref"), "p1")
 
+    @patch("app.rapport_gaps.mark_answered")
+    @patch("app.rapport_gaps.open_semantic_gap")
+    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…"))
+    @patch("app.circles_flow._flush_parked_features", return_value=0)
+    @patch("app.circles_flow.upsert_canonical_place", return_value="p1")
+    @patch("app.places.place_details", return_value=dict(_DETAILS))
+    @patch(
+        "app.circles_flow._own_affiliation",
+        return_value={"id": "a1", "circle_type": "fitness", "detail": "my gym"},
+    )
+    @patch("app.circles_flow.service_client")
+    def test_grounding_closes_the_which_spot_ask(
+        self, sb, _own, _details, _upsert, _flush, _q, _open_gap, mark_answered
+    ) -> None:
+        # Pinning through any path closes the open ask, or the tile re-asks for a
+        # place already on the profile (FE ask #3, issues #63).
+        table = _chain([{"gap_row_id": "g7"}])
+        sb.return_value.table.return_value = table
+        ground_affiliation("u1", "a1", "gpid1")
+        mark_answered.assert_called_once_with("g7")
+
 
 class TestFlushParkedFeatures(unittest.TestCase):
     @patch("app.circles_flow.upsert_place_feature", return_value=True)
@@ -140,17 +161,25 @@ class TestFlushParkedFeatures(unittest.TestCase):
 
 class TestGroundOptions(unittest.TestCase):
     @patch("app.places.search_places")
-    def test_uses_phrase_without_feature_notes(self, search) -> None:
+    def test_unnamed_circle_searches_the_type_keyword(self, search) -> None:
+        # No venue name to go on ("my spin class") — the type keyword is all we
+        # have, and its results are suggestions, never the user's own spot.
         search.return_value = [
             {"name": "OrangeTheory", "address": "addr", "place_id": "g1"},
             {"name": "NoId", "address": "addr", "place_id": ""},
         ]
-        aff = {"id": "a1", "circle_type": "fitness", "detail": "my spin class; has_pool=true"}
+        aff = {
+            "id": "a1",
+            "circle_type": "fitness",
+            "detail": "my spin class; has_pool=true",
+            "place_name": "",
+        }
         options = ground_options("u1", aff, block_id="b1")
-        self.assertEqual(search.call_args.kwargs["query"], "my spin class")
+        self.assertEqual(search.call_args.kwargs["query"], "gym")
         self.assertEqual(search.call_args.kwargs["included_type"], "gym")
         self.assertEqual(len(options), 1)
         self.assertEqual(options[0]["google_place_id"], "g1")
+        self.assertTrue(options[0]["suggested"])
 
     @patch("app.places.search_places", return_value=[])
     def test_query_override(self, search) -> None:
