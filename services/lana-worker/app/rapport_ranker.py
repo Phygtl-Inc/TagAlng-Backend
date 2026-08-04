@@ -120,6 +120,11 @@ def _build(
     gap = gap or {}
     question = row.get("question") or gap.get("question", "")
     why_frame = row.get("why_frame") or ""
+    # The card's "why I'm asking" line. Composed off the turn when the gap opens, so a
+    # freshly-opened row (or one from before the column existed) can still be empty —
+    # serve nothing and let _heal_reason write it for the next read; the client falls
+    # back to the teaser meanwhile.
+    why_reason = str(row.get("why_reason") or "").strip()
     if lang and lang != "en":
         # Questions are stored English-canonical and rendered into the user's language at
         # WRITE time (question_i18n) — serving is a lookup, never an LLM wait. A miss (race
@@ -130,26 +135,69 @@ def _build(
         if isinstance(entry, dict) and entry.get("question"):
             question = str(entry["question"])
             why_frame = str(entry.get("why_frame") or why_frame)
+            translated_reason = str(entry.get("why_reason") or "").strip()
+            if translated_reason:
+                why_reason = translated_reason
+            elif why_reason:
+                # The reason landed after this entry was rendered — re-render it so the
+                # next read has the line in the user's language instead of English.
+                _kick_i18n(row, question, why_frame, lang, i18n, why_reason)
+            else:
+                why_reason = ""
         elif question:
-            try:
-                from app.rapport_i18n import localize_gap_row_async
-
-                localize_gap_row_async(
-                    row["gap_row_id"], question, why_frame, lang, i18n
-                )
-            except Exception:  # noqa: BLE001 — self-heal is best-effort
-                logger.exception("rapport: i18n self-heal kickoff failed")
+            _kick_i18n(row, question, why_frame, lang, i18n, why_reason)
     built = {
         "gap_row_id": row["gap_row_id"],
         "gap_id": row["gap_id"],
         "parent_bucket": row["parent_bucket"],
         "why_frame": why_frame,
+        "why_reason": why_reason or None,
         "question": question,
         "sensitivity_tier": gap.get("sensitivity_tier", "LOW"),
         "chip_color_token": f"--d-{row['parent_bucket']}",
     }
     built.update(_place_extras(row))
+    if not why_reason:
+        _heal_reason(row, question)
     return built
+
+
+def _kick_i18n(
+    row: dict[str, Any],
+    question: str,
+    why_frame: str,
+    lang: str,
+    i18n: Any,
+    why_reason: str,
+) -> None:
+    """Background render of one gap's texts into ``lang`` (serve-time self-heal)."""
+    try:
+        from app.rapport_i18n import localize_gap_row_async
+
+        localize_gap_row_async(
+            row["gap_row_id"], question, why_frame, lang, i18n, why_reason or None
+        )
+    except Exception:  # noqa: BLE001 — self-heal is best-effort
+        logger.exception("rapport: i18n self-heal kickoff failed")
+
+
+def _heal_reason(row: dict[str, Any], question: str) -> None:
+    """Compose the missing why-line in the background so the next read has it.
+
+    Covers rows opened before the reason existed and compose calls that failed —
+    without this, an old gap would show the bare teaser forever."""
+    try:
+        from app.rapport_reasons import attach_ask_reason_async
+
+        attach_ask_reason_async(
+            str(row.get("gap_row_id") or ""),
+            str(row.get("question") or question or ""),
+            user_id=str(row.get("user_id") or "") or None,
+            why_frame=str(row.get("why_frame") or "") or None,
+            grounding=bool(row.get("affiliation_ref")),
+        )
+    except Exception:  # noqa: BLE001 — the ask still serves without a why-line
+        logger.exception("rapport: why-reason self-heal kickoff failed")
 
 
 def _place_extras(row: dict[str, Any]) -> dict[str, Any]:

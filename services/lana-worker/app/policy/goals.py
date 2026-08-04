@@ -33,10 +33,14 @@ _MAX_PER_QUEUE = 4
 CHAT_ASK_COOLDOWN_HOURS = 24
 
 _GAP_FIELDS = (
+    "gap_row_id, gap_id, question, covers_concept, why_frame, why_reason, "
+    "unlock_score, chat_asked_at"
+)
+# Pre-20260930 / pre-20260928 environments lack why_reason / chat_asked_at; step down
+# rather than degrade the whole rapport queue to empty.
+_GAP_FIELDS_NO_REASON = (
     "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score, chat_asked_at"
 )
-# Pre-20260928 environments have no chat_asked_at; retry without it rather than
-# degrade the whole rapport queue to empty.
 _GAP_FIELDS_LEGACY = (
     "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score"
 )
@@ -73,7 +77,7 @@ def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
     (and re-asked, reworded) turn after turn.
     """
     rows: list[dict[str, Any]] = []
-    for fields in (_GAP_FIELDS, _GAP_FIELDS_LEGACY):
+    for fields in (_GAP_FIELDS, _GAP_FIELDS_NO_REASON, _GAP_FIELDS_LEGACY):
         try:
             res = (
                 service_client()
@@ -101,7 +105,12 @@ def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
             "kind": "rapport_gap",
             "summary": str(r.get("question") or r.get("covers_concept") or "")[:200],
             "value_hint": _clamp01(r.get("unlock_score")),
-            "context": {"why": r.get("why_frame"), "concept": r.get("covers_concept")},
+            # why_reason is the real rationale ("so I can introduce you to neighbors
+            # who…"); the teaser is only a topic label, so it's the fallback.
+            "context": {
+                "why": r.get("why_reason") or r.get("why_frame"),
+                "concept": r.get("covers_concept"),
+            },
         }
         for r in rows
         if r.get("question") or r.get("covers_concept")

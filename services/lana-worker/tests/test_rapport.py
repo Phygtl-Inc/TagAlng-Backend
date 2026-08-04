@@ -67,7 +67,12 @@ class _Query:
             return _Result(list(self.store["selects"].get(self.table, [])))
         if self._op == "insert":
             self.store["inserts"].append((self.table, self._payload))
-            return _Result([self._payload])
+            # PostgREST echoes the inserted row WITH its generated id; the gap code
+            # reads gap_row_id off it to kick the follow-up work (i18n, why-line).
+            row = dict(self._payload) if isinstance(self._payload, dict) else self._payload
+            if isinstance(row, dict):
+                row.setdefault("gap_row_id", f"{self.table}_row_1")
+            return _Result([row])
         if self._op == "update":
             self.store["updates"].append((self.table, self._payload))
             return _Result([])
@@ -434,6 +439,132 @@ class TestRanker(unittest.TestCase):
         self.assertEqual(ask["sensitivity_tier"], "LOW")
         marked = [r for (_t2, r) in store["updates"] if r.get("status") == "asked"]
         self.assertTrue(marked)
+
+
+# ── the "why I'm asking" line on the ask card ─────────────────────────────────
+class TestAskReason(unittest.TestCase):
+    """The ⓘ line must explain what the answer DOES for the user, not name the topic."""
+
+    def test_ranker_serves_the_stored_reason(self):
+        row = {
+            "gap_row_id": "g1", "gap_id": "deepen:fit_407", "parent_bucket": "interest",
+            "why_frame": "about FIT 407 Lake Nona…",
+            "why_reason": "Knowing what you go there for lets me introduce you to "
+                          "neighbors who show up for the same thing.",
+            "question": "What do you enjoy most about your time at FIT 407 Lake Nona?",
+        }
+        with patch.object(rapport_ranker, "_heal_reason") as heal:
+            built = rapport_ranker._build(row, None)
+        self.assertTrue(built["why_reason"].startswith("Knowing what you go there for"))
+        self.assertEqual(built["why_frame"], "about FIT 407 Lake Nona…")  # teaser untouched
+        heal.assert_not_called()
+
+    def test_missing_reason_serves_none_and_composes_in_background(self):
+        # A row from before the reason existed: the client falls back to the teaser and
+        # the next read has the real line.
+        row = {
+            "gap_row_id": "g2", "gap_id": "deepen:running", "parent_bucket": "activity",
+            "why_frame": "about your running…", "question": "Which mornings do you run?",
+        }
+        with patch.object(rapport_ranker, "_heal_reason") as heal:
+            built = rapport_ranker._build(row, None)
+        self.assertIsNone(built["why_reason"])
+        heal.assert_called_once()
+
+    def test_translated_reason_wins_when_stored(self):
+        row = {
+            "gap_row_id": "g3", "gap_id": "deepen:running", "parent_bucket": "activity",
+            "why_frame": "about your running…", "why_reason": "English reason",
+            "question": "Which mornings do you run?",
+            "question_i18n": {
+                "es": {
+                    "question": "¿Qué mañanas corres?",
+                    "why_frame": "sobre tus carreras…",
+                    "why_reason": "Así puedo presentarte a vecinos que corren a esa hora.",
+                }
+            },
+        }
+        with patch.object(rapport_ranker, "_heal_reason"):
+            built = rapport_ranker._build(row, None, "es")
+        self.assertEqual(
+            built["why_reason"], "Así puedo presentarte a vecinos que corren a esa hora."
+        )
+
+    def test_reason_newer_than_translation_kicks_a_rerender(self):
+        # Reason composed after the entry was rendered → serve English once, re-render.
+        row = {
+            "gap_row_id": "g4", "gap_id": "deepen:running", "parent_bucket": "activity",
+            "why_frame": "about your running…", "why_reason": "English reason",
+            "question": "Which mornings do you run?",
+            "question_i18n": {"es": {"question": "¿Qué mañanas corres?"}},
+        }
+        with patch.object(rapport_ranker, "_heal_reason"), \
+             patch.object(rapport_ranker, "_kick_i18n") as kick:
+            built = rapport_ranker._build(row, None, "es")
+        self.assertEqual(built["why_reason"], "English reason")
+        kick.assert_called_once()
+
+    def test_compose_cleans_banned_lexicon_and_length(self):
+        from app import rapport_reasons
+
+        long_tail = " and more words" * 30
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), \
+             patch(
+                 "app.orchestrator.llm.llm_json",
+                 return_value={"reason": '  "So I can match you with moms on your block"'
+                                         + long_tail},
+             ):
+            reason = rapport_reasons.compose_ask_reason("Which mornings do you run?")
+        self.assertIsNotNone(reason)
+        self.assertLessEqual(len(reason), 140)
+        for banned in ("moms", "block", "match you with"):
+            self.assertNotIn(banned, reason)
+
+    def test_compose_returns_none_without_an_llm(self):
+        # No canned "it helps me know you better" line — nothing is stored, the teaser
+        # keeps showing, and the next read retries.
+        from app import rapport_reasons
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            self.assertIsNone(rapport_reasons.compose_ask_reason("Which mornings do you run?"))
+
+    def test_attach_stores_the_reason_on_the_gap(self):
+        from app import rapport_reasons
+
+        store = _store()
+        with patch.object(rapport_reasons, "service_client", return_value=_Supabase(store)), \
+             patch.object(
+                 rapport_reasons, "compose_ask_reason",
+                 return_value="So I can point you to neighbors out at the same hour.",
+             ):
+            written = rapport_reasons.attach_ask_reason("g9", "Which mornings do you run?")
+        self.assertIsNotNone(written)
+        patched = [p for (t, p) in store["updates"] if t == "rapport_gaps"]
+        self.assertEqual(
+            patched,
+            [{"why_reason": "So I can point you to neighbors out at the same hour."}],
+        )
+
+    def test_attach_writes_nothing_when_compose_fails(self):
+        from app import rapport_reasons
+
+        store = _store()
+        with patch.object(rapport_reasons, "service_client", return_value=_Supabase(store)), \
+             patch.object(rapport_reasons, "compose_ask_reason", return_value=None):
+            self.assertIsNone(rapport_reasons.attach_ask_reason("g9", "Which mornings?"))
+        self.assertEqual(store["updates"], [])
+
+    def test_opening_a_gap_kicks_the_reason(self):
+        store = _store()
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)), \
+             patch("app.rapport_reasons.attach_ask_reason_async") as kick:
+            rapport_gaps.open_semantic_gap(
+                "u1", "m1", "Which mornings do you run?",
+                label="Running", bucket="activity", teaser="about your running…",
+            )
+        kick.assert_called_once()
+        self.assertEqual(kick.call_args.kwargs["why_frame"], "about your running…")
+        self.assertFalse(kick.call_args.kwargs["grounding"])
 
 
 if __name__ == "__main__":
