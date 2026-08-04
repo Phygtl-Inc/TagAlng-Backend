@@ -117,6 +117,73 @@ def _forced_slots_for_kind(
     return slots
 
 
+def _wire_ask_gap_action(action: Any) -> None:
+    """Hold a policy `ask_gap` to the question that was actually vetted.
+
+    Rapport questions are written by app/rapport_synth.py under a real quality
+    bar — no yes/no, no opinions or origin stories, no consumer/brand
+    preferences, and one test each must pass: "would the answer change who they
+    connect with?". The home tile serves those strings verbatim. The chat path
+    got the same question only as a *topic hint* in candidate_goals and then
+    wrote its own sentence, so none of those bars applied to what the user read
+    — which is how "is there a favorite blue thing that cheers you up?" shipped
+    (QA 2026-08-03). A colour is not something a neighbour can share.
+
+    So: the model still writes the warm lead-in, and the QUESTION comes from the
+    vetted row. Same division of labour as _wire_ground_place_action below,
+    where the model writes the ask and real map data fills the chips.
+
+    An `ask_gap` whose goal_id resolves to no open gap is a question nothing
+    vetted — downgraded to `reply`, keeping whatever warmth it opened with.
+
+    Also stamps chat_asked_at, so candidate_goals stops offering this gap and it
+    cannot be re-asked next turn.
+    """
+    if getattr(action, "kind", None) != "ask_gap":
+        return
+    gid = str(getattr(action, "goal_id", None) or "")
+    row = None
+    if gid.startswith("gap:"):
+        from app.rapport_gaps import get_gap_row
+
+        row = get_gap_row(gid.split(":", 1)[1].strip())
+    question = str((row or {}).get("question") or "").strip()
+    if not question:
+        logging.getLogger(__name__).info("ask_gap_unvetted goal_id=%r -> reply", gid or None)
+        action.kind = "reply"
+        action.goal_id = None
+        action.chips = []
+        return
+    action.utterance = _merge_vetted_question(str(action.utterance or ""), question)
+    from app.rapport_gaps import mark_chat_asked
+
+    mark_chat_asked(str(row.get("gap_row_id") or ""))
+
+
+def _merge_vetted_question(utterance: str, question: str) -> str:
+    """Keep the model's acknowledgement, end on the vetted question.
+
+    The lead-in is the part worth keeping — it's what makes the ask feel like a
+    reply rather than a form field. Everything from the model's own question
+    mark onward is dropped, because that sentence is the unvetted one.
+    """
+    said = str(utterance or "").strip()
+    if not said:
+        return question
+    if question.lower() in said.lower():
+        return said  # already asking exactly the vetted question
+    head = said
+    for mark in ("?", "؟"):
+        if mark in head:
+            head = head.split(mark, 1)[0]
+            # Drop the truncated interrogative clause, keep the sentences before it.
+            parts = re.split(r"(?<=[.!…])\s+", head.strip())
+            head = " ".join(parts[:-1]) if len(parts) > 1 else ""
+            break
+    head = head.strip()
+    return f"{head} {question}".strip() if head else question
+
+
 def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[str, Any]) -> None:
     """Connect a policy `ground_place` decision to the REAL grounding rails.
 
@@ -256,6 +323,9 @@ def _policy_rapport_reply(
         )
     if action is None or action.kind == "handoff":
         return None
+    # Before the bookkeeping below: this can downgrade ask_gap -> reply, and a
+    # downgraded turn must not count against the ask streak or park a goal.
+    _wire_ask_gap_action(action)
     apply_defer(session_ctx, action)
     note_ask_streak(session_ctx, action)
     audit_decision(
@@ -1764,6 +1834,8 @@ def run_lana_unified_pipeline(
                 history=history, user_message=user_message,
             )
         if _action is not None and _action.kind != "handoff":
+            # Ahead of the bookkeeping: may downgrade ask_gap -> reply.
+            _wire_ask_gap_action(_action)
             apply_defer(session_ctx, _action)
             note_ask_streak(session_ctx, _action)
             audit_decision(

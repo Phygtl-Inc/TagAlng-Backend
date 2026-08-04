@@ -710,6 +710,80 @@ def reconcile_heritage_claims(user_id: str, batch: list[ExtractedClaim]) -> None
     _dismiss_claims_by_ids(sb, to_dismiss)
 
 
+def dismiss_retracted_concepts(user_id: str, concepts: list[str]) -> int:
+    """Dismiss claims the user has just walked back, in ANY bucket.
+
+    Until now retraction only existed for heritage, and only behind an explicit
+    verb: dismiss_claims_from_edit_message needs "remove/delete/drop/clear" AND a
+    word from a hardcoded nationality list. So "blue isn't really my favorite
+    color anymore" could not touch the profile — Lana agreed warmly ("our
+    favorites can shift") while the claim sat there untouched (QA 2026-08-03).
+
+    The concepts come from the extractor, which is shown the user's exact stored
+    concept slugs, so this needs no phrase matching. Conversational retraction;
+    the explicit "remove X" path is unchanged.
+    """
+    wanted = {str(c).strip().lower() for c in concepts or [] if str(c).strip()}
+    if not user_id or not wanted:
+        return 0
+    try:
+        sb = service_client()
+        res = (
+            sb.table("user_identity_claims")
+            .select("id, concept")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .execute()
+        )
+        ids = [
+            str(r.get("id"))
+            for r in (res.data or [])
+            if isinstance(r, dict) and str(r.get("concept") or "").strip().lower() in wanted
+        ]
+        if not ids:
+            return 0
+        _dismiss_claims_by_ids(sb, ids)
+        # The gap that produced this claim must not treat it as answered any more
+        # — otherwise the topic is both gone and unaskable.
+        logger.info(
+            "claims_retracted user=%s concepts=%s count=%d", user_id, sorted(wanted), len(ids)
+        )
+        return len(ids)
+    except Exception:
+        logger.exception("dismiss_retracted_concepts_failed user=%s", user_id)
+        return 0
+
+
+def drop_retracted(
+    claims: list[ExtractedClaim], retracted: list[str]
+) -> list[ExtractedClaim]:
+    """A retraction outranks anything re-emitted for the same concept this turn.
+
+    _merge_into_existing treats a re-mention as corroboration and only ever
+    raises confidence, so without this a turn that walked a claim back could
+    strengthen it instead of removing it.
+    """
+    if not retracted:
+        return claims
+    gone = {str(c).strip().lower() for c in retracted}
+    return [c for c in claims if str(c.concept or "").strip().lower() not in gone]
+
+
+def parse_retracted_concepts(data: Any) -> list[str]:
+    """Read `retracted_concepts` off the raw extractor payload, defensively."""
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("retracted_concepts")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw[:8]:
+        slug = str(item or "").strip().lower()
+        if slug and re.fullmatch(r"[a-z][a-z0-9_]{1,63}", slug) and slug not in out:
+            out.append(slug)
+    return out
+
+
 def dismiss_claims_from_edit_message(user_id: str, message: str) -> int:
     """Dismiss claims the user explicitly asked to remove."""
     low = message.lower()
@@ -1265,6 +1339,14 @@ def try_upsert_claims_from_message(
         circles_captured = int(run_circle_capture(user_id, data).get("circles") or 0)
     except Exception:
         logger.exception("circle_capture_failed")
+    # Retractions first, and they WIN over anything re-emitted this turn for the
+    # same concept. _merge_into_existing is corroboration-only ("confidence only
+    # rises"), so without this precedence a turn that walked a claim back could
+    # end up strengthening it instead.
+    retracted = parse_retracted_concepts(data)
+    if retracted:
+        dismiss_retracted_concepts(user_id, retracted)
+        claims = drop_retracted(claims, retracted)
     if nickname and not stated_nick:
         nickname = _normalize_nickname(nickname)
         persist_profile_patch(user_id, {"nickname": nickname})

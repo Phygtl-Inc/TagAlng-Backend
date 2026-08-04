@@ -294,6 +294,31 @@ def mark_answered(gap_row_id: str, answer_claim_id: str | None = None) -> None:
         logger.exception("rapport: mark_answered failed for %s", gap_row_id)
 
 
+def mark_chat_asked(gap_row_id: str) -> None:
+    """Stamp a gap Lana just asked in CONVERSATION, so candidate_goals stops
+    offering it and the policy cannot re-ask it next turn.
+
+    Deliberately NOT status='asked': that status means "showing on the home
+    tile", and rapport_ranker._pending_ask re-shows any such row verbatim — so
+    reusing it would surface every chat question as a tile as well. The status
+    stays 'open' because an asked-and-ignored question is not answered; when the
+    user does engage, mark_answered closes it properly.
+
+    QA 2026-08-03: without this the same gap was asked three turns running,
+    reworded each time so the verbatim loop guard never saw it.
+    """
+    if not gap_row_id:
+        return
+    try:
+        service_client().table("rapport_gaps").update(
+            {"chat_asked_at": _now(), "updated_at": _now()}
+        ).eq("gap_row_id", gap_row_id).execute()
+    except Exception:
+        # Pre-20260928 environments have no chat_asked_at. Never fail the turn
+        # over bookkeeping — worst case the gap stays askable, as it does today.
+        logger.warning("rapport: mark_chat_asked failed for %s", gap_row_id, exc_info=True)
+
+
 def record_skip(gap_row_id: str) -> None:
     """Bump skip count; the RPC reopens the gap or expires it after 3 skips."""
     try:
