@@ -15,8 +15,11 @@ The home-screen read path (``rapport_ranker.next_ask``) then just picks
 right after a switch, or an old row) it serves the English text and kicks a
 background render here so the next fetch self-heals.
 
-``question_i18n`` shape: ``{"pt": {"question": "...", "why_frame": "..."}}`` —
-one key per language actually used; English needs no entry.
+``question_i18n`` shape:
+``{"pt": {"question": "...", "why_frame": "...", "why_reason": "..."}}`` — one key
+per language actually used; English needs no entry. ``why_reason`` (the card's
+"why I'm asking" line) is composed a beat after the row is inserted, so its
+translation arrives with a second render of the same entry.
 """
 
 from __future__ import annotations
@@ -31,13 +34,18 @@ from app.i18n import _ai_render, normalize_lang_code  # noqa: PLC2701 — same-p
 logger = logging.getLogger(__name__)
 
 
-def render_gap_texts(question: str, why_frame: str | None, lang: str) -> dict[str, str] | None:
-    """AI-render a gap's question + teaser into ``lang``.
+def render_gap_texts(
+    question: str,
+    why_frame: str | None,
+    lang: str,
+    why_reason: str | None = None,
+) -> dict[str, str] | None:
+    """AI-render a gap's question + teaser + why-line into ``lang``.
 
-    Returns ``{"question": ..., "why_frame": ...}`` or None when there is
-    nothing to store (English/invalid lang, LLM unconfigured, render failure) —
-    callers must NOT write an entry on None, so the serve-time fallback keeps
-    seeing the miss and can retry later."""
+    Returns ``{"question": ..., "why_frame": ..., "why_reason": ...}`` or None when
+    there is nothing to store (English/invalid lang, LLM unconfigured, render
+    failure) — callers must NOT write an entry on None, so the serve-time fallback
+    keeps seeing the miss and can retry later."""
     code = normalize_lang_code(lang)
     if not code or code == "en":
         return None
@@ -51,6 +59,9 @@ def render_gap_texts(question: str, why_frame: str | None, lang: str) -> dict[st
     frame = str(why_frame or "").strip()
     if frame:
         out["why_frame"] = _ai_render(frame, code) or frame
+    reason = str(why_reason or "").strip()
+    if reason:
+        out["why_reason"] = _ai_render(reason, code) or reason
     return out
 
 
@@ -60,12 +71,13 @@ def localize_gap_row(
     why_frame: str | None,
     lang: str,
     existing_i18n: dict[str, Any] | None = None,
+    why_reason: str | None = None,
 ) -> bool:
     """Render one gap into ``lang`` and merge it into ``question_i18n``. Best-effort."""
     code = normalize_lang_code(lang)
     if not gap_row_id or not code or code == "en":
         return False
-    rendered = render_gap_texts(question, why_frame, code)
+    rendered = render_gap_texts(question, why_frame, code, why_reason)
     if not rendered:
         return False
     merged = dict(existing_i18n) if isinstance(existing_i18n, dict) else {}
@@ -87,17 +99,27 @@ def localize_user_gaps(user_id: str, lang: str) -> int:
     code = normalize_lang_code(lang)
     if not user_id or not code or code == "en":
         return 0
-    try:
-        rows = (
-            service_client()
-            .table("rapport_gaps")
-            .select("gap_row_id, question, why_frame, question_i18n")
-            .eq("user_id", user_id)
-            .in_("status", ["open", "asked"])
-            .execute()
-        ).data or []
-    except Exception:  # noqa: BLE001
-        logger.exception("rapport-i18n: open-gap load failed for %s", user_id)
+    rows: list[dict[str, Any]] = []
+    # Pre-20260930 environments have no why_reason column; retry without it rather
+    # than leave the whole backlog untranslated.
+    for fields in (
+        "gap_row_id, question, why_frame, why_reason, question_i18n",
+        "gap_row_id, question, why_frame, question_i18n",
+    ):
+        try:
+            rows = (
+                service_client()
+                .table("rapport_gaps")
+                .select(fields)
+                .eq("user_id", user_id)
+                .in_("status", ["open", "asked"])
+                .execute()
+            ).data or []
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    else:
+        logger.error("rapport-i18n: open-gap load failed for %s", user_id)
         return 0
     done = 0
     for row in rows:
@@ -105,7 +127,12 @@ def localize_user_gaps(user_id: str, lang: str) -> int:
         if isinstance(i18n, dict) and isinstance(i18n.get(code), dict):
             continue  # already rendered for this language
         if localize_gap_row(
-            row["gap_row_id"], row.get("question") or "", row.get("why_frame"), code, i18n
+            row["gap_row_id"],
+            row.get("question") or "",
+            row.get("why_frame"),
+            code,
+            i18n,
+            row.get("why_reason"),
         ):
             done += 1
     if done:
@@ -129,6 +156,7 @@ def localize_gap_row_async(
     why_frame: str | None,
     lang: str,
     existing_i18n: dict[str, Any] | None = None,
+    why_reason: str | None = None,
 ) -> None:
     """Fire-and-forget single-row render — the next-ask self-heal on a cache miss."""
     code = normalize_lang_code(lang)
@@ -136,7 +164,7 @@ def localize_gap_row_async(
         return
     threading.Thread(
         target=localize_gap_row,
-        args=(gap_row_id, question, why_frame, code, existing_i18n),
+        args=(gap_row_id, question, why_frame, code, existing_i18n, why_reason),
         daemon=True,
         name="rapport-i18n-row",
     ).start()
