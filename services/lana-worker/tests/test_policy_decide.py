@@ -6,7 +6,8 @@ import unittest
 
 from app.lingo_guard import GuardResult, find_violations, naive_clean
 from app.policy.decide import (
-    NextAction, apply_defer, ask_streak, note_ask_streak, parse_next_action,
+    MAX_CONSECUTIVE_ASKS, NextAction, _apply_ask_ceiling, _revision_note, apply_defer,
+    ask_streak, note_ask_streak, parse_next_action,
 )
 
 
@@ -296,6 +297,91 @@ class TestGoalNormalization(unittest.TestCase):
         self.assertEqual(
             sorted(c["capability_id"] for c in open_),
             ["discovery.find_peers", "sharing.host"],
+        )
+
+
+class TestAskCeiling(unittest.TestCase):
+    """`consecutive_personal_asks` was passed to the model and reasoned about in
+    prose, with nothing enforcing it — so a third and fourth back-to-back
+    personal question stayed reachable (QA 2026-08-03: three in a row, once
+    right after the user asked what she even meant)."""
+
+    def _ask(self, **kw):
+        base = {"kind": "ask_gap", "utterance": "What nights are you free?",
+                "goal_id": "gap:row1"}
+        base.update(kw)
+        return NextAction(**base)
+
+    def test_third_ask_is_deferred_not_asked(self) -> None:
+        gated = _apply_ask_ceiling(self._ask(), streak=MAX_CONSECUTIVE_ASKS)
+        self.assertEqual(gated.kind, "capture_defer")
+        self.assertEqual(gated.defer_goal_id, "gap:row1")
+
+    def test_under_the_ceiling_asks_freely(self) -> None:
+        gated = _apply_ask_ceiling(self._ask(), streak=MAX_CONSECUTIVE_ASKS - 1)
+        self.assertEqual(gated.kind, "ask_gap")
+
+    def test_ground_place_is_exempt(self) -> None:
+        """"Which gym did you mean?" finishes something the user started — it is
+        the last step before we can act, not profile-deepening."""
+        action = self._ask(kind="ground_place", goal_id="circle:gym")
+        self.assertEqual(_apply_ask_ceiling(action, streak=9).kind, "ground_place")
+
+    def test_offers_are_exempt(self) -> None:
+        action = self._ask(kind="bridge_offer", goal_id="cap:sharing.host")
+        self.assertEqual(_apply_ask_ceiling(action, streak=9).kind, "bridge_offer")
+
+    def test_deferred_goal_is_resurfaceable(self) -> None:
+        ctx: dict = {}
+        apply_defer(ctx, _apply_ask_ceiling(self._ask(), streak=MAX_CONSECUTIVE_ASKS))
+        self.assertEqual(ctx["deferred_goal_ids"], ["gap:row1"])
+
+
+class TestRevisionNote(unittest.TestCase):
+    """The utterance is what the user reads, so a kind downgrade alone leaves the
+    offending sentence on screen — every visible violation gets one retry."""
+
+    def test_ceiling_breach_asks_for_a_rewrite(self) -> None:
+        note = _revision_note(
+            NextAction(kind="ask_gap", utterance="And what's your usual unwind?"),
+            streak=MAX_CONSECUTIVE_ASKS,
+        )
+        assert note is not None
+        self.assertIn("back-to-back", note)
+        self.assertIn("capture_defer", note)
+
+    def test_distress_ask_asks_for_a_rewrite(self) -> None:
+        note = _revision_note(
+            NextAction(
+                kind="ask_gap", utterance="Is there a favorite blue thing that lifts you?",
+                distress_turn=True,
+            ),
+            streak=0,
+        )
+        assert note is not None
+        self.assertIn("distress", note)
+
+    def test_distress_reply_needs_no_revision(self) -> None:
+        self.assertIsNone(
+            _revision_note(
+                NextAction(kind="reply", utterance="I hope you rest.", distress_turn=True),
+                streak=0,
+            )
+        )
+
+    def test_ordinary_dead_end_still_flagged(self) -> None:
+        note = _revision_note(
+            NextAction(kind="reply", utterance="Thanks for sharing your go-to spot."),
+            streak=0,
+        )
+        assert note is not None
+        self.assertIn("dead", note)
+
+    def test_healthy_turn_is_left_alone(self) -> None:
+        self.assertIsNone(
+            _revision_note(
+                NextAction(kind="ask_gap", utterance="Which nights are you free?"), streak=0
+            )
         )
 
 

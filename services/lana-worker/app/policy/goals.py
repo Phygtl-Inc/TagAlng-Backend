@@ -27,6 +27,20 @@ logger = logging.getLogger(__name__)
 
 _MAX_PER_QUEUE = 4
 
+# How long a gap asked in CONVERSATION stays off the candidate list. Asked and
+# ignored is not answered, so it may come back — but not on the next turn, and
+# not three turns running (QA 2026-08-03).
+CHAT_ASK_COOLDOWN_HOURS = 24
+
+_GAP_FIELDS = (
+    "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score, chat_asked_at"
+)
+# Pre-20260928 environments have no chat_asked_at; retry without it rather than
+# degrade the whole rapport queue to empty.
+_GAP_FIELDS_LEGACY = (
+    "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score"
+)
+
 
 def _clamp01(x: Any) -> float:
     try:
@@ -35,23 +49,52 @@ def _clamp01(x: Any) -> float:
         return 0.5
 
 
-def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
-    """Open 'By the way…' questions — the one queue that's fully live today."""
+def _asked_in_chat_recently(row: dict[str, Any]) -> bool:
+    """True while a conversationally-asked gap is still cooling down."""
+    from datetime import datetime, timedelta, timezone
+
+    raw = str(row.get("chat_asked_at") or "").strip()
+    if not raw:
+        return False
     try:
-        res = (
-            service_client()
-            .table("rapport_gaps")
-            .select("gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score")
-            .eq("user_id", user_id)
-            .eq("status", "open")
-            .order("unlock_score", desc=True)
-            .limit(_MAX_PER_QUEUE)
-            .execute()
-        )
-        rows = [r for r in (res.data or []) if isinstance(r, dict)]
-    except Exception:
-        logger.exception("goals_rapport_failed user=%s", user_id)
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - when < timedelta(hours=CHAT_ASK_COOLDOWN_HOURS)
+
+
+def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
+    """Open 'By the way…' questions — the one queue that's fully live today.
+
+    Gaps Lana already asked in conversation are held back for a day: the policy
+    reads this list every turn, so without the filter one open gap was re-offered
+    (and re-asked, reworded) turn after turn.
+    """
+    rows: list[dict[str, Any]] = []
+    for fields in (_GAP_FIELDS, _GAP_FIELDS_LEGACY):
+        try:
+            res = (
+                service_client()
+                .table("rapport_gaps")
+                .select(fields)
+                .eq("user_id", user_id)
+                .eq("status", "open")
+                .order("unlock_score", desc=True)
+                # Over-fetch: the cooldown filter below runs in Python, so the
+                # cap must survive dropping a few rows.
+                .limit(_MAX_PER_QUEUE * 3)
+                .execute()
+            )
+            rows = [r for r in (res.data or []) if isinstance(r, dict)]
+            break
+        except Exception:
+            continue
+    else:
+        logger.warning("goals_rapport_failed user=%s", user_id)
         return []
+    rows = [r for r in rows if not _asked_in_chat_recently(r)][:_MAX_PER_QUEUE]
     return [
         {
             "id": f"gap:{r.get('gap_row_id')}",
