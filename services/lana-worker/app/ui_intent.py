@@ -57,6 +57,9 @@ PEER_DISCOVERY_ACTIVE_INTENTS = frozenset({
     "discovery.find_in_block",
     "discovery.show_peer_profile",
     "discovery.explain_peer_match",
+    # The recommendation cascade puts neighbors who posted a matching tip on peer rows
+    # (with the rec itself) — those are peer cards on a looking.tip turn.
+    "looking.tip",
 })
 
 _PHASE_TO_INTENT: dict[str, str] = {

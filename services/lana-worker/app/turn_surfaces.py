@@ -34,6 +34,16 @@ TURN_SCOPED_SURFACES = frozenset({
     # (peer_seek_offer_pending is NOT here: the next turn reads it to interpret
     # the tap, then clears it with None — same split as policy_chip_msgs.)
     "peer_seek_offer",
+    # Recommendation-ask offer pills ("Yes, ask my neighbors" / "No, just the list") and the
+    # post-posting manage pills ("Take it down"). Same split as above: the *_pending twins
+    # are NOT here, because the next turn reads them to interpret the answer and then
+    # clears them with None.
+    "tip_ask_offer",
+    "posting_manage",
+    # The seek-side ask card ("Gentle pediatric dentist" + its chips). Same split again:
+    # ask_draft_pending is NOT here, because the next turn reads it to recognize
+    # "Looks good" / "Let me tweak that" and then clears it with None.
+    "ask_draft",
     # Per-turn signal to main.py's background claim extractor. Must NOT persist: a
     # prior peer-discovery turn (e.g. ZIP entry) set it True, and {**old, **new} merge
     # leaked that True into the identity turn — suppressing the claim-save so the user's

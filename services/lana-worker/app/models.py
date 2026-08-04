@@ -35,6 +35,17 @@ class PeerMatchRow(BaseModel):
     match_badge: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
     actions: list["UiActionRow"] = Field(default_factory=list)
+    # ── The recommendation cascade (§12a/b) ──────────────────────────────────────────
+    # What this neighbor actually recommended, in their own words, and the tip_share row
+    # it came from (so a tap can open or attribute it). Present only on a looking.tip turn
+    # where this neighbor posted a matching tip — absent everywhere else, including on
+    # claim-affinity matches, which have no rec behind them.
+    tip_text: str | None = None
+    tip_signal_id: str | None = None
+    # Honest distance phrase ("a few minutes away", "1.4 mi away") straight from
+    # humanize_distance_text. None whenever either side's coarse point is unknown —
+    # never a guess, and never confused with matching_peer_label (a shared thread).
+    distance_text: str | None = None
 
 
 class DiscoveryWeakPeerRow(BaseModel):
@@ -153,6 +164,28 @@ class TipDraftPayload(BaseModel):
     trait_tags: list[str] = Field(default_factory=list)
     status_label: str | None = None
     outreach_copy: str | None = None
+
+
+class AskDraftChip(BaseModel):
+    """An entity chip on the ask-draft card. `field` is the part of the ask it stands for
+    (category | locality | qualifier), so a tap can re-ask just that one."""
+
+    label: str
+    tone: str = "coral"  # coral | sky | green | amber | violet
+    field: str | None = None
+
+
+class AskDraftPayload(BaseModel):
+    """What Lana understood a recommendation SEEK to be, read back before anything is
+    broadcast (frame C-4-look-tip-P2). The share-side twin is TipDraft; this is the seek
+    side, and it is a receipt of understanding — never a promise that anything was posted."""
+
+    title: str | None = None
+    detail: str | None = None
+    category: str | None = None
+    locality: str | None = None
+    chips: list[AskDraftChip] = Field(default_factory=list)
+    ready: bool = False
 
 
 class SignalSavedPayload(BaseModel):
@@ -436,6 +469,10 @@ class SendMessageRequest(BaseModel):
     # Deterministic intent from a tapped CTA (e.g. "host_event" from "A meet to host").
     # Lets the server enter a flow without depending on fuzzy classification.
     intent_hint: str | None = None
+    # The threads the user weighted in "What matters most" (intent_hint="look_tip_rerank").
+    # Labels as shown — they are matched against each row's own tags and rec text, so they
+    # only ever re-ORDER the ranking; an unmatched weight changes nothing.
+    weights: list[str] = Field(default_factory=list, max_length=8)
     # A "By the way…" tile answer (intent_hint="rapport_answer"): the gap being answered and
     # the tile's question, so the worker closes the gap and gives the profile engine context.
     rapport_gap_row_id: str | None = None
@@ -481,6 +518,9 @@ class SendMessageResponse(BaseModel):
     item_draft: ItemDraft | None = None
     tip_draft: TipDraft | None = None
     look_draft: LookDraft | None = None
+    # Seek-side ask card on a looking.tip turn (§12d). Absent on every other turn, so the
+    # FE renders nothing until it arrives.
+    ask_draft: AskDraftPayload | None = None
     routing: TurnRouting | None = None
     # See CreateSessionResponse.preferred_language — echoed every turn so the FE
     # can follow a mid-chat language switch (auto-persisted after 2 diverging turns).

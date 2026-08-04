@@ -102,6 +102,8 @@ from app.models import (
     ReverseGeocodeRequest,
     SignalPhotoUploadResponse,
     TipDraft,
+    AskDraftChip,
+    AskDraftPayload,
     ExtractedClaim,
     HighlightSpan,
     JointMomentCandidate,
@@ -714,9 +716,38 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 match_badge=str(row.get("match_badge") or "") or None,
                 trait_tags=[str(t) for t in tags[:6]],
                 actions=_ui_action_rows_from_raw(row.get("actions")),
+                # Cascade fields — present only when the row came with a neighbor's rec
+                # (looking.tip) or a resolved distance; None everywhere else.
+                tip_text=str(row.get("tip_text") or "") or None,
+                tip_signal_id=str(row.get("tip_signal_id") or "") or None,
+                distance_text=str(row.get("distance_text") or "") or None,
             )
         )
     return out
+
+
+def _ask_draft_from_ctx(ctx: dict[str, Any]) -> AskDraftPayload | None:
+    raw = ctx.get("ask_draft")
+    if not isinstance(raw, dict) or not str(raw.get("title") or "").strip():
+        return None
+    chips_raw = raw.get("chips")
+    chips = [
+        AskDraftChip(
+            label=str(c.get("label") or "").strip(),
+            tone=str(c.get("tone") or "coral"),
+            field=str(c.get("field") or "") or None,
+        )
+        for c in (chips_raw if isinstance(chips_raw, list) else [])
+        if isinstance(c, dict) and str(c.get("label") or "").strip()
+    ]
+    return AskDraftPayload(
+        title=str(raw.get("title") or "").strip(),
+        detail=str(raw.get("detail") or "").strip() or None,
+        category=str(raw.get("category") or "").strip() or None,
+        locality=str(raw.get("locality") or "").strip() or None,
+        chips=chips[:6],
+        ready=bool(raw.get("ready")),
+    )
 
 
 def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]:
@@ -1499,6 +1530,21 @@ def _run_lana_message(
         # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
         # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
         session_ctx_in["browse_skip_seed"] = True
+    # Entry into the recommendation cascade from the Find fork's second option. Documented
+    # so the fork doesn't have to depend on the classifier reading a bare ask correctly
+    # (it did on every probe — this makes it a guarantee rather than a hope).
+    #   look_tip         — this message IS a recommendation ask; answer it, post nothing.
+    #   look_tip_rerank  — re-rank the last ask by the threads in `weights`, server-side.
+    if purpose == "lana" and body.intent_hint == "look_tip":
+        session_ctx_in["tip_seek_hint"] = True
+        # A seek is the inverse of the share flow; never let both be armed.
+        session_ctx_in["tip_share_active"] = False
+        session_ctx_in["tip_draft"] = None
+    if purpose == "lana" and body.intent_hint == "look_tip_rerank":
+        session_ctx_in["tip_rerank"] = {
+            "weights": [str(w).strip() for w in (body.weights or []) if str(w).strip()][:8],
+            "widen": False,
+        }
     # A "By the way…" tile answer — route it deterministically to the profile path (save the
     # claim + reply in-thread) rather than the classifier, which would misread a bare answer
     # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
@@ -1819,6 +1865,7 @@ def _run_lana_message(
         item_draft=item_draft,
         tip_draft=tip_draft,
         look_draft=look_draft,
+        ask_draft=_ask_draft_from_ctx(merged),
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
@@ -2305,6 +2352,34 @@ def hook_event_cancel(
             ),
         )
     return {"ok": True, "notified": len(roster)}
+
+
+@app.post("/hooks/signal-matches")
+def hook_signal_matches(
+    older_than_minutes: int = 10,
+    limit: int = 200,
+    x_sweep_token: str | None = Header(default=None),
+):
+    """Deliver match notifications that no live turn carried (a crashed turn, or an insert
+    that didn't come from a Lana turn).
+
+    The normal path needs nothing scheduled: save_local_signal drains and delivers inside the
+    turn that created the match. This is the safety net — correct to call never, hourly, or
+    by hand.
+
+    Auth is a shared secret (SIGNAL_SWEEP_TOKEN), not a user session: it fans out to other
+    people's recipients, so it is an operator action. Fails CLOSED — with no token configured
+    the endpoint refuses rather than standing open.
+    """
+    expected = os.environ.get("SIGNAL_SWEEP_TOKEN", "").strip()
+    if not expected or str(x_sweep_token or "").strip() != expected:
+        raise HTTPException(status_code=403, detail="forbidden")
+    from app.signal_match_notify import sweep_stale_signal_matches
+
+    notified = sweep_stale_signal_matches(
+        older_than_minutes=int(older_than_minutes), limit=int(limit)
+    )
+    return {"ok": True, "notified": notified}
 
 
 @app.post("/lana/places/search", response_model=PlaceSearchResponse)

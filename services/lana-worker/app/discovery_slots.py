@@ -310,6 +310,13 @@ _SYSTEM = (
     "tip_share (sharing.tip) = the user NAMES a specific provider/place THEY vouch for: "
     "'I recommend Dr Smith', 'try Dr Lee', 'my favorite pizza is Tony's', 'Dr Patel is a great dentist'. "
     "If no specific name/place is given, it is NOT tip_share. "
+    "NEVER flip an ASK into a SHARE. When RECENT TURNS show the user ASKING for a "
+    "recommendation and Lana OFFERING to ask their neighbors, their reply to that offer "
+    "('yes, ask my neighbors', 'yes please', 'no thanks', 'in my block obv') is an ANSWER to "
+    "Lana's offer — goal=continue — and is NEVER tip_share/sharing.tip, no matter how many "
+    "times the word 'recommendation' appears in the context. The person who asked for a "
+    "doctor does not have a doctor to recommend; classifying that as sharing records the "
+    "exact opposite of what they said. Only a NAMED provider in THEIR OWN words is a share. "
     "NEVER tip_seek when user wants to FIND/SHOW NEIGHBORS by heritage, life stage, or traits "
     "(find italian moms, find italian dads, brazilian parents on my block) — that is discovery.find_by_attrs. "
     "host_meet = the user is the ORGANIZER who wants to bring neighbors together for a gathering THEY "
@@ -439,7 +446,13 @@ _SYSTEM = (
     "looking.swap|looking.meet|looking.tip|sharing.swap|sharing.host|sharing.tip; "
     "tier.send_nudge|tier.respond_nudge|social.list_intros|social.propose_intro; "
     "auth.signup_phone|auth.login_phone|auth.logout|auth.upload_photo; "
-    "settings.change_name|settings.change_zip|settings.notification_prefs; "
+    "settings.change_name|settings.change_zip|settings.notification_prefs|settings.remove_posting; "
+    "settings.remove_posting = the user wants something they POSTED taken down / undone / "
+    "cancelled — an ask or offer Lana sent to their neighbors ('remove my posting', 'take that "
+    "down', 'cancel that ask', 'I don't want that posted any more', 'undo it', 'delete my "
+    "request'). goal=chat, in_discovery=false. This is about WITHDRAWING an existing post, so it "
+    "is NEVER save_signal / looking.* / sharing.* — never re-post what they asked you to remove. "
+    "Cancelling an EVENT they are hosting is not this (that is the host flow). "
     "help.what_can_you_do|help.who_are_you; "
     "system.out_of_scope (set with goal=out_of_scope for an errand TagAlng cannot do); "
     "system.unsafe (set with goal=unsafe for inappropriate/abusive content Lana must refuse); "
@@ -828,6 +841,48 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "'nope, not those', 'it's not any of them'), that is abandon=true — they are declining "
             "the options, not answering with one. A reply that rejects them but NAMES a different "
             "place ('no, it's the one by Publix') is a normal answer (goal=chat, abandon=false)"
+        )
+    # An armed offer IS a capture — the highest-priority one, because its accept WRITES.
+    # Before this, an armed offer reported active_capture=none: Lana had just answered a
+    # recommendation ask and offered to ask the neighbors, the user tapped "Yes, ask my
+    # neighbors", and with nothing but the transcript (whose recent bubbles were thick with
+    # the words "recommendation" and "share your tip") the router read the ACCEPT as
+    # sharing.tip and the share capture recorded them as RECOMMENDING a doctor — the inverse
+    # of their ask (dev QA 2026-08-04). The state line now says what was offered.
+    tip_offer = session_ctx.get("tip_ask_offer_pending")
+    posting_offer = session_ctx.get("posting_manage_pending")
+    if isinstance(tip_offer, dict) or isinstance(posting_offer, dict):
+        if isinstance(tip_offer, dict):
+            what = str(tip_offer.get("detail") or "").strip()
+            offered = (
+                "Lana just ANSWERED the user's request for a recommendation"
+                + (f' ("{what[:80]}")' if what else "")
+                + " and offered ONE thing: to also ask their neighbors nearby for a "
+                "recommendation of their own. Nothing has been posted yet."
+            )
+        else:
+            what = str(posting_offer.get("detail") or "").strip()
+            offered = (
+                "Lana just posted the user's ask to their neighbors"
+                + (f' ("{what[:80]}")' if what else "")
+                + " and offered to take that posting down."
+            )
+        return (
+            "offer_reply — "
+            + offered
+            + " The latest message is most likely their ANSWER to that offer: an accept "
+            "('yes', 'yes please', 'go ahead', 'ask them'), a decline ('no thanks', 'not "
+            "now', 'maybe later', 'I didn't want anything posted'), or a request to take it "
+            "down. Classify it as goal=continue and let the engine act on it. "
+            "*** It is NEVER tip_share / sharing.tip. *** The user ASKED for a "
+            "recommendation; they do not have one to give, so reading their 'yes' as them "
+            "SHARING a recommendation records the exact opposite of what they said — no "
+            "matter how often the words 'recommend' or 'tip' appear in the recent turns. "
+            "Only a NAMED provider or place in THEIR OWN words is a share. A genuinely new "
+            "request (a different search, a refinement like 'kid-friendly ones' or 'show me "
+            "all of them', an unrelated question) is classified fresh as normal; and a "
+            "message about how they FEEL, a symptom, distress or danger is ALWAYS its own "
+            "safety lane, never an offer reply"
         )
     if session_ctx.get("look_meet_active"):
         return (

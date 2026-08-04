@@ -354,6 +354,66 @@ def peer_seek_offer_actions() -> list[dict[str, Any]]:
     ]
 
 
+def tip_ask_offer_actions(rec_chips: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Pills under a recommendation answer — the offer that gates the posting.
+
+    The accept/decline messages are the canonical English strings discovery_route compares
+    against when the LLM offer-reader is unavailable (_read_offer_reply), so they must match
+    _TIP_ASK_ACCEPT_MSG / _TIP_ASK_DECLINE_MSG exactly. Labels are localized at render.
+
+    The reply's LAST question is the offer, so accept leads. One refine chip from the
+    personalizer ("Vegetarian", "See all restaurants") rides along when there is one —
+    otherwise arming the offer would silently hide the angles the personalizer just found."""
+    rows = [
+        _action(
+            action_id="tip_ask_yes",
+            label="Yes, ask my neighbors",
+            message="Yes, ask my neighbors",
+            style="primary",
+        )
+    ]
+    for i, c in enumerate(rec_chips or []):
+        if not isinstance(c, dict):
+            continue
+        label = str(c.get("label") or "").strip()
+        message = str(c.get("message") or "").strip()
+        if label and message:
+            rows.append(
+                _action(
+                    action_id=f"tip_rec_{i}", label=label, message=message, style="secondary"
+                )
+            )
+            break
+    rows.append(
+        _action(
+            action_id="tip_ask_no",
+            label="No, just the list",
+            message="No, just the list",
+            style="secondary",
+        )
+    )
+    return rows
+
+
+def posting_manage_actions() -> list[dict[str, Any]]:
+    """Pills after a posting went out — the removal offer is now real (close_local_signal),
+    so it is safe to show. Message must match discovery_route._POSTING_REMOVE_MSG."""
+    return [
+        _action(
+            action_id="posting_show_log",
+            label="Show my neighborhood log",
+            message="show my block log",
+            style="primary",
+        ),
+        _action(
+            action_id="posting_remove",
+            label="Take it down",
+            message="Take my posting down",
+            style="secondary",
+        ),
+    ]
+
+
 def event_created_actions() -> list[dict[str, Any]]:
     """After an event publishes the FE renders the native CTAs (Open the meet up /
     Share with a mom) — those navigate / open the share sheet, which a message-sending
@@ -457,6 +517,21 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
     # options. Renders on ui_intent chat (zero matches never reach show_peer_preview).
     if ctx.get("peer_seek_offer"):
         return peer_seek_offer_actions()
+
+    # Recommendation-ask surfaces. These render regardless of ui_intent because the answer
+    # turn no longer writes a signal (so there is no signal_saved / UI_INTENT_SIGNAL_SAVED to
+    # hang them off) — the chips must answer the question the reply actually ended on:
+    #   tip_ask_offer   → "want me to ask your neighbors too?" (the write is a tap away)
+    #   posting_manage  → the posting went out; "Take it down" is now backed by a real RPC
+    #   rec_chips       → the angle pick / widen chips when no offer was armed this turn
+    rec_chips_any = ctx.get("rec_chips")
+    rec_chips_any = rec_chips_any if isinstance(rec_chips_any, list) else []
+    if ctx.get("tip_ask_offer"):
+        return tip_ask_offer_actions(rec_chips_any)
+    if ctx.get("posting_manage"):
+        return posting_manage_actions()
+    if rec_chips_any:
+        return rec_chip_actions(rec_chips_any)
 
     # Concierge reply to a rapport tile answer — suggested answers or one action chip.
     # Also render regardless of ui_intent (the turn is a plain "chat" reply).

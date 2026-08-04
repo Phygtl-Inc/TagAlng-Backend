@@ -235,7 +235,45 @@ def _infer_tip_category(detail: str) -> str | None:
     return None
 
 
-def _confirm_prompt(field: str, attempt: int) -> str:
+def _compose_where_hint_ask(detail: str, attempt: int) -> str:
+    """The where-ask for a tip being SHARED, grounded in the tip itself.
+
+    The old line was "I have most of it. **Where, roughly?**" — contextless mechanic-talk
+    that names neither what it has nor what it wants, and reads as a non-sequitur whenever
+    the draft holds no real tip (dev QA 2026-08-04: a doctor ASK was misrouted into this
+    cascade and the user got "Where, roughly?" with nothing to place). Grounding it in the
+    detail makes the ask self-explanatory, and when the detail is vague the model naturally
+    asks WHICH one they mean.
+    """
+    from app.reply_compose import compose_reply
+
+    what = str(detail or "").strip()
+    fallback = (
+        "A neighborhood or cross-street is enough — or say skip."
+        if attempt > 1
+        else "Whereabouts is it — a neighborhood or cross-street is plenty."
+    )
+    if not what:
+        return fallback
+    return compose_reply(
+        goal=(
+            "The user is sharing a local recommendation with their neighbors and you need "
+            "roughly WHERE it is before you post it. Ask for that in one short question, "
+            "naming what they're recommending so the question explains itself. A "
+            "neighborhood or cross-street is enough. If what they gave you is vague and "
+            "names no specific place or provider, ask WHICH one they mean instead."
+            + (" They already skipped past this once — keep it lighter and offer to skip."
+               if attempt > 1 else "")
+        ),
+        facts=[f"What they're recommending: {what[:120]}"],
+        fallback=fallback,
+        max_sentences=1,
+    )
+
+
+def _confirm_prompt(field: str, attempt: int, *, detail: str = "") -> str:
+    if field == "where_hint":
+        return _compose_where_hint_ask(detail, attempt)
     if field == "stage":
         if attempt <= 1:
             return "Quick one — is this for a kid or an adult?"
@@ -248,10 +286,6 @@ def _confirm_prompt(field: str, attempt: int) -> str:
         if attempt <= 1:
             return "When works for you — weekday morning, weekend, something else?"
         return "Any rough timing — mornings, weekends, flexible?"
-    if field == "where_hint":
-        if attempt <= 1:
-            return "I have most of it. **Where, roughly?**"
-        return "A neighborhood or cross-street is enough — or say skip."
     if field == "category":
         if attempt <= 1:
             return "What kind of tip is this — health, food, home, activities, or something else?"
@@ -294,7 +328,11 @@ def needs_confirm(draft: dict[str, Any]) -> tuple[bool, str, str]:
     if intent in ("tip_seek", "tip_share"):
         if intent == "tip_share" and not draft.get("where_hint") and not _has_where_hint(detail):
             field = "where_hint"
-            return True, field, _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
+            return (
+                True,
+                field,
+                _confirm_prompt(field, int(attempts.get(field, 0)) + 1, detail=detail),
+            )
     return False, "", ""
 
 
@@ -453,7 +491,11 @@ def advance_signal_draft(
         if need:
             updated["phase"] = PHASE_SIGNAL_CONFIRM
             updated["confirm_field"] = field
-            prompt = _confirm_prompt(field, int(attempts.get(field, 0)) + 1)
+            prompt = _confirm_prompt(
+                field,
+                int(attempts.get(field, 0)) + 1,
+                detail=str(updated.get("detail") or ""),
+            )
             return updated, prompt, False
         updated["phase"] = PHASE_SIGNAL_LISTENING
         return updated, None, True
