@@ -49,6 +49,13 @@ TURN_SCOPED_SURFACES = frozenset({
     # leaked that True into the identity turn — suppressing the claim-save so the user's
     # self-description never persisted. Re-stamped each turn by handlers that need it.
     "skip_claims_background_extract",
+    # The look screen's "YOUR COMMUNITIES" card. Stamped only by the looking-open turn
+    # (activity_browse's P1 ask); without this the {**old, **new} merge would keep
+    # re-rendering it under every later reply in the session.
+    "communities_card",
+    # Nearby joinable communities listed by a discovery.communities turn — the cards
+    # belong to the turn that answered the ask, not to every later reply.
+    "community_discovery",
     # A one-shot Supabase instruction the FE executes (send/verify an OTP, logout).
     # Without this a login turn's send_login_otp survived the merge and kept
     # re-announcing an auth stage on unrelated later turns.

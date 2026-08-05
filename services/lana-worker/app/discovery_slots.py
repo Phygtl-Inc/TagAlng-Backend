@@ -441,7 +441,8 @@ _SYSTEM = (
     "When goal=show_block_log set intro_direction null. "
     "LAYER 1 CATALOG — set linear_intent to the best match (confidence ≥ 0.85 when sure): "
     "discovery.find_peers|discovery.find_by_attrs|discovery.find_in_block|discovery.find_activities|"
-    "discovery.block_log|discovery.show_peer_profile|discovery.explain_peer_match; "
+    "discovery.block_log|discovery.show_peer_profile|discovery.explain_peer_match|"
+    "discovery.communities; "
     "identity.add_claim|identity.edit_claim|identity.complete_profile|identity.show_my_profile; "
     "looking.swap|looking.meet|looking.tip|sharing.swap|sharing.host|sharing.tip; "
     "tier.send_nudge|tier.respond_nudge|social.list_intros|social.propose_intro; "
@@ -459,6 +460,15 @@ _SYSTEM = (
     "system.medical (set with goal=medical for a health/medical concern — see MEDICAL below); "
     "system.crisis (set with goal=crisis for emotional distress or danger — see CRISIS below). "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
+    "Use discovery.communities when the user asks about COMMUNITIES / groups / places people "
+    "belong to — theirs or ones nearby to join ('show me communities around me', 'what "
+    "communities am I in', 'any groups near me', 'communities I can join', 'which gyms do "
+    "people here go to', 'is there a book club nearby'). goal=chat, in_discovery=false. "
+    "A community is a PLACE people belong to (a gym, a church, a school, a club) — this is "
+    "NEVER discovery.find_by_attrs on the word 'community' and NEVER goal=peers: the user is "
+    "asking about places, not about neighbors whose trait is 'community'. Asking to be "
+    "introduced to PEOPLE stays find_peers; asking what's HAPPENING (events, this weekend) "
+    "stays find_activities. "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
     "identity.add_claim, goal=chat, in_discovery=false, identity_snippet=null "
@@ -883,6 +893,37 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "all of them', an unrelated question) is classified fresh as normal; and a "
             "message about how they FEEL, a symptom, distress or danger is ALWAYS its own "
             "safety lane, never an offer reply"
+        )
+    # The share capture asks tailored follow-ups ("What type of doctor is Dr. Mitchel?") and
+    # gets bare fragments back ("family doctor"). With active_capture=none the router read
+    # that fragment as a fresh tip_seek — the classifier is told a share must NAME a provider
+    # — so the sticky lane released and Lana answered the user's own recommendation with
+    # Google listings, mid-share (dev QA 2026-08-05). The state line now says whose question
+    # the fragment is answering.
+    if session_ctx.get("tip_share_active"):
+        pending_q = str(session_ctx.get("tip_pending_question") or "").strip()
+        draft = session_ctx.get("tip_draft") if isinstance(session_ctx.get("tip_draft"), dict) else {}
+        named = str((draft or {}).get("name") or "").strip()
+        q_line = f' Lana\'s pending question was: "{pending_q[:300]}".' if pending_q else ""
+        named_line = f' The provider they are vouching for is already captured: "{named[:80]}".' if named else ""
+        return (
+            "tip_share — the user is SHARING a recommendation THEY vouch for, and Lana is "
+            "filling in the missing pieces of that tip."
+            + named_line
+            + q_line
+            + " A reply that ANSWERS that question is goal=save_signal with "
+            "signal_intent=tip_share (linear_intent sharing.tip) — not goal=chat — even when "
+            "it is a bare NOUN PHRASE naming the category, the "
+            "speciality, the cuisine or the trait of what they are recommending ('family "
+            "doctor', 'pediatrician', 'Italian', 'great with toddlers', 'Lake Nona'): they "
+            "are DESCRIBING the provider they already named, not asking you to find one. "
+            "*** Such a reply is NEVER tip_seek / looking.tip. *** The rule that a share must "
+            "name a specific provider applies to the tip as a WHOLE, not to this one reply — "
+            "reading it as a seek makes Lana answer the user's own recommendation with a list "
+            "of places, the inverse of what they said. Only an explicit REQUEST for something "
+            "to be found for them ('actually, can you find me a dentist?', 'who do my "
+            "neighbors use?') is a PIVOT — classify that fresh so it leaves the share; and a "
+            "reply that backs out ('never mind', 'I don't want to share it') is abandon=true"
         )
     if session_ctx.get("look_meet_active"):
         return (

@@ -182,10 +182,39 @@ come alive. What changes per mode:
 - Fail-open everywhere: any gate lookup error proceeds ungated — a gating bug
   must never lock discovery. State reads are the stored `zip_unlock` row (no
   recount on the hot path; missing rows recount once, read-repair style).
-- `capability_index.required_state` is now populated to match (migration
-  `20260908`): `looking.meet` + `discovery.find_peers` → `{zip_open}`,
-  `sharing.*` → `{}` explicitly, `discovery.find_activities` stays `{}` on
-  purpose (browse availability is never state-gated; only its empty copy is).
+- **Communities are not gated at all** — not by mode, not by state.
+  `/lana/circles/discover` never consults the gate: it exposes no member
+  identities, and an existing community is supply that already exists (the same
+  reason a host's event stays visible). Membership is what unlocks names.
+- `capability_index.required_state` deliberately carries **no** area-state
+  predicate for discovery (migration `20261005`): a static array cannot say
+  "blocked in hard mode only", and the mode-blind `{zip_open}` seeded by
+  `20260908` made all three discovery capabilities vanish from `decide_turn` in
+  any not-open area — soft mode included, which is precisely what soft mode is
+  not supposed to do. The mode-aware rule lives in
+  `zip_unlock.discovery_zip_gate` and nowhere else. Verification-style
+  predicates still belong here; area-state ones do not.
+
+#### Amendment reverted: browse is not blocked pre-open (2026-08-05)
+
+Between 2026-07-30 and 2026-08-05 the code blocked `browse` in **every** gate
+mode, citing `LANA_RAPPORT_BRIDGE_SPEC_v1`. That contradicted this section
+("nothing is blocked" in soft; supply-aware in any mode) and had two real costs:
+a host's event was invisible to the neighbours it was created for, and — combined
+with the `capability_index` gate above — any discovery-shaped ask in a warming
+area got the "your area's just getting started" bridge, which then asserted that
+nothing existed without counting anything (observed on prod in a ZIP that has a
+2-member community).
+
+The QA symptom the amendment targeted — a lone off-topic event card answering
+"meet other runners" in a waitlist ZIP — is handled precisely by the **relevance
+floor** shipped in the same batch (`look_meet`, bridge spec §2): zero-relevance
+events are dropped, real matching ones are not. Blocking the surface was the
+blunt version of that fix.
+
+Unchanged by the revert: **peers still locks in hard mode**. Sparse-area intros
+are junk-quality and privacy-risky, and that remains the one surface that truly
+locks.
 
 ## Contract for the onion matcher (other dev)
 

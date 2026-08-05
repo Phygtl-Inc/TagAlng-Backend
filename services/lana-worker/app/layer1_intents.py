@@ -15,6 +15,10 @@ LINEAR_INTENTS: frozenset[str] = frozenset({
     "discovery.block_log",
     "discovery.show_peer_profile",
     "discovery.explain_peer_match",
+    # Communities (the user-facing word; "circle" stays backstage). Covers both
+    # "what communities am I in" and "what's around me to join" — one lane, because
+    # the honest answer to either is usually both halves.
+    "discovery.communities",
     # Identity
     "identity.add_claim",
     "identity.edit_claim",
@@ -336,6 +340,13 @@ def _apply_discovery_linear_slots(out: dict[str, Any], linear: str, *, msg: str)
     elif linear == "discovery.show_peer_profile":
         out["goal"] = "chat"
         out["in_discovery"] = False
+    elif linear == "discovery.communities":
+        # Answered from circle_affiliations + places, not from the peer matcher — so
+        # it must NOT carry goal=peers (that is what turned "show me communities
+        # around me" into a keyword search for neighbors "interested in community").
+        out["goal"] = "chat"
+        out["in_discovery"] = False
+        out.pop("attr_filter", None)
     elif linear == "identity.add_claim":
         out["goal"] = "chat"
         out["in_discovery"] = False
@@ -403,7 +414,12 @@ def utterance_indicates_tip_seek(msg: str) -> bool:
     # NOT a request for a teacher/doctor. Only treat it as a seek if a request cue exists.
     if _SELF_DESCRIPTION_RE.search(text) and not _TIP_SEEK_CUE_RE.search(text):
         return False
-    if _TIP_SEEK_SERVICE_RE.search(text):
+    # A service noun ALONE is not a request. "family doctor" — the answer to Lana's own
+    # "what type of doctor is Dr. Mitchel?" — matched here and turned a share into a seek
+    # the moment the sticky lane released, no matter what the classifier said. This
+    # fallback fires only when the words themselves carry a request cue; every ambiguous
+    # read belongs to the AI classifier, which owns intent.
+    if _TIP_SEEK_SERVICE_RE.search(text) and _TIP_SEEK_CUE_RE.search(text):
         return True
     return bool(_TIP_SEEK_UTTERANCE_RE.search(text) and _TIP_SEEK_SERVICE_RE.search(text))
 

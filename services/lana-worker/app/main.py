@@ -104,6 +104,17 @@ from app.models import (
     TipDraft,
     AskDraftChip,
     AskDraftPayload,
+    CommunitiesCardPayload,
+    CommunityCardRow,
+    CommunityDiscoveryResponse,
+    CommunityDiscoveryRow,
+    CommunityEventRow,
+    CommunityJoinResponse,
+    CommunityFeatureRow,
+    CommunityMemberPreviewRow,
+    CommunityMemberRow,
+    CommunityMembersResponse,
+    CommunityProfileResponse,
     ExtractedClaim,
     HighlightSpan,
     JointMomentCandidate,
@@ -750,6 +761,69 @@ def _ask_draft_from_ctx(ctx: dict[str, Any]) -> AskDraftPayload | None:
     )
 
 
+def _communities_from_ctx(ctx: dict[str, Any]) -> CommunitiesCardPayload | None:
+    """The look screen's communities card. Turn-scoped (app/turn_surfaces.py), so it
+    serializes only on the turn that stamped it."""
+    raw = ctx.get("communities_card")
+    if not isinstance(raw, dict):
+        return None
+    items_raw = raw.get("items")
+    items: list[CommunityCardRow] = []
+    for row in items_raw if isinstance(items_raw, list) else []:
+        if not isinstance(row, dict) or not str(row.get("affiliation_id") or "").strip():
+            continue
+        items.append(
+            CommunityCardRow(
+                affiliation_id=str(row["affiliation_id"]),
+                place_id=str(row.get("place_id") or "") or None,
+                place_name=str(row.get("place_name") or "") or None,
+                place_address=str(row.get("place_address") or "") or None,
+                circle_type=str(row.get("circle_type") or "") or None,
+                relation=str(row.get("relation") or "") or None,
+                emoji=str(row.get("emoji") or "") or None,
+                member_count=int(row.get("member_count") or 0),
+                meets_this_week=int(row.get("meets_this_week") or 0),
+                active=bool(row.get("active")),
+                status_line=str(row.get("status_line") or "") or None,
+            )
+        )
+    if not items:
+        return None
+    return CommunitiesCardPayload(
+        items=items,
+        total=int(raw.get("total") or len(items)),
+        more_count=int(raw.get("more_count") or 0),
+    )
+
+
+def _community_discovery_from_ctx(ctx: dict[str, Any]) -> CommunityDiscoveryResponse | None:
+    """Nearby joinable communities listed by a chat community ask. Turn-scoped."""
+    raw = ctx.get("community_discovery")
+    if not isinstance(raw, dict):
+        return None
+    rows_raw = raw.get("communities")
+    rows = [
+        CommunityDiscoveryRow(
+            place_id=str(r.get("place_id") or ""),
+            place_name=r.get("place_name"),
+            place_address=r.get("place_address"),
+            place_type=r.get("place_type"),
+            relation=r.get("relation"),
+            emoji=r.get("emoji"),
+            zip=r.get("zip"),
+            member_count=int(r.get("member_count") or 0),
+            distance_text=r.get("distance_text"),
+            is_member=bool(r.get("is_member")),
+            status_line=r.get("status_line"),
+        )
+        for r in (rows_raw if isinstance(rows_raw, list) else [])
+        if isinstance(r, dict) and str(r.get("place_id") or "").strip()
+    ]
+    if not rows:
+        return None
+    return CommunityDiscoveryResponse(communities=rows, radius_meters=0)
+
+
 def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]:
     raw = ctx.get("activity_previews")
     if not isinstance(raw, list):
@@ -1005,6 +1079,8 @@ def _onboarding_fields(
         "peer_matches": peers,
         "discovery_surface": discovery_surface,
         "activity_previews": activities,
+        "communities": _communities_from_ctx(ctx),
+        "community_discovery": _community_discovery_from_ctx(ctx),
         "place_suggestions": _place_suggestions_from_ctx(ctx),
         "auth_intent": ctx.get("auth_intent"),
         "login_phone": ctx.get("login_phone"),
@@ -2568,6 +2644,250 @@ def post_circles_ground(
         },
     )
     return result
+
+
+class CommunityProfileBody(_BaseModel):
+    # Either identifier works: the affiliation row from /lana/circles/mine, or the
+    # canonical place id it carries. Membership is re-checked either way.
+    affiliation_id: str | None = None
+    place_id: str | None = None
+
+
+class CommunityMembersBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    limit: int = 20
+    offset: int = 0
+
+
+def _community_error(exc: ValueError) -> HTTPException:
+    detail = str(exc)
+    status = 400 if detail == "place_required" else 404
+    return HTTPException(status_code=status, detail=detail)
+
+
+class CommunityDiscoverBody(_BaseModel):
+    # Optional name filter ("orange", "st luke") — everything nearby when absent.
+    query: str | None = None
+    limit: int = 20
+
+
+class CommunityJoinBody(_BaseModel):
+    place_id: str
+    # The joiner's own framing, if the UI asked ("it's my gym"). Defaults to the
+    # place's advisory type — the user's framing is never taken from other members.
+    circle_type: str | None = None
+
+
+@app.post("/lana/circles/discover", response_model=CommunityDiscoveryResponse)
+def post_circles_discover(
+    body: CommunityDiscoverBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Communities near the caller that already have members — the ones they could
+    join (C-CIRCLE-COMM-DISCOVER).
+
+    Returns places, member counts and coarse distances, and deliberately NO member
+    identities: who is at a place stays members-only (§F), so joining is what earns
+    the names. `is_member` marks the caller's own places instead of hiding them."""
+    auth = verify_auth(authorization)
+    from app.community_discovery import discover_communities, radius_meters
+
+    # Distance phrases come back rendered ("1.4 mi away" / "2,3 km"), so the caller's
+    # own locale decides the units — same rule as the peer `_near` RPCs.
+    locale = (recipient_langs([auth.user_id]).get(auth.user_id) or "en").strip() or "en"
+    rows = discover_communities(
+        auth.user_id,
+        limit=max(1, min(int((body.limit if body else 20) or 20), 40)),
+        query=(body.query if body else None),
+        locale=locale,
+    )
+    return CommunityDiscoveryResponse(
+        communities=[
+            CommunityDiscoveryRow(
+                place_id=str(r.get("place_id") or ""),
+                place_name=r.get("place_name"),
+                place_address=r.get("place_address"),
+                place_type=r.get("place_type"),
+                relation=r.get("relation"),
+                emoji=r.get("emoji"),
+                zip=r.get("zip"),
+                member_count=int(r.get("member_count") or 0),
+                distance_text=r.get("distance_text"),
+                is_member=bool(r.get("is_member")),
+                status_line=r.get("status_line"),
+            )
+            for r in rows
+            if str(r.get("place_id") or "").strip()
+        ],
+        radius_meters=int(radius_meters()),
+    )
+
+
+@app.post("/lana/circles/join", response_model=CommunityJoinResponse)
+def post_circles_join(
+    body: CommunityJoinBody,
+    authorization: str | None = Header(default=None),
+):
+    """Join a community found in Lana — a self-claim ("I go here too"), so it takes
+    effect at once with no approval and nobody notified. Leaving is
+    /lana/circles/remove, which drops it from matching immediately.
+
+    Provenance: a fresh row is source=confirmed_via='community_join'; joining a place
+    the user had already MENTIONED confirms that candidate instead, keeping
+    source='chat_extraction' and recording confirmed_via='community_join'."""
+    auth = verify_auth(authorization)
+    from app.community_discovery import join_community, joined_via_label
+
+    try:
+        result = join_community(
+            auth.user_id,
+            (body.place_id or "").strip(),
+            circle_type=(body.circle_type or "").strip().lower() or None,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 400 if detail in ("place_required", "join_failed") else 404
+        raise HTTPException(status_code=status, detail=detail) from exc
+    if not result.get("already_member"):
+        amplitude_track(
+            "circle_joined",
+            user_id=auth.user_id,
+            event_properties={
+                "place_id": result.get("place_id"),
+                # The product question this whole pair exists to answer.
+                "source": result.get("source"),
+                "confirmed_via": result.get("confirmed_via"),
+                "promoted_from_candidate": bool(result.get("promoted_from_candidate")),
+            },
+        )
+    return CommunityJoinResponse(
+        affiliation_id=str(result.get("affiliation_id") or ""),
+        place_id=str(result.get("place_id") or ""),
+        place_name=result.get("place_name"),
+        status=str(result.get("status") or "confirmed"),
+        already_member=bool(result.get("already_member")),
+        source=result.get("source"),
+        confirmed_via=result.get("confirmed_via"),
+        joined_via_label=joined_via_label(
+            result.get("confirmed_via"), result.get("source")
+        ),
+        promoted_from_candidate=bool(result.get("promoted_from_candidate")),
+    )
+
+
+@app.post("/lana/circles/profile", response_model=CommunityProfileResponse)
+def post_circles_profile(
+    body: CommunityProfileBody,
+    authorization: str | None = Header(default=None),
+):
+    """One community's profile (C-CIRCLE-COMM-PROFILE): who's there, what members said
+    it has, what's coming up, and the create-a-meet / invite CTAs.
+
+    Members-only by construction — the caller must hold a confirmed, non-dismissed
+    affiliation at the place, or this 404s `not_a_member` (§F: a place is named to the
+    people who go there, never browsed as a directory)."""
+    auth = verify_auth(authorization)
+    from app.community_surface import community_profile
+
+    try:
+        data = community_profile(
+            auth.user_id,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+            place_id=(body.place_id or "").strip() or None,
+            phone_verified=auth.phone_verified,
+        )
+    except ValueError as exc:
+        raise _community_error(exc) from exc
+    return CommunityProfileResponse(
+        place_id=str(data["place_id"]),
+        affiliation_id=str(data.get("affiliation_id") or "") or None,
+        place_name=data.get("place_name"),
+        place_address=data.get("place_address"),
+        circle_type=data.get("circle_type"),
+        circle_key=data.get("circle_key"),
+        relation=data.get("relation"),
+        emoji=data.get("emoji"),
+        detail=data.get("detail"),
+        member_count=int(data.get("member_count") or 0),
+        active=bool(data.get("active")),
+        status_line=data.get("status_line"),
+        description=data.get("description"),
+        features=[
+            CommunityFeatureRow(
+                key=str(f.get("key") or ""),
+                label=str(f.get("label") or ""),
+                sub_group=str(f.get("sub_group") or "") or None,
+            )
+            for f in (data.get("features") or [])
+            if isinstance(f, dict) and str(f.get("label") or "").strip()
+        ],
+        member_preview=[
+            CommunityMemberPreviewRow(
+                peer_user_id=str(m.get("peer_user_id") or ""),
+                nickname=m.get("nickname"),
+                avatar_url=m.get("avatar_url"),
+            )
+            for m in (data.get("member_preview") or [])
+            if isinstance(m, dict) and str(m.get("peer_user_id") or "").strip()
+        ],
+        upcoming_events=[
+            CommunityEventRow(
+                event_id=str(e.get("event_id") or ""),
+                title=str(e.get("title") or ""),
+                starts_at=e.get("starts_at"),
+                has_time=e.get("has_time") is not False,
+                venue_name=e.get("venue_name"),
+                going_count=int(e.get("going_count") or 0),
+            )
+            for e in (data.get("upcoming_events") or [])
+            if isinstance(e, dict) and str(e.get("event_id") or "").strip()
+        ],
+        actions=_ui_action_rows_from_raw(data.get("actions")),
+    )
+
+
+@app.post("/lana/circles/members", response_model=CommunityMembersResponse)
+def post_circles_members(
+    body: CommunityMembersBody,
+    authorization: str | None = Header(default=None),
+):
+    """Every neighbour at one of the caller's communities (C-CIRCLE-COMM-PEOPLE), each
+    with one truthful shared line and a Nudge. Paginated; mutual blocks filtered out.
+    An unverified caller gets the count and no names, exactly like the peer cards."""
+    auth = verify_auth(authorization)
+    from app.community_surface import community_members
+
+    try:
+        data = community_members(
+            auth.user_id,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+            place_id=(body.place_id or "").strip() or None,
+            limit=max(1, min(int(body.limit or 20), 50)),
+            offset=max(0, int(body.offset or 0)),
+            phone_verified=auth.phone_verified,
+        )
+    except ValueError as exc:
+        raise _community_error(exc) from exc
+    return CommunityMembersResponse(
+        place_id=str(data["place_id"]),
+        place_name=data.get("place_name"),
+        member_count=int(data.get("member_count") or 0),
+        members=[
+            CommunityMemberRow(
+                peer_user_id=str(m.get("peer_user_id") or ""),
+                nickname=m.get("nickname"),
+                avatar_url=m.get("avatar_url"),
+                trait_tags=[str(t) for t in (m.get("trait_tags") or [])][:6],
+                shared_line=m.get("shared_line"),
+                actions=_ui_action_rows_from_raw(m.get("actions")),
+            )
+            for m in (data.get("members") or [])
+            if isinstance(m, dict) and str(m.get("peer_user_id") or "").strip()
+        ],
+        has_more=bool(data.get("has_more")),
+        requires_phone_verification=bool(data.get("requires_phone_verification")),
+    )
 
 
 # ── Invites + ZIP unlock (§A.2 · §D · §E) ─────────────────────────────────────

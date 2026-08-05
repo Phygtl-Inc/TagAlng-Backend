@@ -185,7 +185,9 @@ def _own_affiliation(user_id: str, affiliation_id: str) -> dict[str, Any] | None
     res = (
         service_client()
         .table("circle_affiliations")
-        .select("id, circle_type, circle_key, detail, status, place_ref, place_name")
+        .select(
+            "id, circle_type, circle_key, detail, status, place_ref, place_name, source"
+        )
         .eq("id", affiliation_id)
         .eq("user_id", user_id)
         .is_("dismissed_at", "null")
@@ -459,8 +461,16 @@ def ground_affiliation(
     if not place_id:
         raise ValueError("place_not_found")
 
+    # Provenance (migration 20261004): `source` says where the community came from,
+    # `confirmed_via` says which action made it real. This path is a grounding answer
+    # unless the row was created by the profile add / invite self-confirm, which pin
+    # their place in the same step.
+    confirmed_via = {
+        "profile_add": "profile_add",
+        "invite_confirmed": "invite_self_confirm",
+    }.get(str(affiliation.get("source") or ""), "grounding_ask")
     service_client().table("circle_affiliations").update(
-        {"place_ref": place_id, "status": "confirmed"}
+        {"place_ref": place_id, "status": "confirmed", "confirmed_via": confirmed_via}
     ).eq("id", affiliation["id"]).execute()
 
     _flush_parked_features(user_id, affiliation, place_id)
@@ -545,6 +555,34 @@ def place_relation_noun(circle_type: str | None) -> str:
     """Caller-relative noun for a grounded place ("gym" → tag "your gym").
     Disclosure-safe by construction (§F / O7): names the RELATION, never the place."""
     return _GROUND_NOUN.get(str(circle_type or "other"), "spot")
+
+
+# Card art per community TYPE — the same job events.cover_emoji does for a meet.
+# Deterministic on purpose: a category icon is not a claim about the place, so it
+# needs no LLM and never varies between surfaces for the same community.
+#
+# These glyphs MIRROR the PWA's own TYPE_EMOJI (src/components/community-kind.tsx),
+# the same way _GROUND_NOUN mirrors its type nouns. Keep them in sync: the whole
+# point of sending an emoji is that one community looks identical everywhere.
+_RELATION_EMOJI: dict[str, str] = {
+    "fitness": "🏋️",
+    "faith": "⛪",
+    "school": "🎓",
+    "kids_activity": "🧸",
+    "neighborhood": "🏘️",
+    "hobby": "🎨",
+    "support": "🤝",
+    "heritage": "🌍",
+    "friends": "👯",
+    "other": "📍",
+}
+
+
+def place_relation_emoji(circle_type: str | None) -> str:
+    """One emoji for a community's type ("fitness" → 🏋️). Advisory card art: the FE
+    may render its own icon instead, and `other` gets a neutral pin rather than a
+    guess at what the place is."""
+    return _RELATION_EMOJI.get(str(circle_type or "other"), _RELATION_EMOJI["other"])
 
 
 _GROUNDING_QUESTION_PROMPT = """You write ONE warm question for a neighborhood app user who \
@@ -1406,10 +1444,16 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
     Grounded rows ONLY: a community without a place does not exist (2026-07-28
     product decision). Ungrounded rows are internal candidates — they surface
     exclusively through Lana's "which spot is it?" ask, never as communities."""
+    # Local import: community_discovery imports this module for place_relation_noun.
+    from app.community_discovery import joined_via_label
+
     sb = service_client()
     res = (
         sb.table("circle_affiliations")
-        .select("id, circle_type, circle_key, detail, status, place_ref, created_at")
+        .select(
+            "id, circle_type, circle_key, detail, status, place_ref, created_at, "
+            "source, confirmed_via"
+        )
         .eq("user_id", user_id)
         .is_("dismissed_at", "null")
         .not_.is_("place_ref", "null")
@@ -1440,12 +1484,27 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "circle_type": r.get("circle_type"),
                 "status": r.get("status"),
                 "grounded": bool(place_ref),
+                # The canonical place id — what the community profile / people panels
+                # are keyed on (app/community_surface.py). Additive: every row here is
+                # grounded, so it is never null.
+                "place_id": place_ref,
+                # The invite label (/lana/invites/mint {circle_key}) — what makes an
+                # invite link say which community it is for.
+                "circle_key": r.get("circle_key"),
                 "place_name": place.get("name"),
                 "place_address": place.get("address"),
                 "detail": detail,
                 "member_count": count,
                 "active": count >= 2,
                 "added_at": r.get("created_at"),
+                # Provenance (migration 20261004): where the community came from and
+                # which action made it real, plus one phrase for rendering it.
+                "source": r.get("source"),
+                "confirmed_via": r.get("confirmed_via"),
+                "joined_via_label": joined_via_label(
+                    r.get("confirmed_via"), r.get("source")
+                ),
+                "emoji": place_relation_emoji(r.get("circle_type")),
             }
         )
     return out

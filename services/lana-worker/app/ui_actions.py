@@ -131,6 +131,58 @@ def peer_card_nudge_action(
     )
 
 
+def community_profile_actions(*, place_name: str, relation: str) -> list[dict[str, Any]]:
+    """The primary CTA on a community profile (C-CIRCLE-COMM-PROFILE): create a meet
+    there. It posts a normal chat message, so hosting stays one implementation — a meet
+    created here is just a meet whose venue Lana already knows.
+
+    "Invite people" is deliberately NOT here: minting a labeled invite link and opening
+    the share sheet is a native FE action (/lana/invites/mint with the profile's
+    circle_key), and a message-posting chip for it would route nowhere (there is no
+    invite intent in chat) — the same reason event_created_actions returns nothing.
+    """
+    _ = relation
+    name = str(place_name or "").strip()
+    if not name:
+        return []
+    return [
+        _action(
+            action_id="community_create_event",
+            label="Create an event",
+            message=f"I want to host something at {name}",
+            style="primary",
+        ),
+    ]
+
+
+def community_join_actions(communities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One "Join <place>" chip per nearby community listed in chat.
+
+    The `message` is the canonical payload the join reader matches when the LLM is
+    unavailable, so it must stay literal ("Join Lp Fit"). Names are the places'
+    real names — the FE localizes the LABEL only, same contract as the tip offer.
+    """
+    rows: list[dict[str, Any]] = []
+    for i, c in enumerate(communities or []):
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("place_name") or "").strip()
+        if not name:
+            continue
+        emoji = str(c.get("emoji") or "").strip()
+        rows.append(
+            _action(
+                action_id=f"community_join_{i}",
+                label=f"{emoji} Join {name}".strip(),
+                message=f"Join {name}",
+                style="primary" if i == 0 else "secondary",
+            )
+        )
+        if len(rows) >= 3:
+            break
+    return rows
+
+
 def weak_match_prompt_actions(
     *,
     nickname: str,
@@ -517,6 +569,14 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
     # options. Renders on ui_intent chat (zero matches never reach show_peer_preview).
     if ctx.get("peer_seek_offer"):
         return peer_seek_offer_actions()
+
+    # Nearby communities just listed in chat ("Join Lp Fit"). Renders on a plain chat
+    # turn, so it can't hang off a ui_intent — same as the clarify / policy chips.
+    discovery = ctx.get("community_discovery")
+    if isinstance(discovery, dict):
+        chips = community_join_actions(discovery.get("communities") or [])
+        if chips:
+            return chips
 
     # Recommendation-ask surfaces. These render regardless of ui_intent because the answer
     # turn no longer writes a signal (so there is no signal_saved / UI_INTENT_SIGNAL_SAVED to

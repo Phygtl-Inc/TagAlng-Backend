@@ -205,16 +205,25 @@ def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] |
     a gating error must never lock a user out of discovery). Otherwise a framing
     dict {mode, blocked, zip5, state, count, threshold}.
 
-    `blocked` (§D.2 as amended by LANA_RAPPORT_BRIDGE_SPEC_v1, 2026-07-30):
-      · peers  — blocked in hard mode (sparse-area intros are junk-quality and
-        privacy-risky);
-      · browse — blocked in every gating mode while the area is not open.
-        Others'-events discovery before unlock undercuts the bridge (QA: a lone
-        off-topic event card answered "meet other runners" in a waitlist ZIP) —
-        pre-open, the product move is always create+invite, so consumers route
-        to that instead of listing supply. The original soft-mode "supply is
-        never hidden" stance is retired for browse; copy must stay honest
-        (the area isn't open yet) and must NOT claim nothing exists.
+    `blocked` — back to what §D.2 actually specifies (2026-08-05):
+      · peers  — blocked in hard mode only (sparse-area intros are junk-quality
+        and privacy-risky, so peers is the ONE surface that truly locks);
+      · browse — never blocked. The gate is deliberately SUPPLY-AWARE: "an area
+        that already has events keeps them fully visible in any mode — hiding a
+        host's event from neighbors starves the meets that make the area come
+        alive" (docs/LANA_CIRCLES_BACKEND.md §D.2), and in soft mode "nothing is
+        blocked".
+
+    The 2026-07-30 bridge-spec amendment that hard-blocked browse in every mode is
+    REVERTED. It was aimed at one QA symptom — a lone off-topic event card
+    answering "meet other runners" in a waitlist ZIP — and that symptom has its
+    own, sharper fix which shipped in the same batch: the relevance floor in
+    look_meet (bridge spec §2) drops zero-relevance events instead of hiding
+    every real one. Blocking the whole surface also contradicted the doc and left
+    hosts' events invisible to the neighbours they were created for.
+
+    The framing facts stay useful either way: an EMPTY result in a not-yet-open
+    area gets the seed-forward copy rather than a bare "nothing found".
     """
     mode = gate_mode()
     if mode == "off" or not user_id:
@@ -229,7 +238,7 @@ def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] |
         return None
     return {
         "mode": mode,
-        "blocked": surface == "browse" or (mode == "hard" and surface == "peers"),
+        "blocked": mode == "hard" and surface == "peers",
         "zip5": snap.get("zip5"),
         "state": snap.get("state"),
         "count": int(snap.get("count") or 0),

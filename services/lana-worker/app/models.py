@@ -188,6 +188,170 @@ class AskDraftPayload(BaseModel):
     ready: bool = False
 
 
+class CommunityCardRow(BaseModel):
+    """One of the caller's communities on the look screen (C-CIRCLE-LOOK-COMMS).
+
+    `place_id` is what the profile / people endpoints are keyed on. Counts are real
+    reads, and `status_line` is the same two facts already in the numbers — render
+    either, never a claim beyond them.
+    """
+
+    affiliation_id: str
+    place_id: str | None = None
+    place_name: str | None = None
+    place_address: str | None = None
+    circle_type: str | None = None
+    # Caller-relative noun for the place ("gym", "school") — never the word "circle".
+    relation: str | None = None
+    # Card art for the community's TYPE (🏋️ / ⛪ / 🎨), the same job events.cover_emoji
+    # does for a meet. Deterministic per type, so it never varies between surfaces;
+    # advisory — render your own icon set instead if you prefer.
+    emoji: str | None = None
+    member_count: int = 0
+    meets_this_week: int = 0
+    active: bool = False
+    status_line: str | None = None
+
+
+class CommunitiesCardPayload(BaseModel):
+    """The "YOUR COMMUNITIES" card — the caller's top three plus how many more there
+    are ("View N more" → the Radar Communities tab). Absent on every turn except the
+    looking-open one, and absent (not empty) when the user has no community yet."""
+
+    items: list[CommunityCardRow] = Field(default_factory=list)
+    total: int = 0
+    more_count: int = 0
+
+
+class CommunityDiscoveryRow(BaseModel):
+    """A community near the caller that they could join (C-CIRCLE-COMM-DISCOVER).
+
+    Carries NO member identities — who is there is members-only, so joining is what
+    earns the names. `member_count` includes the caller when `is_member` is true,
+    which is why `status_line` phrases those two cases differently.
+    """
+
+    place_id: str
+    place_name: str | None = None
+    place_address: str | None = None
+    place_type: str | None = None
+    relation: str | None = None
+    emoji: str | None = None
+    zip: str | None = None
+    member_count: int = 0
+    # Coarse (block/ZIP centroid) distance phrase, or null when either point is
+    # unknown — never a guess.
+    distance_text: str | None = None
+    is_member: bool = False
+    status_line: str | None = None
+
+
+class CommunityDiscoveryResponse(BaseModel):
+    communities: list[CommunityDiscoveryRow] = Field(default_factory=list)
+    # The radius actually searched, in metres — so an empty list can be explained
+    # ("nothing within ~5 miles") rather than looking like a bug.
+    radius_meters: int = 0
+
+
+class CommunityJoinResponse(BaseModel):
+    """The result of joining. `source` is where the community first came from and is
+    NOT overwritten by joining: a place the user mentioned in chat and later joined
+    from the panel reads source='chat_extraction', confirmed_via='community_join'."""
+
+    affiliation_id: str
+    place_id: str
+    place_name: str | None = None
+    status: str = "confirmed"
+    already_member: bool = False
+    source: str | None = None
+    confirmed_via: str | None = None
+    joined_via_label: str | None = None
+    # True when the join confirmed an existing candidate of theirs rather than
+    # creating a new row (they had mentioned the place before).
+    promoted_from_candidate: bool = False
+
+
+class CommunityFeatureRow(BaseModel):
+    """A feature members actually volunteered about the place ("Pool", "Childcare").
+    Never inferred from the place type — if nobody said it, it isn't here."""
+
+    key: str
+    label: str
+    sub_group: str | None = None
+
+
+class CommunityEventRow(BaseModel):
+    event_id: str
+    title: str
+    starts_at: str | None = None
+    # False = the meet has no real clock time; render the date alone (#56).
+    has_time: bool = True
+    venue_name: str | None = None
+    # The real going roster — the only thing "popular" is ordered on.
+    going_count: int = 0
+
+
+class CommunityMemberPreviewRow(BaseModel):
+    peer_user_id: str
+    nickname: str | None = None
+    avatar_url: str | None = None
+
+
+class CommunityProfileResponse(BaseModel):
+    """One community, for the people who go there (C-CIRCLE-COMM-PROFILE)."""
+
+    place_id: str
+    affiliation_id: str | None = None
+    place_name: str | None = None
+    place_address: str | None = None
+    circle_type: str | None = None
+    # Invite label for POST /lana/invites/mint — the "Invite people" CTA is native FE
+    # (mint + share sheet), so its input rides here instead of in `actions`.
+    circle_key: str | None = None
+    # Provenance: where the community came from (`source`) vs the action that made it
+    # real (`confirmed_via`); `joined_via_label` is the one-phrase render of the pair.
+    source: str | None = None
+    confirmed_via: str | None = None
+    joined_via_label: str | None = None
+    relation: str | None = None
+    emoji: str | None = None
+    detail: str | None = None
+    member_count: int = 0
+    active: bool = False
+    status_line: str | None = None
+    # AI-authored from the real facts below (features / area / member count), never a
+    # judgement of the place. Null when there is nothing true to say about it yet.
+    description: str | None = None
+    features: list[CommunityFeatureRow] = Field(default_factory=list)
+    member_preview: list[CommunityMemberPreviewRow] = Field(default_factory=list)
+    upcoming_events: list[CommunityEventRow] = Field(default_factory=list)
+    actions: list["UiActionRow"] = Field(default_factory=list)
+
+
+class CommunityMemberRow(BaseModel):
+    """A neighbour at the place. Deliberately carries NO stars, band, badge or
+    similarity: nothing here compared two people. `shared_line` states what is proven
+    — the identity threads you both hold, or else the one fact every row here shares
+    ("You both go to this gym")."""
+
+    peer_user_id: str
+    nickname: str | None = None
+    avatar_url: str | None = None
+    trait_tags: list[str] = Field(default_factory=list)
+    shared_line: str | None = None
+    actions: list["UiActionRow"] = Field(default_factory=list)
+
+
+class CommunityMembersResponse(BaseModel):
+    place_id: str
+    place_name: str | None = None
+    member_count: int = 0
+    members: list[CommunityMemberRow] = Field(default_factory=list)
+    has_more: bool = False
+    # True for an unverified caller: the count is real, the names are withheld.
+    requires_phone_verification: bool = False
+
+
 class SignalSavedPayload(BaseModel):
     signal_id: str | None = None
     intent: str | None = None
@@ -453,6 +617,10 @@ class CreateSessionResponse(BaseModel):
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
+    # Same look-screen card as on SendMessageResponse — absent unless the opening
+    # turn itself was the looking-open one.
+    communities: CommunitiesCardPayload | None = None
+    community_discovery: CommunityDiscoveryResponse | None = None
     auth_intent: str | None = None
     login_phone: str | None = None
     requires_login_otp: bool = False
@@ -513,6 +681,13 @@ class SendMessageResponse(BaseModel):
     ready_to_complete: bool = False
     ui: LanaTurnUi = Field(default_factory=LanaTurnUi)
     event_draft: EventDraft | None = None
+    # The look screen's "YOUR COMMUNITIES" card. Present only on the looking-open turn
+    # (and only when the user has at least one community) — absent everywhere else.
+    communities: CommunitiesCardPayload | None = None
+    # Nearby communities the user could join, on a turn where they asked about
+    # communities in chat ("show me communities around me"). Same rows as
+    # /lana/circles/discover, already filtered to ones they're not in.
+    community_discovery: CommunityDiscoveryResponse | None = None
     # Set once an event publishes — the FE builds a shareable /meet/{id} link from it.
     event_id: str | None = None
     item_draft: ItemDraft | None = None

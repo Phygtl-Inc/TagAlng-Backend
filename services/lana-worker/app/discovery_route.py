@@ -488,27 +488,48 @@ def _fetch_verified_peer_matches(
         return peers
 
 
-def _zip_gate_peers_turn(
+def _onboarding_wants_peers(
+    session_ctx: dict[str, Any], ctx_base: dict[str, Any] | None = None
+) -> bool:
+    """Should the post-verify funnel END in a neighbors list?
+
+    The funnel is entered by two different populations and they want opposite things:
+
+    · A SIGNUP in flight (`signup_phone` set). Peers is opt-IN here — only when
+      `_verify_gate_reply` stamped `signup_origin='peers'`, meaning it gated someone who
+      was already mid-peers-funnel and had asked to see names. Every other road into
+      signup (a Sign in whose email has no account, a host flow, a tip ask) gets the
+      neutral welcome, because nobody asked to be matched.
+
+    · No signup — just a name gate, e.g. a verified user who never set a nickname and
+      has now asked to find people. Nothing to opt into; keep today's behaviour.
+
+    An explicit origin settles it either way. Only when nothing was stamped do we ask
+    whether a signup is in flight at all — `signup_phone` is the marker, and it survives
+    the whole gate → email → OTP → name run.
+
+    Deliberately NOT keyed on `active_intent`: `_routing_ctx` defaults it to find_peers,
+    so it is stamped on turns nobody requested peers for, including the signup email step.
+    """
+    ctx_base = ctx_base or {}
+    origin = str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
+    if origin:
+        return origin == "peers"
+    return not (session_ctx.get("signup_phone") or ctx_base.get("signup_phone"))
+
+
+def _seed_forward_peers_turn(
     ctx_base: dict[str, Any],
     *,
-    user_id: str | None,
+    frame: dict[str, Any],
     block_id: str | None,
-) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    """Circles §D.2, hard mode only: peer introductions need an OPEN area — in a
-    3-person ZIP the matches are junk-quality and privacy-risky. Returns the
-    seed-forward turn (exemplar #7: honest + host pill, never a dead end) when
-    gated, None to proceed. Default mode is 'soft', which never blocks peers;
-    creation paths (host/share/invite) must never call this."""
-    try:
-        from app.zip_unlock import discovery_zip_gate, gate_framing_facts
-
-        frame = discovery_zip_gate(user_id, surface="peers")
-    except Exception:  # noqa: BLE001 — a gating error must fail OPEN
-        logging.getLogger(__name__).exception("peers_zip_gate_failed")
-        return None
-    if not frame or not frame.get("blocked"):
-        return None
+    tool: str = "zip_gate_peers",
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """The honest, never-a-dead-end peers reply for an area that isn't open yet
+    (exemplar #7): name the situation plainly, then hand them the one thing that
+    changes it. Shared by the §D.2 gate and the zero-match supply floor."""
     from app.reply_compose import compose_reply
+    from app.zip_unlock import gate_framing_facts
 
     reply = compose_reply(
         goal=(
@@ -534,8 +555,64 @@ def _zip_gate_peers_turn(
     )
     ctx["suggestions"] = ["Host a meet"]
     ctx.pop("activity_previews", None)
-    ctx["last_routing"] = _discovery_routing_stub("listening", "zip_gate_peers")
+    ctx["last_routing"] = _discovery_routing_stub("listening", tool)
     return reply, ctx, ctx["last_routing"], []
+
+
+def _zip_gate_peers_turn(
+    ctx_base: dict[str, Any],
+    *,
+    user_id: str | None,
+    block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Circles §D.2, hard mode only: peer introductions need an OPEN area — in a
+    3-person ZIP the matches are junk-quality and privacy-risky. Returns the
+    seed-forward turn (exemplar #7: honest + host pill, never a dead end) when
+    gated, None to proceed. Default mode is 'soft', which never blocks peers;
+    creation paths (host/share/invite) must never call this."""
+    try:
+        from app.zip_unlock import discovery_zip_gate
+
+        frame = discovery_zip_gate(user_id, surface="peers")
+    except Exception:  # noqa: BLE001 — a gating error must fail OPEN
+        logging.getLogger(__name__).exception("peers_zip_gate_failed")
+        return None
+    if not frame or not frame.get("blocked"):
+        return None
+    return _seed_forward_peers_turn(ctx_base, frame=frame, block_id=block_id)
+
+
+def _peers_supply_floor_turn(
+    ctx_base: dict[str, Any],
+    *,
+    user_id: str | None,
+    block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Zero REAL matches in an area that hasn't opened → say so, don't pad.
+
+    Runs after `_fetch_verified_peer_matches` comes back empty and before the
+    `fetch_preview_peers_on_block` fallback, which is a bare `WHERE home_block_id`
+    read: unscored rows, `matching_peer_label: "Near you"`, and `nickname: null`
+    for anyone who never set one. Rendering three of those as "I found 3 neighbors"
+    asserts a match that was never computed and names people it cannot name.
+
+    Independent of gate mode on purpose — soft mode declines to BLOCK the surface,
+    which is a different question from what to do when the surface has nothing
+    true to say. Returns None (keep the fallback list) whenever the area is open,
+    the ZIP is unknown, or gating is off entirely — the fallback is honest there,
+    because an open area means real neighbors with real profiles."""
+    try:
+        from app.zip_unlock import discovery_zip_gate
+
+        frame = discovery_zip_gate(user_id, surface="peers")
+    except Exception:  # noqa: BLE001 — a floor error must fail OPEN
+        logging.getLogger(__name__).exception("peers_supply_floor_failed")
+        return None
+    if not frame:  # area open / unknown ZIP / gating off → today's behaviour
+        return None
+    return _seed_forward_peers_turn(
+        ctx_base, frame=frame, block_id=block_id, tool="peers_supply_floor"
+    )
 
 
 def _preview_peers_with_ids(
@@ -1395,6 +1472,53 @@ def _try_layer1_intent_turn(
         return None
 
     ctx_base = dict(session_ctx)
+
+    if linear == "discovery.communities":
+        # "show me communities around me" — answered from circle_affiliations + places.
+        # Verification gates the READ the same way find-peers does: the block/place read
+        # and the member counts are neighbours' data.
+        if not phone_verified or not user_id:
+            return (
+                compose_reply(
+                    goal=(
+                        "They asked what communities are around them. Verifying their "
+                        "email is what unlocks seeing neighbours' spots — say that in one "
+                        "warm line and invite them to verify. No guilt, no list."
+                    ),
+                    fallback=(
+                        "Verify your email and I can show you the communities near you — "
+                        "the spots your neighbours already go to."
+                    ),
+                    session_ctx=ctx_base,
+                    user_message=msg,
+                ),
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent="discovery.communities",
+                ),
+                _discovery_routing_stub(phase or "listening", "communities_need_verify"),
+                [],
+            )
+        from app.community_discovery import communities_chat_turn
+
+        reply = communities_chat_turn(
+            user_id,
+            message=msg,
+            session_ctx=ctx_base,
+            locale=str(session_ctx.get("preferred_lang") or "en"),
+        )
+        ctx = _routing_ctx(
+            ctx_base, phase=phase or "listening", active_intent="discovery.communities"
+        )
+        # _routing_ctx wipes turn-scoped surfaces; re-attach the two this turn stamped.
+        for key in ("community_discovery", "communities_card"):
+            if ctx_base.get(key):
+                ctx[key] = ctx_base[key]
+        ctx["last_routing"] = _discovery_routing_stub(
+            phase or "listening", "communities_nearby"
+        )
+        return reply, ctx, ctx["last_routing"], []
 
     if linear == "identity.show_my_profile":
         if not phone_verified:
@@ -2553,6 +2677,42 @@ def _stamp_peer_seek_offer(ctx: dict[str, Any], display_filter: str) -> None:
     what the NEXT turn reads to interpret the tap (cleared with None, never pop)."""
     ctx["peer_seek_offer"] = {"filter": display_filter}
     ctx["peer_seek_offer_pending"] = {"filter": display_filter}
+
+
+def _try_community_join_reply_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    phase: str | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Join a community the previous turn listed. One-turn offer: whatever comes next
+    consumes it, and anything that isn't a join falls through to normal routing.
+
+    The membership write is idempotent (join_community returns already_member rather
+    than inserting twice), so a double tap is harmless."""
+    if not user_id or not session_ctx.get("community_join_pending"):
+        return None
+    from app.community_discovery import join_confirm_reply, read_join_reply
+
+    result = read_join_reply(user_id, msg, session_ctx)
+    if not result:
+        return None
+    member_count: int | None = None
+    try:
+        from app.community_surface import member_count as _count
+
+        member_count = _count(str(result.get("place_id") or ""))
+    except Exception:  # noqa: BLE001 — the count is a nicety, the join already happened
+        logging.getLogger(__name__).exception("community_join_count_failed")
+    reply = join_confirm_reply(
+        result, session_ctx=session_ctx, message=msg, member_count=member_count
+    )
+    ctx = _routing_ctx(
+        session_ctx, phase=phase or "listening", active_intent="discovery.communities"
+    )
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "community_joined")
+    return reply, ctx, ctx["last_routing"], []
 
 
 def _try_peer_seek_offer_reply_turn(
@@ -6355,6 +6515,11 @@ def _handle_signup_phone_message(
         phase=PHASE_AWAIT_SIGNUP_OTP,
         signup_phone=email,
     )
+    # Only DEFAULT it — a gate-entered signup already stamped why it started ("peers"
+    # when the user was mid-funnel), and _routing_ctx carries that forward. Reaching the
+    # email step with nothing stamped means nobody asked for matches.
+    if not str(ctx.get("signup_origin") or "").strip():
+        ctx["signup_origin"] = "direct"
     ctx["auth_action"] = _auth_action(
         type="link_email_signup",
         email=email,
@@ -6844,6 +7009,11 @@ def _start_activity_browse_from_discovery(
     )
     phase = str(session_ctx.get("routing_phase") or "listening")
     ctx = _routing_ctx(session_ctx, phase=phase, active_intent="discovery.find_activities")
+    # _routing_ctx wipes turn-scoped surfaces, which is right for stale cards but would
+    # also drop the one this turn just stamped — the look screen's communities card.
+    card = session_ctx.get("communities_card")
+    if card:
+        ctx["communities_card"] = card
     return reply, ctx, _discovery_routing_stub(phase, "activity_browse"), []
 
 
@@ -7708,7 +7878,10 @@ def handle_discovery_turn(
         # auto-publishes it (see the post-verify host block above). Don't route them into the
         # find-peers name/identity funnel, and tell them their event is about to go up.
         host_publishing = bool(session_ctx.get("host_publish_pending"))
-        direct_signup = str(session_ctx.get("signup_origin") or "") == "direct"
+        # Opt-IN, same as the post-verify funnel: only promise a neighbors list to
+        # someone the verify gate caught mid-peers-funnel. Anything else gets the
+        # neutral ending, so the promise here and the actual last turn agree.
+        peers_requested = str(session_ctx.get("signup_origin") or "") == "peers"
         ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=email)
         if not host_publishing:
             ctx["pending_post_verify"] = True
@@ -7724,16 +7897,16 @@ def handle_discovery_turn(
             reply = (
                 "Perfect — verifying you now. One moment and I'll post your event for neighbors."
             )
-        elif direct_signup:
-            # Direct account ask: never pre-promise a neighbors list they didn't request.
-            reply = (
-                "Perfect — verifying you now. Once you're verified, tell me your first name "
-                "and you're all set."
-            )
-        else:
+        elif peers_requested:
             reply = (
                 "Perfect — verifying you now. Once you're verified, tell me your first name "
                 "and I'll show neighbors you can connect with."
+            )
+        else:
+            # Never pre-promise a neighbors list nobody requested.
+            reply = (
+                "Perfect — verifying you now. Once you're verified, tell me your first name "
+                "and you're all set."
             )
         return (
             reply,
@@ -7926,6 +8099,16 @@ def handle_discovery_turn(
         )
         if seek_offer_turn is not None:
             reply, ctx, routing, peers = seek_offer_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        # Tap (or typed answer) on "want to join one of these?" — read before the signal
+        # lane for the same reason: "Join Lp Fit" must not be captured as a fresh signal.
+        join_turn = _try_community_join_reply_turn(
+            msg=msg, session_ctx=session_ctx, user_id=user_id, phase=phase
+        )
+        if join_turn is not None:
+            reply, ctx, routing, peers = join_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 
@@ -8416,14 +8599,12 @@ def handle_discovery_turn(
             ctx_base["identity_snippet"] = seeded
             effective_snippet = seeded
 
-    _direct_signup_pending = (
-        str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
-        == "direct"
-        and (ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME)
+    # The identity interrogation is a MATCHING input, so a signup that isn't heading for
+    # a neighbors list skips it and ends at the welcome (same rule as the funnel below).
+    _non_peers_signup_pending = not _onboarding_wants_peers(session_ctx, ctx_base) and (
+        ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME
     )
-    if not effective_snippet and not _direct_signup_pending:
-        # Direct signups skip the identity interrogation too — they asked for an
-        # account, not matches; the post-verify branch below ends at a welcome.
+    if not effective_snippet and not _non_peers_signup_pending:
         in_funnel = phase in _FUNNEL_PHASES or block_just_resolved
         if not in_funnel:
             if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
@@ -8505,6 +8686,14 @@ def handle_discovery_turn(
         # (no-op once home_block_id exists).
         if phone_verified and not home_block_id:
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+        # Does this funnel END in a neighbors list? Resolved up here because it also
+        # decides how the sub-steps are FRAMED: a name and a ZIP are account setup for
+        # everyone, but "tell me about yourself so I can match you" is a peers question,
+        # and tagging every step `find_peers` is what made a plain signup feel like a funnel.
+        peers_requested = _onboarding_wants_peers(session_ctx, ctx_base)
+        # "auth.signup_phone" is the registered intent for an in-flight signup (see
+        # layer1_intents) — the funnel's own steps must not claim to be find_peers.
+        onboarding_intent = INTENT_FIND_PEERS if peers_requested else "auth.signup_phone"
         if session_ctx.get("awaiting_name_change") or active == "settings.change_name":
             name_turn = _try_awaiting_name_change_turn(
                 msg=msg,
@@ -8531,7 +8720,7 @@ def handle_discovery_turn(
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_DISPLAY_NAME,
-                    active_intent=INTENT_FIND_PEERS,
+                    active_intent=onboarding_intent,
                     preview_block_id=block_id,
                     pending_post_verify=True,
                     signup_phone=session_ctx.get("signup_phone"),
@@ -8549,30 +8738,48 @@ def handle_discovery_turn(
                     _routing_ctx(
                         ctx_base,
                         phase=PHASE_NEED_DISPLAY_NAME,
-                        active_intent=INTENT_FIND_PEERS,
+                        active_intent=onboarding_intent,
                         preview_block_id=block_id,
                         pending_post_verify=True,
                     ),
                     _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
                     [],
                 )
-        if not snippet and (_is_affirmative(msg) or (phase == PHASE_NEED_DISPLAY_NAME and not nick)):
+        # "Tell me about yourself" is a MATCHING input — only worth asking when a
+        # neighbors list is what this signup is heading for. A plain signup skips it and
+        # falls through to the welcome; rapport picks identity up later, in context.
+        if (
+            peers_requested
+            and not snippet
+            and (_is_affirmative(msg) or (phase == PHASE_NEED_DISPLAY_NAME and not nick))
+        ):
             return (
                 compose_identity_ask(msg=msg, purpose="match"),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_IDENTITY,
-                    active_intent=INTENT_FIND_PEERS,
+                    active_intent=onboarding_intent,
                     preview_block_id=block_id,
                     pending_post_verify=True,
                 ),
                 _discovery_routing_stub(PHASE_NEED_IDENTITY),
                 [],
             )
-        direct_signup = (
-            str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
-            == "direct"
-        )
+        # Why `peers_requested` is opt-IN (resolved at the top of this block):
+        #
+        # The funnel was originally the only road to verification (ZIP → identity →
+        # display name → preview → verify gate → full matches), so showing matches was
+        # the payoff the user had explicitly asked for by tapping "show me their names".
+        # Since then, signup became reachable from everywhere — a Sign in button whose
+        # email has no account, a host flow, a tip ask — and every one of those inherited
+        # the funnel's ending. Asking "was this flagged standalone?" means each new entry
+        # point silently opts into a neighbors list nobody requested.
+        #
+        # So it is inverted: `peers` is what `_verify_gate_reply` stamps when it gates
+        # someone who was ALREADY mid-peers-funnel. Anything that never went through that
+        # gate — including the login→no-account pivot — ends at the neutral welcome, and
+        # the user's next message decides what happens. In-progress flows (host draft,
+        # meet seek, tip ask, signal) resume earlier in this function and never reach here.
         if not phone_verified:
             nick = str(
                 (ctx_base.get("display_name_saved") and extract_display_name_reply(msg))
@@ -8581,9 +8788,9 @@ def handle_discovery_turn(
             ).strip()
             lead = f"Got it{', ' + nick if nick else ''}! "
             tail = (
-                "Finishing verification — send one more message and you're all set."
-                if direct_signup
-                else "Finishing verification — send one more message and I'll show your matches."
+                "Finishing verification — send one more message and I'll show your matches."
+                if peers_requested
+                else "Finishing verification — send one more message and you're all set."
             )
             return (
                 f"{lead}{tail}",
@@ -8598,8 +8805,8 @@ def handle_discovery_turn(
                 [],
             )
         _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
-        if direct_signup:
-            # They asked for an account, not for matches — end at a neutral welcome
+        if not peers_requested:
+            # They came here for an account, not for matches — end at a neutral welcome
             # (the FE home state), never an unrequested neighbors list. Intent gets
             # re-decided on their next message.
             nick = str(
@@ -8640,6 +8847,11 @@ def handle_discovery_turn(
         except Exception:
             peers = []
         if not peers:
+            floored = _peers_supply_floor_turn(
+                ctx_base, user_id=user_id, block_id=block_id
+            )
+            if floored is not None:
+                return floored
             peers = fetch_preview_peers_on_block(
                 block_id,
                 limit=3,
@@ -8711,6 +8923,9 @@ def handle_discovery_turn(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
                 return reply, ctx, ctx["last_routing"], peers
+        floored = _peers_supply_floor_turn(ctx_base, user_id=user_id, block_id=block_id)
+        if floored is not None:
+            return floored
         peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
         from app.i18n import session_lang as _session_lang
 
@@ -8773,6 +8988,11 @@ def handle_discovery_turn(
                 return reply, ctx, ctx["last_routing"], peers
 
         if wants_peers or phase != PHASE_PREVIEW:
+            floored = _peers_supply_floor_turn(
+                ctx_base, user_id=user_id, block_id=block_id
+            )
+            if floored is not None:
+                return floored
             peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
             from app.i18n import session_lang as _session_lang
 
