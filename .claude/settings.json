@@ -44,7 +44,13 @@
       "Bash(.venv/bin/python -c \"import app.context, app.layer1_handlers, app.peer_radius, app.discovery_route; print\\('imports OK — no circular import'\\)\")",
       "Bash(rg -n \"google_place_id\" -B6 -A6 src/lib/*.ts src/lib/**/*.ts)",
       "Bash(.venv/bin/python -m pytest tests/test_circle_grounding.py -q)",
-      "Bash(rg -rn \"groundCircle|groundOptions\" src/features src/lib)"
+      "Bash(rg -rn \"groundCircle|groundOptions\" src/features src/lib)",
+      "Bash(.venv/bin/python -m pytest tests/test_tip_share_answer.py -q)",
+      "Bash(/Users/dev/Downloads/TagAlng-backend/services/lana-worker/.venv/bin/python -m pytest tests/ -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_community_surface.py -x -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_community_surface.py tests/test_circles_flow.py tests/test_activity_browse.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_activity_browse.py tests/test_community_surface.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_community_discovery.py -q)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations"

@@ -91,10 +91,30 @@ class TestAttrSemanticReply(unittest.TestCase):
         self.assertIn("gymmer", reply)
         self.assertNotIn("matching \"gymmer\"", reply)
 
-    def test_lexical_reply_unchanged(self) -> None:
+    def test_lexical_hit_claims_only_the_neighbors_own_words(self) -> None:
+        # An attr search matches the SEARCHER'S words against a neighbor's own claims —
+        # a one-sided fact. QA saw "5 people near you who share your interest in
+        # community" over rows like "Enjoys social gatherings", where nothing had
+        # established the searcher shares anything ([[truthful-peer-match-model]]).
         peers = [{"peer_user_id": "p2", "matching_peer_label": "Italian heritage"}]
         reply = format_attr_peers_reply(peers, filter_text="italians")
-        self.assertIn("matching \"italians\"", reply)
+        self.assertIn("italians", reply)
+        self.assertIn("mentions", reply)
+        for overclaim in ("share your", "in common", "you have in common"):
+            self.assertNotIn(overclaim, reply.lower())
+
+    def test_proven_shared_claim_may_say_in_common(self) -> None:
+        # A shared claim pair IS proof, so the stronger wording stays available.
+        peers = [
+            {
+                "peer_user_id": "p3",
+                "matching_peer_label": "Runner",
+                "shared_labels": ["Runner"],
+                "has_exact_concept_match": True,
+            }
+        ]
+        reply = format_attr_peers_reply(peers, filter_text="runners")
+        self.assertIn("in common", reply.lower())
 
     def test_match_rows_carry_semantic_flag(self) -> None:
         rows = peers_to_match_rows(

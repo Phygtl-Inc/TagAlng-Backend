@@ -277,6 +277,46 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
         session_ctx[k] = None
 
 
+def _turn_is_tip_ask(
+    ctx: dict[str, Any],
+    msg: str,
+    *,
+    history: list[dict[str, Any]] | None,
+    home_block_id: str | None,
+    phone_verified: bool,
+    timer: TurnTimer | None = None,
+) -> bool:
+    """Is this turn a place/service recommendation ask (looking.tip)?
+
+    Used to keep decide_turn off recommendation turns. Reads the classifier's verdict,
+    which is cached per user message — the same parse handle_discovery_turn reuses, so this
+    costs no extra model call. Fails CLOSED (False) so a classifier hiccup leaves the policy
+    gate exactly as it was rather than diverting every turn to the engines.
+    """
+    try:
+        from app.discovery_slots import discovery_slots_for_turn
+        from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR
+
+        slots = discovery_slots_for_turn(
+            ctx,
+            msg,
+            routing_phase=str(ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or ctx.get("preview_block_id")),
+            has_identity=bool(ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        if not isinstance(slots, dict):
+            return False
+        linear = str(slots.get("linear_intent") or "")
+        sig = str(slots.get("signal_intent") or "") or SIGNAL_INTENT_BY_LINEAR.get(linear, "")
+        return sig == "tip_seek" and float(slots.get("confidence") or 0.0) >= 0.5
+    except Exception:  # noqa: BLE001 — a gate helper must never break the turn
+        logging.getLogger(__name__).exception("tip_ask_policy_gate_failed")
+        return False
+
+
 def _policy_rapport_reply(
     *,
     user_id: str,
@@ -1807,6 +1847,13 @@ def run_lana_unified_pipeline(
         and str(session_ctx.get("routing_phase") or "") in ("", "listening")
         and not session_ctx.get("event_host_active")
         and not session_ctx.get("pending_confirmation")
+        # A concrete engine offer is armed and this reply answers it: "want me to ask your
+        # neighbors too?" / "want me to take that posting down?". Those accepts and declines
+        # WRITE (or withdraw) a posting, so they belong to the engine that armed them — a
+        # policy reply here would answer in prose and silently drop the action, leaving the
+        # offer armed for a later, unrelated turn.
+        and not session_ctx.get("tip_ask_offer_pending")
+        and not session_ctx.get("posting_manage_pending")
         # Regex unsafe backstop stays ahead of the policy — safety turns belong
         # to the legacy rails (the policy prompt also hands them off, belt+braces).
         and not _utterance_is_unsafe_backstop(user_message)
@@ -1824,6 +1871,18 @@ def run_lana_unified_pipeline(
             and session_ctx["_discovery_slots"].get("_forced_kind")
             and str(session_ctx.get("_discovery_slots_for") or "")
             == str(user_message or "").strip()
+        )
+        # A recommendation ask ("recommend me a doctor nearby") is an ACTION turn: it runs
+        # a real neighbor-tip + Places lookup and can post the ask to neighbors. The policy
+        # prompt is told to hand those off, but on QA 2026-08-04 it answered one with
+        # "I'll keep an ear out and let you know if a neighbor recommends a doctor" — a
+        # listening promise nothing had armed, with no places and no offer, while the
+        # engine (handler=None in the turn log) never ran. Skip deterministically on the
+        # classifier's own verdict rather than trusting the prompt.
+        and not _turn_is_tip_ask(
+            session_ctx, user_message,
+            history=history, home_block_id=home_block_id,
+            phone_verified=phone_verified, timer=timer,
         )
     ):
         from app.policy.decide import apply_defer, audit_decision, decide_turn, note_ask_streak

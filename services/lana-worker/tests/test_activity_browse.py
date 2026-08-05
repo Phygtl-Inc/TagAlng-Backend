@@ -170,6 +170,61 @@ class TestRunBrowseTurn(unittest.TestCase):
         self.assertIn("what kind of thing", reply.lower())
         self.assertTrue((ctx.get("browse_draft") or {}).get("_asked"))
 
+    @patch("app.community_surface.meets_this_week", return_value=2)
+    @patch("app.circles_flow.list_my_circles")
+    def test_look_screen_carries_the_communities_card(self, circles, _meets) -> None:
+        # The look screen shows her own places while she decides what she's up for
+        # (C-CIRCLE-LOOK-COMMS) — stamped on the P1 ask turn and nowhere else.
+        circles.return_value = [
+            {
+                "id": "a1",
+                "circle_type": "fitness",
+                "status": "confirmed",
+                "grounded": True,
+                "place_id": "p1",
+                "place_name": "OrangeTheory Narcoossee",
+                "place_address": "9145 Narcoossee Rd",
+                "detail": None,
+                "member_count": 34,
+                "active": True,
+                "added_at": "2026-07-01T00:00:00Z",
+            }
+        ]
+        ctx: dict = {
+            "activity_browse_active": True,
+            "browse_draft": None,
+            "browse_skip_seed": True,
+        }
+        run_activity_browse_turn(
+            user_message="I'm looking for a meet or playgroup",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+            user_id="u1",
+        )
+        card = ctx.get("communities_card")
+        self.assertIsNotNone(card)
+        self.assertEqual(card["items"][0]["place_name"], "OrangeTheory Narcoossee")
+        self.assertEqual(card["items"][0]["status_line"], "34 people · 2 meets this week")
+
+    @patch("app.circles_flow.list_my_circles", return_value=[])
+    def test_no_card_without_a_community(self, _circles) -> None:
+        ctx: dict = {
+            "activity_browse_active": True,
+            "browse_draft": None,
+            "browse_skip_seed": True,
+        }
+        run_activity_browse_turn(
+            user_message="I'm looking for a meet or playgroup",
+            session_ctx=ctx,
+            history=[],
+            user_jwt="jwt",
+            home_block_id="b1",
+            user_id="u1",
+        )
+        self.assertIsNone(ctx.get("communities_card"))
+
     @patch(
         "app.activity_browse._fetch_block_events",
         return_value=[

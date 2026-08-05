@@ -827,6 +827,57 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "See what’s nearby", "es": "Ver qué hay cerca", "pt": "Ver o que há por perto",
     },
 
+    # A neighbor posted the thing this person had asked for. Titled by the RECIPIENT's own
+    # ask, so the notification lands as "the thing you wanted" rather than "someone did
+    # something" — the body carries the neighbor's own words.
+    "notify.signal_match.tip_title": {
+        "en": "A neighbor answered your ask 💬",
+        "es": "Alguien de tu zona respondió a tu pregunta 💬",
+        "pt": "Alguém da sua área respondeu ao seu pedido 💬",
+    },
+    "notify.signal_match.tip_wanted_title": {
+        "en": "A neighbor is looking for your tip",
+        "es": "Alguien cerca busca tu recomendación",
+        "pt": "Alguém por perto procura sua dica",
+    },
+    "notify.signal_match.item_title": {
+        "en": "A neighbor has what you were after 📦",
+        "es": "Alguien cerca tiene lo que buscabas 📦",
+        "pt": "Alguém por perto tem o que você procurava 📦",
+    },
+    "notify.signal_match.item_wanted_title": {
+        "en": "A neighbor needs what you offered",
+        "es": "Alguien cerca necesita lo que ofreciste",
+        "pt": "Alguém por perto precisa do que você ofereceu",
+    },
+    "notify.signal_match.meet_title": {
+        "en": "Someone nearby is up for it 👋",
+        "es": "Alguien cerca se apunta 👋",
+        "pt": "Alguém por perto está a fim 👋",
+    },
+    "notify.signal_match.title": {
+        "en": "A neighbor matched your ask",
+        "es": "Alguien cerca coincide con tu petición",
+        "pt": "Alguém por perto combina com seu pedido",
+    },
+    # Email subject is its own string, deliberately emoji-free: the push title carries the
+    # emoji, but an emoji in a subject line costs deliverability, and email is the channel
+    # that actually reaches people here (a verified user always has an address; a push
+    # subscription is opt-in and rare). Mirrors notify.intro.title vs notify.intro.subject.
+    "notify.signal_match.subject": {
+        "en": "A neighbor answered your ask",
+        "es": "Alguien de tu zona respondió a tu pregunta",
+        "pt": "Alguém da sua área respondeu ao seu pedido",
+    },
+    "notify.signal_match.body_generic": {
+        "en": "A neighbor near you posted something that fits what you asked for.",
+        "es": "Alguien cerca de ti publicó algo que encaja con lo que pediste.",
+        "pt": "Alguém perto de você publicou algo que combina com o que você pediu.",
+    },
+    "notify.signal_match.cta": {
+        "en": "See it", "es": "Verlo", "pt": "Ver",
+    },
+
     "notify.intro.title": {
         "en": "A neighbor wants to connect 🤝",
         "es": "Alguien de tu zona quiere conectar 🤝",

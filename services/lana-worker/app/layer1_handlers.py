@@ -779,19 +779,51 @@ def format_attr_peers_reply(
                 "come close — here's what they've shared. Want me to introduce you to any of them?"
             ),
         )
+    # "What you have in common" is only true when the matcher PROVED an overlap — a
+    # shared claim pair, or an exact concept hit ([[truthful-peer-match-model]]). An attr
+    # search matches the SEARCHER'S WORDS against the neighbour's own claims, which is a
+    # one-sided fact: QA saw "5 people near you who share your interest in community"
+    # over rows reading "Enjoys social gatherings" / "Hosts community meetups" — nobody
+    # had established that the searcher shares anything. Say what actually happened.
+    proven_shared = any(
+        isinstance(p, dict)
+        and (
+            (isinstance(p.get("shared_labels"), list) and p["shared_labels"])
+            or p.get("has_exact_concept_match")
+        )
+        for p in peers
+    )
+    if proven_shared:
+        return compose_reply(
+            goal=(
+                "Tell the user how many neighbors matched their search — the cards "
+                "below show what they have in common — and offer to introduce them "
+                "to any of the neighbors."
+            ),
+            facts=[
+                f'What they searched for: "{filter_text}"',
+                f"Neighbors found: {n}",
+            ],
+            fallback=(
+                f"I found {n} neighbor{'s' if n != 1 else ''} matching \"{filter_text}\" — "
+                "here's what you have in common. Want me to introduce you to any of them?"
+            ),
+        )
     return compose_reply(
         goal=(
-            "Tell the user how many neighbors matched their search — the cards "
-            "below show what they have in common — and offer to introduce them "
-            "to any of the neighbors."
+            "Tell the user how many neighbors' OWN words match what they searched for. "
+            "Critical: nothing has established that the user shares this — the cards "
+            "show what those neighbors said about themselves, so never write 'people "
+            "who share your interest' or 'what you have in common'. Then offer an intro."
         ),
         facts=[
             f'What they searched for: "{filter_text}"',
-            f"Neighbors found: {n}",
+            f"Neighbors whose own claims match that search: {n}",
         ],
         fallback=(
-            f"I found {n} neighbor{'s' if n != 1 else ''} matching \"{filter_text}\" — "
-            "here's what you have in common. Want me to introduce you to any of them?"
+            f"{n} neighbor{'s' if n != 1 else ''} near you "
+            f"{'mention' if n != 1 else 'mentions'} \"{filter_text}\" in what "
+            "they've shared — here's what they said. Want me to introduce you?"
         ),
     )
 

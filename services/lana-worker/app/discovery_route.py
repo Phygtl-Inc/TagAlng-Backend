@@ -56,7 +56,9 @@ from app.guest_capabilities import (
     wants_host_activity,
     wants_peer_find,
 )
-from app.peer_radius import fetch_peer_matches_within_radius
+from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
+from app.tip_rec_cascade import WIDE_FETCH as WIDE_TIP_FETCH
+from app.tip_rec_cascade import stamp_tip_peer_surface
 from app.hosting_cta import (
     handle_hosting_open_turn,
     handle_hosting_send_mom_turn,
@@ -102,7 +104,9 @@ from app.local_signals import (
     INTENT_SHOW_BLOCK_LOG,
     block_log_match_summary,
     block_log_take_action,
+    close_local_signal,
     fetch_my_block_log,
+    find_neighbor_tips,
     filter_block_log_for_signal,
     format_block_log_reply,
     format_signal_saved_reply,
@@ -484,27 +488,48 @@ def _fetch_verified_peer_matches(
         return peers
 
 
-def _zip_gate_peers_turn(
+def _onboarding_wants_peers(
+    session_ctx: dict[str, Any], ctx_base: dict[str, Any] | None = None
+) -> bool:
+    """Should the post-verify funnel END in a neighbors list?
+
+    The funnel is entered by two different populations and they want opposite things:
+
+    · A SIGNUP in flight (`signup_phone` set). Peers is opt-IN here — only when
+      `_verify_gate_reply` stamped `signup_origin='peers'`, meaning it gated someone who
+      was already mid-peers-funnel and had asked to see names. Every other road into
+      signup (a Sign in whose email has no account, a host flow, a tip ask) gets the
+      neutral welcome, because nobody asked to be matched.
+
+    · No signup — just a name gate, e.g. a verified user who never set a nickname and
+      has now asked to find people. Nothing to opt into; keep today's behaviour.
+
+    An explicit origin settles it either way. Only when nothing was stamped do we ask
+    whether a signup is in flight at all — `signup_phone` is the marker, and it survives
+    the whole gate → email → OTP → name run.
+
+    Deliberately NOT keyed on `active_intent`: `_routing_ctx` defaults it to find_peers,
+    so it is stamped on turns nobody requested peers for, including the signup email step.
+    """
+    ctx_base = ctx_base or {}
+    origin = str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
+    if origin:
+        return origin == "peers"
+    return not (session_ctx.get("signup_phone") or ctx_base.get("signup_phone"))
+
+
+def _seed_forward_peers_turn(
     ctx_base: dict[str, Any],
     *,
-    user_id: str | None,
+    frame: dict[str, Any],
     block_id: str | None,
-) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    """Circles §D.2, hard mode only: peer introductions need an OPEN area — in a
-    3-person ZIP the matches are junk-quality and privacy-risky. Returns the
-    seed-forward turn (exemplar #7: honest + host pill, never a dead end) when
-    gated, None to proceed. Default mode is 'soft', which never blocks peers;
-    creation paths (host/share/invite) must never call this."""
-    try:
-        from app.zip_unlock import discovery_zip_gate, gate_framing_facts
-
-        frame = discovery_zip_gate(user_id, surface="peers")
-    except Exception:  # noqa: BLE001 — a gating error must fail OPEN
-        logging.getLogger(__name__).exception("peers_zip_gate_failed")
-        return None
-    if not frame or not frame.get("blocked"):
-        return None
+    tool: str = "zip_gate_peers",
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """The honest, never-a-dead-end peers reply for an area that isn't open yet
+    (exemplar #7): name the situation plainly, then hand them the one thing that
+    changes it. Shared by the §D.2 gate and the zero-match supply floor."""
     from app.reply_compose import compose_reply
+    from app.zip_unlock import gate_framing_facts
 
     reply = compose_reply(
         goal=(
@@ -530,8 +555,64 @@ def _zip_gate_peers_turn(
     )
     ctx["suggestions"] = ["Host a meet"]
     ctx.pop("activity_previews", None)
-    ctx["last_routing"] = _discovery_routing_stub("listening", "zip_gate_peers")
+    ctx["last_routing"] = _discovery_routing_stub("listening", tool)
     return reply, ctx, ctx["last_routing"], []
+
+
+def _zip_gate_peers_turn(
+    ctx_base: dict[str, Any],
+    *,
+    user_id: str | None,
+    block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Circles §D.2, hard mode only: peer introductions need an OPEN area — in a
+    3-person ZIP the matches are junk-quality and privacy-risky. Returns the
+    seed-forward turn (exemplar #7: honest + host pill, never a dead end) when
+    gated, None to proceed. Default mode is 'soft', which never blocks peers;
+    creation paths (host/share/invite) must never call this."""
+    try:
+        from app.zip_unlock import discovery_zip_gate
+
+        frame = discovery_zip_gate(user_id, surface="peers")
+    except Exception:  # noqa: BLE001 — a gating error must fail OPEN
+        logging.getLogger(__name__).exception("peers_zip_gate_failed")
+        return None
+    if not frame or not frame.get("blocked"):
+        return None
+    return _seed_forward_peers_turn(ctx_base, frame=frame, block_id=block_id)
+
+
+def _peers_supply_floor_turn(
+    ctx_base: dict[str, Any],
+    *,
+    user_id: str | None,
+    block_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Zero REAL matches in an area that hasn't opened → say so, don't pad.
+
+    Runs after `_fetch_verified_peer_matches` comes back empty and before the
+    `fetch_preview_peers_on_block` fallback, which is a bare `WHERE home_block_id`
+    read: unscored rows, `matching_peer_label: "Near you"`, and `nickname: null`
+    for anyone who never set one. Rendering three of those as "I found 3 neighbors"
+    asserts a match that was never computed and names people it cannot name.
+
+    Independent of gate mode on purpose — soft mode declines to BLOCK the surface,
+    which is a different question from what to do when the surface has nothing
+    true to say. Returns None (keep the fallback list) whenever the area is open,
+    the ZIP is unknown, or gating is off entirely — the fallback is honest there,
+    because an open area means real neighbors with real profiles."""
+    try:
+        from app.zip_unlock import discovery_zip_gate
+
+        frame = discovery_zip_gate(user_id, surface="peers")
+    except Exception:  # noqa: BLE001 — a floor error must fail OPEN
+        logging.getLogger(__name__).exception("peers_supply_floor_failed")
+        return None
+    if not frame:  # area open / unknown ZIP / gating off → today's behaviour
+        return None
+    return _seed_forward_peers_turn(
+        ctx_base, frame=frame, block_id=block_id, tool="peers_supply_floor"
+    )
 
 
 def _preview_peers_with_ids(
@@ -1392,6 +1473,53 @@ def _try_layer1_intent_turn(
 
     ctx_base = dict(session_ctx)
 
+    if linear == "discovery.communities":
+        # "show me communities around me" — answered from circle_affiliations + places.
+        # Verification gates the READ the same way find-peers does: the block/place read
+        # and the member counts are neighbours' data.
+        if not phone_verified or not user_id:
+            return (
+                compose_reply(
+                    goal=(
+                        "They asked what communities are around them. Verifying their "
+                        "email is what unlocks seeing neighbours' spots — say that in one "
+                        "warm line and invite them to verify. No guilt, no list."
+                    ),
+                    fallback=(
+                        "Verify your email and I can show you the communities near you — "
+                        "the spots your neighbours already go to."
+                    ),
+                    session_ctx=ctx_base,
+                    user_message=msg,
+                ),
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent="discovery.communities",
+                ),
+                _discovery_routing_stub(phase or "listening", "communities_need_verify"),
+                [],
+            )
+        from app.community_discovery import communities_chat_turn
+
+        reply = communities_chat_turn(
+            user_id,
+            message=msg,
+            session_ctx=ctx_base,
+            locale=str(session_ctx.get("preferred_lang") or "en"),
+        )
+        ctx = _routing_ctx(
+            ctx_base, phase=phase or "listening", active_intent="discovery.communities"
+        )
+        # _routing_ctx wipes turn-scoped surfaces; re-attach the two this turn stamped.
+        for key in ("community_discovery", "communities_card"):
+            if ctx_base.get(key):
+                ctx[key] = ctx_base[key]
+        ctx["last_routing"] = _discovery_routing_stub(
+            phase or "listening", "communities_nearby"
+        )
+        return reply, ctx, ctx["last_routing"], []
+
     if linear == "identity.show_my_profile":
         if not phone_verified:
             return (
@@ -2028,15 +2156,25 @@ def save_pending_signal_ask(
     )
 
 
-def _compose_verify_gate_ask(user_msg: str) -> str:
+def _compose_verify_gate_ask(user_msg: str, *, purpose: str | None = None) -> str:
     """AI-authored verify gate (Lana's voice) — acknowledge WHAT the user asked for and say
     it'll be set up, THEN explain the one thing needed (email verification) and ask for it.
     The old canned "Verify your email first" opener read as a cold wall that ignored the
     request ("can you recommend me a babysitter" → demand for email with zero empathy).
-    Static friendly fallback when no LLM is configured."""
+    Static friendly fallback when no LLM is configured.
+
+    `purpose` overrides what verification buys them. The default promises a posting, which is
+    a lie on the recommendation path — that turn is going to ANSWER them, not post anything
+    (see _tip_seek_answer_turn)."""
+    what_it_buys = purpose or (
+        "you'll save their ask for neighbors nearby and ping them when a neighbor responds"
+    )
     fallback = (
-        "Happy to help with that! To save your ask and share it with neighbors nearby I just "
-        "need to verify you first — what's your email?"
+        "Happy to help with that! To look that up near you I just need to verify you first — "
+        "what's your email?"
+        if purpose
+        else "Happy to help with that! To save your ask and share it with neighbors nearby I "
+        "just need to verify you first — what's your email?"
     )
     try:
         from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
@@ -2047,12 +2185,13 @@ def _compose_verify_gate_ask(user_msg: str) -> str:
             model=synthesizer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. The user asked for something "
-                "you CAN do — you'll save their ask for neighbors nearby and ping "
-                "them when a neighbor responds — but they aren't verified yet, and you need "
-                "their email before you can post anything. Write ONE short chat message "
+                f"you CAN do — {what_it_buys} — but they aren't verified yet, and you need "
+                "their email before you can go ahead. Write ONE short chat message "
                 "(max 2 sentences): first acknowledge specifically what they asked for and "
-                "say you'll set it up, then explain you just need to verify them and ask "
-                "for their email. Never promise results you don't have. "
+                "say what you'll do with it (exactly what is described above — no more), then "
+                "explain you just need to verify them and ask for their email. Never promise "
+                "results you don't have, and never promise to post or share anything unless "
+                "the description above says you will. "
                 'Return JSON {"message": "..."}.'
             ),
             user_payload=f"The user's request: {str(user_msg or '').strip()[:300]}",
@@ -2250,6 +2389,46 @@ def _try_signal_lane_turn(
         active_linear = str(draft.get("linear_intent") or "")
     elif linear and is_signal_lane_intent(slots):
         active_linear = str(linear)
+
+    # ── Recommendation ask: leave the signal lane HERE, before its gates ─────────────
+    # A tip_seek is a question, so it never enters the capture cascade ("which category?"
+    # before a single recommendation is mechanic-first), and it must not hit this lane's
+    # verify/ZIP gates either — those speak for a POSTING ("so I can save your ask and share
+    # it with neighbors"), which is not what this turn does. _try_save_signal_turn intercepts
+    # tip_seek into the read-only answer turn, which owns its own verify/ZIP framing.
+    # An in-flight draft (legacy state, or a swap/meet capture) is untouched.
+    if slots and not isinstance(draft, dict):
+        from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR
+        from app.lana_paths import tip_ask_consent_enabled
+
+        _sig = normalize_signal_intent(
+            slots.get("signal_intent")
+        ) or SIGNAL_INTENT_BY_LINEAR.get(linear or "")
+        _sig_goal = str(slots.get("goal") or "") == "save_signal" or is_signal_lane_intent(slots)
+        if (
+            _sig == "tip_seek"
+            and _sig_goal
+            and float(slots.get("confidence") or 0.0) >= 0.5
+            and tip_ask_consent_enabled()
+        ):
+            return _try_save_signal_turn(
+                msg=msg,
+                # This lane's own gate (confidence >= 0.5) is what just passed; float it over
+                # _try_save_signal_turn's stricter bar so a mid-confidence recommendation ask
+                # still gets ANSWERED instead of dropping through to chat.
+                slots={
+                    **slots,
+                    "goal": "save_signal",
+                    "signal_intent": "tip_seek",
+                    "confidence": max(float(slots.get("confidence") or 0.0), 0.6),
+                },
+                session_ctx=ctx_base,
+                user_jwt=user_jwt,
+                phone_verified=phone_verified,
+                home_block_id=home_block_id,
+                phase=phase,
+                user_id=user_id,
+            )
 
     if active_linear or isinstance(draft, dict):
         if not phone_verified:
@@ -2498,6 +2677,42 @@ def _stamp_peer_seek_offer(ctx: dict[str, Any], display_filter: str) -> None:
     what the NEXT turn reads to interpret the tap (cleared with None, never pop)."""
     ctx["peer_seek_offer"] = {"filter": display_filter}
     ctx["peer_seek_offer_pending"] = {"filter": display_filter}
+
+
+def _try_community_join_reply_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    phase: str | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Join a community the previous turn listed. One-turn offer: whatever comes next
+    consumes it, and anything that isn't a join falls through to normal routing.
+
+    The membership write is idempotent (join_community returns already_member rather
+    than inserting twice), so a double tap is harmless."""
+    if not user_id or not session_ctx.get("community_join_pending"):
+        return None
+    from app.community_discovery import join_confirm_reply, read_join_reply
+
+    result = read_join_reply(user_id, msg, session_ctx)
+    if not result:
+        return None
+    member_count: int | None = None
+    try:
+        from app.community_surface import member_count as _count
+
+        member_count = _count(str(result.get("place_id") or ""))
+    except Exception:  # noqa: BLE001 — the count is a nicety, the join already happened
+        logging.getLogger(__name__).exception("community_join_count_failed")
+    reply = join_confirm_reply(
+        result, session_ctx=session_ctx, message=msg, member_count=member_count
+    )
+    ctx = _routing_ctx(
+        session_ctx, phase=phase or "listening", active_intent="discovery.communities"
+    )
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "community_joined")
+    return reply, ctx, ctx["last_routing"], []
 
 
 def _try_peer_seek_offer_reply_turn(
@@ -2858,11 +3073,17 @@ def _tip_seek_fallback_reply(
     block_id: str,
     session_ctx: dict[str, Any],
     user_id: str | None,
+    posted: bool = True,
 ) -> str:
     """Empty tip-seek → Google Places fallback, claim-personalized + verified (hybrid loop).
 
     Mutates ctx (google_place_suggestions, rec_chips, rec_widen_noun, rec_filter_asked) and
     returns the reply, or "" to keep the plain saved-signal reply (no places surfaced).
+
+    posted=False is the consent path (tip_ask_consent_enabled): nothing has been written yet,
+    so every "I've posted your ask / I'll ping you when a neighbor recommends one" clause is
+    dropped — the caller appends the ask-neighbors OFFER instead. Claiming a posting that
+    doesn't exist is the bug this parameter exists to prevent.
 
     Hybrid flow: ONE obvious claim-angle → apply it (verified) + refine chips; SEVERAL
     distinct angles → ask the user to pick first (chips, no search this turn); none relevant,
@@ -2903,10 +3124,17 @@ def _tip_seek_fallback_reply(
             return ""
         ctx["google_place_suggestions"] = places[:3]
         if reason_widen:
+            if not posted:
+                return f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH})."
             return (
                 f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}). "
                 "Your ask is still posted for neighbors, so I'll ping you the moment a neighbor "
                 "recommends one."
+            )
+        if not posted:
+            return (
+                f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
+                f"{_TIP_VOUCH})."
             )
         return (
             f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
@@ -2994,6 +3222,11 @@ def _tip_seek_fallback_reply(
         )
         ctx["rec_chips"] = chips
         reframe = chosen.get("reframe") or f"Focused on {chosen.get('label', 'a good fit').lower()} spots."
+        if not posted:
+            # No "want me to widen?" here — the caller ends this turn with the ask-neighbors
+            # offer, and two questions in one breath is the ask-stacking bug
+            # ([[rapport-ask-stacking-and-tile-context]]). The widen stays available as a chip.
+            return f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH})."
         return (
             f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}), "
             "and I've posted your ask for neighbors — I'll ping you the moment a neighbor "
@@ -3010,10 +3243,859 @@ def _tip_seek_fallback_reply(
     ctx["google_place_suggestions"] = fallback[:3]
     ctx["rec_widen_noun"] = noun
     label = str(chosen.get("label") or "").strip().lower() or "matching"
+    if not posted:
+        return (
+            f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
+            f"({_TIP_VOUCH})."
+        )
     return (
         f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
         f"({_TIP_VOUCH}). Your ask is posted for neighbors — I'll ping you the moment a "
         "neighbor recommends one."
+    )
+
+
+# ── Recommendation asks: ANSWER first, post only on consent ──────────────────────────
+#
+# "recommend me a doctor" is a QUESTION. The legacy path made it a broadcast: the router
+# read tip_seek → save_local_signal wrote a listening row (notifying matching neighbors at
+# strength >= 0.80) → the reply was generated from that write ("I've noted you're looking
+# for a recommendation…"), with the actual answer relegated to a fallback. Three problems
+# fell out of that ordering: the plumbing became the answer, every lane re-entry (a chip
+# tap, a "maybe later") wrote ANOTHER posting, and Lana's own offer to remove a posting had
+# nothing behind it.
+#
+# Now: read neighbor tips (find_neighbor_tips — no write), else Google, then ONE offer whose
+# accept does the write. Chip payloads are canonical English because the offer reader's
+# deterministic floor compares against them (labels are localized at render time).
+_TIP_ASK_ACCEPT_MSG = "Yes, ask my neighbors"
+_TIP_ASK_DECLINE_MSG = "No, just the list"
+_POSTING_REMOVE_MSG = "Take my posting down"
+# The recommendation-cascade protocol payloads (frontend §12, frames C-4-look-tip-P2/P4).
+# The FE posts these strings verbatim as the user's message; the LABEL it renders is
+# localized, the payload is not. Same contract as the two above.
+_ASK_DRAFT_OK_MSG = "Looks good"
+_ASK_DRAFT_TWEAK_MSG = "Let me tweak that"
+_TIP_KEEP_LISTENING_MSG = "Keep listening for me"
+_TIP_FIND_MORE_MSG = "Find more people"
+
+
+def _stamp_tip_ask_offer(
+    ctx: dict[str, Any], *, detail: str, category: str | None
+) -> None:
+    """Arm the one-turn "want me to ask your neighbors too?" offer.
+
+    tip_ask_offer renders the pills (turn-scoped surface); tip_ask_offer_pending is what the
+    NEXT turn reads to interpret the answer, and is cleared with None — never pop, or the
+    session merge resurrects it and the offer stays armed forever ([[ctx-pop-resurrection]]).
+    """
+    payload = {"detail": detail, "category": category}
+    ctx["tip_ask_offer"] = payload
+    ctx["tip_ask_offer_pending"] = payload
+
+
+def _stamp_posting_manage_offer(ctx: dict[str, Any], saved: dict[str, Any]) -> None:
+    """Arm the post-save "I can take it down" offer — same split as above. This is what
+    makes the removal line truthful: the pending payload carries the signal_id that
+    close_local_signal will close."""
+    payload = {
+        "signal_id": saved.get("signal_id"),
+        "detail": saved.get("detail_text"),
+        "intent": saved.get("intent"),
+    }
+    ctx["posting_manage"] = payload
+    ctx["posting_manage_pending"] = payload
+    # Survives past the one-turn offer so a later "actually, remove that" still resolves.
+    ctx["last_saved_signal"] = payload
+
+
+def _read_offer_reply(*, offer: str, detail: str, msg: str) -> str:
+    """accept | decline | remove | other for a reply to one of the offers above.
+
+    AI-first (no accept/decline phrase lists — [[no-new-regex-use-ai-signals]]); the floor
+    when the LLM is unavailable is an exact comparison against the chip payloads Lana
+    herself offered, which is not a matcher over free text.
+    """
+    from app.tip_ask_ai import interpret_offer_reply
+
+    verdict = interpret_offer_reply(offer=offer, detail=detail, msg=msg)
+    if verdict:
+        return verdict
+    text = str(msg or "").strip().lower()
+    if text in (_TIP_ASK_ACCEPT_MSG.lower(), _TIP_KEEP_LISTENING_MSG.lower()):
+        return "accept"
+    if text == _TIP_ASK_DECLINE_MSG.lower():
+        return "decline"
+    if text == _POSTING_REMOVE_MSG.lower():
+        return "remove"
+    return "other"
+
+
+def _compose_tip_ask_offer_line(detail: str, session_ctx: dict[str, Any]) -> str:
+    """The ONE offer that gates the write. Ends the recommendation answer."""
+    return compose_reply(
+        goal=(
+            "You just answered the user's recommendation ask with what you could find. "
+            "Nothing has been posted anywhere and you must not imply otherwise. Ask ONE "
+            "short question: would they like you to also ask their neighbors nearby for a "
+            "recommendation of their own? Make clear it is their call."
+        ),
+        facts=[f"What they asked for: {_ask_excerpt(detail)}", "Nothing has been posted yet."],
+        session_ctx=session_ctx,
+        fallback="Want me to ask your neighbors for their own recommendation too?",
+        max_sentences=1,
+    )
+
+
+def _compose_neighbor_tip_reply(
+    tips: list[dict[str, Any]],
+    *,
+    detail: str,
+    session_ctx: dict[str, Any],
+    weights: list[str] | None = None,
+    widened: bool = False,
+) -> str:
+    """A real neighbor recommendation — the one answer that beats Google. Every fact the
+    composer gets is one the row itself carries (who, what they recommended, how far), so
+    the prose can never claim more than the cards do."""
+    facts = [f"What they asked for: {_ask_excerpt(detail)}"]
+    lines: list[str] = []
+    for row in tips[:3]:
+        text = str(row.get("detail_text") or "").strip()
+        if not text:
+            continue
+        who = str(row.get("neighbor_label") or "A neighbor on your block").strip()
+        where = str(row.get("distance_text") or "").strip()
+        lines.append(
+            f"{who} recommended: {text}" + (f" ({where})" if where else "")
+        )
+    facts.extend(lines)
+    if weights:
+        facts.append("What they said matters most: " + ", ".join(weights[:4]))
+    if widened:
+        facts.append("You just widened the search past their own block.")
+    fallback_body = "\n".join(f"• {line}" for line in lines)
+    goal = (
+        "A neighbor on the user's block already posted a recommendation that matches "
+        "what they asked for. Lead with it — this is a real neighbor vouch, not a "
+        "Google listing, so say who recommended what in their words. Do not invent "
+        "any detail beyond the facts, and do not claim anything has been posted."
+    )
+    if weights:
+        goal = (
+            "The user just told you which threads matter most to them, and you re-ordered "
+            "the neighbors' recommendations around that. Say in one breath that you put "
+            "the ones matching what they care about first, then lead with the top rec in "
+            "the neighbor's own words. Never claim a neighbor said something about a "
+            "thread the facts do not show, and do not claim anything has been posted."
+        )
+    elif widened:
+        goal = (
+            "The user asked you to look further out, so you searched past their own block. "
+            "Say that plainly, then lead with what the neighbors further out recommended, "
+            "in their own words. Do not claim anything has been posted."
+        )
+    return compose_reply(
+        goal=goal,
+        facts=facts,
+        session_ctx=session_ctx,
+        fallback=f"A neighbor near you already recommended one:\n{fallback_body}",
+        max_sentences=3,
+    )
+
+
+def _tip_ask_locality(session_ctx: dict[str, Any]) -> str | None:
+    """The area label for the ask draft — never a guess, only what we already know."""
+    for key in ("block_display_name", "block_name", "preview_zip", "zip"):
+        val = str(session_ctx.get(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _stamp_tip_ask_draft(
+    ctx: dict[str, Any],
+    *,
+    msg: str,
+    detail: str,
+    category: str | None,
+    session_ctx: dict[str, Any],
+) -> None:
+    """The seek-side receipt of what Lana understood (§12d). Best-effort — an ask that
+    cannot be drafted still gets answered."""
+    from app.tip_ask_draft import stamp_ask_draft
+
+    try:
+        stamp_ask_draft(
+            ctx,
+            msg=msg,
+            detail=detail,
+            category=category,
+            locality=_tip_ask_locality(session_ctx),
+        )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("ask_draft_stamp_failed")
+
+
+def _tip_seek_answer_turn(
+    *,
+    msg: str,
+    detail: str,
+    category: str | None,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+    user_id: str | None,
+    active_intent: str,
+    weights: list[str] | None = None,
+    widen: bool = False,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors."""
+    ctx_base = dict(session_ctx)
+
+    if not phone_verified:
+        # Unchanged auth surface (a signed-out session still can't run block reads or
+        # Places lookups), but the ask is now framed by what verification actually buys
+        # them here — recommendations near them — not "so I can post your ask".
+        ctx_base["tip_seek_pending"] = {"detail": detail, "category": category}
+        ctx = _routing_ctx(ctx_base, phase=PHASE_AWAIT_SIGNUP_PHONE, active_intent=active_intent)
+        ctx["requires_phone_verification"] = True
+        # The gate at least arrives with her actual ask attached, rather than a bare
+        # "verify first" over a question she already typed (§12d, guest behaviour note).
+        _stamp_tip_ask_draft(
+            ctx, msg=msg, detail=detail, category=category, session_ctx=session_ctx
+        )
+        return (
+            _compose_verify_gate_ask(
+                msg,
+                purpose=(
+                    "you'll look up recommendations near them (from neighbors who have "
+                    "shared one, and from what's nearby) — nothing gets posted anywhere"
+                ),
+            ),
+            ctx,
+            _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE, "tip_seek_need_verify"),
+            [],
+        )
+
+    block_id = _resolve_block_id_for_turn(
+        session_ctx=session_ctx,
+        home_block_id=home_block_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+    )
+    if not block_id:
+        # This turn's message may itself be the ZIP we asked for last turn (the resume
+        # lands here with tip_seek_pending re-armed), so place it before asking again.
+        zip5 = extract_zip(msg)
+        blocks = fetch_blocks_for_zip(user_jwt, zip5) if zip5 else []
+        if blocks:
+            block_id = str(blocks[0].get("block_id") or "") or None
+            if block_id:
+                ctx_base["preview_block_id"] = block_id
+                ctx_base["preview_zip"] = zip5
+                session_ctx["preview_block_id"] = block_id
+    if not block_id:
+        ctx_base["tip_seek_pending"] = {"detail": detail, "category": category}
+        zip_ctx = _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent)
+        _stamp_tip_ask_draft(
+            zip_ctx, msg=msg, detail=detail, category=category, session_ctx=session_ctx
+        )
+        return (
+            compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before you can look anything up near "
+                    "them. Ask for it warmly, framed as what it's for — searching near them. "
+                    "Nothing is being posted, so never say their ask will be saved or shared."
+                ),
+                session_ctx=session_ctx,
+                fallback="What ZIP are you in? Then I can look for good ones near you.",
+                cache=True,
+            ),
+            zip_ctx,
+            _discovery_routing_stub(PHASE_NEED_ZIP, "tip_seek_need_zip"),
+            [],
+        )
+
+    # We're answering NOW, so the resume stash is spent — a leftover would re-answer this
+    # same ask after some unrelated later verify/ZIP turn.
+    ctx_base["tip_seek_pending"] = None
+    ctx = _routing_ctx(ctx_base, phase=phase or PHASE_PREVIEW, active_intent=active_intent)
+    ctx.pop("activity_previews", None)
+    _clear_peer_surface(ctx)
+    if block_id and not resolve_block_id(ctx, home_block_id):
+        ctx["preview_block_id"] = block_id
+
+    _stamp_tip_ask_draft(
+        ctx, msg=msg, detail=detail, category=category, session_ctx=session_ctx
+    )
+    # Remembered before the search, not after it: a re-rank or a widen has to work even when
+    # this turn's answer came from Places because no neighbor had posted a matching tip.
+    ctx["tip_last_ask"] = {"detail": detail, "category": category}
+    ctx["tip_rerank_weights"] = list(weights or []) or None
+    # Weighted or widened turns fetch past the page the user was shown, so a re-rank can
+    # reach someone who wasn't on it (§12c) — that reach is the whole point of doing this
+    # server-side. A plain ask keeps the original narrow read.
+    wide = bool(weights) or widen
+    neighbor_tips = find_neighbor_tips(
+        user_jwt,
+        block_id=block_id,
+        query=detail,
+        category=category,
+        limit=WIDE_TIP_FETCH if wide else 3,
+        locale=str(session_ctx.get("preferred_lang") or "en"),
+        radius_meters=radius_meters() if widen else None,
+    )
+    logging.getLogger(__name__).info(
+        "tip_seek_answer.enter block=%s detail=%r category=%r neighbor_tips=%d wide=%s",
+        block_id, detail, category, len(neighbor_tips), wide,
+    )
+
+    if neighbor_tips:
+        # The rec rides ON the neighbor's row, not only in the prose (§12a/b): the quote is
+        # what makes the row a pre-qualified answer instead of one more person to message.
+        shown = stamp_tip_peer_surface(
+            ctx, neighbor_tips, phone_verified=phone_verified, weights=weights
+        )
+        reply = _compose_neighbor_tip_reply(
+            neighbor_tips,
+            detail=detail,
+            session_ctx=session_ctx,
+            weights=weights,
+            widened=widen,
+        )
+        _stamp_tip_ask_offer(ctx, detail=detail, category=category)
+        ctx["last_routing"] = _discovery_routing_stub(
+            phase or "listening",
+            "tip_seek_reranked" if (weights or widen) else "tip_seek_neighbor_tip",
+        )
+        return reply, ctx, ctx["last_routing"], list(shown)
+
+    rec = _tip_seek_fallback_reply(
+        ctx=ctx,
+        msg=msg,
+        detail=detail,
+        category=category,
+        block_id=block_id,
+        session_ctx=session_ctx,
+        user_id=user_id,
+        posted=False,
+    )
+    # The hybrid loop asked which angle they want (chips, no results this turn) — that IS
+    # this turn's question. Stacking the ask-neighbors offer on top would be two asks in one
+    # breath ([[rapport-ask-stacking-and-tile-context]]); it comes back once results land.
+    asked_angle = bool(ctx.get("rec_filter_asked"))
+    if rec and asked_angle:
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_seek_angle_ask")
+        return rec, ctx, ctx["last_routing"], []
+
+    if not rec:
+        reply = compose_reply(
+            goal=(
+                "You looked and found nothing nearby for what the user asked for. Say that "
+                "plainly — never pad it with places you did not find. Then offer ONE next "
+                "step: you could ask their neighbors nearby, who often know the good ones. "
+                "Nothing has been posted yet, so do not imply it has."
+            ),
+            facts=[f"What they asked for: {_ask_excerpt(detail)}", "Nothing has been posted yet."],
+            session_ctx=session_ctx,
+            fallback=(
+                f"I couldn't find a good match nearby for {_ask_excerpt(detail)}. Want me to "
+                "ask your neighbors — they usually know the good ones?"
+            ),
+        )
+    else:
+        reply = f"{rec} {_compose_tip_ask_offer_line(detail, session_ctx)}".strip()
+    _stamp_tip_ask_offer(ctx, detail=detail, category=category)
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_seek_answered")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _save_consented_tip_ask(
+    *,
+    detail: str,
+    category: str | None,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phase: str,
+    block_id: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """The write, now that the user asked for it. Idempotent per (user, intent, detail) at
+    the RPC, so a re-tapped chip can't multiply postings."""
+    result = save_local_signal(
+        user_jwt,
+        intent="tip_seek",
+        detail_text=detail,
+        category=category,
+        block_id=block_id,
+        zip_code=str(session_ctx.get("zip") or "") or None,
+    )
+    ctx = _routing_ctx(
+        dict(session_ctx), phase=phase or PHASE_PREVIEW, active_intent="looking.tip"
+    )
+    ctx["tip_ask_offer_pending"] = None
+    # This turn's answer is the posting receipt, not the cascade — leaving last turn's rec
+    # cards attached would read as "and here are the neighbors who answered it", which is
+    # exactly what has NOT happened yet.
+    _clear_peer_surface(ctx)
+    matches_shown = int(result.get("matches_created") or 0)
+    filtered_entries: list[dict[str, Any]] = []
+    try:
+        filtered_entries = filter_block_log_for_signal(
+            fetch_my_block_log(user_jwt),
+            signal_intent="tip_seek",
+            signal_id=str(result.get("signal_id") or "") or None,
+            detail_text=str(result.get("detail_text") or detail or "") or None,
+        )
+        if filtered_entries:
+            matches_shown = len(filtered_entries)
+            stamp_block_log_ctx(ctx, filtered_entries)
+    except HTTPException:
+        matches_shown = max(matches_shown, 0)
+
+    stamp_signal_saved_ctx(ctx, result, active_intent="looking.tip")
+    if isinstance(ctx.get("signal_saved"), dict):
+        ctx["signal_saved"]["matches_created"] = matches_shown
+    _stamp_posting_manage_offer(ctx, ctx.get("signal_saved") or {})
+
+    facts = [f"What you posted, in their words: {_ask_excerpt(detail)}"]
+    if matches_shown > 0:
+        facts.append(f"Neighbors already matching this ask: {matches_shown}")
+    reply = compose_reply(
+        goal=(
+            "The user just said yes, so you asked their neighbors nearby for a "
+            "recommendation. Confirm what you asked for in their own words and promise to "
+            "text them when a neighbor recommends one (that is true). Then tell them in the "
+            "same breath that you can take it down anytime they want. Never say 'noted', "
+            "'saved to my system', or 'on my radar'."
+        ),
+        facts=facts,
+        session_ctx=session_ctx,
+        fallback=(
+            f"Asking your neighbors now — {_ask_excerpt(detail)}. I'll text you the moment "
+            "someone recommends one, and I can take it down whenever you like."
+        ),
+    )
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_ask_posted")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_tip_ask_offer_reply_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Read the reply to the ask-neighbors / manage-posting offer.
+
+    One turn only: whatever comes next consumes the offer. accept → the write happens;
+    decline → warm close, nothing written (this is what stops a "maybe later" from being
+    re-read as a fresh tip_seek and posting AGAIN); remove → close the posting; other → the
+    offer is disarmed and the turn falls through to normal routing (a refinement like
+    "kid-friendly ones" must still reach the recommendation lane)."""
+    pending = session_ctx.get("tip_ask_offer_pending")
+    manage = session_ctx.get("posting_manage_pending")
+    if not isinstance(pending, dict) and not isinstance(manage, dict):
+        return None
+    offer = "ask_neighbors" if isinstance(pending, dict) else "manage_posting"
+    payload = pending if isinstance(pending, dict) else manage
+    detail = str((payload or {}).get("detail") or "").strip()
+    category = (payload or {}).get("category")
+    # None, not pop — the session-ctx merge resurrects popped keys.
+    session_ctx["tip_ask_offer_pending"] = None
+    session_ctx["posting_manage_pending"] = None
+
+    verdict = _read_offer_reply(offer=offer, detail=detail, msg=msg)
+    if verdict == "other":
+        return None
+
+    if verdict == "remove":
+        return _remove_posting_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phase=phase,
+            signal_id=str((payload or {}).get("signal_id") or "") or None,
+            detail=detail,
+        )
+
+    if verdict == "decline":
+        ctx = _routing_ctx(dict(session_ctx), phase=phase or "listening", active_intent="none")
+        ctx["tip_ask_offer_pending"] = None
+        ctx["posting_manage_pending"] = None
+        goal = (
+            "The user does not want their ask posted to neighbors. Confirm warmly that "
+            "nothing was posted — it stays between the two of you — and leave the door open "
+            "if they change their mind. One short message, no pressure, no re-offer."
+            if offer == "ask_neighbors"
+            else "The user wants to leave their posting up as it is. Acknowledge briefly and "
+            "warmly, and remind them in one clause that you'll text them when a neighbor "
+            "recommends one. No re-offer."
+        )
+        fallback = (
+            "No problem — nothing posted. Just say the word if you'd like me to ask around later."
+            if offer == "ask_neighbors"
+            else "Sounds good — I'll leave it up and text you when a neighbor recommends one."
+        )
+        reply = compose_reply(goal=goal, session_ctx=session_ctx, fallback=fallback)
+        ctx["last_routing"] = _discovery_routing_stub(
+            phase or "listening", f"tip_ask_{offer}_declined"
+        )
+        return reply, ctx, ctx["last_routing"], []
+
+    # accept
+    if offer == "manage_posting":
+        # "Yes" to the manage-posting offer means take it down (the only thing offered).
+        return _remove_posting_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phase=phase,
+            signal_id=str((payload or {}).get("signal_id") or "") or None,
+            detail=detail,
+        )
+    if not detail:
+        return None
+    if not phone_verified:
+        ctx_base = dict(session_ctx)
+        ctx_base["signal_pending"] = {
+            "intent": "tip_seek", "detail": detail, "category": category,
+        }
+        ctx = _routing_ctx(ctx_base, phase=PHASE_AWAIT_SIGNUP_PHONE, active_intent="looking.tip")
+        ctx["requires_phone_verification"] = True
+        return (
+            _compose_verify_gate_ask(msg),
+            ctx,
+            _discovery_routing_stub(PHASE_AWAIT_SIGNUP_PHONE, "tip_ask_need_verify"),
+            [],
+        )
+    block_id = _resolve_block_id_for_turn(
+        session_ctx=session_ctx,
+        home_block_id=home_block_id,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+    )
+    if not block_id:
+        ctx_base = dict(session_ctx)
+        ctx_base["signal_pending"] = {
+            "intent": "tip_seek", "detail": detail, "category": category,
+        }
+        return (
+            compose_reply(
+                goal=(
+                    "You need the user's 5-digit ZIP before their ask can go to neighbors "
+                    "nearby. Ask for it warmly."
+                ),
+                session_ctx=session_ctx,
+                fallback=(
+                    "What ZIP are you in? Once I know your area I can ask neighbors nearby."
+                ),
+                cache=True,
+            ),
+            _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent="looking.tip"),
+            _discovery_routing_stub(PHASE_NEED_ZIP, "tip_ask_need_zip"),
+            [],
+        )
+    try:
+        return _save_consented_tip_ask(
+            detail=detail,
+            category=str(category or "") or None,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phase=phase,
+            block_id=block_id,
+        )
+    except HTTPException:
+        logging.getLogger(__name__).exception("tip_ask_save_failed")
+        ctx = _routing_ctx(dict(session_ctx), phase=phase or "listening", active_intent="none")
+        return (
+            compose_reply(
+                goal=(
+                    "You tried to send the user's ask to their neighbors and it failed on "
+                    "your side. Apologise briefly, say it did not go out, and offer to try "
+                    "again. Never claim it was posted."
+                ),
+                session_ctx=session_ctx,
+                fallback=(
+                    "Something went wrong on my side and your ask didn't go out to neighbors "
+                    "— want me to try again?"
+                ),
+            ),
+            ctx,
+            _discovery_routing_stub(phase or "listening", "tip_ask_save_failed"),
+            [],
+        )
+
+
+def _try_tip_cascade_control_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+    user_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Re-run the last recommendation ask under the user's own weighting (§12c).
+
+    Two controls, both re-ranking SERVER-side over a wider fetch than the page she was
+    shown — which is the part the frontend cannot do for itself:
+      · "what matters most" weights (intent_hint=look_tip_rerank, or a tapped thread), and
+      · "find more people", which widens past her own block via the radius lever.
+    Neither writes anything: this is still the answer half of the lane.
+    """
+    rerank = session_ctx.get("tip_rerank")
+    weights: list[str] = []
+    widen = False
+    if isinstance(rerank, dict):
+        # Consumed on arrival, even if there turns out to be nothing to re-rank — a hint
+        # left armed would silently re-order some later, unrelated ask.
+        session_ctx["tip_rerank"] = None  # None, not pop — merge resurrects popped keys
+        weights = [str(w).strip() for w in (rerank.get("weights") or []) if str(w).strip()]
+        widen = bool(rerank.get("widen"))
+
+    last = session_ctx.get("tip_last_ask")
+    if not isinstance(last, dict):
+        return None
+    detail = str(last.get("detail") or "").strip()
+    if not detail:
+        return None
+
+    text = str(msg or "").strip().lower()
+    # Chip-payload comparison, not a phrase matcher: these are the exact strings Lana's own
+    # pills post back (labels are localized at render time — see the canonical list above).
+    if text == _TIP_FIND_MORE_MSG.lower():
+        widen = True
+    if not weights and not widen:
+        return None
+
+    return _tip_seek_answer_turn(
+        msg=msg,
+        detail=detail,
+        category=str(last.get("category") or "") or None,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        phase=phase,
+        user_id=user_id,
+        active_intent="looking.tip",
+        weights=weights or None,
+        widen=widen,
+    )
+
+
+def _try_ask_draft_reply_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+    user_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Read a reply to the ask-draft card ("Looks good" / "Let me tweak that", §12d).
+
+    Runs AFTER the ask-neighbors offer reader, deliberately. When both are armed the user is
+    answering Lana's spoken question ("want me to ask your neighbors?"), and a yes there is
+    posting consent; reading it as draft-confirmation instead would silently swallow the
+    answer. Only what the offer reader passed on ("other") reaches here.
+
+    A tweak does not re-ask the question from scratch — the correction is folded into the
+    ask on the NEXT turn, so "closer to home" cannot be misrouted as a brand-new seek.
+    """
+    pending = session_ctx.get("ask_draft_pending")
+    if not isinstance(pending, dict):
+        return None
+    detail = str(pending.get("detail") or "").strip()
+    session_ctx["ask_draft_pending"] = None  # None, not pop — merge resurrects popped keys
+
+    text = str(msg or "").strip().lower()
+    verdict: str | None = None
+    if text == _ASK_DRAFT_TWEAK_MSG.lower():
+        verdict = "tweak"
+    elif text == _ASK_DRAFT_OK_MSG.lower():
+        verdict = "confirm"
+    if verdict is None:
+        from app.tip_ask_ai import interpret_ask_draft_reply
+
+        verdict = interpret_ask_draft_reply(
+            title=str(pending.get("title") or ""), detail=detail, msg=msg
+        )
+    if verdict not in ("confirm", "tweak"):
+        return None
+
+    ctx = _routing_ctx(dict(session_ctx), phase=phase or "listening", active_intent="looking.tip")
+    ctx["ask_draft_pending"] = None
+    if verdict == "tweak":
+        ctx["tip_tweak_pending"] = {"detail": detail, "category": pending.get("category")}
+        reply = compose_reply(
+            goal=(
+                "The user wants to correct the ask you read back to them. Ask what to "
+                "change in one short question — you already have their ask, so you only "
+                "need the fix, not the whole thing again. Nothing has been posted."
+            ),
+            facts=[f"The ask as you have it: {_ask_excerpt(detail)}"],
+            session_ctx=session_ctx,
+            fallback=f"Sure — what should I change about {_ask_excerpt(detail)}?",
+            max_sentences=1,
+        )
+        ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_ask_tweak")
+        return reply, ctx, ctx["last_routing"], []
+
+    # confirm — the answer already went out with the card, so there is nothing left to do
+    # but acknowledge. Never re-offer the posting here: that offer had its turn.
+    reply = compose_reply(
+        goal=(
+            "The user confirmed you read their ask correctly. Acknowledge in one short, "
+            "warm line and leave it there — do not re-ask anything, do not re-offer to "
+            "post it to neighbors, and do not claim anything has been posted."
+        ),
+        facts=[f"The ask they confirmed: {_ask_excerpt(detail)}"],
+        session_ctx=session_ctx,
+        fallback="Perfect — that's what I've got.",
+        max_sentences=1,
+    )
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_ask_confirmed")
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_tip_tweak_answer_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    phase: str,
+    user_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """The turn after "let me tweak that": their correction, folded into the ask."""
+    pending = session_ctx.get("tip_tweak_pending")
+    if not isinstance(pending, dict):
+        return None
+    session_ctx["tip_tweak_pending"] = None  # None, not pop — merge resurrects popped keys
+    correction = str(msg or "").strip()
+    prior = str(pending.get("detail") or "").strip()
+    if not correction or not prior:
+        return None
+
+    from app.tip_ask_draft import merge_ask_correction
+
+    return _tip_seek_answer_turn(
+        msg=msg,
+        detail=merge_ask_correction(prior_detail=prior, correction=correction),
+        category=str(pending.get("category") or "") or None,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        phase=phase,
+        user_id=user_id,
+        active_intent="looking.tip",
+    )
+
+
+def _remove_posting_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phase: str,
+    signal_id: str | None = None,
+    detail: str = "",
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Withdraw a posting for real (close_local_signal), then say only what happened.
+
+    Lana has always offered this in prose; nothing implemented it, so the offer fell through
+    to the nearest lane and POSTED AGAIN. Every branch here reports the true outcome —
+    including "there's nothing to take down"."""
+    last = session_ctx.get("last_saved_signal")
+    if not signal_id and isinstance(last, dict):
+        signal_id = str(last.get("signal_id") or "") or None
+        detail = detail or str(last.get("detail") or "")
+    result = close_local_signal(user_jwt, signal_id=signal_id)
+    closed = bool(result.get("closed"))
+    reason = str(result.get("reason") or "")
+    what = _ask_excerpt(str(result.get("detail_text") or detail or ""))
+
+    ctx = _routing_ctx(dict(session_ctx), phase=phase or "listening", active_intent="none")
+    ctx["tip_ask_offer_pending"] = None
+    ctx["posting_manage_pending"] = None
+    if closed:
+        ctx["last_saved_signal"] = None
+        reply = compose_reply(
+            goal=(
+                "You just took the user's posting down at their request. Confirm it is gone "
+                "and that neighbors won't see it any more, name what it was, and make clear "
+                "they can ask you to post something again anytime. No lecture, no re-offer."
+            ),
+            facts=[f"The posting you removed: {what}"] if what else None,
+            session_ctx=session_ctx,
+            fallback=(
+                f"Done — I've taken that down{f' ({what})' if what else ''}. Neighbors won't "
+                "see it any more. Say the word if you want me to ask around another time."
+            ),
+        )
+        stub = "posting_closed"
+    elif reason == "unavailable":
+        reply = compose_reply(
+            goal=(
+                "The user asked you to take a posting down and the removal failed on your "
+                "side — it is still up. Say so honestly, apologise briefly, and say you'll "
+                "get it removed. Never claim it is gone."
+            ),
+            session_ctx=session_ctx,
+            fallback=(
+                "I couldn't take it down just now — it's still up, and I'm sorry. I'll get "
+                "that removed for you."
+            ),
+        )
+        stub = "posting_close_unavailable"
+    else:
+        reply = compose_reply(
+            goal=(
+                "The user asked you to take a posting down, but they have nothing posted "
+                "right now (either it was never posted or it is already closed). Reassure "
+                "them plainly that there is nothing out there, and offer to help with what "
+                "they actually wanted."
+            ),
+            session_ctx=session_ctx,
+            fallback=(
+                "Good news — you have nothing posted right now, so there's nothing to take "
+                "down. What can I help you with?"
+            ),
+        )
+        stub = "posting_close_none"
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", stub)
+    return reply, ctx, ctx["last_routing"], []
+
+
+def _try_remove_posting_turn(
+    *,
+    msg: str,
+    slots: dict[str, Any] | None,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    phase: str,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """AI-routed "take my posting down" (linear_intent=settings.remove_posting), for turns
+    where no offer is armed — the user coming back to it later."""
+    if not (slots and phone_verified):
+        return None
+    linear = slots_linear_intent(slots)
+    if linear != "settings.remove_posting" or not intent_confidence_met(slots, linear):
+        return None
+    return _remove_posting_turn(
+        msg=msg, session_ctx=session_ctx, user_jwt=user_jwt, phase=phase,
     )
 
 
@@ -3063,6 +4145,27 @@ def _try_save_signal_turn(
             _routing_ctx(ctx_base, phase=phase or "listening", active_intent=active_intent),
             _discovery_routing_stub(phase or "listening", "save_signal_need_detail"),
             [],
+        )
+
+    # A recommendation ask is a QUESTION first. Answer it and let the user decide whether it
+    # also becomes a posting. Every tip_seek save funnels through here (the early seek turn,
+    # the fast turn, the draft-ready cascade and the pipeline all end at _try_save_signal_turn),
+    # so this is the single interception point — and the accept path calls
+    # _save_consented_tip_ask directly, so it can't be intercepted back into the answer.
+    from app.lana_paths import tip_ask_consent_enabled
+
+    if intent == "tip_seek" and tip_ask_consent_enabled():
+        return _tip_seek_answer_turn(
+            msg=msg,
+            detail=detail,
+            category=category,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+            user_id=user_id,
+            active_intent=active_intent,
         )
 
     if not phone_verified:
@@ -3854,6 +4957,12 @@ def _try_tip_seek_fast_turn(
         utterance_indicates_tip_seek(msg)
         or str(enriched.get("signal_intent") or "") == "tip_seek"
     ):
+        return None
+    # The user is closing the thread, not opening a recommendation search. The regex arm
+    # above reads a service noun in ANY sentence ("I don't want a doctor posted anywhere"),
+    # so an abandon must win over it — the classifier's signal, not a phrase list
+    # ([[no-new-regex-use-ai-signals]]).
+    if enriched.get("abandon"):
         return None
     if slots and is_signal_lane_intent(enriched) and str(enriched.get("signal_intent") or "") != "tip_seek":
         linear = slots_linear_intent(enriched)
@@ -5406,6 +6515,11 @@ def _handle_signup_phone_message(
         phase=PHASE_AWAIT_SIGNUP_OTP,
         signup_phone=email,
     )
+    # Only DEFAULT it — a gate-entered signup already stamped why it started ("peers"
+    # when the user was mid-funnel), and _routing_ctx carries that forward. Reaching the
+    # email step with nothing stamped means nobody asked for matches.
+    if not str(ctx.get("signup_origin") or "").strip():
+        ctx["signup_origin"] = "direct"
     ctx["auth_action"] = _auth_action(
         type="link_email_signup",
         email=email,
@@ -5895,6 +7009,11 @@ def _start_activity_browse_from_discovery(
     )
     phase = str(session_ctx.get("routing_phase") or "listening")
     ctx = _routing_ctx(session_ctx, phase=phase, active_intent="discovery.find_activities")
+    # _routing_ctx wipes turn-scoped surfaces, which is right for stale cards but would
+    # also drop the one this turn just stamped — the look screen's communities card.
+    card = session_ctx.get("communities_card")
+    if card:
+        ctx["communities_card"] = card
     return reply, ctx, _discovery_routing_stub(phase, "activity_browse"), []
 
 
@@ -6165,6 +7284,53 @@ def handle_discovery_turn(
             ctx["look_meet_saved_now"] = session_ctx.get("look_meet_saved_now") or None
             return pending_reply, ctx, _discovery_routing_stub("listening", "look_meet"), []
 
+    # The Find fork's "a recommendation" option (intent_hint=look_tip) — a deterministic
+    # entry, so the lane never depends on the classifier reading a bare ask. Consumed here:
+    # the NEXT turn is a normal one (a refinement, an offer reply) and must route on its own.
+    if session_ctx.get("tip_seek_hint"):
+        session_ctx["tip_seek_hint"] = None  # None, not pop — merge resurrects popped keys
+        _hint_detail = str(msg or "").strip()
+        if _hint_detail:
+            from app.lana_paths import tip_ask_consent_enabled
+
+            if tip_ask_consent_enabled():
+                return _tip_seek_answer_turn(
+                    msg=msg,
+                    detail=_hint_detail,
+                    category=None,
+                    session_ctx=session_ctx,
+                    user_jwt=user_jwt,
+                    phone_verified=phone_verified,
+                    home_block_id=home_block_id,
+                    phase=phase,
+                    user_id=user_id,
+                    active_intent="looking.tip",
+                )
+
+    # A recommendation ask that hit the verify gate was stashed (tip_seek_pending) — the
+    # moment they're verified, ANSWER it. Deliberately not the signal_pending path below:
+    # that one posts on resume, and this user asked a question. The ask-neighbors offer is
+    # re-armed by the answer turn, so the posting is still one tap away.
+    if phone_verified and isinstance(session_ctx.get("tip_seek_pending"), dict):
+        _tp = dict(session_ctx.get("tip_seek_pending") or {})
+        _tp_detail = str(_tp.get("detail") or "").strip()
+        session_ctx["tip_seek_pending"] = None  # None, not pop — merge resurrects popped keys
+        if _tp_detail:
+            if not home_block_id:
+                _try_assign_home_block(user_jwt, session_ctx=session_ctx, home_block_id=home_block_id)
+            return _tip_seek_answer_turn(
+                msg=msg,
+                detail=_tp_detail,
+                category=str(_tp.get("category") or "") or None,
+                session_ctx=session_ctx,
+                user_jwt=user_jwt,
+                phone_verified=phone_verified,
+                home_block_id=home_block_id,
+                phase=phase,
+                user_id=user_id,
+                active_intent="looking.tip",
+            )
+
     # A guest's looking/sharing ask (babysitter rec, swap, …) that hit the verify gate was
     # stashed (signal_pending) — the moment they come back verified, save it so they never
     # have to repeat themselves (mirrors look_seek_pending above). Missing block → ask the
@@ -6292,6 +7458,81 @@ def handle_discovery_turn(
     clarify_was_pending = bool(session_ctx.get("clarify_pending"))
     if clarify_was_pending:
         session_ctx["clarify_pending"] = None
+
+    # ── Reply to the ask-neighbors / manage-posting offer — BEFORE every lane ─────────
+    # An armed one-turn offer owns the next turn, because any lane that sees the answer
+    # first will re-read it as a fresh intent. It sits above the tip_SHARE gate below for
+    # a reason (dev QA 2026-08-04): tapping "Yes, ask my neighbors" on a doctor ASK was
+    # classified tip_share (the word "recommendation" was all over the context), the share
+    # capture grabbed the turn, asked "Where, roughly?", and saved the user as SHARING a
+    # doctor recommendation — the exact inverse of what they wanted.
+    #
+    # Safety still wins: unsafe and crisis are refused earlier in this function, and the
+    # offer reader answers "other" for anything that isn't an accept/decline/removal, so a
+    # distress or medical turn falls straight through to its rail.
+    # Cascade controls first: a re-rank / widen carries an explicit FE hint (or Lana's own
+    # chip payload), so it must not be handed to the offer reader, which would be judging a
+    # search instruction as posting consent.
+    for _cascade_turn in (
+        _try_tip_cascade_control_turn,
+        _try_tip_tweak_answer_turn,
+    ):
+        cascade = _cascade_turn(
+            msg=msg,
+            session_ctx=session_ctx,
+            user_jwt=user_jwt,
+            phone_verified=phone_verified,
+            home_block_id=home_block_id,
+            phase=phase,
+            user_id=user_id,
+        )
+        if cascade is not None:
+            reply, ctx, routing, peers = cascade
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+    tip_offer_turn = _try_tip_ask_offer_reply_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        phase=phase,
+    )
+    if tip_offer_turn is not None:
+        reply, ctx, routing, peers = tip_offer_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
+
+    # Only turns the offer reader passed on reach the ask-draft card (see its docstring for
+    # why that order is load-bearing).
+    draft_turn = _try_ask_draft_reply_turn(
+        msg=msg,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        phase=phase,
+        user_id=user_id,
+    )
+    if draft_turn is not None:
+        reply, ctx, routing, peers = draft_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
+
+    # "Take my posting down" with no offer armed — the user coming back to it later.
+    remove_turn = _try_remove_posting_turn(
+        msg=msg,
+        slots=slots,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        phase=phase,
+    )
+    if remove_turn is not None:
+        reply, ctx, routing, peers = remove_turn
+        ctx["unified_mode"] = True
+        return reply, ctx, routing, peers
 
     hosting_cta_turn = _try_hosting_cta_turn(
         msg=msg,
@@ -6637,7 +7878,10 @@ def handle_discovery_turn(
         # auto-publishes it (see the post-verify host block above). Don't route them into the
         # find-peers name/identity funnel, and tell them their event is about to go up.
         host_publishing = bool(session_ctx.get("host_publish_pending"))
-        direct_signup = str(session_ctx.get("signup_origin") or "") == "direct"
+        # Opt-IN, same as the post-verify funnel: only promise a neighbors list to
+        # someone the verify gate caught mid-peers-funnel. Anything else gets the
+        # neutral ending, so the promise here and the actual last turn agree.
+        peers_requested = str(session_ctx.get("signup_origin") or "") == "peers"
         ctx = _routing_ctx(session_ctx, phase=PHASE_PREVIEW, signup_phone=email)
         if not host_publishing:
             ctx["pending_post_verify"] = True
@@ -6653,16 +7897,16 @@ def handle_discovery_turn(
             reply = (
                 "Perfect — verifying you now. One moment and I'll post your event for neighbors."
             )
-        elif direct_signup:
-            # Direct account ask: never pre-promise a neighbors list they didn't request.
-            reply = (
-                "Perfect — verifying you now. Once you're verified, tell me your first name "
-                "and you're all set."
-            )
-        else:
+        elif peers_requested:
             reply = (
                 "Perfect — verifying you now. Once you're verified, tell me your first name "
                 "and I'll show neighbors you can connect with."
+            )
+        else:
+            # Never pre-promise a neighbors list nobody requested.
+            reply = (
+                "Perfect — verifying you now. Once you're verified, tell me your first name "
+                "and you're all set."
             )
         return (
             reply,
@@ -6855,6 +8099,16 @@ def handle_discovery_turn(
         )
         if seek_offer_turn is not None:
             reply, ctx, routing, peers = seek_offer_turn
+            ctx["unified_mode"] = True
+            return reply, ctx, routing, peers
+
+        # Tap (or typed answer) on "want to join one of these?" — read before the signal
+        # lane for the same reason: "Join Lp Fit" must not be captured as a fresh signal.
+        join_turn = _try_community_join_reply_turn(
+            msg=msg, session_ctx=session_ctx, user_id=user_id, phase=phase
+        )
+        if join_turn is not None:
+            reply, ctx, routing, peers = join_turn
             ctx["unified_mode"] = True
             return reply, ctx, routing, peers
 
@@ -7345,14 +8599,12 @@ def handle_discovery_turn(
             ctx_base["identity_snippet"] = seeded
             effective_snippet = seeded
 
-    _direct_signup_pending = (
-        str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
-        == "direct"
-        and (ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME)
+    # The identity interrogation is a MATCHING input, so a signup that isn't heading for
+    # a neighbors list skips it and ends at the welcome (same rule as the funnel below).
+    _non_peers_signup_pending = not _onboarding_wants_peers(session_ctx, ctx_base) and (
+        ctx_base.get("pending_post_verify") or phase == PHASE_NEED_DISPLAY_NAME
     )
-    if not effective_snippet and not _direct_signup_pending:
-        # Direct signups skip the identity interrogation too — they asked for an
-        # account, not matches; the post-verify branch below ends at a welcome.
+    if not effective_snippet and not _non_peers_signup_pending:
         in_funnel = phase in _FUNNEL_PHASES or block_just_resolved
         if not in_funnel:
             if goal not in ("continue", "peers", "both") or not slots.get("in_discovery"):
@@ -7434,6 +8686,14 @@ def handle_discovery_turn(
         # (no-op once home_block_id exists).
         if phone_verified and not home_block_id:
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+        # Does this funnel END in a neighbors list? Resolved up here because it also
+        # decides how the sub-steps are FRAMED: a name and a ZIP are account setup for
+        # everyone, but "tell me about yourself so I can match you" is a peers question,
+        # and tagging every step `find_peers` is what made a plain signup feel like a funnel.
+        peers_requested = _onboarding_wants_peers(session_ctx, ctx_base)
+        # "auth.signup_phone" is the registered intent for an in-flight signup (see
+        # layer1_intents) — the funnel's own steps must not claim to be find_peers.
+        onboarding_intent = INTENT_FIND_PEERS if peers_requested else "auth.signup_phone"
         if session_ctx.get("awaiting_name_change") or active == "settings.change_name":
             name_turn = _try_awaiting_name_change_turn(
                 msg=msg,
@@ -7460,7 +8720,7 @@ def handle_discovery_turn(
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_DISPLAY_NAME,
-                    active_intent=INTENT_FIND_PEERS,
+                    active_intent=onboarding_intent,
                     preview_block_id=block_id,
                     pending_post_verify=True,
                     signup_phone=session_ctx.get("signup_phone"),
@@ -7478,30 +8738,48 @@ def handle_discovery_turn(
                     _routing_ctx(
                         ctx_base,
                         phase=PHASE_NEED_DISPLAY_NAME,
-                        active_intent=INTENT_FIND_PEERS,
+                        active_intent=onboarding_intent,
                         preview_block_id=block_id,
                         pending_post_verify=True,
                     ),
                     _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
                     [],
                 )
-        if not snippet and (_is_affirmative(msg) or (phase == PHASE_NEED_DISPLAY_NAME and not nick)):
+        # "Tell me about yourself" is a MATCHING input — only worth asking when a
+        # neighbors list is what this signup is heading for. A plain signup skips it and
+        # falls through to the welcome; rapport picks identity up later, in context.
+        if (
+            peers_requested
+            and not snippet
+            and (_is_affirmative(msg) or (phase == PHASE_NEED_DISPLAY_NAME and not nick))
+        ):
             return (
                 compose_identity_ask(msg=msg, purpose="match"),
                 _routing_ctx(
                     ctx_base,
                     phase=PHASE_NEED_IDENTITY,
-                    active_intent=INTENT_FIND_PEERS,
+                    active_intent=onboarding_intent,
                     preview_block_id=block_id,
                     pending_post_verify=True,
                 ),
                 _discovery_routing_stub(PHASE_NEED_IDENTITY),
                 [],
             )
-        direct_signup = (
-            str(session_ctx.get("signup_origin") or ctx_base.get("signup_origin") or "")
-            == "direct"
-        )
+        # Why `peers_requested` is opt-IN (resolved at the top of this block):
+        #
+        # The funnel was originally the only road to verification (ZIP → identity →
+        # display name → preview → verify gate → full matches), so showing matches was
+        # the payoff the user had explicitly asked for by tapping "show me their names".
+        # Since then, signup became reachable from everywhere — a Sign in button whose
+        # email has no account, a host flow, a tip ask — and every one of those inherited
+        # the funnel's ending. Asking "was this flagged standalone?" means each new entry
+        # point silently opts into a neighbors list nobody requested.
+        #
+        # So it is inverted: `peers` is what `_verify_gate_reply` stamps when it gates
+        # someone who was ALREADY mid-peers-funnel. Anything that never went through that
+        # gate — including the login→no-account pivot — ends at the neutral welcome, and
+        # the user's next message decides what happens. In-progress flows (host draft,
+        # meet seek, tip ask, signal) resume earlier in this function and never reach here.
         if not phone_verified:
             nick = str(
                 (ctx_base.get("display_name_saved") and extract_display_name_reply(msg))
@@ -7510,9 +8788,9 @@ def handle_discovery_turn(
             ).strip()
             lead = f"Got it{', ' + nick if nick else ''}! "
             tail = (
-                "Finishing verification — send one more message and you're all set."
-                if direct_signup
-                else "Finishing verification — send one more message and I'll show your matches."
+                "Finishing verification — send one more message and I'll show your matches."
+                if peers_requested
+                else "Finishing verification — send one more message and you're all set."
             )
             return (
                 f"{lead}{tail}",
@@ -7527,8 +8805,8 @@ def handle_discovery_turn(
                 [],
             )
         _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
-        if direct_signup:
-            # They asked for an account, not for matches — end at a neutral welcome
+        if not peers_requested:
+            # They came here for an account, not for matches — end at a neutral welcome
             # (the FE home state), never an unrequested neighbors list. Intent gets
             # re-decided on their next message.
             nick = str(
@@ -7569,6 +8847,11 @@ def handle_discovery_turn(
         except Exception:
             peers = []
         if not peers:
+            floored = _peers_supply_floor_turn(
+                ctx_base, user_id=user_id, block_id=block_id
+            )
+            if floored is not None:
+                return floored
             peers = fetch_preview_peers_on_block(
                 block_id,
                 limit=3,
@@ -7640,6 +8923,9 @@ def handle_discovery_turn(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
                 return reply, ctx, ctx["last_routing"], peers
+        floored = _peers_supply_floor_turn(ctx_base, user_id=user_id, block_id=block_id)
+        if floored is not None:
+            return floored
         peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
         from app.i18n import session_lang as _session_lang
 
@@ -7702,6 +8988,11 @@ def handle_discovery_turn(
                 return reply, ctx, ctx["last_routing"], peers
 
         if wants_peers or phase != PHASE_PREVIEW:
+            floored = _peers_supply_floor_turn(
+                ctx_base, user_id=user_id, block_id=block_id
+            )
+            if floored is not None:
+                return floored
             peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
             from app.i18n import session_lang as _session_lang
 

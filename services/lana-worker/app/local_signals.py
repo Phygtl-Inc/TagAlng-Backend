@@ -32,6 +32,10 @@ _INTENT_LABELS: dict[str, str] = {
     "tip_share": "sharing a recommendation",
 }
 
+# find_neighbor_tips v1 (20261001120000) took only these. Used to retry against a DB that
+# has not yet applied the v2 migration.
+_V1_TIP_ARGS = frozenset({"p_block_id", "p_query", "p_category", "p_limit"})
+
 _MATCH_TYPES_BY_SIGNAL_INTENT: dict[str, frozenset[str]] = {
     "swap_seek": frozenset({"inbound_for_my_seek"}),
     "swap_offer": frozenset({"inbound_for_my_offer"}),
@@ -88,6 +92,97 @@ def save_local_signal(
             raw = call_rpc(user_jwt, "save_local_signal", legacy_payload)
         else:
             raise
+    result = raw if isinstance(raw, dict) else {}
+
+    # The matcher ran inside that insert and found the other side of somebody's open ask —
+    # tell them NOW, in this turn. Before this the match rows piled up in
+    # match_notifications with no consumer, so "I'll text you when a neighbor recommends
+    # one" only came true for people who opened the radar themselves. Fire-and-forget on a
+    # daemon thread: the poster's turn never waits on someone else's push. A reused row
+    # (dedupe) creates no new matches, hence the matches_created guard.
+    try:
+        if int(result.get("matches_created") or 0) > 0:
+            from app.signal_match_notify import notify_new_signal_matches
+
+            notify_new_signal_matches(user_jwt, signal_id=str(result.get("signal_id") or ""))
+    except Exception:  # noqa: BLE001 — a notification must never break a save
+        pass
+    return result
+
+
+def find_neighbor_tips(
+    user_jwt: str,
+    *,
+    block_id: str,
+    query: str,
+    category: str | None = None,
+    limit: int = 3,
+    locale: str = "en",
+    radius_meters: float | None = None,
+) -> list[dict[str, Any]]:
+    """Neighbors' tip_share posts that match this ask — READ-ONLY (no signal written).
+
+    This is how a recommendation ask gets a real neighbor answer without posting a
+    tip_seek first: before find_neighbor_tips the only matcher ran inside
+    save_local_signal, so asking a question was the same act as broadcasting it.
+    Best-effort: [] whenever the RPC is missing (older DB) or errors.
+
+    v2 (20261002120000) adds the author, the distance and the tip's own tags to each row,
+    plus radius_meters to widen past the caller's block. A DB still on v1 rejects the two
+    new arguments, so those are dropped and the call is retried — the caller reads every v2
+    field with .get() and simply shows a thinner row.
+    """
+    if not (str(query or "").strip()):
+        return []
+    if not block_id and radius_meters is None:
+        return []
+    payload: dict[str, Any] = {
+        "p_block_id": block_id,
+        "p_query": str(query).strip(),
+        "p_category": (str(category).strip() or None) if category else None,
+        "p_limit": int(limit),
+        "p_locale": str(locale or "en"),
+    }
+    if radius_meters is not None:
+        payload["p_radius_meters"] = float(radius_meters)
+    try:
+        raw = call_rpc(user_jwt, "find_neighbor_tips", payload)
+    except HTTPException as exc:
+        if "pgrst202" not in str(exc.detail or "").lower():
+            return []
+        if not block_id:
+            return []  # v1 has no radius mode and no block to fall back to
+        legacy = {k: v for k, v in payload.items() if k in _V1_TIP_ARGS}
+        try:
+            raw = call_rpc(user_jwt, "find_neighbor_tips", legacy)
+        except HTTPException:
+            return []
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
+
+
+def close_local_signal(user_jwt: str, *, signal_id: str | None = None) -> dict[str, Any]:
+    """Withdraw a posting (default: the caller's most recent open one).
+
+    Returns the RPC's verdict dict: {"closed": bool, ...}. `closed: False` with
+    reason not_found/already_closed is a normal outcome the caller must speak to —
+    never claim a removal that did not happen.
+    """
+    payload: dict[str, Any] = {}
+    if signal_id:
+        payload["p_signal_id"] = signal_id
+    try:
+        raw = call_rpc(user_jwt, "close_local_signal", payload)
+    except HTTPException as exc:
+        detail = str(exc.detail or "").lower()
+        # Migration not applied in this environment yet — the caller apologises rather
+        # than pretending the posting is gone.
+        if "pgrst202" in detail or "close_local_signal" in detail:
+            return {"closed": False, "reason": "unavailable"}
+        raise
     return raw if isinstance(raw, dict) else {}
 
 

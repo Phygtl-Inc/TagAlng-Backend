@@ -62,11 +62,23 @@ class TestDiscoveryZipGate(unittest.TestCase):
         self.assertEqual(frame["count"], 7)
         self.assertEqual(frame["threshold"], 10)
 
-    def test_browse_blocked_pre_open_in_every_mode(self) -> None:
-        # §D.2 as amended by the rapport-bridge spec (2026-07-30): others' events
-        # are never surfaced before the area opens — soft AND hard.
-        self.assertTrue(self._gate("soft", _WARMING, "browse")["blocked"])
-        self.assertTrue(self._gate("hard", _WARMING, "browse")["blocked"])
+    def test_browse_is_never_blocked_pre_open(self) -> None:
+        # §D.2 is supply-aware: "an area that already has events keeps them fully
+        # visible in any mode". The 2026-07-30 amendment that blocked browse is
+        # reverted (2026-08-05) — it hid hosts' real events from the neighbours they
+        # were created for, and the off-topic-match symptom it targeted has its own
+        # fix (look_meet's relevance floor). Framing facts still ride along, for
+        # EMPTY results only.
+        for mode in ("soft", "hard"):
+            frame = self._gate(mode, _WARMING, "browse")
+            self.assertIsNotNone(frame)
+            self.assertFalse(frame["blocked"], mode)
+            self.assertEqual(frame["count"], 7)
+
+    def test_peers_still_locks_in_hard_mode(self) -> None:
+        # The one surface that truly locks — sparse-area intros stay off.
+        self.assertTrue(self._gate("hard", _WARMING, "peers")["blocked"])
+        self.assertFalse(self._gate("soft", _WARMING, "peers")["blocked"])
 
     def test_hard_blocks_peers(self) -> None:
         self.assertTrue(self._gate("hard", _WARMING, "peers")["blocked"])

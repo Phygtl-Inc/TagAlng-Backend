@@ -69,6 +69,7 @@ User answers/dismisses ─► YOU call  record-answer / record-skip / mute-fact
     "gap_id": "activity_social_pref",
     "parent_bucket": "activity",
     "why_frame": "about your morning run…",
+    "why_reason": "Knowing when you run lets me point you to neighbors out at the same hour.",
     "question": "Do you usually do that solo, or with other moms?",
     "sensitivity_tier": "LOW",
     "chip_color_token": "--d-activity"
@@ -88,6 +89,7 @@ User answers/dismisses ─► YOU call  record-answer / record-skip / mute-fact
 | `gap_id` | string | **Pass back** to `mute-fact`. Also useful as a stable key. |
 | `parent_bucket` | string | Pillar: `heritage`\|`stage`\|`vicinity`\|`faith`\|`activity`\|`interest`\|`general`. |
 | `why_frame` | string | The **teaser** headline, e.g. *"about your morning run…"*. Lowercase, ends with `…`. |
+| `why_reason` | string \| null | **Why she's asking**, AI-written per question, e.g. *"Knowing when you run lets me point you to neighbors out at the same hour."* Show it as the ⓘ line on the opened card. `null` while it's still being composed (a beat after the gap opens) — fall back to `why_frame`. |
 | `question` | string | The **actual question** to show under the teaser, e.g. *"How old are your little ones?"*. |
 | `sensitivity_tier` | `"LOW"`\|`"MED"`\|`"HIGH"` | Optional styling hint; backend already gates HIGH ones. |
 | `chip_color_token` | string | CSS var for the pillar chip color, e.g. `--d-activity`. Map to your palette. |
@@ -153,6 +155,7 @@ export interface RapportAsk {
   gap_id: string;
   parent_bucket: string;
   why_frame: string;
+  why_reason?: string | null;
   question: string;
   sensitivity_tier: 'LOW' | 'MED' | 'HIGH';
   chip_color_token: string;
@@ -234,6 +237,7 @@ curl -s -X POST "$BASE/lana/rapport/mute-fact" -H "Authorization: Bearer $TOKEN"
 ## 6. Rendering guidance
 
 - **Two lines:** `why_frame` is the teaser (her words, e.g. *"about your morning run…"*); `question` is the sentence she answers. Show both — teaser as eyebrow/headline, question above the input.
+- **The ⓘ line is `why_reason`, not the teaser.** It answers "why are you asking me this?" in her voice and is written per question, so it explains what the answer lets her do. Render `why_reason || why_frame` — a freshly-opened ask can arrive without one, and the next fetch will have it.
 - **Chip color:** map `chip_color_token` (e.g. `--d-activity`) to your palette. Buckets: identity/heritage, stage, vicinity, faith, activity, interest, general.
 - **Always offer an out:** a "Not now" (skip) and a "Don't ask this" (mute). Never make the ask blocking.
 - **Never render in the chat thread.** It belongs on the idle/home surface, between tasks.

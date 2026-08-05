@@ -116,7 +116,12 @@ class TestGroundAffiliation(unittest.TestCase):
         self.assertEqual(result["status"], "confirmed")
         self.assertEqual(result["place_id"], "p1")
         patch_row = table.update.call_args[0][0]
-        self.assertEqual(patch_row, {"place_ref": "p1", "status": "confirmed"})
+        # confirmed_via records WHICH action made this real (migration 20261004): this
+        # row came from chat capture, so answering the grounding ask is what closed it.
+        self.assertEqual(
+            patch_row,
+            {"place_ref": "p1", "status": "confirmed", "confirmed_via": "grounding_ask"},
+        )
         self.assertEqual(open_gap.call_args.kwargs.get("place_ref"), "p1")
 
     @patch("app.rapport_gaps.mark_answered")
