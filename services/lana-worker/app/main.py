@@ -1473,6 +1473,8 @@ def _run_lana_message(
     authorization: str | None,
     emit: Callable[[str, str | None], None] | None = None,
     accept_language: str | None = None,
+    amp_session_id: str | None = None,
+    amp_device_id: str | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
@@ -1886,9 +1888,16 @@ def _run_lana_message(
 
     # Server-truth product analytics (Amplitude) — fire-and-forget, same user_id as the
     # browser so events stitch. Tracks the turn + the conversions the client can't be
-    # trusted to report (publish / save actually happened server-side).
+    # trusted to report (publish / save actually happened server-side). The browser's
+    # session/device ids ride along so each event lands on the Session Replay timeline.
     _ui = ob.get("ui_intent")
-    amplitude_track("lana_turn", user_id=auth.user_id, event_properties={"ui_intent": _ui})
+    _amp_ids = {"session_id": amp_session_id, "device_id": amp_device_id}
+    amplitude_track(
+        "lana_turn",
+        user_id=auth.user_id,
+        event_properties={"ui_intent": _ui},
+        **_amp_ids,
+    )
     _conversions = {
         "event_created": "event_hosted",
         "item_listed": "item_listed",
@@ -1900,6 +1909,7 @@ def _run_lana_message(
             _conversions[_ui],
             user_id=auth.user_id,
             event_properties={"event_id": merged.get("event_id")} if _ui == "event_created" else None,
+            **_amp_ids,
         )
         # A meet just published → confirm to the host via push + email.
         if _ui == "event_created" and merged.get("event_id"):
@@ -1927,6 +1937,7 @@ def _run_lana_message(
             "signal_saved",
             user_id=auth.user_id,
             event_properties={"intent": (_sig or {}).get("intent"), "category": (_sig or {}).get("category")},
+            **_amp_ids,
         )
 
     return SendMessageResponse(
@@ -1956,11 +1967,15 @@ def send_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
     accept_language: str | None = Header(default=None),
+    x_amplitude_session_id: str | None = Header(default=None),
+    x_amplitude_device_id: str | None = Header(default=None),
 ):
     """Blocking turn — returns the full SendMessageResponse as one JSON body."""
     return _run_lana_message(
         session_id, body, background_tasks, authorization,
         accept_language=accept_language,
+        amp_session_id=x_amplitude_session_id,
+        amp_device_id=x_amplitude_device_id,
     )
 
 
@@ -1975,6 +1990,8 @@ def stream_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
     accept_language: str | None = Header(default=None),
+    x_amplitude_session_id: str | None = Header(default=None),
+    x_amplitude_device_id: str | None = Header(default=None),
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
@@ -1999,6 +2016,8 @@ def stream_lana_message(
             resp = _run_lana_message(
                 session_id, body, background_tasks, authorization, emit=emit,
                 accept_language=accept_language,
+                amp_session_id=x_amplitude_session_id,
+                amp_device_id=x_amplitude_device_id,
             )
             events.put(("result", resp))
         except HTTPException as exc:

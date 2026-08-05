@@ -50,7 +50,13 @@
       "Bash(.venv/bin/python -m pytest tests/test_community_surface.py -x -q)",
       "Bash(.venv/bin/python -m pytest tests/test_community_surface.py tests/test_circles_flow.py tests/test_activity_browse.py -q)",
       "Bash(.venv/bin/python -m pytest tests/test_activity_browse.py tests/test_community_surface.py -q)",
-      "Bash(.venv/bin/python -m pytest tests/test_community_discovery.py -q)"
+      "Bash(.venv/bin/python -m pytest tests/test_community_discovery.py -q)",
+      "Bash(.venv/bin/python3 -c \"import app.main; print\\('main imports OK'\\)\")",
+      "Bash(.venv/bin/python3 -m ruff check app/analytics.py app/main.py)",
+      "Bash(npx prettier *)",
+      "Bash(timeout 300 .venv/bin/python -m pytest --collect-only -q)",
+      "Bash(timeout 420 .venv/bin/python -m pytest tests/ -q -x -p no:randomly)",
+      "Bash(timeout 600 .venv/bin/python -m pytest tests/ -q -p no:randomly)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations"
