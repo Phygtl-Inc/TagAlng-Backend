@@ -95,7 +95,9 @@ class TestRedeem(unittest.TestCase):
         self.assertTrue(out["confirm_prompt"])
         self.assertEqual(out["circle_type"], "faith")
         self.assertEqual(users.update.call_args[0][0], {"invited_by": "owner"})
-        recount.assert_called_once_with("32827")
+        # Suppressed: attribution counts, but a redemption must not broadcast the
+        # open transition to a whole ZIP. Announcing needs a deliberate owner.
+        recount.assert_called_once_with("32827", notify_on_open=False)
 
     @patch("app.zip_unlock.recount_zip")
     @patch("app.circle_invites._rate_limited", return_value=False)

@@ -194,18 +194,35 @@ def open_semantic_gap(
         # unique(user_id, gap_id) violation = already open for this topic — fine
         logger.debug("rapport: semantic gap %s exists/race", gap_id)
         return False
+    gap_row_id = str(((res.data or [{}])[0] or {}).get("gap_row_id") or "")
+    # The ⓘ line on the ask card explains WHY this question helps ("so I can introduce
+    # you to neighbors who…") rather than just naming the topic. AI-authored per gap,
+    # in a background thread — a subtitle never makes a user wait on an LLM.
+    if gap_row_id:
+        try:
+            from app.rapport_reasons import attach_ask_reason_async
+
+            attach_ask_reason_async(
+                gap_row_id,
+                q_text,
+                user_id=user_id,
+                label=label,
+                why_frame=why_frame,
+                grounding=bool(affiliation_ref),
+            )
+        except Exception:  # noqa: BLE001 — the gap itself is already saved
+            logger.exception("rapport: why-reason kickoff failed")
     # Write-time i18n: question/why_frame are English-canonical; render them into the
     # user's preferred language NOW (off the read path) so the home tile serves a saved
-    # string. Background + best-effort — next_ask self-heals any miss.
+    # string. Background + best-effort — next_ask self-heals any miss. (The reason lands
+    # a moment later and re-renders the entry itself.)
     try:
         from app.lang_pref import get_user_preferred_language
         from app.rapport_i18n import localize_gap_row_async
 
         pref = get_user_preferred_language(user_id)
-        if pref and pref != "en":
-            gap_row_id = str(((res.data or [{}])[0] or {}).get("gap_row_id") or "")
-            if gap_row_id:
-                localize_gap_row_async(gap_row_id, q_text, why_frame, pref)
+        if pref and pref != "en" and gap_row_id:
+            localize_gap_row_async(gap_row_id, q_text, why_frame, pref)
     except Exception:  # noqa: BLE001 — localization must never block a gap opening
         logger.exception("rapport: gap i18n kickoff failed")
     return True
@@ -292,6 +309,31 @@ def mark_answered(gap_row_id: str, answer_claim_id: str | None = None) -> None:
         ).execute()
     except Exception:
         logger.exception("rapport: mark_answered failed for %s", gap_row_id)
+
+
+def mark_chat_asked(gap_row_id: str) -> None:
+    """Stamp a gap Lana just asked in CONVERSATION, so candidate_goals stops
+    offering it and the policy cannot re-ask it next turn.
+
+    Deliberately NOT status='asked': that status means "showing on the home
+    tile", and rapport_ranker._pending_ask re-shows any such row verbatim — so
+    reusing it would surface every chat question as a tile as well. The status
+    stays 'open' because an asked-and-ignored question is not answered; when the
+    user does engage, mark_answered closes it properly.
+
+    QA 2026-08-03: without this the same gap was asked three turns running,
+    reworded each time so the verbatim loop guard never saw it.
+    """
+    if not gap_row_id:
+        return
+    try:
+        service_client().table("rapport_gaps").update(
+            {"chat_asked_at": _now(), "updated_at": _now()}
+        ).eq("gap_row_id", gap_row_id).execute()
+    except Exception:
+        # Pre-20260928 environments have no chat_asked_at. Never fail the turn
+        # over bookkeeping — worst case the gap stays askable, as it does today.
+        logger.warning("rapport: mark_chat_asked failed for %s", gap_row_id, exc_info=True)
 
 
 def record_skip(gap_row_id: str) -> None:

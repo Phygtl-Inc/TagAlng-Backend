@@ -666,6 +666,252 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "¡Perfecto! Seguimos en español.",
         "pt": "Perfeito! Seguimos em português.",
     },
+
+    # ---- Push / email notifications -------------------------------------
+    # Reach a DIFFERENT user than the one taking the turn, so they never pass
+    # through finalize_reply_language and shipped English to every recipient
+    # (prod 2026-08-03: 9 of 37 users are es/pt). Keyed rather than AI-rendered
+    # at send time on purpose: {title} is the HOST'S OWN WORDS and t() formats
+    # placeholders AFTER picking the language, so a meet called "Pizza Playdate"
+    # stays "Pizza Playdate" in every locale.
+    "notify.event_live.title": {
+        "en": "Your meet is live 🎉",
+        "es": "Tu plan ya está publicado 🎉",
+        "pt": "Seu encontro está no ar 🎉",
+    },
+    "notify.event_live.body": {
+        "en": "“{title}” is posted in your area — I’ll tell you when neighbors ask to join.",
+        "es": "“{title}” ya está publicado en tu zona — te aviso cuando alguien quiera unirse.",
+        "pt": "“{title}” já está publicado na sua área — aviso quando alguém pedir para participar.",
+    },
+    "notify.event_live.subject": {
+        "en": "Your meet “{title}” is live",
+        "es": "Tu plan “{title}” ya está publicado",
+        "pt": "Seu encontro “{title}” está no ar",
+    },
+    "notify.event_live.email_body": {
+        "en": "“{title}” is now posted in your area. I’ll let you know as neighbors ask to join.",
+        "es": "“{title}” ya está publicado en tu zona. Te aviso cuando la gente pida unirse.",
+        "pt": "“{title}” já está publicado na sua área. Aviso quando as pessoas pedirem para participar.",
+    },
+    "notify.event_live.cta": {
+        "en": "Open the meet", "es": "Ver el plan", "pt": "Abrir o encontro",
+    },
+
+    "notify.joined_host.title": {
+        "en": "{who} joined", "es": "{who} se unió", "pt": "{who} entrou",
+    },
+    "notify.joined_host.body": {
+        "en": "{who} just joined “{title}”.",
+        "es": "{who} acaba de unirse a “{title}”.",
+        "pt": "{who} acabou de entrar em “{title}”.",
+    },
+    "notify.joined_host.subject": {
+        "en": "{who} joined “{title}”",
+        "es": "{who} se unió a “{title}”",
+        "pt": "{who} entrou em “{title}”",
+    },
+    "notify.joined_host.email_body": {
+        "en": "{who} is in — see everyone going.",
+        "es": "{who} confirmó — mira quiénes van.",
+        "pt": "{who} confirmou — veja quem vai.",
+    },
+    "notify.joined_host.cta": {
+        "en": "View attendees", "es": "Ver asistentes", "pt": "Ver participantes",
+    },
+
+    "notify.join_request.title": {
+        "en": "New join request",
+        "es": "Nueva solicitud para unirse",
+        "pt": "Novo pedido para participar",
+    },
+    "notify.join_request.body": {
+        "en": "{who} wants to join “{title}”.",
+        "es": "{who} quiere unirse a “{title}”.",
+        "pt": "{who} quer participar de “{title}”.",
+    },
+    "notify.join_request.subject": {
+        "en": "{who} wants to join “{title}”",
+        "es": "{who} quiere unirse a “{title}”",
+        "pt": "{who} quer participar de “{title}”",
+    },
+    "notify.join_request.email_body": {
+        "en": "{who} asked to join “{title}”. Approve or decline.",
+        "es": "{who} pidió unirse a “{title}”. Acepta o rechaza.",
+        "pt": "{who} pediu para participar de “{title}”. Aceite ou recuse.",
+    },
+    "notify.join_request.cta": {
+        "en": "Review request", "es": "Revisar solicitud", "pt": "Ver pedido",
+    },
+
+    "notify.youre_in.title": {
+        "en": "You’re in 🎉", "es": "¡Estás dentro! 🎉", "pt": "Você está dentro! 🎉",
+    },
+    "notify.youre_in.body_self": {
+        "en": "You joined “{title}”.",
+        "es": "Te uniste a “{title}”.",
+        "pt": "Você entrou em “{title}”.",
+    },
+    "notify.youre_in.body_approved": {
+        "en": "You’re approved for “{title}”.",
+        "es": "Te aceptaron en “{title}”.",
+        "pt": "Você foi aceito em “{title}”.",
+    },
+    "notify.youre_in.subject": {
+        "en": "You’re in: “{title}”",
+        "es": "Estás dentro: “{title}”",
+        "pt": "Você está dentro: “{title}”",
+    },
+    "notify.youre_in.email_self": {
+        "en": "You joined “{title}”. See the details and group chat.",
+        "es": "Te uniste a “{title}”. Mira los detalles y el chat del grupo.",
+        "pt": "Você entrou em “{title}”. Veja os detalhes e o chat do grupo.",
+    },
+    "notify.youre_in.email_approved": {
+        "en": "The host approved you for “{title}”. See the details and group chat.",
+        "es": "El anfitrión te aceptó en “{title}”. Mira los detalles y el chat del grupo.",
+        "pt": "O anfitrião aceitou você em “{title}”. Veja os detalhes e o chat do grupo.",
+    },
+
+    "notify.request_sent.title": {
+        "en": "Request sent", "es": "Solicitud enviada", "pt": "Pedido enviado",
+    },
+    "notify.request_sent.body": {
+        "en": "Your request to join “{title}” is in — the host will confirm.",
+        "es": "Tu solicitud para unirte a “{title}” está enviada — el anfitrión confirmará.",
+        "pt": "Seu pedido para participar de “{title}” foi enviado — o anfitrião vai confirmar.",
+    },
+    "notify.request_sent.subject": {
+        "en": "Request sent: “{title}”",
+        "es": "Solicitud enviada: “{title}”",
+        "pt": "Pedido enviado: “{title}”",
+    },
+    "notify.request_sent.email_body": {
+        "en": "Your request to join “{title}” is in. The host will confirm.",
+        "es": "Tu solicitud para unirte a “{title}” está enviada. El anfitrión confirmará.",
+        "pt": "Seu pedido para participar de “{title}” foi enviado. O anfitrião vai confirmar.",
+    },
+
+    "notify.declined.title": {
+        "en": "Update on “{title}”",
+        "es": "Novedad sobre “{title}”",
+        "pt": "Atualização sobre “{title}”",
+    },
+    "notify.declined.body": {
+        "en": "The host couldn’t fit you in this time.",
+        "es": "El anfitrión no pudo darte lugar esta vez.",
+        "pt": "O anfitrião não conseguiu encaixar você desta vez.",
+    },
+
+    "notify.cancelled.title": {
+        "en": "“{title}” was cancelled",
+        "es": "“{title}” se canceló",
+        "pt": "“{title}” foi cancelado",
+    },
+    "notify.cancelled.body": {
+        "en": "The host cancelled this meet. Sorry — hopefully next time.",
+        "es": "El anfitrión canceló este plan. Lo sentimos — ojalá a la próxima.",
+        "pt": "O anfitrião cancelou este encontro. Sentimos muito — quem sabe na próxima.",
+    },
+    "notify.cancelled.subject": {
+        "en": "Cancelled: “{title}”",
+        "es": "Cancelado: “{title}”",
+        "pt": "Cancelado: “{title}”",
+    },
+    "notify.cancelled.email_body": {
+        "en": "The host had to call this one off. Keep an eye out — something new is usually around the corner.",
+        "es": "El anfitrión tuvo que cancelarlo. Mantente atento — casi siempre surge algo nuevo.",
+        "pt": "O anfitrião precisou cancelar. Fique de olho — quase sempre aparece algo novo.",
+    },
+    "notify.cancelled.cta": {
+        "en": "See what’s nearby", "es": "Ver qué hay cerca", "pt": "Ver o que há por perto",
+    },
+
+    # A neighbor posted the thing this person had asked for. Titled by the RECIPIENT's own
+    # ask, so the notification lands as "the thing you wanted" rather than "someone did
+    # something" — the body carries the neighbor's own words.
+    "notify.signal_match.tip_title": {
+        "en": "A neighbor answered your ask 💬",
+        "es": "Alguien de tu zona respondió a tu pregunta 💬",
+        "pt": "Alguém da sua área respondeu ao seu pedido 💬",
+    },
+    "notify.signal_match.tip_wanted_title": {
+        "en": "A neighbor is looking for your tip",
+        "es": "Alguien cerca busca tu recomendación",
+        "pt": "Alguém por perto procura sua dica",
+    },
+    "notify.signal_match.item_title": {
+        "en": "A neighbor has what you were after 📦",
+        "es": "Alguien cerca tiene lo que buscabas 📦",
+        "pt": "Alguém por perto tem o que você procurava 📦",
+    },
+    "notify.signal_match.item_wanted_title": {
+        "en": "A neighbor needs what you offered",
+        "es": "Alguien cerca necesita lo que ofreciste",
+        "pt": "Alguém por perto precisa do que você ofereceu",
+    },
+    "notify.signal_match.meet_title": {
+        "en": "Someone nearby is up for it 👋",
+        "es": "Alguien cerca se apunta 👋",
+        "pt": "Alguém por perto está a fim 👋",
+    },
+    "notify.signal_match.title": {
+        "en": "A neighbor matched your ask",
+        "es": "Alguien cerca coincide con tu petición",
+        "pt": "Alguém por perto combina com seu pedido",
+    },
+    # Email subject is its own string, deliberately emoji-free: the push title carries the
+    # emoji, but an emoji in a subject line costs deliverability, and email is the channel
+    # that actually reaches people here (a verified user always has an address; a push
+    # subscription is opt-in and rare). Mirrors notify.intro.title vs notify.intro.subject.
+    "notify.signal_match.subject": {
+        "en": "A neighbor answered your ask",
+        "es": "Alguien de tu zona respondió a tu pregunta",
+        "pt": "Alguém da sua área respondeu ao seu pedido",
+    },
+    "notify.signal_match.body_generic": {
+        "en": "A neighbor near you posted something that fits what you asked for.",
+        "es": "Alguien cerca de ti publicó algo que encaja con lo que pediste.",
+        "pt": "Alguém perto de você publicou algo que combina com o que você pediu.",
+    },
+    "notify.signal_match.cta": {
+        "en": "See it", "es": "Verlo", "pt": "Ver",
+    },
+
+    "notify.intro.title": {
+        "en": "A neighbor wants to connect 🤝",
+        "es": "Alguien de tu zona quiere conectar 🤝",
+        "pt": "Alguém da sua área quer se conectar 🤝",
+    },
+    "notify.intro.body_generic": {
+        "en": "A neighbor near you wants to connect — take a peek.",
+        "es": "Alguien cerca de ti quiere conectar — échale un vistazo.",
+        "pt": "Alguém perto de você quer se conectar — dá uma olhada.",
+    },
+    "notify.intro.subject": {
+        "en": "A neighbor near you wants to connect",
+        "es": "Alguien cerca de ti quiere conectar",
+        "pt": "Alguém perto de você quer se conectar",
+    },
+    "notify.intro.heading": {
+        "en": "A neighbor wants to connect",
+        "es": "Alguien de tu zona quiere conectar",
+        "pt": "Alguém da sua área quer se conectar",
+    },
+    "notify.intro.cta": {
+        "en": "See who", "es": "Ver quién", "pt": "Ver quem",
+    },
+
+    "notify.area_open.title": {
+        "en": "Your neighborhood just came alive",
+        "es": "Tu zona acaba de cobrar vida",
+        "pt": "Sua região acabou de ganhar vida",
+    },
+    "notify.area_open.body": {
+        "en": "Enough neighbors have joined — you can now discover meets, people, and plans near you.",
+        "es": "Ya se unió suficiente gente — ahora puedes descubrir planes y personas cerca de ti.",
+        "pt": "Já entrou gente suficiente — agora você pode descobrir encontros e pessoas perto de você.",
+    },
 }
 
 

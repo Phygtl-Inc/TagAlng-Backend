@@ -1,5 +1,3 @@
-import json
-import os
 from typing import Any
 
 from app.context import build_system_prompt, format_user_context
@@ -66,16 +64,6 @@ Output ONLY valid JSON:
 """
 
 
-def _vertex_client():
-    project = os.environ.get("GCP_VERTEX_PROJECT", "")
-    location = os.environ.get("GCP_VERTEX_LOCATION", "us-central1")
-    if not project:
-        raise RuntimeError("GCP_VERTEX_PROJECT not set")
-    from google import genai
-
-    return genai.Client(vertexai=True, project=project, location=location)
-
-
 def _format_history(messages: list[dict[str, Any]]) -> str:
     if not messages:
         return "(no messages yet)"
@@ -114,22 +102,20 @@ def _parse_turn(data: Any) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
     return assistant_message, status, ctx, ui
 
 
-def _call_lana(payload: str) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_LANA_MODEL", os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"))
-    from google.genai import types
+LANA_MAX_OUTPUT_TOKENS = 1024  # matches vertex_event.EVENT_MAX_OUTPUT_TOKENS
 
-    system = build_system_prompt()
-    response = client.models.generate_content(
-        model=model,
-        contents=payload,
-        config=types.GenerateContentConfig(
-            temperature=0.55,
-            response_mime_type="application/json",
-            system_instruction=system + "\n\n" + LANA_TURN_SUFFIX,
-        ),
+
+def _call_lana(payload: str) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    from app.orchestrator.llm import vertex_generate_json
+
+    # parse_json_object, not json.loads — models emit fenced/near-JSON and a
+    # single stray markdown fence used to 502 the whole turn here.
+    data = vertex_generate_json(
+        system=build_system_prompt() + "\n\n" + LANA_TURN_SUFFIX,
+        user_payload=payload,
+        max_tokens=LANA_MAX_OUTPUT_TOKENS,
+        temperature=0.55,
     )
-    data = json.loads((response.text or "{}").strip())
     return _parse_turn(data)
 
 

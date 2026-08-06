@@ -88,6 +88,13 @@ class TestWireGroundPlace(unittest.TestCase):
             [c["google_place_id"] for c in grounding["candidates"]], ["gp1", "gp2"]
         )
         self.assertFalse(ctx["rapport_offer_pending"])
+        # A way out of a wrong list, offered as a chip but never as a candidate.
+        from app.circles_flow import _ESCAPE_SEND
+
+        self.assertEqual(action.chips[-1]["send"], _ESCAPE_SEND)
+        self.assertNotIn(
+            _ESCAPE_SEND, [c["send"] for c in grounding["candidates"]]
+        )
 
     def test_no_affiliation_strips_fiction_chips_only(self) -> None:
         action = _Action()

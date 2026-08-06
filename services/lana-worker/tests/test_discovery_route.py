@@ -2669,6 +2669,110 @@ class TestDirectSignupEnding(unittest.TestCase):
         self.assertIn("neighbor", reply.lower())
 
 
+class TestOnboardingWantsPeers(unittest.TestCase):
+    """Peers is the END of the funnel only when someone asked for it."""
+
+    def test_unstamped_signup_in_flight_is_not_peers(self) -> None:
+        from app.discovery_route import _onboarding_wants_peers
+
+        # The reported bug: "sign in" → no account → signup pivot. A signup is in
+        # flight and nothing stamped an origin, so it must NOT end in a peers list.
+        self.assertFalse(_onboarding_wants_peers({"signup_phone": "a@b.com"}))
+
+    def test_name_gate_without_signup_still_shows_peers(self) -> None:
+        from app.discovery_route import _onboarding_wants_peers
+
+        # Not a signup at all — a verified user who never set a nickname. Unchanged.
+        self.assertTrue(_onboarding_wants_peers({"pending_post_verify": True}))
+
+    def test_explicit_origin_wins_over_signup_marker(self) -> None:
+        from app.discovery_route import _onboarding_wants_peers
+
+        self.assertTrue(_onboarding_wants_peers({"signup_origin": "peers"}))
+        self.assertFalse(
+            _onboarding_wants_peers({"signup_origin": "direct"})
+        )  # no signup_phone, but the origin is explicit
+
+    def test_active_intent_is_not_a_peers_signal(self) -> None:
+        from app.discovery_route import _onboarding_wants_peers
+
+        # _routing_ctx defaults active_intent to find_peers, so it gets stamped on
+        # turns nobody requested peers for. It must not resurrect the funnel ending.
+        self.assertFalse(
+            _onboarding_wants_peers(
+                {"active_intent": "discovery.find_peers", "signup_phone": "a@b.com"}
+            )
+        )
+
+
+class TestLoginPivotSignupOrigin(unittest.TestCase):
+    def test_no_account_pivot_marks_direct(self) -> None:
+        from app.guest_login import _signup_pivot
+
+        _reply, ctx = _signup_pivot({}, "nobody@example.com")
+        self.assertEqual(ctx.get("signup_origin"), "direct")
+        self.assertEqual(ctx.get("routing_phase"), "await_signup_otp")
+
+    def test_signup_email_step_defaults_direct_but_keeps_peers(self) -> None:
+        from app.discovery_route import _handle_signup_phone_message
+
+        with patch(
+            "app.discovery_route.email_has_registered_account", return_value=False
+        ):
+            _r, ctx, _s, _p = _handle_signup_phone_message(
+                "me@example.com", {}, is_anonymous=True
+            )
+            self.assertEqual(ctx.get("signup_origin"), "direct")
+
+            # A gate-entered signup already recorded WHY it started — never overwrite it.
+            _r, ctx, _s, _p = _handle_signup_phone_message(
+                "me@example.com", {"signup_origin": "peers"}, is_anonymous=True
+            )
+            self.assertEqual(ctx.get("signup_origin"), "peers")
+
+
+class TestPeersSupplyFloor(unittest.TestCase):
+    """Zero real matches in an unopened area must not be padded with unscored rows."""
+
+    def test_unopened_area_returns_seed_forward_not_placeholder_rows(self) -> None:
+        from app.discovery_route import _peers_supply_floor_turn
+
+        frame = {
+            "mode": "soft",
+            "blocked": False,  # soft mode declines to BLOCK — a different question
+            "zip5": "32827",
+            "state": "seeding",
+            "count": 3,
+            "threshold": 25,
+        }
+        with patch("app.zip_unlock.discovery_zip_gate", return_value=frame):
+            result = _peers_supply_floor_turn(
+                {}, user_id="user-1", block_id="block-1"
+            )
+        self.assertIsNotNone(result)
+        _reply, ctx, routing, peers = result
+        self.assertEqual(peers, [])
+        self.assertEqual(routing.get("tool_to_call"), "peers_supply_floor")
+        self.assertEqual(ctx.get("suggestions"), ["Host a meet"])
+
+    def test_open_area_keeps_todays_fallback(self) -> None:
+        from app.discovery_route import _peers_supply_floor_turn
+
+        # discovery_zip_gate returns None for an open area / unknown ZIP / gating off.
+        with patch("app.zip_unlock.discovery_zip_gate", return_value=None):
+            self.assertIsNone(
+                _peers_supply_floor_turn({}, user_id="user-1", block_id="block-1")
+            )
+
+    def test_gate_error_fails_open(self) -> None:
+        from app.discovery_route import _peers_supply_floor_turn
+
+        with patch("app.zip_unlock.discovery_zip_gate", side_effect=RuntimeError("boom")):
+            self.assertIsNone(
+                _peers_supply_floor_turn({}, user_id="user-1", block_id="block-1")
+            )
+
+
 class TestPreviewPeersSelfExclusion(unittest.TestCase):
     def test_caller_excluded_from_own_roster(self) -> None:
         from app.discovery_route import fetch_preview_peers_on_block

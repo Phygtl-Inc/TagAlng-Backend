@@ -2,9 +2,10 @@
 list the policy arbitrates over (engineering doc §C.2).
 
 This is a consumption merge, not a schema merge: rapport_gaps,
-circle_affiliations (ungrounded), suggestion_queue, pending_signal_asks, and
-the available capabilities keep their own tables — they just arrive at the
-policy in one shape:
+circle_affiliations (ungrounded → ask which place; grounded → offer to organize
+something for it), suggestion_queue, pending_signal_asks, and the available
+capabilities keep their own tables — they just arrive at the policy in one
+shape:
 
     {id, kind, summary, value_hint, context}
 
@@ -26,6 +27,24 @@ logger = logging.getLogger(__name__)
 
 _MAX_PER_QUEUE = 4
 
+# How long a gap asked in CONVERSATION stays off the candidate list. Asked and
+# ignored is not answered, so it may come back — but not on the next turn, and
+# not three turns running (QA 2026-08-03).
+CHAT_ASK_COOLDOWN_HOURS = 24
+
+_GAP_FIELDS = (
+    "gap_row_id, gap_id, question, covers_concept, why_frame, why_reason, "
+    "unlock_score, chat_asked_at"
+)
+# Pre-20260930 / pre-20260928 environments lack why_reason / chat_asked_at; step down
+# rather than degrade the whole rapport queue to empty.
+_GAP_FIELDS_NO_REASON = (
+    "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score, chat_asked_at"
+)
+_GAP_FIELDS_LEGACY = (
+    "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score"
+)
+
 
 def _clamp01(x: Any) -> float:
     try:
@@ -34,30 +53,64 @@ def _clamp01(x: Any) -> float:
         return 0.5
 
 
-def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
-    """Open 'By the way…' questions — the one queue that's fully live today."""
+def _asked_in_chat_recently(row: dict[str, Any]) -> bool:
+    """True while a conversationally-asked gap is still cooling down."""
+    from datetime import datetime, timedelta, timezone
+
+    raw = str(row.get("chat_asked_at") or "").strip()
+    if not raw:
+        return False
     try:
-        res = (
-            service_client()
-            .table("rapport_gaps")
-            .select("gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score")
-            .eq("user_id", user_id)
-            .eq("status", "open")
-            .order("unlock_score", desc=True)
-            .limit(_MAX_PER_QUEUE)
-            .execute()
-        )
-        rows = [r for r in (res.data or []) if isinstance(r, dict)]
-    except Exception:
-        logger.exception("goals_rapport_failed user=%s", user_id)
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - when < timedelta(hours=CHAT_ASK_COOLDOWN_HOURS)
+
+
+def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
+    """Open 'By the way…' questions — the one queue that's fully live today.
+
+    Gaps Lana already asked in conversation are held back for a day: the policy
+    reads this list every turn, so without the filter one open gap was re-offered
+    (and re-asked, reworded) turn after turn.
+    """
+    rows: list[dict[str, Any]] = []
+    for fields in (_GAP_FIELDS, _GAP_FIELDS_NO_REASON, _GAP_FIELDS_LEGACY):
+        try:
+            res = (
+                service_client()
+                .table("rapport_gaps")
+                .select(fields)
+                .eq("user_id", user_id)
+                .eq("status", "open")
+                .order("unlock_score", desc=True)
+                # Over-fetch: the cooldown filter below runs in Python, so the
+                # cap must survive dropping a few rows.
+                .limit(_MAX_PER_QUEUE * 3)
+                .execute()
+            )
+            rows = [r for r in (res.data or []) if isinstance(r, dict)]
+            break
+        except Exception:
+            continue
+    else:
+        logger.warning("goals_rapport_failed user=%s", user_id)
         return []
+    rows = [r for r in rows if not _asked_in_chat_recently(r)][:_MAX_PER_QUEUE]
     return [
         {
             "id": f"gap:{r.get('gap_row_id')}",
             "kind": "rapport_gap",
             "summary": str(r.get("question") or r.get("covers_concept") or "")[:200],
             "value_hint": _clamp01(r.get("unlock_score")),
-            "context": {"why": r.get("why_frame"), "concept": r.get("covers_concept")},
+            # why_reason is the real rationale ("so I can introduce you to neighbors
+            # who…"); the teaser is only a topic label, so it's the fallback.
+            "context": {
+                "why": r.get("why_reason") or r.get("why_frame"),
+                "concept": r.get("covers_concept"),
+            },
         }
         for r in rows
         if r.get("question") or r.get("covers_concept")
@@ -81,6 +134,53 @@ def _grounding_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
                 "summary": f"user mentioned their {key.replace('_', ' ')} — the exact place is not known yet",
                 "value_hint": 0.6,
                 "context": {"circle_key": key, "circle_type": c.get("type")},
+            }
+        )
+        if len(out) >= _MAX_PER_QUEUE:
+            break
+    return out
+
+
+def _circle_offer_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
+    """Grounded communities the policy can offer to organize something FOR.
+
+    Ungrounded circles arrive above as `ungrounded_circle` (ask which place);
+    once pinned they used to leave the goal list entirely, so nothing
+    community-shaped remained to pursue and a vague "I'm bored" degraded into a
+    read-out of the capability catalog (QA 2026-07-31 — four features named,
+    three generic chips, no offer). Hosting and inviting are always available
+    (§D.2 — unlock gates consumption, never creation), so this goal is honest
+    even in a still-waking area. `send` is pre-written so a chip accepting the
+    offer is self-contained: the host engine re-reads it as a fresh message and
+    never saw the bubble it came from.
+    """
+    out: list[dict[str, Any]] = []
+    for c in world.get("circles") or []:
+        if not (c.get("grounded") and c.get("confirmed")):
+            continue
+        key = str(c.get("key") or "").strip()
+        if not key:
+            continue
+        # Their own word for the group, never a label we invented.
+        topic = key.replace("_", " ")
+        place = str(c.get("place") or "").strip()
+        where = f" at {place}" if place else ""
+        pinned = f", pinned to {place}" if place else ""
+        out.append(
+            {
+                "id": f"circle_offer:{key}",
+                "kind": "circle_offer",
+                "summary": (
+                    f"their {topic}{pinned} — a community of theirs you can offer to "
+                    "organize ONE specific get-together for"
+                ),
+                "value_hint": 0.7,
+                "context": {
+                    "circle_key": key,
+                    "circle_type": c.get("type"),
+                    "place_name": place or None,
+                    "send": f"help me host a get-together for my {topic}{where}",
+                },
             }
         )
         if len(out) >= _MAX_PER_QUEUE:
@@ -186,6 +286,7 @@ def candidate_goals(
     goals = (
         _rapport_goals(user_id)
         + _grounding_goals(world)
+        + _circle_offer_goals(world)
         + _offer_goals(user_id)
         + _pending_ask_goals(user_id)
         + _capability_goals(world)

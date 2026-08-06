@@ -106,6 +106,27 @@ class TestGroundingTurnResultArmsOffer(unittest.TestCase):
         )
         self.assertIsNone(ctx["rapport_grounding"])
 
+    def test_unpinned_close_still_arms_the_find_people_offer(self) -> None:
+        # The place could not be pinned, but the community is known — the offer to
+        # LOOK for neighbors rides the same rails a pinned close uses (2026-08-03).
+        result = {
+            "reply": "I'll remember it the way you said it. Want me to look for "
+                     "neighbors into table tennis too?",
+            "options": [],
+            "pending": None,
+            "grounded": False,
+            "offer": {
+                "kind": "find_neighbors",
+                "label": "Yes, look",
+                "send": "connect me with neighbors into table tennis",
+                "topic": "table tennis",
+            },
+        }
+        _reply, _status, ctx, _ui, _draft = _grounding_turn_result({}, result, _Timer())
+        self.assertTrue(ctx["rapport_offer_pending"])
+        self.assertEqual(ctx["rapport_pending_action"]["kind"], "find_neighbors")
+        self.assertIsNone(ctx["rapport_grounding"])
+
     def test_no_offer_resets_state(self) -> None:
         result = {"reply": "Locked in.", "options": [], "pending": None,
                   "grounded": True, "offer": None}

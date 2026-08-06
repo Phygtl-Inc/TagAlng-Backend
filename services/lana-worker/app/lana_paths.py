@@ -55,6 +55,22 @@ def rec_personalize_enabled() -> bool:
     return _llm_ready()
 
 
+def tip_ask_consent_enabled() -> bool:
+    """Answer a recommendation ask FIRST; post it to neighbors only if they say yes.
+
+    Off (legacy): the moment the router read tip_seek, Lana wrote a local_signals row and
+    the reply was generated from that write ("I've noted you're looking for a recommendation
+    …") — so asking a question was the same act as broadcasting it, every re-entry made
+    another posting, and neighbors could be notified for an ask the user never made.
+
+    On (default): the ask is answered from neighbor tips + Google, nothing is written, and
+    ONE offer ("want me to ask your neighbors too?") gates the write. Set
+    LANA_TIP_ASK_CONSENT=0 to fall back to the legacy write-first path.
+    """
+    flag = os.environ.get("LANA_TIP_ASK_CONSENT", "1").strip().lower()
+    return flag not in ("0", "false", "off", "legacy")
+
+
 def decide_turn_mode() -> str:
     """Unified conversational policy (decide_turn) rollout knob.
 

@@ -117,6 +117,73 @@ def _forced_slots_for_kind(
     return slots
 
 
+def _wire_ask_gap_action(action: Any) -> None:
+    """Hold a policy `ask_gap` to the question that was actually vetted.
+
+    Rapport questions are written by app/rapport_synth.py under a real quality
+    bar — no yes/no, no opinions or origin stories, no consumer/brand
+    preferences, and one test each must pass: "would the answer change who they
+    connect with?". The home tile serves those strings verbatim. The chat path
+    got the same question only as a *topic hint* in candidate_goals and then
+    wrote its own sentence, so none of those bars applied to what the user read
+    — which is how "is there a favorite blue thing that cheers you up?" shipped
+    (QA 2026-08-03). A colour is not something a neighbour can share.
+
+    So: the model still writes the warm lead-in, and the QUESTION comes from the
+    vetted row. Same division of labour as _wire_ground_place_action below,
+    where the model writes the ask and real map data fills the chips.
+
+    An `ask_gap` whose goal_id resolves to no open gap is a question nothing
+    vetted — downgraded to `reply`, keeping whatever warmth it opened with.
+
+    Also stamps chat_asked_at, so candidate_goals stops offering this gap and it
+    cannot be re-asked next turn.
+    """
+    if getattr(action, "kind", None) != "ask_gap":
+        return
+    gid = str(getattr(action, "goal_id", None) or "")
+    row = None
+    if gid.startswith("gap:"):
+        from app.rapport_gaps import get_gap_row
+
+        row = get_gap_row(gid.split(":", 1)[1].strip())
+    question = str((row or {}).get("question") or "").strip()
+    if not question:
+        logging.getLogger(__name__).info("ask_gap_unvetted goal_id=%r -> reply", gid or None)
+        action.kind = "reply"
+        action.goal_id = None
+        action.chips = []
+        return
+    action.utterance = _merge_vetted_question(str(action.utterance or ""), question)
+    from app.rapport_gaps import mark_chat_asked
+
+    mark_chat_asked(str(row.get("gap_row_id") or ""))
+
+
+def _merge_vetted_question(utterance: str, question: str) -> str:
+    """Keep the model's acknowledgement, end on the vetted question.
+
+    The lead-in is the part worth keeping — it's what makes the ask feel like a
+    reply rather than a form field. Everything from the model's own question
+    mark onward is dropped, because that sentence is the unvetted one.
+    """
+    said = str(utterance or "").strip()
+    if not said:
+        return question
+    if question.lower() in said.lower():
+        return said  # already asking exactly the vetted question
+    head = said
+    for mark in ("?", "؟"):
+        if mark in head:
+            head = head.split(mark, 1)[0]
+            # Drop the truncated interrogative clause, keep the sentences before it.
+            parts = re.split(r"(?<=[.!…])\s+", head.strip())
+            head = " ".join(parts[:-1]) if len(parts) > 1 else ""
+            break
+    head = head.strip()
+    return f"{head} {question}".strip() if head else question
+
+
 def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[str, Any]) -> None:
     """Connect a policy `ground_place` decision to the REAL grounding rails.
 
@@ -140,7 +207,7 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
     action.chips = []
     try:
         from app.auth import service_client
-        from app.circles_flow import _chip, _home_block_id, ground_options
+        from app.circles_flow import _chip, _home_block_id, _with_escape, ground_options
 
         key = ""
         gid = str(getattr(action, "goal_id", None) or "")
@@ -149,7 +216,7 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
         q = (
             service_client()
             .table("circle_affiliations")
-            .select("id, circle_type, circle_key, detail, status, place_ref")
+            .select("id, circle_type, circle_key, detail, status, place_ref, place_name")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .is_("place_ref", "null")
@@ -167,7 +234,11 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
             user_id, aff, block_id=_home_block_id(user_id), query=None
         )
         candidates = [{**_chip(o), "name": o.get("name")} for o in options]
-        chips = [{"label": c["label"], "send": c["send"]} for c in candidates]
+        # Escape hatch rides along as a chip but never as a candidate — a wrong
+        # list must always have a way out (2026-08-03).
+        chips = [
+            {"label": c["label"], "send": c["send"]} for c in _with_escape(candidates)
+        ]
         session_ctx["rapport_active"] = True
         session_ctx["rapport_grounding"] = {
             "affiliation_id": str(aff.get("id") or ""),
@@ -204,6 +275,46 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
         "rapport_offer_pending", "rapport_pending_action", "rapport_grounding",
     ):
         session_ctx[k] = None
+
+
+def _turn_is_tip_ask(
+    ctx: dict[str, Any],
+    msg: str,
+    *,
+    history: list[dict[str, Any]] | None,
+    home_block_id: str | None,
+    phone_verified: bool,
+    timer: TurnTimer | None = None,
+) -> bool:
+    """Is this turn a place/service recommendation ask (looking.tip)?
+
+    Used to keep decide_turn off recommendation turns. Reads the classifier's verdict,
+    which is cached per user message — the same parse handle_discovery_turn reuses, so this
+    costs no extra model call. Fails CLOSED (False) so a classifier hiccup leaves the policy
+    gate exactly as it was rather than diverting every turn to the engines.
+    """
+    try:
+        from app.discovery_slots import discovery_slots_for_turn
+        from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR
+
+        slots = discovery_slots_for_turn(
+            ctx,
+            msg,
+            routing_phase=str(ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or ctx.get("preview_block_id")),
+            has_identity=bool(ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        if not isinstance(slots, dict):
+            return False
+        linear = str(slots.get("linear_intent") or "")
+        sig = str(slots.get("signal_intent") or "") or SIGNAL_INTENT_BY_LINEAR.get(linear, "")
+        return sig == "tip_seek" and float(slots.get("confidence") or 0.0) >= 0.5
+    except Exception:  # noqa: BLE001 — a gate helper must never break the turn
+        logging.getLogger(__name__).exception("tip_ask_policy_gate_failed")
+        return False
 
 
 def _policy_rapport_reply(
@@ -252,6 +363,9 @@ def _policy_rapport_reply(
         )
     if action is None or action.kind == "handoff":
         return None
+    # Before the bookkeeping below: this can downgrade ask_gap -> reply, and a
+    # downgraded turn must not count against the ask streak or park a goal.
+    _wire_ask_gap_action(action)
     apply_defer(session_ctx, action)
     note_ask_streak(session_ctx, action)
     audit_decision(
@@ -1149,18 +1263,16 @@ def run_lana_unified_pipeline(
                     result.get("offer") if isinstance(result.get("offer"), dict) else None
                 )
                 auto_send = str((auto_offer or {}).get("send") or "").strip()
-                if (
-                    result.get("grounded")
-                    and auto_offer is not None
-                    and auto_offer.get("auto")
-                    and auto_send
-                ):
+                if auto_offer is not None and auto_offer.get("auto") and auto_send:
                     # The grounding served an action the user ALREADY asked for
                     # (policy stamped pending_action on the ground_place turn) —
                     # never re-offer their own request: dispatch it now with the
                     # place pre-filled, exactly like an offer accept, and carry
                     # the community-save announcement as a preamble to the
                     # engine's reply (one bubble, no extra confirm loop).
+                    # Not gated on `grounded`: when the place could NOT be pinned
+                    # the request still stands, and it dispatches place-less
+                    # rather than dying with the grounding (2026-08-03).
                     forced_slots = _forced_slots_for_kind(
                         str(auto_offer.get("kind") or ""), auto_send, auto_offer,
                         session_ctx,
@@ -1735,6 +1847,13 @@ def run_lana_unified_pipeline(
         and str(session_ctx.get("routing_phase") or "") in ("", "listening")
         and not session_ctx.get("event_host_active")
         and not session_ctx.get("pending_confirmation")
+        # A concrete engine offer is armed and this reply answers it: "want me to ask your
+        # neighbors too?" / "want me to take that posting down?". Those accepts and declines
+        # WRITE (or withdraw) a posting, so they belong to the engine that armed them — a
+        # policy reply here would answer in prose and silently drop the action, leaving the
+        # offer armed for a later, unrelated turn.
+        and not session_ctx.get("tip_ask_offer_pending")
+        and not session_ctx.get("posting_manage_pending")
         # Regex unsafe backstop stays ahead of the policy — safety turns belong
         # to the legacy rails (the policy prompt also hands them off, belt+braces).
         and not _utterance_is_unsafe_backstop(user_message)
@@ -1753,6 +1872,18 @@ def run_lana_unified_pipeline(
             and str(session_ctx.get("_discovery_slots_for") or "")
             == str(user_message or "").strip()
         )
+        # A recommendation ask ("recommend me a doctor nearby") is an ACTION turn: it runs
+        # a real neighbor-tip + Places lookup and can post the ask to neighbors. The policy
+        # prompt is told to hand those off, but on QA 2026-08-04 it answered one with
+        # "I'll keep an ear out and let you know if a neighbor recommends a doctor" — a
+        # listening promise nothing had armed, with no places and no offer, while the
+        # engine (handler=None in the turn log) never ran. Skip deterministically on the
+        # classifier's own verdict rather than trusting the prompt.
+        and not _turn_is_tip_ask(
+            session_ctx, user_message,
+            history=history, home_block_id=home_block_id,
+            phone_verified=phone_verified, timer=timer,
+        )
     ):
         from app.policy.decide import apply_defer, audit_decision, decide_turn, note_ask_streak
 
@@ -1762,6 +1893,8 @@ def run_lana_unified_pipeline(
                 history=history, user_message=user_message,
             )
         if _action is not None and _action.kind != "handoff":
+            # Ahead of the bookkeeping: may downgrade ask_gap -> reply.
+            _wire_ask_gap_action(_action)
             apply_defer(session_ctx, _action)
             note_ask_streak(session_ctx, _action)
             audit_decision(

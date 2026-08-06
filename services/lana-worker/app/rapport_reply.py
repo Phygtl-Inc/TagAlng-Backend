@@ -273,20 +273,15 @@ def rapport_concierge_reply(
 
 
 def _vertex_concierge_reply(user_payload: str) -> Any:
-    """Direct Vertex Gemini fallback when the orchestrator LLM isn't configured."""
-    from app.orchestrator.json_util import parse_json_object
-    from app.vertex_extract import _vertex_client
+    """Direct Vertex Gemini fallback when the orchestrator LLM isn't configured.
+    Same token budget (512) and same timeout the OpenAI path uses — see
+    llm.gemini_config()."""
+    from app.orchestrator.llm import vertex_generate_json
 
-    client = _vertex_client()
-    model = os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
-    from google.genai import types
-
-    response = client.models.generate_content(
-        model=model,
-        contents=CONCIERGE_PROMPT + "\n\n" + user_payload,
-        config=types.GenerateContentConfig(
-            temperature=0.5,
-            response_mime_type="application/json",
-        ),
+    return vertex_generate_json(
+        model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+        system=CONCIERGE_PROMPT,
+        user_payload=user_payload,
+        max_tokens=512,  # parity with the llm_json call above
+        temperature=0.5,
     )
-    return parse_json_object(response.text or "")

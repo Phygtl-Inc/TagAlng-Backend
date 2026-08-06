@@ -168,6 +168,11 @@ def _signup_pivot(session_ctx: dict[str, Any], email: str) -> tuple[str, dict[st
     ctx = _exit_login_ctx(session_ctx)
     ctx["routing_phase"] = "await_signup_otp"
     ctx["signup_phone"] = email
+    # They came to SIGN IN, not to be matched. Record that, so the post-verify funnel
+    # ends at the welcome instead of an unrequested neighbors list. (The funnel now
+    # defaults that way regardless; this makes the intent explicit rather than implied
+    # by the absence of a flag.)
+    ctx["signup_origin"] = "direct"
     ctx["auth_action"] = {
         "type": "link_email_signup",
         "email": email,

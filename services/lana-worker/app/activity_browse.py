@@ -385,37 +385,6 @@ def _compose_area_warming_empty(
     )
 
 
-def _compose_area_gated_browse(
-    msg: str, frame: dict[str, Any], session_ctx: dict[str, Any]
-) -> str:
-    """Pre-open area asked to browse others' events (§D.2 hard gate, bridge-spec
-    alignment 2026-07-30): the area is still waking up, so nothing is listed —
-    turn it forward to hosting. Copy must stay honest: never claim the calendar
-    is empty (supply may exist; it is gated), and never blame the user."""
-    from app.reply_compose import compose_reply
-    from app.zip_unlock import gate_framing_facts
-
-    return compose_reply(
-        goal=(
-            "Their area hasn't opened up yet, so you can't show them what other "
-            "neighbors are hosting — say that honestly (their area is still "
-            "waking up; never claim nothing is happening, never blame them). "
-            "Then turn it forward: they don't have to wait — they can host "
-            "something and share it with their own people (the pill below says "
-            "'Host a meet'), which is exactly what brings their area to life. "
-            "Warm, zero guilt, max 2 sentences."
-        ),
-        facts=gate_framing_facts(frame),
-        fallback=(
-            "Your area is still waking up, so I can't show what neighbors are "
-            "hosting quite yet. You don't have to wait, though — want to host "
-            "something and bring your people in?"
-        ),
-        session_ctx=session_ctx,
-        user_message=msg,
-    )
-
-
 def _compose_empty_seek_offer(
     interest: str,
     *,
@@ -739,6 +708,13 @@ def run_activity_browse_turn(
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
         session_ctx["routing_phase"] = "listening"
+        # The look screen's "YOUR COMMUNITIES" card (C-CIRCLE-LOOK-COMMS). This is the
+        # one turn it rides on: the user just opened "find a meet" and hasn't said what
+        # for yet, and her own places are the most useful thing on screen while she
+        # decides. Absent (not empty) when she has no community — see community_surface.
+        from app.community_surface import stamp_communities_card
+
+        stamp_communities_card(session_ctx, user_id)
         return t("browse.ask_interest", lang)
 
     from app.discovery_route import (
@@ -887,21 +863,11 @@ def run_activity_browse_turn(
     weekend_only = bool(re.search(r"\bweekend\b", interest, re.I) or re.search(r"\bweekend\b", msg, re.I))
     events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
 
-    # §D.2 hard gate (bridge-spec alignment 2026-07-30): while the user's area is
-    # not open, others' events are never listed — the pre-open move is hosting +
-    # bringing your own people in. Checked BEFORE the filter so gated supply
-    # can't leak through a topical match (QA: a lone coffee event answered
-    # "meet other runners" in a waitlist ZIP).
-    gate = _zip_gate_frame(user_id)
-    if gate and gate.get("blocked"):
-        draft["_seek_offer"] = None
-        draft["suggestions"] = ["Host a meet"]
-        session_ctx["browse_draft"] = draft
-        session_ctx["activity_browse_active"] = True
-        session_ctx["activity_previews"] = []
-        session_ctx["routing_phase"] = "listening"
-        return _compose_area_gated_browse(msg, gate, session_ctx)
-
+    # No pre-open block here (reverted 2026-08-05, see zip_unlock.discovery_zip_gate):
+    # §D.2 is supply-aware — a host's event stays visible to the neighbours it was
+    # created for whatever state the area is in. The QA case that motivated the block
+    # (an off-topic event answering "meet other runners") is handled by the relevance
+    # floor instead. The gate frame is still read below, for EMPTY results only.
     matched, label = _filter_events_by_query(events, interest)
 
     from app.discovery_route import activity_previews_from_events

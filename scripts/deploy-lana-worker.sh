@@ -118,6 +118,12 @@ OPENAI_SYNTH_MODEL: "${OPENAI_SYNTH}"
 OPENAI_TIMEOUT_SEC: "${OPENAI_TIMEOUT_SEC:-15}"
 LANA_DECIDE_TURN: "${LANA_DECIDE_TURN:-off}"
 LANA_ZIP_UNLOCK_GATE: "${LANA_ZIP_UNLOCK_GATE:-soft}"
+LANA_PEER_RADIUS_MATCH: "${LANA_PEER_RADIUS_MATCH:-off}"
+LANA_PEER_RADIUS_METERS: "${LANA_PEER_RADIUS_METERS:-8000}"
+# Was set in both env files but never forwarded, so the running service has
+# never actually seen it — --env-vars-file REPLACES the service environment,
+# so anything missing from this list is absent, not inherited.
+IDENTITY_CONCEPT_LINK_ENABLED: "${IDENTITY_CONCEPT_LINK_ENABLED:-0}"
 LANA_DISCOVERY_MODEL: "${LANA_DISCOVERY_MODEL:-}"
 CORS_ALLOW_ORIGINS: "${CORS}"
 GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY:-}"

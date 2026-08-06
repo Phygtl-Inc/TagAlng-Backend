@@ -310,6 +310,13 @@ _SYSTEM = (
     "tip_share (sharing.tip) = the user NAMES a specific provider/place THEY vouch for: "
     "'I recommend Dr Smith', 'try Dr Lee', 'my favorite pizza is Tony's', 'Dr Patel is a great dentist'. "
     "If no specific name/place is given, it is NOT tip_share. "
+    "NEVER flip an ASK into a SHARE. When RECENT TURNS show the user ASKING for a "
+    "recommendation and Lana OFFERING to ask their neighbors, their reply to that offer "
+    "('yes, ask my neighbors', 'yes please', 'no thanks', 'in my block obv') is an ANSWER to "
+    "Lana's offer — goal=continue — and is NEVER tip_share/sharing.tip, no matter how many "
+    "times the word 'recommendation' appears in the context. The person who asked for a "
+    "doctor does not have a doctor to recommend; classifying that as sharing records the "
+    "exact opposite of what they said. Only a NAMED provider in THEIR OWN words is a share. "
     "NEVER tip_seek when user wants to FIND/SHOW NEIGHBORS by heritage, life stage, or traits "
     "(find italian moms, find italian dads, brazilian parents on my block) — that is discovery.find_by_attrs. "
     "host_meet = the user is the ORGANIZER who wants to bring neighbors together for a gathering THEY "
@@ -434,18 +441,34 @@ _SYSTEM = (
     "When goal=show_block_log set intro_direction null. "
     "LAYER 1 CATALOG — set linear_intent to the best match (confidence ≥ 0.85 when sure): "
     "discovery.find_peers|discovery.find_by_attrs|discovery.find_in_block|discovery.find_activities|"
-    "discovery.block_log|discovery.show_peer_profile|discovery.explain_peer_match; "
+    "discovery.block_log|discovery.show_peer_profile|discovery.explain_peer_match|"
+    "discovery.communities; "
     "identity.add_claim|identity.edit_claim|identity.complete_profile|identity.show_my_profile; "
     "looking.swap|looking.meet|looking.tip|sharing.swap|sharing.host|sharing.tip; "
     "tier.send_nudge|tier.respond_nudge|social.list_intros|social.propose_intro; "
     "auth.signup_phone|auth.login_phone|auth.logout|auth.upload_photo; "
-    "settings.change_name|settings.change_zip|settings.notification_prefs; "
+    "settings.change_name|settings.change_zip|settings.notification_prefs|settings.remove_posting; "
+    "settings.remove_posting = the user wants something they POSTED taken down / undone / "
+    "cancelled — an ask or offer Lana sent to their neighbors ('remove my posting', 'take that "
+    "down', 'cancel that ask', 'I don't want that posted any more', 'undo it', 'delete my "
+    "request'). goal=chat, in_discovery=false. This is about WITHDRAWING an existing post, so it "
+    "is NEVER save_signal / looking.* / sharing.* — never re-post what they asked you to remove. "
+    "Cancelling an EVENT they are hosting is not this (that is the host flow). "
     "help.what_can_you_do|help.who_are_you; "
     "system.out_of_scope (set with goal=out_of_scope for an errand TagAlng cannot do); "
     "system.unsafe (set with goal=unsafe for inappropriate/abusive content Lana must refuse); "
     "system.medical (set with goal=medical for a health/medical concern — see MEDICAL below); "
     "system.crisis (set with goal=crisis for emotional distress or danger — see CRISIS below). "
     "Use identity.show_my_profile for 'what do you know about me', 'show my claims', 'my profile'. "
+    "Use discovery.communities when the user asks about COMMUNITIES / groups / places people "
+    "belong to — theirs or ones nearby to join ('show me communities around me', 'what "
+    "communities am I in', 'any groups near me', 'communities I can join', 'which gyms do "
+    "people here go to', 'is there a book club nearby'). goal=chat, in_discovery=false. "
+    "A community is a PLACE people belong to (a gym, a church, a school, a club) — this is "
+    "NEVER discovery.find_by_attrs on the word 'community' and NEVER goal=peers: the user is "
+    "asking about places, not about neighbors whose trait is 'community'. Asking to be "
+    "introduced to PEOPLE stays find_peers; asking what's HAPPENING (events, this weekend) "
+    "stays find_activities. "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
     "identity.add_claim, goal=chat, in_discovery=false, identity_snippet=null "
@@ -828,6 +851,79 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "'nope, not those', 'it's not any of them'), that is abandon=true — they are declining "
             "the options, not answering with one. A reply that rejects them but NAMES a different "
             "place ('no, it's the one by Publix') is a normal answer (goal=chat, abandon=false)"
+        )
+    # An armed offer IS a capture — the highest-priority one, because its accept WRITES.
+    # Before this, an armed offer reported active_capture=none: Lana had just answered a
+    # recommendation ask and offered to ask the neighbors, the user tapped "Yes, ask my
+    # neighbors", and with nothing but the transcript (whose recent bubbles were thick with
+    # the words "recommendation" and "share your tip") the router read the ACCEPT as
+    # sharing.tip and the share capture recorded them as RECOMMENDING a doctor — the inverse
+    # of their ask (dev QA 2026-08-04). The state line now says what was offered.
+    tip_offer = session_ctx.get("tip_ask_offer_pending")
+    posting_offer = session_ctx.get("posting_manage_pending")
+    if isinstance(tip_offer, dict) or isinstance(posting_offer, dict):
+        if isinstance(tip_offer, dict):
+            what = str(tip_offer.get("detail") or "").strip()
+            offered = (
+                "Lana just ANSWERED the user's request for a recommendation"
+                + (f' ("{what[:80]}")' if what else "")
+                + " and offered ONE thing: to also ask their neighbors nearby for a "
+                "recommendation of their own. Nothing has been posted yet."
+            )
+        else:
+            what = str(posting_offer.get("detail") or "").strip()
+            offered = (
+                "Lana just posted the user's ask to their neighbors"
+                + (f' ("{what[:80]}")' if what else "")
+                + " and offered to take that posting down."
+            )
+        return (
+            "offer_reply — "
+            + offered
+            + " The latest message is most likely their ANSWER to that offer: an accept "
+            "('yes', 'yes please', 'go ahead', 'ask them'), a decline ('no thanks', 'not "
+            "now', 'maybe later', 'I didn't want anything posted'), or a request to take it "
+            "down. Classify it as goal=continue and let the engine act on it. "
+            "*** It is NEVER tip_share / sharing.tip. *** The user ASKED for a "
+            "recommendation; they do not have one to give, so reading their 'yes' as them "
+            "SHARING a recommendation records the exact opposite of what they said — no "
+            "matter how often the words 'recommend' or 'tip' appear in the recent turns. "
+            "Only a NAMED provider or place in THEIR OWN words is a share. A genuinely new "
+            "request (a different search, a refinement like 'kid-friendly ones' or 'show me "
+            "all of them', an unrelated question) is classified fresh as normal; and a "
+            "message about how they FEEL, a symptom, distress or danger is ALWAYS its own "
+            "safety lane, never an offer reply"
+        )
+    # The share capture asks tailored follow-ups ("What type of doctor is Dr. Mitchel?") and
+    # gets bare fragments back ("family doctor"). With active_capture=none the router read
+    # that fragment as a fresh tip_seek — the classifier is told a share must NAME a provider
+    # — so the sticky lane released and Lana answered the user's own recommendation with
+    # Google listings, mid-share (dev QA 2026-08-05). The state line now says whose question
+    # the fragment is answering.
+    if session_ctx.get("tip_share_active"):
+        pending_q = str(session_ctx.get("tip_pending_question") or "").strip()
+        draft = session_ctx.get("tip_draft") if isinstance(session_ctx.get("tip_draft"), dict) else {}
+        named = str((draft or {}).get("name") or "").strip()
+        q_line = f' Lana\'s pending question was: "{pending_q[:300]}".' if pending_q else ""
+        named_line = f' The provider they are vouching for is already captured: "{named[:80]}".' if named else ""
+        return (
+            "tip_share — the user is SHARING a recommendation THEY vouch for, and Lana is "
+            "filling in the missing pieces of that tip."
+            + named_line
+            + q_line
+            + " A reply that ANSWERS that question is goal=save_signal with "
+            "signal_intent=tip_share (linear_intent sharing.tip) — not goal=chat — even when "
+            "it is a bare NOUN PHRASE naming the category, the "
+            "speciality, the cuisine or the trait of what they are recommending ('family "
+            "doctor', 'pediatrician', 'Italian', 'great with toddlers', 'Lake Nona'): they "
+            "are DESCRIBING the provider they already named, not asking you to find one. "
+            "*** Such a reply is NEVER tip_seek / looking.tip. *** The rule that a share must "
+            "name a specific provider applies to the tip as a WHOLE, not to this one reply — "
+            "reading it as a seek makes Lana answer the user's own recommendation with a list "
+            "of places, the inverse of what they said. Only an explicit REQUEST for something "
+            "to be found for them ('actually, can you find me a dentist?', 'who do my "
+            "neighbors use?') is a PIVOT — classify that fresh so it leaves the share; and a "
+            "reply that backs out ('never mind', 'I don't want to share it') is abandon=true"
         )
     if session_ctx.get("look_meet_active"):
         return (

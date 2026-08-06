@@ -424,19 +424,11 @@ def _find_block_events(
     the session zip, so we fall back to the home block's centroid (every verified
     neighbour has a home_block_id) — that's what actually makes this fire.
     """
-    # §D.2 gate (bridge-spec alignment 2026-07-30): while the seeker's area is
-    # not open, others' events are never listed — pre-open, the product move is
-    # create+invite (the no-events reply already ends on "Start listening / send
-    # it to a neighbor you know"). Fail OPEN on any gating error.
-    try:
-        from app.zip_unlock import discovery_zip_gate
-
-        _sub = _jwt_sub(user_jwt)
-        _frame = discovery_zip_gate(_sub, surface="browse") if _sub else None
-        if _frame and _frame.get("blocked"):
-            return []
-    except Exception:  # noqa: BLE001 — a gate error must never hide the flow
-        pass
+    # No area gate here (reverted 2026-08-05): §D.2 is supply-aware — real events
+    # stay visible to the neighbours they were created for in any unlock state, and
+    # hiding them starves the meets that make an area come alive. The 2026-07-30
+    # block was aimed at off-topic matches, which the relevance floor below handles
+    # precisely. See zip_unlock.discovery_zip_gate for the full reasoning.
     args: dict[str, Any] = {"p_limit": 20}
     if zip_code:
         args["p_zip"] = zip_code

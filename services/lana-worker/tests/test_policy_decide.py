@@ -6,7 +6,8 @@ import unittest
 
 from app.lingo_guard import GuardResult, find_violations, naive_clean
 from app.policy.decide import (
-    NextAction, apply_defer, ask_streak, note_ask_streak, parse_next_action,
+    MAX_CONSECUTIVE_ASKS, NextAction, _apply_ask_ceiling, _revision_note, apply_defer,
+    ask_streak, note_ask_streak, parse_next_action,
 )
 
 
@@ -183,6 +184,82 @@ class TestGoalNormalization(unittest.TestCase):
         self.assertEqual(goals[0]["kind"], "ungrounded_circle")
         self.assertTrue(goals[0]["context"]["deferred_earlier"])
 
+    def test_grounded_circle_becomes_an_offerable_goal(self) -> None:
+        """A pinned community must stay in the goal list as something to OFFER —
+        when it dropped out, a vague "I'm bored" got the capability catalog
+        instead of an offer (QA 2026-07-31)."""
+        from app.policy.goals import _circle_offer_goals
+
+        goals = _circle_offer_goals(
+            {
+                "circles": [
+                    {"key": "grandkids", "type": "family", "grounded": True,
+                     "confirmed": True, "place": "Lake Nona Park"},
+                    # ungrounded → the grounding ask owns it, not an offer
+                    {"key": "gym_friends", "type": "fitness", "grounded": False,
+                     "confirmed": True, "place": None},
+                    # suggested-but-unconfirmed → not a community yet
+                    {"key": "squash_group", "type": "sport", "grounded": True,
+                     "confirmed": False, "place": "Life Time"},
+                ]
+            }
+        )
+        self.assertEqual([g["id"] for g in goals], ["circle_offer:grandkids"])
+        goal = goals[0]
+        self.assertEqual(goal["kind"], "circle_offer")
+        # Their own word for the group, and the real place, both reach the policy.
+        self.assertIn("grandkids", goal["summary"])
+        self.assertIn("Lake Nona Park", goal["summary"])
+        # The accept-send must stand alone: the host engine re-reads it cold.
+        self.assertEqual(
+            goal["context"]["send"],
+            "help me host a get-together for my grandkids at Lake Nona Park",
+        )
+
+    def test_circle_offer_send_survives_a_missing_place_name(self) -> None:
+        from app.policy.goals import _circle_offer_goals
+
+        goals = _circle_offer_goals(
+            {"circles": [{"key": "squash_group", "grounded": True,
+                          "confirmed": True, "place": None}]}
+        )
+        self.assertEqual(
+            goals[0]["context"]["send"], "help me host a get-together for my squash group"
+        )
+        self.assertIsNone(goals[0]["context"]["place_name"])
+
+    def test_place_names_batches_one_read_and_tolerates_gaps(self) -> None:
+        from unittest.mock import patch
+
+        seen: dict = {}
+
+        class _Res:
+            data = [{"id": "p1", "name": "Lake Nona Park"}, {"id": "p2", "name": None}]
+
+        class _Table:
+            def select(self, *_a, **_k):
+                return self
+
+            def in_(self, _col, ids):
+                seen["ids"] = ids
+                return self
+
+            def execute(self):
+                return _Res()
+
+        class _Client:
+            def table(self, *_a, **_k):
+                return _Table()
+
+        rows = [{"place_ref": "p1"}, {"place_ref": "p2"}, {"place_ref": None}, {}]
+        with patch("app.policy.world.service_client", return_value=_Client()):
+            from app.policy.world import _place_names
+
+            names = _place_names(rows)
+        self.assertEqual(seen["ids"], ["p1", "p2"])  # one batched read, no None
+        self.assertEqual(names["p1"], "Lake Nona Park")
+        self.assertEqual(names["p2"], "")  # falsy → world_state maps it to None
+
     def test_capability_containment(self) -> None:
         from unittest.mock import patch
 
@@ -220,6 +297,91 @@ class TestGoalNormalization(unittest.TestCase):
         self.assertEqual(
             sorted(c["capability_id"] for c in open_),
             ["discovery.find_peers", "sharing.host"],
+        )
+
+
+class TestAskCeiling(unittest.TestCase):
+    """`consecutive_personal_asks` was passed to the model and reasoned about in
+    prose, with nothing enforcing it — so a third and fourth back-to-back
+    personal question stayed reachable (QA 2026-08-03: three in a row, once
+    right after the user asked what she even meant)."""
+
+    def _ask(self, **kw):
+        base = {"kind": "ask_gap", "utterance": "What nights are you free?",
+                "goal_id": "gap:row1"}
+        base.update(kw)
+        return NextAction(**base)
+
+    def test_third_ask_is_deferred_not_asked(self) -> None:
+        gated = _apply_ask_ceiling(self._ask(), streak=MAX_CONSECUTIVE_ASKS)
+        self.assertEqual(gated.kind, "capture_defer")
+        self.assertEqual(gated.defer_goal_id, "gap:row1")
+
+    def test_under_the_ceiling_asks_freely(self) -> None:
+        gated = _apply_ask_ceiling(self._ask(), streak=MAX_CONSECUTIVE_ASKS - 1)
+        self.assertEqual(gated.kind, "ask_gap")
+
+    def test_ground_place_is_exempt(self) -> None:
+        """"Which gym did you mean?" finishes something the user started — it is
+        the last step before we can act, not profile-deepening."""
+        action = self._ask(kind="ground_place", goal_id="circle:gym")
+        self.assertEqual(_apply_ask_ceiling(action, streak=9).kind, "ground_place")
+
+    def test_offers_are_exempt(self) -> None:
+        action = self._ask(kind="bridge_offer", goal_id="cap:sharing.host")
+        self.assertEqual(_apply_ask_ceiling(action, streak=9).kind, "bridge_offer")
+
+    def test_deferred_goal_is_resurfaceable(self) -> None:
+        ctx: dict = {}
+        apply_defer(ctx, _apply_ask_ceiling(self._ask(), streak=MAX_CONSECUTIVE_ASKS))
+        self.assertEqual(ctx["deferred_goal_ids"], ["gap:row1"])
+
+
+class TestRevisionNote(unittest.TestCase):
+    """The utterance is what the user reads, so a kind downgrade alone leaves the
+    offending sentence on screen — every visible violation gets one retry."""
+
+    def test_ceiling_breach_asks_for_a_rewrite(self) -> None:
+        note = _revision_note(
+            NextAction(kind="ask_gap", utterance="And what's your usual unwind?"),
+            streak=MAX_CONSECUTIVE_ASKS,
+        )
+        assert note is not None
+        self.assertIn("back-to-back", note)
+        self.assertIn("capture_defer", note)
+
+    def test_distress_ask_asks_for_a_rewrite(self) -> None:
+        note = _revision_note(
+            NextAction(
+                kind="ask_gap", utterance="Is there a favorite blue thing that lifts you?",
+                distress_turn=True,
+            ),
+            streak=0,
+        )
+        assert note is not None
+        self.assertIn("distress", note)
+
+    def test_distress_reply_needs_no_revision(self) -> None:
+        self.assertIsNone(
+            _revision_note(
+                NextAction(kind="reply", utterance="I hope you rest.", distress_turn=True),
+                streak=0,
+            )
+        )
+
+    def test_ordinary_dead_end_still_flagged(self) -> None:
+        note = _revision_note(
+            NextAction(kind="reply", utterance="Thanks for sharing your go-to spot."),
+            streak=0,
+        )
+        assert note is not None
+        self.assertIn("dead", note)
+
+    def test_healthy_turn_is_left_alone(self) -> None:
+        self.assertIsNone(
+            _revision_note(
+                NextAction(kind="ask_gap", utterance="Which nights are you free?"), streak=0
+            )
         )
 
 

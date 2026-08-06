@@ -675,6 +675,11 @@ class TestLayer1DiscoveryRouting(unittest.TestCase):
         # A guest's ask gates into the REAL verify sub-flow (await_signup_phone → the FE's
         # collect_email UI; the email turn routes to signup, not the ZIP funnel) and the
         # ask is stashed so it survives verification.
+        #
+        # A RECOMMENDATION ask stashes in tip_seek_pending, not signal_pending: the two
+        # stashes resume differently — signal_pending POSTS on resume, tip_seek_pending
+        # ANSWERS (see [[tip-ask-consent]] / _tip_seek_answer_turn). Asking a question must
+        # not queue a broadcast behind the verify gate.
         mock_slots.return_value = {
             "linear_intent": "looking.tip",
             "goal": "save_signal",
@@ -693,8 +698,8 @@ class TestLayer1DiscoveryRouting(unittest.TestCase):
         )
         self.assertEqual(ctx.get("routing_phase"), "await_signup_phone")
         self.assertTrue(ctx.get("requires_phone_verification"))
-        pending = ctx.get("signal_pending") or {}
-        self.assertEqual(pending.get("intent"), "tip_seek")
+        self.assertIsNone(ctx.get("signal_pending"))
+        pending = ctx.get("tip_seek_pending") or {}
         self.assertIn("babysit", str(pending.get("detail")).lower())
         self.assertIn("email", reply.lower())
 

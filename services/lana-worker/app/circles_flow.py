@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from typing import Any
 
 from app.auth import service_client
@@ -184,7 +185,9 @@ def _own_affiliation(user_id: str, affiliation_id: str) -> dict[str, Any] | None
     res = (
         service_client()
         .table("circle_affiliations")
-        .select("id, circle_type, circle_key, detail, status, place_ref")
+        .select(
+            "id, circle_type, circle_key, detail, status, place_ref, place_name, source"
+        )
         .eq("id", affiliation_id)
         .eq("user_id", user_id)
         .is_("dismissed_at", "null")
@@ -194,6 +197,103 @@ def _own_affiliation(user_id: str, affiliation_id: str) -> dict[str, Any] | None
     return (res.data or [None])[0]
 
 
+# How far past the block bias a NAMED search may reach (metres). Their gym or
+# temple is often a couple of towns over; a nearby-only search then "fails" and
+# we start offering strangers' places instead.
+_WIDE_SEARCH_RADIUS_M = 60000.0
+
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_place_text(text: str) -> str:
+    """Fold accents/punctuation/case for name comparison ("EōS Fitness" → "eos fitness").
+
+    Apostrophes are DELETED rather than spaced, so the possessive a user types
+    still matches how Google spells it ("St. Luke's" ≡ "St Lukes")."""
+    stripped = (
+        unicodedata.normalize("NFKD", str(text or ""))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+        .replace("'", "")
+    )
+    return " ".join(_NON_ALNUM_RE.sub(" ", stripped).split())
+
+
+def _name_hit(claimed: str, candidate: str) -> bool:
+    """Does this Google result actually BEAR the name the user gave us?
+
+    Containment either way on normalized text — the same certainty bar
+    match_grounding_candidate() uses to accept a tap, so "orangetheory" matches
+    "OrangeTheory Narcoossee" while "Fitness CF" does not match "Crunch Fitness".
+    Deliberately not fuzzy: a near-miss quietly pins the user to the WRONG place,
+    which is the §F trust failure this whole flow exists to prevent."""
+    want, got = _norm_place_text(claimed), _norm_place_text(candidate)
+    if len(want) < 3 or not got:
+        return False
+    return want in got or got in want
+
+
+_PLACE_NAME_PROMPT = """You pull the venue name out of what a neighborhood-app user \
+said about a community they attend.
+
+Output ONLY JSON: {"place_name": "..."} — or {"place_name": null}
+
+Rules:
+- place_name = the business/organization/venue name they actually SAID, verbatim and \
+nothing else ("I go to the gym at Fitness CF" -> "Fitness CF"; "our church is St. \
+Luke's" -> "St. Luke's").
+- null when they named only an activity or the KIND of place ("my gym", "we play futsal \
+on Sundays", "my Tuesday spin class", "our church").
+- NEVER invent, complete, or guess a name they did not say. Never answer with the \
+activity word itself."""
+
+
+def _resolve_place_name(user_id: str, affiliation: dict[str, Any]) -> str:
+    """The venue name the user said for this community, "" when they named none.
+
+    Normally the extractor supplies it at capture. This resolves (once, then
+    persists) the rows it didn't: affiliations captured before place_name existed,
+    and messages where the extractor missed it. '' is a REAL answer meaning "they
+    named no venue" — stored so we never re-ask the model; null means unresolved."""
+    stored = affiliation.get("place_name")
+    if stored is not None:
+        return str(stored).strip()
+
+    phrase = _FEATURE_NOTE_RE.sub("", str(affiliation.get("detail") or "")).strip(" ;")
+    name = ""
+    if phrase:
+        try:
+            from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+            if not llm_configured():
+                return ""  # unresolved — retried on the next serve, never persisted
+            data = llm_json(
+                model=router_model(),
+                system=_PLACE_NAME_PROMPT,
+                user_payload=f'they said: "{phrase}"',
+                max_tokens=60,
+                temperature=0.0,
+            )
+            name = str((data or {}).get("place_name") or "").strip()[:120]
+            # A model that echoes the phrase back has named nothing.
+            if name and _norm_place_text(name) == _norm_place_text(phrase):
+                name = ""
+        except Exception:
+            logger.exception("place_name_resolve_failed aff=%s", affiliation.get("id"))
+            return ""
+    affiliation["place_name"] = name
+    aff_id = str(affiliation.get("id") or "")
+    if aff_id:
+        try:
+            service_client().table("circle_affiliations").update(
+                {"place_name": name}
+            ).eq("id", aff_id).eq("user_id", user_id).execute()
+        except Exception:
+            logger.exception("place_name_persist_failed aff=%s", aff_id)
+    return name
+
+
 def ground_options(
     user_id: str,
     affiliation: dict[str, Any],
@@ -201,51 +301,76 @@ def ground_options(
     block_id: str | None,
     query: str | None = None,
 ) -> list[dict[str, Any]]:
-    """2-3 real nearby places to offer as grounding chips, biased to the user's block.
+    """Real places to offer as grounding chips, biased to the user's block.
 
-    Uses the user's own phrase (affiliation.detail) as the search text, falling back
-    to the circle type's keyword; `query` overrides ("search for another")."""
+    Returns three DIFFERENT kinds of row, and callers must not conflate them (the
+    2026-08-03 "Fitness CF" bug was showing the third as if it were the first):
+
+      · a MATCH (`suggested` False) — the user gave us a name (an explicit
+        `query`, or the AI-extracted place_name) and this place actually BEARS
+        it. Block-biased first, then widened once, since a named venue can sit a
+        town over. Offer these as matches.
+      · a SUGGESTION (`suggested` True) — they never named a venue ("my gym"), so
+        this is the circle type's keyword search: a nearby place of the right
+        KIND. Fair to offer as "which one is it?", never as theirs.
+      · a CONSOLATION (`suggested` True + `unmatched_name` set) — they DID name a
+        venue and we could not find it. Same rows as above, but the reply must
+        lead with not having found what they said, and a surface that can't say
+        that should not show them at all.
+
+    An explicit `query` that matches nothing returns [] — a typed search is the
+    user being specific, and answering it with arbitrary nearby spots is a lie."""
     from app.places import search_places
 
     circle_type = str(affiliation.get("circle_type") or "other")
     included_type, keyword = _TYPE_SEARCH.get(circle_type, (None, ""))
-    detail = str(affiliation.get("detail") or "")
-    # Strip parked feature notes ("; has_pool=true") from the search phrase.
-    phrase = _FEATURE_NOTE_RE.sub("", detail).strip(" ;")
-    q = (query or "").strip() or phrase or keyword
-    if not q:
-        return []
+    typed = (query or "").strip()
+    named = typed or _resolve_place_name(user_id, affiliation)
 
-    def _search(text: str) -> list[dict[str, Any]]:
+    def _search(text: str, *, radius: float | None = None) -> list[dict[str, Any]]:
         rows = search_places(
             query=text,
             block_id=block_id,
             user_id=user_id,
             limit=3,
             included_type=included_type,
+            **({"radius": radius} if radius else {}),
         )
         return [
             {
                 "name": r["name"],
                 "address": r.get("address"),
                 "google_place_id": r["place_id"],
+                "suggested": False,
             }
             for r in rows
             if r.get("place_id")
         ]
 
-    options = _search(q)
-    if (
-        not options
-        and not (query or "").strip()  # never second-guess an EXPLICIT search
-        and keyword
-        and q.lower() != keyword.lower()
-    ):
-        # The captured phrase is often a whole sentence ("We go to church on
-        # sundays") that text-search can't match to a place. Retry with the
-        # circle type's keyword — block bias still narrows it to THEIR area.
-        options = _search(keyword)
-    return options
+    if named:
+        hits = [o for o in _search(named) if _name_hit(named, o["name"])]
+        if not hits:
+            # Nothing by that name in the neighbourhood — widen once before
+            # doubting them. Chains and clubs are routinely a few towns out.
+            hits = [
+                o
+                for o in _search(named, radius=_WIDE_SEARCH_RADIUS_M)
+                if _name_hit(named, o["name"])
+            ]
+        if hits or typed:
+            return hits
+        # Named, but not findable on the map. Keyword results ride along as
+        # consolations, tagged with the name we failed to find so the caller can
+        # lead with that — or drop them, if its surface can't say it.
+        if not keyword:
+            return []
+        return [
+            {**o, "suggested": True, "unmatched_name": named} for o in _search(keyword)
+        ]
+
+    if not keyword:
+        return []
+    return [{**o, "suggested": True} for o in _search(keyword)]
 
 
 def _flush_parked_features(
@@ -279,6 +404,34 @@ def _flush_parked_features(
     return flushed
 
 
+def _close_grounding_gap(affiliation_id: str) -> None:
+    """Close the "which spot?" ask for an affiliation that just got pinned.
+
+    Grounding used to be closed only by the caller that owned the turn, so pinning
+    through /lana/circles/ground (the tile's search box picks by place id, which no
+    cached candidate can match) left the gap open and the ask re-showed for a place
+    already on the profile (FE ask #3, issues #63). Closing it HERE covers every
+    path into grounding, present and future. Idempotent: the chat path's own
+    mark_answered on the same row is a no-op after this."""
+    if not affiliation_id:
+        return
+    try:
+        from app.rapport_gaps import mark_answered
+
+        rows = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id")
+            .eq("affiliation_ref", affiliation_id)
+            .in_("status", ["open", "asked"])
+            .execute()
+        ).data or []
+        for row in rows:
+            mark_answered(str(row.get("gap_row_id") or ""))
+    except Exception:
+        logger.exception("close_grounding_gap_failed aff=%s", affiliation_id)
+
+
 def ground_affiliation(
     user_id: str,
     affiliation_id: str,
@@ -308,11 +461,20 @@ def ground_affiliation(
     if not place_id:
         raise ValueError("place_not_found")
 
+    # Provenance (migration 20261004): `source` says where the community came from,
+    # `confirmed_via` says which action made it real. This path is a grounding answer
+    # unless the row was created by the profile add / invite self-confirm, which pin
+    # their place in the same step.
+    confirmed_via = {
+        "profile_add": "profile_add",
+        "invite_confirmed": "invite_self_confirm",
+    }.get(str(affiliation.get("source") or ""), "grounding_ask")
     service_client().table("circle_affiliations").update(
-        {"place_ref": place_id, "status": "confirmed"}
+        {"place_ref": place_id, "status": "confirmed", "confirmed_via": confirmed_via}
     ).eq("id", affiliation["id"]).execute()
 
     _flush_parked_features(user_id, affiliation, place_id)
+    _close_grounding_gap(affiliation_id)
 
     if open_enrichment_gap:
         try:
@@ -393,6 +555,34 @@ def place_relation_noun(circle_type: str | None) -> str:
     """Caller-relative noun for a grounded place ("gym" → tag "your gym").
     Disclosure-safe by construction (§F / O7): names the RELATION, never the place."""
     return _GROUND_NOUN.get(str(circle_type or "other"), "spot")
+
+
+# Card art per community TYPE — the same job events.cover_emoji does for a meet.
+# Deterministic on purpose: a category icon is not a claim about the place, so it
+# needs no LLM and never varies between surfaces for the same community.
+#
+# These glyphs MIRROR the PWA's own TYPE_EMOJI (src/components/community-kind.tsx),
+# the same way _GROUND_NOUN mirrors its type nouns. Keep them in sync: the whole
+# point of sending an emoji is that one community looks identical everywhere.
+_RELATION_EMOJI: dict[str, str] = {
+    "fitness": "🏋️",
+    "faith": "⛪",
+    "school": "🎓",
+    "kids_activity": "🧸",
+    "neighborhood": "🏘️",
+    "hobby": "🎨",
+    "support": "🤝",
+    "heritage": "🌍",
+    "friends": "👯",
+    "other": "📍",
+}
+
+
+def place_relation_emoji(circle_type: str | None) -> str:
+    """One emoji for a community's type ("fitness" → 🏋️). Advisory card art: the FE
+    may render its own icon instead, and `other` gets a neutral pin rather than a
+    guess at what the place is."""
+    return _RELATION_EMOJI.get(str(circle_type or "other"), _RELATION_EMOJI["other"])
 
 
 _GROUNDING_QUESTION_PROMPT = """You write ONE warm question for a neighborhood app user who \
@@ -525,12 +715,59 @@ def _chip(option: dict[str, Any]) -> dict[str, Any]:
     """One grounding option in the shape both surfaces consume: the tile taps
     google_place_id straight into /lana/circles/ground; a chat chip posts `send`."""
     name = str(option.get("name") or "").strip()
-    return {
+    chip = {
         "label": name[:28],
         "address": option.get("address"),
         "google_place_id": option.get("google_place_id"),
         "send": f"It's {name}"[:120],
+        # Carried so the reply can't call a nearby same-kind place a match.
+        "suggested": bool(option.get("suggested")),
     }
+    if option.get("unmatched_name"):
+        # The name we looked for and missed — the reply has to lead with it.
+        chip["unmatched_name"] = str(option["unmatched_name"])
+    return chip
+
+
+# The way out of a wrong list. Without it a user whose spot we failed to find has
+# no move on the tile at all (its only affordance is these chips) — they either
+# tap someone else's gym or drop the thread (Ankit, 2026-08-03). It carries no
+# google_place_id on purpose: match_grounding_candidate skips id-less rows, so it
+# can never be mistaken for a place, and both surfaces just post its `send`.
+_ESCAPE_SEND = "none of those — it's somewhere else"
+
+
+def _escape_chip() -> dict[str, Any]:
+    return {
+        "label": "Not these",
+        "address": None,
+        "google_place_id": None,
+        "send": _ESCAPE_SEND,
+        "suggested": False,
+    }
+
+
+def _with_escape(chips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Offered places + the escape hatch. Never on an empty list (nothing to escape)."""
+    return [*chips, _escape_chip()] if chips else []
+
+
+def _is_escape(message: str) -> bool:
+    return _norm_place_text(message) == _norm_place_text(_ESCAPE_SEND)
+
+
+def _unmatched_name(rows: list[dict[str, Any]] | None) -> str:
+    """The name we looked for and failed to find, when that's what these rows are."""
+    for row in rows or []:
+        if isinstance(row, dict) and row.get("unmatched_name"):
+            return str(row["unmatched_name"])
+    return ""
+
+
+def _offers_are_suggestions(chips: list[dict[str, Any]] | None) -> bool:
+    """True when the list is 'nearby places of this kind', not confirmed name matches."""
+    rows = [c for c in (chips or []) if isinstance(c, dict) and c.get("google_place_id")]
+    return bool(rows) and all(c.get("suggested") for c in rows)
 
 
 def grounding_payload_for_gap(user_id: str, gap_row: dict[str, Any]) -> dict[str, Any]:
@@ -547,20 +784,49 @@ def grounding_payload_for_gap(user_id: str, gap_row: dict[str, Any]) -> dict[str
         "affiliation_id": affiliation_id,
         "options": [],
     }
+    try:
+        affiliation = _own_affiliation(user_id, affiliation_id) or {}
+    except Exception:
+        logger.exception("grounding_affiliation_load_failed aff=%s", affiliation_id)
+        affiliation = {}
+    # What KIND of place this is and the user's own words for it, so the card can
+    # show the right glyph and speak in their noun ("your gym") instead of a
+    # neutral pin (FE ask #1, issues #63). Both absent-safe by contract.
+    if affiliation.get("circle_type"):
+        payload["circle_type"] = str(affiliation["circle_type"])
+    detail = _FEATURE_NOTE_RE.sub("", str(affiliation.get("detail") or "")).strip(" ;")
+    if detail:
+        payload["detail"] = detail
+    if affiliation.get("place_name"):
+        # Their own name for the spot, when they gave one — truer than `detail`
+        # for copy that wants to name it.
+        payload["place_name"] = str(affiliation["place_name"])
     stored = gap_row.get("grounding_options")
     if isinstance(stored, list):
         payload["options"] = stored
         return payload
     try:
-        affiliation = _own_affiliation(user_id, affiliation_id)
         if not affiliation:
             return payload
-        options = [
-            _chip(o)
-            for o in ground_options(
-                user_id, affiliation, block_id=_home_block_id(user_id)
-            )
+        # Tile rules differ from chat's, because PlaceGroundingCard renders options
+        # as a pick-one place grid — with no room for "these are guesses", and with
+        # a LONE option shown as "the place she mentioned — pin it?". So:
+        #   · consolations are dropped. The question names the place ("which
+        #     Fitness CF?"), and tiles that don't bear that name are the whole bug.
+        #     Zero options opens the card's own search box, which is the honest move.
+        #   · a lone suggestion is dropped too — "which gym?" answered with one
+        #     nearby gym reads as a claim about her. Two or three read as a choice,
+        #     which is what the grid is for, so those stay.
+        #   · no escape chip: the card already ships "Search another" and a skip,
+        #     and an id-less chip would render as a place tile.
+        rows = [
+            o
+            for o in ground_options(user_id, affiliation, block_id=_home_block_id(user_id))
+            if not o.get("unmatched_name")
         ]
+        if len(rows) == 1 and rows[0].get("suggested"):
+            rows = []
+        options = [_chip(o) for o in rows]
         service_client().table("rapport_gaps").update(
             {"grounding_options": options}
         ).eq("gap_row_id", gap_row["gap_row_id"]).execute()
@@ -646,6 +912,78 @@ def _place_co_member_count(place_id: str, exclude_user: str) -> int:
     except Exception:
         logger.exception("place_co_member_count_failed place=%s", place_id)
         return 0
+
+
+def _unpinned_close(
+    affiliation: dict[str, Any] | None,
+    said: str,
+    *,
+    goal_head: str,
+    fallback_head: str,
+    session_ctx: dict[str, Any] | None,
+    pending_action: str | None = None,
+) -> dict[str, Any]:
+    """Close a grounding thread that never got a pin — WITH the next step a pinned
+    one ends on (ACKNOWLEDGE → OFFER, same bridge shape as ground_and_confirm).
+
+    A failed pin used to dead-end on "I'll remember that one", which reads as a
+    thread dropped (Ankit, 2026-08-03). But we still know WHAT the community is —
+    their own words plus the circle key — and neighbours match on that, not on an
+    address. So the close offers to LOOK for people into it. It can only ever be
+    an offer to look: with no place there is no co-member count, so any claim
+    about who is out there would be invented.
+
+    An action the user had already asked for (pending_action) wins instead: their
+    own request is dispatched, place-less, rather than re-offered to them."""
+    aff = affiliation or {}
+    noun = place_relation_noun(aff.get("circle_type"))
+    topic = str(aff.get("circle_key") or "").replace("_", " ").strip() or noun
+    facts = [f'They told you: "{said[:120]}"', f"Their community: {topic}."]
+    offer: dict[str, Any] | None = None
+
+    if pending_action in ("host_meet", "find_neighbors"):
+        if session_ctx is not None:
+            session_ctx["_grounding_offer_done"] = True
+        send = (
+            f"connect me with neighbors into {topic}"
+            if pending_action == "find_neighbors"
+            else f"help me host a {topic} meet"
+        )
+        goal = (
+            f"{goal_head} ONE short warm sentence, no question and no offer — you "
+            "are about to help with what they already asked for next. Never 'on my "
+            "radar' / 'noted in my system'."
+        )
+        offer = {"kind": pending_action, "label": "", "send": send, "topic": topic, "auto": True}
+        fallback = fallback_head
+    elif session_ctx is not None and not session_ctx.get("_grounding_offer_done"):
+        goal = (
+            f"{goal_head} Then offer ONE next step: that you look for neighbors who "
+            f"are into {topic} too. You have NOT looked yet and nobody is confirmed "
+            "— so never imply people are waiting, and never promise an intro. End on "
+            "the offer question; the chip below is the tap. Never 'on my radar'."
+        )
+        offer = {
+            "kind": "find_neighbors",
+            "label": "Yes, look",
+            "send": f"connect me with neighbors into {topic}",
+            "topic": topic,
+        }
+        fallback = f"{fallback_head} Want me to look for neighbors into {topic} too?"
+        session_ctx["_grounding_offer_done"] = True
+    else:
+        goal = f"{goal_head} One sentence, no question."
+        fallback = fallback_head
+
+    return {
+        "reply": _compose_grounding_reply(
+            goal=goal, facts=facts, fallback=fallback, session_ctx=session_ctx
+        ),
+        "options": [],
+        "pending": None,
+        "grounded": False,
+        "offer": offer,
+    }
 
 
 def ground_and_confirm(
@@ -835,35 +1173,55 @@ def handle_grounding_answer(
             user_id, affiliation_id, str(tapped["google_place_id"]), session_ctx=session_ctx
         )
 
-    if abandon:
-        # A rejection of the offered chips, not a place name: feeding it to Places
-        # search returns arbitrary nearby spots ("none of these" → random cafés),
-        # and it isn't detail worth keeping either.
+    affiliation = _own_affiliation(user_id, affiliation_id)
+    if not affiliation or affiliation.get("place_ref"):
+        # Dismissed or grounded through another surface since the question opened.
         return {
-            "reply": _compose_grounding_reply(
-                goal=(
-                    "They passed on pinning down the spot — close warmly, one "
-                    "sentence, no question. Never push for the place again."
-                ),
-                facts=[f'They said: "{answer[:120]}"'],
-                fallback="No worries — we can leave that one.",
-                session_ctx=session_ctx,
-            ),
+            "reply": "Got it — thanks for telling me.",
             "options": [],
             "pending": None,
             "grounded": False,
         }
 
-    affiliation = _own_affiliation(user_id, affiliation_id)
-    close = {
-        "reply": "Got it — thanks for telling me.",
-        "options": [],
-        "pending": None,
-        "grounded": False,
-    }
-    if not affiliation or affiliation.get("place_ref"):
-        # Dismissed or grounded through another surface since the question opened.
-        return close
+    if abandon:
+        # A rejection of the offered chips, not a place name: feeding it to Places
+        # search returns arbitrary nearby spots ("none of these" → random cafés),
+        # and it isn't detail worth keeping either.
+        return _unpinned_close(
+            affiliation,
+            answer,
+            goal_head=(
+                "They passed on pinning down the spot — accept that warmly and "
+                "never push for the place again."
+            ),
+            fallback_head="No worries — we can leave that one.",
+            session_ctx=session_ctx,
+        )
+
+    if _is_escape(answer):
+        # They tapped "not these" on the offered list. Their spot exists, we just
+        # showed the wrong ones — ask what it's called instead of closing.
+        return {
+            "reply": _compose_grounding_reply(
+                goal=(
+                    "None of the places you offered were theirs. Say that plainly, "
+                    "no apology spiral, and ask what their spot is called — or which "
+                    "street or town it's in, if they'd rather. One short sentence."
+                ),
+                facts=[f"Their community: {place_relation_noun(affiliation.get('circle_type'))}."],
+                fallback="My list was off — what's it called?",
+                session_ctx=session_ctx,
+            ),
+            # No candidates: the next free-text turn drives a fresh search.
+            "options": [],
+            "pending": {
+                "affiliation_id": affiliation_id,
+                "candidates": [],
+                "answer_text": "",
+                "attempts": 1,
+            },
+            "grounded": False,
+        }
 
     candidates = [
         {**_chip(o), "name": o.get("name")}
@@ -873,31 +1231,58 @@ def handle_grounding_answer(
     ]
     if not candidates:
         note_ungrounded_detail(user_id, affiliation_id, answer)
-        close["reply"] = _compose_grounding_reply(
-            goal=(
-                "Warmly acknowledge the spot they named — you couldn't find it on the "
-                "map, so just note you'll remember it. One sentence, no question."
+        return _unpinned_close(
+            affiliation,
+            answer,
+            goal_head=(
+                "Warmly acknowledge the spot they named — you could not find it on "
+                "the map, so say you'll remember it the way they said it."
             ),
-            facts=[f'They said: "{answer[:120]}"'],
-            fallback="Got it — I'll remember that one.",
+            fallback_head="Got it — I'll remember that one.",
             session_ctx=session_ctx,
         )
-        return close
 
     names = [str(c.get("name") or "") for c in candidates]
+    missing = _unmatched_name(candidates)
+    if missing:
+        # We could not find what they named, so these are merely nearby places of
+        # the same kind. Presenting them as matches is the 2026-08-03 bug.
+        goal = (
+            "You could NOT find the place they named. Say so plainly, naming what "
+            "they told you, then ask whether it's one of these nearby places or "
+            "somewhere else — these are guesses of the right kind, NOT their spot, "
+            "so never call them matches. One short sentence. The list renders as "
+            "tappable chips below your message."
+        )
+        fallback = f"I couldn't find {missing} nearby — is it {names[0]}, or somewhere else?"
+    elif _offers_are_suggestions(candidates):
+        # They never named a venue, so nothing failed — these are simply the
+        # nearby places of that kind, offered as a choice.
+        goal = (
+            "They haven't named their spot, so ask which of these nearby places it "
+            "is — offer them as options, never as something you already know about "
+            "them, and leave room for 'somewhere else'. One short warm sentence. "
+            "The list renders as tappable chips below your message."
+        )
+        fallback = f"Is it {names[0]}, or somewhere else?"
+    else:
+        goal = (
+            "They named their spot; you found places that really do carry that name. "
+            "Ask them to confirm which one — one short warm sentence referencing the "
+            "first match. The matches render as tappable chips below your message."
+        )
+        fallback = f"Nice — is that {names[0]}?"
     reply = _compose_grounding_reply(
-        goal=(
-            "They named their spot; you found likely matches nearby. Ask them to "
-            "confirm which one — one short warm sentence referencing the first "
-            "match. The matches render as tappable chips below your message."
-        ),
-        facts=[f'They said: "{answer[:120]}"', f"Nearby matches: {', '.join(names[:3])}."],
-        fallback=f"Nice — is that {names[0]}?",
+        goal=goal,
+        facts=[f'They said: "{answer[:120]}"', f"What you found: {', '.join(names[:3])}."],
+        fallback=fallback,
         session_ctx=session_ctx,
     )
     return {
         "reply": reply,
-        "options": [{"label": c["label"], "send": c["send"]} for c in candidates],
+        "options": [
+            {"label": c["label"], "send": c["send"]} for c in _with_escape(candidates)
+        ],
         "pending": {
             "affiliation_id": affiliation_id,
             "candidates": candidates,
@@ -937,22 +1322,55 @@ def handle_grounding_confirmation(
             pending_action=pending_action,
         )
 
-    if abandon or attempts >= 3:
-        # "no" / "neither" / worn out — keep their words as detail and close warmly.
-        note_ungrounded_detail(user_id, affiliation_id, str(state.get("answer_text") or msg))
-        reply = _compose_grounding_reply(
-            goal=(
-                "None of the map matches were their spot — close warmly, noting "
-                "you'll remember what they told you. One sentence, no question."
+    affiliation = _own_affiliation(user_id, affiliation_id)
+    said = str(state.get("answer_text") or msg)
+
+    escaped = _is_escape(msg)
+    if escaped and attempts < 3:
+        # "Not these" — the list was wrong, not the user. Ask for the name.
+        return {
+            "reply": _compose_grounding_reply(
+                goal=(
+                    "None of the places you offered were theirs. Say that plainly and "
+                    "ask what their spot is called — or which street or town it's in, "
+                    "if that's easier. One short sentence, no apology spiral."
+                ),
+                facts=[
+                    f"Their community: "
+                    f"{place_relation_noun((affiliation or {}).get('circle_type'))}."
+                ],
+                fallback="My list was off — what's it called?",
+                session_ctx=session_ctx,
             ),
-            facts=[f'They told you: "{str(state.get("answer_text") or msg)[:120]}"'],
-            fallback="No problem — I'll remember it the way you said it.",
+            "options": [],
+            "pending": {
+                "affiliation_id": affiliation_id,
+                # Cleared so their next words drive a fresh search.
+                "candidates": [],
+                "answer_text": said[:120],
+                "attempts": attempts + 1,
+                "pending_action": pending_action,
+            },
+            "grounded": False,
+        }
+
+    if abandon or escaped or attempts >= 3:
+        # "no" / "neither" / worn out — keep their words as detail, then close on the
+        # bridge (an offer to look for their people, which needs no pin).
+        note_ungrounded_detail(user_id, affiliation_id, said)
+        return _unpinned_close(
+            affiliation,
+            said,
+            goal_head=(
+                "None of the map matches were their spot — accept that warmly and "
+                "say you'll remember it the way they told you."
+            ),
+            fallback_head="No problem — I'll remember it the way you said it.",
             session_ctx=session_ctx,
+            pending_action=pending_action,
         )
-        return {"reply": reply, "options": [], "pending": None, "grounded": False}
 
     # They typed a different name / correction — search once more with their words.
-    affiliation = _own_affiliation(user_id, affiliation_id)
     if not affiliation or affiliation.get("place_ref"):
         return {"reply": "Got it — thanks!", "options": [], "pending": None, "grounded": False}
     fresh = [
@@ -963,33 +1381,32 @@ def handle_grounding_confirmation(
     ]
     if not fresh:
         note_ungrounded_detail(user_id, affiliation_id, msg)
-        return {
-            "reply": _compose_grounding_reply(
-                goal=(
-                    "You couldn't find the place they named on the map — acknowledge "
-                    "warmly and note you'll remember it as they said it. One sentence."
-                ),
-                facts=[f'They said: "{msg[:120]}"'],
-                fallback="Got it — I'll remember that one.",
-                session_ctx=session_ctx,
+        return _unpinned_close(
+            affiliation,
+            msg,
+            goal_head=(
+                "You could not find the place they named on the map — acknowledge it "
+                "warmly and say you'll remember it as they said it."
             ),
-            "options": [],
-            "pending": None,
-            "grounded": False,
-        }
+            fallback_head="Got it — I'll remember that one.",
+            session_ctx=session_ctx,
+            pending_action=pending_action,
+        )
     names = [str(c.get("name") or "") for c in fresh]
     return {
         "reply": _compose_grounding_reply(
             goal=(
-                "They corrected which place they meant; you found new likely matches. "
-                "Ask them to confirm which one — short and warm; the matches render "
-                "as tappable chips."
+                "They corrected which place they meant; you found places carrying that "
+                "name. Ask them to confirm which one — short and warm; the matches "
+                "render as tappable chips."
             ),
-            facts=[f'They said: "{msg[:120]}"', f"Nearby matches: {', '.join(names[:3])}."],
+            facts=[f'They said: "{msg[:120]}"', f"What you found: {', '.join(names[:3])}."],
             fallback=f"Is it {names[0]}?",
             session_ctx=session_ctx,
         ),
-        "options": [{"label": c["label"], "send": c["send"]} for c in fresh],
+        "options": [
+            {"label": c["label"], "send": c["send"]} for c in _with_escape(fresh)
+        ],
         "pending": {
             "affiliation_id": affiliation_id,
             "candidates": fresh,
@@ -1027,10 +1444,16 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
     Grounded rows ONLY: a community without a place does not exist (2026-07-28
     product decision). Ungrounded rows are internal candidates — they surface
     exclusively through Lana's "which spot is it?" ask, never as communities."""
+    # Local import: community_discovery imports this module for place_relation_noun.
+    from app.community_discovery import joined_via_label
+
     sb = service_client()
     res = (
         sb.table("circle_affiliations")
-        .select("id, circle_type, circle_key, detail, status, place_ref, created_at")
+        .select(
+            "id, circle_type, circle_key, detail, status, place_ref, created_at, "
+            "source, confirmed_via"
+        )
         .eq("user_id", user_id)
         .is_("dismissed_at", "null")
         .not_.is_("place_ref", "null")
@@ -1061,12 +1484,27 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "circle_type": r.get("circle_type"),
                 "status": r.get("status"),
                 "grounded": bool(place_ref),
+                # The canonical place id — what the community profile / people panels
+                # are keyed on (app/community_surface.py). Additive: every row here is
+                # grounded, so it is never null.
+                "place_id": place_ref,
+                # The invite label (/lana/invites/mint {circle_key}) — what makes an
+                # invite link say which community it is for.
+                "circle_key": r.get("circle_key"),
                 "place_name": place.get("name"),
                 "place_address": place.get("address"),
                 "detail": detail,
                 "member_count": count,
                 "active": count >= 2,
                 "added_at": r.get("created_at"),
+                # Provenance (migration 20261004): where the community came from and
+                # which action made it real, plus one phrase for rendering it.
+                "source": r.get("source"),
+                "confirmed_via": r.get("confirmed_via"),
+                "joined_via_label": joined_via_label(
+                    r.get("confirmed_via"), r.get("source")
+                ),
+                "emoji": place_relation_emoji(r.get("circle_type")),
             }
         )
     return out

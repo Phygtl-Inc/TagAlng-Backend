@@ -107,6 +107,12 @@ def compose_match_reason(row: dict[str, Any]) -> tuple[str | None, list[str]]:
 
 def enrich_peer_match_row(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
+    if out.get("tip_rec"):
+        # A recommendation-cascade row (app/tip_rec_cascade.py) arrives fully formed: its
+        # tags are the TIP's, and it deliberately carries no stars, band or badge because
+        # nothing here compared two people. Enriching it would either wipe those tags (the
+        # unscored branch below) or invent an affinity we never computed.
+        return out
     scored = out.get("similarity_score") is not None
     if not scored and not out.get("onion_match"):
         # Unscored row (block-preview fallback): a neighbor, not a match — never
@@ -241,6 +247,16 @@ def stamp_peer_discovery_ctx(ctx: dict[str, Any], *, phone_verified: bool) -> No
     """Enrich peer_matches + discovery_surface on ctx (additive, safe for legacy FE)."""
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list) or not raw:
+        return
+    if any(isinstance(r, dict) and r.get("tip_rec") for r in raw):
+        # Recommendation-cascade turn: the rows and their counts strip were built by
+        # tip_rec_cascade, which ranks by the rec, not by claim affinity. Re-ranking them
+        # here (shared_count / stars, none of which these rows have) would scramble the
+        # order the user was just shown.
+        if not phone_verified:
+            for row in raw:
+                if isinstance(row, dict):
+                    row.pop("actions", None)
         return
     enriched = enrich_peer_match_rows(raw, phone_verified=phone_verified)
     enriched = attach_peer_card_actions(enriched, phone_verified=phone_verified)

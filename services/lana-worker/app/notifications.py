@@ -168,6 +168,49 @@ def _user_contact(user_id: str | None) -> tuple[str | None, str | None]:
         return None, None
 
 
+def recipient_lang(user_id: str | None) -> str | None:
+    """The language THIS recipient reads in (users.locale), or None for English.
+
+    Notifications are the one outbound surface that addresses somebody other
+    than the person taking the turn, so `session_lang` is the wrong source —
+    the host cancelling a meet may be writing in English while an attendee
+    reads Spanish. Best-effort: any failure returns None and the caller falls
+    back to English rather than dropping the notification.
+    """
+    if not user_id:
+        return None
+    sb = service_client()
+    if sb is None:
+        return None
+    try:
+        row = (
+            sb.table("users").select("locale").eq("id", str(user_id)).single().execute()
+        )
+        return ((row.data or {}).get("locale") or "").strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def recipient_langs(user_ids: list[str]) -> dict[str, str | None]:
+    """recipient_lang for a roster, in ONE query — fan-outs must not issue a
+    lookup per person (the area-open push targets up to 500)."""
+    ids = [str(u) for u in user_ids if u]
+    if not ids:
+        return {}
+    sb = service_client()
+    if sb is None:
+        return {}
+    try:
+        rows = sb.table("users").select("id,locale").in_("id", ids).execute().data or []
+    except Exception:  # noqa: BLE001
+        return {}
+    return {
+        str(r.get("id")): ((r.get("locale") or "").strip() or None)
+        for r in rows
+        if isinstance(r, dict)
+    }
+
+
 def notify_user(
     user_id: str | None,
     *,

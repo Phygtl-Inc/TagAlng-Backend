@@ -63,6 +63,7 @@ from app.i18n import (
     localize_text,
     normalize_lang_code,
     session_lang,
+    t,
 )
 from app.lana_dispatch import lana_unified_opening, lana_unified_turn
 from app.lang_pref import (
@@ -101,6 +102,19 @@ from app.models import (
     ReverseGeocodeRequest,
     SignalPhotoUploadResponse,
     TipDraft,
+    AskDraftChip,
+    AskDraftPayload,
+    CommunitiesCardPayload,
+    CommunityCardRow,
+    CommunityDiscoveryResponse,
+    CommunityDiscoveryRow,
+    CommunityEventRow,
+    CommunityJoinResponse,
+    CommunityFeatureRow,
+    CommunityMemberPreviewRow,
+    CommunityMemberRow,
+    CommunityMembersResponse,
+    CommunityProfileResponse,
     ExtractedClaim,
     HighlightSpan,
     JointMomentCandidate,
@@ -122,7 +136,19 @@ from app.models import (
     TurnRouting,
 )
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
-from app.orchestrator.llm import llm_configured, openai_configured, provider, router_model, synthesizer_model, vertex_configured
+from app.orchestrator.llm import (
+    _fallback_target,
+    _openai_max_retries,
+    _openai_timeout_sec,
+    _vertex_timeout_sec,
+    fallback_enabled,
+    llm_configured,
+    openai_configured,
+    provider,
+    router_model,
+    synthesizer_model,
+    vertex_configured,
+)
 from app.orchestrator.extract import (
     _extract_model as orchestrator_extract_model,
     claude_extract_event_from_transcript,
@@ -162,7 +188,7 @@ from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
 from app.feedback import record_feedback as record_lana_feedback
-from app.notifications import email_html, notify_user
+from app.notifications import email_html, notify_user, recipient_lang, recipient_langs
 from app.rapport_gaps import (
     mark_answered as rapport_mark_answered,
     mute_gap as rapport_mute_gap,
@@ -187,7 +213,7 @@ if not any(getattr(h, "_lana_turn_handler", False) for h in _app_logger.handlers
     _app_logger.addHandler(_turn_handler)
     _app_logger.propagate = False
 
-app = FastAPI(title="TagAlng lana-worker", version="0.5.4")
+app = FastAPI(title="TagAlng lana-worker", version="0.5.5")
 
 _cors_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -701,9 +727,101 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 match_badge=str(row.get("match_badge") or "") or None,
                 trait_tags=[str(t) for t in tags[:6]],
                 actions=_ui_action_rows_from_raw(row.get("actions")),
+                # Cascade fields — present only when the row came with a neighbor's rec
+                # (looking.tip) or a resolved distance; None everywhere else.
+                tip_text=str(row.get("tip_text") or "") or None,
+                tip_signal_id=str(row.get("tip_signal_id") or "") or None,
+                distance_text=str(row.get("distance_text") or "") or None,
             )
         )
     return out
+
+
+def _ask_draft_from_ctx(ctx: dict[str, Any]) -> AskDraftPayload | None:
+    raw = ctx.get("ask_draft")
+    if not isinstance(raw, dict) or not str(raw.get("title") or "").strip():
+        return None
+    chips_raw = raw.get("chips")
+    chips = [
+        AskDraftChip(
+            label=str(c.get("label") or "").strip(),
+            tone=str(c.get("tone") or "coral"),
+            field=str(c.get("field") or "") or None,
+        )
+        for c in (chips_raw if isinstance(chips_raw, list) else [])
+        if isinstance(c, dict) and str(c.get("label") or "").strip()
+    ]
+    return AskDraftPayload(
+        title=str(raw.get("title") or "").strip(),
+        detail=str(raw.get("detail") or "").strip() or None,
+        category=str(raw.get("category") or "").strip() or None,
+        locality=str(raw.get("locality") or "").strip() or None,
+        chips=chips[:6],
+        ready=bool(raw.get("ready")),
+    )
+
+
+def _communities_from_ctx(ctx: dict[str, Any]) -> CommunitiesCardPayload | None:
+    """The look screen's communities card. Turn-scoped (app/turn_surfaces.py), so it
+    serializes only on the turn that stamped it."""
+    raw = ctx.get("communities_card")
+    if not isinstance(raw, dict):
+        return None
+    items_raw = raw.get("items")
+    items: list[CommunityCardRow] = []
+    for row in items_raw if isinstance(items_raw, list) else []:
+        if not isinstance(row, dict) or not str(row.get("affiliation_id") or "").strip():
+            continue
+        items.append(
+            CommunityCardRow(
+                affiliation_id=str(row["affiliation_id"]),
+                place_id=str(row.get("place_id") or "") or None,
+                place_name=str(row.get("place_name") or "") or None,
+                place_address=str(row.get("place_address") or "") or None,
+                circle_type=str(row.get("circle_type") or "") or None,
+                relation=str(row.get("relation") or "") or None,
+                emoji=str(row.get("emoji") or "") or None,
+                member_count=int(row.get("member_count") or 0),
+                meets_this_week=int(row.get("meets_this_week") or 0),
+                active=bool(row.get("active")),
+                status_line=str(row.get("status_line") or "") or None,
+            )
+        )
+    if not items:
+        return None
+    return CommunitiesCardPayload(
+        items=items,
+        total=int(raw.get("total") or len(items)),
+        more_count=int(raw.get("more_count") or 0),
+    )
+
+
+def _community_discovery_from_ctx(ctx: dict[str, Any]) -> CommunityDiscoveryResponse | None:
+    """Nearby joinable communities listed by a chat community ask. Turn-scoped."""
+    raw = ctx.get("community_discovery")
+    if not isinstance(raw, dict):
+        return None
+    rows_raw = raw.get("communities")
+    rows = [
+        CommunityDiscoveryRow(
+            place_id=str(r.get("place_id") or ""),
+            place_name=r.get("place_name"),
+            place_address=r.get("place_address"),
+            place_type=r.get("place_type"),
+            relation=r.get("relation"),
+            emoji=r.get("emoji"),
+            zip=r.get("zip"),
+            member_count=int(r.get("member_count") or 0),
+            distance_text=r.get("distance_text"),
+            is_member=bool(r.get("is_member")),
+            status_line=r.get("status_line"),
+        )
+        for r in (rows_raw if isinstance(rows_raw, list) else [])
+        if isinstance(r, dict) and str(r.get("place_id") or "").strip()
+    ]
+    if not rows:
+        return None
+    return CommunityDiscoveryResponse(communities=rows, radius_meters=0)
 
 
 def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]:
@@ -961,6 +1079,8 @@ def _onboarding_fields(
         "peer_matches": peers,
         "discovery_surface": discovery_surface,
         "activity_previews": activities,
+        "communities": _communities_from_ctx(ctx),
+        "community_discovery": _community_discovery_from_ctx(ctx),
         "place_suggestions": _place_suggestions_from_ctx(ctx),
         "auth_intent": ctx.get("auth_intent"),
         "login_phone": ctx.get("login_phone"),
@@ -1015,7 +1135,7 @@ def _bearer_token(authorization: str | None) -> str:
 def root():
     return {
         "service": "tagalng-lana-worker",
-        "version": "0.5.3",
+        "version": "0.5.5",  # keep in sync with FastAPI(version=...) above
         "orchestrator": _use_orchestrator(),
         "endpoints": {
             "health": "GET /health",
@@ -1052,6 +1172,11 @@ def health():
             if _use_orchestrator() and llm_configured()
             else os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
         ),
+        "fallback_enabled": fallback_enabled(),
+        "fallback_target": _fallback_target(provider()),
+        "openai_timeout_sec": _openai_timeout_sec(),
+        "vertex_timeout_sec": _vertex_timeout_sec(),
+        "openai_max_retries": _openai_max_retries(),
     }
 
 
@@ -1348,6 +1473,8 @@ def _run_lana_message(
     authorization: str | None,
     emit: Callable[[str, str | None], None] | None = None,
     accept_language: str | None = None,
+    amp_session_id: str | None = None,
+    amp_device_id: str | None = None,
 ) -> SendMessageResponse:
     """Core of a Lana message turn. Shared by the blocking and streaming endpoints.
 
@@ -1481,6 +1608,21 @@ def _run_lana_message(
         # the flow asks P1 ("what kind of meet?") and never releases on the seed turn (the
         # classifier mis-reads the generic payload as meet_seek). Consumed next turn.
         session_ctx_in["browse_skip_seed"] = True
+    # Entry into the recommendation cascade from the Find fork's second option. Documented
+    # so the fork doesn't have to depend on the classifier reading a bare ask correctly
+    # (it did on every probe — this makes it a guarantee rather than a hope).
+    #   look_tip         — this message IS a recommendation ask; answer it, post nothing.
+    #   look_tip_rerank  — re-rank the last ask by the threads in `weights`, server-side.
+    if purpose == "lana" and body.intent_hint == "look_tip":
+        session_ctx_in["tip_seek_hint"] = True
+        # A seek is the inverse of the share flow; never let both be armed.
+        session_ctx_in["tip_share_active"] = False
+        session_ctx_in["tip_draft"] = None
+    if purpose == "lana" and body.intent_hint == "look_tip_rerank":
+        session_ctx_in["tip_rerank"] = {
+            "weights": [str(w).strip() for w in (body.weights or []) if str(w).strip()][:8],
+            "widen": False,
+        }
     # A "By the way…" tile answer — route it deterministically to the profile path (save the
     # claim + reply in-thread) rather than the classifier, which would misread a bare answer
     # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
@@ -1746,9 +1888,16 @@ def _run_lana_message(
 
     # Server-truth product analytics (Amplitude) — fire-and-forget, same user_id as the
     # browser so events stitch. Tracks the turn + the conversions the client can't be
-    # trusted to report (publish / save actually happened server-side).
+    # trusted to report (publish / save actually happened server-side). The browser's
+    # session/device ids ride along so each event lands on the Session Replay timeline.
     _ui = ob.get("ui_intent")
-    amplitude_track("lana_turn", user_id=auth.user_id, event_properties={"ui_intent": _ui})
+    _amp_ids = {"session_id": amp_session_id, "device_id": amp_device_id}
+    amplitude_track(
+        "lana_turn",
+        user_id=auth.user_id,
+        event_properties={"ui_intent": _ui},
+        **_amp_ids,
+    )
     _conversions = {
         "event_created": "event_hosted",
         "item_listed": "item_listed",
@@ -1760,6 +1909,7 @@ def _run_lana_message(
             _conversions[_ui],
             user_id=auth.user_id,
             event_properties={"event_id": merged.get("event_id")} if _ui == "event_created" else None,
+            **_amp_ids,
         )
         # A meet just published → confirm to the host via push + email.
         if _ui == "event_created" and merged.get("event_id"):
@@ -1767,16 +1917,17 @@ def _run_lana_message(
             _etitle = (
                 getattr(event_draft, "title", None) or "your meet"
             ) if event_draft else "your meet"
+            _lang = recipient_lang(auth.user_id)
             notify_user(
                 auth.user_id,
-                title="Your meet is live 🎉",
-                body=f"“{_etitle}” is posted in your area — I’ll tell you when neighbors ask to join.",
+                title=t("notify.event_live.title", _lang),
+                body=t("notify.event_live.body", _lang, title=_etitle),
                 url=f"/meet/{_eid}",
-                email_subject=f"Your meet “{_etitle}” is live",
+                email_subject=t("notify.event_live.subject", _lang, title=_etitle),
                 email_html=email_html(
-                    "Your meet is live 🎉",
-                    f"“{_etitle}” is now posted in your area. I’ll let you know as neighbors ask to join.",
-                    cta_label="Open the meet",
+                    t("notify.event_live.title", _lang),
+                    t("notify.event_live.email_body", _lang, title=_etitle),
+                    cta_label=t("notify.event_live.cta", _lang),
                     cta_path=f"/meet/{_eid}",
                 ),
             )
@@ -1786,6 +1937,7 @@ def _run_lana_message(
             "signal_saved",
             user_id=auth.user_id,
             event_properties={"intent": (_sig or {}).get("intent"), "category": (_sig or {}).get("category")},
+            **_amp_ids,
         )
 
     return SendMessageResponse(
@@ -1800,6 +1952,7 @@ def _run_lana_message(
         item_draft=item_draft,
         tip_draft=tip_draft,
         look_draft=look_draft,
+        ask_draft=_ask_draft_from_ctx(merged),
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
@@ -1814,11 +1967,15 @@ def send_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
     accept_language: str | None = Header(default=None),
+    x_amplitude_session_id: str | None = Header(default=None),
+    x_amplitude_device_id: str | None = Header(default=None),
 ):
     """Blocking turn — returns the full SendMessageResponse as one JSON body."""
     return _run_lana_message(
         session_id, body, background_tasks, authorization,
         accept_language=accept_language,
+        amp_session_id=x_amplitude_session_id,
+        amp_device_id=x_amplitude_device_id,
     )
 
 
@@ -1833,6 +1990,8 @@ def stream_lana_message(
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
     accept_language: str | None = Header(default=None),
+    x_amplitude_session_id: str | None = Header(default=None),
+    x_amplitude_device_id: str | None = Header(default=None),
 ):
     """Same turn as the blocking endpoint, streamed as Server-Sent Events.
 
@@ -1857,6 +2016,8 @@ def stream_lana_message(
             resp = _run_lana_message(
                 session_id, body, background_tasks, authorization, emit=emit,
                 accept_language=accept_language,
+                amp_session_id=x_amplitude_session_id,
+                amp_device_id=x_amplitude_device_id,
             )
             events.put(("result", resp))
         except HTTPException as exc:
@@ -2097,53 +2258,61 @@ def hook_event_join(
     # → host
     if host_id and host_id != auth.user_id:
         if auto:
+            _hl = recipient_lang(host_id)
             notify_user(
                 host_id,
-                title=f"{who} joined",
-                body=f"{who} just joined “{title}”.",
+                title=t("notify.joined_host.title", _hl, who=who),
+                body=t("notify.joined_host.body", _hl, who=who, title=title),
                 url=f"/meet/{eid}/requests",
-                email_subject=f"{who} joined “{title}”",
+                email_subject=t("notify.joined_host.subject", _hl, who=who, title=title),
                 email_html=email_html(
-                    f"{who} joined “{title}”", f"{who} is in — see everyone going.",
-                    "View attendees", f"/meet/{eid}/requests",
+                    t("notify.joined_host.subject", _hl, who=who, title=title),
+                    t("notify.joined_host.email_body", _hl, who=who),
+                    t("notify.joined_host.cta", _hl), f"/meet/{eid}/requests",
                 ),
             )
         else:
+            _hl = recipient_lang(host_id)
             notify_user(
                 host_id,
-                title="New join request",
-                body=f"{who} wants to join “{title}”.",
+                title=t("notify.join_request.title", _hl),
+                body=t("notify.join_request.body", _hl, who=who, title=title),
                 url=f"/meet/{eid}/requests",
-                email_subject=f"{who} wants to join “{title}”",
+                email_subject=t("notify.join_request.subject", _hl, who=who, title=title),
                 email_html=email_html(
-                    "New join request", f"{who} asked to join “{title}”. Approve or decline.",
-                    "Review request", f"/meet/{eid}/requests",
+                    t("notify.join_request.title", _hl),
+                    t("notify.join_request.email_body", _hl, who=who, title=title),
+                    t("notify.join_request.cta", _hl), f"/meet/{eid}/requests",
                 ),
             )
 
     # → joiner
     if auto:
+        _jl = recipient_lang(auth.user_id)
         notify_user(
             auth.user_id,
-            title="You’re in 🎉",
-            body=f"You joined “{title}”.",
+            title=t("notify.youre_in.title", _jl),
+            body=t("notify.youre_in.body_self", _jl, title=title),
             url=f"/meet/{eid}",
-            email_subject=f"You’re in: “{title}”",
+            email_subject=t("notify.youre_in.subject", _jl, title=title),
             email_html=email_html(
-                "You’re in 🎉", f"You joined “{title}”. See the details and group chat.",
-                "Open the meet", f"/meet/{eid}",
+                t("notify.youre_in.title", _jl),
+                t("notify.youre_in.email_self", _jl, title=title),
+                t("notify.event_live.cta", _jl), f"/meet/{eid}",
             ),
         )
     else:
+        _jl = recipient_lang(auth.user_id)
         notify_user(
             auth.user_id,
-            title="Request sent",
-            body=f"Your request to join “{title}” is in — the host will confirm.",
+            title=t("notify.request_sent.title", _jl),
+            body=t("notify.request_sent.body", _jl, title=title),
             url=f"/meet/{eid}",
-            email_subject=f"Request sent: “{title}”",
+            email_subject=t("notify.request_sent.subject", _jl, title=title),
             email_html=email_html(
-                "Request sent", f"Your request to join “{title}” is in. The host will confirm.",
-                "Open the meet", f"/meet/{eid}",
+                t("notify.request_sent.title", _jl),
+                t("notify.request_sent.email_body", _jl, title=title),
+                t("notify.event_live.cta", _jl), f"/meet/{eid}",
             ),
         )
     return {"ok": True}
@@ -2187,22 +2356,25 @@ def hook_event_decision(
         return {"ok": False}
     title = ev.get("title") or "a meet"
     if status == "approved":
+        _rl = recipient_lang(requester_id)
         notify_user(
             requester_id,
-            title="You’re in 🎉",
-            body=f"You’re approved for “{title}”.",
+            title=t("notify.youre_in.title", _rl),
+            body=t("notify.youre_in.body_approved", _rl, title=title),
             url=f"/meet/{eid}",
-            email_subject=f"You’re in: “{title}”",
+            email_subject=t("notify.youre_in.subject", _rl, title=title),
             email_html=email_html(
-                "You’re in 🎉", f"The host approved you for “{title}”. See the details and group chat.",
-                "Open the meet", f"/meet/{eid}",
+                t("notify.youre_in.title", _rl),
+                t("notify.youre_in.email_approved", _rl, title=title),
+                t("notify.event_live.cta", _rl), f"/meet/{eid}",
             ),
         )
     elif status == "declined":
+        _rl = recipient_lang(requester_id)
         notify_user(
             requester_id,
-            title=f"Update on “{title}”",
-            body="The host couldn’t fit you in this time.",
+            title=t("notify.declined.title", _rl, title=title),
+            body=t("notify.declined.body", _rl),
             url=f"/meet/{eid}",
         )
     return {"ok": True}
@@ -2257,21 +2429,52 @@ def hook_event_cancel(
         return {"ok": False}
 
     roster = {r.get("requester_id") for r in rows} - {None, auth.user_id}
+    # Each attendee reads in their OWN language, not the host's — one query for
+    # the whole roster, never a lookup per person.
+    langs = recipient_langs([str(u) for u in roster])
     for uid in roster:
+        lang = langs.get(str(uid))
         notify_user(
             uid,
-            title=f"“{title}” was cancelled",
-            body="The host cancelled this meet. Sorry — hopefully next time.",
+            title=t("notify.cancelled.title", lang, title=title),
+            body=t("notify.cancelled.body", lang),
             url=f"/meet/{eid}",
-            email_subject=f"Cancelled: “{title}”",
+            email_subject=t("notify.cancelled.subject", lang, title=title),
             email_html=email_html(
-                f"“{title}” was cancelled",
-                "The host had to call this one off. Keep an eye out — "
-                "something new is usually around the corner.",
-                "See what’s nearby", "/",
+                t("notify.cancelled.title", lang, title=title),
+                t("notify.cancelled.email_body", lang),
+                t("notify.cancelled.cta", lang), "/",
             ),
         )
     return {"ok": True, "notified": len(roster)}
+
+
+@app.post("/hooks/signal-matches")
+def hook_signal_matches(
+    older_than_minutes: int = 10,
+    limit: int = 200,
+    x_sweep_token: str | None = Header(default=None),
+):
+    """Deliver match notifications that no live turn carried (a crashed turn, or an insert
+    that didn't come from a Lana turn).
+
+    The normal path needs nothing scheduled: save_local_signal drains and delivers inside the
+    turn that created the match. This is the safety net — correct to call never, hourly, or
+    by hand.
+
+    Auth is a shared secret (SIGNAL_SWEEP_TOKEN), not a user session: it fans out to other
+    people's recipients, so it is an operator action. Fails CLOSED — with no token configured
+    the endpoint refuses rather than standing open.
+    """
+    expected = os.environ.get("SIGNAL_SWEEP_TOKEN", "").strip()
+    if not expected or str(x_sweep_token or "").strip() != expected:
+        raise HTTPException(status_code=403, detail="forbidden")
+    from app.signal_match_notify import sweep_stale_signal_matches
+
+    notified = sweep_stale_signal_matches(
+        older_than_minutes=int(older_than_minutes), limit=int(limit)
+    )
+    return {"ok": True, "notified": notified}
 
 
 @app.post("/lana/places/search", response_model=PlaceSearchResponse)
@@ -2460,6 +2663,250 @@ def post_circles_ground(
         },
     )
     return result
+
+
+class CommunityProfileBody(_BaseModel):
+    # Either identifier works: the affiliation row from /lana/circles/mine, or the
+    # canonical place id it carries. Membership is re-checked either way.
+    affiliation_id: str | None = None
+    place_id: str | None = None
+
+
+class CommunityMembersBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    limit: int = 20
+    offset: int = 0
+
+
+def _community_error(exc: ValueError) -> HTTPException:
+    detail = str(exc)
+    status = 400 if detail == "place_required" else 404
+    return HTTPException(status_code=status, detail=detail)
+
+
+class CommunityDiscoverBody(_BaseModel):
+    # Optional name filter ("orange", "st luke") — everything nearby when absent.
+    query: str | None = None
+    limit: int = 20
+
+
+class CommunityJoinBody(_BaseModel):
+    place_id: str
+    # The joiner's own framing, if the UI asked ("it's my gym"). Defaults to the
+    # place's advisory type — the user's framing is never taken from other members.
+    circle_type: str | None = None
+
+
+@app.post("/lana/circles/discover", response_model=CommunityDiscoveryResponse)
+def post_circles_discover(
+    body: CommunityDiscoverBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Communities near the caller that already have members — the ones they could
+    join (C-CIRCLE-COMM-DISCOVER).
+
+    Returns places, member counts and coarse distances, and deliberately NO member
+    identities: who is at a place stays members-only (§F), so joining is what earns
+    the names. `is_member` marks the caller's own places instead of hiding them."""
+    auth = verify_auth(authorization)
+    from app.community_discovery import discover_communities, radius_meters
+
+    # Distance phrases come back rendered ("1.4 mi away" / "2,3 km"), so the caller's
+    # own locale decides the units — same rule as the peer `_near` RPCs.
+    locale = (recipient_langs([auth.user_id]).get(auth.user_id) or "en").strip() or "en"
+    rows = discover_communities(
+        auth.user_id,
+        limit=max(1, min(int((body.limit if body else 20) or 20), 40)),
+        query=(body.query if body else None),
+        locale=locale,
+    )
+    return CommunityDiscoveryResponse(
+        communities=[
+            CommunityDiscoveryRow(
+                place_id=str(r.get("place_id") or ""),
+                place_name=r.get("place_name"),
+                place_address=r.get("place_address"),
+                place_type=r.get("place_type"),
+                relation=r.get("relation"),
+                emoji=r.get("emoji"),
+                zip=r.get("zip"),
+                member_count=int(r.get("member_count") or 0),
+                distance_text=r.get("distance_text"),
+                is_member=bool(r.get("is_member")),
+                status_line=r.get("status_line"),
+            )
+            for r in rows
+            if str(r.get("place_id") or "").strip()
+        ],
+        radius_meters=int(radius_meters()),
+    )
+
+
+@app.post("/lana/circles/join", response_model=CommunityJoinResponse)
+def post_circles_join(
+    body: CommunityJoinBody,
+    authorization: str | None = Header(default=None),
+):
+    """Join a community found in Lana — a self-claim ("I go here too"), so it takes
+    effect at once with no approval and nobody notified. Leaving is
+    /lana/circles/remove, which drops it from matching immediately.
+
+    Provenance: a fresh row is source=confirmed_via='community_join'; joining a place
+    the user had already MENTIONED confirms that candidate instead, keeping
+    source='chat_extraction' and recording confirmed_via='community_join'."""
+    auth = verify_auth(authorization)
+    from app.community_discovery import join_community, joined_via_label
+
+    try:
+        result = join_community(
+            auth.user_id,
+            (body.place_id or "").strip(),
+            circle_type=(body.circle_type or "").strip().lower() or None,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 400 if detail in ("place_required", "join_failed") else 404
+        raise HTTPException(status_code=status, detail=detail) from exc
+    if not result.get("already_member"):
+        amplitude_track(
+            "circle_joined",
+            user_id=auth.user_id,
+            event_properties={
+                "place_id": result.get("place_id"),
+                # The product question this whole pair exists to answer.
+                "source": result.get("source"),
+                "confirmed_via": result.get("confirmed_via"),
+                "promoted_from_candidate": bool(result.get("promoted_from_candidate")),
+            },
+        )
+    return CommunityJoinResponse(
+        affiliation_id=str(result.get("affiliation_id") or ""),
+        place_id=str(result.get("place_id") or ""),
+        place_name=result.get("place_name"),
+        status=str(result.get("status") or "confirmed"),
+        already_member=bool(result.get("already_member")),
+        source=result.get("source"),
+        confirmed_via=result.get("confirmed_via"),
+        joined_via_label=joined_via_label(
+            result.get("confirmed_via"), result.get("source")
+        ),
+        promoted_from_candidate=bool(result.get("promoted_from_candidate")),
+    )
+
+
+@app.post("/lana/circles/profile", response_model=CommunityProfileResponse)
+def post_circles_profile(
+    body: CommunityProfileBody,
+    authorization: str | None = Header(default=None),
+):
+    """One community's profile (C-CIRCLE-COMM-PROFILE): who's there, what members said
+    it has, what's coming up, and the create-a-meet / invite CTAs.
+
+    Members-only by construction — the caller must hold a confirmed, non-dismissed
+    affiliation at the place, or this 404s `not_a_member` (§F: a place is named to the
+    people who go there, never browsed as a directory)."""
+    auth = verify_auth(authorization)
+    from app.community_surface import community_profile
+
+    try:
+        data = community_profile(
+            auth.user_id,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+            place_id=(body.place_id or "").strip() or None,
+            phone_verified=auth.phone_verified,
+        )
+    except ValueError as exc:
+        raise _community_error(exc) from exc
+    return CommunityProfileResponse(
+        place_id=str(data["place_id"]),
+        affiliation_id=str(data.get("affiliation_id") or "") or None,
+        place_name=data.get("place_name"),
+        place_address=data.get("place_address"),
+        circle_type=data.get("circle_type"),
+        circle_key=data.get("circle_key"),
+        relation=data.get("relation"),
+        emoji=data.get("emoji"),
+        detail=data.get("detail"),
+        member_count=int(data.get("member_count") or 0),
+        active=bool(data.get("active")),
+        status_line=data.get("status_line"),
+        description=data.get("description"),
+        features=[
+            CommunityFeatureRow(
+                key=str(f.get("key") or ""),
+                label=str(f.get("label") or ""),
+                sub_group=str(f.get("sub_group") or "") or None,
+            )
+            for f in (data.get("features") or [])
+            if isinstance(f, dict) and str(f.get("label") or "").strip()
+        ],
+        member_preview=[
+            CommunityMemberPreviewRow(
+                peer_user_id=str(m.get("peer_user_id") or ""),
+                nickname=m.get("nickname"),
+                avatar_url=m.get("avatar_url"),
+            )
+            for m in (data.get("member_preview") or [])
+            if isinstance(m, dict) and str(m.get("peer_user_id") or "").strip()
+        ],
+        upcoming_events=[
+            CommunityEventRow(
+                event_id=str(e.get("event_id") or ""),
+                title=str(e.get("title") or ""),
+                starts_at=e.get("starts_at"),
+                has_time=e.get("has_time") is not False,
+                venue_name=e.get("venue_name"),
+                going_count=int(e.get("going_count") or 0),
+            )
+            for e in (data.get("upcoming_events") or [])
+            if isinstance(e, dict) and str(e.get("event_id") or "").strip()
+        ],
+        actions=_ui_action_rows_from_raw(data.get("actions")),
+    )
+
+
+@app.post("/lana/circles/members", response_model=CommunityMembersResponse)
+def post_circles_members(
+    body: CommunityMembersBody,
+    authorization: str | None = Header(default=None),
+):
+    """Every neighbour at one of the caller's communities (C-CIRCLE-COMM-PEOPLE), each
+    with one truthful shared line and a Nudge. Paginated; mutual blocks filtered out.
+    An unverified caller gets the count and no names, exactly like the peer cards."""
+    auth = verify_auth(authorization)
+    from app.community_surface import community_members
+
+    try:
+        data = community_members(
+            auth.user_id,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+            place_id=(body.place_id or "").strip() or None,
+            limit=max(1, min(int(body.limit or 20), 50)),
+            offset=max(0, int(body.offset or 0)),
+            phone_verified=auth.phone_verified,
+        )
+    except ValueError as exc:
+        raise _community_error(exc) from exc
+    return CommunityMembersResponse(
+        place_id=str(data["place_id"]),
+        place_name=data.get("place_name"),
+        member_count=int(data.get("member_count") or 0),
+        members=[
+            CommunityMemberRow(
+                peer_user_id=str(m.get("peer_user_id") or ""),
+                nickname=m.get("nickname"),
+                avatar_url=m.get("avatar_url"),
+                trait_tags=[str(t) for t in (m.get("trait_tags") or [])][:6],
+                shared_line=m.get("shared_line"),
+                actions=_ui_action_rows_from_raw(m.get("actions")),
+            )
+            for m in (data.get("members") or [])
+            if isinstance(m, dict) and str(m.get("peer_user_id") or "").strip()
+        ],
+        has_more=bool(data.get("has_more")),
+        requires_phone_verification=bool(data.get("requires_phone_verification")),
+    )
 
 
 # ── Invites + ZIP unlock (§A.2 · §D · §E) ─────────────────────────────────────

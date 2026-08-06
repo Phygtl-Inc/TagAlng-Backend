@@ -37,15 +37,22 @@ logger = logging.getLogger(__name__)
 # The original "supply is never hidden" soft-mode stance is retired for browse.
 _GATE_MODES = ("off", "soft", "hard")
 
-_OPEN_PUSH_TITLE = "Your neighborhood just came alive"
-_OPEN_PUSH_BODY = (
-    "Enough neighbors have joined — you can now discover meets, people, "
-    "and plans near you."
-)
+# The open-transition copy lives in the i18n catalog as notify.area_open.*
+# (2026-08-03) — it reaches up to 500 people who each read in their own
+# language, so it cannot be a module constant.
 
 
 def recount_zip(zip5: str, *, notify_on_open: bool = True) -> dict[str, Any] | None:
-    """Recount + transition one ZIP. Returns the state dict or None on failure."""
+    """Recount + transition one ZIP. Returns the state dict or None on failure.
+
+    notify_on_open gates ONLY the open-transition push fan-out — the recount, the
+    state write and the founding stamps happen in SQL regardless. Every caller
+    passes False today: a count that a *read* triggers must never broadcast to a
+    whole ZIP (2026-08-02 — `area_progress` served GET /lana/area/progress and
+    could push "your neighborhood just came alive" to up to 500 users with nobody
+    pressing anything). The announcement needs a deliberate owner; until one
+    exists, `opened` is consumed silently and the push never fires.
+    """
     z = str(zip5 or "").strip()
     if not z:
         return None
@@ -65,12 +72,13 @@ def _notify_zip_opened_async(zip5: str) -> None:
 
     def _run() -> None:
         try:
+            from app.i18n import t
             from app.notifications import send_push
 
             res = (
                 service_client()
                 .table("users")
-                .select("id")
+                .select("id, locale")
                 .eq("home_zip", zip5)
                 .not_.is_("phone_verified_at", "null")
                 .limit(500)
@@ -81,8 +89,16 @@ def _notify_zip_opened_async(zip5: str) -> None:
                 uid = str(row.get("id") or "")
                 if not uid:
                     continue
+                # locale rides along on the roster query — 500 recipients must
+                # never mean 500 extra lookups.
+                lang = (row.get("locale") or "").strip() or None
                 try:
-                    send_push(uid, title=_OPEN_PUSH_TITLE, body=_OPEN_PUSH_BODY, url="/")
+                    send_push(
+                        uid,
+                        title=t("notify.area_open.title", lang),
+                        body=t("notify.area_open.body", lang),
+                        url="/",
+                    )
                     sent += 1
                 except Exception:
                     logger.exception("zip_opened_push_failed user=%s", uid)
@@ -169,7 +185,7 @@ def _unlock_snapshot(zip5: str) -> dict[str, Any] | None:
             "count": row.get("verified_active_count"),
             "threshold": row.get("unlock_threshold"),
         }
-    state = recount_zip(z)
+    state = recount_zip(z, notify_on_open=False)
     return (
         {
             "zip5": state.get("zip5") or z,
@@ -189,16 +205,25 @@ def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] |
     a gating error must never lock a user out of discovery). Otherwise a framing
     dict {mode, blocked, zip5, state, count, threshold}.
 
-    `blocked` (§D.2 as amended by LANA_RAPPORT_BRIDGE_SPEC_v1, 2026-07-30):
-      · peers  — blocked in hard mode (sparse-area intros are junk-quality and
-        privacy-risky);
-      · browse — blocked in every gating mode while the area is not open.
-        Others'-events discovery before unlock undercuts the bridge (QA: a lone
-        off-topic event card answered "meet other runners" in a waitlist ZIP) —
-        pre-open, the product move is always create+invite, so consumers route
-        to that instead of listing supply. The original soft-mode "supply is
-        never hidden" stance is retired for browse; copy must stay honest
-        (the area isn't open yet) and must NOT claim nothing exists.
+    `blocked` — back to what §D.2 actually specifies (2026-08-05):
+      · peers  — blocked in hard mode only (sparse-area intros are junk-quality
+        and privacy-risky, so peers is the ONE surface that truly locks);
+      · browse — never blocked. The gate is deliberately SUPPLY-AWARE: "an area
+        that already has events keeps them fully visible in any mode — hiding a
+        host's event from neighbors starves the meets that make the area come
+        alive" (docs/LANA_CIRCLES_BACKEND.md §D.2), and in soft mode "nothing is
+        blocked".
+
+    The 2026-07-30 bridge-spec amendment that hard-blocked browse in every mode is
+    REVERTED. It was aimed at one QA symptom — a lone off-topic event card
+    answering "meet other runners" in a waitlist ZIP — and that symptom has its
+    own, sharper fix which shipped in the same batch: the relevance floor in
+    look_meet (bridge spec §2) drops zero-relevance events instead of hiding
+    every real one. Blocking the whole surface also contradicted the doc and left
+    hosts' events invisible to the neighbours they were created for.
+
+    The framing facts stay useful either way: an EMPTY result in a not-yet-open
+    area gets the seed-forward copy rather than a bare "nothing found".
     """
     mode = gate_mode()
     if mode == "off" or not user_id:
@@ -213,7 +238,7 @@ def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] |
         return None
     return {
         "mode": mode,
-        "blocked": surface == "browse" or (mode == "hard" and surface == "peers"),
+        "blocked": mode == "hard" and surface == "peers",
         "zip5": snap.get("zip5"),
         "state": snap.get("state"),
         "count": int(snap.get("count") or 0),
@@ -251,7 +276,7 @@ def area_progress(user_id: str, zip5: str | None = None) -> dict[str, Any]:
     if not z:
         return {"state": None, "count": 0, "threshold": None, "zip5": None,
                 "is_founding_eligible": False, "founding_earned": False}
-    state = recount_zip(z) or {}
+    state = recount_zip(z, notify_on_open=False) or {}
     founding_earned = bool(profile.get("founding_earned_at"))
     eligible = founding_earned or (
         str(state.get("state") or "") in ("closed", "warming")

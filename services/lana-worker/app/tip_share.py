@@ -227,12 +227,37 @@ _TIP_SHARE_NATIVE_SIGNALS = frozenset({"tip_share"})
 _TIP_SHARE_NATIVE_LINEARS = frozenset({"sharing.tip"})
 
 
+def _reply_is_an_offered_option(message: str, session_ctx: dict[str, Any]) -> bool:
+    """The user answered with one of the options Lana just put in front of them (typed or
+    chip-tapped). Picking Lana's OWN suggestion is definitionally an answer to Lana's own
+    question, whatever a stateless read of the bare words ("family doctor") looks like —
+    the same rule the browse clarifier uses for offered chips. Deliberately an EXACT match:
+    the safety here comes from the strictness, so anything the user composed themselves
+    still goes to the classifier and can still pivot the lane."""
+    msg = re.sub(r"[\s.!?,]+", " ", str(message or "").strip().lower()).strip()
+    if not msg:
+        return False
+    draft = session_ctx.get("tip_draft")
+    options = (draft or {}).get("suggestions") if isinstance(draft, dict) else None
+    for opt in options or []:
+        norm = re.sub(r"[\s.!?,]+", " ", str(opt or "").strip().lower()).strip()
+        if norm and norm == msg:
+            return True
+    return False
+
+
 def _is_tip_share_answer(
     message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None"
 ) -> bool:
     """Is this turn a genuine answer/refine for the tip-share capture's current step?"""
     from app.lane_decision import is_confident_off_lane, is_meta_or_chat
 
+    # Checked before the classifier's read: the share flow asks tailored questions whose
+    # answers are bare category fragments, and read on their own those fragments look like
+    # a fresh recommendation ASK — which released the lane mid-share and answered the
+    # user's own tip with Google listings (dev QA 2026-08-05).
+    if _reply_is_an_offered_option(message, session_ctx):
+        return True
     if is_meta_or_chat(slots):
         return False
     return not is_confident_off_lane(
@@ -263,6 +288,7 @@ def reset_tip_share_state(session_ctx: dict[str, Any]) -> None:
         "tip_draft",
         "tip_ready",
         "tip_pending_ask",
+        "tip_pending_question",
         "tip_asked_fields",
     ):
         session_ctx[k] = None
@@ -289,7 +315,7 @@ def run_tip_share_turn(
     turns = int(session_ctx.get("tip_turns") or 0) + 1
     session_ctx["tip_turns"] = turns
     if _CANCEL_RE.search(msg) or turns > _TIP_TURN_CAP:
-        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_enrich_count", "tip_asked_fields"):
+        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_enrich_count", "tip_asked_fields"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["routing_phase"] = "listening"
@@ -298,7 +324,7 @@ def run_tip_share_turn(
     # ── The "Pass the tip along" CTA on the ready card → save it ──
     if session_ctx.get("tip_ready") and _PASS_RE.search(msg):
         saved = _save_tip(draft=draft, user_jwt=user_jwt, block_id=home_block_id, zip_code=zip_code)
-        for k in ("tip_share_active", "tip_ready", "tip_pending_ask"):
+        for k in ("tip_share_active", "tip_ready", "tip_pending_ask", "tip_pending_question"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["tip_enrich_count"] = 0
@@ -350,6 +376,7 @@ def run_tip_share_turn(
         draft["suggestions"] = opts
         session_ctx["tip_draft"] = draft
         session_ctx["tip_share_active"] = True
+        session_ctx["tip_pending_question"] = q
         session_ctx["routing_phase"] = "listening"
         return f"Sure — {q}"
 
@@ -373,6 +400,7 @@ def run_tip_share_turn(
     if not _has(draft, "name") and not _has(draft, "category"):
         session_ctx["tip_draft"] = draft
         session_ctx["tip_share_active"] = True
+        session_ctx["tip_pending_question"] = "What do you want to recommend?"
         session_ctx["routing_phase"] = "listening"
         return "Love that — what do you want to recommend?"
 
@@ -385,6 +413,7 @@ def run_tip_share_turn(
         draft["suggestions"] = sugg
         session_ctx["tip_draft"] = draft
         session_ctx["tip_share_active"] = True
+        session_ctx["tip_pending_question"] = "Who or where? A name helps me find them."
         session_ctx["routing_phase"] = "listening"
         if sugg:
             return f"Heard you — **{_summary(draft)}**. Who or where? A few near you, or tell me:"
@@ -396,6 +425,7 @@ def run_tip_share_turn(
         draft["suggestions"] = _CATEGORY_SUGGESTIONS
         session_ctx["tip_draft"] = draft
         session_ctx["tip_share_active"] = True
+        session_ctx["tip_pending_question"] = "What kind of recommendation is it?"
         session_ctx["routing_phase"] = "listening"
         return f"Heard you — **{_summary(draft)}**. What kind of recommendation is it?"
 
@@ -414,6 +444,9 @@ def run_tip_share_turn(
         draft["suggestions"] = ask["options"]
         session_ctx["tip_draft"] = draft
         session_ctx["tip_share_active"] = True
+        # The question verbatim, so next turn's router knows the bare fragment coming back
+        # ("family doctor") is its ANSWER and not a fresh recommendation ask.
+        session_ctx["tip_pending_question"] = str(ask["question"])
         session_ctx["routing_phase"] = "listening"
         return f"Heard you — **{_summary(draft)}**. {ask['question']}"
 
@@ -424,6 +457,7 @@ def run_tip_share_turn(
     session_ctx["tip_draft"] = draft
     session_ctx["tip_share_active"] = True
     session_ctx["tip_ready"] = True
+    session_ctx["tip_pending_question"] = None  # nothing outstanding on the ready card
     session_ctx["routing_phase"] = "listening"
     summary = _summary(draft)
     return compose_reply(

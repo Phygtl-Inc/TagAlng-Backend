@@ -57,29 +57,60 @@ def _zip_snapshot(home_zip: str | None) -> dict[str, Any]:
         return {}
 
 
+_CIRCLE_FIELDS = "circle_key, circle_type, grounded, status, detail, place_ref"
+# Pre-20260906 environments miss place_ref; retry without it rather than
+# degrade the whole circles list to empty.
+_CIRCLE_FIELDS_LEGACY = "circle_key, circle_type, grounded, status, detail"
+
+
 def _circles(user_id: str) -> list[dict[str, Any]]:
+    sb = service_client()
+    for fields in (_CIRCLE_FIELDS, _CIRCLE_FIELDS_LEGACY):
+        try:
+            res = (
+                sb.table("circle_affiliations")
+                .select(fields)
+                .eq("user_id", user_id)
+                .is_("dismissed_at", "null")
+                .order("created_at", desc=True)
+                .limit(8)
+                .execute()
+            )
+            return [r for r in (res.data or []) if isinstance(r, dict)]
+        except Exception:
+            continue
+    logger.warning("world_state_circles_failed user=%s", user_id)
+    return []
+
+
+def _place_names(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """place_ref -> place name, one batched read. The policy needs the real name
+    to offer something concrete ("a get-together for your squash group at Life
+    Time"); without it an offer can only speak vaguely."""
+    ids = sorted({str(r.get("place_ref")) for r in rows if r.get("place_ref")})
+    if not ids:
+        return {}
     try:
-        res = (
-            service_client()
-            .table("circle_affiliations")
-            .select("circle_key, circle_type, grounded, status, detail")
-            .eq("user_id", user_id)
-            .is_("dismissed_at", "null")
-            .order("created_at", desc=True)
-            .limit(8)
-            .execute()
-        )
-        return [r for r in (res.data or []) if isinstance(r, dict)]
+        res = service_client().table("places").select("id, name").in_("id", ids).execute()
+        return {
+            str(p["id"]): str(p.get("name") or "")
+            for p in (res.data or [])
+            if isinstance(p, dict) and p.get("id")
+        }
     except Exception:
-        logger.exception("world_state_circles_failed user=%s", user_id)
-        return []
+        logger.exception("world_state_place_names_failed")
+        return {}
 
 
 def world_state(user_id: str) -> dict[str, Any]:
     """The policy's read of the user's world. Shape:
 
-    {user: {...}, area: {state, count, threshold}, circles: [...],
+    {user: {...}, area: {state, count, threshold},
+     circles: [{key, type, grounded, confirmed, place}],
      states: ["verified", "zip_open", ...]}
+
+    `place` is the pinned place's real name (None until grounded) — the policy
+    needs it to offer something concrete rather than gesture at "somewhere".
 
     Per-peer relationship tiers stay out on purpose — they're per-pair lookups
     (get_relationship_tiers_for_user needs peer ids) that only matter once the
@@ -88,6 +119,7 @@ def world_state(user_id: str) -> dict[str, Any]:
     user = _user_row(user_id)
     area = _zip_snapshot(str(user.get("home_zip") or "") or None)
     circles = _circles(user_id)
+    place_names = _place_names(circles)
 
     states: list[str] = []
     if user.get("phone_verified_at") or user.get("email_verified_at"):
@@ -121,6 +153,7 @@ def world_state(user_id: str) -> dict[str, Any]:
                 "type": c.get("circle_type"),
                 "grounded": bool(c.get("grounded")),
                 "confirmed": str(c.get("status") or "") == "confirmed",
+                "place": place_names.get(str(c.get("place_ref") or "")) or None,
             }
             for c in circles
         ],
