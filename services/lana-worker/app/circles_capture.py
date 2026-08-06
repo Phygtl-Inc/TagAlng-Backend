@@ -340,6 +340,7 @@ def run_circle_capture(user_id: str, data: Any) -> dict[str, int]:
     if not user_id:
         return result
     try:
+        parsed_raw = (data or {}).get("circle_candidates") if isinstance(data, dict) else None
         circles = parse_circle_candidates(data)
         if circles:
             result["circles"] = persist_circle_candidates(user_id, circles)
@@ -358,9 +359,21 @@ def run_circle_capture(user_id: str, data: Any) -> dict[str, int]:
             result["features"] = persist_place_feature_candidates(user_id, features)
         # Always log the verdict — "emitted nothing" and "persisted N" must both be
         # visible, or a silent no-capture turn is indistinguishable from a failure.
+        # `field` separates the two ways emitted=0 happens: "absent" means the model
+        # never wrote the key (it skimmed past the circles rules — a prompt/model-tier
+        # problem), "empty" means it considered the message and declined (correct for
+        # most turns). Without this the two were indistinguishable (2026-08-05).
+        field = (
+            "absent"
+            if not isinstance(data, dict) or "circle_candidates" not in data
+            else "empty"
+            if not parsed_raw
+            else "present"
+        )
         logger.info(
-            "circle_capture user=%s emitted=%d persisted=%d features=%d",
+            "circle_capture user=%s field=%s emitted=%d persisted=%d features=%d",
             user_id,
+            field,
             len(circles),
             result["circles"],
             result["features"],

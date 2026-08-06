@@ -879,6 +879,7 @@ class IdentityPersistResult:
         "conflict",
         "conflict_prompt",
         "nickname",
+        "nickname_changed_from",
         "kids_count",
         "primary_label",
         "primary_bucket",
@@ -893,6 +894,7 @@ class IdentityPersistResult:
         conflict: dict[str, Any] | None = None,
         conflict_prompt: str | None = None,
         nickname: str | None = None,
+        nickname_changed_from: str | None = None,
         kids_count: int | None = None,
         primary_label: str | None = None,
         primary_bucket: str | None = None,
@@ -903,6 +905,7 @@ class IdentityPersistResult:
         self.conflict = conflict
         self.conflict_prompt = conflict_prompt
         self.nickname = nickname
+        self.nickname_changed_from = nickname_changed_from
         self.kids_count = kids_count
         self.primary_label = primary_label
         self.primary_bucket = primary_bucket
@@ -951,12 +954,14 @@ def persist_identity_from_message(
             conflict=result.heritage_conflict,
             conflict_prompt=heritage_conflict_prompt(from_label, pending_claim),
             nickname=result.nickname,
+            nickname_changed_from=result.nickname_changed_from,
             kids_count=result.kids_count,
         )
     return IdentityPersistResult(
         saved=result.saved,
         dismissed=dismissed,
         nickname=result.nickname,
+        nickname_changed_from=result.nickname_changed_from,
         kids_count=result.kids_count,
         primary_label=result.primary_label,
         primary_bucket=result.primary_bucket,
@@ -972,7 +977,9 @@ def handle_change_name(user_id: str | None, message: str) -> tuple[str, str | No
             cache=True,
         ), None
     if user_id:
-        persist_profile_patch(user_id, {"nickname": nick})
+        # The user came in on an explicit "change my name" intent, so this caller
+        # can vouch for the rename — the only kind that may replace a saved name.
+        persist_profile_patch(user_id, {"nickname": nick}, allow_rename=True)
     return compose_reply(
         goal="Confirm you'll call the user by their new name from here on.",
         facts=[f"Their new name: {nick}"],

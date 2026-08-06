@@ -253,12 +253,16 @@ def _pending_ask_goals(user_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _capability_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
+def _capability_goals(caps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """What Lana can offer right now — capability_index filtered by
     required_state ⊆ user states. surface_priority folds into value_hint as a
-    weak prior (5→0.5, 8→0.8), nothing more."""
+    weak prior (5→0.5, 8→0.8), nothing more.
+
+    Takes the already-fetched list: candidate_goals needs the same rows for its
+    inactive-capability filter, and reading capability_index twice per turn is
+    latency for nothing."""
     out: list[dict[str, Any]] = []
-    for cap in capabilities_available(world):
+    for cap in caps:
         cap_id = str(cap.get("capability_id") or "").strip()
         if not cap_id:
             continue
@@ -283,14 +287,26 @@ def candidate_goals(
     """The unified goal list for one turn. Goals the policy previously deferred
     (capture_defer) are marked so it knows they're fair game to resurface at
     the next natural pause."""
+    # One read of capability_index, used twice below.
+    caps = capabilities_available(world)
     goals = (
         _rapport_goals(user_id)
         + _grounding_goals(world)
         + _circle_offer_goals(world)
         + _offer_goals(user_id)
         + _pending_ask_goals(user_id)
-        + _capability_goals(world)
+        + _capability_goals(caps)
     )
+    # A goal naming a capability that is switched off must not reach the policy.
+    # _capability_goals already filters on is_active; _offer_goals (latent
+    # suggestions) did not, so a retired capability could still be offered from
+    # the queue — which is how an unshipped feature gets pitched in chat.
+    active = {c.get("capability_id") for c in caps}
+    goals = [
+        g for g in goals
+        if not g["context"].get("capability_id")
+        or g["context"]["capability_id"] in active
+    ]
     deferred = set(deferred_goal_ids or [])
     for g in goals:
         if g["id"] in deferred:

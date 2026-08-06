@@ -81,6 +81,29 @@ def synthesizer_model() -> str:
     return "claude-sonnet-4-6" if provider() == "claude" else "gemini-2.5-pro"
 
 
+def extractor_model() -> str:
+    """Provider-correct model for every structured EXTRACTION call.
+
+    Deliberately NOT the router tier. Extraction is the most instruction-dense
+    call in the system (six required output fields, ~4k tokens of rules), and a
+    mini-tier model reliably nails the primary field while silently dropping the
+    trailing ones: "i play pickleball regularly with friends" produced the
+    plays_pickleball claim and circle_candidates [] on gpt-4.1-mini — twice in
+    prod and once locally — losing the affiliation the onion matcher needs
+    (2026-08-05).
+
+    LANA_EXTRACT_MODEL overrides, but it MUST match the active provider:
+    llm_json routes by provider(), not by the model string, so a Gemini id under
+    LANA_LLM_PROVIDER=openai 502s the call (2026-07-30).
+    """
+    override = os.environ.get("LANA_EXTRACT_MODEL", "").strip()
+    if override:
+        return override
+    if provider() in ("openai", "claude"):
+        return synthesizer_model()
+    return os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
+
+
 def _openai_timeout_sec() -> float:
     raw = os.environ.get("OPENAI_TIMEOUT_SEC", "60").strip()
     try:

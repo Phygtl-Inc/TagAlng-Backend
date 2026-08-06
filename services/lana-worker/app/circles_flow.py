@@ -596,13 +596,29 @@ Rules:
 - Short (<120 chars), warm, direct — never yes/no, never an interrogation.
 - NEVER the words "circle", "block", or "match". Say "spot", "place", or their own word.
 - teaser: 2-5 word lead-in ending with "…".
-- English only (rendered into the user's language downstream)."""
+- English only (rendered into the user's language downstream).
+
+- FORK — first judge whether their phrase implies a place or other people AT ALL.
+  · It DOES ("my gym", "our church", "we play futsal on Sundays", "my Tuesday spin
+    class", "I play squash with friends every week") → ask which specific one it is.
+    This is the normal case.
+  · It does NOT — a recurring thing that needs no venue and names no one else ("I
+    play guitar every weekend", "I play violin regularly", "I paint on Sundays") →
+    do NOT presume a venue. Ask whether they do it somewhere in particular or mostly
+    on their own, leaving BOTH answers easy: "Do you play guitar anywhere in
+    particular, or mostly on your own?" Never "which spot do you play guitar at?" —
+    someone who plays in their living room has no answer to that and the question
+    dead-ends. Still ONE question, still <120 chars."""
 
 
 def _grounding_question(circle_type: str, detail: str | None) -> tuple[str, str]:
     """AI-authored per the lingo rules; a type-templated line as fallback."""
     noun = place_relation_noun(circle_type)
     phrase = _FEATURE_NOTE_RE.sub("", str(detail or "")).strip(" ;")
+    # KNOWN GAP: this presumes a venue exists, so a solo hobby that falls back here
+    # (lexicon leak / no LLM configured) still gets the dead-end question. Left as-is
+    # deliberately — the place-or-solo fork lives in the prompt above, and hardcoding
+    # it here would blunt the common case, where "which one is it" is exactly right.
     fallback = (
         f"You mentioned your {noun} — which one is it, exactly?",
         f"about your {noun}…",
@@ -1191,8 +1207,14 @@ def handle_grounding_answer(
             affiliation,
             answer,
             goal_head=(
-                "They passed on pinning down the spot — accept that warmly and "
-                "never push for the place again."
+                # Two different replies arrive here: "skip it" and "I just do it at "
+                # home". Asserting they passed on the question is wrong for the
+                # second — they answered it — so this stays neutral about WHICH and
+                # simply accepts that there is no spot to pin.
+                "There is no spot to pin for this one — either they passed on the "
+                "question or they do it on their own. Accept that warmly WITHOUT "
+                "assuming which, never imply they dodged you, and never ask for the "
+                "place again."
             ),
             fallback_head="No worries — we can leave that one.",
             session_ctx=session_ctx,
@@ -1357,6 +1379,9 @@ def handle_grounding_confirmation(
     if abandon or escaped or attempts >= 3:
         # "no" / "neither" / worn out — keep their words as detail, then close on the
         # bridge (an offer to look for their people, which needs no pin).
+        # `said` is their SEED answer, not this turn's message, so it is a venue
+        # attempt ("orange theory") even when this reply is a bare "neither" — which
+        # is why noting it is right here and wrong on the seed turn's abandon branch.
         note_ungrounded_detail(user_id, affiliation_id, said)
         return _unpinned_close(
             affiliation,

@@ -62,6 +62,8 @@ and you stay curious — after capturing what they said, you propose ONE warm fo
 Output ONLY valid JSON (no markdown):
 {
   "nickname": "first name neighbors should use, or null",
+  "nickname_quote": "verbatim words from THIS message where they state it, or null",
+  "nickname_is_rename": false,
   "kids_count": null,
   "role": null,
   "grammatical_gender": null,
@@ -81,8 +83,6 @@ Output ONLY valid JSON (no markdown):
     }
   ],
   "retracted_concepts": ["exact concept slug from ALREADY ON PROFILE the user is walking back — usually empty"],
-  "followup_question": "one warm question that adds a NEW MATCHABLE facet (never backstory), or null",
-  "followup_topic": "a short grammatical teaser for the question, 2-5 words, e.g. 'about your reading…', 'about the World Cup…', 'about your running…' — or null when followup_question is null",
   "circle_candidates": [
     {
       "circle_type": "fitness",
@@ -100,8 +100,15 @@ Output ONLY valid JSON (no markdown):
       "sub_group": "",
       "confidence": 0.8
     }
-  ]
+  ],
+  "followup_question": "one warm question that adds a NEW MATCHABLE facet (never backstory), or null",
+  "followup_topic": "a short grammatical teaser for the question, 2-5 words, e.g. 'about your reading…', 'about the World Cup…', 'about your running…' — or null when followup_question is null"
 }
+
+EVERY key above is REQUIRED in your output, every turn. "claims" and "circle_candidates" are \
+two SEPARATE ledgers filled by two SEPARATE decisions — never let one stand in for the other, and \
+never omit a key to mean empty: write [] or null explicitly. Decide circle_candidates BEFORE you \
+write followup_question.
 
 Allowed bucket values: heritage, stage, vicinity, faith, activity, interest, general.
 Allowed disclosure: public, mutual, private.
@@ -114,7 +121,7 @@ neighbor matches on the same terms ("me gusta jugar al cricket" → concept "cri
 followup_topic are ALSO English — they are stored canonically and AI-rendered into the user's preferred \
 language at display time, so a later language switch re-renders the whole queue.
 - Max 6 claims from this message only
-- If no identity content (greetings, "ok", ZIP, phone), return {"nickname": null, "kids_count": null, "claims": [], "followup_question": null}
+- If no identity content (greetings, "ok", ZIP, phone), return {"nickname": null, "nickname_quote": null, "nickname_is_rename": false, "kids_count": null, "claims": [], "circle_candidates": [], "place_feature_candidates": [], "followup_question": null}
 - Split distinct threads — capture EACH one, do not collapse (e.g. "pakistani dad, married 10 years, speak 5 languages, do triathlon" → pakistani_heritage + multilingual + married_ten_years + triathlon; "dad" and kid count go to kids_count, never a claim)
 - Capture LANGUAGES spoken as one claim, bucket "interest" (e.g. "speak 7 languages" → concept "multilingual", label "Speaks 7 languages")
 - Capture RELATIONSHIP status as a claim, bucket "stage" (e.g. "married 10 years" → concept "long_married", label "Married 10 years")
@@ -139,11 +146,89 @@ language at display time, so a later language switch re-renders the whole queue.
 - NEVER make parenting/kids into a claim — only kids_count carries it
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
-- nickname only when user states their name ("I'm Brinda", "call me Sam", "my name is brigade")
-- followup_question — becomes a "By the way…" tile on their home screen; their answer is stored as an identity claim used to match them with nearby neighbors. Warm neighborhood-concierge tone, not an interviewer; ask only what genuinely helps them connect locally. Propose ONE only if it adds a CONNECTION-MATCHABLE facet — something that would help them MEET or RELATE to nearby neighbors: shared activities/hobbies, kids or family stage, local spots they go, cultural or community ties, their weekly rhythm. Generic consumer/brand/device/product preferences are NOT connection facets — which phone, which apps, gadgets, streaming services, operating system → return null (no neighbor connects over that). Reason about what you ALREADY know to hit a real GAP. Two shapes: (1) SHARPEN a "vague": true claim — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know. VARY the dimension to fit the topic — do NOT default to "solo or with others" for everything (that has become repetitive). Choose the ONE most natural from a range: sub-type/genre (books → "Any genres you gravitate to?"), frequency/rhythm (running → "Mornings or weekends?"), setting or local spot ("A local place you like for it?"), skill/level, doing-it-with-others, kids' involvement, teach-vs-learn. FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you started, what you enjoy/love most, or what "caught your interest"); those add NO matchable facet — replace with a concrete one or return null. Do NOT repeat a question shape listed in ALREADY ASKED above; if the only fitting angle was already asked, return null or pick a different dimension. Write ONLY the question itself — NO "By the way", no greeting or lead-in phrase (the tile shows its own "By the way…" framing; a prefix just doubles it). Short (<120 char), warm, OPEN, reference what they said. Return null when nothing is vague AND no fresh matchable dimension fits — silence beats filler. HARD RULE: null for any sensitive / help-seeking topic — divorce or relationship trouble, health/medical, mental health/safety, money/debt, legal/immigration — and when the message is a question aimed at you.
+- nickname — ONLY when the user is telling you what THEY want to be called ("I'm Brinda", "call me \
+Sam", "my name is brigade"). A name is the one fact the user hears in EVERY reply, so a wrong one is \
+insulting and obvious. You are the only thing that can change it — be strict:
+  · A CORRECTION is still a statement of their name, and you MUST resolve it to the name they \
+AFFIRM — never the name they deny, and never the negation word itself: "my name is not Orlando but \
+Tom" → "Tom" (NOT "not", NOT "Orlando"); "it's Tom, not Orlando" → "Tom"; "wrong, I'm Tom" → "Tom".
+  · A denial with NO replacement is null, not a name: "I'm not Joe" → null, "that's not my name" → null.
+  · When LANA JUST ASKED what to call them ("what should neighbors call you?", "what's your \
+name?"), a bare word IS the answer to that — "Tommaso" → "Tommaso". Take it.
+  · For ANY OTHER question in LANA JUST ASKED, a bare word is an ANSWER to that question, not a \
+name. A city, venue, gym, church, dish, team, or time is never a nickname — asked "which Lagoinha \
+location?", the message "Orlando" is a place and nickname is null.
+  · null when the message merely CONTAINS a name-shaped word (a place, a brand, a saint, a team) \
+without the user claiming it for themselves, and null for anyone else's name ("my son Marco" → null).
+  · null when it matches CURRENTLY SAVED NAME — there is nothing to change.
+- nickname_quote: the VERBATIM words from THIS message where they state their name ("my name is not \
+Orlando but Tom" → "but Tom"; "call me Sam" → "call me Sam"). It MUST appear character-for-character \
+in the message. null whenever nickname is null. A nickname whose quote is absent from the message is \
+DISCARDED, so quote exactly.
+- nickname_is_rename: true ONLY when CURRENTLY SAVED NAME is present AND this message tells you to \
+stop using it and use a different one instead. This is a HIGH bar — it takes an explicit correction \
+or request ("my name is not Orlando but Tom", "call me Tom from now on", "stop calling me Orlando"). \
+Mentioning a name in passing, answering a question, or being unsure is NOT a rename: leave it false \
+and we keep the saved name. false when there is no saved name (that is a first fill, not a rename).
+- circle_candidates — DECIDE THIS BEFORE followup_question. A circle is a real-world COMMUNITY the \
+user belongs to or attends recurringly. It is a SEPARATE ledger from claims and is judged separately: \
+emitting the claim does NOT discharge this field, and most activity messages produce BOTH ("I play \
+pickleball regularly with friends" → claim plays_pickleball AND circle {fitness, pickleball_group}). \
+Run this three-step test on anything the user says about their OWN activities, places, or groups:
+  STEP 1 — is it about THEMSELVES? First-person membership or attendance. Not who/what they are \
+searching for, not someone else's.
+  STEP 2 — is there a RHYTHM or a MEMBERSHIP? Any of: "regularly", "every week", "on weekends", \
+"on Sundays", "twice a week", "always", a named class/club/team, or a possessive that implies \
+belonging ("my gym", "our church").
+  STEP 3 — is there a GROUP or a PLACE? EITHER is enough on its own. A group = other people \
+("with friends", "with my crew", "with my team", "we play…"). A place = a venue or even just the \
+KIND of venue ("the gym", "the court", "the ground").
+  All three pass → EMIT. A missing venue name is NEVER a reason to skip: the regular group IS the \
+community, and the place gets asked later through a separate grounding step. Confidence 0.8+ when \
+the rhythm is stated outright.
+- circle_candidates EMIT list — every one of these MUST produce a circle, place_name null:
+  "i play pickleball regularly with friends" → {fitness, pickleball_group}
+  "I play pickleball on weekends with friends" → {fitness, pickleball_group}
+  "I play squash with friends every week" → {fitness, squash_group}
+  "we play futsal on Sundays" → {fitness, futsal_group}
+  "I play futsal regularly on the ground" → {fitness, futsal_group}
+  "I play table tennis regularly" → {fitness, table_tennis_group}
+  "I go to the gym every weekend" / "my gym" → {fitness, gym}
+  "my Tuesday spin class" → {fitness, spin_class}
+  "our church" → {faith, church_group}
+  "my book club" → {hobby, book_club}
+- circle_candidates SKIP list — and ONLY these:
+  a one-off ("tried a yoga class once"), an aspiration ("thinking of joining a gym"), watching \
+without doing ("I like watching football"), solo with NO group AND NO place ("I run every morning"), \
+no rhythm AND no group ("I play squash sometimes"), or the thing they are SEARCHING for ("any yoga \
+classes nearby?", "show me cycling activities").
+  When a message looks like it could sit on either list, the EMIT list WINS. "With friends" or \
+"we" always satisfies STEP 3, so it can never fall under the solo exclusion.
+- The search exclusion applies ONLY to the thing being searched for — NEVER to background the user \
+gives about themselves in the same message ("any weekday events? I'm busy weekends because I go to \
+the gym every weekend" → the events are NOT a circle, {fitness, gym} IS; "looking for a Saturday \
+playdate since our church group meets Sundays" → {faith, church_group}).
+- circle_type MUST be one of: school, faith, fitness, kids_activity, neighborhood, hobby, support, \
+heritage, friends, other. circle_key: snake_case slug naming the COMMUNITY (same format as concept) \
+— reuse the SAME slug you would pick for that community every time so re-mentions corroborate one \
+row instead of creating a second ("Life Time" is always life_time, never regular_weekend_gym_goer).
+- The ALREADY ON PROFILE dedupe rule does NOT apply to circle_candidates. Re-state the circle EVERY \
+time the community is mentioned, even when the matching claim is already on the profile and even when \
+you emitted it before — repeats are harmless corroboration, silence loses the circle. Never capture a \
+child's name in raw_phrase.
+- place_name (inside circle_candidates): the venue/business/organization name they actually SAID for \
+that community, verbatim and nothing else — "I go to the gym at Fitness CF" → "Fitness CF"; "our \
+church is St. Luke's" → "St. Luke's"; "my kids are at Lake Nona Middle" → "Lake Nona Middle". null \
+whenever they named only the activity or the KIND of place ("my gym", "we play futsal on Sundays", \
+"my Tuesday spin class", "our church"). NEVER invent, complete, or guess a name they did not say — a \
+wrong name gets them attached to the wrong place. Do not put the activity word in it ("gym", "church" \
+alone are not names).
+- INTERLOCK — if your followup_question asks WHERE or WHICH SPOT the user does a recurring activity, \
+that activity MUST also appear in circle_candidates. Asking "which court do you play at?" while \
+leaving circle_candidates empty is a contradiction: the answer would have nothing to attach to. \
+Either emit the circle, or ask a different dimension.
+- followup_question — becomes a "By the way…" tile on their home screen; their answer is stored as an identity claim used to match them with nearby neighbors. Warm neighborhood-concierge tone, not an interviewer; ask only what genuinely helps them connect locally. Propose ONE only if it adds a CONNECTION-MATCHABLE facet — something that would help them MEET or RELATE to nearby neighbors: shared activities/hobbies, kids or family stage, local spots they go, cultural or community ties, their weekly rhythm. Generic consumer/brand/device/product preferences are NOT connection facets — which phone, which apps, gadgets, streaming services, operating system → return null (no neighbor connects over that). Reason about what you ALREADY know to hit a real GAP. Two shapes: (1) SHARPEN a "vague": true claim — vague tech_worker → "What kind of tech — engineering, product, design?"; "speaks 5 languages" → "Which five?". (2) FILL a matchable dimension you don't yet know. VARY the dimension to fit the topic — do NOT default to "solo or with others" for everything (that has become repetitive). Choose the ONE most natural from a range: sub-type/genre (books → "Any genres you gravitate to?"), frequency/rhythm (running → "Mornings or weekends?"), setting or local spot ("A local place you like for it?" — allowed ONLY when that activity is also in circle_candidates, see INTERLOCK above), skill/level, doing-it-with-others, kids' involvement, teach-vs-learn. FORBIDDEN — never ask an opinion, feeling, or origin-story question (anything asking why, how you started, what you enjoy/love most, or what "caught your interest"); those add NO matchable facet — replace with a concrete one or return null. Do NOT repeat a question shape listed in ALREADY ASKED above; if the only fitting angle was already asked, return null or pick a different dimension. Write ONLY the question itself — NO "By the way", no greeting or lead-in phrase (the tile shows its own "By the way…" framing; a prefix just doubles it). Short (<120 char), warm, OPEN, reference what they said. Return null when nothing is vague AND no fresh matchable dimension fits — silence beats filler. HARD RULE: null for any sensitive / help-seeking topic — divorce or relationship trouble, health/medical, mental health/safety, money/debt, legal/immigration — and when the message is a question aimed at you.
 - followup_topic: a 2-5 word grammatical lead-in that names the thread for the tile, ending with "…" — e.g. "about your reading…", "about the World Cup…", "about your Portuguese…". Write natural English; NEVER glue a raw label ("about your interested in books…" is wrong). null whenever followup_question is null.
-- circle_candidates: real-world COMMUNITIES the user BELONGS TO or attends recurringly — their gym or fitness class, faith community, a school community, a hobby/sports club, a support group, a heritage/cultural association, a friend group ("my gym", "our church", "my Tuesday spin class", "my book club"). Habitual attendance at a place counts ("I go to my gym every weekend" → {fitness, gym}); so does plain recurring attendance without "my" ("I go to the gym every weekend"). A RECURRING ACTIVITY DONE WITH OTHERS also counts even when no club or venue is named — the regular group IS the community and the place gets asked later ("I play squash with friends every week" → {fitness, squash_group}; "we play futsal on Sundays" → {fitness, futsal_group}; "I play futsal regularly on the ground" → {fitness, futsal_group}). First-person membership/attendance only — NOT one-off visits ("tried a yoga class once"), aspirations ("thinking of joining a gym"), a bare liking with no attendance ("I like watching football"), a solo habit with no group and no place ("I run every morning"), occasional play with no rhythm ("I play squash sometimes"), or who/what they're SEARCHING for ("any yoga classes nearby?", "show me cycling activities" → NEVER a circle). The search exclusion applies ONLY to the thing being searched for — NEVER to background the user gives about themselves inside the same message. A search ask often carries a community mention in its "because…" context, and that mention MUST still be captured ("any weekday events? I'm busy weekends because I go to the gym every weekend" → the searched-for events are NOT a circle, but {fitness, gym} IS; "looking for a Saturday playdate since our church group meets Sundays" → {faith, church_group}). circle_type MUST be one of: school, faith, fitness, kids_activity, neighborhood, hobby, support, heritage, friends, other. circle_key: snake_case slug for the community (same format as concept). IMPORTANT — circles are a SEPARATE ledger from claims: the ALREADY ON PROFILE dedupe rule does NOT apply here. Re-state the circle_candidate EVERY time the community is mentioned, even when a matching claim/thread is already on the profile and even when you emitted it before (repeats are harmless corroboration; staying silent loses the circle). A community can ALSO yield a normal claim (spin class → does_spin) — emit both. Empty [] only when the message truly names no community they attend. Never capture a child's name in raw_phrase.
-- place_name (inside circle_candidates): the venue/business/organization name they actually SAID for that community, verbatim and nothing else — "I go to the gym at Fitness CF" → "Fitness CF"; "our church is St. Luke's" → "St. Luke's"; "my kids are at Lake Nona Middle" → "Lake Nona Middle". null whenever they named only the activity or the KIND of place ("my gym", "we play futsal on Sundays", "my Tuesday spin class", "our church"). NEVER invent, complete, or guess a name they did not say — a wrong name gets them attached to the wrong place. Do not put the activity word in it ("gym", "church" alone are not names).
 - place_feature_candidates: ONLY when the user volunteers an OBJECTIVE attribute of a community place from circle_candidates (or one they clearly already told you about) — "we swim there" → has_pool, "they watch the kids while I train" → has_childcare, "there's a sauna" → has_sauna. key: snake_case (has_pool, has_childcare, has_kids_area, has_sauna, has_classes, stroller_friendly, or a new one in the same style). value: "true"/"false" or a short freeform ("50m lap pool"). sub_group: a program/room inside the place ("spin", "toddler swim"), else "". circle_key MUST match the community it is about. Subjective opinions ("I love it there") are NOT features. Empty [] when none.
 
 User message:
@@ -324,6 +409,31 @@ def _existing_claims_block(existing_labels: list[Any] | None) -> str:
     )
 
 
+def _name_context_block(current_nickname: str | None, asked_question: str | None) -> str:
+    """The two facts the extractor needs before it is allowed to touch a name.
+
+    Without the SAVED NAME it cannot tell a first fill from a rename, so every
+    name-shaped word looked like an improvement. Without the QUESTION it cannot
+    tell a name from an answer — a lone "Orlando" replying to "which Lagoinha
+    location?" once overwrote a real name. Neither is derivable from the message.
+    """
+    name = str(current_nickname or "").strip()
+    if name:
+        lines = [
+            f"CURRENTLY SAVED NAME: {name} — they are ALREADY called this. Emit nickname only to "
+            "CHANGE it, and only with nickname_is_rename true. Otherwise leave nickname null."
+        ]
+    else:
+        lines = ["CURRENTLY SAVED NAME: (none yet — a stated name here is a first fill, not a rename)"]
+    q = str(asked_question or "").strip()
+    if q:
+        lines.append(
+            f'LANA JUST ASKED: "{q}" — this message is most likely an ANSWER to that question. '
+            "An answer is not a nickname unless the question asked what to call them."
+        )
+    return "\n".join(lines) + "\n\n"
+
+
 def _recent_questions_block(recent_questions: list[str] | None) -> str:
     """Tell the extractor what it has recently asked, so its follow-up isn't a near-duplicate."""
     qs = [str(q).strip() for q in (recent_questions or []) if str(q).strip()]
@@ -341,6 +451,9 @@ def vertex_extract_claims_from_utterance(
     message: str,
     existing_labels: list[str] | None = None,
     recent_questions: list[str] | None = None,
+    *,
+    current_nickname: str | None = None,
+    asked_question: str | None = None,
 ) -> Any:
     from app.orchestrator.llm import vertex_generate_json
 
@@ -348,6 +461,7 @@ def vertex_extract_claims_from_utterance(
         INCREMENTAL_EXTRACT_PROMPT
         + _existing_claims_block(existing_labels)
         + _recent_questions_block(recent_questions)
+        + _name_context_block(current_nickname, asked_question)
         + message.strip()
     )
     return vertex_generate_json(
@@ -363,6 +477,9 @@ def incremental_claims_from_utterance(
     message: str,
     existing_labels: list[str] | None = None,
     recent_questions: list[str] | None = None,
+    *,
+    current_nickname: str | None = None,
+    asked_question: str | None = None,
 ) -> Any:
     """Extract claims via orchestrator LLM when configured; else Vertex."""
     import logging
@@ -373,21 +490,31 @@ def incremental_claims_from_utterance(
         INCREMENTAL_EXTRACT_PROMPT
         + _existing_claims_block(existing_labels)
         + _recent_questions_block(recent_questions)
+        + _name_context_block(current_nickname, asked_question)
     )
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, router_model
+        from app.orchestrator.llm import extractor_model, llm_configured, llm_json
 
         if llm_configured():
             return llm_json(
-                model=router_model(),
+                model=extractor_model(),
                 system=system,
                 user_payload=text,
-                max_tokens=512,
+                # Room for all six fields at once. At 512 a full turn (claims with
+                # synonyms + details, followup, circles, features) has to choose
+                # what to drop, and circles — last in the schema — lost.
+                max_tokens=1024,
                 temperature=0.2,
             )
     except Exception:
         log.exception("llm_incremental_claim_extract_failed")
-    return vertex_extract_claims_from_utterance(text, existing_labels, recent_questions)
+    return vertex_extract_claims_from_utterance(
+        text,
+        existing_labels,
+        recent_questions,
+        current_nickname=current_nickname,
+        asked_question=asked_question,
+    )
 
 
 def vertex_extract_from_transcript(

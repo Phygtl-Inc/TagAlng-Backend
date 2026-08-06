@@ -1690,6 +1690,13 @@ def _try_layer1_intent_turn(
             except Exception:  # noqa: BLE001
                 known_before = []
         res = persist_identity_from_message(user_id, msg, linear_intent=linear)
+        if res.nickname_changed_from and res.nickname:
+            # One-turn signal so the reply confirms the rename out loud rather than
+            # quietly starting to use a new name.
+            session_ctx["nickname_changed"] = {
+                "from": res.nickname_changed_from,
+                "to": res.nickname,
+            }
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or "listening",
@@ -6490,6 +6497,19 @@ def _handle_signup_phone_message(
             dest_uid = registered_user_id_for_email(email)
             if dest_uid:
                 stash_pending_signal_ask(dest_uid, pending_signal)
+        # Everything ELSE the guest had in flight. The three stashes above cover one
+        # flow each and were added one incident at a time; this catches the rest in
+        # one place, so a new pending flow is carried by default instead of being
+        # silently dropped until someone reports it (app/login_carry.py owns the
+        # carry/exclude decision, and a test fails on any unclassified key).
+        from app.db import stash_login_carry
+        from app.login_carry import collect as collect_login_carry
+
+        _carry = collect_login_carry(session_ctx)
+        if _carry:
+            dest_uid = registered_user_id_for_email(email)
+            if dest_uid:
+                stash_login_carry(dest_uid, _carry)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,

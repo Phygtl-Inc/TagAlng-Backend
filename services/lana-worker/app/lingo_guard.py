@@ -42,9 +42,24 @@ _MATCH_PERSON_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Features that DO NOT EXIST yet. The policy is told never to OFFER swapping, and
+# it obeys — but the word alone reads as the feature. A tester saw "if you ever
+# want to swap favorite spots" (she meant trading recommendations) and reasonably
+# read it as the unbuilt item-swap. Intent doesn't matter here; the word does.
+# DELETE THIS RULE the day swap ships — it is a shipping-state guard, not a
+# lexicon principle, and it will start suppressing legitimate copy.
+_UNSHIPPED_FEATURE_RE = re.compile(
+    r"\b(swap(?:s|ped|ping)?|hand[-\s]?me[-\s]?downs?)\b",
+    re.IGNORECASE,
+)
+
 # Last-resort substitutions when the LLM rewrite is unavailable or still dirty.
 # Crude but always lexicon-clean — a slightly stiff sentence beats a banned word.
 _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
+    # "swap favorite spots" -> "share favorite spots" reads naturally; the
+    # item-trading senses are forbidden upstream, so nothing legitimate is lost.
+    (re.compile(r"\bswap(?:s|ped|ping)?\b", re.I), "share"),
+    (re.compile(r"\bhand[-\s]?me[-\s]?downs?\b", re.I), "shared items"),
     (re.compile(r"\bmoms\b", re.I), "people"),
     (re.compile(r"\b(?:mom|mommy|mama|mum|mamá|mamãe)\b", re.I), "parent"),
     (re.compile(r"\bblocks?\b", re.I), "area"),
@@ -90,6 +105,7 @@ def find_violations(text: str) -> list[str]:
         return []
     hits = [m.group(0).lower() for m in _BANNED_RE.finditer(text)]
     hits += [m.group(0).lower() for m in _MATCH_PERSON_RE.finditer(text)]
+    hits += [m.group(0).lower() for m in _UNSHIPPED_FEATURE_RE.finditer(text)]
     seen: set[str] = set()
     out: list[str] = []
     for h in hits:

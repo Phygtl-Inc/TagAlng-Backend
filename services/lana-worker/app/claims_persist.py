@@ -96,6 +96,19 @@ _NAME_INTRO_PATTERNS = (
 
 _NOT_NAMES = frozenset(
     {
+        # Negators, first. "My name is not Orlando but Tom" is a CORRECTION, and the
+        # pattern below reads it as a statement — capturing the negation as the name.
+        # The extractor resolves such turns properly; this guard only stops the
+        # fallback from writing a negation into an empty name.
+        "not",
+        "isnt",
+        "isn't",
+        "aint",
+        "ain't",
+        "never",
+        "no",
+        "nope",
+        "wrong",
         "italian",
         "brazilian",
         "latino",
@@ -196,7 +209,17 @@ def user_needs_display_name(user_id: str | None, session_ctx: dict[str, Any]) ->
 
 
 def persist_nickname_if_stated(user_id: str, message: str) -> str | None:
-    """Sync write to users.nickname when the user states their name."""
+    """FALLBACK first-fill only — this pattern match can never rename anyone.
+
+    Names are meaning, not format: "my name is not Orlando but Tom" needs
+    negation, contrast, and antecedent resolution to reach "Tom", and no pattern
+    can do that (this one captured "not"). The extractor owns renames; the match
+    below survives only to fill an EMPTY name when the LLM is unavailable or the
+    message is too short to extract from, and persist_profile_patch refuses it
+    the moment a name exists.
+    """
+    if current_nickname(user_id):
+        return None
     nick = extract_nickname_from_message(message)
     if not nick:
         return None
@@ -204,11 +227,33 @@ def persist_nickname_if_stated(user_id: str, message: str) -> str | None:
     return nick
 
 
+def nickname_rename_is_stated(data: Any, message: str, saved: str | None) -> bool:
+    """May the extractor REPLACE a name already on file?
+
+    Three independent things must line up, because this is the write that a bad
+    extraction makes most visible: the model must claim it is a rename, it must
+    point at the words the user used, and that quote must really be in the
+    message. A name merely mentioned in passing — or inferred from a place the
+    user named — clears none of these.
+    """
+    if not saved or not isinstance(data, dict):
+        return False
+    if not bool(data.get("nickname_is_rename")):
+        return False
+    quote = str(data.get("nickname_quote") or "").strip()
+    if len(quote) < 2:
+        return False
+    return quote.casefold() in str(message or "").casefold()
+
+
 @dataclass
 class ClaimExtractResult:
     saved: int = 0
     heritage_conflict: dict[str, Any] | None = None
     nickname: str | None = None
+    # Set only when a name already on file was replaced this turn, so the reply
+    # can confirm the change instead of silently answering to a new name.
+    nickname_changed_from: str | None = None
     kids_count: int | None = None
     followup_question: str | None = None
     # The richest claim this turn — used to frame the rapport follow-up tile.
@@ -849,12 +894,51 @@ def should_extract_claims_from_message(message: str) -> bool:
     return True
 
 
-def persist_profile_patch(user_id: str, patch: dict[str, str]) -> None:
+def current_nickname(user_id: str | None) -> str | None:
+    """The name already on file, or None. Cheap indexed read — the rename guard
+    and the extractor's SAVED NAME context both need it."""
+    if not user_id:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("users")
+            .select("nickname")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0] or {}
+        return str(row.get("nickname") or "").strip() or None
+    except Exception:
+        logger.exception("current_nickname_failed for %s", user_id)
+        return None
+
+
+def persist_profile_patch(
+    user_id: str, patch: dict[str, str], *, allow_rename: bool = False
+) -> None:
+    """Write the user's name. FILL-ONLY unless the caller proved the user asked
+    for the change (allow_rename).
+
+    A name is the one profile fact the user hears in EVERY reply, so a bad write
+    is immediately visible and insulting — a lone "Orlando" answering "which
+    Lagoinha location?" once replaced a real name, and the negation in "my name
+    is not Orlando but Tom" landed as "Not". Same discipline as
+    persist_role_gender: a stated name can be refined, never silently erased.
+    """
     row: dict[str, Any] = {}
     if patch.get("nickname"):
         row["nickname"] = patch["nickname"][:30]
     if patch.get("full_name"):
         row["full_name"] = patch["full_name"][:80]
+    if not row:
+        return
+    if "nickname" in row and not allow_rename and current_nickname(user_id):
+        # Already named — a fill has nothing to do, and a replacement needs a
+        # caller that can vouch for the user's intent. Only nickname is gated:
+        # it is the one they hear in every reply. full_name is a separate field.
+        row.pop("nickname")
     if not row:
         return
     service_client().table("users").update(row).eq("id", user_id).execute()
@@ -1295,13 +1379,19 @@ def try_upsert_claims_from_message(
     skip_heritage: bool = False,
     message_id: str | None = None,
     allow_rapport_gap: bool = True,
+    asked_question: str | None = None,
 ) -> ClaimExtractResult:
     """Flash extract from one user line → upsert claims; confirm heritage conflicts.
 
     Also opens ONE contextual rapport follow-up gap from the extractor's own warm question.
     This is the SHARED entry point (background task AND the inline discovery/identity path
     call it), so the gap opens regardless of which path handled the turn.
+
+    asked_question is what Lana said just before this message. Pass it when the
+    caller has it: without it the extractor cannot tell a name from an ANSWER,
+    and a bare "Orlando" replying to "which Lagoinha location?" reads as a name.
     """
+    saved_nick = current_nickname(user_id)
     stated_nick = persist_nickname_if_stated(user_id, message)
     if not should_extract_claims_from_message(message):
         return ClaimExtractResult(nickname=stated_nick)
@@ -1318,7 +1408,13 @@ def try_upsert_claims_from_message(
                 recent_questions = recent_gap_questions(user_id)
             except Exception:
                 logger.debug("rapport: recent_gap_questions unavailable")
-        data = incremental_claims_from_utterance(message, existing_labels, recent_questions)
+        data = incremental_claims_from_utterance(
+            message,
+            existing_labels,
+            recent_questions,
+            current_nickname=saved_nick,
+            asked_question=asked_question,
+        )
         nickname, claims, kids_count, followup = parse_incremental_claims_data(data)
         # AI-written teaser for the tile ("about your reading…") — read straight off the raw
         # dict so we don't churn parse_incremental_claims_data's tuple arity.
@@ -1347,22 +1443,46 @@ def try_upsert_claims_from_message(
     if retracted:
         dismiss_retracted_concepts(user_id, retracted)
         claims = drop_retracted(claims, retracted)
+    renamed_from: str | None = None
     if nickname and not stated_nick:
         nickname = _normalize_nickname(nickname)
-        persist_profile_patch(user_id, {"nickname": nickname})
-        stated_nick = nickname
+        rename_ok = nickname_rename_is_stated(data, message, saved_nick)
+        if not saved_nick:
+            # First fill — nothing to lose, and persist_profile_patch double-checks.
+            persist_profile_patch(user_id, {"nickname": nickname})
+            stated_nick = nickname
+        elif rename_ok and nickname.casefold() != saved_nick.casefold():
+            persist_profile_patch(user_id, {"nickname": nickname}, allow_rename=True)
+            stated_nick = nickname
+            renamed_from = saved_nick
+        else:
+            # A name-shaped word that the user never asked us to be called. Keep
+            # theirs — this is the write that produced "Orlando" and then "Not".
+            logger.info(
+                "nickname_rename_declined user=%s saved=%s proposed=%s is_rename=%s",
+                user_id,
+                saved_nick,
+                nickname,
+                bool(isinstance(data, dict) and data.get("nickname_is_rename")),
+            )
     # Kids count is private (count only) — persist regardless of whether other claims survive.
     persist_kids_count(user_id, kids_count)
     # Role / grammatical gender are private address facts (never claims) — same rule.
     persist_role_gender(user_id, data)
     if not claims:
         return ClaimExtractResult(
-            nickname=stated_nick, kids_count=kids_count, followup_question=followup
+            nickname=stated_nick,
+            nickname_changed_from=renamed_from,
+            kids_count=kids_count,
+            followup_question=followup,
         )
     claims = filter_extracted_claims(message, claims)
     if not claims:
         return ClaimExtractResult(
-            nickname=stated_nick, kids_count=kids_count, followup_question=followup
+            nickname=stated_nick,
+            nickname_changed_from=renamed_from,
+            kids_count=kids_count,
+            followup_question=followup,
         )
 
     heritage = [c for c in claims if c.bucket == "heritage"]
@@ -1380,6 +1500,7 @@ def try_upsert_claims_from_message(
                 saved=saved,
                 heritage_conflict=pending_heritage_from_claim(from_label, new_claim),
                 nickname=stated_nick,
+                nickname_changed_from=renamed_from,
                 kids_count=kids_count,
                 followup_question=followup,
             )
@@ -1404,6 +1525,7 @@ def try_upsert_claims_from_message(
     return ClaimExtractResult(
         saved=saved,
         nickname=stated_nick,
+        nickname_changed_from=renamed_from,
         kids_count=kids_count,
         followup_question=followup,
         primary_label=primary.label if primary else None,
