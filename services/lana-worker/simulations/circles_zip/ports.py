@@ -10,8 +10,12 @@ swapping backends is a one-file change (live_impl.py), never a harness change.
 RECONCILED 2026-07-28 with Asjid's authoritative reply
 ------------------------------------------------------
 The original build assumed "nothing in Circles/ZIP exists in the repo yet." That was
-WRONG — Phase 1 IS built (branch `circles`, migrations 20260906/20260907/20260908, worker
-in services/lana-worker, live in dev). The grep missed it only because the as-built names
+WRONG — Phase 1 IS built (branch `circles`, migrations 20260906/20260907 — plus 20260916,
+which made a confirmed circle's place MANDATORY — worker in services/lana-worker, live in
+dev). CORRECTED 2026-08-03: rev-1 cited "20260908" for the ZIP machine; that file is
+20260908120000_capability_required_state.sql and has nothing to do with circles. `zip_unlock`
+AND `recount_zip_unlock` both live in 20260906120000_circles_places_phase_a.sql (:201, :279).
+The grep missed the feature only because the as-built names
 diverge from spec: the table is `zip_unlock` (NOT a `zips` alter); places live on
 `place_ref → places(id)` (NOT inline place_id/place_name/lat/lng columns); there is no
 literal `ZIP_OPENED` constant. This file has been reconciled against Asjid's written
@@ -37,7 +41,10 @@ are now RESOLVED below. The scoring is:
                    *** place and type do NOT stack — it is MAX, not SUM ***
     shared_concept_count = COUNT(DISTINCT shared concept_ids) over PUBLIC, non-dismissed claims
     candidate set = status='confirmed' AND dismissed_at IS NULL AND place_ref IS NOT NULL
-                    (suggested/dismissed/ungrounded rows NEVER score; blocked pairs excluded)
+                    (suggested/dismissed/ungrounded rows NEVER score; blocked pairs excluded
+                    on BOTH arms via lana_is_blocked, which is symmetric). A peer with no
+                    overlap on EITHER arm is not a zero-score row — it is not a row at all
+                    (`candidates` is a FULL OUTER JOIN of circle_scored and concept_scored).
     order = score desc, then nickname asc ; p_limit default 20 clamp [1,50] ; p_min_score 1
     NO proximity term, NO block-scoping (users store no coordinates; locality lives in the
     serving layer). This file was reconciled against Asjid's rev-2 written corrections — it
@@ -47,7 +54,7 @@ are now RESOLVED below. The scoring is:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Literal, Protocol
 
 # ---------------------------------------------------------------------------
@@ -215,10 +222,18 @@ class Mom:
         return self.phone_verified_at is not None
 
     def has_recent_session(self, as_of: datetime, window_days: int) -> bool:
-        """U2(b): EXISTS a lana_sessions row with created_at in the last `window_days`."""
+        """U2(b): EXISTS a lana_sessions row with created_at in the last `window_days`.
+
+        STRICT boundary, to match the SQL. `recount_zip_unlock` (migration
+        20260906120000_circles_places_phase_a.sql:301-305) tests
+        `s.created_at > now() - interval '30 days'` — a session at EXACTLY the window edge
+        does NOT count. The previous `(as_of - last_session_at).days <= window_days` was
+        off by one in TWO ways: it admitted the exact edge, and because timedelta.days
+        TRUNCATES it also admitted anything up to window_days + 23:59:59. Both directions
+        OVERCOUNT verified-active vs prod, which inflates ZIP unlock counts near the edge."""
         if self.last_session_at is None:
             return False
-        return (as_of - self.last_session_at).days <= window_days
+        return (as_of - self.last_session_at) < timedelta(days=window_days)
 
     def has_confirmed_thing(self) -> bool:
         """U2(c): ≥1 confirmed thing — a confirmed, non-dismissed circle_affiliation OR an
@@ -230,7 +245,9 @@ class Mom:
 
 @dataclass
 class ZipState:
-    """Models the net-new `zip_unlock` table (migration 20260908) — NOT a `zips` alter.
+    """Models the net-new `zip_unlock` table — NOT a `zips` alter. It is created in
+    20260906120000_circles_places_phase_a.sql:201 (with `recount_zip_unlock` at :279), not in
+    the "20260908" rev-1 cited: that file is capability_required_state and is unrelated.
     RESOLVED (Asjid 2026-07-28): there is no `zips` table extension; rows in `zip_unlock`
     are created ON DEMAND at first recount."""
     zip_code: str  # = zip_unlock.zip5 (PK)
@@ -418,8 +435,12 @@ class RankedCandidate:
     by the stub for backward-compatible reporting only and is not a scoring/ordering input."""
     user_id: str            # RPC: peer_user_id
     score: float
-    same_place: bool
-    same_type: bool
+    same_place: bool | None
+    same_type: bool | None
+    # NOTE (honesty): these two booleans are HARNESS-side knowledge. The RPC's component columns
+    # are a mutually-exclusive split of the MAXed circle_bonus, so when a peer matched on PLACE the
+    # response cannot express whether they ALSO share a type. In live mode `same_type` is therefore
+    # None ("not observable"), never a fabricated False. The stub sets both from real knowledge.
     shared_affinities: tuple[str, ...]
     # --- real RPC output columns (rev-2) ---------------------------------------------
     same_place_bonus: float = 0.0   # RPC column: 0 or +3 (shares a confirmed place_ref)
@@ -455,6 +476,8 @@ class MatcherPort(Protocol):
     ) -> list[RankedCandidate]:
         """§C — the onion matcher. Returns candidates ordered by (score desc, nickname asc),
         clamped to p_limit in [1,50], filtered to score >= p_min_score.
+        FLAGGED: the nickname tiebreak is the RPC's; the stub cannot reproduce it and sorts by
+        user_id instead (see MatcherStub.score_matches / README "Known divergences" #1).
         REV-2 (Asjid 2026-07-28): §C is now BUILT + deployed. LIVE backs this with the SQL
         RPC `score_onion_candidates_for_user(p_user_id, p_limit=20, p_min_score=1)`
         (migration 20260914, service-role only), or the gated wrapper

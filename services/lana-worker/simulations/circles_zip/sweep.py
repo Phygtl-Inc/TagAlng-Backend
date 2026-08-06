@@ -7,8 +7,8 @@ Phase 1 IS built (branch `circles`, migrations 20260906-08) and REV-2: the onion
 (§C) is now BUILT + deployed too (branch `main`, PR #107/#114, migrations 20260913/14).
 Neither branch is visible from here, so the harness still runs against the stub — but the
 stub now MIRRORS the deployed onion algorithm, so its scoring measurements are PARITY checks
-(max-not-sum circle bonus; confirmed+grounded only; order score desc/nickname asc; clamp
-[1,50]; concept arm gated by dormancy), not merely spec-sensitivity. Offline re-weighting of
+(max-not-sum circle bonus; confirmed+grounded only; blocked pairs excluded; clamp [1,50];
+concept arm gated by dormancy), not merely spec-sensitivity. Offline re-weighting of
 the RPC's returned component columns (place/type/concept) is the intended tuning loop and is
 what the weight sweeps drive. It becomes a full regression tool the moment SIM_BACKEND=live
 is wired up in backend.py/live_impl.py.
@@ -27,7 +27,7 @@ import statistics
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend import Backend, get_backend
 from population import PopulationConfig, generate_population
@@ -43,6 +43,19 @@ from ports import (
 
 RING_ORDER = ("R1", "R2", "R3", "R4", "R5")
 OUT_DIR = Path(__file__).parent / "out"
+
+# The measurements whose `passed` decides main()'s exit code. Every one is MECHANICAL with
+# ground truth known BY CONSTRUCTION (a hand-seeded fixture), never a distribution over the
+# sampled population — a gate that reads a sampled rate fails on fixture artifacts, not on
+# regressions. selftest.py plants a violation in each of these and asserts it fires, and
+# asserts this tuple still matches the keys run_one_config actually produces.
+GATE_CHECKS: tuple[str, ...] = (
+    "onion_scoring_parity",
+    "day_zero_floor",
+    "blocked_pair_exclusion",
+    "founding_volume_invariance",
+    "disclosure_correctness",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -74,13 +87,18 @@ def measure_match_coverage(
 # Measurement 2 · day-zero floor (§C.4's acceptance criterion, as a dedicated fixture)
 # ---------------------------------------------------------------------------
 
-def check_day_zero_floor(scoring_config: ScoringConfig) -> dict[str, Any]:
+def check_day_zero_floor(
+    scoring_config: ScoringConfig, backend: Backend | None = None
+) -> dict[str, Any]:
     """A lone pioneer: 1 grounded circle, 0 co-members sharing her exact place — but
     someone (anywhere — the built matcher has no zip/adjacency scoping) shares her
     circle_type. Per §C.4 she must still receive >=1 match; under the BUILT algorithm that
     match is a TYPE-ONLY floor row (same_type True, same_place False, score == +1 >=
     p_min_score), NOT an adjacency ring. The far stranger (nothing shared) must score 0 and
-    be excluded by the p_min_score filter."""
+    be excluded (she is not even a candidate row — see MatcherStub's FULL-OUTER-JOIN note).
+
+    `backend` defaults to get_backend(); selftest.py injects a deliberately broken matcher to
+    prove this check fails on a planted violation."""
     now = PopulationConfig().now  # reproducible reference; matcher ignores it anyway
     pioneer = Mom(
         user_id="pioneer",
@@ -118,7 +136,7 @@ def check_day_zero_floor(scoring_config: ScoringConfig) -> dict[str, Any]:
     stranger = Mom(user_id="stranger", home_zip="Z999", circles=[], phone_verified_at=now, last_session_at=None, affinities=frozenset())
 
     adjacency = {"Z000": {"Z001"}, "Z001": {"Z000"}}
-    backend = get_backend(zip_adjacency=adjacency)
+    backend = backend or get_backend(zip_adjacency=adjacency)
     population = [pioneer, neighbor, stranger]
 
     candidates = backend.matcher.score_matches(pioneer, population, scoring_config)
@@ -165,8 +183,12 @@ def _parity_mom(uid: str, zip_code: str, circles: list[CircleAffiliation], conce
                phone_verified_at=now, last_session_at=now, affinities=concepts)
 
 
-def measure_onion_scoring_parity(scoring_config: ScoringConfig) -> dict[str, Any]:
-    backend = get_backend()  # stub; no adjacency (built matcher has none)
+def measure_onion_scoring_parity(
+    scoring_config: ScoringConfig, backend: Backend | None = None
+) -> dict[str, Any]:
+    # `backend` defaults to get_backend() (stub; no adjacency — the built matcher has none).
+    # selftest.py injects broken matchers here to prove each sub-check fires.
+    backend = backend or get_backend()
     cfg_on = replace(scoring_config, concept_arm_enabled=True, n_results=20, p_min_score=1)
     cfg_off = replace(scoring_config, concept_arm_enabled=False, n_results=20, p_min_score=1)
 
@@ -197,9 +219,12 @@ def measure_onion_scoring_parity(scoring_config: ScoringConfig) -> dict[str, Any
     checks: dict[str, bool] = {}
     # circle_bonus is MAX, not SUM (place+type peer scores 3, never 4):
     checks["max_not_sum"] = "both" in on and on["both"].score == 3.0 and on["both"].same_place and on["both"].same_type
-    # components are returned SEPARATELY (0/3 and 0/1) even though the score MAXes them:
-    checks["components_returned_raw"] = (
-        "both" in on and on["both"].same_place_bonus == 3.0 and on["both"].same_type_bonus == 1.0
+    # The RPC's component columns are a SPLIT OF THE MAX, not raw per-arm values (migration
+    # 20260914:159-160). They are mutually exclusive, so a place+type peer is (3, 0) — NOT
+    # (3, 1). Asserting (3, 1) here previously enshrined a stub-vs-RPC divergence as the parity
+    # target, which would have reported a CORRECT backend as broken on the first live diff.
+    checks["components_are_max_split"] = (
+        "both" in on and on["both"].same_place_bonus == 3.0 and on["both"].same_type_bonus == 0.0
     )
     checks["place_only_is_3"] = "place_only" in on and on["place_only"].score == 3.0 and not on["place_only"].same_type
     checks["type_only_is_1"] = "type_only" in on and on["type_only"].score == 1.0 and not on["type_only"].same_place
@@ -208,8 +233,13 @@ def measure_onion_scoring_parity(scoring_config: ScoringConfig) -> dict[str, Any
     # only confirmed+grounded rows score; suggested/dismissed/ungrounded/nothing excluded:
     checks["ineligible_rows_never_score"] = excluded.isdisjoint(on.keys())
     checks["min_score_filters_zeros"] = "nothing" not in on
-    # order: score desc, then nickname (user_id) asc:
-    checks["order_score_desc_then_nickname"] = res_on == sorted(res_on, key=lambda c: (-c.score, c.user_id))
+    # ORDER: only the reproducible half is asserted. `score desc` is real and testable; the
+    # server's secondary key is `nickname asc nulls last`, which this harness cannot reproduce
+    # and which is not even a total order server-side (nickname is often NULL). Asserting a
+    # nickname order here would be asserting a fiction — see the FLAGGED note in
+    # MatcherStub.score_matches and README "Known divergences" #1.
+    checks["order_score_desc"] = [c.score for c in res_on] == sorted((c.score for c in res_on), reverse=True)
+    checks["tiebreak_is_deterministic"] = res_on == sorted(res_on, key=lambda c: (-c.score, c.user_id))
     # dormancy: with the concept arm off, a concept-only peer drops out; circle rows unchanged:
     checks["concept_dormancy_toggle"] = (
         "concept_only" not in off and "type_only" in off and off["both"].score == 3.0
@@ -232,8 +262,77 @@ def measure_onion_scoring_parity(scoring_config: ScoringConfig) -> dict[str, Any
         "passed": checks["all_passed"],
         "top_scores_concept_on": [(c.user_id, c.score) for c in res_on],
         "acceptance": "rev-2 §C: stub reproduces the deployed onion algorithm — MAX(place,type) "
-                      "circle bonus (not sum), confirmed+grounded-only candidates, order "
-                      "score desc/nickname asc, p_limit clamp [1,50], concept-arm dormancy toggle",
+                      "circle bonus (not sum), component columns as a split of that MAX, "
+                      "confirmed+grounded-only candidates, score desc ordering (the server's "
+                      "nickname tiebreak is not reproducible here — FLAGGED), p_limit clamp "
+                      "[1,50], concept-arm dormancy toggle",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Measurement 2c · blocked pairs are EXCLUDED (with a real negative control)
+# ---------------------------------------------------------------------------
+
+def check_blocked_pair_exclusion(
+    scoring_config: ScoringConfig, backend_factory: Callable[..., Backend] | None = None
+) -> dict[str, Any]:
+    """A blocked peer must never be scored — and the check is only worth anything if that
+    same peer WOULD have been returned unblocked, so the control arm asserts exactly that.
+
+    Real behaviour being mirrored: both scoring arms filter on
+    `not public.lana_is_blocked(p_user_id, a.user_id)` (migration 20260914120000:76 for
+    peer_circles, :113 for peer_concepts), and lana_is_blocked is SYMMETRIC — "true if
+    either user has blocked the other" (20260618130000:47-55) — so the exclusion must hold
+    from BOTH sides regardless of who blocked whom.
+
+    Four assertions:
+      1. CONTROL: with no blocks, `blocked_peer` is returned (score 3) — the pair really
+         would have matched, so its later absence is caused by the block, not by nothing.
+      2. blocked_peer is gone once the pair is blocked;
+      3. `ok_peer` (same overlap, not blocked) is STILL returned — the exclusion is
+         targeted, not a blanket wipe (guards against a check that passes because the
+         matcher returned nothing at all);
+      4. symmetry: scoring FROM blocked_peer also drops the focus mom.
+
+    `backend_factory` defaults to get_backend; selftest.py passes one that builds a matcher
+    ignoring blocks, to prove this fires."""
+    factory = backend_factory or get_backend
+    focus = _parity_mom("focus", "Z000", [_parity_circle("focus", 0, "fitness", "P_shared")], frozenset())
+    blocked_peer = _parity_mom("blocked_peer", "Z000",
+                               [_parity_circle("blocked_peer", 0, "fitness", "P_shared")], frozenset())
+    ok_peer = _parity_mom("ok_peer", "Z000",
+                          [_parity_circle("ok_peer", 0, "fitness", "P_shared")], frozenset())
+    pop = [focus, blocked_peer, ok_peer]
+    cfg = replace(scoring_config, n_results=20, p_min_score=1)
+
+    control = factory().matcher.score_matches(focus, pop, cfg)
+    control_ids = {c.user_id: c.score for c in control}
+
+    # declared (blocked_peer, focus) — the REVERSE of the direction we score in, so a
+    # directed-edge implementation would wrongly let it through here.
+    blocks = {frozenset(("blocked_peer", "focus"))}
+    blocked_backend = factory(blocked_pairs=blocks)
+    after = {c.user_id for c in blocked_backend.matcher.score_matches(focus, pop, cfg)}
+    reverse = {c.user_id for c in blocked_backend.matcher.score_matches(blocked_peer, pop, cfg)}
+
+    checks = {
+        # The control asserts PRESENCE, not a specific score: `scoring_config` is swept
+        # (exact_place_weight runs 1.0/3.0/6.0), so pinning 3.0 here would report FAIL at a
+        # legitimate sweep point — a false positive, and this is a gate. The score is still
+        # reported below for the reader.
+        "control_pair_would_have_matched": "blocked_peer" in control_ids,
+        "blocked_peer_excluded": "blocked_peer" not in after,
+        "unblocked_peer_still_returned": "ok_peer" in after,
+        "exclusion_is_symmetric": "focus" not in reverse and "ok_peer" in reverse,
+    }
+    checks["all_passed"] = all(checks.values())
+    return {
+        "checks": checks,
+        "passed": checks["all_passed"],
+        "control_scores": control_ids,
+        "acceptance": "§C: a blocked pair is excluded from BOTH arms and in BOTH directions "
+                      "(lana_is_blocked is symmetric), while an equivalent unblocked peer is "
+                      "still returned",
     }
 
 
@@ -241,38 +340,213 @@ def measure_onion_scoring_parity(scoring_config: ScoringConfig) -> dict[str, Any
 # Measurement 3 · founding-eligibility vs raw invite volume (§I anti-gaming, §E.5)
 # ---------------------------------------------------------------------------
 
+def is_founding_eligible(mom: Mom, zip_states: dict[str, ZipState]) -> bool:
+    """The product's `is_founding_eligible`, mirrored from
+    `app/zip_unlock.py :: area_progress()` (lines 255-260):
+
+        founding_earned = bool(profile["founding_earned_at"])
+        eligible = founding_earned or (state in ("closed","warming")
+                                       and phone_verified_at and _has_confirmed_thing(user))
+
+    The `founding_earned OR` disjunct was MISSING here: once her area opened, a mom who had
+    ALREADY earned founding read back as ineligible — the opposite of the product's answer
+    and of the stamp's own persistence rule (opened_at/founding never un-stamp).
+
+    The rest is RESOLVED (Asjid 2026-07-28): the stamp fires for everyone qualifying at the
+    instant the ZIP transitions to open, inside the recount transaction — no first-N ordinal
+    tracking exists or is needed. Qualifying state is "NOT YET OPEN" (closed OR warming), not
+    "not closed" (guess #6), and the "or intro" branch counts (guess #4).
+
+    Deliberately takes NO invite-volume argument: founding is earned by the mom's own
+    verification + engagement, never by how many people she recruited (§E.5/§I). That
+    absence is the invariant check_founding_volume_invariance() exists to defend."""
+    if mom.founding_earned_at is not None:
+        return True  # already stamped — persists after the area opens
+    zs = zip_states.get(mom.home_zip)
+    if zs is None or zs.unlock_state == "open":
+        return False
+    return mom.phone_verified and mom.has_confirmed_thing()
+
+
 def measure_founding_vs_invite_volume(
     population: list[Mom], zip_states: dict[str, ZipState], area_config: AreaStateConfig
 ) -> dict[str, Any]:
+    """DESCRIPTIVE ONLY — reports the observed rate per invite-volume bucket; it is NOT a
+    gate. Bucket rates over a sampled population are not a sound pass/fail signal: the
+    fixture degrades spam RECRUITS (unverified/inactive) but leaves spam INVITERS untouched,
+    so the high-volume bucket is a handful of ordinary moms and its rate legitimately lands
+    above the 0-invite bucket's. Gating on `rate(6_plus) <= rate(0)` would fail on that
+    fixture artifact, not on a real regression. The enforced version of §E.5 is the
+    by-construction counterfactual in check_founding_volume_invariance()."""
     invited_counts: dict[str, int] = {m.user_id: 0 for m in population}
     for mom in population:
         if mom.invited_by is not None and mom.invited_by in invited_counts:
             invited_counts[mom.invited_by] += 1
 
-    def is_founding_eligible(mom: Mom) -> bool:
-        # RESOLVED (Asjid 2026-07-28): the founding stamp fires for EVERYONE qualifying at
-        # the instant the ZIP transitions to open, inside the recount transaction — no
-        # first-N ordinal tracking exists or is needed. The qualifying state is "NOT YET
-        # OPEN" (closed OR warming) + phone-verified + ≥1 confirmed thing (a confirmed
-        # circle OR an accepted intro). Two corrections vs the original guess: "not closed"
-        # → "not yet open" (guess #6), and the "or intro" branch now counts (guess #4).
-        zs = zip_states.get(mom.home_zip)
-        if zs is None or zs.unlock_state == "open":
-            return False
-        return mom.phone_verified and mom.has_confirmed_thing()
-
     buckets = {"0_invites": [], "1_5_invites": [], "6_plus_invites": []}
     for mom in population:
         n = invited_counts[mom.user_id]
         bucket = "0_invites" if n == 0 else ("1_5_invites" if n <= 5 else "6_plus_invites")
-        buckets[bucket].append(is_founding_eligible(mom))
+        buckets[bucket].append(is_founding_eligible(mom, zip_states))
 
     return {
         "founding_rate_by_own_invite_count": {
             b: (round(sum(vals) / len(vals), 4) if vals else None) for b, vals in buckets.items()
         },
         "n_per_bucket": {b: len(vals) for b, vals in buckets.items()},
-        "acceptance": "§E.5/§I: founding rate should NOT rise with raw invite volume — only with the inviter's own verification/engagement",
+        "acceptance": "§E.5/§I (DESCRIPTIVE, not gated): founding rate should NOT rise with raw "
+                      "invite volume — only with the inviter's own verification/engagement. "
+                      "Enforced by check_founding_volume_invariance().",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Measurement 3a · §E.5/§I ENFORCED — founding eligibility is invariant under invite volume
+# ---------------------------------------------------------------------------
+
+def _founding_invariance_fixture() -> tuple[list[Mom], dict[str, ZipState]]:
+    """A hand-built population whose ground truth is known BY CONSTRUCTION, exposed so the
+    selftest can rebuild the identical world and inject a deliberately volume-sensitive
+    predicate.
+
+    Two engagement cohorts, four moms each, in a WARMING zip (not yet open, so founding is
+    still winnable). Within each cohort the members are IDENTICAL on every input the product
+    predicate reads (verified, confirmed thing, zip state) and differ ONLY in how many people
+    they invited: 0, 1, 6, 12. So the correct founding rate is 100% across every bucket for
+    the engaged cohort and 0% across every bucket for the unengaged one — no sampling, no
+    distribution assumption, nothing to tune. Plus two open-zip moms that pin the
+    `founding_earned` disjunct (one stamped, one not)."""
+    now = PopulationConfig().now
+    moms: list[Mom] = []
+
+    def _mk(uid: str, zip_code: str, engaged: bool, earned: bool = False) -> Mom:
+        return Mom(
+            user_id=uid,
+            home_zip=zip_code,
+            circles=[_parity_circle(uid, 0, "fitness", f"{uid}_place")] if engaged else [],
+            phone_verified_at=(now if engaged else None),
+            last_session_at=now,
+            affinities=frozenset(),
+            founding_earned_at=(now if earned else None),
+        )
+
+    # one member per cohort per reported bucket: 0 -> 0_invites, 1 -> 1_5_invites,
+    # 6 and 12 -> 6_plus_invites (two members there, so the bucket is not a single point).
+    VOLUMES = (0, 1, 6, 12)
+    for engaged in (True, False):
+        tag = "eng" if engaged else "un"
+        for v in VOLUMES:
+            moms.append(_mk(f"{tag}_{v:02d}", "Z_WARM", engaged=engaged))
+    # the invite EDGES: `filler_*` moms exist only to point their invited_by at an inviter.
+    # They live in an OPEN zip so they are ineligible themselves and cannot move any rate.
+    filler = 0
+    for engaged in (True, False):
+        tag = "eng" if engaged else "un"
+        for v in VOLUMES:
+            for _ in range(v):
+                moms.append(Mom(user_id=f"filler_{filler:03d}", home_zip="Z_OPEN", circles=[],
+                                phone_verified_at=None, last_session_at=None,
+                                invited_by=f"{tag}_{v:02d}"))
+                filler += 1
+    # the founding_earned disjunct, in an OPEN zip where the state test alone says "no":
+    moms.append(_mk("earned_after_open", "Z_OPEN", engaged=True, earned=True))
+    moms.append(_mk("unearned_after_open", "Z_OPEN", engaged=True, earned=False))
+
+    zip_states = {
+        # states are FIXED by construction (not recounted) so the fixture isolates exactly one
+        # axis — invite volume — from the verified-active count that would otherwise co-vary.
+        "Z_WARM": ZipState(zip_code="Z_WARM", unlock_state="warming", verified_active_count=4,
+                           unlock_threshold=10),
+        "Z_OPEN": ZipState(zip_code="Z_OPEN", unlock_state="open", verified_active_count=99,
+                           unlock_threshold=10, opened_at=PopulationConfig().now),
+    }
+    return moms, zip_states
+
+
+EligibleFn = Callable[[Mom, dict[str, ZipState]], bool]
+
+
+def check_founding_volume_invariance(
+    eligible_fn_for: Callable[[list[Mom]], EligibleFn] | None = None,
+) -> dict[str, Any]:
+    """§E.5/§I as a GATE: raw invite volume must never buy founding eligibility.
+
+    Three deterministic assertions over _founding_invariance_fixture():
+      (a) BY CONSTRUCTION — within an engagement cohort whose members differ only in invite
+          volume, the eligibility rate is identical in every volume bucket.
+      (b) ONE-SIDED COUNTERFACTUAL — re-run every mom after handing her 25 fresh invitees
+          (mutating ONLY the invite graph on a deep copy). No mom may FLIP ineligible→
+          eligible. One-sided on purpose: "volume must not confer founding" is the
+          anti-gaming property; a drop would be a different bug, and is reported separately
+          rather than gated, so this can never false-positive on an unrelated change.
+      (c) the `founding_earned` disjunct — an already-stamped mom stays eligible after her
+          area opens; an unstamped peer in the same open zip does not.
+
+    The seam is a FACTORY (population → predicate), not a bare predicate, so an injected
+    volume-sensitive implementation can re-read the invite graph of whichever world it is
+    handed — otherwise arm (b) could never fire and would be untestable. The real predicate
+    ignores the population argument entirely, which is the whole point."""
+    make_fn = eligible_fn_for or (lambda _population: is_founding_eligible)
+    population, zip_states = _founding_invariance_fixture()
+    fn = make_fn(population)
+
+    def _counts(pop: list[Mom]) -> dict[str, int]:
+        counts = {m.user_id: 0 for m in pop}
+        for m in pop:
+            if m.invited_by in counts:
+                counts[m.invited_by] += 1
+        return counts
+
+    invited = _counts(population)
+    cohorts: dict[str, dict[str, list[bool]]] = {"eng": {}, "un": {}}
+    for mom in population:
+        if not (mom.user_id.startswith("eng_") or mom.user_id.startswith("un_")):
+            continue
+        n = invited[mom.user_id]
+        bucket = "0_invites" if n == 0 else ("1_5_invites" if n <= 5 else "6_plus_invites")
+        cohorts[mom.user_id.split("_")[0]].setdefault(bucket, []).append(fn(mom, zip_states))
+
+    rates = {
+        cohort: {b: (sum(v) / len(v) if v else None) for b, v in buckets.items()}
+        for cohort, buckets in cohorts.items()
+    }
+    flat_by_construction = all(
+        len({r for r in buckets.values() if r is not None}) == 1 for buckets in rates.values()
+    )
+
+    # (b) counterfactual: 25 new invitees each, invite graph only.
+    flipped_on: list[str] = []
+    flipped_off: list[str] = []
+    for target in [m.user_id for m in population if not m.user_id.startswith("filler_")]:
+        boosted = copy.deepcopy(population)
+        for i in range(25):
+            boosted.append(Mom(user_id=f"boost_{target}_{i}", home_zip="Z_OPEN", circles=[],
+                               phone_verified_at=None, last_session_at=None,
+                               invited_by=target))
+        before = fn(next(m for m in population if m.user_id == target), zip_states)
+        after = make_fn(boosted)(next(m for m in boosted if m.user_id == target), zip_states)
+        if after and not before:
+            flipped_on.append(target)
+        elif before and not after:
+            flipped_off.append(target)
+
+    by_id = {m.user_id: m for m in population}
+    earned_disjunct = (
+        fn(by_id["earned_after_open"], zip_states) is True
+        and fn(by_id["unearned_after_open"], zip_states) is False
+    )
+
+    passed = flat_by_construction and not flipped_on and earned_disjunct
+    return {
+        "passed": passed,
+        "rate_by_bucket_by_cohort": rates,
+        "flipped_eligible_by_invite_volume": flipped_on,
+        "flipped_ineligible_by_invite_volume": flipped_off,  # reported, NOT gated (see docstring)
+        "founding_earned_disjunct_ok": earned_disjunct,
+        "acceptance": "§E.5/§I: founding eligibility is INVARIANT under invite volume — equal "
+                      "rates across volume buckets in a cohort that differs only in volume, no "
+                      "mom flips eligible after gaining 25 invitees, and an already-earned "
+                      "founding member stays eligible once her area opens",
     }
 
 
@@ -407,8 +681,12 @@ def run_one_config(
     activation_config: ActivationConfig,
     area_config: AreaStateConfig,
 ) -> dict[str, Any]:
-    population, adjacency = generate_population(pop_config)
-    backend = get_backend(zip_adjacency=adjacency)
+    gen = generate_population(pop_config)
+    population = gen.moms
+    # blocked_pairs threaded in so the population's blocks actually reach the matcher —
+    # accepting them on MatcherStub but never passing them (the previous shape) left a real
+    # SQL behaviour unmodelled AND untested.
+    backend = get_backend(zip_adjacency=gen.zip_adjacency, blocked_pairs=gen.blocked_pairs)
 
     zip_states = _build_zip_states(population, area_config, backend, pop_config.now)
 
@@ -416,9 +694,12 @@ def run_one_config(
         "match_coverage": measure_match_coverage(population, backend, scoring_config),
         "day_zero_floor": check_day_zero_floor(scoring_config),
         "onion_scoring_parity": measure_onion_scoring_parity(scoring_config),
+        "blocked_pair_exclusion": check_blocked_pair_exclusion(scoring_config),
         "founding_vs_invite_volume": measure_founding_vs_invite_volume(population, zip_states, area_config),
+        "founding_volume_invariance": check_founding_volume_invariance(),
         "disclosure_correctness": check_disclosure_correctness(population, backend),
         "circle_activation": measure_circle_activation(population, backend, activation_config),
+        "n_blocked_pairs": len(gen.blocked_pairs),
         "zip_states_summary": {z: s.unlock_state for z, s in zip_states.items()},
     }
 
@@ -553,19 +834,32 @@ def render_report(sweep_results: dict[str, Any]) -> str:
     lines.append("correctness verdict — no real population data exists yet to calibrate against.")
     lines.append("")
 
-    lines.append("## Acceptance checks (pass/fail against Master spec §C.4/§F.3 + rev-2 onion parity)")
+    lines.append("## Acceptance checks (pass/fail against Master spec §C.4/§E.5/§F.3 + rev-2 onion parity)")
     dz = sweep_results["baseline"]["day_zero_floor"]
     dc = sweep_results["baseline"]["disclosure_correctness"]
     op = sweep_results["baseline"]["onion_scoring_parity"]
+    bp = sweep_results["baseline"]["blocked_pair_exclusion"]
+    fi = sweep_results["baseline"]["founding_volume_invariance"]
     lines.append(f"- Onion scoring parity (rev-2 §C): {'PASS' if op['passed'] else 'FAIL'} — "
-                 f"stub mirrors the deployed algorithm (MAX-not-sum circle bonus, confirmed+grounded "
-                 f"only, order score desc/nickname asc, clamp [1,50], concept dormancy toggle)")
+                 f"stub mirrors the deployed algorithm (MAX-not-sum circle bonus, split component "
+                 f"columns, confirmed+grounded only, clamp [1,50], concept dormancy toggle)")
     if not op["passed"]:
         failed = [k for k, v in op["checks"].items() if not v and k != "all_passed"]
         lines.append(f"    - failing sub-checks: {failed}")
     lines.append(f"- Day-zero floor (§C.4): {'PASS' if dz['passed'] else 'FAIL'} — {dz['candidates']}")
+    lines.append(f"- Blocked-pair exclusion (§C): {'PASS' if bp['passed'] else 'FAIL'} — "
+                 f"blocked peer dropped from both directions, control pair scored "
+                 f"{bp['control_scores'].get('blocked_peer')} unblocked")
+    if not bp["passed"]:
+        lines.append(f"    - failing sub-checks: {[k for k, v in bp['checks'].items() if not v and k != 'all_passed']}")
+    lines.append(f"- Founding invariance under invite volume (§E.5/§I): {'PASS' if fi['passed'] else 'FAIL'} — "
+                 f"rates by bucket {fi['rate_by_bucket_by_cohort']}, "
+                 f"flipped-eligible-by-volume: {fi['flipped_eligible_by_invite_volume'] or 'none'}")
     lines.append(f"- Disclosure correctness (§F.3): {'PASS' if dc['passed'] else 'FAIL'} — "
                  f"{dc['leaks_at_stranger_tier']}/{dc['circles_checked']} circles leaked place info at stranger tier")
+    lines.append("")
+    lines.append(f"Blocked pairs in the baseline population: "
+                 f"{sweep_results['baseline']['n_blocked_pairs']} (excluded from match coverage).")
     lines.append("")
 
     lines.append("## Match coverage across the sweep")
@@ -603,6 +897,10 @@ def render_report(sweep_results: dict[str, Any]) -> str:
     lines.append("")
 
     lines.append("## Founding-eligibility rate by own invite-count bucket (baseline config)")
+    lines.append("DESCRIPTIVE — the sampled population is not a sound pass/fail signal here (the")
+    lines.append("fixture degrades spam RECRUITS but not spam INVITERS, so the high-volume bucket is")
+    lines.append("ordinary moms). The enforced §E.5 property is the by-construction invariance check")
+    lines.append("in the acceptance section above.")
     fbucket = sweep_results["baseline"]["founding_vs_invite_volume"]
     lines.append("| bucket | n | founding-eligible rate |")
     lines.append("|---|---|---|")
@@ -649,9 +947,11 @@ def render_report(sweep_results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="smaller population, fewer sweep points")
+    parser.add_argument("--no-gate", action="store_true",
+                        help="report only; do not exit non-zero on an acceptance-check failure")
     args = parser.parse_args()
 
     results = run_sweep(quick=args.quick)
@@ -663,6 +963,26 @@ def main() -> None:
     print(report)
     print(f"\n[sweep] report written to {report_path}")
 
+    # GATE: the acceptance checks must actually decide the exit code. Previously main() rendered
+    # "FAIL" into the report and still exited 0, so a broken parity/floor/disclosure check could
+    # never fail a caller or CI — a gate that cannot fail is not a gate.
+    # run_sweep returns {config_label: {measurement: result}}; "baseline" is the default config.
+    # Every gate here is MECHANICAL with ground truth known by construction — see selftest.py,
+    # which plants a violation in each one and asserts it fires.
+    baseline = (results or {}).get("baseline") or {}
+    gates = {name: (baseline.get(name) or {}) for name in GATE_CHECKS}
+    # FAIL CLOSED: a gate that went missing, returned {} or crashed into a partial result is a
+    # FAILURE, not a pass. `passed is False` would have let a renamed/dropped measurement quietly
+    # stop gating — the exact vacuity this suite exists to prevent.
+    failed = [name for name, g in gates.items() if g.get("passed") is not True]
+    if failed:
+        print(f"\n[sweep] ACCEPTANCE FAILURE: {', '.join(failed)}")
+        if not args.no_gate:
+            return 1
+    else:
+        print("[sweep] acceptance checks passed")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

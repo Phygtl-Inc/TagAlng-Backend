@@ -22,13 +22,22 @@ class Backend:
     activation: CircleActivationPort
 
 
-def get_backend(zip_adjacency: dict[str, set[str]] | None = None) -> Backend:
+def get_backend(
+    zip_adjacency: dict[str, set[str]] | None = None,
+    blocked_pairs: set[frozenset[str]] | None = None,
+) -> Backend:
+    """`blocked_pairs` is the harness stand-in for `user_blocks` / `lana_is_blocked` — the
+    real matcher drops blocked peers on BOTH scoring arms (migration 20260914120000:76,:113)
+    and the predicate is symmetric, so pairs are UNORDERED frozensets. It is threaded through
+    here (not just accepted by MatcherStub) because otherwise nothing could ever exercise the
+    exclusion: population.py generates the pairs, run_one_config passes them in. LIVE ignores
+    it — the DB holds the real blocks."""
     kind = os.environ.get("SIM_BACKEND", "stub").strip().lower()
     if kind == "stub":
         from stub_impl import AreaStateStub, CircleActivationStub, DisclosureStub, MatcherStub
 
         return Backend(
-            matcher=MatcherStub(zip_adjacency=zip_adjacency),
+            matcher=MatcherStub(zip_adjacency=zip_adjacency, blocked_pairs=blocked_pairs),
             disclosure=DisclosureStub(),
             area_state=AreaStateStub(),
             activation=CircleActivationStub(),
