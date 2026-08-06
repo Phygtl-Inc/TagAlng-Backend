@@ -117,7 +117,24 @@ def _forced_slots_for_kind(
     return slots
 
 
-def _wire_ask_gap_action(action: Any) -> None:
+def _close_dangling_lead_in(utterance: str) -> str:
+    """Make a lead-in written to be continued stand on its own.
+
+    An `ask_gap` utterance is deliberately unfinished — the vetted question gets
+    appended to it. When that append does not happen, the trailing connector is
+    all the person sees: "Italian pizza's a good one —". Trim the connector and
+    terminate the sentence; a slightly flat line beats a fragment.
+    """
+    text = str(utterance or "").strip()
+    if not text:
+        return text
+    text = re.sub(r"[\s]*[—–\-:;,]+$", "", text).strip()
+    if text and text[-1] not in ".!?…" and not text.endswith(("؟", "？")):
+        text += "."
+    return text
+
+
+def _wire_ask_gap_action(action: Any, *, user_id: str | None = None) -> None:
     """Hold a policy `ask_gap` to the question that was actually vetted.
 
     Rapport questions are written by app/rapport_synth.py under a real quality
@@ -153,11 +170,83 @@ def _wire_ask_gap_action(action: Any) -> None:
         action.kind = "reply"
         action.goal_id = None
         action.chips = []
+        # The model wrote a LEAD-IN, expecting the stored question to be appended.
+        # Shipping it as-is sent "Italian pizza's a good one —" and nothing else
+        # (2026-08-06). Whatever the reason a gap fails to resolve, the person must
+        # still receive a whole sentence.
+        action.utterance = _close_dangling_lead_in(action.utterance)
         return
     action.utterance = _merge_vetted_question(str(action.utterance or ""), question)
+    _promote_grounding_gap(action, row, user_id=user_id)
     from app.rapport_gaps import mark_chat_asked
 
     mark_chat_asked(str(row.get("gap_row_id") or ""))
+
+
+def _close_reused_gap_question(action: Any, *, user_id: str | None) -> None:
+    """Catch a queued question asked as a plain `reply`.
+
+    _wire_ask_gap_action stamps chat_asked_at only for kind='ask_gap'. The policy
+    can (and does) ask a queued question while returning kind='reply' with
+    goal_id null, which stamped nothing — so the gap stayed offerable and the
+    home tile re-served the SAME question minutes after the user answered it in
+    chat. Keyed on what the user actually read, so the label the model chose
+    cannot decide whether the ask counted.
+    """
+    if not user_id or getattr(action, "kind", None) == "ask_gap":
+        return  # ask_gap already stamped its own row
+    try:
+        from app.rapport_gaps import mark_chat_asked_if_reused
+
+        mark_chat_asked_if_reused(user_id, str(getattr(action, "utterance", "") or ""))
+    except Exception:  # noqa: BLE001 — bookkeeping must never break a turn
+        logging.getLogger(__name__).exception("rapport_reused_gap_stamp_failed")
+
+
+def _promote_grounding_gap(action: Any, row: dict[str, Any], *, user_id: str | None) -> None:
+    """A gap with an `affiliation_ref` is a PLACE-grounding ask, so it must go out as
+    `ground_place`, not `ask_gap`.
+
+    The two kinds are wired differently: `ask_gap` only pastes vetted text, while
+    `ground_place` also fetches real map candidates and arms rapport_grounding, which
+    is what routes the answer into handle_grounding_confirmation → ground_and_confirm.
+    Asked as an `ask_gap`, "which spot do you play violin at?" reached the user with no
+    chips and nothing armed, so naming the place pinned nothing and no community was
+    ever created (dev QA 2026-08-05, the flute/violin turn).
+
+    Deterministic on purpose: which kind carries a place ask is a structural
+    invariant, not a judgement call the policy should be able to get wrong.
+    _wire_ground_place_action resolves the affiliation from a `circle:<key>` goal_id,
+    so the goal_id is rewritten to match. Anything unresolvable is left as an
+    `ask_gap` — a plain question is a worse turn, never a broken one.
+    """
+    aff_id = str(row.get("affiliation_ref") or "").strip()
+    if not aff_id or not user_id:
+        return
+    try:
+        from app.auth import service_client
+
+        res = (
+            service_client()
+            .table("circle_affiliations")
+            .select("circle_key, place_ref")
+            .eq("id", aff_id)
+            .eq("user_id", user_id)
+            .is_("place_ref", "null")
+            .limit(1)
+            .execute()
+        )
+        key = str(((res.data or [{}])[0] or {}).get("circle_key") or "").strip()
+    except Exception:  # noqa: BLE001 — promotion is an upgrade; the ask still goes out
+        logging.getLogger(__name__).exception("grounding_gap_promote_failed aff=%s", aff_id)
+        return
+    if not key:
+        return  # grounded or dismissed since the gap opened — nothing to pin
+    action.kind = "ground_place"
+    action.goal_id = f"circle:{key}"
+    logging.getLogger(__name__).info(
+        "ask_gap_promoted_to_ground_place aff=%s key=%s", aff_id, key
+    )
 
 
 def _merge_vetted_question(utterance: str, question: str) -> str:
@@ -178,9 +267,20 @@ def _merge_vetted_question(utterance: str, question: str) -> str:
             head = head.split(mark, 1)[0]
             # Drop the truncated interrogative clause, keep the sentences before it.
             parts = re.split(r"(?<=[.!…])\s+", head.strip())
-            head = " ".join(parts[:-1]) if len(parts) > 1 else ""
+            if len(parts) > 1:
+                head = " ".join(parts[:-1])
+            else:
+                # No sentence break at all. A natural lead-in is joined to the
+                # question by a CONNECTOR, not a full stop ("Italian pizza's a good
+                # one — any favorite spots?"), so the sentence split saw one part
+                # and discarded the acknowledgement along with the question: the
+                # person got a bare "Any favorite local spots for Italian pizza?"
+                # with nothing about what they had just said (2026-08-06). Cut at
+                # the LAST connector so "Got it, Asjid — …" keeps the name.
+                cut = re.match(r"^(.{3,})\s*[—–:;,]\s*\S", head.strip())
+                head = cut.group(1) if cut else ""
             break
-    head = head.strip()
+    head = _close_dangling_lead_in(head.strip())
     return f"{head} {question}".strip() if head else question
 
 
@@ -273,6 +373,7 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
         "rapport_active", "rapport_answer",
         "rapport_followup_question", "rapport_followup_count", "rapport_reply",
         "rapport_offer_pending", "rapport_pending_action", "rapport_grounding",
+        "rapport_place_ask",
     ):
         session_ctx[k] = None
 
@@ -364,8 +465,10 @@ def _policy_rapport_reply(
     if action is None or action.kind == "handoff":
         return None
     # Before the bookkeeping below: this can downgrade ask_gap -> reply, and a
-    # downgraded turn must not count against the ask streak or park a goal.
-    _wire_ask_gap_action(action)
+    # downgraded turn must not count against the ask streak or park a goal. It can
+    # also promote a place-grounding gap to ground_place, which line 381 then wires.
+    _wire_ask_gap_action(action, user_id=user_id)
+    _close_reused_gap_question(action, user_id=user_id)
     apply_defer(session_ctx, action)
     note_ask_streak(session_ctx, action)
     audit_decision(
@@ -1235,6 +1338,9 @@ def run_lana_unified_pipeline(
             abandon = False
             release = False
             if not matched:
+                # Tells the classifier this ask's answer becomes a Places query, so
+                # "nowhere in particular" is an answer to close on, not a query.
+                session_ctx["rapport_place_ask"] = True
                 rap_slots = discovery_slots_for_turn(
                     session_ctx,
                     user_message,
@@ -1428,6 +1534,9 @@ def run_lana_unified_pipeline(
                         f"{tile_q} (offered place options: {opt_names})"
                         if opt_names else tile_q
                     )
+                # Same as the confirmation path: this ask's answer feeds a Places
+                # search, so a "there is no place" reply must close, not search.
+                session_ctx["rapport_place_ask"] = True
                 rap_slots = discovery_slots_for_turn(
                     session_ctx,
                     user_message,
@@ -1480,7 +1589,19 @@ def run_lana_unified_pipeline(
         saved_label: str | None = None
         saved_bucket: str | None = None
         try:
-            res = try_upsert_claims_from_message(user_id, user_message, allow_rapport_gap=False)
+            # The tile question is what this message is answering — hand it over so a
+            # bare answer ("Orlando", "Fitness CF") can't be mistaken for a new name.
+            res = try_upsert_claims_from_message(
+                user_id,
+                user_message,
+                allow_rapport_gap=False,
+                asked_question=question or None,
+            )
+            if res.nickname_changed_from and res.nickname:
+                session_ctx["nickname_changed"] = {
+                    "from": res.nickname_changed_from,
+                    "to": res.nickname,
+                }
             saved_any = res.saved > 0
             if saved_any:
                 claim_id = latest_claim_id(user_id)
@@ -1843,8 +1964,31 @@ def run_lana_unified_pipeline(
             logging.getLogger(__name__).exception("decide_shadow_spawn_failed")
     elif (
         _decide_mode == "on"
-        and phone_verified
+        # NOT gated on verification. It was, and an unverified person therefore
+        # got a completely different, much worse Lana — no offers, no chips, and
+        # none of the guards (prod 2026-08-06: "I like italian food" -> "Hope you
+        # find some great local spots to enjoy", a dead end telling them to go do
+        # it themselves while looking.tip sat available; "I like to play baseball
+        # regularly" -> a compliment and nothing else). That is the FIRST
+        # impression — the turn that decides whether someone signs up at all — so
+        # it was the worst possible place to run the weaker path.
+        # Nothing is over-promised by letting the policy speak here: what may be
+        # offered is decided by capability required_state (capabilities_available
+        # filters on the user's real states, and `verified` is one of them), and
+        # onboarding turns are still excluded by routing_phase below, so the
+        # policy cannot talk over the name / ZIP / verify gates.
+        and user_id
         and str(session_ctx.get("routing_phase") or "") in ("", "listening")
+        # A verification handshake is in flight (we asked for their email / code /
+        # ZIP to finish something they already requested). Those turns carry
+        # multi-turn state the auth engine owns — the ask being resumed, the phase,
+        # the active intent — and the policy speaking mid-handshake loses it: an
+        # email typed at the gate came back as `collect_zip` with active_intent
+        # reset to discovery.find_peers and the tip ask gone (2026-08-06).
+        # routing_phase alone does not cover this: the FIRST turn of the handshake
+        # still reads "listening".
+        and not session_ctx.get("requires_phone_verification")
+        and not session_ctx.get("pending_signup_gate")
         and not session_ctx.get("event_host_active")
         and not session_ctx.get("pending_confirmation")
         # A concrete engine offer is armed and this reply answers it: "want me to ask your
@@ -1893,8 +2037,10 @@ def run_lana_unified_pipeline(
                 history=history, user_message=user_message,
             )
         if _action is not None and _action.kind != "handoff":
-            # Ahead of the bookkeeping: may downgrade ask_gap -> reply.
-            _wire_ask_gap_action(_action)
+            # Ahead of the bookkeeping: may downgrade ask_gap -> reply, or promote
+            # it to ground_place so _wire_ground_place_action below arms the rails.
+            _wire_ask_gap_action(_action, user_id=user_id)
+            _close_reused_gap_question(_action, user_id=user_id)
             apply_defer(session_ctx, _action)
             note_ask_streak(session_ctx, _action)
             audit_decision(

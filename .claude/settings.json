@@ -56,10 +56,19 @@
       "Bash(npx prettier *)",
       "Bash(timeout 300 .venv/bin/python -m pytest --collect-only -q)",
       "Bash(timeout 420 .venv/bin/python -m pytest tests/ -q -x -p no:randomly)",
-      "Bash(timeout 600 .venv/bin/python -m pytest tests/ -q -p no:randomly)"
+      "Bash(timeout 600 .venv/bin/python -m pytest tests/ -q -p no:randomly)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest -q)",
+      "Bash(/Users/dev/Downloads/TagAlng-backend/.venv_lana_worker/bin/python -m pytest -q)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_claim_followup.py::TestPersistIdentityFromMessage -q)",
+      "Bash(/bin/zsh -c 'command -v node')",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_claim_followup.py::TestPersistIdentityFromMessage::test_verify_gate_without_user -q)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest -q 2>&1 | grep ^FAILED | sed 's/ - .*//' | sort > /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt; comm -13 /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/base.txt /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt; echo \"--- totals\"; tail -1 /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt >/dev/null; ../../.venv_lana_worker/bin/python -m pytest -q 2>&1 | tail -2)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_unshipped_capability_not_offered.py -q)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_ask_streak_counts_questions.py -q)"
     ],
     "additionalDirectories": [
-      "/Users/dev/Downloads/TagAlng-backend/supabase/migrations"
+      "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",
+      "/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad"
     ]
   }
 }

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -6,6 +7,8 @@ from fastapi import HTTPException
 from app.auth import service_client
 
 from app.turn_surfaces import TURN_SCOPED_SURFACES
+
+logger = logging.getLogger(__name__)
 
 # Keys set to None in a turn ctx are removed from persisted session (shallow merge otherwise keeps stale values).
 _INTRO_STATE_NULL_DELETES = frozenset({
@@ -234,6 +237,78 @@ def pop_pending_signal_ask(user_id: str) -> dict[str, Any] | None:
         return ask if isinstance(ask, dict) and ask else None
     except Exception:
         return None
+
+
+def stash_login_carry(user_id: str, carry: dict[str, Any]) -> None:
+    """Hold a guest's in-flight work for the account they are logging into.
+
+    Written while the caller is still the GUEST, against the destination account —
+    so it is service-role only, like the sibling stash tables. Best-effort: losing
+    the stash costs the user a repeat, breaking the verify turn costs them the login.
+    """
+    if not user_id or not isinstance(carry, dict) or not carry:
+        return
+    try:
+        service_client().table("pending_login_carry").upsert(
+            {
+                "user_id": user_id,
+                "carry": carry,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="user_id",
+        ).execute()
+    except Exception:
+        # Still swallowed — a bookkeeping failure must never break someone's login.
+        # But LOUDLY: silent-and-unlogged meant an unpushed migration
+        # (20261007120000_pending_login_carry) looked exactly like the bug this
+        # stash exists to fix, and was only found by hitting it again.
+        logger.warning(
+            "stash_login_carry failed for %s — in-flight work will be lost on login "
+            "(is 20261007120000_pending_login_carry pushed?); keys=%s",
+            user_id,
+            sorted(carry),
+            exc_info=True,
+        )
+        return
+
+
+def pop_login_carry(user_id: str) -> dict[str, Any]:
+    """Read and delete the carried context (one-shot). {} when nothing waits.
+
+    A day-old stash is ignored rather than applied: it belongs to a conversation
+    the person has long left, and resuming it then would be eerie, not helpful.
+    """
+    if not user_id:
+        return {}
+    try:
+        sb = service_client()
+        res = (
+            sb.table("pending_login_carry")
+            .select("carry, created_at")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [None])[0]
+        if not isinstance(row, dict):
+            return {}
+        sb.table("pending_login_carry").delete().eq("user_id", user_id).execute()
+        carry = row.get("carry")
+        if not isinstance(carry, dict) or not carry:
+            return {}
+        raw_ts = str(row.get("created_at") or "")
+        if raw_ts:
+            try:
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(
+                    raw_ts.replace("Z", "+00:00")
+                )
+                if age.total_seconds() > 24 * 3600:
+                    return {}
+            except ValueError:
+                pass
+        return carry
+    except Exception:
+        return {}
 
 
 def merge_session_context(

@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.auth import service_client
@@ -266,7 +267,17 @@ def reconcile_gaps(user_id: str, message_id: str | None = None) -> None:
 
 
 def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
-    """Fetch a gap row's identifying fields (for persisting its answer as a claim)."""
+    """Fetch a gap row's identifying fields, INCLUDING its question.
+
+    `question` was missing from this select for as long as
+    _wire_ask_gap_action has relied on it, and that function treats a row with no
+    question as "nothing vetted this" — so EVERY ask_gap silently downgraded to
+    `reply`, the stored question was never substituted, and mark_chat_asked never
+    ran (it sits after that early return). The model writes a lead-in expecting the
+    system to append the question, so the person received a dangling fragment:
+    "Italian pizza's a good one —" and nothing else (2026-08-06). Two of the
+    rapport bugs chased today were downstream of this one line.
+    """
     if not gap_row_id:
         return None
     try:
@@ -274,7 +285,7 @@ def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
             service_client()
             .table("rapport_gaps")
             .select(
-                "gap_row_id, gap_id, covers_concept, parent_bucket, why_frame, "
+                "gap_row_id, gap_id, question, covers_concept, parent_bucket, why_frame, "
                 "place_ref, affiliation_ref, grounding_options"
             )
             .eq("gap_row_id", gap_row_id)
@@ -334,6 +345,72 @@ def mark_chat_asked(gap_row_id: str) -> None:
         # Pre-20260928 environments have no chat_asked_at. Never fail the turn
         # over bookkeeping — worst case the gap stays askable, as it does today.
         logger.warning("rapport: mark_chat_asked failed for %s", gap_row_id, exc_info=True)
+
+
+def _normalize_question(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", str(text or "").casefold()).strip()
+
+
+def _trailing_question(utterance: str) -> str:
+    """The question Lana actually ended on. Her replies are warm-up + question
+    ("You really do love their pizza! Out of curiosity, is there a favorite
+    dish…?"), so the lead-in must not dilute the comparison."""
+    parts = [p for p in re.split(r"(?<=[.!?])\s+", str(utterance or "").strip()) if p]
+    for part in reversed(parts):
+        if part.rstrip().endswith("?"):
+            return part
+    return parts[-1] if parts else ""
+
+
+def mark_chat_asked_if_reused(user_id: str, utterance: str) -> str | None:
+    """Stamp a queued gap that this reply asked WITHOUT declaring itself an ask_gap.
+
+    mark_chat_asked only ever ran for kind='ask_gap'. The policy can ask a queued
+    question as a plain `reply` with goal_id null — it did exactly that twice in a
+    row (prod 2026-08-05 21:30:42 and 21:31:05, its own `why` naming "the queued
+    question about their favorite dish at The Piazza Italia"). Nothing stamped, so
+    the gap stayed offerable and the home tile served the SAME question six
+    minutes later, after the user had already answered it in chat.
+
+    So the stamp is keyed on what the user actually READ, not on the label the
+    model chose to attach. Verbatim reuse is caught by containment; a reworded ask
+    by ratio on the trailing question only.
+    """
+    if not user_id or not str(utterance or "").strip():
+        return None
+    asked_norm = _normalize_question(utterance)
+    tail_norm = _normalize_question(_trailing_question(utterance))
+    if not asked_norm:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id, question, chat_asked_at, answered_at")
+            .eq("user_id", user_id)
+            .eq("status", "open")
+            .limit(40)
+            .execute()
+        )
+        rows = [r for r in (res.data or []) if isinstance(r, dict)]
+    except Exception:
+        logger.warning("rapport: mark_chat_asked_if_reused lookup failed", exc_info=True)
+        return None
+    for row in rows:
+        if row.get("chat_asked_at") or row.get("answered_at"):
+            continue
+        q = _normalize_question(row.get("question"))
+        if len(q) < 12:
+            continue
+        hit = q in asked_norm
+        if not hit and tail_norm:
+            hit = SequenceMatcher(None, q, tail_norm).ratio() >= 0.7
+        if hit:
+            gid = str(row.get("gap_row_id") or "")
+            mark_chat_asked(gid)
+            logger.info("rapport: chat_asked stamped from a non-ask_gap turn %s", gid)
+            return gid
+    return None
 
 
 def record_skip(gap_row_id: str) -> None:

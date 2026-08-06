@@ -1360,6 +1360,36 @@ def create_lana_session(
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
                     is_anonymous=auth.is_anonymous, needs_name=_needs_name
                 )
+                # Anything else the guest had in flight before logging into this
+                # account (a recommendation ask, a community join, a drafted ask).
+                # Restoring the keys is enough: the post-verify resume paths already
+                # act on them — they just never survived the session reset. Named in
+                # the greeting so it is visibly not forgotten (prod 2026-08-06: an
+                # Italian-restaurant ask became "how can I help you today?").
+                if not auth.is_anonymous:
+                    from app.db import pop_login_carry
+                    from app.login_carry import describe as describe_carry
+
+                    _carry = pop_login_carry(auth.user_id)
+                    if _carry:
+                        session_ctx = {**session_ctx, **_carry}
+                        _waiting = describe_carry(_carry)
+                        if _waiting and not _needs_name:
+                            opening = compose_reply(
+                                goal=(
+                                    "Greet them back after signing in and say you still "
+                                    "have the thing they asked for before verifying, "
+                                    "naming it in their own words. Invite them to say the "
+                                    "word and you'll pick it straight back up. Do not "
+                                    "re-ask what they already told you."
+                                ),
+                                facts=[f"What they asked for: {_waiting}"],
+                                fallback=(
+                                    f"You're in — I still have **{_waiting}** on the go. "
+                                    "Say the word and I'll pick it right back up."
+                                ),
+                                max_sentences=2,
+                            )
                 draft_raw = None
                 use_orch = False
         elif use_orch:
@@ -1537,7 +1567,12 @@ def _run_lana_message(
     session_ctx_in["user_role"] = auth.role
     session_ctx_in["user_grammatical_gender"] = auth.grammatical_gender
     set_address_context(auth.role, auth.grammatical_gender)
+    # A rename announcement is worth exactly one turn. Cleared with None, never
+    # popped — a popped key gets resurrected by the stored-context merge and Lana
+    # would re-announce the same name change on every later turn.
+    session_ctx_in["nickname_changed"] = None
     if purpose in ("lana", "profile_intake"):
+        # Fill-only fallback: this cannot rename anyone (see persist_nickname_if_stated).
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
     # Deterministic entry into the in-chat event-host flow — from the "A meet to host"
@@ -3370,8 +3405,23 @@ def post_rapport_record_answer(
     if text:
         # Extract claims from the answer (no per-message rapport gap — the coverage synth owns
         # tile questions), then reconcile any now-covered gaps.
+        # The tile question this text answers. Without it the extractor sees only
+        # the bare answer, so "Pizza Mortadella" produced the follow-up "is there
+        # a local spot where you usually order mortadella pizza?" — the question
+        # it was answering had already named the place (prod 2026-08-05).
+        _asked = None
+        try:
+            from app.rapport_gaps import get_gap_row
+
+            _asked = str((get_gap_row(body.gap_row_id) or {}).get("question") or "") or None
+        except Exception:  # noqa: BLE001 — context is a bonus, never a blocker
+            logger.debug("rapport: gap question lookup failed for asked_question")
         res = try_upsert_claims_from_message(
-            auth.user_id, text, message_id=body.message_id, allow_rapport_gap=False
+            auth.user_id,
+            text,
+            message_id=body.message_id,
+            allow_rapport_gap=False,
+            asked_question=_asked,
         )
         saved = res.saved
         rapport_reconcile_gaps(auth.user_id, body.message_id)
