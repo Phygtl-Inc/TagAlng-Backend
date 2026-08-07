@@ -246,19 +246,41 @@ def discovery_zip_gate(user_id: str | None, *, surface: str) -> dict[str, Any] |
     }
 
 
-def gate_framing_facts(frame: dict[str, Any]) -> list[str]:
+def gate_framing_facts(
+    frame: dict[str, Any], *, neighbors_found: int | None = None
+) -> list[str]:
     """Compose-ready facts about the user's not-yet-open area, for AI-authored
-    empty states. Lingo-clean: 'your area', never 'block'/'ZIP <n>' in copy."""
+    empty states. Lingo-clean: 'your area', never 'block'/'ZIP <n>' in copy.
+
+    Says NOTHING about how many people are around unless the caller measured it.
+    `verified_active_count` counts people who cleared the introductions bar
+    (verified + active in 30d + a confirmed circle or accepted intro) — it is not
+    a population. Prod 2026-08-07: 32827 was 'warming 3/10' with 11 signups and 9
+    verified in it, and 94404 was 'closed 0/10' with 2 verified in it. Copy built
+    off that number asserted an emptiness nobody ever measured, which is exactly
+    what this function used to lead with.
+
+    neighbors_found — how many real neighbors the caller's search returned. None
+    means the surface didn't look (browse, which is asking about events), so no
+    supply claim is made at all.
+    """
     count = int(frame.get("count") or 0)
     threshold = frame.get("threshold")
-    facts = [
-        "Their area is still coming alive — not enough verified neighbors have "
-        "joined yet for full discovery.",
-    ]
+    facts: list[str] = []
+    if neighbors_found == 0:
+        facts.append(
+            "Their search turned up nobody nearby — say that plainly, no hedging."
+        )
+    elif neighbors_found:
+        facts.append(
+            f"Their search DID find {neighbors_found} nearby — never suggest the "
+            "area is empty or that there is nobody around."
+        )
     if threshold:
         facts.append(
-            f"Progress: {count} of {threshold} neighbors so far. Never call it a "
-            "waitlist or quota — frame it as their area waking up."
+            f"Introductions unlock at {count} of {threshold}. That counts people "
+            "who confirmed a community, NOT how many live here — never use it to "
+            "describe how many people are around. Never call it a waitlist or quota."
         )
     facts.append(
         "The genuinely useful move: they can host something or bring their own "

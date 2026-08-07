@@ -2001,6 +2001,26 @@ def run_lana_unified_pipeline(
         # Regex unsafe backstop stays ahead of the policy — safety turns belong
         # to the legacy rails (the policy prompt also hands them off, belt+braces).
         and not _utterance_is_unsafe_backstop(user_message)
+        # Auth actions are never the policy's turn. "sign out" got an AI-composed
+        # goodbye ("All set — take care, Asjid.") and no auth_action, so
+        # derive_ui_intent never returned sign_out, the FE never rendered the
+        # confirm, and nobody was signed out — and because `await_logout` is armed
+        # by the handler that never ran, saying it again just loops.
+        #
+        # A REGRESSION FROM ENABLING THIS GATE, not from anything auth-side:
+        # before 2fb311a (2026-07-30) `_utterance_is_unsafe_backstop` returned the
+        # raw (matched, kind) tuple, always truthy, so this whole branch was dead
+        # and the legacy engines answered every typed turn. Fixing that exposed
+        # every action intent lacking an escape here (cf. the tip-ask escape
+        # below, same fallout).
+        #
+        # LOGOUT ONLY, deliberately. `guest_login.wants_login` is the mirror
+        # matcher but carries a bare `\blogin\b`, so it fires on "my login for
+        # the gym app broke" — putting it in this gate would hand ordinary chat
+        # to the auth engine, trading this bug for a worse one. Login has the
+        # same structural exposure and needs a tighter matcher before it can be
+        # escaped here; see test_auth_turns_kept_off_policy.
+        and not looks_like_logout(user_message)
         # A tapped LEGACY chip is an engine command ("Widen the search") — never
         # the policy's turn. Taps on the policy's own chips stay with the policy.
         and not (

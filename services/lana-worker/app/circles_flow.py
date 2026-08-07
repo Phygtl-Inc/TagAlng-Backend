@@ -327,13 +327,42 @@ def ground_options(
     typed = (query or "").strip()
     named = typed or _resolve_place_name(user_id, affiliation)
 
-    def _search(text: str, *, radius: float | None = None) -> list[dict[str, Any]]:
+    # The circle's OWN words beat the coarse type keyword. circle_type is a bucket
+    # of ~10 values, so "fitness" searched "gym" for EVERY sport: a
+    # table_tennis_group was offered three gyms (2026-08-06), and futsal, swimming
+    # and climbing would each get the same. Use what the user actually said.
+    own_words = str(affiliation.get("circle_key") or "").replace("_", " ").strip()
+    # Drop the words that describe the PERSON or the grouping rather than the
+    # place: "church_attendee" -> "church", "table_tennis_group" -> "table tennis".
+    own_words = re.sub(
+        r"\b(group|team|crew|member|attendee|goer|lover|fan|participant|visitor|"
+        r"enthusiast|athlete|player)s?\b",
+        "",
+        own_words,
+    ).strip()
+    own_words = re.sub(r"\s+", " ", own_words)
+    # Used ALONE, never concatenated with the type keyword — joining them produced
+    # "church attendee church mosque synagogue temple", which matches nothing.
+    if own_words and own_words != keyword:
+        keyword = own_words
+        # includedType is derived from that same coarse bucket, so it FILTERS OUT
+        # the very venue we now search for — a table-tennis hall is not a "gym".
+        # Dropping it widens to what the words describe.
+        included_type = None
+
+    # A typed search is someone looking around, so give them more than the three
+    # chips a suggestion row shows.
+    _limit = 6 if typed else 3
+
+    def _search(
+        text: str, *, radius: float | None = None, restrict: bool = True, limit: int = 3
+    ) -> list[dict[str, Any]]:
         rows = search_places(
             query=text,
             block_id=block_id,
             user_id=user_id,
-            limit=3,
-            included_type=included_type,
+            limit=limit,
+            included_type=included_type if restrict else None,
             **({"radius": radius} if radius else {}),
         )
         return [
@@ -348,15 +377,31 @@ def ground_options(
         ]
 
     if named:
-        hits = [o for o in _search(named) if _name_hit(named, o["name"])]
+        # A TYPED search is the person being specific, so it is never narrowed by
+        # the circle's coarse type — searching "table tennis hall" with
+        # includedType=gym matched nothing and the box looked broken (2026-08-06).
+        _restrict = not typed
+        # _name_hit stays on for a typed query too: typing "Fitness CF" must not
+        # come back as "Crunch Fitness" — a near-miss silently pins someone to a
+        # place they never said (the 2026-08-03 bug, and the reason
+        # test_typed_search_never_falls_back_to_nearby_spots asserts []). What was
+        # wrong was the includedType above, which narrowed a typed search to the
+        # circle's coarse bucket so "table tennis" could only ever match a "gym".
+        def _keep(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [o for o in rows if _name_hit(named, o["name"])]
+
+        hits = _keep(_search(named, restrict=_restrict, limit=_limit))
         if not hits:
             # Nothing by that name in the neighbourhood — widen once before
             # doubting them. Chains and clubs are routinely a few towns out.
-            hits = [
-                o
-                for o in _search(named, radius=_WIDE_SEARCH_RADIUS_M)
-                if _name_hit(named, o["name"])
-            ]
+            hits = _keep(
+                _search(
+                    named,
+                    radius=_WIDE_SEARCH_RADIUS_M,
+                    restrict=_restrict,
+                    limit=_limit,
+                )
+            )
         if hits or typed:
             return hits
         # Named, but not findable on the map. Keyword results ride along as

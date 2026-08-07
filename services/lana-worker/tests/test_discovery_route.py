@@ -2732,22 +2732,24 @@ class TestLoginPivotSignupOrigin(unittest.TestCase):
 
 
 class TestPeersSupplyFloor(unittest.TestCase):
-    """Zero real matches in an unopened area must not be padded with unscored rows."""
+    """An unopened area with NOBODY on the block must not be padded with unscored
+    rows — but an unopened area WITH real neighbors must show them."""
+
+    FRAME = {
+        "mode": "soft",
+        "blocked": False,  # soft mode declines to BLOCK — a different question
+        "zip5": "32827",
+        "state": "warming",
+        "count": 3,
+        "threshold": 10,
+    }
 
     def test_unopened_area_returns_seed_forward_not_placeholder_rows(self) -> None:
         from app.discovery_route import _peers_supply_floor_turn
 
-        frame = {
-            "mode": "soft",
-            "blocked": False,  # soft mode declines to BLOCK — a different question
-            "zip5": "32827",
-            "state": "seeding",
-            "count": 3,
-            "threshold": 25,
-        }
-        with patch("app.zip_unlock.discovery_zip_gate", return_value=frame):
+        with patch("app.zip_unlock.discovery_zip_gate", return_value=self.FRAME):
             result = _peers_supply_floor_turn(
-                {}, user_id="user-1", block_id="block-1"
+                {}, user_id="user-1", block_id="block-1", neighbors=[]
             )
         self.assertIsNotNone(result)
         _reply, ctx, routing, peers = result
@@ -2755,13 +2757,30 @@ class TestPeersSupplyFloor(unittest.TestCase):
         self.assertEqual(routing.get("tool_to_call"), "peers_supply_floor")
         self.assertEqual(ctx.get("suggestions"), ["Host a meet"])
 
+    def test_real_neighbors_are_never_suppressed(self) -> None:
+        """The regression this whole change exists for: prod 32827 was 'warming
+        3/10' with 11 signups, the block fetch returned 3 real neighbors, and the
+        floor discarded them to say "not enough verified neighbors have joined
+        yet". A non-empty roster must pass straight through."""
+        from app.discovery_route import _peers_supply_floor_turn
+
+        neighbors = [{"peer_user_id": "u2", "similarity_score": None}]
+        with patch("app.zip_unlock.discovery_zip_gate", return_value=self.FRAME):
+            self.assertIsNone(
+                _peers_supply_floor_turn(
+                    {}, user_id="user-1", block_id="block-1", neighbors=neighbors
+                )
+            )
+
     def test_open_area_keeps_todays_fallback(self) -> None:
         from app.discovery_route import _peers_supply_floor_turn
 
         # discovery_zip_gate returns None for an open area / unknown ZIP / gating off.
         with patch("app.zip_unlock.discovery_zip_gate", return_value=None):
             self.assertIsNone(
-                _peers_supply_floor_turn({}, user_id="user-1", block_id="block-1")
+                _peers_supply_floor_turn(
+                    {}, user_id="user-1", block_id="block-1", neighbors=[]
+                )
             )
 
     def test_gate_error_fails_open(self) -> None:
@@ -2769,7 +2788,9 @@ class TestPeersSupplyFloor(unittest.TestCase):
 
         with patch("app.zip_unlock.discovery_zip_gate", side_effect=RuntimeError("boom")):
             self.assertIsNone(
-                _peers_supply_floor_turn({}, user_id="user-1", block_id="block-1")
+                _peers_supply_floor_turn(
+                    {}, user_id="user-1", block_id="block-1", neighbors=[]
+                )
             )
 
 
@@ -2794,6 +2815,10 @@ class TestPreviewPeersSelfExclusion(unittest.TestCase):
             def limit(self, *_a, **_k):
                 return self
 
+            def order(self, *_a, **_k):
+                self.ordered = True
+                return self
+
             def execute(self):
                 class R:
                     data = [{"id": "peer-2", "nickname": "Maria"}]
@@ -2811,6 +2836,9 @@ class TestPreviewPeersSelfExclusion(unittest.TestCase):
                 "block-1", limit=3, include_peer_ids=True, exclude_user_id="me-1"
             )
         self.assertEqual(fake.neq_calls, [("id", "me-1")])
+        # Unordered, rows[:limit] took whatever Postgres returned — which on prod
+        # can be three nickname-less rows while named neighbors sit further down.
+        self.assertTrue(getattr(fake, "ordered", False))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["nickname"], "Maria")
 

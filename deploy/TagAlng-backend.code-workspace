@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../../tagalng-pwa-main"
+		},
+		{
+			"path": "../../lana-admin-portal"
 		}
 	],
 	"settings": {}
