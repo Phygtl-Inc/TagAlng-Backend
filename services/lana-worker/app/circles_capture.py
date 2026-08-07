@@ -176,6 +176,91 @@ def _fetch_affiliation(sb: Any, user_id: str, circle_key: str) -> dict[str, Any]
     return (res.data or [None])[0]
 
 
+# Category words that name a KIND of place, not a particular community. A mention
+# this vague is the same community as a specific one of the same type the person
+# already has — "the gym" is their Fitness CF, not a second gym.
+_GENERIC_KEYS = frozenset(
+    {
+        "gym", "restaurant", "church", "cafe", "coffee_shop", "bar", "park",
+        "school", "store", "shop", "market", "library", "club", "team", "class",
+        "group", "studio", "pool", "court", "field", "temple", "mosque",
+    }
+)
+
+
+def _key_tokens(key: str) -> set[str]:
+    """Meaningful words in a circle key, minus the grouping/category noise."""
+    parts = [p for p in str(key or "").lower().split("_") if p]
+    return {p for p in parts if p not in _GENERIC_KEYS and len(p) > 1}
+
+
+def same_community(a_key: str, a_type: str, b_key: str, b_type: str) -> bool:
+    """Are these two circle keys the SAME real-world community?
+
+    Capture creates one row per phrasing, so a single gym accumulated four:
+    `gym`, `fitness_cf`, `fitness_cf_st_cloud`, `crossfit_st_cloud` — and a single
+    church three. Each one then queues its own "which spot is it?" question, so the
+    queue was six deep for two actual communities, and one of those questions was
+    asked about a gym that was ALREADY pinned (2026-08-07).
+
+    Deliberately conservative and deterministic — merging two genuinely different
+    communities is worse than leaving a duplicate, so only two cases count:
+      · same type and one side is a bare category ("gym" ~ "fitness_cf")
+      · same type and one side's words contain the other's
+        ("fitness_cf" ~ "fitness_cf_st_cloud")
+    """
+    if not a_key or not b_key or a_type != b_type:
+        return False
+    a, b = str(a_key).lower(), str(b_key).lower()
+    if a == b:
+        return True
+    if a in _GENERIC_KEYS or b in _GENERIC_KEYS:
+        return True
+    ta, tb = _key_tokens(a), _key_tokens(b)
+    if not ta or not tb:
+        return False
+    return ta <= tb or tb <= ta
+
+
+def _fetch_same_community(
+    sb: Any, user_id: str, cand: CircleCandidate
+) -> dict[str, Any] | None:
+    """An existing circle that is the same community as this candidate.
+
+    Prefers a GROUNDED row: merging into the one already pinned to a real place is
+    what stops a fourth duplicate queueing a question we can already answer.
+    """
+    try:
+        res = (
+            sb.table("circle_affiliations")
+            .select(
+                "id, confidence, detail, status, place_ref, circle_type, "
+                "place_name, circle_key"
+            )
+            .eq("user_id", user_id)
+            .eq("circle_type", cand.circle_type)
+            .is_("dismissed_at", "null")
+            .limit(20)
+            .execute()
+        )
+        rows = [r for r in (res.data or []) if isinstance(r, dict)]
+    except Exception:
+        logger.exception("fetch_same_community_failed key=%s", cand.circle_key)
+        return None
+    hits = [
+        r
+        for r in rows
+        if same_community(
+            cand.circle_key, cand.circle_type, str(r.get("circle_key") or ""),
+            str(r.get("circle_type") or ""),
+        )
+    ]
+    if not hits:
+        return None
+    hits.sort(key=lambda r: (0 if r.get("place_ref") else 1, str(r.get("circle_key") or "")))
+    return hits[0]
+
+
 def persist_circle_candidates(user_id: str, candidates: list[CircleCandidate]) -> int:
     """Upsert suggested affiliations; a re-mention corroborates (confidence rises).
 
@@ -188,8 +273,15 @@ def persist_circle_candidates(user_id: str, candidates: list[CircleCandidate]) -
         if cand.confidence < _MIN_CANDIDATE_CONFIDENCE:
             continue
         try:
-            existing = _fetch_affiliation(sb, user_id, cand.circle_key)
+            existing = _fetch_affiliation(
+                sb, user_id, cand.circle_key
+            ) or _fetch_same_community(sb, user_id, cand)
             if existing:
+                if str(existing.get("circle_key") or "") not in ("", cand.circle_key):
+                    logger.info(
+                        "circle_dedupe user=%s %s -> existing %s",
+                        user_id, cand.circle_key, existing.get("circle_key"),
+                    )
                 try:
                     old_conf = float(existing.get("confidence") or 0.0)
                 except (TypeError, ValueError):

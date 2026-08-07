@@ -68,6 +68,27 @@ class NextAction:
         }
 
 
+def turn_has_topic(session_ctx: dict[str, Any], user_message: str) -> bool:
+    """Did the person raise something of their own this turn?
+
+    Read off the classifier verdict the turn already computed (no word list, no new
+    call): a message the router could pin an intent to has a subject. An empty
+    turn — "hey", "ok", "not much" — is where a queued place-question is genuinely
+    the best thing Lana can say, so those stay available; anything with a topic of
+    its own must not be trampled by one.
+    """
+    slots = session_ctx.get("_discovery_slots")
+    if isinstance(slots, dict) and "linear_intent" in slots:
+        # A verdict exists — trust it, INCLUDING when it says there is no intent.
+        # Treating "none" as "no verdict" would send every empty turn down the
+        # cautious branch below and the empty-turn case would never fire.
+        intent = str(slots.get("linear_intent") or "").strip().lower()
+        return bool(intent) and intent not in ("none", "unknown", "null")
+    # No verdict at all — assume they said something, the cautious side: a withheld
+    # goal costs a beat, a mistimed one costs trust.
+    return bool(str(user_message or "").strip())
+
+
 def policy_model() -> str:
     """Model for the policy decision. Defaults to the synthesizer, so unset changes
     nothing.
@@ -501,7 +522,13 @@ def decide_turn(
             str(g) for g in (session_ctx.get("deferred_goal_ids") or []) if g
         ]
         _t_world = _time.monotonic() - _t0
-        goals = candidate_goals(user_id, world, deferred_goal_ids=deferred)
+        goals = candidate_goals(
+            user_id,
+            world,
+            deferred_goal_ids=deferred,
+            user_message=user_message,
+            turn_has_topic=turn_has_topic(session_ctx, user_message),
+        )
         _t_goals = _time.monotonic() - _t0
         _known = _claims(user_id, user_message)
         _t_claims = _time.monotonic() - _t0
