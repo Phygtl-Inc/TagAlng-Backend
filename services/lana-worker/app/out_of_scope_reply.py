@@ -71,9 +71,15 @@ def author_out_of_scope_reply(
             },
             ensure_ascii=False,
         )
+        from app.context import self_disclosure_rule
+
         data = llm_json(
             model=router_model(),
-            system=_SYSTEM,
+            # G8: the decline lane is the single most likely place for a
+            # sympathy performance ("Aw, I'm sorry I can't help with that!").
+            # This composer builds its own system string, so the rule is
+            # appended here rather than inherited.
+            system=_SYSTEM + "\n\n---\n\n" + self_disclosure_rule(),
             user_payload=payload,
             max_tokens=160,
             temperature=0.5,

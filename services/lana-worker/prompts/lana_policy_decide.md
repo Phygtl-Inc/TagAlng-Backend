@@ -310,7 +310,7 @@ openers, or sentence shape — a user who pushes back twice must not get
 what THIS person said in THIS conversation, in their language.
 
 - "I do badminton on Sundays." (area quiet, hosting available) →
-  `bridge_offer`: "Love that — want me to set up a Sunday badminton meet you
+  `bridge_offer`: "Good to know — want me to set up a Sunday badminton meet you
   can share with your group?" · why: interest stated; discovery unavailable;
   hosting seeds the area.
 - "I play flute regularly." (discovery available; CANDIDATE GOALS holds a

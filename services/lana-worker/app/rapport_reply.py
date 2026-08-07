@@ -24,7 +24,11 @@ _ACTION_KINDS = frozenset(
     {"find_neighbors", "find_activities", "host_meet", "seek_tip", "share_tip", "none"}
 )
 
-_FALLBACK_REPLY = "Love that — I've saved it to your profile. Tell me more anytime."
+# G8: "Love that" is an indicative first-person preference — a self-disclosure
+# Lana cannot honestly make (SPEC_X3_HONESTY S-EN-1), and "Love it." is already
+# on SPEC_P1_LANGUAGE's banned-literal list for a different reason. Acknowledge
+# HER; don't state a preference of your own.
+_FALLBACK_REPLY = "Got it — I've saved it to your profile. Tell me more anytime."
 
 CONCIERGE_PROMPT = """You are Lana, a warm neighborhood concierge in a block-based neighborhood app \
 where neighbors connect with nearby neighbors. Everything the app does is LOCAL and NEIGHBORLY: meeting \
@@ -175,7 +179,7 @@ def _sanitize_language_offer(raw: Any) -> list[str]:
 def _fallback(saved_label: str | None) -> dict[str, Any]:
     if saved_label:
         return {
-            "reply": f"Love that — I've saved “{saved_label}” to your profile. Tell me more anytime.",
+            "reply": f"Got it — I've saved “{saved_label}” to your profile. Tell me more anytime.",
             "options": [],
             "action": None,
         }
@@ -237,12 +241,16 @@ def rapport_concierge_reply(
         # prompt's constraint set (they parrot the topic into an app purpose and emit
         # the banned passive "I'm here whenever…" close — QA 2026-07-29). One
         # low-volume call per claim, so the latency/cost delta is negligible.
+        from app.context import self_disclosure_rule
         from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
 
         if llm_configured():
             data = llm_json(
                 model=synthesizer_model(),
-                system=CONCIERGE_PROMPT,
+                # G8: this composer answers a personal disclosure ("By the
+                # way…"), so it is the highest-affect surface in the worker and
+                # needs the honesty rule explicitly — it builds its own prompt.
+                system=CONCIERGE_PROMPT + "\n\n---\n\n" + self_disclosure_rule(),
                 user_payload=user_payload,
                 max_tokens=512,
                 temperature=0.5,
@@ -276,11 +284,16 @@ def _vertex_concierge_reply(user_payload: str) -> Any:
     """Direct Vertex Gemini fallback when the orchestrator LLM isn't configured.
     Same token budget (512) and same timeout the OpenAI path uses — see
     llm.gemini_config()."""
+    from app.context import self_disclosure_rule
     from app.orchestrator.llm import vertex_generate_json
 
     return vertex_generate_json(
         model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
-        system=CONCIERGE_PROMPT,
+        # SPEC_X3_HONESTY F07: the E-FALLBACK arm forces the Vertex path, and
+        # "the persona rule and the guardrail may not be applied identically on
+        # both providers" — a delta between arms is a finding in its own right.
+        # Same rule, same place in the prompt, both providers.
+        system=CONCIERGE_PROMPT + "\n\n---\n\n" + self_disclosure_rule(),
         user_payload=user_payload,
         max_tokens=512,  # parity with the llm_json call above
         temperature=0.5,

@@ -454,9 +454,9 @@ def _revision_note(action: NextAction, *, streak: int) -> str | None:
 
 
 def _system_prompt() -> str:
-    from app.context import lingo_constitution, load_prompt
+    from app.context import load_prompt, voice_rules
 
-    return load_prompt("lana_policy_decide.md") + "\n\n---\n\n" + lingo_constitution()
+    return load_prompt("lana_policy_decide.md") + "\n\n---\n\n" + voice_rules()
 
 
 def name_change_signal(session_ctx: dict[str, Any]) -> dict[str, Any] | None:

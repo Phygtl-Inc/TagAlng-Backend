@@ -9,7 +9,8 @@ breaks a turn (tests and local dev run fallback-only via llm_configured()).
 
 Grounding rule: the model may only say what ``facts`` support. It never
 invents counts, names, places, or promises — the composing prompt carries the
-lingo constitution, so role/gender-aware address and the banned-lexicon rules
+voice rules (lingo constitution + the C+D self-disclosure rule), so
+role/gender-aware address, the banned lexicon, and the honesty constraint
 apply to these turns exactly like chat turns.
 
 Language: when the session has a language, the reply is authored directly in
@@ -93,7 +94,7 @@ def compose_reply(
             else "Write in English."
         )
 
-        from app.context import lingo_constitution
+        from app.context import voice_rules
 
         system = (
             "You are Lana, a warm local concierge, mid-conversation with a "
@@ -104,7 +105,7 @@ def compose_reply(
             "never robotic, never a form.\n"
             f"- {lang_directive}\n"
             '- Return JSON {"message": "..."}.\n\n'
-            + lingo_constitution()
+            + voice_rules()
         )
         payload = (
             f"GOAL: {goal.strip()}\n\nFACTS:\n"
