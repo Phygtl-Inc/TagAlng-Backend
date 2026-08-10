@@ -146,3 +146,50 @@ def test_typed_search_returns_more_than_three(serving) -> None:
         "u1", _aff("gym"), block_id="zip-32832", query="table tennis hall"
     )
     assert calls[0]["limit"] == 6, "a typed search should show more than the 3 chips"
+
+
+# --- noun and emoji come from the community, not its grouping bucket -------
+
+
+def test_stored_noun_beats_the_type_map() -> None:
+    """circle_type "fitness" maps to "gym", so a table-tennis club was called "your
+    gym" — in the question text and the place tag (2026-08-07)."""
+    from app.circles_flow import place_relation_noun
+
+    assert place_relation_noun("fitness", "table tennis club") == "table tennis club"
+    assert place_relation_noun("faith", "small group") == "small group"
+
+
+def test_the_type_map_is_still_the_fallback() -> None:
+    """Rows captured before 20261008 have no noun — behaviour must not change."""
+    from app.circles_flow import place_relation_noun
+
+    assert place_relation_noun("fitness", None) == "gym"
+    assert place_relation_noun("fitness", "", "table_tennis_group") == "gym"
+    assert place_relation_noun(None, None) == "spot"
+
+
+def test_stored_emoji_beats_the_type_map() -> None:
+    from app.circles_flow import place_relation_emoji
+
+    assert place_relation_emoji("fitness", "🏓") == "🏓"
+    assert place_relation_emoji("fitness", None) == "🏋️"
+    assert place_relation_emoji("nonsense", None) == "📍"
+
+
+def test_a_noun_is_rejected_when_it_is_not_a_noun() -> None:
+    """It renders as "your <noun>", so a clause there reads as gibberish — and a
+    venue name would leak the place the relation deliberately hides."""
+    from app.circles_capture import _clean_noun
+
+    assert _clean_noun("table tennis club") == "table tennis club"
+    assert _clean_noun("Small Group") == "small group"
+    assert _clean_noun("your gym at fitness cf st cloud please") == ""
+    assert _clean_noun(None) == ""
+
+
+def test_only_one_emoji_survives() -> None:
+    from app.circles_capture import _clean_emoji
+
+    assert _clean_emoji("🏓") == "🏓"
+    assert _clean_emoji("not an emoji") == ""

@@ -186,7 +186,8 @@ def _own_affiliation(user_id: str, affiliation_id: str) -> dict[str, Any] | None
         service_client()
         .table("circle_affiliations")
         .select(
-            "id, circle_type, circle_key, detail, status, place_ref, place_name, source"
+            "id, circle_type, circle_key, detail, status, place_ref, place_name, "
+            "source, noun, emoji"
         )
         .eq("id", affiliation_id)
         .eq("user_id", user_id)
@@ -596,9 +597,43 @@ _GROUND_NOUN: dict[str, str] = {
     "other": "spot",
 }
 
-def place_relation_noun(circle_type: str | None) -> str:
+# Words in a circle_key that describe the PERSON or the grouping, not the activity.
+# Shared with ground_options' search-term derivation — same job, same list.
+_KEY_NOISE_RE = re.compile(
+    r"\b(group|team|crew|member|attendee|goer|lover|fan|participant|visitor|"
+    r"enthusiast|athlete|player)s?\b"
+)
+
+
+def activity_from_key(circle_key: str | None) -> str:
+    """The activity a circle_key names ("table_tennis_group" → "table tennis")."""
+    words = str(circle_key or "").replace("_", " ").strip()
+    words = _KEY_NOISE_RE.sub("", words).strip()
+    return re.sub(r"\s+", " ", words)
+
+
+def place_relation_noun(
+    circle_type: str | None,
+    stored: str | None = None,
+    circle_key: str | None = None,
+) -> str:
     """Caller-relative noun for a grounded place ("gym" → tag "your gym").
-    Disclosure-safe by construction (§F / O7): names the RELATION, never the place."""
+    Disclosure-safe by construction (§F / O7): names the RELATION, never the place.
+
+    `stored` is the noun chosen for THIS community at capture. Without it we fall
+    back to the type map — where every sport is "gym", so a table_tennis_group was
+    called "your gym" in both the question and the place tag (2026-08-07).
+
+    circle_key is accepted but deliberately NOT used to synthesise a noun: string
+    surgery on a slug produces copy a person reads, and it produces bad copy —
+    "crossfit_st_cloud" becomes "your crossfit st cloud", and stripping the noise
+    word from "lagoinha_small_group" leaves "your lagoinha small". An LLM asked at
+    capture gets these right; a regex cannot. Rows captured before this keep the
+    category noun until they are mentioned again.
+    """
+    kept = str(stored or "").strip()
+    if kept:
+        return kept[:40]
     return _GROUND_NOUN.get(str(circle_type or "other"), "spot")
 
 
@@ -623,10 +658,20 @@ _RELATION_EMOJI: dict[str, str] = {
 }
 
 
-def place_relation_emoji(circle_type: str | None) -> str:
-    """One emoji for a community's type ("fitness" → 🏋️). Advisory card art: the FE
-    may render its own icon instead, and `other` gets a neutral pin rather than a
-    guess at what the place is."""
+def place_relation_emoji(circle_type: str | None, stored: str | None = None) -> str:
+    """One emoji for a community ("table tennis" → 🏓). Advisory card art: the FE may
+    render its own icon instead, and an unknown type gets a neutral pin rather than a
+    guess at what the place is.
+
+    `stored` is the emoji chosen for THIS community at capture (the same job
+    events.cover_emoji does, and now by the same means — an AI pick, not a lookup).
+    Without it every sport fell to the type map's 🏋️. No key-derived middle step
+    here: an activity cannot be turned into an emoji by string surgery, so an
+    un-captured row keeps the category glyph until it is re-mentioned.
+    """
+    kept = str(stored or "").strip()
+    if kept:
+        return kept
     return _RELATION_EMOJI.get(str(circle_type or "other"), _RELATION_EMOJI["other"])
 
 
@@ -656,9 +701,20 @@ Rules:
     dead-ends. Still ONE question, still <120 chars."""
 
 
-def _grounding_question(circle_type: str, detail: str | None) -> tuple[str, str]:
-    """AI-authored per the lingo rules; a type-templated line as fallback."""
-    noun = place_relation_noun(circle_type)
+def _grounding_question(
+    circle_type: str,
+    detail: str | None,
+    *,
+    noun_override: str | None = None,
+    circle_key: str | None = None,
+) -> tuple[str, str]:
+    """AI-authored per the lingo rules; a type-templated line as fallback.
+
+    noun_override is the community's own noun. Without it the fallback line calls
+    every sport a "gym" — the question a table-tennis club actually received
+    (2026-08-07).
+    """
+    noun = place_relation_noun(circle_type, noun_override, circle_key)
     phrase = _FEATURE_NOTE_RE.sub("", str(detail or "")).strip(" ;")
     # KNOWN GAP: this presumes a venue exists, so a solo hobby that falls back here
     # (lexicon leak / no LLM configured) still gets the dead-end question. Left as-is
@@ -719,7 +775,7 @@ def ensure_grounding_gaps(user_id: str, *, max_open: int | None = None) -> int:
             return 0
         affs = (
             sb.table("circle_affiliations")
-            .select("id, circle_type, detail")
+            .select("id, circle_type, circle_key, detail, noun, emoji")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .is_("place_ref", "null")
@@ -740,7 +796,12 @@ def ensure_grounding_gaps(user_id: str, *, max_open: int | None = None) -> int:
         aff_id = str(aff.get("id") or "")
         if not aff_id or aff_id in already_asked:
             continue
-        question, teaser = _grounding_question(aff.get("circle_type"), aff.get("detail"))
+        question, teaser = _grounding_question(
+            aff.get("circle_type"),
+            aff.get("detail"),
+            noun_override=aff.get("noun"),
+            circle_key=aff.get("circle_key"),
+        )
         if open_semantic_gap(
             user_id,
             None,
@@ -855,6 +916,16 @@ def grounding_payload_for_gap(user_id: str, gap_row: dict[str, Any]) -> dict[str
     # neutral pin (FE ask #1, issues #63). Both absent-safe by contract.
     if affiliation.get("circle_type"):
         payload["circle_type"] = str(affiliation["circle_type"])
+    # This community's OWN noun and glyph, so the card can stop deriving them from
+    # circle_type — a ten-value grouping bucket where every sport is "fitness", which
+    # rendered a table-tennis club as "your gym" with a 🏋️ (2026-08-07). Sent only
+    # when captured; the FE keeps its type fallback for older circles.
+    _noun = str(affiliation.get("noun") or "").strip()
+    if _noun:
+        payload["relation_noun"] = _noun
+    _emoji = str(affiliation.get("emoji") or "").strip()
+    if _emoji:
+        payload["emoji"] = _emoji
     detail = _FEATURE_NOTE_RE.sub("", str(affiliation.get("detail") or "")).strip(" ;")
     if detail:
         payload["detail"] = detail
@@ -997,7 +1068,7 @@ def _unpinned_close(
     An action the user had already asked for (pending_action) wins instead: their
     own request is dispatched, place-less, rather than re-offered to them."""
     aff = affiliation or {}
-    noun = place_relation_noun(aff.get("circle_type"))
+    noun = place_relation_noun(aff.get("circle_type"), aff.get("noun"), aff.get("circle_key"))
     topic = str(aff.get("circle_key") or "").replace("_", " ").strip() or noun
     facts = [f'They told you: "{said[:120]}"', f"Their community: {topic}."]
     offer: dict[str, Any] | None = None
@@ -1275,7 +1346,10 @@ def handle_grounding_answer(
                     "no apology spiral, and ask what their spot is called — or which "
                     "street or town it's in, if they'd rather. One short sentence."
                 ),
-                facts=[f"Their community: {place_relation_noun(affiliation.get('circle_type'))}."],
+                facts=[
+                    "Their community: "
+                    f"{place_relation_noun(affiliation.get('circle_type'), affiliation.get('noun'), affiliation.get('circle_key'))}."
+                ],
                 fallback="My list was off — what's it called?",
                 session_ctx=session_ctx,
             ),
@@ -1404,7 +1478,7 @@ def handle_grounding_confirmation(
                 ),
                 facts=[
                     f"Their community: "
-                    f"{place_relation_noun((affiliation or {}).get('circle_type'))}."
+                    f"{place_relation_noun((affiliation or {}).get('circle_type'), (affiliation or {}).get('noun'), (affiliation or {}).get('circle_key'))}."
                 ],
                 fallback="My list was off — what's it called?",
                 session_ctx=session_ctx,
@@ -1522,7 +1596,7 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
         sb.table("circle_affiliations")
         .select(
             "id, circle_type, circle_key, detail, status, place_ref, created_at, "
-            "source, confirmed_via"
+            "source, confirmed_via, noun, emoji"
         )
         .eq("user_id", user_id)
         .is_("dismissed_at", "null")
@@ -1574,7 +1648,14 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "joined_via_label": joined_via_label(
                     r.get("confirmed_via"), r.get("source")
                 ),
-                "emoji": place_relation_emoji(r.get("circle_type")),
+                "emoji": place_relation_emoji(r.get("circle_type"), r.get("emoji")),
+                # This community's own noun, so every surface says the same thing.
+                # Without it a client derives one from circle_type — a ten-value
+                # grouping bucket where every sport is "fitness" — and a table-tennis
+                # club reads as "gym" (2026-08-07).
+                "relation": place_relation_noun(
+                    r.get("circle_type"), r.get("noun"), r.get("circle_key")
+                ),
             }
         )
     return out

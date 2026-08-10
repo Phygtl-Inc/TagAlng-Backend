@@ -89,6 +89,8 @@ Output ONLY valid JSON (no markdown):
       "circle_key": "spin_class",
       "raw_phrase": "my Tuesday spin class",
       "place_name": "the venue name they SAID, or null",
+      "noun": "2-3 word noun for what this community IS",
+      "emoji": "ONE emoji for it",
       "confidence": 0.9
     }
   ],
@@ -212,6 +214,12 @@ playdate since our church group meets Sundays" → {faith, church_group}).
 heritage, friends, other. circle_key: snake_case slug naming the COMMUNITY (same format as concept) \
 — reuse the SAME slug you would pick for that community every time so re-mentions corroborate one \
 row instead of creating a second ("Life Time" is always life_time, never regular_weekend_gym_goer).
+- noun / emoji describe THIS community, and both are shown to the user. circle_type \
+is a coarse grouping bucket where every sport is "fitness", so it cannot supply \
+either: a table-tennis club came out as "your gym" with a 🏋️. Write what the thing \
+actually is — "table tennis club" 🏓, "small group" ⛪, "spin class" 🚴, "book club" \
+📚, "run club" 🏃. noun is lower-case, no venue name in it (it becomes "your <noun>", \
+and naming the place there would leak it); emoji is exactly one character.
 - The ALREADY ON PROFILE dedupe rule does NOT apply to circle_candidates. Re-state the circle EVERY \
 time the community is mentioned, even when the matching claim is already on the profile and even when \
 you emitted it before — repeats are harmless corroboration, silence loses the circle. Never capture a \

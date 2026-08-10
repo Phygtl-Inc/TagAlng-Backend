@@ -64,7 +64,11 @@
       "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_claim_followup.py::TestPersistIdentityFromMessage::test_verify_gate_without_user -q)",
       "Bash(../../.venv_lana_worker/bin/python -m pytest -q 2>&1 | grep ^FAILED | sed 's/ - .*//' | sort > /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt; comm -13 /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/base.txt /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt; echo \"--- totals\"; tail -1 /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt >/dev/null; ../../.venv_lana_worker/bin/python -m pytest -q 2>&1 | tail -2)",
       "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_unshipped_capability_not_offered.py -q)",
-      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_ask_streak_counts_questions.py -q)"
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_ask_streak_counts_questions.py -q)",
+      "Bash(../../.venv_lana_worker/bin/python -c \"import ast;ast.parse\\(open\\('app/circles_flow.py'\\).read\\(\\)\\);print\\('syntax ok'\\)\")",
+      "Bash(../../.venv_lana_worker/bin/python -c ' *)",
+      "Bash(PATH=/Users/dev/.nvm/versions/node/v20.19.5/bin:__TRACKED_VAR__ npm run ts-check)",
+      "Bash(PATH=/Users/dev/.nvm/versions/node/v20.19.5/bin:__TRACKED_VAR__ npx eslint src/features/voice/components src/lib/circles.ts src/lib/circles.schema.ts src/app/dev/communities/page.tsx)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",

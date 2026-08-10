@@ -152,6 +152,9 @@ def discover_communities(
                 "place_address": str(r.get("address") or "").strip() or None,
                 "place_type": primary or None,
                 # What members call it, in the app's own vocabulary — never "circle".
+                # Derived from the PLACE's type, not from a circle: this lists
+                # communities the viewer is NOT in, so there is no row of theirs to
+                # take a noun/emoji from.
                 "relation": place_relation_noun(primary),
                 "emoji": place_relation_emoji(primary),
                 "zip": str(r.get("zip") or "").strip() or None,
@@ -236,7 +239,7 @@ def _existing_rows(user_id: str) -> list[dict[str, Any]]:
         res = (
             service_client()
             .table("circle_affiliations")
-            .select("id, circle_key, circle_type, place_ref, status, source, confirmed_via")
+            .select("id, circle_key, circle_type, place_ref, status, source, confirmed_via, noun, emoji")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .limit(60)

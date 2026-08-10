@@ -81,7 +81,8 @@ def caller_affiliation_at(user_id: str, place_id: str) -> dict[str, Any] | None:
             service_client()
             .table("circle_affiliations")
             .select(
-                "id, circle_type, circle_key, detail, created_at, source, confirmed_via"
+                "id, circle_type, circle_key, detail, created_at, source, "
+                "confirmed_via, noun, emoji"
             )
             .eq("user_id", user_id)
             .eq("place_ref", place_id)
@@ -515,8 +516,10 @@ def communities_card(user_id: str, *, top: int = CARD_TOP_N) -> dict[str, Any] |
                 "place_name": c.get("place_name"),
                 "place_address": c.get("place_address"),
                 "circle_type": c.get("circle_type"),
-                "relation": place_relation_noun(c.get("circle_type")),
-                "emoji": place_relation_emoji(c.get("circle_type")),
+                "relation": place_relation_noun(
+                    c.get("circle_type"), c.get("noun"), c.get("circle_key")
+                ),
+                "emoji": place_relation_emoji(c.get("circle_type"), c.get("emoji")),
                 "member_count": count,
                 "meets_this_week": meets,
                 "active": bool(c.get("active")),
@@ -565,7 +568,11 @@ def community_profile(
     if not place:
         raise ValueError("place_not_found")
     name = str(place.get("name") or "").strip()
-    relation = place_relation_noun(mine.get("circle_type") or place.get("place_type"))
+    relation = place_relation_noun(
+        mine.get("circle_type") or place.get("place_type"),
+        mine.get("noun"),
+        mine.get("circle_key"),
+    )
     features = place_features(pid)
     members = _member_rows(pid)
     count = len(members)
@@ -587,7 +594,9 @@ def community_profile(
         "confirmed_via": mine.get("confirmed_via"),
         "joined_via_label": _joined_via_label(mine),
         "relation": relation,
-        "emoji": place_relation_emoji(mine.get("circle_type") or place.get("place_type")),
+        "emoji": place_relation_emoji(
+            mine.get("circle_type") or place.get("place_type"), mine.get("emoji")
+        ),
         "detail": str(mine.get("detail") or "").strip() or None,
         "member_count": count,
         "active": count >= 2,
@@ -663,7 +672,11 @@ def community_members(
     mine = caller_affiliation_at(user_id, pid)
     if not mine:
         raise ValueError("not_a_member")
-    relation = place_relation_noun(mine.get("circle_type") or place.get("place_type"))
+    relation = place_relation_noun(
+        mine.get("circle_type") or place.get("place_type"),
+        mine.get("noun"),
+        mine.get("circle_key"),
+    )
     members = _member_rows(pid)
     total = len(members)
     if not phone_verified:

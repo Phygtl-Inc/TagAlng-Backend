@@ -62,6 +62,12 @@ class CircleCandidate:
     # a sentence matches no place, and the type-keyword fallback then offered
     # arbitrary nearby spots as if they were the user's own (2026-08-03).
     place_name: str = ""
+    # What this community IS, in the user's terms, chosen by the extractor at
+    # capture. circle_type cannot supply either: it is a ten-value grouping bucket
+    # where every sport is "fitness", so a table-tennis club rendered as "your gym"
+    # with a 🏋️ (2026-08-07). Empty falls back to the type maps in circles_flow.
+    noun: str = ""
+    emoji: str = ""
 
 
 @dataclass
@@ -79,6 +85,25 @@ def _slugify(text: str) -> str:
     if slug and not slug[0].isalpha():
         slug = "x_" + slug
     return slug if _KEY_RE.match(slug or "") else ""
+
+
+def _clean_noun(raw: Any) -> str:
+    """A short lower-case noun. Rejects anything sentence-shaped — it is rendered as
+    "your <noun>", so a stray clause there reads as gibberish to the user."""
+    text = re.sub(r"\s+", " ", str(raw or "").strip().lower())
+    if not text or len(text) > 32 or len(text.split()) > 3:
+        return ""
+    return text if re.fullmatch(r"[a-z0-9][a-z0-9 '\-]*", text) else ""
+
+
+def _clean_emoji(raw: Any) -> str:
+    """Exactly one emoji, via the same validator event cover art uses."""
+    try:
+        from app.lana_ui import sanitize_cover_emoji
+
+        return str(sanitize_cover_emoji(raw) or "")
+    except Exception:
+        return ""
 
 
 def parse_circle_candidates(data: Any) -> list[CircleCandidate]:
@@ -114,6 +139,8 @@ def parse_circle_candidates(data: Any) -> list[CircleCandidate]:
                 raw_phrase=phrase or key.replace("_", " "),
                 confidence=conf,
                 place_name=str(item.get("place_name") or "").strip()[:120],
+                noun=_clean_noun(item.get("noun")),
+                emoji=_clean_emoji(item.get("emoji")),
             )
         )
     return out[:_MAX_CANDIDATES]
@@ -166,7 +193,7 @@ def _embed_circle(cand: CircleCandidate) -> list[float] | None:
 def _fetch_affiliation(sb: Any, user_id: str, circle_key: str) -> dict[str, Any] | None:
     res = (
         sb.table("circle_affiliations")
-        .select("id, confidence, detail, status, place_ref, circle_type, place_name")
+        .select("id, confidence, detail, status, place_ref, circle_type, place_name, noun, emoji")
         .eq("user_id", user_id)
         .eq("circle_key", circle_key)
         .is_("dismissed_at", "null")
@@ -235,7 +262,7 @@ def _fetch_same_community(
             sb.table("circle_affiliations")
             .select(
                 "id, confidence, detail, status, place_ref, circle_type, "
-                "place_name, circle_key"
+                "place_name, circle_key, noun, emoji"
             )
             .eq("user_id", user_id)
             .eq("circle_type", cand.circle_type)
@@ -297,6 +324,13 @@ def persist_circle_candidates(user_id: str, candidates: list[CircleCandidate]) -
                 # through grounding, not through a passing re-mention).
                 if cand.place_name and not str(existing.get("place_name") or "").strip():
                     patch["place_name"] = cand.place_name
+                # Backfill only — a re-mention fills a blank noun/emoji so rows
+                # captured before 20261008 stop rendering as their bucket, but never
+                # overwrites one we already have.
+                if cand.noun and not str(existing.get("noun") or "").strip():
+                    patch["noun"] = cand.noun
+                if cand.emoji and not str(existing.get("emoji") or "").strip():
+                    patch["emoji"] = cand.emoji
                 sb.table("circle_affiliations").update(patch).eq(
                     "id", existing["id"]
                 ).execute()
@@ -312,6 +346,10 @@ def persist_circle_candidates(user_id: str, candidates: list[CircleCandidate]) -
                 }
                 if cand.place_name:
                     row["place_name"] = cand.place_name
+                if cand.noun:
+                    row["noun"] = cand.noun
+                if cand.emoji:
+                    row["emoji"] = cand.emoji
                 embedding = _embed_circle(cand)
                 if embedding is not None:
                     row["embedding"] = embedding
