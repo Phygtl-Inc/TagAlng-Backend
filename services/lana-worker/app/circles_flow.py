@@ -558,9 +558,22 @@ def tag_claim_place_from_gap(gap_row_id: str, claim_id: str) -> None:
         place_ref = gap.get("place_ref")
         if not place_ref:
             return
-        service_client().table("user_identity_claims").update(
-            {"place_ref": str(place_ref)}
-        ).eq("id", claim_id).execute()
+        sb = service_client()
+        sb.table("user_identity_claims").update({"place_ref": str(place_ref)}).eq(
+            "id", claim_id
+        ).execute()
+        # Same fact, second surface: "what do you enjoy most at {place}?" is where
+        # chat learns an activity, so it lands on the panel's list too.
+        res = sb.table("user_identity_claims").select("user_id, label").eq("id", claim_id).limit(
+            1
+        ).execute()
+        row = (res.data or [None])[0]
+        if row:
+            from app.place_activities import link_activity_from_claim
+
+            link_activity_from_claim(
+                str(row.get("user_id") or ""), str(place_ref), str(row.get("label") or "")
+            )
     except Exception:
         logger.exception("tag_claim_place_failed gap=%s claim=%s", gap_row_id, claim_id)
 
@@ -1616,6 +1629,10 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
             .execute()
         )
         places = {str(p["id"]): p for p in (pres.data or [])}
+    # One read for every row's activity chips (app/place_activities.py).
+    from app.place_activities import activities_for_places
+
+    activities = activities_for_places(place_ids, user_id)
     out: list[dict[str, Any]] = []
     for r in rows:
         place_ref = str(r.get("place_ref") or "") or None
@@ -1638,6 +1655,9 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "place_name": place.get("name"),
                 "place_address": place.get("address"),
                 "detail": detail,
+                # What people do here, `mine` marking this user's own — the edit
+                # panel's "your activities" chips and its add-more menu in one list.
+                "activities": activities.get(place_ref or "", []),
                 "member_count": count,
                 "active": count >= 2,
                 "added_at": r.get("created_at"),

@@ -106,6 +106,7 @@ from app.models import (
     AskDraftChip,
     AskDraftPayload,
     CommunitiesCardPayload,
+    CommunityActivityRow,
     CommunityCardRow,
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
@@ -2948,9 +2949,20 @@ def post_circles_profile(
                 key=str(f.get("key") or ""),
                 label=str(f.get("label") or ""),
                 sub_group=str(f.get("sub_group") or "") or None,
+                emoji=str(f.get("emoji") or "") or None,
             )
             for f in (data.get("features") or [])
             if isinstance(f, dict) and str(f.get("label") or "").strip()
+        ],
+        activities=[
+            CommunityActivityRow(
+                concept=str(a.get("concept") or ""),
+                label=str(a.get("label") or ""),
+                member_count=int(a.get("member_count") or 0),
+                mine=bool(a.get("mine")),
+            )
+            for a in (data.get("activities") or [])
+            if isinstance(a, dict) and str(a.get("label") or "").strip()
         ],
         member_preview=[
             CommunityMemberPreviewRow(
@@ -3018,6 +3030,152 @@ def post_circles_members(
         has_more=bool(data.get("has_more")),
         requires_phone_verification=bool(data.get("requires_phone_verification")),
     )
+
+
+# ── What people do here, and what the place has (C-PROFILE-CIRCLE-SUBS) ───────
+# Both lists are member-curated and members-only: every call re-checks the caller's
+# affiliation at the place. An activity is also written as an identity claim, so it
+# shapes matching like one volunteered in chat (app/place_activities.py).
+
+
+class CommunityActivityAddBody(_BaseModel):
+    # Either identifier, same as the profile read.
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    # Free text as the member typed it, or a label tapped from the "add more" menu.
+    label: str
+
+
+class CommunityActivityRemoveBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    concept: str
+
+
+class CommunityFeatureAddBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    label: str
+    # Program/room inside the place ("toddler swim"); "" is the place itself.
+    sub_group: str | None = None
+
+
+class CommunityFeatureRemoveBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    key: str
+
+
+def _activity_error(exc: ValueError) -> HTTPException:
+    detail = str(exc)
+    if detail in ("place_required", "label_required", "concept_required", "key_required"):
+        return HTTPException(status_code=400, detail=detail)
+    if detail == "too_many_activities":
+        return HTTPException(status_code=409, detail=detail)
+    if detail == "not_yours":
+        return HTTPException(status_code=403, detail=detail)
+    return HTTPException(status_code=404, detail=detail)
+
+
+@app.post("/lana/circles/activities/add")
+def post_circles_activity_add(
+    body: CommunityActivityAddBody,
+    authorization: str | None = Header(default=None),
+):
+    """"I do aerobics here." Idempotent per (place, member, activity)."""
+    auth = verify_auth(authorization)
+    from app.place_activities import add_activity
+
+    try:
+        result = add_activity(
+            auth.user_id,
+            label=body.label,
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    if not result.get("already_there"):
+        amplitude_track(
+            "community_activity_added",
+            user_id=auth.user_id,
+            event_properties={
+                "place_id": result.get("place_id"),
+                "concept": result.get("concept"),
+            },
+        )
+    return result
+
+
+@app.post("/lana/circles/activities/remove")
+def post_circles_activity_remove(
+    body: CommunityActivityRemoveBody,
+    authorization: str | None = Header(default=None),
+):
+    """Stop listing it here. The interest itself stays on their profile."""
+    auth = verify_auth(authorization)
+    from app.place_activities import remove_activity
+
+    try:
+        remove_activity(
+            auth.user_id,
+            concept=(body.concept or "").strip().lower(),
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/lana/circles/features/add")
+def post_circles_feature_add(
+    body: CommunityFeatureAddBody,
+    authorization: str | None = Header(default=None),
+):
+    """"It has a pool." Shared with every member — same rows Lana learns in chat,
+    same write policy (an owner's own row is never overwritten by a member's)."""
+    auth = verify_auth(authorization)
+    from app.place_activities import add_feature
+
+    try:
+        result = add_feature(
+            auth.user_id,
+            label=body.label,
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+            sub_group=(body.sub_group or "").strip(),
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    amplitude_track(
+        "community_feature_added",
+        user_id=auth.user_id,
+        event_properties={"place_id": result.get("place_id"), "key": result.get("key")},
+    )
+    return result
+
+
+@app.post("/lana/circles/features/remove")
+def post_circles_feature_remove(
+    body: CommunityFeatureRemoveBody,
+    authorization: str | None = Header(default=None),
+):
+    """Take back a feature you added. 403 for anyone else's — a statement about a
+    shared place belongs to the member who made it."""
+    auth = verify_auth(authorization)
+    from app.place_activities import remove_feature
+
+    try:
+        remove_feature(
+            auth.user_id,
+            key=(body.key or "").strip().lower(),
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    return {"ok": True}
 
 
 # ── Invites + ZIP unlock (§A.2 · §D · §E) ─────────────────────────────────────
