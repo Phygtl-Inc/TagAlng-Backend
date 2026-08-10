@@ -369,6 +369,7 @@ def upsert_place_feature(
     confidence: float = 0.6,
     source: str = "rapport",
     contributed_by: str | None = None,
+    emoji: str = "",
 ) -> bool:
     """One truth per (place, key, sub_group). Write policy (documented on the table):
     overwrite only when the new confidence >= stored; source='owner' rows are never
@@ -394,14 +395,16 @@ def upsert_place_feature(
             old_conf = 0.0
         if confidence < old_conf:
             return False
-        sb.table("place_features").update(
-            {
-                "value": value,
-                "confidence": confidence,
-                "source": source,
-                "contributed_by": contributed_by,
-            }
-        ).eq("id", existing["id"]).execute()
+        patch: dict[str, Any] = {
+            "value": value,
+            "confidence": confidence,
+            "source": source,
+            "contributed_by": contributed_by,
+        }
+        # Never blank an emoji the row already has: the chat path doesn't pick one.
+        if emoji:
+            patch["emoji"] = emoji
+        sb.table("place_features").update(patch).eq("id", existing["id"]).execute()
         return True
     sb.table("place_features").insert(
         {
@@ -412,6 +415,7 @@ def upsert_place_feature(
             "confidence": confidence,
             "source": source,
             "contributed_by": contributed_by,
+            "emoji": emoji or None,
         }
     ).execute()
     return True

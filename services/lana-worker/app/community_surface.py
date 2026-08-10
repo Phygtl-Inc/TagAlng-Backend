@@ -326,7 +326,7 @@ def place_features(place_id: str) -> list[dict[str, Any]]:
         res = (
             service_client()
             .table("place_features")
-            .select("key, value, sub_group, confidence, source")
+            .select("key, value, sub_group, confidence, source, emoji")
             .eq("place_id", place_id)
             .order("confidence", desc=True)
             .limit(40)
@@ -352,7 +352,14 @@ def place_features(place_id: str) -> list[dict[str, Any]]:
         if not label or label.lower() in seen:
             continue
         seen.add(label.lower())
-        out.append({"key": key, "label": label, "sub_group": str(r.get("sub_group") or "") or None})
+        out.append(
+            {
+                "key": key,
+                "label": label,
+                "sub_group": str(r.get("sub_group") or "") or None,
+                "emoji": str(r.get("emoji") or "").strip() or None,
+            }
+        )
         if len(out) >= _MAX_FEATURES:
             break
     return out
@@ -574,6 +581,9 @@ def community_profile(
         mine.get("circle_key"),
     )
     features = place_features(pid)
+    from app.place_activities import activities_at_place
+
+    activities = activities_at_place(pid, user_id)
     members = _member_rows(pid)
     count = len(members)
     preview = _member_preview(user_id, members, phone_verified=phone_verified)
@@ -609,6 +619,9 @@ def community_profile(
             members=count,
         ),
         "features": features,
+        # Everything anyone does here, `mine` marking the caller's own — one list
+        # serves both "your activities" and the "add more" menu (place_activities.py).
+        "activities": activities,
         "member_preview": preview,
         "upcoming_events": events,
         "actions": community_profile_actions(place_name=name, relation=relation)

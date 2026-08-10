@@ -278,6 +278,19 @@ class CommunityFeatureRow(BaseModel):
     key: str
     label: str
     sub_group: str | None = None
+    # Picked when the feature was written; null on rows learned before 20261010.
+    emoji: str | None = None
+
+
+class CommunityActivityRow(BaseModel):
+    """Something people DO at this place ("Aerobics"). `mine` is the caller's own —
+    the same list is the "your activities" chips and the "add more" menu, so what
+    the other members do is the only suggestion offered."""
+
+    concept: str
+    label: str
+    member_count: int = 0
+    mine: bool = False
 
 
 class CommunityEventRow(BaseModel):
@@ -323,6 +336,7 @@ class CommunityProfileResponse(BaseModel):
     # judgement of the place. Null when there is nothing true to say about it yet.
     description: str | None = None
     features: list[CommunityFeatureRow] = Field(default_factory=list)
+    activities: list[CommunityActivityRow] = Field(default_factory=list)
     member_preview: list[CommunityMemberPreviewRow] = Field(default_factory=list)
     upcoming_events: list[CommunityEventRow] = Field(default_factory=list)
     actions: list["UiActionRow"] = Field(default_factory=list)
