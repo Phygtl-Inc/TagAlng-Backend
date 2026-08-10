@@ -36,6 +36,11 @@ are writing in.
      "small group" -> a sensible small number like 6)
    - auto_approve: true if anyone can join freely, false if they want to approve joiners
    - allow_share: true if attendees may pass the invite on, false if invite-only
+   - repeats: "weekly" | "biweekly" | "monthly" if they want this to happen on a REPEATING
+     schedule ("every Friday", "make it a weekly thing", "every other Saturday" ->
+     "biweekly", "once a month"). "none" if they say to make it a ONE-TIME meet after all
+     ("actually just this once"). null when their latest message says nothing either way —
+     a single far-off date is not a repeat.
    - redo: parts they asked to CHANGE or REDO **without giving the new value in the same
      message** ("let's change the title", "a different time", "I want another spot") — any of
      "title", "when", "place". When they DID give the new value ("change the title to Pasta
@@ -60,6 +65,7 @@ are writing in.
 Return ONE JSON object:
 {"title": <string|null>, "place": <string|null>, "capacity": <int|null>,
  "auto_approve": <bool|null>, "allow_share": <bool|null>,
+ "repeats": "weekly"|"biweekly"|"monthly"|"none"|null,
  "redo": ["title"|"when"|"place", ...], "publish": <bool>, "reply": <string>}"""
 
 
@@ -110,9 +116,15 @@ def host_turn_brain(
             "capacity": None,
             "auto_approve": None,
             "allow_share": None,
+            "repeats": None,
             "redo": [],
             "publish": data.get("publish") is True,
         }
+        # Recurring meets. "none" is the host taking a cadence back OFF, which is why this
+        # isn't just a truthy check — it has to survive as a distinct instruction.
+        repeats = str(data.get("repeats") or "").strip().lower()
+        if repeats in ("weekly", "biweekly", "monthly", "none"):
+            out["repeats"] = repeats
         raw_redo = data.get("redo")
         if isinstance(raw_redo, list):
             asked = {str(s).strip().lower() for s in raw_redo}

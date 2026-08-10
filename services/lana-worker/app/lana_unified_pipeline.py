@@ -30,6 +30,8 @@ _EVENT_DRAFT_FIELDS = {
     "has_time",
     "ends_at",
     "duration_minutes",
+    "recurrence",
+    "recurrence_until",
     "max_attendees",
     "auto_approve",
     "allow_attendee_share",
@@ -940,6 +942,14 @@ def _apply_host_brain(
         ed["auto_approve"] = brain["auto_approve"]
     if isinstance(brain.get("allow_share"), bool):
         ed["allow_attendee_share"] = brain["allow_share"]
+    # "make it a weekly thing" mid-flow. The AI reading this turn owns the cadence; the
+    # when-resolver picks it up on the entry turn, this catches every turn after it.
+    repeats = brain.get("repeats")
+    if repeats == "none":
+        ed["recurrence"] = None
+        ed["recurrence_until"] = None
+    elif repeats:
+        ed["recurrence"] = repeats
 
 
 def _parse_event_settings(message: str, settings: dict[str, Any]) -> None:
@@ -2312,6 +2322,14 @@ def run_lana_unified_pipeline(
             else:
                 nd = when.get("date")
                 ntime = when.get("time")
+                # "every Friday" → a recurring meet: ONE row whose starts_at rolls forward
+                # after each occurrence, with a standing roster. The date above is the
+                # first one. Only stamped when the host said it this turn, so it survives
+                # later chip taps (the resolver returns null to mean "unchanged").
+                if when.get("repeats"):
+                    ed["recurrence"] = when["repeats"]
+                if when.get("until"):
+                    ed["recurrence_until"] = when["until"]
             if nd:
                 wd = nd
             if ntime:

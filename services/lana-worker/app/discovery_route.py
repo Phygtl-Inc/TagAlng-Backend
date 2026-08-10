@@ -6234,12 +6234,19 @@ def fetch_preview_events_on_block(
     attaches each host's nickname for host-aware filtering.
     """
     try:
+        from app.event_publish import roll_recurring_events
+
         sb = service_client()
+        # A recurring meet's row carries its NEXT occurrence; nothing else advances it, so
+        # an un-rolled weekly meet would be filtered out by the starts_at floor below.
+        roll_recurring_events()
         now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
         fetch_n = pool if pool and pool > 0 else limit * 3
         res = (
             sb.table("events")
-            .select("id, title, starts_at, has_time, venue_name, cohort_tags, host_id")
+            .select(
+                "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, recurrence"
+            )
             .eq("block_id", block_id)
             .eq("status", "open")
             .gte("starts_at", now_iso)

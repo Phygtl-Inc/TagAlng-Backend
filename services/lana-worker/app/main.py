@@ -92,6 +92,7 @@ from app.models import (
     EventDraft,
     EventJoinHookRequest,
     EventSetupRequest,
+    EventSkipRequest,
     EventVenueRequest,
     ItemDraft,
     LookDraft,
@@ -2482,6 +2483,81 @@ def hook_event_cancel(
             ),
         )
     return {"ok": True, "notified": len(roster)}
+
+
+@app.post("/hooks/event-skip")
+def hook_event_skip(
+    body: EventSkipRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Host calls off ONE occurrence of a recurring meet ("skip this Friday") — the series
+    itself lives on, RSVPs stand, the group chat stays. One round trip for the FE: the
+    worker calls skip_event_occurrence with the host's own JWT (which enforces host-only),
+    then pushes the NEW date to the going roster in each person's language. The in-app
+    group-chat notice is posted by the RPC, which is why it isn't repeated here."""
+    auth = verify_auth(authorization)
+    from datetime import datetime, timezone
+
+    from app.auth import service_client
+    from app.event_publish import event_tz, skip_event_occurrence
+
+    next_raw = skip_event_occurrence(body.event_id, _bearer_token(authorization))
+
+    # The date attendees read, in the meet's own timezone — an evening meet's UTC date
+    # is already tomorrow, which would name the wrong day.
+    next_label = None
+    if next_raw:
+        try:
+            dt = datetime.fromisoformat(str(next_raw).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            next_label = dt.astimezone(event_tz()).strftime("%a %b %d").replace(" 0", " ")
+        except ValueError:
+            next_label = None
+
+    sb = service_client()
+    if sb is None:
+        return {"ok": True, "next_starts_at": next_raw, "notified": 0}
+    try:
+        ev = sb.table("events").select("title").eq("id", body.event_id).single().execute().data or {}
+        rows = (
+            sb.table("event_requests")
+            .select("requester_id")
+            .eq("event_id", body.event_id)
+            .in_("status", ["approved", "attended"])
+            .eq("rsvp_status", "going")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 - the skip already happened; delivery is best-effort
+        return {"ok": True, "next_starts_at": next_raw, "notified": 0}
+
+    title = ev.get("title") or "a meet"
+    roster = {r.get("requester_id") for r in rows} - {None, auth.user_id}
+    langs = recipient_langs([str(u) for u in roster])
+    for uid in roster:
+        lang = langs.get(str(uid))
+        # No next date = the skip ended the series, so the copy must not promise one.
+        line = (
+            t("notify.skipped.body", lang, next=next_label)
+            if next_label
+            else t("notify.skipped.body_last", lang)
+        )
+        notify_user(
+            uid,
+            title=t("notify.skipped.title", lang, title=title),
+            body=line,
+            url=f"/meet/{body.event_id}",
+            email_subject=t("notify.skipped.subject", lang, title=title),
+            email_html=email_html(
+                t("notify.skipped.title", lang, title=title),
+                line,
+                t("notify.skipped.cta", lang),
+                f"/meet/{body.event_id}",
+            ),
+        )
+    return {"ok": True, "next_starts_at": next_raw, "notified": len(roster)}
 
 
 @app.post("/hooks/signal-matches")
