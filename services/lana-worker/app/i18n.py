@@ -827,6 +827,32 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "See what’s nearby", "es": "Ver qué hay cerca", "pt": "Ver o que há por perto",
     },
 
+    # ONE occurrence of a recurring meet called off — the meet itself lives on, so the
+    # copy has to say "this one" and name the next date, never read as a cancellation.
+    "notify.skipped.title": {
+        "en": "No “{title}” this time",
+        "es": "Esta vez no hay “{title}”",
+        "pt": "Sem “{title}” desta vez",
+    },
+    "notify.skipped.body": {
+        "en": "The host skipped this one. Next: {next}.",
+        "es": "El anfitrión se saltó esta vez. Próxima: {next}.",
+        "pt": "O anfitrião pulou esta. Próxima: {next}.",
+    },
+    "notify.skipped.body_last": {
+        "en": "The host called this one off — it was the last of the series.",
+        "es": "El anfitrión lo canceló — era el último de la serie.",
+        "pt": "O anfitrião cancelou — era o último da série.",
+    },
+    "notify.skipped.subject": {
+        "en": "Skipped this time: “{title}”",
+        "es": "Cancelado esta vez: “{title}”",
+        "pt": "Pulado desta vez: “{title}”",
+    },
+    "notify.skipped.cta": {
+        "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
+    },
+
     # A neighbor posted the thing this person had asked for. Titled by the RECIPIENT's own
     # ask, so the notification lands as "the thing you wanted" rather than "someone did
     # something" — the body carries the neighbor's own words.

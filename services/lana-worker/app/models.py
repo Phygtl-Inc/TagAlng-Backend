@@ -402,6 +402,11 @@ class EventDraft(BaseModel):
     has_time: bool | None = None
     ends_at: str | None = None
     duration_minutes: int | None = None
+    # Recurring meets: one meet whose starts_at rolls forward, with a standing roster.
+    # 'weekly' | 'biweekly' | 'monthly'; None = a one-off. recurrence_until is a plain
+    # date ("2026-08-31") — None means the DB's 180-day default from creation.
+    recurrence: str | None = None
+    recurrence_until: str | None = None
     max_attendees: int | None = None
     # Join settings captured in the host flow.
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
@@ -556,6 +561,13 @@ class EventDecisionHookRequest(BaseModel):
 
 class EventCancelHookRequest(BaseModel):
     """FE calls this right after cancel_event so the going roster gets push + email."""
+
+    event_id: str
+
+
+class EventSkipRequest(BaseModel):
+    """Host calls off ONE occurrence of a recurring meet ("skip this Friday"). Unlike
+    cancel, the worker calls the RPC itself and then notifies — one round trip for the FE."""
 
     event_id: str
 

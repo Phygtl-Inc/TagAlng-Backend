@@ -172,6 +172,14 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
             duration_minutes = max(1, min(int(duration), 720))
         except (TypeError, ValueError):
             duration_minutes = None
+    # Recurring meets ("every Friday"): only the three cadences the DB accepts survive, so
+    # a hallucinated "daily" degrades to a one-off meet instead of failing the host's
+    # publish. This function REBUILDS the draft from these keys, so anything missing here
+    # is dropped on the next turn's merge — recurrence has to be listed, not passed along.
+    recurrence = str(raw.get("recurrence") or "").strip().lower() or None
+    if recurrence not in ("weekly", "biweekly", "monthly"):
+        recurrence = None
+    recurrence_until = field("recurrence_until", 10)
     max_att = raw.get("max_attendees")
     max_attendees: int | None = None
     if max_att is not None:
@@ -235,6 +243,8 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
         "starts_at": starts_at,
         "ends_at": ends_at,
         "duration_minutes": duration_minutes,
+        "recurrence": recurrence,
+        "recurrence_until": recurrence_until,
         "max_attendees": max_attendees,
         "cohort_tags": cohort_tags,
         "bring_items": bring_items,
@@ -256,6 +266,9 @@ _CLEARABLE_EVENT_FIELDS = frozenset(
         "duration_minutes",
         "max_attendees",
         "cohort_tags",
+        # "actually just this once" — a host must be able to take the cadence back off.
+        "recurrence",
+        "recurrence_until",
     }
 )
 
@@ -276,6 +289,10 @@ def merge_event_drafts(
         "starts_at",
         "ends_at",
         "duration_minutes",
+        # A cadence, once given, persists across turns and can be CHANGED by a later turn
+        # ("make it monthly"). Dropping it back to a one-off goes through clear_fields.
+        "recurrence",
+        "recurrence_until",
         "max_attendees",
     ):
         if new.get(key) not in (None, "", []):
