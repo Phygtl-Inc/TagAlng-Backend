@@ -143,6 +143,34 @@ class TestBrowseRelease(unittest.TestCase):
         )
 
 
+class TestPendingInterestSwallowsEverything(unittest.TestCase):
+    """While P1 ("what kind of thing are you up for?") is unanswered, ANY message is
+    taken as the interest — even one the classifier reads as hosting. That is deliberate
+    for typed answers, and it is why a deterministic CTA entry (main.py) has to clear the
+    browse itself: tapping a community's "Create an event" was otherwise swallowed as a
+    search for that venue and answered "there's nothing happening there in your area"."""
+
+    PENDING = {
+        "activity_browse_active": True,
+        "browse_draft": {"_asked": True, "interest": ""},
+    }
+
+    def test_a_confident_host_turn_does_not_release(self) -> None:
+        self.assertFalse(
+            activity_browse_should_release(
+                "I want to host a meet at The Man Cave Warehouse",
+                dict(self.PENDING),
+                {"linear_intent": "sharing.host", "goal": "host", "confidence": 0.95},
+            )
+        )
+
+    def test_the_reset_is_what_frees_the_turn(self) -> None:
+        ctx = dict(self.PENDING)
+        reset_activity_browse_state(ctx)
+        self.assertFalse(ctx.get("activity_browse_active"))
+        self.assertIsNone(ctx.get("browse_draft"))
+
+
 class TestResolveClarifier(unittest.TestCase):
     def test_resolve_seek(self) -> None:
         self.assertEqual(_resolve_browse_or_meet_answer("set up a meet", None), "seek")

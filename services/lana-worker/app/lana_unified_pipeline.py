@@ -37,6 +37,7 @@ _EVENT_DRAFT_FIELDS = {
     "allow_attendee_share",
     "bring_items",
     "cover_emoji",
+    "circle_place_id",
     "cohort_tags",
     "affinity_prompt",
     "affinity_options",
@@ -778,9 +779,41 @@ def _seed_setup_defaults(ed: dict[str, Any]) -> None:
         ed["bring_items"] = []
 
 
+def _host_communities(user_id: str) -> list[dict[str, Any]]:
+    """The host's own communities for the setup card's dropdown (2/5). Real rows only —
+    the picker offers what she actually belongs to, never an AI guess. Best-effort: an
+    empty list just means the FE hides the card."""
+    try:
+        from app.circles_flow import list_my_circles
+
+        return [
+            {
+                "place_id": c["place_id"],
+                "name": c.get("place_name"),
+                "emoji": c.get("emoji"),
+                "relation": c.get("relation"),
+                # The same place as a venue: picking a community pre-fills the meet's
+                # where, since most community meets happen at the community's own spot.
+                # The host can still change it — a school picnic can be at a park.
+                "address": c.get("place_address"),
+                "google_place_id": c.get("google_place_id"),
+                "lat": c.get("lat"),
+                "lng": c.get("lng"),
+            }
+            for c in list_my_circles(user_id)
+            if c.get("place_id") and c.get("place_name")
+        ][:20]
+    except Exception:  # noqa: BLE001 - the dropdown is optional; hosting must not break
+        import logging
+
+        logging.getLogger(__name__).exception("host_communities_failed")
+        return []
+
+
 def _ensure_setup_config(
     ed: dict[str, Any],
     *,
+    user_id: str,
     history: list[dict[str, Any]],
     user_message: str,
     timer: Any,
@@ -796,6 +829,9 @@ def _ensure_setup_config(
 
     with timer.stage("llm_event_setup"):
         cfg = setup_suggestions(history=history, user_message=user_message, draft=ed)
+    # The community dropdown's options are data, not suggestions — read them here so the
+    # card ships with the AI's copy and the host's real communities in one payload.
+    cfg["communities"] = _host_communities(user_id)
     ed["event_setup"] = cfg
     if not ed.get("cover_emoji") and cfg.get("cover_emoji"):
         ed["cover_emoji"] = cfg["cover_emoji"]
@@ -2306,10 +2342,12 @@ def run_lana_unified_pipeline(
             # re-matching a stray weekday ("friday" in "not on friday").
             from app.event_when import resolve_event_when
 
-            # Skip the LLM date resolver when the draft already has a start AND this message
-            # carries no temporal words — otherwise it ran on EVERY host turn (incl. tapping
-            # a capacity/approval/share chip), adding one LLM round-trip each time.
-            if wd and wt and not _has_temporal_tokens(user_message):
+            # Skip the LLM date resolver when this message carries no temporal words at
+            # all — it can only resolve what the host said, so there is nothing for it to
+            # read, and the setup card asks for the date anyway. It used to run on EVERY
+            # host turn (tapping a capacity chip, or entering from a community's "Create
+            # an event"), paying ~2.4s for an empty answer.
+            if not _has_temporal_tokens(user_message):
                 when = {}
             else:
                 with timer.stage("llm_event_when"):
@@ -2538,7 +2576,8 @@ def run_lana_unified_pipeline(
                     )
                 else:
                     _ensure_setup_config(
-                        ed, history=history, user_message=user_message, timer=timer
+                        ed, user_id=user_id, history=history,
+                        user_message=user_message, timer=timer,
                     )
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
@@ -2558,7 +2597,8 @@ def run_lana_unified_pipeline(
             elif stage == "review":
                 if _is_host_confirm(user_message) or _is_host_drop(user_message):
                     _ensure_setup_config(
-                        ed, history=history, user_message=user_message, timer=timer
+                        ed, user_id=user_id, history=history,
+                        user_message=user_message, timer=timer,
                     )
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
@@ -2842,7 +2882,8 @@ def run_lana_unified_pipeline(
                         )
                     else:
                         _ensure_setup_config(
-                            ed, history=history, user_message=user_message, timer=timer
+                            ed, user_id=user_id, history=history,
+                            user_message=user_message, timer=timer,
                         )
                         _seed_setup_defaults(ed)
                         turn_ctx["host_stage"] = "setup"

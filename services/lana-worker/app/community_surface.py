@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
 from app.auth import service_client
@@ -257,15 +259,28 @@ def _going_counts(event_ids: list[str]) -> dict[str, int]:
 
 
 def _events_at_place(place_id: str, *, limit: int, within_days: int | None = None) -> list[dict]:
+    # Held here OR created for this community (setup card 2/5) — a school's picnic in the
+    # park belongs on the school's screen even though the venue is the park. or_ takes a
+    # formatted string, so the id must be a real uuid before it goes in: a caller-supplied
+    # place ref never gets to write PostgREST syntax. Anything else falls back to the
+    # single-column filter, which PostgREST parameterizes for us.
+    try:
+        uuid.UUID(str(place_id))
+        two_column = True
+    except (ValueError, AttributeError, TypeError):
+        two_column = False
     try:
         q = (
             service_client()
             .table("events")
             .select("id, title, starts_at, has_time, venue_name, host_id")
-            .eq("place_ref", place_id)
-            .eq("status", "open")
-            .gte("starts_at", _now_iso())
         )
+        q = (
+            q.or_(f"place_ref.eq.{place_id},circle_place_ref.eq.{place_id}")
+            if two_column
+            else q.eq("place_ref", place_id)
+        )
+        q = q.eq("status", "open").gte("starts_at", _now_iso())
         if within_days:
             until = datetime.now(timezone.utc) + timedelta(days=within_days)
             q = q.lte("starts_at", until.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -281,9 +296,29 @@ def meets_this_week(place_id: str) -> int:
     return len(_events_at_place(place_id, limit=20, within_days=7))
 
 
-def _event_rows_for_profile(place_id: str) -> list[dict[str, Any]]:
-    """Upcoming meets at the place, the best-attended first. "Popular" is a real
-    going count — never a guess, and never an ordering we can't defend."""
+def _this_week(rows: list[dict[str, Any]]) -> int:
+    """How many of these upcoming meets land in the next 7 days. Counted from rows we
+    already hold rather than re-querying — every profile open was reading the place's
+    events twice."""
+    until = datetime.now(timezone.utc) + timedelta(days=7)
+    n = 0
+    for r in rows:
+        try:
+            starts = datetime.fromisoformat(str(r.get("starts_at") or ""))
+        except ValueError:
+            continue
+        if starts.tzinfo is None:
+            starts = starts.replace(tzinfo=timezone.utc)
+        if starts <= until:
+            n += 1
+    return n
+
+
+def _event_rows_for_profile(place_id: str) -> tuple[list[dict[str, Any]], int]:
+    """Upcoming meets at the place, the best-attended first, plus how many are inside
+    the next 7 days. "Popular" is a real going count — never a guess, and never an
+    ordering we can't defend. The week count comes from the FULL read, not the few rows
+    the card shows, so the status line stays true when there are more."""
     raw = _events_at_place(place_id, limit=20)
     counts = _going_counts([str(r.get("id")) for r in raw if r.get("id")])
     rows = [
@@ -299,7 +334,7 @@ def _event_rows_for_profile(place_id: str) -> list[dict[str, Any]]:
         if str(r.get("title") or "").strip()
     ]
     rows.sort(key=lambda r: (-int(r["going_count"]), str(r["starts_at"] or "")))
-    return rows[:_MAX_PROFILE_EVENTS]
+    return rows[:_MAX_PROFILE_EVENTS], _this_week(rows)
 
 
 # ── features ──────────────────────────────────────────────────────────────────
@@ -391,7 +426,32 @@ def _blurb(
     members: int,
 ) -> str | None:
     """AI-authored from true facts, with a factual template as the floor
-    ([[ai-authored-copy-not-canned]]). None when we know nothing to say."""
+    ([[ai-authored-copy-not-canned]]). None when we know nothing to say.
+
+    Cached on its facts: the same place, features and member count always describe the
+    same thing, and the card can't render until this returns — an uncached call was ~1.6s
+    of every profile open, paid again on every re-open. A changed fact (a new feature, the
+    second member arriving) is a different key, so the copy still follows the truth.
+    """
+    return _blurb_cached(
+        place_name=place_name,
+        relation=relation,
+        area=area,
+        features=tuple(features or ()),  # hashable
+        members=members,
+    )
+
+
+@lru_cache(maxsize=512)
+def _blurb_cached(
+    *,
+    place_name: str,
+    relation: str,
+    area: str | None,
+    features: tuple[str, ...],
+    members: int,
+) -> str | None:
+    features = list(features)
     fallback: str | None = None
     if features:
         joined = ", ".join(f.lower() for f in features[:3])
@@ -412,12 +472,15 @@ def _blurb(
         else "Nobody else here has called it their spot yet"
     )
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
 
         if not llm_configured():
             return fallback
+        # Router tier on purpose: one 140-token sentence from facts we hand it. The synth
+        # model spent seconds on it and the profile card can't render until it returns —
+        # this is the whole reason opening a community felt slow.
         data = llm_json(
-            model=synthesizer_model(),
+            model=router_model(),
             system=_BLURB_PROMPT,
             user_payload="\n".join(f"- {f}" for f in facts),
             max_tokens=140,
@@ -587,7 +650,7 @@ def community_profile(
     members = _member_rows(pid)
     count = len(members)
     preview = _member_preview(user_id, members, phone_verified=phone_verified)
-    events = _event_rows_for_profile(pid)
+    events, meets_this_week_count = _event_rows_for_profile(pid)
     return {
         "place_id": pid,
         "affiliation_id": str(mine.get("id") or ""),
@@ -610,7 +673,9 @@ def community_profile(
         "detail": str(mine.get("detail") or "").strip() or None,
         "member_count": count,
         "active": count >= 2,
-        "status_line": _status_line(count, len(_events_at_place(pid, limit=20, within_days=7))),
+        # Counted from the meets already fetched above — reading this place's events
+        # twice was a wasted round trip on every profile open.
+        "status_line": _status_line(count, meets_this_week_count),
         "description": _blurb(
             place_name=name,
             relation=relation,
@@ -651,6 +716,10 @@ def _create_event_venue(place: dict[str, Any]) -> dict[str, Any] | None:
         "place_id": google_id,
         "lat": place.get("lat"),
         "lng": place.get("lng"),
+        # Hosting from HERE means the meet is for this community — so the setup card's
+        # picker arrives pre-selected and its members get the publish email. Our places.id,
+        # not the Google one: that is what events.circle_place_ref stores.
+        "circle_place_id": str(place.get("id") or "") or None,
     }
 
 

@@ -285,6 +285,80 @@ class TestListMyCircles(unittest.TestCase):
         self.assertEqual(rows[0]["place_name"], "OrangeTheory")
 
 
+class TestOneCommunityPerPlace(unittest.TestCase):
+    """Two claims can name one spot in different words ("St. Luke's" /
+    "attends St. Luke's"). The list must show it once, and the member count must be
+    people — not rows, which told the list "2 people" for one person."""
+
+    @patch("app.circles_flow._member_count", return_value=1)
+    @patch("app.circles_flow.service_client")
+    def test_two_affiliations_at_one_place_list_once(self, sb, _count) -> None:
+        affs = _chain(
+            [
+                {
+                    "id": "a2", "circle_type": "faith", "circle_key": "attends_st_lukes",
+                    "detail": None, "status": "confirmed", "place_ref": "p1",
+                    "created_at": "2026-08-02",
+                },
+                {
+                    "id": "a1", "circle_type": "faith", "circle_key": "st_lukes",
+                    "detail": "St. Luke's", "status": "confirmed", "place_ref": "p1",
+                    "created_at": "2026-08-01",
+                },
+            ]
+        )
+        affs.not_ = affs
+        places = _chain([{"id": "p1", "name": "St. Luke's", "address": "4851 S Apopka"}])
+        sb.return_value = _sb_with_tables({"circle_affiliations": affs, "places": places})
+        rows = list_my_circles("u1")
+        self.assertEqual(len(rows), 1)
+        # Newest framing survives; the older row's detail fills the gap it left.
+        self.assertEqual(rows[0]["id"], "a2")
+        self.assertEqual(rows[0]["detail"], "St. Luke's")
+
+    @patch("app.circles_flow.service_client")
+    def test_member_count_is_people_not_rows(self, sb) -> None:
+        from app.circles_flow import _member_count, _member_counts
+
+        sb.return_value.table.return_value = _chain(
+            [
+                {"user_id": "u1", "place_ref": "p1"},
+                {"user_id": "u1", "place_ref": "p1"},
+                {"user_id": "u2", "place_ref": "p1"},
+                {"user_id": "u3", "place_ref": "p2"},
+            ]
+        )
+        self.assertEqual(_member_count("p1"), 2)
+        # …and the whole list is one query, not one per place.
+        self.assertEqual(_member_counts(["p1", "p2"]), {"p1": 2, "p2": 1})
+
+    @patch("app.rapport_gaps.open_semantic_gap")
+    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…"))
+    @patch("app.circles_flow._close_grounding_gap")
+    @patch("app.circles_flow._flush_parked_features", return_value=0)
+    @patch("app.circles_flow.upsert_canonical_place", return_value="p1")
+    @patch("app.places.place_details", return_value=dict(_DETAILS))
+    @patch(
+        "app.circles_flow._own_affiliation",
+        return_value={"id": "a2", "circle_type": "faith", "detail": "St. Luke's"},
+    )
+    @patch(
+        "app.circles_flow._active_affiliation_at_place",
+        return_value={"id": "a1", "detail": "St. Luke's"},
+    )
+    @patch("app.circles_flow.service_client")
+    def test_grounding_onto_a_place_you_already_hold_merges(
+        self, sb, _existing, _own, _details, _upsert, _flush, _close, _q, _gap
+    ) -> None:
+        table = _chain()
+        sb.return_value.table.return_value = table
+        result = ground_affiliation("u1", "a2", "gpid1")
+        # The caller gets the row that was already there, and the redundant one is
+        # soft-dismissed — never a second community at the same place.
+        self.assertEqual(result["affiliation_id"], "a1")
+        self.assertIn("dismissed_at", table.update.call_args[0][0])
+
+
 class TestTagClaimPlace(unittest.TestCase):
     @patch("app.circles_flow.service_client")
     @patch("app.rapport_gaps.get_gap_row", return_value={"place_ref": "p1"})

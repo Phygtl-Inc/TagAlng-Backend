@@ -348,4 +348,16 @@ def publish_event(
         import logging
 
         logging.getLogger(__name__).exception("event_place_stamp_kickoff_failed")
+    # The community the host picked on the setup card (2/5): tag the meet and email that
+    # community's members. Background for the same reason — a mail-out never gates publish.
+    try:
+        from app.event_place import stamp_event_community_async
+
+        stamp_event_community_async(
+            str(event_id), draft.circle_place_id, user_id, fields["title"]
+        )
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).exception("event_community_stamp_kickoff_failed")
     return str(event_id)

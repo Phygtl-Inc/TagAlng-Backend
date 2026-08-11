@@ -68,7 +68,8 @@
       "Bash(../../.venv_lana_worker/bin/python -c \"import ast;ast.parse\\(open\\('app/circles_flow.py'\\).read\\(\\)\\);print\\('syntax ok'\\)\")",
       "Bash(../../.venv_lana_worker/bin/python -c ' *)",
       "Bash(PATH=/Users/dev/.nvm/versions/node/v20.19.5/bin:__TRACKED_VAR__ npm run ts-check)",
-      "Bash(PATH=/Users/dev/.nvm/versions/node/v20.19.5/bin:__TRACKED_VAR__ npx eslint src/features/voice/components src/lib/circles.ts src/lib/circles.schema.ts src/app/dev/communities/page.tsx)"
+      "Bash(PATH=/Users/dev/.nvm/versions/node/v20.19.5/bin:__TRACKED_VAR__ npx eslint src/features/voice/components src/lib/circles.ts src/lib/circles.schema.ts src/app/dev/communities/page.tsx)",
+      "Bash(perl -0pi -e \"s/  SingleSelectQuestionConfig,\\\\n//; s/import \\\\{ asBoolean, asDateTime, asString \\\\}/import { asBoolean, asDateTime }/\" src/features/voice/components/host-setup-carousel.tsx)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",

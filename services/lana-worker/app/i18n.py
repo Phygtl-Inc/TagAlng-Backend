@@ -803,6 +803,28 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "O anfitrião não conseguiu encaixar você desta vez.",
     },
 
+    # A meet posted for a community the recipient belongs to. {place} is the community's
+    # own place name ("Lake Nona YMCA") — the only thing that makes this mail welcome
+    # rather than noise, so it leads.
+    "notify.community_event.subject": {
+        "en": "New meet at {place}",
+        "es": "Nuevo plan en {place}",
+        "pt": "Novo encontro em {place}",
+    },
+    "notify.community_event.title": {
+        "en": "“{title}” — for {place}",
+        "es": "“{title}” — para {place}",
+        "pt": "“{title}” — para {place}",
+    },
+    "notify.community_event.body": {
+        "en": "Someone from {place} is putting this together and your community is invited. Take a look — join if it fits.",
+        "es": "Alguien de {place} está organizando esto y tu comunidad está invitada. Échale un vistazo — únete si te encaja.",
+        "pt": "Alguém de {place} está organizando isto e a sua comunidade está convidada. Dê uma olhada — participe se fizer sentido.",
+    },
+    "notify.community_event.cta": {
+        "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
+    },
+
     "notify.cancelled.title": {
         "en": "“{title}” was cancelled",
         "es": "“{title}” se canceló",

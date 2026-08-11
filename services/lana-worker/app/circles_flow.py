@@ -198,6 +198,30 @@ def _own_affiliation(user_id: str, affiliation_id: str) -> dict[str, Any] | None
     return (res.data or [None])[0]
 
 
+def _active_affiliation_at_place(
+    user_id: str, place_id: str, *, exclude_id: str | None = None
+) -> dict[str, Any] | None:
+    """This user's live affiliation at a place, if they already have one — the guard
+    that keeps one community per place per person."""
+    res = (
+        service_client()
+        .table("circle_affiliations")
+        .select("id, circle_key, detail, created_at")
+        .eq("user_id", user_id)
+        .eq("place_ref", place_id)
+        .is_("dismissed_at", "null")
+        .order("created_at")
+        .limit(2)
+        .execute()
+    )
+    for row in res.data or []:
+        row_id = str((row or {}).get("id") or "")
+        if not row_id or row_id == (exclude_id or ""):
+            continue
+        return row
+    return None
+
+
 # How far past the block bias a NAMED search may reach (metres). Their gym or
 # temple is often a couple of towns over; a nearby-only search then "fails" and
 # we start offering strangers' places instead.
@@ -506,6 +530,33 @@ def ground_affiliation(
     )
     if not place_id:
         raise ValueError("place_not_found")
+
+    # One community per place, per person. Two claims can name the same spot in
+    # different words ("St. Luke's" → st_lukes_church, "attends St. Luke's" →
+    # attends_st_lukes_church) and the unique index is on circle_key, so nothing stopped
+    # them both grounding here — the list then showed the place twice and the member
+    # count (rows, not people) claimed "2 people" for one person. Fold into the row
+    # that got here first: its features still land on the place, and the redundant row
+    # is soft-dismissed like any other removal.
+    existing = _active_affiliation_at_place(user_id, place_id, exclude_id=str(affiliation["id"]))
+    if existing:
+        _flush_parked_features(user_id, affiliation, place_id)
+        _close_grounding_gap(affiliation_id)
+        from datetime import datetime, timezone
+
+        service_client().table("circle_affiliations").update(
+            {"dismissed_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", affiliation["id"]).execute()
+        logger.info(
+            "circle_ground.merged_duplicate user=%s place=%s kept=%s dropped=%s",
+            user_id, place_id, existing.get("id"), affiliation["id"],
+        )
+        return {
+            "affiliation_id": str(existing.get("id")),
+            "place_id": place_id,
+            "place_name": details["name"],
+            "status": "confirmed",
+        }
 
     # Provenance (migration 20261004): `source` says where the community came from,
     # `confirmed_via` says which action made it real. This path is a grounding answer
@@ -1575,22 +1626,42 @@ def handle_grounding_confirmation(
     }
 
 
-def _member_count(place_id: str) -> int:
-    """Confirmed, non-dismissed members of a place (Place Profile §5.1)."""
+def _member_counts(place_ids: list[str]) -> dict[str, int]:
+    """place_id -> how many DISTINCT people are confirmed there, for a whole list of
+    places in ONE query. Counting per place made the communities list N round trips to
+    a remote database, which is what "View more" spent its seconds on.
+
+    Distinct people, not rows: one person can hold two affiliations at the same place,
+    which is how the list told them "2 people" while the profile said "just you".
+    """
+    ids = [p for p in dict.fromkeys(place_ids) if p]
+    if not ids:
+        return {}
     try:
         res = (
             service_client()
             .table("circle_affiliations")
-            .select("id", count="exact")
-            .eq("place_ref", place_id)
+            .select("user_id, place_ref")
+            .in_("place_ref", ids)
             .eq("status", "confirmed")
             .is_("dismissed_at", "null")
+            .limit(2000)
             .execute()
         )
-        return int(res.count or 0)
     except Exception:
-        logger.exception("member_count_failed place=%s", place_id)
-        return 0
+        logger.exception("member_counts_failed places=%s", len(ids))
+        return {}
+    people: dict[str, set[str]] = {}
+    for r in res.data or []:
+        pid, uid = str(r.get("place_ref") or ""), str(r.get("user_id") or "")
+        if pid and uid:
+            people.setdefault(pid, set()).add(uid)
+    return {pid: len(users) for pid, users in people.items()}
+
+
+def _member_count(place_id: str) -> int:
+    """One place's member count (Place Profile §5.1)."""
+    return _member_counts([place_id]).get(place_id, 0)
 
 
 def list_my_circles(user_id: str) -> list[dict[str, Any]]:
@@ -1618,13 +1689,29 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
         .limit(40)
         .execute()
     )
-    rows = res.data or []
+    # One row per PLACE: a person can hold two affiliations at the same spot (rows
+    # predating the ground_affiliation merge guard), and the list rendered the place
+    # twice. Newest-first order means the survivor is the most recent framing of it;
+    # an older row's detail fills in when the newer one has none.
+    rows: list[dict[str, Any]] = []
+    by_place: dict[str, dict[str, Any]] = {}
+    for r in res.data or []:
+        pid = str(r.get("place_ref") or "")
+        kept = by_place.get(pid)
+        if kept is None:
+            by_place[pid] = r
+            rows.append(r)
+        elif not str(kept.get("detail") or "").strip():
+            kept["detail"] = r.get("detail")
     place_ids = sorted({str(r["place_ref"]) for r in rows if r.get("place_ref")})
     places: dict[str, dict[str, Any]] = {}
     if place_ids:
         pres = (
             sb.table("places")
-            .select("id, name, address")
+            # Coords + the GOOGLE id come along so a caller can use the place as a
+            # venue (the host setup card pre-fills the meet's where from the community
+            # picked) without a second read or a re-geocode.
+            .select("id, name, address, google_place_id, lat, lng")
             .in_("id", place_ids)
             .execute()
         )
@@ -1633,11 +1720,14 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
     from app.place_activities import activities_for_places
 
     activities = activities_for_places(place_ids, user_id)
+    # Every place's member count in ONE query — a count per row made this list N round
+    # trips to a remote database, which is what the communities list spent its wait on.
+    counts = _member_counts(place_ids)
     out: list[dict[str, Any]] = []
     for r in rows:
         place_ref = str(r.get("place_ref") or "") or None
         place = places.get(place_ref or "", {})
-        count = _member_count(place_ref) if place_ref else 0
+        count = counts.get(place_ref or "", 0)
         detail = _FEATURE_NOTE_RE.sub("", str(r.get("detail") or "")).strip(" ;") or None
         out.append(
             {
@@ -1654,6 +1744,11 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "circle_key": r.get("circle_key"),
                 "place_name": place.get("name"),
                 "place_address": place.get("address"),
+                # The place as a usable VENUE — google id + coords, so hosting can pin
+                # this exact spot instead of re-searching its name.
+                "google_place_id": place.get("google_place_id"),
+                "lat": place.get("lat"),
+                "lng": place.get("lng"),
                 "detail": detail,
                 # What people do here, `mine` marking this user's own — the edit
                 # panel's "your activities" chips and its add-more menu in one list.

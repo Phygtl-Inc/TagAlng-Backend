@@ -368,5 +368,46 @@ class TestBlurbTruthfulness(unittest.TestCase):
             )
 
 
+class TestCreateEventCta(unittest.TestCase):
+    def test_its_message_enters_hosting_without_the_classifier(self) -> None:
+        """The CTA posts a normal chat message, so its WORDS decide the lane. Phrased as
+        "host something at X" it read as a search and answered "there aren't any
+        activities by them in your area" — a discovery result for a hosting button."""
+        from app.discovery_route import looks_like_host_event_entry
+        from app.ui_actions import community_profile_actions
+
+        actions = community_profile_actions(place_name="St. Luke's", relation="church")
+        self.assertTrue(looks_like_host_event_entry(actions[0]["message"]))
+
+
+class TestEventsAtPlace(unittest.TestCase):
+    """A community's upcoming list holds meets held HERE plus meets created FOR it (the
+    setup card's community tag), and the two-column filter only ever sees a real uuid."""
+
+    PID = "3f2a0c4e-1111-4222-8333-444455556666"
+
+    @patch("app.community_surface.service_client")
+    def test_uuid_place_matches_both_columns(self, sb) -> None:
+        from app.community_surface import _events_at_place
+
+        chain = _chain([{"id": "e1"}])
+        sb.return_value = _sb({"events": chain})
+        self.assertEqual(_events_at_place(self.PID, limit=5), [{"id": "e1"}])
+        self.assertEqual(
+            chain.or_.call_args.args[0],
+            f"place_ref.eq.{self.PID},circle_place_ref.eq.{self.PID}",
+        )
+
+    @patch("app.community_surface.service_client")
+    def test_non_uuid_never_reaches_the_or_filter(self, sb) -> None:
+        from app.community_surface import _events_at_place
+
+        chain = _chain([{"id": "e1"}])
+        sb.return_value = _sb({"events": chain})
+        _events_at_place("p1,circle_place_ref.not.is.null", limit=5)
+        chain.or_.assert_not_called()
+        chain.eq.assert_any_call("place_ref", "p1,circle_place_ref.not.is.null")
+
+
 if __name__ == "__main__":
     unittest.main()
