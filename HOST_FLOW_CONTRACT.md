@@ -78,6 +78,8 @@ Sent on every host turn; serialized from the `EventDraft` model.
   "starts_at": "2026-07-11T09:00:00", // ISO (naive local; TZ-anchored at publish)
   "ends_at":   "2026-07-11T10:30:00",
   "duration_minutes": 90,
+  "recurrence": "weekly",             // "weekly"|"biweekly"|"monthly"|null (null = one-off)
+  "recurrence_until": "2026-08-31",   // null = 180 days from publish
   "max_attendees": 8,                 // null = no limit
   "auto_approve": false,              // false = host approves each join; true = anyone joins
   "allow_attendee_share": true,       // attendees can pass the invite link
@@ -93,6 +95,8 @@ Sent on every host turn; serialized from the `EventDraft` model.
 
 FE usage by field:
 - `title` / `description` / `cohort_tags` / `starts_at` / `venue_name` → review + celebration cards.
+- `recurrence` → the "Every Friday" badge on review/confirm/celebration. `starts_at` is the
+  FIRST occurrence; captured from the host's own words ("every Friday at 6"), no extra step.
 - `max_attendees` / `auto_approve` / `allow_attendee_share` / `bring_items` → carousel initial state + confirm/celebration pills.
 - `event_setup` → carousel card copy/options (§4).
 - `place_id` / `venue_lat` / `venue_lng` / `venue_address` → precise "open in maps" pin.
@@ -194,6 +198,31 @@ Response:
 
 ---
 
+## 7b. Recurring meets — one row that rolls forward
+
+A recurring meet is **one** `events` row whose `starts_at` is the NEXT occurrence, not N
+rows. So: one group chat, one standing RSVP per person (approved once = in every week),
+one card in browse. After an occurrence passes, `roll_recurring_events()` advances the row
+— read-repair on every `/meet` open and every chat browse, no cron.
+
+Two host actions, and they are different:
+
+| Host wants | Call | Effect |
+| ---------- | ---- | ------ |
+| End the whole thing | `cancel_event` RPC + `POST /hooks/event-cancel` (unchanged) | series over, roster notified |
+| Skip just this one | `POST /hooks/event-skip` `{ "event_id": "…" }` | that date is called off, `starts_at` moves to the next one, roster notified with the new date |
+
+`/hooks/event-skip` does the RPC **and** the fan-out, so it's one call (unlike cancel):
+```jsonc
+{ "ok": true, "next_starts_at": "2026-08-21T22:00:00+00:00", "notified": 6 }
+```
+`next_starts_at: null` means that was the last occurrence, so the series is now closed.
+Errors come back as 400s the FE can render: `not_event_host`, `not_recurring`,
+`event_not_open`, `event_not_found`, `occurrence_conflict`.
+
+Show "Skip this one" only when `recurrence` is non-null. Attendees have no skip — a
+standing RSVP means "can't make it this week" is just a message in the group chat.
+
 ## 8. Published meet — `/meet/{id}` (`get_event_preview[_authed]` RPC)
 
 After publish, the shared meet page reads the event via the preview RPCs (not the chat
@@ -204,6 +233,8 @@ turn). Host-set fields surfaced there:
   "title": "…", "description": "…", "starts_at": "…", "ends_at": "…",
   "venue_name": "…", "venue_address": "…", "place_id": "…",
   "cohort_tags": ["…"], "max_attendees": 8,
+  "recurrence": "weekly" | null,               // "Every Friday" badge; starts_at is the next one
+  "recurrence_until": "2026-08-31" | null,
   "bring_items": ["Stroller", "Coffee mug"],   // rendered as the pinned "bring" list
   "participant_count": 0, "participants": [ … ], "distance_text": "…"
 }

@@ -133,8 +133,15 @@ def peer_card_nudge_action(
 
 def community_profile_actions(*, place_name: str, relation: str) -> list[dict[str, Any]]:
     """The primary CTA on a community profile (C-CIRCLE-COMM-PROFILE): create a meet
-    there. It posts a normal chat message, so hosting stays one implementation — a meet
+    there. It posts a normal chat message, so hosting stays ONE implementation — a meet
     created here is just a meet whose venue Lana already knows.
+
+    The venue is not left to the host brain to re-resolve, though: the FE stamps the
+    profile's `create_event_venue` block (POST /lana/sessions/{id}/event-venue, a plain
+    context write) BEFORE posting this message. Without that stamp the brain
+    re-geocodes the place name and can pin a different google place than the
+    community's — and `upcoming_events` filters on place_ref, so the meet goes missing
+    from the community it was created in.
 
     "Invite people" is deliberately NOT here: minting a labeled invite link and opening
     the share sheet is a native FE action (/lana/invites/mint with the profile's

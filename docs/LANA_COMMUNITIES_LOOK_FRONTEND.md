@@ -180,6 +180,10 @@ POST /lana/circles/profile
     { "event_id": "…", "title": "Saturday run", "starts_at": "…",
       "has_time": true, "venue_name": null, "going_count": 2 }
   ],
+  "create_event_venue": { "name": "OrangeTheory Narcoossee",
+                          "address": "9145 Narcoossee Rd",
+                          "place_id": "ChIJ…",        // GOOGLE place id, not our place_id
+                          "lat": 28.38, "lng": -81.21 },
   "actions": [{ "id": "community_create_event", "label": "Create an event",
                 "message": "I want to host something at OrangeTheory Narcoossee",
                 "style": "primary" }]
@@ -208,14 +212,43 @@ list is panel 4.
 
 **The two CTAs, deliberately split:**
 
-- *Create an event* is in `actions` — post its `message` like any chat CTA, and the host
-  flow opens with the venue already known.
+- *Create an event* goes **through chat**, like every other host — hosting stays one
+  implementation. Two calls in the tap handler, in this order:
+
+  ```jsonc
+  POST /lana/sessions/{session_id}/event-venue     // create_event_venue, verbatim
+  { "name": "…", "address": "…", "place_id": "ChIJ…", "lat": 28.38, "lng": -81.21 }
+  → { "ok": true }
+
+  POST /lana/sessions/{session_id}/messages        // then the chip's own message
+  { "message": "I want to host something at OrangeTheory Narcoossee" }
+  ```
+
+  The first call is a plain context stamp (no model call) that pins the venue and marks
+  the where-step satisfied; the second is the normal chat turn, so Lana opens the host
+  flow already knowing where — she asks only for what's actually missing. Skip the stamp
+  and it still works, just worse: the host brain re-geocodes the name and can land on a
+  different google place.
+
+  Render this same chip **above "Popular events" too** — one payload serves both spots,
+  nothing extra to fetch.
+
+  `create_event_venue.place_id` is the **Google** place id, deliberately not the
+  profile's `place_id` (our `places.id`). Publishing re-resolves the pin through Google
+  and stamps `events.place_ref` from it; feed it the wrong id and the meet lands on a
+  different `place_ref` than the community — and `upcoming_events` filters on
+  `place_ref`, so the meet you just created would be missing from the community you
+  created it in. Post the block as-is and that can't happen. `create_event_venue` is
+  `null` when the place has no Google id on file — just post the message and let the
+  host flow ask for the venue.
+
 - *Invite people* is **not** in `actions`, on purpose: minting a labeled link and opening
   the share sheet is native FE work (`POST /lana/invites/mint { circle_key }` → `{token,
   url}`), which a message-posting chip cannot do. Same reason `event_created_actions`
   returns nothing. Render it as your own secondary button.
 
-`actions` and `member_preview` are empty for an unverified caller.
+`actions`, `create_event_venue` and `member_preview` are empty/`null` for an unverified
+caller.
 
 ## Panel 4 — the people (`C-CIRCLE-COMM-PEOPLE`)
 
