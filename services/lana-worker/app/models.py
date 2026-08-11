@@ -433,6 +433,9 @@ class EventDraft(BaseModel):
     bring_items: list[str] = Field(default_factory=list)
     # AI-picked emoji cover (☕🎨⚽…) — the card's visual when there's no cover image.
     cover_emoji: str | None = None
+    # The community this meet is for (setup card 2/5) — the canonical place id of one of
+    # the host's own communities. None = a plain neighborhood meet, which is the default.
+    circle_place_id: str | None = None
     # AI-tailored quick-setup card config (capacity/sharing/approval/bring labels + bring
     # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
     event_setup: dict[str, Any] | None = None
@@ -542,6 +545,10 @@ class EventVenueRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
     place_id: str | None = None
+    # Set when the host started from a community's screen ("Create an event" there): the
+    # meet is FOR that community, not merely held at its address. Pre-selects the setup
+    # card's community picker, which the host can still change or clear.
+    circle_place_id: str | None = None
 
 
 class EventSetupRequest(BaseModel):
@@ -563,6 +570,9 @@ class EventSetupRequest(BaseModel):
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
     allow_attendee_share: bool | None = None
     bring_items: list[str] = Field(default_factory=list)
+    # Community card: the place id of the community picked in the dropdown, or None for
+    # "None" (just the host's own meet). Members are emailed at publish.
+    circle_place_id: str | None = None
 
 
 class EventJoinHookRequest(BaseModel):

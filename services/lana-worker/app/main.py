@@ -1583,6 +1583,22 @@ def _run_lana_message(
         body.intent_hint == "host_event"
         or looks_like_host_event_entry(body.message)
     ):
+        # A deterministic entry outranks whatever lane was mid-question. The browse asks
+        # "what kind of thing are you up for?" and then treats the NEXT message as its
+        # answer, whatever it is — so tapping "Create an event" on a community got
+        # swallowed as a search for that venue and answered "there's nothing happening
+        # there" while this block set host mode. A button that says "I am hosting" is
+        # never an answer to another lane's question.
+        from app.activity_browse import reset_activity_browse_state
+
+        reset_activity_browse_state(session_ctx_in)
+        # Hosting entered FROM a place (a community's "Create an event"): the client
+        # stamped that venue on the draft moments ago, precisely so this flow doesn't
+        # re-ask or re-geocode it. The fresh-draft wipe below would throw it away, so
+        # carry it across — one shot, cleared as it's consumed.
+        seeded = bool(session_ctx_in.get("event_venue_seeded"))
+        seeded_venue = session_ctx_in.get("event_venue") if seeded else None
+        seeded_draft = (session_ctx_in.get("event_draft") or {}) if seeded else {}
         session_ctx_in["event_host_active"] = True
         session_ctx_in["event_host_turns"] = 0
         session_ctx_in["event_affinity_asked"] = False
@@ -1601,6 +1617,24 @@ def _run_lana_message(
         session_ctx_in["event_share_asked"] = False
         # Batched-setup stage (review → setup → confirm → published); start unset.
         session_ctx_in["host_stage"] = None
+        if seeded_venue:
+            session_ctx_in["event_venue"] = seeded_venue
+            session_ctx_in["event_place_asked"] = True
+            session_ctx_in["event_draft"] = {
+                k: v
+                for k, v in seeded_draft.items()
+                if k
+                in (
+                    "venue_name",
+                    "venue_address",
+                    "place_id",
+                    "venue_lat",
+                    "venue_lng",
+                    # Which community this is for — the whole point of hosting from one.
+                    "circle_place_id",
+                )
+            }
+        session_ctx_in["event_venue_seeded"] = None
     # Deterministic entry into the in-chat "pass along an item" flow — from the
     # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
     # dependency, so it engages before discovery classifies it as sharing.swap).
@@ -1608,6 +1642,9 @@ def _run_lana_message(
         body.intent_hint == "pass_along"
         or looks_like_pass_along_entry(body.message)
     ):
+        from app.activity_browse import reset_activity_browse_state
+
+        reset_activity_browse_state(session_ctx_in)  # same swallow as the host entry above
         session_ctx_in["pass_along_active"] = True
         session_ctx_in["pass_along_turns"] = 0
         session_ctx_in["pass_along_photo_prompted"] = False
@@ -1622,6 +1659,9 @@ def _run_lana_message(
         body.intent_hint == "tip_share"
         or looks_like_tip_share_entry(body.message)
     ):
+        from app.activity_browse import reset_activity_browse_state
+
+        reset_activity_browse_state(session_ctx_in)  # same swallow as the host entry above
         session_ctx_in["tip_share_active"] = True
         session_ctx_in["tip_turns"] = 0
         session_ctx_in["tip_ready"] = None
@@ -2162,6 +2202,11 @@ def set_event_venue(
     draft["place_id"] = (body.place_id or "").strip() or None
     draft["venue_lat"] = body.lat
     draft["venue_lng"] = body.lng
+    # Hosting started from a community's screen: the meet is FOR that community. Only set
+    # here (never cleared) — this endpoint is a venue write, and the setup card's picker is
+    # where the host says "actually, none".
+    if body.circle_place_id and body.circle_place_id.strip():
+        draft["circle_place_id"] = body.circle_place_id.strip()
     ctx["event_draft"] = draft
     ctx["event_venue"] = {
         "name": draft["venue_name"],
@@ -2171,7 +2216,15 @@ def set_event_venue(
         "lng": body.lng,
     }
     ctx["event_place_asked"] = True  # the where-step is satisfied precisely now
+    # One-shot: the next turn may be the host-flow ENTRY (a community's "Create an
+    # event" stamps the venue, then posts the CTA). That entry starts a fresh draft,
+    # which would drop what we just stamped — this flag tells it to keep the venue.
+    ctx["event_venue_seeded"] = True
     update_session_context(session_id, ctx)
+    _LOG.info(
+        "event_venue_stamped session=%s venue=%r community=%s",
+        session_id, draft["venue_name"], draft.get("circle_place_id"),
+    )
     return {"ok": True}
 
 
@@ -2228,6 +2281,9 @@ def set_event_setup(
         draft["auto_approve"] = bool(body.auto_approve)
     if body.allow_attendee_share is not None:
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
+    # Community card: the carousel is a full submission, so an absent value is the "None"
+    # option (just the host's own meet), not "leave what was there".
+    draft["circle_place_id"] = (body.circle_place_id or "").strip() or None
     from app.lana_ui import is_none_bring_item
 
     # A typed none-answer ("nothing", "no need") on the bring card is an empty list,
