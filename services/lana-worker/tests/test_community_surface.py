@@ -285,7 +285,17 @@ class TestCommunityProfile(unittest.TestCase):
                 ]
             ),
             "places": _chain(
-                [{"id": "p1", "name": "OrangeTheory", "address": "9145 Narcoossee Rd", "zip": "32827"}]
+                [
+                    {
+                        "id": "p1",
+                        "name": "OrangeTheory",
+                        "address": "9145 Narcoossee Rd",
+                        "zip": "32827",
+                        "google_place_id": "ChIJgoogle",
+                        "lat": 28.4,
+                        "lng": -81.2,
+                    }
+                ]
             ),
             "place_features": _chain(
                 [{"key": "has_pool", "value": None, "sub_group": "", "confidence": 0.8}]
@@ -303,9 +313,12 @@ class TestCommunityProfile(unittest.TestCase):
         # Best-attended meet leads; the count is the real going roster.
         self.assertEqual(out["upcoming_events"][0]["event_id"], "e1")
         self.assertEqual(out["upcoming_events"][0]["going_count"], 2)
-        # One chat CTA only: hosting is a message, inviting is a native mint + share
-        # sheet, so the profile carries the invite LABEL instead of a dead chip.
+        # Hosting still goes through chat (one host implementation), but the venue is
+        # stamped from here first — and `place_id` must be the GOOGLE id, since our
+        # places.id would publish a meet whose place_ref never matches this community.
         self.assertEqual([a["id"] for a in out["actions"]], ["community_create_event"])
+        self.assertEqual(out["create_event_venue"]["place_id"], "ChIJgoogle")
+        self.assertEqual(out["create_event_venue"]["name"], "OrangeTheory")
         self.assertIn("circle_key", out)
 
     @patch("app.community_surface._blurb", return_value=None)
@@ -328,6 +341,7 @@ class TestCommunityProfile(unittest.TestCase):
         sb.return_value = _sb(tables)
         out = community_profile("u1", place_id="p1", phone_verified=False)
         self.assertEqual(out["actions"], [])
+        self.assertIsNone(out["create_event_venue"])
         self.assertEqual(out["member_preview"], [])
 
 

@@ -132,7 +132,7 @@ def _place_row(place_id: str) -> dict[str, Any]:
         res = (
             service_client()
             .table("places")
-            .select("id, name, address, place_type, zip")
+            .select("id, name, address, place_type, zip, google_place_id, lat, lng")
             .eq("id", place_id)
             .limit(1)
             .execute()
@@ -624,9 +624,33 @@ def community_profile(
         "activities": activities,
         "member_preview": preview,
         "upcoming_events": events,
+        # The venue for "Create an event": POST this block verbatim to
+        # /lana/sessions/{id}/event-venue (a plain context write) BEFORE posting the
+        # chip's message, so hosting runs through chat as always but on THIS place
+        # instead of a re-geocoded name. `place_id` is the GOOGLE id (not our
+        # places.id), so the post-publish stamp lands on this same place_ref and the
+        # meet shows up in this community's upcoming_events. Null = no google id on
+        # file, so the FE lets the host flow ask for the venue as usual.
+        "create_event_venue": _create_event_venue(place) if phone_verified else None,
         "actions": community_profile_actions(place_name=name, relation=relation)
         if phone_verified
         else [],
+    }
+
+
+def _create_event_venue(place: dict[str, Any]) -> dict[str, Any] | None:
+    google_id = str(place.get("google_place_id") or "").strip()
+    name = str(place.get("name") or "").strip()
+    if not google_id or not name:
+        return None
+    return {
+        "name": name,
+        # "" not null — EventVenueRequest.address is a plain str, so the block has to be
+        # postable verbatim.
+        "address": str(place.get("address") or "").strip(),
+        "place_id": google_id,
+        "lat": place.get("lat"),
+        "lng": place.get("lng"),
     }
 
 

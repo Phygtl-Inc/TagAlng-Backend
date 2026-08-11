@@ -339,6 +339,10 @@ class CommunityProfileResponse(BaseModel):
     activities: list[CommunityActivityRow] = Field(default_factory=list)
     member_preview: list[CommunityMemberPreviewRow] = Field(default_factory=list)
     upcoming_events: list[CommunityEventRow] = Field(default_factory=list)
+    # "Create an event" input: POST verbatim to /lana/sessions/{id}/event-venue, then open
+    # the setup screen with the venue pinned — no chat turn, no classifier. Null when the
+    # place has no google id on file (FE asks for the venue as usual).
+    create_event_venue: "EventVenueRequest | None" = None
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
