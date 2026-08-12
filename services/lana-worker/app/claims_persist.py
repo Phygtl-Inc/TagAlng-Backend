@@ -1064,6 +1064,28 @@ def kick_claim_embedding_backfill(
     threading.Thread(target=_run, daemon=True, name="claim-embed-backfill").start()
 
 
+def _embed_text_for(c: ExtractedClaim) -> str:
+    """The exact string _embed_claim would send to the embedder, for change detection."""
+    return claim_embedding_text(
+        concept=c.concept,
+        label=c.label,
+        source_quote=c.source_quote,
+        bucket=c.bucket,
+        details=c.details,
+    )
+
+
+def _embed_text_for_row(row: dict[str, Any], concept: str) -> str:
+    """Same, for the row already in the table."""
+    return claim_embedding_text(
+        concept=concept,
+        label=str(row.get("label") or ""),
+        source_quote=row.get("source_quote"),
+        bucket=row.get("bucket"),
+        details=[str(d) for d in (row.get("details") or [])],
+    )
+
+
 def _embed_claim(c: ExtractedClaim) -> list[float] | None:
     try:
         text = claim_embedding_text(
@@ -1217,22 +1239,37 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
     for c in claims:
         if c.confidence < MIN_CLAIM_CONFIDENCE:
             continue
-        embedding = _embed_claim(c)
         existing = (
             sb.table("user_identity_claims")
-            .select("id, confidence, synonyms, details")
+            .select("id, confidence, synonyms, details, label, source_quote, bucket")
             .eq("user_id", user_id)
             .eq("concept", c.concept)
             .is_("dismissed_at", "null")
             .limit(1)
             .execute()
         )
+        embedding: list[float] | None = None
         if existing.data:
             claim_id = existing.data[0]["id"]
             merged = _merge_into_existing(c, existing.data[0])
-            row = _claim_row(user_id, merged, embedding)
+            # Embed the MERGED claim, and only when its embedded text actually changed.
+            # This used to embed the pre-merge `c` and write it unconditionally, so the
+            # stored vector (a) described a different claim than the stored row, and
+            # (b) was replaced on every re-mention — the embed text includes source_quote,
+            # so simply saying "I play tennis" again moved the vector and, with it, every
+            # match score against that person. Same fact, new number, for no reason.
+            row = _claim_row(user_id, merged, None)
+            if _embed_text_for(merged) != _embed_text_for_row(existing.data[0], merged.concept):
+                embedding = _embed_claim(merged)
+                if embedding is not None:
+                    row["embedding"] = embedding
+            elif _identity_concept_link_enabled():
+                # Text unchanged, so the STORED vector stays put — but concept resolution
+                # below still needs one to match against. Computed, not written.
+                embedding = _embed_claim(merged)
             sb.table("user_identity_claims").update(row).eq("id", claim_id).execute()
         else:
+            embedding = _embed_claim(c)
             row = _claim_row(user_id, c, embedding)
             res = sb.table("user_identity_claims").insert(row).execute()
             claim_id = None

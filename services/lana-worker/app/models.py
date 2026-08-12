@@ -34,10 +34,11 @@ class PeerMatchRow(BaseModel):
     match_band: str | None = None
     match_badge: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
-    # An intro to this neighbor is already on its way — the card shows "Sent" instead of
-    # a Nudge button, so Lana saying "I just sent your intro" can't sit above a control
-    # that still invites the same action.
-    intro_sent: bool = False
+    # "intro_sent" (an intro is on its way) or "connected" (they already know each other,
+    # per user_relationships.tier). Either way the card shows a status, not a Nudge button:
+    # Lana saying "I just sent your intro" must not sit above a control inviting the same
+    # action, and nudging an existing connection can only hit the 7-day pair cooldown.
+    connection: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
     # ── The recommendation cascade (§12a/b) ──────────────────────────────────────────
     # What this neighbor actually recommended, in their own words, and the tip_share row

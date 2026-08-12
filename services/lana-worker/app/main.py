@@ -728,7 +728,7 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 match_band=str(row.get("match_band") or "") or None,
                 match_badge=str(row.get("match_badge") or "") or None,
                 trait_tags=[str(t) for t in tags[:6]],
-                intro_sent=bool(row.get("intro_sent")),
+                connection=str(row.get("connection") or "") or None,
                 actions=_ui_action_rows_from_raw(row.get("actions")),
                 # Cascade fields — present only when the row came with a neighbor's rec
                 # (looking.tip) or a resolved distance; None everywhere else.
@@ -1013,7 +1013,7 @@ def _onboarding_fields(
 ) -> dict[str, Any]:
     from app.peer_discovery_surface import stamp_peer_discovery_ctx
 
-    stamp_peer_discovery_ctx(ctx, phone_verified=auth.phone_verified)
+    stamp_peer_discovery_ctx(ctx, phone_verified=auth.phone_verified, user_id=auth.user_id)
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
     # Ship the card only on the turn it was created — the ctx key lives on as state.
     intro = (

@@ -857,7 +857,7 @@ def _try_neighbor_intro_turn(
         _sent_to = str(intro.get("candidate_user_id") or "")
         for _row in peers:
             if isinstance(_row, dict) and str(_row.get("peer_user_id") or "") == _sent_to:
-                _row["intro_sent"] = True
+                _row["connection"] = "intro_sent"
         ctx.pop("recent_intro_duplicate", None)
         attach_pending_intros_after_propose(
             ctx, user_jwt=user_jwt, intro=intro, peer=peer

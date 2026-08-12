@@ -448,6 +448,27 @@ def try_propose_intro_from_preview(
                 ),
                 {"status": "need_verify"},
             )
+        if "nudge_cooldown_pair" in detail:
+            # lana_propose_neighbor_intro sends the nudge itself when the pair are still
+            # strangers, so the 7-day per-pair cooldown surfaces here too. Say the real
+            # reason — a bare failure reads as "try again", which cannot work for a week.
+            _nick = str(peer.get("nickname") or "them").strip() or "them"
+            return (
+                compose_reply(
+                    goal=(
+                        "You already nudged this neighbor within the last week, so you "
+                        "can't send another yet. Say so plainly, tell them the ball is "
+                        "in the neighbor's court, and make clear retrying won't help "
+                        "until the week is up."
+                    ),
+                    facts=[f"The neighbor's name: {_nick}", "Nudges to the same person are once per 7 days"],
+                    fallback=(
+                        f"You already nudged {_nick} in the last week — it's with them now. "
+                        "I can't send another until the week's up."
+                    ),
+                ),
+                {"status": "nudge_cooldown", "candidate_user_id": peer.get("peer_user_id")},
+            )
         raise
 
     if not intro.get("intro_id"):
