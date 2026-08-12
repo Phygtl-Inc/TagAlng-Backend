@@ -1223,13 +1223,21 @@ def _inject_event_quick_replies(
         draft["suggestions"] = _PLACE_SUGGESTIONS
 
 
-def _event_published_reply(reply: str, draft: dict[str, Any]) -> str:
+def _event_published_reply(reply: str, draft: dict[str, Any], *, cta_driven: bool = False) -> str:
     title = str((draft or {}).get("title") or "your event").strip() or "your event"
     note = f"🎉 Done — **{title}** is live in your area. Neighbors who match can RSVP now."
     base = str(reply or "").strip()
-    # The orchestrator wrote `base` without knowing we'd publish this turn. If it's
-    # still asking for a detail ("…where will the jog start?"), keeping it contradicts
-    # the publish — so drop any question and lead only with a clean acknowledgment.
+    # A CTA publish ("Drop the meet up") is a button payload, not a sentence the upstream
+    # composer understood: it reads "drop" as backing out and writes an abandon line
+    # ("I've noted you'd like to drop the meetup") that shipped right above the live meet.
+    # Only the host brain writes a `base` that KNEW we were publishing, so on the CTA path
+    # the note stands alone. Keying on who drove the publish, not on the wording — the
+    # vocabulary already lives in host_turn.py and discovery_slots.py, and a phrase list
+    # here would be a third place to keep in sync.
+    if cta_driven:
+        return note
+    # The composer wrote `base` without knowing we'd publish. If it's still asking for a
+    # detail ("…where will the jog start?"), keeping it contradicts the publish.
     if base and "?" not in base:
         return f"{base}\n\n{note}"
     return note
@@ -2726,6 +2734,8 @@ def run_lana_unified_pipeline(
                 # ("publícalo", "pode postar"). The CTA matchers catch the first; the host
                 # brain's `publish` read catches the second — an AI signal, not a word list.
                 drop_asked = _is_host_drop(user_message) or _is_host_confirm(user_message)
+                # A button payload, not free text — the upstream reply never understood it.
+                cta_publish = drop_asked
                 brain = None
                 if not drop_asked:
                     # Free text at confirm — an inline edit, a redo ask, a question, or a
@@ -2817,7 +2827,7 @@ def run_lana_unified_pipeline(
                         # turn doesn't re-enter the verify funnel after a clean publish.
                         turn_ctx["host_publish_pending"] = None
                         turn_ctx["pending_post_verify"] = None
-                        reply = _event_published_reply(reply, ed)
+                        reply = _event_published_reply(reply, ed, cta_driven=cta_publish)
                     else:
                         # Publish rejected — surface the reason; hold at confirm so a retry
                         # (after verify / fixing the spot) republishes.

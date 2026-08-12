@@ -34,6 +34,10 @@ class PeerMatchRow(BaseModel):
     match_band: str | None = None
     match_badge: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
+    # An intro to this neighbor is already on its way — the card shows "Sent" instead of
+    # a Nudge button, so Lana saying "I just sent your intro" can't sit above a control
+    # that still invites the same action.
+    intro_sent: bool = False
     actions: list["UiActionRow"] = Field(default_factory=list)
     # ── The recommendation cascade (§12a/b) ──────────────────────────────────────────
     # What this neighbor actually recommended, in their own words, and the tip_share row

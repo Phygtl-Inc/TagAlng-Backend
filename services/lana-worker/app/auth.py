@@ -87,12 +87,34 @@ def require_verified_neighbor_comms(auth: AuthSession) -> None:
         raise HTTPException(status_code=403, detail="phone_not_verified")
 
 
+def _supabase(url: str, key: str):
+    """A Supabase client whose pooled connections survive going idle.
+
+    postgrest hardcodes `http2=True`, and httpcore's HTTP/2 `has_expired()` only checks
+    the keepalive timer — unlike HTTP/1.1, which probes the socket ("idle but readable"
+    means the server hung up) and evicts it. So a connection Supabase closed while we were
+    busy with a slow LLM turn stayed in the pool and failed instantly on reuse:
+    `ReadError: [Errno 35] Resource temporarily unavailable`, ~7ms in, losing a reply that
+    had already cost 20s+ to compute.
+
+    HTTP/1.1 fixes it at the source with no retry — retrying a POST insert could
+    double-write, and neither httpx's `retries=` (connect errors only) nor postgrest's
+    send_with_retry (GET/HEAD on 503/520) covers this case anyway. We issue a handful of
+    sequential REST calls per turn, so h2 multiplexing was buying nothing here.
+    """
+    from supabase import ClientOptions
+
+    return create_client(
+        url, key, options=ClientOptions(httpx_client=httpx.Client(http2=False))
+    )
+
+
 @lru_cache(maxsize=1)
 def _cached_service_client():
     # Built once and reused so the underlying httpx session keeps the connection
     # alive (HTTP keepalive) — otherwise every DB call pays a fresh TCP + TLS
     # handshake to Supabase, which dominates per-call latency.
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return _supabase(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 def service_client():
@@ -114,7 +136,7 @@ def email_has_registered_account(email: str) -> bool:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return False
     try:
-        sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        sb = _supabase(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         res = (
             sb.table("users")
             .select("id, email_verified_at")
@@ -153,7 +175,7 @@ def registered_user_id_for_email(email: str) -> str | None:
     if not normalized or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return None
     try:
-        sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        sb = _supabase(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         res = (
             sb.table("users")
             .select("id, email_verified_at")
@@ -187,7 +209,7 @@ def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
     if confirmed and not user.get("is_anonymous"):
         if SUPABASE_SERVICE_ROLE_KEY:
             try:
-                sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                sb = _supabase(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
                 sb.table("users").update({column: confirmed}).eq(
                     "id", user_id
                 ).execute()
@@ -200,7 +222,7 @@ def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
 def _load_user_profile(user_id: str) -> dict:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
-    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    sb = _supabase(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     try:
         profile = (
             sb.table("users")

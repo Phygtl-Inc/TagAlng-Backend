@@ -355,6 +355,10 @@ def stamp_intro_proposal_ctx(
         "shared_dimensions": intro.get("shared_dimensions") or [],
         "status": intro.get("status") or "proposed",
     }
+    # The intro CARD belongs to this turn only. `intro_proposal` itself must persist —
+    # two "don't re-propose" guards in discovery_route read it on later turns — so the
+    # one-turn signal is separate, matching event_published_now / item_listed_now.
+    ctx["intro_proposed_now"] = True
     ctx["active_intent"] = INTENT_PROPOSE_INTRO
     from app.intro_list import clear_intro_offer_ctx
 

@@ -189,6 +189,12 @@ def attach_peer_card_actions(
             continue
         peer_id = str(item.get("peer_user_id") or "").strip()
         nick = str(item.get("nickname") or "").strip()
+        if item.get("intro_sent"):
+            # Already introduced — offering the nudge again would just create a
+            # duplicate_intro_recent error the user never asked for.
+            item.pop("actions", None)
+            out.append(item)
+            continue
         if peer_id and nick:
             item["actions"] = [
                 peer_card_nudge_action(nickname=nick, peer_user_id=peer_id),

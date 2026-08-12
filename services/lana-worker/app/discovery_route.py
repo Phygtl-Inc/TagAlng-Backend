@@ -852,6 +852,12 @@ def _try_neighbor_intro_turn(
             "matching_peer_label": intro.get("match_reason"),
         }
         stamp_intro_proposal_ctx(ctx, intro=intro, peer=peer)
+        # The intro is away — this neighbor's card must stop offering a nudge, or the
+        # turn reads "I just sent your intro to X" directly above a Nudge button for X.
+        _sent_to = str(intro.get("candidate_user_id") or "")
+        for _row in peers:
+            if isinstance(_row, dict) and str(_row.get("peer_user_id") or "") == _sent_to:
+                _row["intro_sent"] = True
         ctx.pop("recent_intro_duplicate", None)
         attach_pending_intros_after_propose(
             ctx, user_jwt=user_jwt, intro=intro, peer=peer
