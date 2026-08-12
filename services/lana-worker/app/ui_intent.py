@@ -97,7 +97,9 @@ def derive_ui_intent(
 
     Use with `routing_phase` (debug) and `auth_action` (Supabase handoff).
     """
-    if ctx.get("intro_proposal"):
+    # Only on the turn the intro was actually sent — `intro_proposal` persists as state
+    # for the re-propose guards, so keying on it here hijacked every later turn's UI.
+    if ctx.get("intro_proposed_now"):
         return UI_INTENT_PROPOSE_NEIGHBOR_INTRO
 
     # In-chat event hosting — the draft card while capturing, then the batched review →

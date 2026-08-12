@@ -143,14 +143,20 @@ class TestDeriveUiIntent(unittest.TestCase):
         )
 
     def test_propose_neighbor_intro(self) -> None:
+        # intro_proposed_now is the propose TURN's flag (stamp_intro_proposal_ctx sets it
+        # alongside the payload). The payload alone must not win — it persists as state for
+        # the re-propose guards, and keying the UI off it hijacked every later turn.
         self.assertEqual(
-            derive_ui_intent({"intro_proposal": {"intro_id": "i1"}}),
+            derive_ui_intent(
+                {"intro_proposal": {"intro_id": "i1"}, "intro_proposed_now": True}
+            ),
             UI_INTENT_PROPOSE_NEIGHBOR_INTRO,
         )
         self.assertEqual(
             derive_ui_intent(
                 {
                     "intro_proposal": {"intro_id": "i1"},
+                    "intro_proposed_now": True,
                     "pending_intro_offer": {"candidate_user_id": "u1"},
                 }
             ),

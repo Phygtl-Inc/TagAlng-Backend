@@ -514,6 +514,8 @@ def peers_to_match_rows(
     *,
     phone_verified: bool,
 ) -> list[dict[str, Any]]:
+    from app.peer_discovery_surface import enrich_peer_match_row
+
     out: list[dict[str, Any]] = []
     for row in peers[:8]:
         if not isinstance(row, dict):
@@ -524,6 +526,10 @@ def peers_to_match_rows(
                 "peer_user_id": row.get("peer_user_id"),
                 "nickname": nick,
                 "avatar_url": row.get("avatar_url"),
+                # The badge the card renders, derived by the SAME helper the card uses, so
+                # Lana's prose describes what is actually on screen. Without it she fell
+                # back to quoting similarity_score as a percentage the card never shows.
+                "match_badge": enrich_peer_match_row(row).get("match_badge"),
                 # Unscored (lexical) rows stay unscored — no invented cosine; the
                 # truthful-match model shows them as fits by claim, not by percent.
                 "similarity_score": row.get("similarity_score"),
@@ -584,23 +590,17 @@ def format_peer_match_explanation(
     nick = str(peer.get("nickname") or "A neighbor").strip()
     label = str(peer.get("matching_peer_label") or "shared traits").strip()
     concept = str(peer.get("matching_peer_concept") or "").strip()
-    score = peer.get("similarity_score")
-    pct = ""
-    if score is not None:
-        try:
-            pct = f"{int(float(score) * 100)}%"
-        except (TypeError, ValueError):
-            pct = ""
+    # The card shows a proven-overlap BADGE ("FIT"), never a number — see
+    # peer_discovery_surface.match_badge and the FE's peer-matches card. Explaining a
+    # percentage the user cannot see ("That 72%…") is the one thing this must not do.
+    badge = str(peer.get("match_badge") or "").strip()
     parts: list[str] = []
     facts: list[str] = [f"Neighbor: {nick}", f'Their preview headline: "{label}"']
-    if pct:
-        parts.append(
-            f"The {pct} on {nick} is similarity between your saved identity threads and "
-            f"theirs in our embedding match — not a quiz score."
-        )
+    if badge:
+        parts.append(f"The {badge} tag on {nick} is how much you two provably share — not a quiz score.")
         facts.append(
-            f"The {pct} is embedding similarity between the user's saved identity "
-            "threads and theirs — not a quiz score"
+            f"The card shows the tag \"{badge}\", which reflects how many public claims "
+            "the two of them provably share — it is not a quiz score"
         )
     parts.append(f"The preview headline for them is \"{label}\".")
     if concept:
@@ -609,7 +609,7 @@ def format_peer_match_explanation(
     if peer.get("has_exact_concept_match"):
         parts.append("They share at least one exact public claim with you.")
         facts.append("They share at least one exact public claim with the user")
-    elif pct:
+    else:
         parts.append(
             "It's overlap across several threads — the label summarizes the strongest "
             "overlap, not every trait they have."
@@ -623,8 +623,10 @@ def format_peer_match_explanation(
         facts.append(f"The user's last matching ask: {identity_snippet[:120]}")
     return compose_reply(
         goal=(
-            "Explain honestly what the similarity shown on this neighbor means — "
-            "grounded only in the facts, no invented traits or scores."
+            "Explain honestly what the match shown on this neighbor means — "
+            "grounded only in the facts, no invented traits or scores. NEVER state a "
+            "percentage or any number: the card shows a word tag, not a score, and "
+            "quoting a figure the user cannot see on screen reads as a lie."
         ),
         facts=facts,
         fallback=" ".join(parts),
@@ -653,22 +655,17 @@ def format_match_list_explanation(
     if len(peers) == 1:
         return format_peer_match_explanation(peers[0], identity_snippet=identity_snippet)
     lines = [
-        "Each % is embedding similarity between your identity threads and theirs — "
-        "higher means more overlap, not a perfect fit on every label."
+        "Each tag is how much you two provably share — more shared claims means a "
+        "stronger tag, not a perfect fit on every label."
     ]
     for i, peer in enumerate(peers[:5]):
         if not isinstance(peer, dict):
             continue
         nick = str(peer.get("nickname") or f"Neighbor {i + 1}").strip()
         label = str(peer.get("matching_peer_label") or "shared traits").strip()
-        score = peer.get("similarity_score")
-        pct = ""
-        if score is not None:
-            try:
-                pct = f" ({int(float(score) * 100)}%)"
-            except (TypeError, ValueError):
-                pct = ""
-        lines.append(f"• {nick}{pct} — {label}")
+        # The badge the card actually renders — never a percentage the user can't see.
+        badge = str(peer.get("match_badge") or "").strip()
+        lines.append(f"• {nick}{f' ({badge})' if badge else ''} — {label}")
     if identity_snippet:
         lines.append(f"You asked about: {identity_snippet[:120]}.")
     lines.append("Ask about a name for their full public claims.")

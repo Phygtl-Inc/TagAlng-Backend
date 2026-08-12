@@ -11,6 +11,13 @@ TURN_SCOPED_SURFACES = frozenset({
     "identity_profile",
     "pending_intros",
     "recent_intro_duplicate",
+    # "I just introduced you to X" — the intro card owns the turn it was created on and
+    # nothing after it. derive_ui_intent checks this FIRST, ahead of hosting and every
+    # other surface, so leaving it set stranded the whole session: once Lana proposed an
+    # intro, every later turn returned propose_neighbor_intro and the host setup carousel
+    # (and every other card) silently never rendered. The persistent `intro_proposal`
+    # payload is deliberately NOT here — later turns still read it to avoid re-proposing.
+    "intro_proposed_now",
     "event_published_now",
     "item_listed_now",
     "tip_listed_now",
