@@ -25,7 +25,8 @@ from typing import Any
 _SYSTEM = """You resolve the DATE and TIME a neighbor wants for an event they are \
 hosting, from their words and the conversation. You are given TODAY's date (with its \
 weekday). Return ONE compact JSON object and nothing else:
-{"date": "YYYY-MM-DD" or null, "time": "HH:MM" or null}
+{"date": "YYYY-MM-DD" or null, "time": "HH:MM" or null, \
+"repeats": "weekly"|"biweekly"|"monthly" or null, "until": "YYYY-MM-DD" or null}
 
 - Resolve natural and relative phrases against TODAY: "28th June", "the 28th", \
 "next Friday", "tomorrow", "tonight", "this weekend", "next month".
@@ -35,10 +36,17 @@ already passed this year, use next year.
 "change it to Sunday".
 - time is 24-hour "HH:MM": "9pm" -> "21:00", "9 in the night" -> "21:00", \
 "noon" -> "12:00", "morning" -> "10:00", "evening"/"night" -> "18:00".
+- repeats is for a RECURRING meet the host wants on a cadence: "every Friday" -> \
+"weekly", "every other Saturday"/"fortnightly" -> "biweekly", "first Sunday of the \
+month"/"monthly" -> "monthly". date is still the FIRST occurrence. A one-time meet, \
+even a far-off one, has repeats null — "this Friday" is not "every Friday".
+- until is when a recurring meet should STOP, only if they said so: "every Friday \
+through August" -> the last day of August, "for the next 6 weeks" -> that date. Null \
+when they gave no end.
 - Return a value ONLY when THIS message states or changes it. Use null to leave the \
 existing draft value untouched — never echo the draft back as if it were new.
 
-Never invent a date or time the user did not express."""
+Never invent a date, time, or cadence the user did not express."""
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
@@ -66,9 +74,10 @@ def resolve_event_when(
     draft: dict[str, Any],
     now: datetime | None = None,
 ) -> dict[str, str] | None:
-    """Resolve the date/time the user expressed THIS turn.
+    """Resolve the date/time (and recurrence) the user expressed THIS turn.
 
-    Returns ``{"date": "YYYY-MM-DD", "time": "HH:MM"}`` (any subset the user expressed),
+    Returns ``{"date": "YYYY-MM-DD", "time": "HH:MM", "repeats": "weekly",
+    "until": "YYYY-MM-DD"}`` (any subset the user expressed),
     or ``None`` when the LLM is unavailable / errored so the caller falls back to regex.
     An empty dict means the model ran but saw no date/time change this turn.
     """
@@ -111,6 +120,17 @@ def resolve_event_when(
         if isinstance(raw_time, str) and _HHMM_RE.match(raw_time.strip()):
             hh, mm = raw_time.strip().split(":")
             out["time"] = f"{int(hh):02d}:{mm}"
+        # Recurring meets: the cadence and (optional) end date. Whitelisted — anything
+        # outside the three the DB accepts is dropped, so the meet publishes as a one-off
+        # rather than blowing up at publish on a check constraint.
+        raw_repeats = str(data.get("repeats") or "").strip().lower()
+        if raw_repeats in ("weekly", "biweekly", "monthly"):
+            out["repeats"] = raw_repeats
+        raw_until = data.get("until")
+        if isinstance(raw_until, str) and _ISO_DATE_RE.match(raw_until.strip()):
+            snapped = _snap_future(raw_until.strip(), today.date())
+            if snapped:
+                out["until"] = snapped
         return out
     except Exception:  # noqa: BLE001 - best-effort; caller falls back to regex
         import logging

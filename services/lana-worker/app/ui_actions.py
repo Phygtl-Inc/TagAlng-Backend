@@ -133,8 +133,15 @@ def peer_card_nudge_action(
 
 def community_profile_actions(*, place_name: str, relation: str) -> list[dict[str, Any]]:
     """The primary CTA on a community profile (C-CIRCLE-COMM-PROFILE): create a meet
-    there. It posts a normal chat message, so hosting stays one implementation — a meet
+    there. It posts a normal chat message, so hosting stays ONE implementation — a meet
     created here is just a meet whose venue Lana already knows.
+
+    The venue is not left to the host brain to re-resolve, though: the FE stamps the
+    profile's `create_event_venue` block (POST /lana/sessions/{id}/event-venue, a plain
+    context write) BEFORE posting this message. Without that stamp the brain
+    re-geocodes the place name and can pin a different google place than the
+    community's — and `upcoming_events` filters on place_ref, so the meet goes missing
+    from the community it was created in.
 
     "Invite people" is deliberately NOT here: minting a labeled invite link and opening
     the share sheet is a native FE action (/lana/invites/mint with the profile's
@@ -149,7 +156,13 @@ def community_profile_actions(*, place_name: str, relation: str) -> list[dict[st
         _action(
             action_id="community_create_event",
             label="Create an event",
-            message=f"I want to host something at {name}",
+            # "a meet", not "something": looks_like_host_event_entry needs a host verb
+            # AND an event noun to enter hosting without the classifier. "host something
+            # at <venue>" missed it, so the tap fell through to discovery and came back
+            # as "there aren't any activities by them in your area" — a search result for
+            # a button that means "I am hosting". The FE also sends intent_hint, but the
+            # message must stand on its own: any client posting this text gets hosting.
+            message=f"I want to host a meet at {name}",
             style="primary",
         ),
     ]

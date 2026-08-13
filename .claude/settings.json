@@ -56,10 +56,27 @@
       "Bash(npx prettier *)",
       "Bash(timeout 300 .venv/bin/python -m pytest --collect-only -q)",
       "Bash(timeout 420 .venv/bin/python -m pytest tests/ -q -x -p no:randomly)",
-      "Bash(timeout 600 .venv/bin/python -m pytest tests/ -q -p no:randomly)"
+      "Bash(timeout 600 .venv/bin/python -m pytest tests/ -q -p no:randomly)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest -q)",
+      "Bash(/Users/dev/Downloads/TagAlng-backend/.venv_lana_worker/bin/python -m pytest -q)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_claim_followup.py::TestPersistIdentityFromMessage -q)",
+      "Bash(/bin/zsh -c 'command -v node')",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_claim_followup.py::TestPersistIdentityFromMessage::test_verify_gate_without_user -q)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest -q 2>&1 | grep ^FAILED | sed 's/ - .*//' | sort > /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt; comm -13 /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/base.txt /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt; echo \"--- totals\"; tail -1 /tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad/now2.txt >/dev/null; ../../.venv_lana_worker/bin/python -m pytest -q 2>&1 | tail -2)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_unshipped_capability_not_offered.py -q)",
+      "Bash(../../.venv_lana_worker/bin/python -m pytest tests/test_ask_streak_counts_questions.py -q)",
+      "Bash(../../.venv_lana_worker/bin/python -c \"import ast;ast.parse\\(open\\('app/circles_flow.py'\\).read\\(\\)\\);print\\('syntax ok'\\)\")",
+      "Bash(../../.venv_lana_worker/bin/python -c ' *)",
+      "Bash(PATH=/Users/dev/.nvm/versions/node/v20.19.5/bin:__TRACKED_VAR__ npm run ts-check)",
+      "Bash(PATH=/Users/dev/.nvm/versions/node/v20.19.5/bin:__TRACKED_VAR__ npx eslint src/features/voice/components src/lib/circles.ts src/lib/circles.schema.ts src/app/dev/communities/page.tsx)",
+      "Bash(perl -0pi -e \"s/  SingleSelectQuestionConfig,\\\\n//; s/import \\\\{ asBoolean, asDateTime, asString \\\\}/import { asBoolean, asDateTime }/\" src/features/voice/components/host-setup-carousel.tsx)",
+      "Bash(/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/f392a0c3-5f82-4459-9025-5cda439869d7/scratchpad/q.sh 'user_identity_claims?select=label,concept,synonyms,updated_at&user_id=eq.b7ead0f4-2221-4857-ab8b-1e59a2451e93&concept=eq.badminton_player')",
+      "Bash(/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/f392a0c3-5f82-4459-9025-5cda439869d7/scratchpad/q.sh 'user_relationships?select=*&or=\\(and\\(user_low.eq.b7ead0f4-2221-4857-ab8b-1e59a2451e93,user_high.eq.069fe9a2-c74e-48f8-9552-4aeb79bda07c\\),and\\(user_low.eq.069fe9a2-c74e-48f8-9552-4aeb79bda07c,user_high.eq.b7ead0f4-2221-4857-ab8b-1e59a2451e93\\)\\)')",
+      "Bash(/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/f392a0c3-5f82-4459-9025-5cda439869d7/scratchpad/q.sh 'users?select=id,nickname,home_block_id,zip_code&id=eq.b7ead0f4-2221-4857-ab8b-1e59a2451e93')"
     ],
     "additionalDirectories": [
-      "/Users/dev/Downloads/TagAlng-backend/supabase/migrations"
+      "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",
+      "/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad"
     ]
   }
 }

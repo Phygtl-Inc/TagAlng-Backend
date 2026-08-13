@@ -836,6 +836,24 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
     if session_ctx.get("rapport_active"):
         pending_q = str(session_ctx.get("rapport_followup_question") or "").strip()
         q_line = f' Lana\'s pending question was: "{pending_q[:300]}".' if pending_q else ""
+        # A place-GROUNDING ask is the one rapport question whose answer becomes a
+        # Places QUERY, so "there is no particular place" has to be separated from
+        # "here is the place". Both are answers, but only the first has something to
+        # search: fed to Google, "I just play at home" returns arbitrary nearby spots
+        # of that kind and offers them as the user's own (the 2026-08-03 bug class).
+        # abandon=true routes it to the unpinned close, which keeps the community and
+        # never asks for a place again. Scoped to this ask on purpose — for an
+        # ordinary rapport question "I usually run alone" is a plain answer (above).
+        place_ask_line = (
+            " THIS pending question asks WHERE the user does that activity, and their answer "
+            "becomes a map search. So when the reply says there is NO particular place — they "
+            "do it alone, at home, in their garage, nowhere specific, it varies, 'just me' — "
+            "set abandon=true: they ANSWERED, and the answer is that no place exists to look "
+            "up. Naming any place, venue kind, or area ('the Y', 'a park nearby', 'downtown') "
+            "is a normal answer instead (goal=chat, abandon=false)."
+            if session_ctx.get("rapport_place_ask")
+            else ""
+        )
         return (
             "rapport — Lana asked a warm, getting-to-know-you question and the user is ANSWERING it."
             + q_line
@@ -851,6 +869,7 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "'nope, not those', 'it's not any of them'), that is abandon=true — they are declining "
             "the options, not answering with one. A reply that rejects them but NAMES a different "
             "place ('no, it's the one by Publix') is a normal answer (goal=chat, abandon=false)"
+            + place_ask_line
         )
     # An armed offer IS a capture — the highest-priority one, because its accept WRITES.
     # Before this, an armed offer reported active_capture=none: Lana had just answered a

@@ -1,7 +1,7 @@
 """AI-tailored quick-setup cards for the in-chat host flow.
 
 Instead of hardcoding "How many people?" + generic bring chips, this asks the LLM to tailor
-the setup cards (name / capacity / sharing / approval / bring) to THIS event — suggested
+the setup cards (name / capacity / community / sharing / approval / bring) to THIS event — suggested
 event names (the first pre-fills the name field, the rest are tap-to-swap chips), the
 audience noun ("parents" vs "neighbors" vs "families"), and bring items that fit the activity (a
 stroller coffee walk → stroller + coffee mug; a potluck → a dish to share). All of it comes
@@ -14,10 +14,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-_SYSTEM = """You set up a neighbor's local event. Given the event so far, tailor the four \
+_SYSTEM = """You set up a neighbor's local event. Given the event so far, tailor the \
 quick-setup cards to THIS event and return ONE compact JSON object:
 {"title_suggestions": ["...", "...", "..."],
  "capacity_label": "...", "capacity_default": 8,
+ "community_label": "...", "community_hint": "...",
  "sharing_label": "...", "sharing_hint": "...",
  "approval_label": "...", "approval_hint": "...",
  "bring_label": "...", "bring_hint": "...", "bring_suggestions": ["...", "..."],
@@ -36,6 +37,10 @@ quick-setup cards to THIS event and return ONE compact JSON object:
   a mixed/neighbor event -> "How many neighbors?", "How many people?", or "How many can come?".
 - capacity_default: a sensible max headcount for this kind of event (small coffee ~8,
   a park playdate ~12, a big potluck ~20). Integer 2-30.
+- community_label / community_hint: whether this meet is for one of the communities the
+  host belongs to (their gym, their kid's school). The hint must say it's optional and
+  fine to skip when it's just their own meet. Never name a specific community — the
+  options are real rows attached separately.
 - sharing_label / sharing_hint: whether attendees can pass the invite link to a friend.
 - approval_label / approval_hint: whether the host approves each join request.
 - bring_label / bring_hint: a friendly "anything to bring?" prompt.
@@ -53,6 +58,8 @@ _DEFAULTS: dict[str, Any] = {
     "title_suggestions": ["Neighborhood Meetup", "Coffee & Catch-up", "Weekend Get-together"],
     "capacity_label": "How many can come?",
     "capacity_default": 8,
+    "community_label": "For one of your communities?",
+    "community_hint": "Optional — skip if it's just your own.",
     "sharing_label": "Can attendees pass the link on?",
     "sharing_hint": "They can hand it to a friend who fits.",
     "approval_label": "Want to approve each joiner?",
@@ -126,6 +133,8 @@ def setup_suggestions(
             "title_suggestions": titles[:3] or list(_DEFAULTS["title_suggestions"]),
             "capacity_label": _str(data.get("capacity_label"), _DEFAULTS["capacity_label"], 40),
             "capacity_default": cap_default,
+            "community_label": _str(data.get("community_label"), _DEFAULTS["community_label"], 60),
+            "community_hint": _str(data.get("community_hint"), _DEFAULTS["community_hint"], 80),
             "sharing_label": _str(data.get("sharing_label"), _DEFAULTS["sharing_label"], 60),
             "sharing_hint": _str(data.get("sharing_hint"), _DEFAULTS["sharing_hint"], 80),
             "approval_label": _str(data.get("approval_label"), _DEFAULTS["approval_label"], 60),

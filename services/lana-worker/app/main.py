@@ -92,6 +92,7 @@ from app.models import (
     EventDraft,
     EventJoinHookRequest,
     EventSetupRequest,
+    EventSkipRequest,
     EventVenueRequest,
     ItemDraft,
     LookDraft,
@@ -105,6 +106,7 @@ from app.models import (
     AskDraftChip,
     AskDraftPayload,
     CommunitiesCardPayload,
+    CommunityActivityRow,
     CommunityCardRow,
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
@@ -726,6 +728,7 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 match_band=str(row.get("match_band") or "") or None,
                 match_badge=str(row.get("match_badge") or "") or None,
                 trait_tags=[str(t) for t in tags[:6]],
+                connection=str(row.get("connection") or "") or None,
                 actions=_ui_action_rows_from_raw(row.get("actions")),
                 # Cascade fields — present only when the row came with a neighbor's rec
                 # (looking.tip) or a resolved distance; None everywhere else.
@@ -1010,9 +1013,14 @@ def _onboarding_fields(
 ) -> dict[str, Any]:
     from app.peer_discovery_surface import stamp_peer_discovery_ctx
 
-    stamp_peer_discovery_ctx(ctx, phone_verified=auth.phone_verified)
+    stamp_peer_discovery_ctx(ctx, phone_verified=auth.phone_verified, user_id=auth.user_id)
     jm = _joint_moment_from_dict(ctx.get("joint_moment"))
-    intro = _intro_proposal_from_dict(ctx.get("intro_proposal"))
+    # Ship the card only on the turn it was created — the ctx key lives on as state.
+    intro = (
+        _intro_proposal_from_dict(ctx.get("intro_proposal"))
+        if ctx.get("intro_proposed_now")
+        else None
+    )
     ui_intent = derive_ui_intent(
         ctx,
         ready_to_complete=ready_to_complete,
@@ -1360,6 +1368,36 @@ def create_lana_session(
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
                     is_anonymous=auth.is_anonymous, needs_name=_needs_name
                 )
+                # Anything else the guest had in flight before logging into this
+                # account (a recommendation ask, a community join, a drafted ask).
+                # Restoring the keys is enough: the post-verify resume paths already
+                # act on them — they just never survived the session reset. Named in
+                # the greeting so it is visibly not forgotten (prod 2026-08-06: an
+                # Italian-restaurant ask became "how can I help you today?").
+                if not auth.is_anonymous:
+                    from app.db import pop_login_carry
+                    from app.login_carry import describe as describe_carry
+
+                    _carry = pop_login_carry(auth.user_id)
+                    if _carry:
+                        session_ctx = {**session_ctx, **_carry}
+                        _waiting = describe_carry(_carry)
+                        if _waiting and not _needs_name:
+                            opening = compose_reply(
+                                goal=(
+                                    "Greet them back after signing in and say you still "
+                                    "have the thing they asked for before verifying, "
+                                    "naming it in their own words. Invite them to say the "
+                                    "word and you'll pick it straight back up. Do not "
+                                    "re-ask what they already told you."
+                                ),
+                                facts=[f"What they asked for: {_waiting}"],
+                                fallback=(
+                                    f"You're in — I still have **{_waiting}** on the go. "
+                                    "Say the word and I'll pick it right back up."
+                                ),
+                                max_sentences=2,
+                            )
                 draft_raw = None
                 use_orch = False
         elif use_orch:
@@ -1537,7 +1575,12 @@ def _run_lana_message(
     session_ctx_in["user_role"] = auth.role
     session_ctx_in["user_grammatical_gender"] = auth.grammatical_gender
     set_address_context(auth.role, auth.grammatical_gender)
+    # A rename announcement is worth exactly one turn. Cleared with None, never
+    # popped — a popped key gets resurrected by the stored-context merge and Lana
+    # would re-announce the same name change on every later turn.
+    session_ctx_in["nickname_changed"] = None
     if purpose in ("lana", "profile_intake"):
+        # Fill-only fallback: this cannot rename anyone (see persist_nickname_if_stated).
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
     # Deterministic entry into the in-chat event-host flow — from the "A meet to host"
@@ -1546,6 +1589,22 @@ def _run_lana_message(
         body.intent_hint == "host_event"
         or looks_like_host_event_entry(body.message)
     ):
+        # A deterministic entry outranks whatever lane was mid-question. The browse asks
+        # "what kind of thing are you up for?" and then treats the NEXT message as its
+        # answer, whatever it is — so tapping "Create an event" on a community got
+        # swallowed as a search for that venue and answered "there's nothing happening
+        # there" while this block set host mode. A button that says "I am hosting" is
+        # never an answer to another lane's question.
+        from app.activity_browse import reset_activity_browse_state
+
+        reset_activity_browse_state(session_ctx_in)
+        # Hosting entered FROM a place (a community's "Create an event"): the client
+        # stamped that venue on the draft moments ago, precisely so this flow doesn't
+        # re-ask or re-geocode it. The fresh-draft wipe below would throw it away, so
+        # carry it across — one shot, cleared as it's consumed.
+        seeded = bool(session_ctx_in.get("event_venue_seeded"))
+        seeded_venue = session_ctx_in.get("event_venue") if seeded else None
+        seeded_draft = (session_ctx_in.get("event_draft") or {}) if seeded else {}
         session_ctx_in["event_host_active"] = True
         session_ctx_in["event_host_turns"] = 0
         session_ctx_in["event_affinity_asked"] = False
@@ -1564,6 +1623,24 @@ def _run_lana_message(
         session_ctx_in["event_share_asked"] = False
         # Batched-setup stage (review → setup → confirm → published); start unset.
         session_ctx_in["host_stage"] = None
+        if seeded_venue:
+            session_ctx_in["event_venue"] = seeded_venue
+            session_ctx_in["event_place_asked"] = True
+            session_ctx_in["event_draft"] = {
+                k: v
+                for k, v in seeded_draft.items()
+                if k
+                in (
+                    "venue_name",
+                    "venue_address",
+                    "place_id",
+                    "venue_lat",
+                    "venue_lng",
+                    # Which community this is for — the whole point of hosting from one.
+                    "circle_place_id",
+                )
+            }
+        session_ctx_in["event_venue_seeded"] = None
     # Deterministic entry into the in-chat "pass along an item" flow — from the
     # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
     # dependency, so it engages before discovery classifies it as sharing.swap).
@@ -1571,6 +1648,9 @@ def _run_lana_message(
         body.intent_hint == "pass_along"
         or looks_like_pass_along_entry(body.message)
     ):
+        from app.activity_browse import reset_activity_browse_state
+
+        reset_activity_browse_state(session_ctx_in)  # same swallow as the host entry above
         session_ctx_in["pass_along_active"] = True
         session_ctx_in["pass_along_turns"] = 0
         session_ctx_in["pass_along_photo_prompted"] = False
@@ -1585,6 +1665,9 @@ def _run_lana_message(
         body.intent_hint == "tip_share"
         or looks_like_tip_share_entry(body.message)
     ):
+        from app.activity_browse import reset_activity_browse_state
+
+        reset_activity_browse_state(session_ctx_in)  # same swallow as the host entry above
         session_ctx_in["tip_share_active"] = True
         session_ctx_in["tip_turns"] = 0
         session_ctx_in["tip_ready"] = None
@@ -2125,6 +2208,11 @@ def set_event_venue(
     draft["place_id"] = (body.place_id or "").strip() or None
     draft["venue_lat"] = body.lat
     draft["venue_lng"] = body.lng
+    # Hosting started from a community's screen: the meet is FOR that community. Only set
+    # here (never cleared) — this endpoint is a venue write, and the setup card's picker is
+    # where the host says "actually, none".
+    if body.circle_place_id and body.circle_place_id.strip():
+        draft["circle_place_id"] = body.circle_place_id.strip()
     ctx["event_draft"] = draft
     ctx["event_venue"] = {
         "name": draft["venue_name"],
@@ -2134,7 +2222,15 @@ def set_event_venue(
         "lng": body.lng,
     }
     ctx["event_place_asked"] = True  # the where-step is satisfied precisely now
+    # One-shot: the next turn may be the host-flow ENTRY (a community's "Create an
+    # event" stamps the venue, then posts the CTA). That entry starts a fresh draft,
+    # which would drop what we just stamped — this flag tells it to keep the venue.
+    ctx["event_venue_seeded"] = True
     update_session_context(session_id, ctx)
+    _LOG.info(
+        "event_venue_stamped session=%s venue=%r community=%s",
+        session_id, draft["venue_name"], draft.get("circle_place_id"),
+    )
     return {"ok": True}
 
 
@@ -2191,6 +2287,9 @@ def set_event_setup(
         draft["auto_approve"] = bool(body.auto_approve)
     if body.allow_attendee_share is not None:
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
+    # Community card: the carousel is a full submission, so an absent value is the "None"
+    # option (just the host's own meet), not "leave what was there".
+    draft["circle_place_id"] = (body.circle_place_id or "").strip() or None
     from app.lana_ui import is_none_bring_item
 
     # A typed none-answer ("nothing", "no need") on the bring card is an empty list,
@@ -2447,6 +2546,81 @@ def hook_event_cancel(
             ),
         )
     return {"ok": True, "notified": len(roster)}
+
+
+@app.post("/hooks/event-skip")
+def hook_event_skip(
+    body: EventSkipRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Host calls off ONE occurrence of a recurring meet ("skip this Friday") — the series
+    itself lives on, RSVPs stand, the group chat stays. One round trip for the FE: the
+    worker calls skip_event_occurrence with the host's own JWT (which enforces host-only),
+    then pushes the NEW date to the going roster in each person's language. The in-app
+    group-chat notice is posted by the RPC, which is why it isn't repeated here."""
+    auth = verify_auth(authorization)
+    from datetime import datetime, timezone
+
+    from app.auth import service_client
+    from app.event_publish import event_tz, skip_event_occurrence
+
+    next_raw = skip_event_occurrence(body.event_id, _bearer_token(authorization))
+
+    # The date attendees read, in the meet's own timezone — an evening meet's UTC date
+    # is already tomorrow, which would name the wrong day.
+    next_label = None
+    if next_raw:
+        try:
+            dt = datetime.fromisoformat(str(next_raw).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            next_label = dt.astimezone(event_tz()).strftime("%a %b %d").replace(" 0", " ")
+        except ValueError:
+            next_label = None
+
+    sb = service_client()
+    if sb is None:
+        return {"ok": True, "next_starts_at": next_raw, "notified": 0}
+    try:
+        ev = sb.table("events").select("title").eq("id", body.event_id).single().execute().data or {}
+        rows = (
+            sb.table("event_requests")
+            .select("requester_id")
+            .eq("event_id", body.event_id)
+            .in_("status", ["approved", "attended"])
+            .eq("rsvp_status", "going")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 - the skip already happened; delivery is best-effort
+        return {"ok": True, "next_starts_at": next_raw, "notified": 0}
+
+    title = ev.get("title") or "a meet"
+    roster = {r.get("requester_id") for r in rows} - {None, auth.user_id}
+    langs = recipient_langs([str(u) for u in roster])
+    for uid in roster:
+        lang = langs.get(str(uid))
+        # No next date = the skip ended the series, so the copy must not promise one.
+        line = (
+            t("notify.skipped.body", lang, next=next_label)
+            if next_label
+            else t("notify.skipped.body_last", lang)
+        )
+        notify_user(
+            uid,
+            title=t("notify.skipped.title", lang, title=title),
+            body=line,
+            url=f"/meet/{body.event_id}",
+            email_subject=t("notify.skipped.subject", lang, title=title),
+            email_html=email_html(
+                t("notify.skipped.title", lang, title=title),
+                line,
+                t("notify.skipped.cta", lang),
+                f"/meet/{body.event_id}",
+            ),
+        )
+    return {"ok": True, "next_starts_at": next_raw, "notified": len(roster)}
 
 
 @app.post("/hooks/signal-matches")
@@ -2837,9 +3011,20 @@ def post_circles_profile(
                 key=str(f.get("key") or ""),
                 label=str(f.get("label") or ""),
                 sub_group=str(f.get("sub_group") or "") or None,
+                emoji=str(f.get("emoji") or "") or None,
             )
             for f in (data.get("features") or [])
             if isinstance(f, dict) and str(f.get("label") or "").strip()
+        ],
+        activities=[
+            CommunityActivityRow(
+                concept=str(a.get("concept") or ""),
+                label=str(a.get("label") or ""),
+                member_count=int(a.get("member_count") or 0),
+                mine=bool(a.get("mine")),
+            )
+            for a in (data.get("activities") or [])
+            if isinstance(a, dict) and str(a.get("label") or "").strip()
         ],
         member_preview=[
             CommunityMemberPreviewRow(
@@ -2907,6 +3092,152 @@ def post_circles_members(
         has_more=bool(data.get("has_more")),
         requires_phone_verification=bool(data.get("requires_phone_verification")),
     )
+
+
+# ── What people do here, and what the place has (C-PROFILE-CIRCLE-SUBS) ───────
+# Both lists are member-curated and members-only: every call re-checks the caller's
+# affiliation at the place. An activity is also written as an identity claim, so it
+# shapes matching like one volunteered in chat (app/place_activities.py).
+
+
+class CommunityActivityAddBody(_BaseModel):
+    # Either identifier, same as the profile read.
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    # Free text as the member typed it, or a label tapped from the "add more" menu.
+    label: str
+
+
+class CommunityActivityRemoveBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    concept: str
+
+
+class CommunityFeatureAddBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    label: str
+    # Program/room inside the place ("toddler swim"); "" is the place itself.
+    sub_group: str | None = None
+
+
+class CommunityFeatureRemoveBody(_BaseModel):
+    affiliation_id: str | None = None
+    place_id: str | None = None
+    key: str
+
+
+def _activity_error(exc: ValueError) -> HTTPException:
+    detail = str(exc)
+    if detail in ("place_required", "label_required", "concept_required", "key_required"):
+        return HTTPException(status_code=400, detail=detail)
+    if detail == "too_many_activities":
+        return HTTPException(status_code=409, detail=detail)
+    if detail == "not_yours":
+        return HTTPException(status_code=403, detail=detail)
+    return HTTPException(status_code=404, detail=detail)
+
+
+@app.post("/lana/circles/activities/add")
+def post_circles_activity_add(
+    body: CommunityActivityAddBody,
+    authorization: str | None = Header(default=None),
+):
+    """"I do aerobics here." Idempotent per (place, member, activity)."""
+    auth = verify_auth(authorization)
+    from app.place_activities import add_activity
+
+    try:
+        result = add_activity(
+            auth.user_id,
+            label=body.label,
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    if not result.get("already_there"):
+        amplitude_track(
+            "community_activity_added",
+            user_id=auth.user_id,
+            event_properties={
+                "place_id": result.get("place_id"),
+                "concept": result.get("concept"),
+            },
+        )
+    return result
+
+
+@app.post("/lana/circles/activities/remove")
+def post_circles_activity_remove(
+    body: CommunityActivityRemoveBody,
+    authorization: str | None = Header(default=None),
+):
+    """Stop listing it here. The interest itself stays on their profile."""
+    auth = verify_auth(authorization)
+    from app.place_activities import remove_activity
+
+    try:
+        remove_activity(
+            auth.user_id,
+            concept=(body.concept or "").strip().lower(),
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/lana/circles/features/add")
+def post_circles_feature_add(
+    body: CommunityFeatureAddBody,
+    authorization: str | None = Header(default=None),
+):
+    """"It has a pool." Shared with every member — same rows Lana learns in chat,
+    same write policy (an owner's own row is never overwritten by a member's)."""
+    auth = verify_auth(authorization)
+    from app.place_activities import add_feature
+
+    try:
+        result = add_feature(
+            auth.user_id,
+            label=body.label,
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+            sub_group=(body.sub_group or "").strip(),
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    amplitude_track(
+        "community_feature_added",
+        user_id=auth.user_id,
+        event_properties={"place_id": result.get("place_id"), "key": result.get("key")},
+    )
+    return result
+
+
+@app.post("/lana/circles/features/remove")
+def post_circles_feature_remove(
+    body: CommunityFeatureRemoveBody,
+    authorization: str | None = Header(default=None),
+):
+    """Take back a feature you added. 403 for anyone else's — a statement about a
+    shared place belongs to the member who made it."""
+    auth = verify_auth(authorization)
+    from app.place_activities import remove_feature
+
+    try:
+        remove_feature(
+            auth.user_id,
+            key=(body.key or "").strip().lower(),
+            place_id=(body.place_id or "").strip() or None,
+            affiliation_id=(body.affiliation_id or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise _activity_error(exc) from exc
+    return {"ok": True}
 
 
 # ── Invites + ZIP unlock (§A.2 · §D · §E) ─────────────────────────────────────
@@ -3370,8 +3701,23 @@ def post_rapport_record_answer(
     if text:
         # Extract claims from the answer (no per-message rapport gap — the coverage synth owns
         # tile questions), then reconcile any now-covered gaps.
+        # The tile question this text answers. Without it the extractor sees only
+        # the bare answer, so "Pizza Mortadella" produced the follow-up "is there
+        # a local spot where you usually order mortadella pizza?" — the question
+        # it was answering had already named the place (prod 2026-08-05).
+        _asked = None
+        try:
+            from app.rapport_gaps import get_gap_row
+
+            _asked = str((get_gap_row(body.gap_row_id) or {}).get("question") or "") or None
+        except Exception:  # noqa: BLE001 — context is a bonus, never a blocker
+            logger.debug("rapport: gap question lookup failed for asked_question")
         res = try_upsert_claims_from_message(
-            auth.user_id, text, message_id=body.message_id, allow_rapport_gap=False
+            auth.user_id,
+            text,
+            message_id=body.message_id,
+            allow_rapport_gap=False,
+            asked_question=_asked,
         )
         saved = res.saved
         rapport_reconcile_gaps(auth.user_id, body.message_id)

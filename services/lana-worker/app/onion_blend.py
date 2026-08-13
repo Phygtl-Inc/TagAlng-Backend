@@ -57,7 +57,7 @@ def _caller_place_tags(user_id: str) -> dict[str, str]:
         res = (
             service_client()
             .table("circle_affiliations")
-            .select("place_ref, circle_type")
+            .select("place_ref, circle_type, circle_key, noun")
             .eq("user_id", user_id)
             .eq("status", "confirmed")
             .is_("dismissed_at", "null")
@@ -75,7 +75,10 @@ def _caller_place_tags(user_id: str) -> dict[str, str]:
             continue
         pid = str(r.get("place_ref") or "")
         if pid and pid not in tags:
-            tags[pid] = f"your {place_relation_noun(r.get('circle_type'))}"
+            tags[pid] = (
+                "your "
+                f"{place_relation_noun(r.get('circle_type'), r.get('noun'), r.get('circle_key'))}"
+            )
     return tags
 
 

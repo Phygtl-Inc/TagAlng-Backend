@@ -68,6 +68,48 @@ class NextAction:
         }
 
 
+def turn_has_topic(session_ctx: dict[str, Any], user_message: str) -> bool:
+    """Did the person raise something of their own this turn?
+
+    Read off the classifier verdict the turn already computed (no word list, no new
+    call): a message the router could pin an intent to has a subject. An empty
+    turn — "hey", "ok", "not much" — is where a queued place-question is genuinely
+    the best thing Lana can say, so those stay available; anything with a topic of
+    its own must not be trampled by one.
+    """
+    slots = session_ctx.get("_discovery_slots")
+    if isinstance(slots, dict) and "linear_intent" in slots:
+        # A verdict exists — trust it, INCLUDING when it says there is no intent.
+        # Treating "none" as "no verdict" would send every empty turn down the
+        # cautious branch below and the empty-turn case would never fire.
+        intent = str(slots.get("linear_intent") or "").strip().lower()
+        return bool(intent) and intent not in ("none", "unknown", "null")
+    # No verdict at all — assume they said something, the cautious side: a withheld
+    # goal costs a beat, a mistimed one costs trust.
+    return bool(str(user_message or "").strip())
+
+
+def policy_model() -> str:
+    """Model for the policy decision. Defaults to the synthesizer, so unset changes
+    nothing.
+
+    Measured 2026-08-06 against OpenAI directly, identical 7,734-token prompt, rate
+    limits at 99.97% headroom and the prefix cache warm:
+        gpt-4.1        31.8s / 30.2s / 38.0s   (~4 output tokens/sec)
+        gpt-4.1-mini    3.5s /  2.6s           (~10x faster)
+    At those numbers gpt-4.1 exceeds a 15s per-attempt budget every single time, so
+    the turn burns three timeouts and falls through to the legacy path — which
+    discards the policy entirely. A cheaper model that ANSWERS beats a better one
+    that times out; this exists so the trade can be made per environment and
+    reverted instantly.
+    """
+    import os
+
+    from app.orchestrator.llm import synthesizer_model
+
+    return os.environ.get("LANA_POLICY_MODEL", "").strip() or synthesizer_model()
+
+
 def _recent_turns(history: list[dict[str, Any]]) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for m in history[-_RECENT_TURNS:]:
@@ -161,11 +203,54 @@ def ask_streak(session_ctx: dict[str, Any]) -> int:
         return 0
 
 
+def _utterance_asks_something(utterance: str) -> bool:
+    return any(ch in str(utterance or "") for ch in ("?", "؟"))
+
+
+def _question_names_its_options(utterance: str) -> bool:
+    """A closed question — it lists the answers, so they should be tappable.
+
+    Only the sentence that ends in the question mark counts: an "or" in the
+    warm-up ("pizza or pasta, you have taste!") decides nothing. Deliberately
+    narrow — it fires on "X, or Y?", not on every question.
+    """
+    import re
+
+    for sentence in re.split(r"(?<=[.!?])\s+", str(utterance or "")):
+        s = sentence.strip()
+        if not s.endswith(("?", "؟")):
+            continue
+        if re.search(r"\bor\b", s, re.I):
+            return True
+    return False
+
+
+def turn_asks_personal_question(action: NextAction) -> bool:
+    """Did the person just get asked about THEMSELVES this turn?
+
+    Judged on the text they read, NOT on the kind the model chose. Counting
+    kinds let the cap be walked straight past: three questions in a row all
+    shipped as kind='reply' (prod 2026-08-06, "favourite spot… or do you make it
+    at home?" -> "favourite pizza spot… or still exploring?" -> "a place you've
+    tried recently?"), and because `reply` fell to the else-branch below, each one
+    RESET the counter to zero. The guard believed nothing had been asked.
+
+    bridge_offer / capture_defer are excluded on purpose: "want me to find pizza
+    spots near you?" is an offer, and charging it to the interrogation budget
+    would suppress exactly the turns we want more of.
+    """
+    if action.kind in _ASK_KINDS:
+        return True
+    if action.kind in ("reply", "follow_thread"):
+        return _utterance_asks_something(action.utterance)
+    return False
+
+
 def note_ask_streak(session_ctx: dict[str, Any], action: NextAction) -> None:
     """Annoyance-guard input: how many personal questions Lana has asked
-    back-to-back. ask_gap/ground_place extend the streak; anything else clears
-    it (with None, never popped — the session merge resurrects popped keys)."""
-    if action.kind in _ASK_KINDS:
+    back-to-back. A turn that asks extends the streak; anything else clears it
+    (with None, never popped — the session merge resurrects popped keys)."""
+    if turn_asks_personal_question(action):
         session_ctx["policy_ask_streak"] = ask_streak(session_ctx) + 1
     else:
         session_ctx["policy_ask_streak"] = None
@@ -251,6 +336,39 @@ def _apply_distress_gate(action: NextAction) -> NextAction:
 MAX_CONSECUTIVE_ASKS = 2
 
 
+def audit_offer_goal(action: NextAction, goals: list[dict[str, Any]], user_id: str) -> None:
+    """Make an offer's goal_id observable — it is otherwise unverified.
+
+    Two silent failures, both the "the label doesn't match what happened" shape
+    that caused three separate bugs on 2026-08-06: a bridge_offer that pitches a
+    capability but attaches no goal_id (prod 12:43:57 offered sharing.host with
+    goal_id None, so nothing downstream can tell which capability was pitched or
+    whether it converted), and a goal_id naming a goal that was never on this
+    turn's menu.
+
+    Deliberately log-only. The fix for both is in the prompt; escalating to a
+    revision_note would buy a cosmetic field with a second LLM round-trip on a
+    hot path, and this defect never reaches the user's screen. If the logs show
+    it is still common after the prompt change, THEN make it enforce.
+    """
+    if action.kind not in ("bridge_offer", "ask_gap", "ground_place"):
+        return
+    gid = str(action.goal_id or "")
+    if not gid:
+        if action.kind == "bridge_offer":
+            logger.warning(
+                "decide_turn_offer_without_goal user=%s utterance=%r",
+                user_id, str(action.utterance or "")[:120],
+            )
+        return
+    known = {str(g.get("id") or "") for g in goals}
+    if gid not in known:
+        logger.warning(
+            "decide_turn_goal_not_on_menu user=%s kind=%s goal=%r",
+            user_id, action.kind, gid,
+        )
+
+
 def _apply_ask_ceiling(action: NextAction, streak: int) -> NextAction:
     """Hard ceiling on back-to-back personal questions.
 
@@ -298,15 +416,41 @@ def _revision_note(action: NextAction, *, streak: int) -> str | None:
             "making, return kind=capture_defer with it in defer_goal_id so it comes "
             "back later."
         )
-    if action.kind == "ask_gap" and streak >= MAX_CONSECUTIVE_ASKS:
+    # Judged on the text, not the kind: three questions in a row all shipped as
+    # kind='reply' and never tripped this (prod 2026-08-06).
+    if turn_asks_personal_question(action) and streak >= MAX_CONSECUTIVE_ASKS:
         return (
             "Your decision for this turn was " + decision + f" — but you have already "
-            f"asked {streak} personal questions back-to-back, and this is another one. "
-            "That reads as an interrogation. Revise it: give instead of asking — answer "
-            "them warmly and, if there is something concrete you can do for them, offer "
-            "that. Keep the question for later by returning kind=capture_defer with its "
-            "goal id in defer_goal_id."
+            f"asked {streak} personal questions back-to-back, and this asks another one. "
+            "It counts however you labelled it: what matters is that they read a "
+            "question about themselves. That reads as an interrogation. Revise it: GIVE "
+            "instead of asking — acknowledge what they said, then offer the single most "
+            "useful thing you can actually do for them from AVAILABLE CAPABILITIES, with "
+            "a chip to accept it. Someone exploring places wants recommendations, not a "
+            "fourth question. Keep any queued question for later with kind=capture_defer "
+            "and its goal id in defer_goal_id."
         )
+    # Chips the person can tap, where the answers are already decided. The prompt
+    # asks for these; on its own it did not deliver them (prod 2026-08-06 — "a
+    # favourite pizza spot around here, or are you still exploring?" shipped bare
+    # and the person typed "Exploring", a word Lana had just put in front of them).
+    if not action.chips and not action.distress_turn and action.kind != "handoff":
+        if action.kind == "bridge_offer":
+            return (
+                "Your decision for this turn was " + decision + " — it offers something "
+                "but gives them nothing to tap. They then have to guess the words that "
+                "trigger it, which is how an offer becomes a dead end. Revise it: keep "
+                "the wording and add ONE chip that accepts the offer, whose `send` is a "
+                "self-contained message an engine can act on by itself."
+            )
+        if _question_names_its_options(action.utterance):
+            return (
+                "Your decision for this turn was " + decision + " — your question names "
+                "the possible answers ('X, or Y?') but ships no chips, so they must type "
+                "a word you just handed them. Revise it: add one chip per option you "
+                "named, label under 28 chars, each `send` a complete answer. Keep the "
+                "question exactly as it is."
+            )
     if (
         action.kind != "handoff"
         # A distress turn is ALLOWED to end without a question or a chip — that
@@ -336,6 +480,22 @@ def _system_prompt() -> str:
     return load_prompt("lana_policy_decide.md") + "\n\n---\n\n" + lingo_constitution()
 
 
+def name_change_signal(session_ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """A rename applied THIS turn, stamped by whichever path persisted it.
+
+    The user has to HEAR the change land. Answering to a new name without a word
+    about it is exactly how a wrong one ("Orlando", then "Not") went unnoticed
+    for days — the reply sounded fine while the profile was wrong.
+    """
+    raw = session_ctx.get("nickname_changed")
+    if not isinstance(raw, dict):
+        return None
+    to = str(raw.get("to") or "").strip()
+    if not to:
+        return None
+    return {"from": str(raw.get("from") or "").strip() or None, "to": to}
+
+
 def decide_turn(
     *,
     user_id: str,
@@ -352,13 +512,37 @@ def decide_turn(
 
     if not llm_configured():
         return None
+    import time as _time
+
+    _t0 = _time.monotonic()
     try:
         world = world_state(user_id)
         streak = ask_streak(session_ctx)
         deferred = [
             str(g) for g in (session_ctx.get("deferred_goal_ids") or []) if g
         ]
-        goals = candidate_goals(user_id, world, deferred_goal_ids=deferred)
+        _t_world = _time.monotonic() - _t0
+        goals = candidate_goals(
+            user_id,
+            world,
+            deferred_goal_ids=deferred,
+            user_message=user_message,
+            turn_has_topic=turn_has_topic(session_ctx, user_message),
+        )
+        _t_goals = _time.monotonic() - _t0
+        _known = _claims(user_id, user_message)
+        _t_claims = _time.monotonic() - _t0
+        # decide_turn's stage time is NOT the model's time: switching the policy to a
+        # fast model took the LLM call to ~1.8s while the stage still read 9s, i.e.
+        # 7s of context assembly nobody could see (prod-local 2026-08-06). Logged as
+        # cumulative offsets so the expensive step is obvious at a glance.
+        logger.info(
+            "decide_turn_context user=%s world=%dms goals=%dms claims=%dms",
+            user_id,
+            int(_t_world * 1000),
+            int((_t_goals - _t_world) * 1000),
+            int((_t_claims - _t_goals) * 1000),
+        )
         payload = {
             "message": str(user_message or "")[:1000],
             # The rapport-tile question this message replies to. The tile lives on
@@ -370,7 +554,7 @@ def decide_turn(
             "conversation_summary": str(session_ctx.get("rolling_summary") or "") or None,
             # Ordered by relevance to THIS message, each flagged with whether it
             # bears on the turn at all.
-            "known_about_them": _claims(user_id, user_message),
+            "known_about_them": _known,
             "world": world,
             "candidate_goals": goals,
             "available_capabilities": [
@@ -382,9 +566,11 @@ def decide_turn(
             # than being corrected after the fact.
             "may_ask_personal_question": streak < MAX_CONSECUTIVE_ASKS,
             "session_language": session_ctx.get("lang") or "en",
+            # Set only on a turn that actually changed their name. Present = say so.
+            "name_just_changed": name_change_signal(session_ctx),
         }
         data = llm_json(
-            model=synthesizer_model(),
+            model=policy_model(),
             system=_system_prompt(),
             user_payload=json.dumps(payload, ensure_ascii=False),
             max_tokens=700,
@@ -405,7 +591,7 @@ def decide_turn(
             retry["revision_note"] = note
             try:
                 data = llm_json(
-                    model=synthesizer_model(),
+                    model=policy_model(),
                     system=_system_prompt(),
                     user_payload=json.dumps(retry, ensure_ascii=False),
                     max_tokens=700,
@@ -425,6 +611,9 @@ def decide_turn(
         # ask_gap on a distress turn or past the ceiling.
         action = _apply_distress_gate(action)
         action = _apply_ask_ceiling(action, streak)
+        # After the retry AND the gates, so it audits what actually ships — a
+        # revision or a gate can change the kind and drop the goal id.
+        audit_offer_goal(action, goals, user_id)
         if action.distress_turn:
             logger.info(
                 "decide_turn_distress user=%s kind=%s why=%r", user_id, action.kind, action.why,

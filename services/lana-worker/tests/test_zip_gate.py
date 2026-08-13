@@ -107,7 +107,26 @@ class TestFramingFacts(unittest.TestCase):
 
     def test_no_threshold_still_frames(self) -> None:
         facts = gate_framing_facts({"count": 0, "threshold": None})
-        self.assertTrue(any("coming alive" in f for f in facts))
+        self.assertTrue(any("brings their area to life" in f for f in facts))
+
+    def test_never_asserts_emptiness_the_caller_did_not_measure(self) -> None:
+        """The 2026-08-07 bug: 'warming 3/10' produced "not enough verified
+        neighbors have joined yet" for a ZIP holding 11 signups. The unlock count
+        is the introductions bar, not a population — with no measured search
+        result, no claim about who is around may be made at all."""
+        joined = " ".join(gate_framing_facts({"count": 3, "threshold": 10})).lower()
+        for banned in ("not enough", "nobody", "no one", "empty"):
+            self.assertNotIn(banned, joined)
+
+    def test_measured_neighbors_forbid_the_empty_framing(self) -> None:
+        facts = gate_framing_facts({"count": 3, "threshold": 10}, neighbors_found=3)
+        joined = " ".join(facts).lower()
+        self.assertIn("did find 3", joined)
+        self.assertIn("never suggest the area is empty", joined)
+
+    def test_measured_zero_says_so_plainly(self) -> None:
+        facts = gate_framing_facts({"count": 0, "threshold": 10}, neighbors_found=0)
+        self.assertTrue(any("nobody nearby" in f for f in facts))
 
 
 class TestPeersGateTurn(unittest.TestCase):

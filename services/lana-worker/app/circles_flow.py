@@ -186,7 +186,8 @@ def _own_affiliation(user_id: str, affiliation_id: str) -> dict[str, Any] | None
         service_client()
         .table("circle_affiliations")
         .select(
-            "id, circle_type, circle_key, detail, status, place_ref, place_name, source"
+            "id, circle_type, circle_key, detail, status, place_ref, place_name, "
+            "source, noun, emoji"
         )
         .eq("id", affiliation_id)
         .eq("user_id", user_id)
@@ -195,6 +196,30 @@ def _own_affiliation(user_id: str, affiliation_id: str) -> dict[str, Any] | None
         .execute()
     )
     return (res.data or [None])[0]
+
+
+def _active_affiliation_at_place(
+    user_id: str, place_id: str, *, exclude_id: str | None = None
+) -> dict[str, Any] | None:
+    """This user's live affiliation at a place, if they already have one — the guard
+    that keeps one community per place per person."""
+    res = (
+        service_client()
+        .table("circle_affiliations")
+        .select("id, circle_key, detail, created_at")
+        .eq("user_id", user_id)
+        .eq("place_ref", place_id)
+        .is_("dismissed_at", "null")
+        .order("created_at")
+        .limit(2)
+        .execute()
+    )
+    for row in res.data or []:
+        row_id = str((row or {}).get("id") or "")
+        if not row_id or row_id == (exclude_id or ""):
+            continue
+        return row
+    return None
 
 
 # How far past the block bias a NAMED search may reach (metres). Their gym or
@@ -327,13 +352,42 @@ def ground_options(
     typed = (query or "").strip()
     named = typed or _resolve_place_name(user_id, affiliation)
 
-    def _search(text: str, *, radius: float | None = None) -> list[dict[str, Any]]:
+    # The circle's OWN words beat the coarse type keyword. circle_type is a bucket
+    # of ~10 values, so "fitness" searched "gym" for EVERY sport: a
+    # table_tennis_group was offered three gyms (2026-08-06), and futsal, swimming
+    # and climbing would each get the same. Use what the user actually said.
+    own_words = str(affiliation.get("circle_key") or "").replace("_", " ").strip()
+    # Drop the words that describe the PERSON or the grouping rather than the
+    # place: "church_attendee" -> "church", "table_tennis_group" -> "table tennis".
+    own_words = re.sub(
+        r"\b(group|team|crew|member|attendee|goer|lover|fan|participant|visitor|"
+        r"enthusiast|athlete|player)s?\b",
+        "",
+        own_words,
+    ).strip()
+    own_words = re.sub(r"\s+", " ", own_words)
+    # Used ALONE, never concatenated with the type keyword — joining them produced
+    # "church attendee church mosque synagogue temple", which matches nothing.
+    if own_words and own_words != keyword:
+        keyword = own_words
+        # includedType is derived from that same coarse bucket, so it FILTERS OUT
+        # the very venue we now search for — a table-tennis hall is not a "gym".
+        # Dropping it widens to what the words describe.
+        included_type = None
+
+    # A typed search is someone looking around, so give them more than the three
+    # chips a suggestion row shows.
+    _limit = 6 if typed else 3
+
+    def _search(
+        text: str, *, radius: float | None = None, restrict: bool = True, limit: int = 3
+    ) -> list[dict[str, Any]]:
         rows = search_places(
             query=text,
             block_id=block_id,
             user_id=user_id,
-            limit=3,
-            included_type=included_type,
+            limit=limit,
+            included_type=included_type if restrict else None,
             **({"radius": radius} if radius else {}),
         )
         return [
@@ -348,15 +402,31 @@ def ground_options(
         ]
 
     if named:
-        hits = [o for o in _search(named) if _name_hit(named, o["name"])]
+        # A TYPED search is the person being specific, so it is never narrowed by
+        # the circle's coarse type — searching "table tennis hall" with
+        # includedType=gym matched nothing and the box looked broken (2026-08-06).
+        _restrict = not typed
+        # _name_hit stays on for a typed query too: typing "Fitness CF" must not
+        # come back as "Crunch Fitness" — a near-miss silently pins someone to a
+        # place they never said (the 2026-08-03 bug, and the reason
+        # test_typed_search_never_falls_back_to_nearby_spots asserts []). What was
+        # wrong was the includedType above, which narrowed a typed search to the
+        # circle's coarse bucket so "table tennis" could only ever match a "gym".
+        def _keep(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [o for o in rows if _name_hit(named, o["name"])]
+
+        hits = _keep(_search(named, restrict=_restrict, limit=_limit))
         if not hits:
             # Nothing by that name in the neighbourhood — widen once before
             # doubting them. Chains and clubs are routinely a few towns out.
-            hits = [
-                o
-                for o in _search(named, radius=_WIDE_SEARCH_RADIUS_M)
-                if _name_hit(named, o["name"])
-            ]
+            hits = _keep(
+                _search(
+                    named,
+                    radius=_WIDE_SEARCH_RADIUS_M,
+                    restrict=_restrict,
+                    limit=_limit,
+                )
+            )
         if hits or typed:
             return hits
         # Named, but not findable on the map. Keyword results ride along as
@@ -461,6 +531,33 @@ def ground_affiliation(
     if not place_id:
         raise ValueError("place_not_found")
 
+    # One community per place, per person. Two claims can name the same spot in
+    # different words ("St. Luke's" → st_lukes_church, "attends St. Luke's" →
+    # attends_st_lukes_church) and the unique index is on circle_key, so nothing stopped
+    # them both grounding here — the list then showed the place twice and the member
+    # count (rows, not people) claimed "2 people" for one person. Fold into the row
+    # that got here first: its features still land on the place, and the redundant row
+    # is soft-dismissed like any other removal.
+    existing = _active_affiliation_at_place(user_id, place_id, exclude_id=str(affiliation["id"]))
+    if existing:
+        _flush_parked_features(user_id, affiliation, place_id)
+        _close_grounding_gap(affiliation_id)
+        from datetime import datetime, timezone
+
+        service_client().table("circle_affiliations").update(
+            {"dismissed_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", affiliation["id"]).execute()
+        logger.info(
+            "circle_ground.merged_duplicate user=%s place=%s kept=%s dropped=%s",
+            user_id, place_id, existing.get("id"), affiliation["id"],
+        )
+        return {
+            "affiliation_id": str(existing.get("id")),
+            "place_id": place_id,
+            "place_name": details["name"],
+            "status": "confirmed",
+        }
+
     # Provenance (migration 20261004): `source` says where the community came from,
     # `confirmed_via` says which action made it real. This path is a grounding answer
     # unless the row was created by the profile add / invite self-confirm, which pin
@@ -512,9 +609,22 @@ def tag_claim_place_from_gap(gap_row_id: str, claim_id: str) -> None:
         place_ref = gap.get("place_ref")
         if not place_ref:
             return
-        service_client().table("user_identity_claims").update(
-            {"place_ref": str(place_ref)}
-        ).eq("id", claim_id).execute()
+        sb = service_client()
+        sb.table("user_identity_claims").update({"place_ref": str(place_ref)}).eq(
+            "id", claim_id
+        ).execute()
+        # Same fact, second surface: "what do you enjoy most at {place}?" is where
+        # chat learns an activity, so it lands on the panel's list too.
+        res = sb.table("user_identity_claims").select("user_id, label").eq("id", claim_id).limit(
+            1
+        ).execute()
+        row = (res.data or [None])[0]
+        if row:
+            from app.place_activities import link_activity_from_claim
+
+            link_activity_from_claim(
+                str(row.get("user_id") or ""), str(place_ref), str(row.get("label") or "")
+            )
     except Exception:
         logger.exception("tag_claim_place_failed gap=%s claim=%s", gap_row_id, claim_id)
 
@@ -551,9 +661,43 @@ _GROUND_NOUN: dict[str, str] = {
     "other": "spot",
 }
 
-def place_relation_noun(circle_type: str | None) -> str:
+# Words in a circle_key that describe the PERSON or the grouping, not the activity.
+# Shared with ground_options' search-term derivation — same job, same list.
+_KEY_NOISE_RE = re.compile(
+    r"\b(group|team|crew|member|attendee|goer|lover|fan|participant|visitor|"
+    r"enthusiast|athlete|player)s?\b"
+)
+
+
+def activity_from_key(circle_key: str | None) -> str:
+    """The activity a circle_key names ("table_tennis_group" → "table tennis")."""
+    words = str(circle_key or "").replace("_", " ").strip()
+    words = _KEY_NOISE_RE.sub("", words).strip()
+    return re.sub(r"\s+", " ", words)
+
+
+def place_relation_noun(
+    circle_type: str | None,
+    stored: str | None = None,
+    circle_key: str | None = None,
+) -> str:
     """Caller-relative noun for a grounded place ("gym" → tag "your gym").
-    Disclosure-safe by construction (§F / O7): names the RELATION, never the place."""
+    Disclosure-safe by construction (§F / O7): names the RELATION, never the place.
+
+    `stored` is the noun chosen for THIS community at capture. Without it we fall
+    back to the type map — where every sport is "gym", so a table_tennis_group was
+    called "your gym" in both the question and the place tag (2026-08-07).
+
+    circle_key is accepted but deliberately NOT used to synthesise a noun: string
+    surgery on a slug produces copy a person reads, and it produces bad copy —
+    "crossfit_st_cloud" becomes "your crossfit st cloud", and stripping the noise
+    word from "lagoinha_small_group" leaves "your lagoinha small". An LLM asked at
+    capture gets these right; a regex cannot. Rows captured before this keep the
+    category noun until they are mentioned again.
+    """
+    kept = str(stored or "").strip()
+    if kept:
+        return kept[:40]
     return _GROUND_NOUN.get(str(circle_type or "other"), "spot")
 
 
@@ -578,10 +722,20 @@ _RELATION_EMOJI: dict[str, str] = {
 }
 
 
-def place_relation_emoji(circle_type: str | None) -> str:
-    """One emoji for a community's type ("fitness" → 🏋️). Advisory card art: the FE
-    may render its own icon instead, and `other` gets a neutral pin rather than a
-    guess at what the place is."""
+def place_relation_emoji(circle_type: str | None, stored: str | None = None) -> str:
+    """One emoji for a community ("table tennis" → 🏓). Advisory card art: the FE may
+    render its own icon instead, and an unknown type gets a neutral pin rather than a
+    guess at what the place is.
+
+    `stored` is the emoji chosen for THIS community at capture (the same job
+    events.cover_emoji does, and now by the same means — an AI pick, not a lookup).
+    Without it every sport fell to the type map's 🏋️. No key-derived middle step
+    here: an activity cannot be turned into an emoji by string surgery, so an
+    un-captured row keeps the category glyph until it is re-mentioned.
+    """
+    kept = str(stored or "").strip()
+    if kept:
+        return kept
     return _RELATION_EMOJI.get(str(circle_type or "other"), _RELATION_EMOJI["other"])
 
 
@@ -596,13 +750,40 @@ Rules:
 - Short (<120 chars), warm, direct — never yes/no, never an interrogation.
 - NEVER the words "circle", "block", or "match". Say "spot", "place", or their own word.
 - teaser: 2-5 word lead-in ending with "…".
-- English only (rendered into the user's language downstream)."""
+- English only (rendered into the user's language downstream).
+
+- FORK — first judge whether their phrase implies a place or other people AT ALL.
+  · It DOES ("my gym", "our church", "we play futsal on Sundays", "my Tuesday spin
+    class", "I play squash with friends every week") → ask which specific one it is.
+    This is the normal case.
+  · It does NOT — a recurring thing that needs no venue and names no one else ("I
+    play guitar every weekend", "I play violin regularly", "I paint on Sundays") →
+    do NOT presume a venue. Ask whether they do it somewhere in particular or mostly
+    on their own, leaving BOTH answers easy: "Do you play guitar anywhere in
+    particular, or mostly on your own?" Never "which spot do you play guitar at?" —
+    someone who plays in their living room has no answer to that and the question
+    dead-ends. Still ONE question, still <120 chars."""
 
 
-def _grounding_question(circle_type: str, detail: str | None) -> tuple[str, str]:
-    """AI-authored per the lingo rules; a type-templated line as fallback."""
-    noun = place_relation_noun(circle_type)
+def _grounding_question(
+    circle_type: str,
+    detail: str | None,
+    *,
+    noun_override: str | None = None,
+    circle_key: str | None = None,
+) -> tuple[str, str]:
+    """AI-authored per the lingo rules; a type-templated line as fallback.
+
+    noun_override is the community's own noun. Without it the fallback line calls
+    every sport a "gym" — the question a table-tennis club actually received
+    (2026-08-07).
+    """
+    noun = place_relation_noun(circle_type, noun_override, circle_key)
     phrase = _FEATURE_NOTE_RE.sub("", str(detail or "")).strip(" ;")
+    # KNOWN GAP: this presumes a venue exists, so a solo hobby that falls back here
+    # (lexicon leak / no LLM configured) still gets the dead-end question. Left as-is
+    # deliberately — the place-or-solo fork lives in the prompt above, and hardcoding
+    # it here would blunt the common case, where "which one is it" is exactly right.
     fallback = (
         f"You mentioned your {noun} — which one is it, exactly?",
         f"about your {noun}…",
@@ -658,7 +839,7 @@ def ensure_grounding_gaps(user_id: str, *, max_open: int | None = None) -> int:
             return 0
         affs = (
             sb.table("circle_affiliations")
-            .select("id, circle_type, detail")
+            .select("id, circle_type, circle_key, detail, noun, emoji")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .is_("place_ref", "null")
@@ -679,7 +860,12 @@ def ensure_grounding_gaps(user_id: str, *, max_open: int | None = None) -> int:
         aff_id = str(aff.get("id") or "")
         if not aff_id or aff_id in already_asked:
             continue
-        question, teaser = _grounding_question(aff.get("circle_type"), aff.get("detail"))
+        question, teaser = _grounding_question(
+            aff.get("circle_type"),
+            aff.get("detail"),
+            noun_override=aff.get("noun"),
+            circle_key=aff.get("circle_key"),
+        )
         if open_semantic_gap(
             user_id,
             None,
@@ -794,6 +980,16 @@ def grounding_payload_for_gap(user_id: str, gap_row: dict[str, Any]) -> dict[str
     # neutral pin (FE ask #1, issues #63). Both absent-safe by contract.
     if affiliation.get("circle_type"):
         payload["circle_type"] = str(affiliation["circle_type"])
+    # This community's OWN noun and glyph, so the card can stop deriving them from
+    # circle_type — a ten-value grouping bucket where every sport is "fitness", which
+    # rendered a table-tennis club as "your gym" with a 🏋️ (2026-08-07). Sent only
+    # when captured; the FE keeps its type fallback for older circles.
+    _noun = str(affiliation.get("noun") or "").strip()
+    if _noun:
+        payload["relation_noun"] = _noun
+    _emoji = str(affiliation.get("emoji") or "").strip()
+    if _emoji:
+        payload["emoji"] = _emoji
     detail = _FEATURE_NOTE_RE.sub("", str(affiliation.get("detail") or "")).strip(" ;")
     if detail:
         payload["detail"] = detail
@@ -936,7 +1132,7 @@ def _unpinned_close(
     An action the user had already asked for (pending_action) wins instead: their
     own request is dispatched, place-less, rather than re-offered to them."""
     aff = affiliation or {}
-    noun = place_relation_noun(aff.get("circle_type"))
+    noun = place_relation_noun(aff.get("circle_type"), aff.get("noun"), aff.get("circle_key"))
     topic = str(aff.get("circle_key") or "").replace("_", " ").strip() or noun
     facts = [f'They told you: "{said[:120]}"', f"Their community: {topic}."]
     offer: dict[str, Any] | None = None
@@ -1191,8 +1387,14 @@ def handle_grounding_answer(
             affiliation,
             answer,
             goal_head=(
-                "They passed on pinning down the spot — accept that warmly and "
-                "never push for the place again."
+                # Two different replies arrive here: "skip it" and "I just do it at "
+                # home". Asserting they passed on the question is wrong for the
+                # second — they answered it — so this stays neutral about WHICH and
+                # simply accepts that there is no spot to pin.
+                "There is no spot to pin for this one — either they passed on the "
+                "question or they do it on their own. Accept that warmly WITHOUT "
+                "assuming which, never imply they dodged you, and never ask for the "
+                "place again."
             ),
             fallback_head="No worries — we can leave that one.",
             session_ctx=session_ctx,
@@ -1208,7 +1410,10 @@ def handle_grounding_answer(
                     "no apology spiral, and ask what their spot is called — or which "
                     "street or town it's in, if they'd rather. One short sentence."
                 ),
-                facts=[f"Their community: {place_relation_noun(affiliation.get('circle_type'))}."],
+                facts=[
+                    "Their community: "
+                    f"{place_relation_noun(affiliation.get('circle_type'), affiliation.get('noun'), affiliation.get('circle_key'))}."
+                ],
                 fallback="My list was off — what's it called?",
                 session_ctx=session_ctx,
             ),
@@ -1337,7 +1542,7 @@ def handle_grounding_confirmation(
                 ),
                 facts=[
                     f"Their community: "
-                    f"{place_relation_noun((affiliation or {}).get('circle_type'))}."
+                    f"{place_relation_noun((affiliation or {}).get('circle_type'), (affiliation or {}).get('noun'), (affiliation or {}).get('circle_key'))}."
                 ],
                 fallback="My list was off — what's it called?",
                 session_ctx=session_ctx,
@@ -1357,6 +1562,9 @@ def handle_grounding_confirmation(
     if abandon or escaped or attempts >= 3:
         # "no" / "neither" / worn out — keep their words as detail, then close on the
         # bridge (an offer to look for their people, which needs no pin).
+        # `said` is their SEED answer, not this turn's message, so it is a venue
+        # attempt ("orange theory") even when this reply is a bare "neither" — which
+        # is why noting it is right here and wrong on the seed turn's abandon branch.
         note_ungrounded_detail(user_id, affiliation_id, said)
         return _unpinned_close(
             affiliation,
@@ -1418,22 +1626,42 @@ def handle_grounding_confirmation(
     }
 
 
-def _member_count(place_id: str) -> int:
-    """Confirmed, non-dismissed members of a place (Place Profile §5.1)."""
+def _member_counts(place_ids: list[str]) -> dict[str, int]:
+    """place_id -> how many DISTINCT people are confirmed there, for a whole list of
+    places in ONE query. Counting per place made the communities list N round trips to
+    a remote database, which is what "View more" spent its seconds on.
+
+    Distinct people, not rows: one person can hold two affiliations at the same place,
+    which is how the list told them "2 people" while the profile said "just you".
+    """
+    ids = [p for p in dict.fromkeys(place_ids) if p]
+    if not ids:
+        return {}
     try:
         res = (
             service_client()
             .table("circle_affiliations")
-            .select("id", count="exact")
-            .eq("place_ref", place_id)
+            .select("user_id, place_ref")
+            .in_("place_ref", ids)
             .eq("status", "confirmed")
             .is_("dismissed_at", "null")
+            .limit(2000)
             .execute()
         )
-        return int(res.count or 0)
     except Exception:
-        logger.exception("member_count_failed place=%s", place_id)
-        return 0
+        logger.exception("member_counts_failed places=%s", len(ids))
+        return {}
+    people: dict[str, set[str]] = {}
+    for r in res.data or []:
+        pid, uid = str(r.get("place_ref") or ""), str(r.get("user_id") or "")
+        if pid and uid:
+            people.setdefault(pid, set()).add(uid)
+    return {pid: len(users) for pid, users in people.items()}
+
+
+def _member_count(place_id: str) -> int:
+    """One place's member count (Place Profile §5.1)."""
+    return _member_counts([place_id]).get(place_id, 0)
 
 
 def list_my_circles(user_id: str) -> list[dict[str, Any]]:
@@ -1452,7 +1680,7 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
         sb.table("circle_affiliations")
         .select(
             "id, circle_type, circle_key, detail, status, place_ref, created_at, "
-            "source, confirmed_via"
+            "source, confirmed_via, noun, emoji"
         )
         .eq("user_id", user_id)
         .is_("dismissed_at", "null")
@@ -1461,22 +1689,45 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
         .limit(40)
         .execute()
     )
-    rows = res.data or []
+    # One row per PLACE: a person can hold two affiliations at the same spot (rows
+    # predating the ground_affiliation merge guard), and the list rendered the place
+    # twice. Newest-first order means the survivor is the most recent framing of it;
+    # an older row's detail fills in when the newer one has none.
+    rows: list[dict[str, Any]] = []
+    by_place: dict[str, dict[str, Any]] = {}
+    for r in res.data or []:
+        pid = str(r.get("place_ref") or "")
+        kept = by_place.get(pid)
+        if kept is None:
+            by_place[pid] = r
+            rows.append(r)
+        elif not str(kept.get("detail") or "").strip():
+            kept["detail"] = r.get("detail")
     place_ids = sorted({str(r["place_ref"]) for r in rows if r.get("place_ref")})
     places: dict[str, dict[str, Any]] = {}
     if place_ids:
         pres = (
             sb.table("places")
-            .select("id, name, address")
+            # Coords + the GOOGLE id come along so a caller can use the place as a
+            # venue (the host setup card pre-fills the meet's where from the community
+            # picked) without a second read or a re-geocode.
+            .select("id, name, address, google_place_id, lat, lng")
             .in_("id", place_ids)
             .execute()
         )
         places = {str(p["id"]): p for p in (pres.data or [])}
+    # One read for every row's activity chips (app/place_activities.py).
+    from app.place_activities import activities_for_places
+
+    activities = activities_for_places(place_ids, user_id)
+    # Every place's member count in ONE query — a count per row made this list N round
+    # trips to a remote database, which is what the communities list spent its wait on.
+    counts = _member_counts(place_ids)
     out: list[dict[str, Any]] = []
     for r in rows:
         place_ref = str(r.get("place_ref") or "") or None
         place = places.get(place_ref or "", {})
-        count = _member_count(place_ref) if place_ref else 0
+        count = counts.get(place_ref or "", 0)
         detail = _FEATURE_NOTE_RE.sub("", str(r.get("detail") or "")).strip(" ;") or None
         out.append(
             {
@@ -1493,7 +1744,15 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "circle_key": r.get("circle_key"),
                 "place_name": place.get("name"),
                 "place_address": place.get("address"),
+                # The place as a usable VENUE — google id + coords, so hosting can pin
+                # this exact spot instead of re-searching its name.
+                "google_place_id": place.get("google_place_id"),
+                "lat": place.get("lat"),
+                "lng": place.get("lng"),
                 "detail": detail,
+                # What people do here, `mine` marking this user's own — the edit
+                # panel's "your activities" chips and its add-more menu in one list.
+                "activities": activities.get(place_ref or "", []),
                 "member_count": count,
                 "active": count >= 2,
                 "added_at": r.get("created_at"),
@@ -1504,7 +1763,14 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "joined_via_label": joined_via_label(
                     r.get("confirmed_via"), r.get("source")
                 ),
-                "emoji": place_relation_emoji(r.get("circle_type")),
+                "emoji": place_relation_emoji(r.get("circle_type"), r.get("emoji")),
+                # This community's own noun, so every surface says the same thing.
+                # Without it a client derives one from circle_type — a ten-value
+                # grouping bucket where every sport is "fitness" — and a table-tennis
+                # club reads as "gym" (2026-08-07).
+                "relation": place_relation_noun(
+                    r.get("circle_type"), r.get("noun"), r.get("circle_key")
+                ),
             }
         )
     return out

@@ -117,6 +117,11 @@ OPENAI_ROUTER_MODEL: "${OPENAI_ROUTER}"
 OPENAI_SYNTH_MODEL: "${OPENAI_SYNTH}"
 OPENAI_TIMEOUT_SEC: "${OPENAI_TIMEOUT_SEC:-15}"
 LANA_DECIDE_TURN: "${LANA_DECIDE_TURN:-off}"
+# decide_turn's model (empty falls back to OPENAI_SYNTH_MODEL). MUST be listed
+# here or the env file's value is silently dropped, exactly as the note below
+# describes — and with OPENAI_TIMEOUT_SEC=15 a slow synth model means the policy
+# times out every call and the legacy path answers instead.
+LANA_POLICY_MODEL: "${LANA_POLICY_MODEL:-}"
 LANA_ZIP_UNLOCK_GATE: "${LANA_ZIP_UNLOCK_GATE:-soft}"
 LANA_PEER_RADIUS_MATCH: "${LANA_PEER_RADIUS_MATCH:-off}"
 LANA_PEER_RADIUS_METERS: "${LANA_PEER_RADIUS_METERS:-8000}"

@@ -1,28 +1,21 @@
 """Session complete extract via orchestrator LLM."""
 
-import os
 from typing import Any
 
 from app.models import EventDraft, ExtractedClaim, MappedSpan
-from app.orchestrator.llm import llm_json, provider, synthesizer_model
+from app.orchestrator.llm import extractor_model, llm_json
 from app.vertex_event_extract import EVENT_EXTRACT_PROMPT, parse_event_extract_data
 from app.vertex_extract import EXTRACT_PROMPT, parse_profile_extract_data
 
 
 def _extract_model() -> str:
-    """Provider-correct model for the /complete extract.
+    """Provider-correct model for the /complete extract — see llm.extractor_model.
 
-    llm_json routes by provider(), NOT by the model string, so returning
-    VERTEX_EXTRACT_MODEL under LANA_LLM_PROVIDER=openai sent "gemini-2.5-flash"
-    to OpenAI and 502'd every profile/event completion (found 2026-07-30).
-    LANA_EXTRACT_MODEL overrides, but it MUST match the active provider."""
-    override = os.environ.get("LANA_EXTRACT_MODEL", "").strip()
-    if override:
-        return override
-    if provider() in ("openai", "claude"):
-        # Large structured JSON — the synth tier, matching what /health reports.
-        return synthesizer_model()
-    return os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
+    Kept as a thin alias so both extraction paths (this one and the per-turn
+    incremental claims/circles pass) resolve through ONE definition; they drifted
+    apart once already, leaving the per-turn pass on the router tier.
+    """
+    return extractor_model()
 
 
 def claude_extract_profile_from_transcript(

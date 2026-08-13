@@ -189,6 +189,12 @@ def attach_peer_card_actions(
             continue
         peer_id = str(item.get("peer_user_id") or "").strip()
         nick = str(item.get("nickname") or "").strip()
+        if item.get("connection"):
+            # Intro already sent, or the two already connected — a nudge here can only
+            # fail (7-day pair cooldown / duplicate_intro_recent).
+            item.pop("actions", None)
+            out.append(item)
+            continue
         if peer_id and nick:
             item["actions"] = [
                 peer_card_nudge_action(nickname=nick, peer_user_id=peer_id),
@@ -243,7 +249,57 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
     }
 
 
-def stamp_peer_discovery_ctx(ctx: dict[str, Any], *, phone_verified: bool) -> None:
+# Tiers that mean the two have actually connected — a Nudge button here is a dead end:
+# the 7-day per-pair cooldown rejects it, and the user is being offered a stranger's
+# affordance for someone they already know. 'nudge' means one is out, awaiting a reply.
+_CONNECTED_TIERS = frozenset({"acquaintance", "direct", "irl_peer"})
+
+
+def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
+    """Mark rows the caller already has a relationship with, in place.
+
+    The tier is recorded (user_relationships, promoted on nudge/accept) but no peer-search
+    path reads it — they filter blocked users only. So Lana kept re-offering an intro to
+    someone the user had already nudged, accepted and messaged, and the send then failed.
+    Best-effort: a lookup failure just leaves the cards as they were.
+    """
+    ids = [
+        str(r["peer_user_id"])
+        for r in rows
+        if isinstance(r, dict) and r.get("peer_user_id") and not r.get("connection")
+    ]
+    if not user_id or not ids:
+        return
+    try:
+        from app.auth import service_client
+
+        res = service_client().rpc(
+            "get_relationship_tiers_for_user",
+            {"p_user_id": user_id, "p_other_user_ids": list(dict.fromkeys(ids))},
+        ).execute()
+        tiers = {
+            str(r["other_user_id"]): str(r.get("tier") or "stranger")
+            for r in (res.data or [])
+            if r.get("other_user_id")
+        }
+    except Exception:  # noqa: BLE001 - cards must render even if the tier lookup fails
+        import logging
+
+        logging.getLogger(__name__).exception("relationship_tier_lookup_failed")
+        return
+    for row in rows:
+        if not isinstance(row, dict) or row.get("connection"):
+            continue
+        tier = tiers.get(str(row.get("peer_user_id") or ""))
+        if tier in _CONNECTED_TIERS:
+            row["connection"] = "connected"
+        elif tier == "nudge":
+            row["connection"] = "intro_sent"
+
+
+def stamp_peer_discovery_ctx(
+    ctx: dict[str, Any], *, phone_verified: bool, user_id: str = ""
+) -> None:
     """Enrich peer_matches + discovery_surface on ctx (additive, safe for legacy FE)."""
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list) or not raw:
@@ -259,6 +315,8 @@ def stamp_peer_discovery_ctx(ctx: dict[str, Any], *, phone_verified: bool) -> No
                     row.pop("actions", None)
         return
     enriched = enrich_peer_match_rows(raw, phone_verified=phone_verified)
+    # Before actions are attached — attach_peer_card_actions skips connected rows.
+    stamp_connection_state(enriched, user_id=user_id)
     enriched = attach_peer_card_actions(enriched, phone_verified=phone_verified)
     ctx["peer_matches"] = enriched
     surface = build_discovery_surface(enriched)

@@ -34,6 +34,11 @@ class PeerMatchRow(BaseModel):
     match_band: str | None = None
     match_badge: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
+    # "intro_sent" (an intro is on its way) or "connected" (they already know each other,
+    # per user_relationships.tier). Either way the card shows a status, not a Nudge button:
+    # Lana saying "I just sent your intro" must not sit above a control inviting the same
+    # action, and nudging an existing connection can only hit the 7-day pair cooldown.
+    connection: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
     # ── The recommendation cascade (§12a/b) ──────────────────────────────────────────
     # What this neighbor actually recommended, in their own words, and the tip_share row
@@ -278,6 +283,19 @@ class CommunityFeatureRow(BaseModel):
     key: str
     label: str
     sub_group: str | None = None
+    # Picked when the feature was written; null on rows learned before 20261010.
+    emoji: str | None = None
+
+
+class CommunityActivityRow(BaseModel):
+    """Something people DO at this place ("Aerobics"). `mine` is the caller's own —
+    the same list is the "your activities" chips and the "add more" menu, so what
+    the other members do is the only suggestion offered."""
+
+    concept: str
+    label: str
+    member_count: int = 0
+    mine: bool = False
 
 
 class CommunityEventRow(BaseModel):
@@ -323,8 +341,13 @@ class CommunityProfileResponse(BaseModel):
     # judgement of the place. Null when there is nothing true to say about it yet.
     description: str | None = None
     features: list[CommunityFeatureRow] = Field(default_factory=list)
+    activities: list[CommunityActivityRow] = Field(default_factory=list)
     member_preview: list[CommunityMemberPreviewRow] = Field(default_factory=list)
     upcoming_events: list[CommunityEventRow] = Field(default_factory=list)
+    # "Create an event" input: POST verbatim to /lana/sessions/{id}/event-venue, then open
+    # the setup screen with the venue pinned — no chat turn, no classifier. Null when the
+    # place has no google id on file (FE asks for the venue as usual).
+    create_event_venue: "EventVenueRequest | None" = None
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
@@ -402,6 +425,11 @@ class EventDraft(BaseModel):
     has_time: bool | None = None
     ends_at: str | None = None
     duration_minutes: int | None = None
+    # Recurring meets: one meet whose starts_at rolls forward, with a standing roster.
+    # 'weekly' | 'biweekly' | 'monthly'; None = a one-off. recurrence_until is a plain
+    # date ("2026-08-31") — None means the DB's 180-day default from creation.
+    recurrence: str | None = None
+    recurrence_until: str | None = None
     max_attendees: int | None = None
     # Join settings captured in the host flow.
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
@@ -410,6 +438,9 @@ class EventDraft(BaseModel):
     bring_items: list[str] = Field(default_factory=list)
     # AI-picked emoji cover (☕🎨⚽…) — the card's visual when there's no cover image.
     cover_emoji: str | None = None
+    # The community this meet is for (setup card 2/5) — the canonical place id of one of
+    # the host's own communities. None = a plain neighborhood meet, which is the default.
+    circle_place_id: str | None = None
     # AI-tailored quick-setup card config (capacity/sharing/approval/bring labels + bring
     # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
     event_setup: dict[str, Any] | None = None
@@ -519,6 +550,10 @@ class EventVenueRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
     place_id: str | None = None
+    # Set when the host started from a community's screen ("Create an event" there): the
+    # meet is FOR that community, not merely held at its address. Pre-selects the setup
+    # card's community picker, which the host can still change or clear.
+    circle_place_id: str | None = None
 
 
 class EventSetupRequest(BaseModel):
@@ -540,6 +575,9 @@ class EventSetupRequest(BaseModel):
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
     allow_attendee_share: bool | None = None
     bring_items: list[str] = Field(default_factory=list)
+    # Community card: the place id of the community picked in the dropdown, or None for
+    # "None" (just the host's own meet). Members are emailed at publish.
+    circle_place_id: str | None = None
 
 
 class EventJoinHookRequest(BaseModel):
@@ -556,6 +594,13 @@ class EventDecisionHookRequest(BaseModel):
 
 class EventCancelHookRequest(BaseModel):
     """FE calls this right after cancel_event so the going roster gets push + email."""
+
+    event_id: str
+
+
+class EventSkipRequest(BaseModel):
+    """Host calls off ONE occurrence of a recurring meet ("skip this Friday"). Unlike
+    cancel, the worker calls the RPC itself and then notifies — one round trip for the FE."""
 
     event_id: str
 

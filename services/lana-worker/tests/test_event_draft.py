@@ -24,6 +24,14 @@ class TestEventDraft(unittest.TestCase):
         self.assertEqual(merged["title"], "Brunch")
         self.assertEqual(merged["venue_name"], "Lake Nona Commons")
 
+    def test_merge_keeps_community_the_meet_is_for(self) -> None:
+        # Hosting from a community's "Create event" stamps circle_place_id on the draft;
+        # the extractor's redraw must not drop it, or the setup card re-asks "is this for
+        # a community?" with None pre-selected.
+        prev = {"title": "Lift session", "circle_place_id": "c0ffee00-0000-0000-0000-000000000001"}
+        merged = merge_event_drafts(prev, {"venue_name": "The Man Cave Warehouse"})
+        self.assertEqual(merged["circle_place_id"], "c0ffee00-0000-0000-0000-000000000001")
+
     def test_clear_fields_resets_slot(self) -> None:
         # Host rejects the name they gave; clearing it without a replacement blanks it
         # so the flow re-asks "what to call it?" instead of looping on the next slot.

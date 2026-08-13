@@ -18,6 +18,7 @@ error.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.auth import service_client
@@ -44,6 +45,83 @@ _GAP_FIELDS_NO_REASON = (
 _GAP_FIELDS_LEGACY = (
     "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score"
 )
+
+
+# Goal kinds that name a SPECIFIC real-world thing (a venue, or a community tied to
+# one). These are standing goals — they sit on the menu every turn — so they are the
+# ones that surface at the wrong moment.
+_PLACE_KINDS = ("ungrounded_circle", "circle_offer")
+
+_GATE_STOPWORDS = frozenset(
+    {"the", "a", "an", "my", "our", "your", "at", "in", "on", "of", "and", "or",
+     "to", "for", "is", "it", "with", "st", "street", "road", "rd", "ave"}
+)
+
+
+def _gate_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", str(text or "").lower())
+    return {w for w in words if len(w) > 2 and w not in _GATE_STOPWORDS}
+
+
+def goal_matches_message(goal: dict[str, Any], message: str) -> bool:
+    """Does this goal name something the person is ACTUALLY talking about?
+
+    Compared against the goal's most SPECIFIC identifier — the pinned venue name
+    when there is one, else the circle's own words. Comparing the category instead
+    would defeat the whole thing: "restaurant" is highly related to "Piazza Italia
+    or Mangia", so the circle pinned to Mizu Sushi would be waved through and offered
+    again (the 2026-08-05 bug).
+
+    ponytail: lexical overlap, not embeddings. We are matching NAMES and activity
+    words, which are lexical, and it costs nothing on a hot path. A miss ("ping pong"
+    vs "table tennis") withholds the goal, which is the safe direction — the home tile
+    still asks it. Upgrade to the claim-ranking embedding if real misses show up.
+    """
+    said = _gate_tokens(message)
+    if not said:
+        return False
+    ctx = goal.get("context") or {}
+    subject = str(ctx.get("place_name") or "") or str(ctx.get("circle_key") or "")
+    return bool(_gate_tokens(subject) & said)
+
+
+def filter_place_goals(
+    goals: list[dict[str, Any]], *, message: str, turn_has_topic: bool
+) -> list[dict[str, Any]]:
+    """Withhold place-naming goals that have nothing to do with this turn.
+
+    The policy picks from what it is given, so a stale goal on the menu is a stale
+    goal that can ship. Twice now one has: a gym-grounding question answered a
+    restaurant message, and a get-together at Mizu Sushi was offered four messages
+    into a conversation about The Piazza Italia. A prompt rule covered both and held
+    two out of three times.
+
+    When the person raised NOTHING of their own, stale goals are exactly right —
+    nothing is being interrupted and a specific question beats "how can I help you
+    today?". So they are withheld only when there is a real topic to trample.
+    """
+    place_goals = [g for g in goals if g.get("kind") in _PLACE_KINDS]
+    if not place_goals:
+        return goals
+    if not str(message or "").strip():
+        # No message to judge against — gate nothing. Withholding on absent
+        # information would silently empty the menu for any caller that does not
+        # pass one, which is worse than the mistimed goal this filter exists to stop.
+        return goals
+    relevant = [g for g in place_goals if goal_matches_message(g, message)]
+    if relevant:
+        keep = {id(g) for g in relevant}
+    elif not turn_has_topic:
+        keep = {id(g) for g in place_goals}  # an empty turn — all fair game
+    else:
+        keep = set()
+    dropped = len(place_goals) - len(keep)
+    if dropped:
+        logger.info(
+            "place_goals_withheld %d of %d (topic=%s)",
+            dropped, len(place_goals), turn_has_topic,
+        )
+    return [g for g in goals if g.get("kind") not in _PLACE_KINDS or id(g) in keep]
 
 
 def _clamp01(x: Any) -> float:
@@ -120,12 +198,30 @@ def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
 def _grounding_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
     """Communities the user mentioned that aren't pinned to a real place yet
     ('my gym' → which gym?). Read straight off the world snapshot — no extra query."""
+    from app.circles_capture import same_community
+
+    grounded = [
+        c
+        for c in (world.get("circles") or [])
+        if c.get("grounded") and str(c.get("key") or "").strip()
+    ]
     out: list[dict[str, Any]] = []
     for c in world.get("circles") or []:
         if c.get("grounded"):
             continue
         key = str(c.get("key") or "").strip()
         if not key:
+            continue
+        # Already answered under a different phrasing. Prod 2026-08-07 asked "which
+        # specific spot is your Fitness CF St. Cloud gym?" while `fitness_cf` was
+        # pinned to Fitness CF - St. Cloud — a question we could already answer,
+        # asked because capture had made a second row for the same gym.
+        if any(
+            same_community(key, str(c.get("type") or ""), str(g.get("key") or ""),
+                           str(g.get("type") or ""))
+            for g in grounded
+        ):
+            logger.info("grounding_skipped_sibling_pinned key=%s", key)
             continue
         out.append(
             {
@@ -253,12 +349,16 @@ def _pending_ask_goals(user_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _capability_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
+def _capability_goals(caps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """What Lana can offer right now — capability_index filtered by
     required_state ⊆ user states. surface_priority folds into value_hint as a
-    weak prior (5→0.5, 8→0.8), nothing more."""
+    weak prior (5→0.5, 8→0.8), nothing more.
+
+    Takes the already-fetched list: candidate_goals needs the same rows for its
+    inactive-capability filter, and reading capability_index twice per turn is
+    latency for nothing."""
     out: list[dict[str, Any]] = []
-    for cap in capabilities_available(world):
+    for cap in caps:
         cap_id = str(cap.get("capability_id") or "").strip()
         if not cap_id:
             continue
@@ -279,17 +379,35 @@ def candidate_goals(
     world: dict[str, Any],
     *,
     deferred_goal_ids: list[str] | None = None,
+    user_message: str = "",
+    turn_has_topic: bool = True,
 ) -> list[dict[str, Any]]:
     """The unified goal list for one turn. Goals the policy previously deferred
     (capture_defer) are marked so it knows they're fair game to resurface at
     the next natural pause."""
+    # One read of capability_index, used twice below.
+    caps = capabilities_available(world)
     goals = (
         _rapport_goals(user_id)
         + _grounding_goals(world)
         + _circle_offer_goals(world)
         + _offer_goals(user_id)
         + _pending_ask_goals(user_id)
-        + _capability_goals(world)
+        + _capability_goals(caps)
+    )
+    # A goal naming a capability that is switched off must not reach the policy.
+    # _capability_goals already filters on is_active; _offer_goals (latent
+    # suggestions) did not, so a retired capability could still be offered from
+    # the queue — which is how an unshipped feature gets pitched in chat.
+    active = {c.get("capability_id") for c in caps}
+    goals = [
+        g for g in goals
+        if not g["context"].get("capability_id")
+        or g["context"]["capability_id"] in active
+    ]
+    # Withhold place-naming goals that this turn is not about (see filter_place_goals).
+    goals = filter_place_goals(
+        goals, message=user_message, turn_has_topic=turn_has_topic
     )
     deferred = set(deferred_goal_ids or [])
     for g in goals:

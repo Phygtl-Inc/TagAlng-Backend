@@ -127,13 +127,22 @@ def send_push(user_id: str | None, *, title: str, body: str, url: str | None = N
 def _email_send(api_key: str, payload: dict[str, Any]) -> None:
     try:
         with httpx.Client(timeout=8.0) as client:
-            client.post(
+            res = client.post(
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=payload,
             )
+        # A rejected send used to be invisible (response ignored, failures at DEBUG):
+        # an unverified RESEND_FROM domain 403s every email app-wide and nothing said so.
+        if res.status_code >= 400:
+            _log.warning(
+                "resend_rejected status=%s from=%s detail=%s",
+                res.status_code,
+                payload.get("from"),
+                res.text[:200],
+            )
     except Exception:  # noqa: BLE001
-        _log.debug("resend_send_failed", exc_info=True)
+        _log.warning("resend_send_failed", exc_info=True)
 
 
 def send_email(to: str | None, *, subject: str, html: str, text: str | None = None) -> None:

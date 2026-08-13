@@ -803,6 +803,28 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "O anfitrião não conseguiu encaixar você desta vez.",
     },
 
+    # A meet posted for a community the recipient belongs to. {place} is the community's
+    # own place name ("Lake Nona YMCA") — the only thing that makes this mail welcome
+    # rather than noise, so it leads.
+    "notify.community_event.subject": {
+        "en": "New meet at {place}",
+        "es": "Nuevo plan en {place}",
+        "pt": "Novo encontro em {place}",
+    },
+    "notify.community_event.title": {
+        "en": "“{title}” — for {place}",
+        "es": "“{title}” — para {place}",
+        "pt": "“{title}” — para {place}",
+    },
+    "notify.community_event.body": {
+        "en": "Someone from {place} is putting this together and your community is invited. Take a look — join if it fits.",
+        "es": "Alguien de {place} está organizando esto y tu comunidad está invitada. Échale un vistazo — únete si te encaja.",
+        "pt": "Alguém de {place} está organizando isto e a sua comunidade está convidada. Dê uma olhada — participe se fizer sentido.",
+    },
+    "notify.community_event.cta": {
+        "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
+    },
+
     "notify.cancelled.title": {
         "en": "“{title}” was cancelled",
         "es": "“{title}” se canceló",
@@ -825,6 +847,32 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "notify.cancelled.cta": {
         "en": "See what’s nearby", "es": "Ver qué hay cerca", "pt": "Ver o que há por perto",
+    },
+
+    # ONE occurrence of a recurring meet called off — the meet itself lives on, so the
+    # copy has to say "this one" and name the next date, never read as a cancellation.
+    "notify.skipped.title": {
+        "en": "No “{title}” this time",
+        "es": "Esta vez no hay “{title}”",
+        "pt": "Sem “{title}” desta vez",
+    },
+    "notify.skipped.body": {
+        "en": "The host skipped this one. Next: {next}.",
+        "es": "El anfitrión se saltó esta vez. Próxima: {next}.",
+        "pt": "O anfitrião pulou esta. Próxima: {next}.",
+    },
+    "notify.skipped.body_last": {
+        "en": "The host called this one off — it was the last of the series.",
+        "es": "El anfitrión lo canceló — era el último de la serie.",
+        "pt": "O anfitrião cancelou — era o último da série.",
+    },
+    "notify.skipped.subject": {
+        "en": "Skipped this time: “{title}”",
+        "es": "Cancelado esta vez: “{title}”",
+        "pt": "Pulado desta vez: “{title}”",
+    },
+    "notify.skipped.cta": {
+        "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
     },
 
     # A neighbor posted the thing this person had asked for. Titled by the RECIPIENT's own

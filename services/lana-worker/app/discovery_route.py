@@ -524,6 +524,7 @@ def _seed_forward_peers_turn(
     frame: dict[str, Any],
     block_id: str | None,
     tool: str = "zip_gate_peers",
+    neighbors_found: int | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """The honest, never-a-dead-end peers reply for an area that isn't open yet
     (exemplar #7): name the situation plainly, then hand them the one thing that
@@ -539,7 +540,7 @@ def _seed_forward_peers_turn(
             "(the pill below says 'Host a meet') is exactly what brings their area to "
             "life. Warm, zero guilt, max 2 sentences, never the word waitlist."
         ),
-        facts=gate_framing_facts(frame),
+        facts=gate_framing_facts(frame, neighbors_found=neighbors_found),
         fallback=(
             "Your area is still coming alive, so I can't set up introductions just "
             "yet — but you don't have to wait. Want to host something and bring "
@@ -587,20 +588,30 @@ def _peers_supply_floor_turn(
     *,
     user_id: str | None,
     block_id: str | None,
+    neighbors: list[dict[str, Any]],
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    """Zero REAL matches in an area that hasn't opened → say so, don't pad.
+    """NOBODY on the block in an area that hasn't opened → say so, don't pad.
 
-    Runs after `_fetch_verified_peer_matches` comes back empty and before the
-    `fetch_preview_peers_on_block` fallback, which is a bare `WHERE home_block_id`
-    read: unscored rows, `matching_peer_label: "Near you"`, and `nickname: null`
-    for anyone who never set one. Rendering three of those as "I found 3 neighbors"
-    asserts a match that was never computed and names people it cannot name.
+    `neighbors` is the already-fetched `fetch_preview_peers_on_block` list, and a
+    non-empty one returns None: real people on the block get shown. They are
+    rendered unscored on purpose (`similarity_score: None`, label "Near you"), so
+    format_preview_message presents them as neighbors and never as computed
+    matches — showing them claims nothing that wasn't measured.
+
+    This used to run BEFORE that fetch and swallow whatever it would have
+    returned. Verified on prod 2026-08-07 for a real user in 32827 ('warming',
+    11 signups, 9 verified): the fetch returned 3 neighbors, the floor discarded
+    them, and the reply said "not enough verified neighbors have joined yet".
+    Suppressing people in order to report an emptiness the search disproved is
+    the bug, not the padding it was written to prevent.
 
     Independent of gate mode on purpose — soft mode declines to BLOCK the surface,
     which is a different question from what to do when the surface has nothing
     true to say. Returns None (keep the fallback list) whenever the area is open,
     the ZIP is unknown, or gating is off entirely — the fallback is honest there,
     because an open area means real neighbors with real profiles."""
+    if neighbors:  # the search disproved emptiness — never claim it
+        return None
     try:
         from app.zip_unlock import discovery_zip_gate
 
@@ -611,7 +622,11 @@ def _peers_supply_floor_turn(
     if not frame:  # area open / unknown ZIP / gating off → today's behaviour
         return None
     return _seed_forward_peers_turn(
-        ctx_base, frame=frame, block_id=block_id, tool="peers_supply_floor"
+        ctx_base,
+        frame=frame,
+        block_id=block_id,
+        tool="peers_supply_floor",
+        neighbors_found=0,
     )
 
 
@@ -837,6 +852,12 @@ def _try_neighbor_intro_turn(
             "matching_peer_label": intro.get("match_reason"),
         }
         stamp_intro_proposal_ctx(ctx, intro=intro, peer=peer)
+        # The intro is away — this neighbor's card must stop offering a nudge, or the
+        # turn reads "I just sent your intro to X" directly above a Nudge button for X.
+        _sent_to = str(intro.get("candidate_user_id") or "")
+        for _row in peers:
+            if isinstance(_row, dict) and str(_row.get("peer_user_id") or "") == _sent_to:
+                _row["connection"] = "intro_sent"
         ctx.pop("recent_intro_duplicate", None)
         attach_pending_intros_after_propose(
             ctx, user_jwt=user_jwt, intro=intro, peer=peer
@@ -1690,6 +1711,13 @@ def _try_layer1_intent_turn(
             except Exception:  # noqa: BLE001
                 known_before = []
         res = persist_identity_from_message(user_id, msg, linear_intent=linear)
+        if res.nickname_changed_from and res.nickname:
+            # One-turn signal so the reply confirms the rename out loud rather than
+            # quietly starting to use a new name.
+            session_ctx["nickname_changed"] = {
+                "from": res.nickname_changed_from,
+                "to": res.nickname,
+            }
         ctx = _routing_ctx(
             ctx_base,
             phase=phase or "listening",
@@ -6115,6 +6143,11 @@ def fetch_preview_peers_on_block(
             sb.table("users")
             .select("id, nickname")
             .eq("home_block_id", block_id)
+            # Named neighbors first. The select was unordered, so `rows[:limit]`
+            # took whatever Postgres happened to return — on prod 32827 (11 on the
+            # block, 4 with a null nickname) that can be three blank rows while
+            # six named neighbors sit further down the same result set.
+            .order("nickname", desc=False, nullsfirst=False)
         )
         if exclude_user_id:
             q = q.neq("id", str(exclude_user_id))
@@ -6207,12 +6240,19 @@ def fetch_preview_events_on_block(
     attaches each host's nickname for host-aware filtering.
     """
     try:
+        from app.event_publish import roll_recurring_events
+
         sb = service_client()
+        # A recurring meet's row carries its NEXT occurrence; nothing else advances it, so
+        # an un-rolled weekly meet would be filtered out by the starts_at floor below.
+        roll_recurring_events()
         now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
         fetch_n = pool if pool and pool > 0 else limit * 3
         res = (
             sb.table("events")
-            .select("id, title, starts_at, has_time, venue_name, cohort_tags, host_id")
+            .select(
+                "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, recurrence"
+            )
             .eq("block_id", block_id)
             .eq("status", "open")
             .gte("starts_at", now_iso)
@@ -6490,6 +6530,19 @@ def _handle_signup_phone_message(
             dest_uid = registered_user_id_for_email(email)
             if dest_uid:
                 stash_pending_signal_ask(dest_uid, pending_signal)
+        # Everything ELSE the guest had in flight. The three stashes above cover one
+        # flow each and were added one incident at a time; this catches the rest in
+        # one place, so a new pending flow is carried by default instead of being
+        # silently dropped until someone reports it (app/login_carry.py owns the
+        # carry/exclude decision, and a test fails on any unclassified key).
+        from app.db import stash_login_carry
+        from app.login_carry import collect as collect_login_carry
+
+        _carry = collect_login_carry(session_ctx)
+        if _carry:
+            dest_uid = registered_user_id_for_email(email)
+            if dest_uid:
+                stash_login_carry(dest_uid, _carry)
         ctx = _login_ctx(
             session_ctx,
             guest_step=GUEST_STEP_LOGIN_OTP,
@@ -8847,17 +8900,17 @@ def handle_discovery_turn(
         except Exception:
             peers = []
         if not peers:
-            floored = _peers_supply_floor_turn(
-                ctx_base, user_id=user_id, block_id=block_id
-            )
-            if floored is not None:
-                return floored
             peers = fetch_preview_peers_on_block(
                 block_id,
                 limit=3,
                 include_peer_ids=phone_verified,
                 exclude_user_id=user_id,
             )
+            floored = _peers_supply_floor_turn(
+                ctx_base, user_id=user_id, block_id=block_id, neighbors=peers
+            )
+            if floored is not None:
+                return floored
             from app.i18n import session_lang as _session_lang
 
             reply = format_preview_message(
@@ -8923,10 +8976,12 @@ def handle_discovery_turn(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
                 return reply, ctx, ctx["last_routing"], peers
-        floored = _peers_supply_floor_turn(ctx_base, user_id=user_id, block_id=block_id)
+        peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
+        floored = _peers_supply_floor_turn(
+            ctx_base, user_id=user_id, block_id=block_id, neighbors=peers
+        )
         if floored is not None:
             return floored
-        peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
         from app.i18n import session_lang as _session_lang
 
         reply = format_preview_message(
@@ -8988,12 +9043,12 @@ def handle_discovery_turn(
                 return reply, ctx, ctx["last_routing"], peers
 
         if wants_peers or phase != PHASE_PREVIEW:
+            peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
             floored = _peers_supply_floor_turn(
-                ctx_base, user_id=user_id, block_id=block_id
+                ctx_base, user_id=user_id, block_id=block_id, neighbors=peers
             )
             if floored is not None:
                 return floored
-            peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
             from app.i18n import session_lang as _session_lang
 
             reply = format_preview_message(

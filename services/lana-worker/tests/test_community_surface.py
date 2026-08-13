@@ -285,7 +285,17 @@ class TestCommunityProfile(unittest.TestCase):
                 ]
             ),
             "places": _chain(
-                [{"id": "p1", "name": "OrangeTheory", "address": "9145 Narcoossee Rd", "zip": "32827"}]
+                [
+                    {
+                        "id": "p1",
+                        "name": "OrangeTheory",
+                        "address": "9145 Narcoossee Rd",
+                        "zip": "32827",
+                        "google_place_id": "ChIJgoogle",
+                        "lat": 28.4,
+                        "lng": -81.2,
+                    }
+                ]
             ),
             "place_features": _chain(
                 [{"key": "has_pool", "value": None, "sub_group": "", "confidence": 0.8}]
@@ -303,9 +313,12 @@ class TestCommunityProfile(unittest.TestCase):
         # Best-attended meet leads; the count is the real going roster.
         self.assertEqual(out["upcoming_events"][0]["event_id"], "e1")
         self.assertEqual(out["upcoming_events"][0]["going_count"], 2)
-        # One chat CTA only: hosting is a message, inviting is a native mint + share
-        # sheet, so the profile carries the invite LABEL instead of a dead chip.
+        # Hosting still goes through chat (one host implementation), but the venue is
+        # stamped from here first — and `place_id` must be the GOOGLE id, since our
+        # places.id would publish a meet whose place_ref never matches this community.
         self.assertEqual([a["id"] for a in out["actions"]], ["community_create_event"])
+        self.assertEqual(out["create_event_venue"]["place_id"], "ChIJgoogle")
+        self.assertEqual(out["create_event_venue"]["name"], "OrangeTheory")
         self.assertIn("circle_key", out)
 
     @patch("app.community_surface._blurb", return_value=None)
@@ -328,6 +341,7 @@ class TestCommunityProfile(unittest.TestCase):
         sb.return_value = _sb(tables)
         out = community_profile("u1", place_id="p1", phone_verified=False)
         self.assertEqual(out["actions"], [])
+        self.assertIsNone(out["create_event_venue"])
         self.assertEqual(out["member_preview"], [])
 
 
@@ -352,6 +366,47 @@ class TestBlurbTruthfulness(unittest.TestCase):
             self.assertIsNone(
                 _blurb(place_name="X", relation="spot", area=None, features=[], members=1)
             )
+
+
+class TestCreateEventCta(unittest.TestCase):
+    def test_its_message_enters_hosting_without_the_classifier(self) -> None:
+        """The CTA posts a normal chat message, so its WORDS decide the lane. Phrased as
+        "host something at X" it read as a search and answered "there aren't any
+        activities by them in your area" — a discovery result for a hosting button."""
+        from app.discovery_route import looks_like_host_event_entry
+        from app.ui_actions import community_profile_actions
+
+        actions = community_profile_actions(place_name="St. Luke's", relation="church")
+        self.assertTrue(looks_like_host_event_entry(actions[0]["message"]))
+
+
+class TestEventsAtPlace(unittest.TestCase):
+    """A community's upcoming list holds meets held HERE plus meets created FOR it (the
+    setup card's community tag), and the two-column filter only ever sees a real uuid."""
+
+    PID = "3f2a0c4e-1111-4222-8333-444455556666"
+
+    @patch("app.community_surface.service_client")
+    def test_uuid_place_matches_both_columns(self, sb) -> None:
+        from app.community_surface import _events_at_place
+
+        chain = _chain([{"id": "e1"}])
+        sb.return_value = _sb({"events": chain})
+        self.assertEqual(_events_at_place(self.PID, limit=5), [{"id": "e1"}])
+        self.assertEqual(
+            chain.or_.call_args.args[0],
+            f"place_ref.eq.{self.PID},circle_place_ref.eq.{self.PID}",
+        )
+
+    @patch("app.community_surface.service_client")
+    def test_non_uuid_never_reaches_the_or_filter(self, sb) -> None:
+        from app.community_surface import _events_at_place
+
+        chain = _chain([{"id": "e1"}])
+        sb.return_value = _sb({"events": chain})
+        _events_at_place("p1,circle_place_ref.not.is.null", limit=5)
+        chain.or_.assert_not_called()
+        chain.eq.assert_any_call("place_ref", "p1,circle_place_ref.not.is.null")
 
 
 if __name__ == "__main__":
