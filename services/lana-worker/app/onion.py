@@ -105,10 +105,15 @@ def score_onion_candidates(
             },
         ).execute()
         rows = res.data if isinstance(res.data, list) else []
+        ok = True
     except Exception:
         logger.exception("score_onion_candidates_failed user=%s", user_id)
         rows = []
+        ok = False
 
     candidates = [_shape(r) for r in rows if isinstance(r, dict)]
-    logger.info("onion_scored user=%s candidates=%d", user_id, len(candidates))
+    # ok=False + candidates=0 is a broken RPC; ok=True + 0 is a real empty
+    # result. They used to log identically, which is how a function that threw
+    # on every call passed for "the area is just quiet" for weeks.
+    logger.info("onion_scored user=%s candidates=%d ok=%s", user_id, len(candidates), ok)
     return {"gated": False, "candidates": candidates, "gate": None, "gate_facts": []}

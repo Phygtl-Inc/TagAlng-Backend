@@ -206,6 +206,10 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
             label = str(b).strip()[:60]
             if label and not is_none_bring_item(label) and label not in bring_items:
                 bring_items.append(label)
+    # The community this meet is FOR (stamped by /event-venue when hosting starts from a
+    # community's screen). Must be listed here or the next merge rebuilds the draft without
+    # it — which re-asked "is this for a community?" with None pre-selected.
+    circle_place_id = field("circle_place_id", 64)
     # AI-tailored quick-setup card config (opaque dict) — passed through untouched.
     event_setup_raw = raw.get("event_setup")
     event_setup = event_setup_raw if isinstance(event_setup_raw, dict) else None
@@ -248,6 +252,7 @@ def parse_event_draft(raw: Any, *, valid_purpose_ids: set[str] | None = None) ->
         "max_attendees": max_attendees,
         "cohort_tags": cohort_tags,
         "bring_items": bring_items,
+        "circle_place_id": circle_place_id,
         "event_setup": event_setup,
         "cover_emoji": cover_emoji,
         "affinity_prompt": affinity_prompt,
@@ -306,6 +311,11 @@ def merge_event_drafts(
         merged["event_setup"] = new["event_setup"]
     elif base.get("event_setup"):
         merged["event_setup"] = base["event_setup"]
+    # Which community the meet is for sticks (merged already carries base's) — only a
+    # fresh value overrides. Clearing it back to "None" is the setup card's job, which
+    # writes the session draft directly.
+    if new.get("circle_place_id"):
+        merged["circle_place_id"] = new["circle_place_id"]
     # Cover emoji: picked once alongside the setup config, then sticks like a slot value.
     if new.get("cover_emoji"):
         merged["cover_emoji"] = new["cover_emoji"]
