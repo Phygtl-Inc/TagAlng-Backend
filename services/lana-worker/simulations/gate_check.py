@@ -11,6 +11,8 @@ Exits non-zero to fail the CI check if the gate fails.
 
 import json
 import os
+import re
+import subprocess
 import sys
 import urllib.request
 
@@ -55,27 +57,56 @@ def _fetch_runs(git_sha: str) -> list[dict]:
         return resp.json()
 
 
+def _resolve_baseline_sha(ref: str) -> str:
+    """Resolve a git ref (usually a tag like `sim-baseline-2026-07-03`) to the commit SHA.
+
+    WHY THIS EXISTS: rows are written by evaluation._write_to_supabase with
+    `git_sha = os.environ["GIT_SHA"]` — an actual 40-char commit SHA. Querying
+    `git_sha=eq.<tag-name>` therefore matched NOTHING, the baseline came back empty, and the
+    gate hit its "no baseline — passes automatically" branch on every run. The regression gate
+    has consequently never gated. Resolve the tag to a SHA so the comparison is real.
+    """
+    ref = ref.strip()
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        return ref  # already a SHA
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-list", "-n", "1", ref], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        if sha:
+            print(f"[gate] resolved baseline ref {ref!r} -> {sha[:7]}")
+            return sha
+    except Exception as exc:
+        print(f"[gate] could not resolve baseline ref {ref!r} via git: {exc}")
+    return ref  # fall through; the empty-result branch below reports it loudly
+
+
 def _fetch_baseline_runs() -> list[dict]:
-    """
-    Fetches runs tagged with BASELINE_TAG.
-    Falls back to the most recent 102 runs if no baseline tag is set.
-    """
+    """Fetches the baseline runs (rows written under the baseline commit's SHA)."""
     if not BASELINE_TAG:
         print("[gate] No BASELINE_TAG set — skipping regression check, gate passes.")
         return []
 
+    sha = _resolve_baseline_sha(BASELINE_TAG)
     with httpx.Client(timeout=15) as http:
         resp = http.get(
             f"{SUPABASE_URL}/rest/v1/simulations",
             params={
                 "select": "bucket,seed_label,weighted_score,scores_json",
-                "git_sha": f"eq.{BASELINE_TAG}",
+                "git_sha": f"eq.{sha}",
                 "limit": "500",
             },
             headers=SUPABASE_HEADERS,
         )
         resp.raise_for_status()
-        return resp.json()
+        rows = resp.json()
+        if not rows:
+            # Do NOT let this look like "no baseline configured" — a configured-but-unmatched
+            # baseline is a broken gate, and silently passing is exactly the fail-open we're fixing.
+            print(f"[gate] WARNING: BASELINE_TAG={BASELINE_TAG!r} resolved to {sha[:7]} but matched "
+                  f"ZERO rows in `simulations`. The regression comparison cannot run — check that "
+                  f"the baseline nightly actually wrote rows with GIT_SHA={sha[:7]}.")
+        return rows
 
 
 def _axis_averages(runs: list[dict]) -> dict[str, float]:

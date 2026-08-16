@@ -20,6 +20,13 @@ import os
 import sys
 from dataclasses import dataclass, field
 
+# This harness scores SPANISH and PORTUGUESE scenarios by design, so its own output contains
+# characters (¡ ¿ ã) that the default Windows console codepage cannot encode. Without this, the
+# run dies mid-suite on a print() — an eval that cannot report on its i18n cases is not an
+# i18n eval. errors="replace" keeps an exotic glyph from ever being fatal.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # allow bare intra-package imports
 
 import checks  # noqa: E402

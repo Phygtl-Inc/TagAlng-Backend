@@ -72,7 +72,7 @@ def map_to_next_action(resp: dict[str, Any]) -> NextAction:
         kind=_kind_from_routing(routing, event_draft, bool(ui_actions)),  # # FLAGGED
         utterance=resp.get("assistant_message", ""),
         tool=routing.get("tool_called"),  # # FLAGGED: a tool name, not necessarily a capability_id
-        tool_args={},
+        tool_args_json="",  # # FLAGGED: runtime returns no structured tool arguments
         defer_goal_id=None,
         chips=chips,
         why="",  # # FLAGGED: runtime emits no rationale — schema check auto-exempts live

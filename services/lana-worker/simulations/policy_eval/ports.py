@@ -39,6 +39,7 @@ PRODUCT should do (the docs are clear) — they are shapes the prose correctly l
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -119,7 +120,31 @@ class NextAction(BaseModel):
         description="A capability_id the user's state makes AVAILABLE, or null. "
                     "Must be a REGISTERED capability_id (see world_state.REGISTERED_CAPABILITIES).",
     )
-    tool_args: dict[str, Any] = Field(default_factory=dict)
+    # WIRE FORM IS A STRING, DELIBERATELY. PART 5 specifies `tool_args` as a mapping, but this
+    # model is handed to OpenAI as a strict `response_format`, and strict mode requires every
+    # object to declare `additionalProperties: false` — which an open-ended dict[str, Any] cannot,
+    # by definition. A `dict` field therefore makes EVERY decide_turn call fail with a 400 before
+    # the policy is ever exercised. Carrying the args as a JSON string keeps the field expressible
+    # while preserving the contract at the read site (see the `tool_args` property below).
+    tool_args_json: str = Field(
+        default="",
+        description='Arguments for `tool` as a JSON object STRING, e.g. \'{"when":"saturday"}\'. '
+                    'Empty string when the tool takes no arguments.',
+    )
+
+    @property
+    def tool_args(self) -> dict[str, Any]:
+        """PART 5's mapping view of `tool_args_json`. Malformed or non-object JSON reads as {} —
+        no check consumes this field today, so a parse failure must not take down a run whose
+        real subject is the utterance and the tool choice."""
+        raw = self.tool_args_json.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
     defer_goal_id: str | None = Field(
         default=None, description="Set when kind == capture_defer: the goal being deferred."
     )
