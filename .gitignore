@@ -54,6 +54,7 @@ supabase/types/database.ts
 
 # Scratch work
 scratch/
+services/lana-worker/simulations/*/out/
 services/lana-worker/simulations/circles_zip/out/
 services/lana-worker/simulations/policy_eval/out/
 services/lana-worker/simulations/out/
