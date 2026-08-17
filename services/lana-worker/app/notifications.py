@@ -42,8 +42,15 @@ def app_url(path: str = "/") -> str:
     return base + path
 
 
-def email_html(heading: str, body: str, cta_label: str | None = None, cta_path: str | None = None) -> str:
-    """Minimal branded email body. cta_* renders a button linking into the app."""
+def email_html(
+    heading: str,
+    body: str,
+    cta_label: str | None = None,
+    cta_path: str | None = None,
+    note: str | None = None,
+) -> str:
+    """Minimal branded email body. cta_* renders a button linking into the app; `note` is
+    one muted context line under the body — the meet's community, for event mail."""
     cta = ""
     if cta_label and cta_path:
         cta = (
@@ -56,7 +63,12 @@ def email_html(heading: str, body: str, cta_label: str | None = None, cta_path: 
         'margin:0 auto;padding:24px;color:#1a1a1a">'
         f'<h1 style="font-size:20px;margin:0 0 8px">{heading}</h1>'
         f'<p style="font-size:15px;line-height:1.5;color:#444;margin:0">{body}</p>'
-        f"{cta}"
+        + (
+            f'<p style="font-size:13px;color:#666;margin:10px 0 0">{note}</p>'
+            if note
+            else ""
+        )
+        + f"{cta}"
         '<p style="font-size:12px;color:#999;margin-top:28px">Lana · your block concierge</p>'
         "</div>"
     )
@@ -228,11 +240,14 @@ def notify_user(
     url: str | None = None,
     email_subject: str | None = None,
     email_html: str | None = None,
+    note: str | None = None,
 ) -> None:
     """Best-effort push + email to one user. Push uses title/body/url; email is sent only
-    when subject + html are given and the user has an email on file. Never raises."""
+    when subject + html are given and the user has an email on file. `note` is one extra
+    context line on the push (the meet's community) — the email carries it via
+    ``email_html(note=…)``, which the caller builds. Never raises."""
     try:
-        send_push(user_id, title=title, body=body, url=url)
+        send_push(user_id, title=title, body=f"{body}\n{note}" if note else body, url=url)
     except Exception:  # noqa: BLE001
         pass
     if email_subject and email_html:

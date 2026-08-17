@@ -268,8 +268,15 @@ def join_community(
     place_id: str,
     *,
     circle_type: str | None = None,
+    membership: str = "member",
 ) -> dict[str, Any]:
     """Join a community the user found in Lana.
+
+    `membership` is the joiner's own answer to "do you actually go here?" (§19):
+    'member' is membership as always; 'curious' parks the row as status='curious', which
+    every member count, roster and matcher excludes — she gets the place in her own list
+    and nobody gets her as a neighbour they have never met. Tapping Join again as a
+    member promotes the same row.
 
     Three cases, in order:
       1. already a confirmed member  → no-op, `already_member: True`
@@ -288,15 +295,17 @@ def join_community(
     if not place:
         raise ValueError("place_not_found")
 
+    joined_status = "curious" if str(membership or "").strip().lower() == "curious" else "confirmed"
+
     sb = service_client()
     rows = _existing_rows(user_id)
     mine_here = next((r for r in rows if str(r.get("place_ref") or "") == place_id), None)
-    if mine_here and str(mine_here.get("status") or "") == "confirmed":
+    if mine_here and str(mine_here.get("status") or "") == joined_status:
         return {
             "affiliation_id": str(mine_here["id"]),
             "place_id": place_id,
             "place_name": place.get("name"),
-            "status": "confirmed",
+            "status": joined_status,
             "already_member": True,
             "source": mine_here.get("source"),
             "confirmed_via": mine_here.get("confirmed_via"),
@@ -324,7 +333,7 @@ def join_community(
 
     patch: dict[str, Any] = {
         "place_ref": place_id,
-        "status": "confirmed",
+        "status": joined_status,
         "confidence": 1.0,  # a deliberate tap, not an inference
         "confirmed_via": CONFIRMED_VIA_JOIN,
     }
@@ -359,8 +368,11 @@ def join_community(
 
     # Housekeeping the grounding path already does: flush any feature notes parked
     # on the candidate, close its "which spot?" ask so the tile stops asking, and
-    # open the one enrichment question ("what do you enjoy most at X?").
-    _after_join(user_id, affiliation_id, candidate, place_id, str(place.get("name") or ""))
+    # open the one enrichment question ("what do you enjoy most at X?"). Skipped for a
+    # curious join — she just said she does NOT go there, so asking what she enjoys
+    # most about it would be Lana not listening.
+    if joined_status == "confirmed":
+        _after_join(user_id, affiliation_id, candidate, place_id, str(place.get("name") or ""))
 
     logger.info(
         "community_joined user=%s place=%s source=%s promoted=%s",
@@ -373,11 +385,61 @@ def join_community(
         "affiliation_id": affiliation_id,
         "place_id": place_id,
         "place_name": place.get("name"),
-        "status": "confirmed",
+        "status": joined_status,
         "already_member": False,
         "source": origin_source,
         "confirmed_via": CONFIRMED_VIA_JOIN,
         "promoted_from_candidate": promoted_from_candidate,
+    }
+
+
+def set_membership(user_id: str, affiliation_id: str, membership: str) -> dict[str, Any]:
+    """"I'm a member — I go here" / "Not yet — just curious" (§19), answered AFTER the
+    join: the sheet is a separate step from the tap, so it posts the answer here.
+
+    'member' → status='confirmed' (counted, named, matched). 'curious' → status='curious'
+    (hers to see, excluded everywhere else). Idempotent.
+
+    Raises ValueError('affiliation_not_found' | 'place_required').
+    """
+    status = "curious" if str(membership or "").strip().lower() == "curious" else "confirmed"
+    sb = service_client()
+    try:
+        res = (
+            sb.table("circle_affiliations")
+            .select("id, place_ref, status")
+            .eq("id", affiliation_id)
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = [r for r in (res.data or []) if isinstance(r, dict)]
+    except Exception:
+        logger.exception("membership_lookup_failed aff=%s", affiliation_id)
+        raise ValueError("affiliation_not_found") from None
+    if not rows:
+        raise ValueError("affiliation_not_found")
+    row = rows[0]
+    place_id = str(row.get("place_ref") or "")
+    if not place_id:
+        # An ungrounded candidate is not a community yet — nothing to be a member of.
+        raise ValueError("place_required")
+    if str(row.get("status") or "") != status:
+        try:
+            sb.table("circle_affiliations").update({"status": status}).eq(
+                "id", affiliation_id
+            ).execute()
+        except Exception:
+            logger.exception("membership_write_failed aff=%s", affiliation_id)
+            raise ValueError("membership_write_failed") from None
+        logger.info(
+            "membership_set user=%s place=%s status=%s", user_id, place_id, status
+        )
+    return {
+        "affiliation_id": affiliation_id,
+        "place_id": place_id,
+        "membership": "member" if status == "confirmed" else "curious",
     }
 
 

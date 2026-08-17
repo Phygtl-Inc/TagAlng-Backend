@@ -77,6 +77,9 @@ class ActivityPreviewRow(BaseModel):
     has_time: bool | None = None
     starts_label: str | None = None
     venue_name: str | None = None
+    # The community this meet was created for, when it has one — same shape as everywhere
+    # else, so the browse row names it beside the venue.
+    community: dict[str, Any] | None = None
     preview: bool = True
 
 
@@ -267,6 +270,9 @@ class CommunityJoinResponse(BaseModel):
     place_id: str
     place_name: str | None = None
     status: str = "confirmed"
+    # What the joiner said she is to the place: 'member' (counted, named, matched) or
+    # 'curious' (hers to watch, excluded from counts, rosters and matching).
+    membership: str = "member"
     already_member: bool = False
     source: str | None = None
     confirmed_via: str | None = None
@@ -285,6 +291,9 @@ class CommunityFeatureRow(BaseModel):
     sub_group: str | None = None
     # Picked when the feature was written; null on rows learned before 20261010.
     emoji: str | None = None
+    # The caller contributed this one, so /features/remove will take it back — the
+    # only rows the card should render an × on (issues #77).
+    mine: bool = False
 
 
 class CommunityActivityRow(BaseModel):
@@ -313,6 +322,9 @@ class CommunityMemberPreviewRow(BaseModel):
     peer_user_id: str
     nickname: str | None = None
     avatar_url: str | None = None
+    # The caller's own face. member_count has always counted her, so she travels in the
+    # list too and the flag keeps neighbour-only affordances off her row (§17).
+    me: bool = False
 
 
 class CommunityProfileResponse(BaseModel):
@@ -334,6 +346,9 @@ class CommunityProfileResponse(BaseModel):
     relation: str | None = None
     emoji: str | None = None
     detail: str | None = None
+    # The caller's own relationship to the place: 'member', or 'curious' — she joined to
+    # watch it, so she gets this head, no roster and no host/invite actions (§19).
+    membership: str = "member"
     member_count: int = 0
     active: bool = False
     status_line: str | None = None
@@ -362,6 +377,9 @@ class CommunityMemberRow(BaseModel):
     avatar_url: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
     shared_line: str | None = None
+    # The caller's own row: no shared line (nothing is shared with yourself) and no
+    # Nudge. Rows rendered now equal member_count (§17).
+    me: bool = False
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
@@ -441,6 +459,10 @@ class EventDraft(BaseModel):
     # The community this meet is for (setup card 2/5) — the canonical place id of one of
     # the host's own communities. None = a plain neighborhood meet, which is the default.
     circle_place_id: str | None = None
+    # Display form of that community — {place_ref, name, emoji, circle_type, detail}, the
+    # same shape every event-reading RPC returns. Stamped for the turn (see
+    # main._draft_from_dict); the id above stays the stored value.
+    community: dict[str, Any] | None = None
     # AI-tailored quick-setup card config (capacity/sharing/approval/bring labels + bring
     # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
     event_setup: dict[str, Any] | None = None

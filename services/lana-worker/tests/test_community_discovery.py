@@ -8,6 +8,7 @@ from app.community_discovery import (
     discover_communities,
     join_community,
     joined_via_label,
+    set_membership,
 )
 
 
@@ -221,6 +222,68 @@ class TestJoinProvenance(unittest.TestCase):
         with self.assertRaises(ValueError) as err:
             join_community("u1", "")
         self.assertEqual(str(err.exception), "place_required")
+
+
+class TestMembershipIntent(unittest.TestCase):
+    """§19: "I'm a member — I go here" vs "Not yet — just curious for now"."""
+
+    def _tables(self, existing=None):
+        return {
+            "places": _chain([{"id": "p1", "name": "OrangeTheory", "place_type": "fitness"}]),
+            "circle_affiliations": _chain(existing if existing is not None else []),
+        }
+
+    @patch("app.community_discovery._after_join")
+    @patch("app.community_discovery.service_client")
+    def test_curious_is_not_written_as_membership(self, sb, after) -> None:
+        affs = _chain([], insert_data=[{"id": "new1"}])
+        sb.return_value = _sb({**self._tables(), "circle_affiliations": affs})
+        out = join_community("u1", "p1", membership="curious")
+        # status='curious' is what every member count, roster and matcher excludes.
+        self.assertEqual(affs.insert.call_args[0][0]["status"], "curious")
+        self.assertEqual(out["status"], "curious")
+        # And Lana does not then ask what she enjoys most about a place she doesn't go to.
+        after.assert_not_called()
+
+    @patch("app.community_discovery._after_join")
+    @patch("app.community_discovery.service_client")
+    def test_member_is_still_the_default(self, sb, after) -> None:
+        affs = _chain([], insert_data=[{"id": "new1"}])
+        sb.return_value = _sb({**self._tables(), "circle_affiliations": affs})
+        self.assertEqual(join_community("u1", "p1")["status"], "confirmed")
+        self.assertEqual(affs.insert.call_args[0][0]["status"], "confirmed")
+        after.assert_called_once()
+
+    @patch("app.community_discovery.service_client")
+    def test_the_sheet_can_promote_a_curious_row(self, sb) -> None:
+        affs = _chain([{"id": "a1", "place_ref": "p1", "status": "curious"}])
+        sb.return_value = _sb({"circle_affiliations": affs})
+        out = set_membership("u1", "a1", "member")
+        self.assertEqual(affs.update.call_args[0][0], {"status": "confirmed"})
+        self.assertEqual(out, {"affiliation_id": "a1", "place_id": "p1", "membership": "member"})
+
+    @patch("app.community_discovery.service_client")
+    def test_repeating_the_same_answer_writes_nothing(self, sb) -> None:
+        affs = _chain([{"id": "a1", "place_ref": "p1", "status": "curious"}])
+        sb.return_value = _sb({"circle_affiliations": affs})
+        self.assertEqual(set_membership("u1", "a1", "curious")["membership"], "curious")
+        affs.update.assert_not_called()
+
+    @patch("app.community_discovery.service_client")
+    def test_an_ungrounded_candidate_is_not_a_community(self, sb) -> None:
+        sb.return_value = _sb({"circle_affiliations": _chain([{"id": "a1", "place_ref": None}])})
+        with self.assertRaises(ValueError) as err:
+            set_membership("u1", "a1", "member")
+        self.assertEqual(str(err.exception), "place_required")
+
+    @patch("app.community_discovery.service_client")
+    def test_someone_elses_row_is_not_found(self, sb) -> None:
+        affs = _chain([])
+        sb.return_value = _sb({"circle_affiliations": affs})
+        with self.assertRaises(ValueError) as err:
+            set_membership("u1", "a1", "member")
+        self.assertEqual(str(err.exception), "affiliation_not_found")
+        self.assertIn(("user_id", "u1"), [c.args for c in affs.eq.call_args_list])
 
 
 class TestJoinablePlaceNames(unittest.TestCase):

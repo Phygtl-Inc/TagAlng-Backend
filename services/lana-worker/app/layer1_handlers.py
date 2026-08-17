@@ -286,14 +286,29 @@ def _call_peer_rpc(user_jwt: str, base: str, args: dict[str, Any]) -> Any:
     """
     name, payload = radius_rpc(base, args)
     if name == base:
-        return call_rpc(user_jwt, name, payload)
+        return _without_connected(user_jwt, call_rpc(user_jwt, name, payload))
     try:
-        return call_rpc(user_jwt, name, payload)
+        return _without_connected(user_jwt, call_rpc(user_jwt, name, payload))
     except Exception:
         logging.getLogger(__name__).exception(
             "peer_radius_rpc_failed rpc=%s — falling back to block scope", name
         )
-        return call_rpc(user_jwt, base, args)
+        return _without_connected(user_jwt, call_rpc(user_jwt, base, args))
+
+
+def _without_connected(user_jwt: str, raw: Any) -> Any:
+    """Strip peers the caller already connected with from a peer-search result.
+
+    Applied at the dispatch every find_peers_* RPC goes through, so no downstream
+    row builder or reply composer ever sees an already-connected neighbor as a fresh
+    candidate. See peer_discovery_surface.drop_connected_peers.
+    """
+    if not isinstance(raw, list):
+        return raw
+    from app.auth import jwt_user_id
+    from app.peer_discovery_surface import drop_connected_peers
+
+    return drop_connected_peers(raw, user_id=jwt_user_id(user_jwt))
 
 
 def _fetch_peers_single_attr(user_jwt: str, token: str, *, limit: int = 20) -> list[dict[str, Any]]:

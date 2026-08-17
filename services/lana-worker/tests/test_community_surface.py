@@ -163,7 +163,7 @@ class TestMembership(unittest.TestCase):
         sb.return_value = _sb({"circle_affiliations": affs})
         self.assertIsNotNone(caller_affiliation_at("u1", "p1"))
         eq_args = [c.args for c in affs.eq.call_args_list]
-        self.assertIn(("status", "confirmed"), eq_args)
+        self.assertIn(("status", ["confirmed"]), [c.args for c in affs.in_.call_args_list])
         self.assertIn(("place_ref", "p1"), eq_args)
         self.assertIn(("dismissed_at", "null"), [c.args for c in affs.is_.call_args_list])
 
@@ -184,6 +184,21 @@ class TestFeatures(unittest.TestCase):
         sb.return_value = _sb({"place_features": _chain(rows)})
         labels = [f["label"] for f in place_features("p1")]
         self.assertEqual(labels, ["Pool"])
+
+    @patch("app.community_surface.service_client")
+    def test_mine_marks_only_what_the_caller_contributed(self, sb) -> None:
+        # The × belongs on the rows /features/remove will actually delete (issues #77).
+        rows = [
+            {"key": "has_pool", "sub_group": "", "confidence": 0.9, "contributed_by": "u1"},
+            {"key": "has_sauna", "sub_group": "", "confidence": 0.9, "contributed_by": "u2"},
+        ]
+        sb.return_value = _sb({"place_features": _chain(rows)})
+        self.assertEqual(
+            {f["label"]: f["mine"] for f in place_features("p1", "u1")},
+            {"Pool": True, "Sauna": False},
+        )
+        # No caller (a read that isn't on anyone's behalf) claims nothing.
+        self.assertFalse(any(f["mine"] for f in place_features("p1")))
 
 
 class TestSharedLine(unittest.TestCase):
@@ -242,11 +257,19 @@ class TestCommunityMembers(unittest.TestCase):
                 self.assertNotIn(invented, row)
 
     @patch("app.community_surface.service_client")
-    def test_self_and_blocked_are_absent(self, sb) -> None:
+    def test_the_caller_is_in_the_list_and_the_blocked_are_not(self, sb) -> None:
+        # §17: member_count counts the caller, so the roster carries her too — one row
+        # per person counted, hers flagged `me` with no shared line and no Nudge.
         sb.return_value = _sb(self._tables())
         out = community_members("u1", place_id="p1")
         ids = [r["peer_user_id"] for r in out["members"]]
-        self.assertEqual(sorted(ids), ["u2", "u3"])
+        self.assertEqual(sorted(ids), ["u1", "u2", "u3"])
+        self.assertEqual(len(out["members"]), out["member_count"] - 1)  # 'blocked' aside
+        me = next(r for r in out["members"] if r["peer_user_id"] == "u1")
+        self.assertTrue(me["me"])
+        self.assertIsNone(me["shared_line"])
+        self.assertEqual(me["actions"], [])
+        self.assertFalse(any(r["me"] for r in out["members"] if r["peer_user_id"] != "u1"))
 
     @patch("app.community_surface.service_client")
     def test_unverified_caller_gets_the_count_only(self, sb) -> None:
@@ -343,6 +366,54 @@ class TestCommunityProfile(unittest.TestCase):
         self.assertEqual(out["actions"], [])
         self.assertIsNone(out["create_event_venue"])
         self.assertEqual(out["member_preview"], [])
+
+    @patch("app.community_surface._blurb", return_value=None)
+    @patch("app.community_surface.service_client")
+    def test_a_curious_joiner_gets_the_head_and_no_roster(self, sb, _blurb) -> None:
+        # §19: she said she does NOT go here. The place opens, the count is real, and
+        # the people who DO go here keep their names.
+        tables = {
+            "circle_affiliations": _chain(
+                [
+                    {"id": "a1", "circle_type": "fitness", "user_id": "u1", "status": "curious"},
+                    {"user_id": "u2", "circle_type": "fitness", "created_at": "2026-01-01"},
+                ]
+            ),
+            "places": _chain([{"id": "p1", "name": "OrangeTheory", "google_place_id": "ChIJg"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain([{"id": "u2", "nickname": "mapleluz", "profile_photo_url": None}]),
+            "user_blocks": _chain([]),
+        }
+        sb.return_value = _sb(tables)
+        out = community_profile("u1", place_id="p1")
+        self.assertEqual(out["membership"], "curious")
+        self.assertEqual(out["place_name"], "OrangeTheory")
+        self.assertEqual(out["member_preview"], [])
+        self.assertEqual(out["actions"], [])
+        self.assertIsNone(out["create_event_venue"])
+
+    @patch("app.community_surface._blurb", return_value=None)
+    @patch("app.community_surface.service_client")
+    def test_a_member_reads_as_one(self, sb, _blurb) -> None:
+        tables = {
+            "circle_affiliations": _chain(
+                [{"id": "a1", "circle_type": "fitness", "user_id": "u1", "status": "confirmed"}]
+            ),
+            "places": _chain([{"id": "p1", "name": "OrangeTheory"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain([{"id": "u1", "nickname": "coral88", "profile_photo_url": None}]),
+            "user_blocks": _chain([]),
+        }
+        sb.return_value = _sb(tables)
+        out = community_profile("u1", place_id="p1")
+        self.assertEqual(out["membership"], "member")
+        # Her own face is in the preview (§17) — one member, one avatar.
+        self.assertEqual([m["peer_user_id"] for m in out["member_preview"]], ["u1"])
+        self.assertTrue(out["member_preview"][0]["me"])
 
 
 class TestBlurbTruthfulness(unittest.TestCase):

@@ -91,7 +91,11 @@ def fetch_peer_matches_within_radius(
     except Exception:
         logger.exception("peer_radius_match_failed user=%s", user_id)
         return None
-    peers = [r for r in rows if isinstance(r, dict)]
+    from app.peer_discovery_surface import drop_connected_peers
+
+    peers = drop_connected_peers(
+        [r for r in rows if isinstance(r, dict)], user_id=user_id
+    )
     logger.info(
         "peer_radius_match user=%s radius_m=%.0f matches=%d",
         user_id, radius_meters(), len(peers),

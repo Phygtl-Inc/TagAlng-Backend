@@ -111,7 +111,15 @@ def score_onion_candidates(
         rows = []
         ok = False
 
-    candidates = [_shape(r) for r in rows if isinstance(r, dict)]
+    from app.peer_discovery_surface import drop_connected_peers
+
+    # Filter on the raw rows — _shape renames peer_user_id to user_id.
+    candidates = [
+        _shape(r)
+        for r in drop_connected_peers(
+            [r for r in rows if isinstance(r, dict)], user_id=user_id
+        )
+    ]
     # ok=False + candidates=0 is a broken RPC; ok=True + 0 is a real empty
     # result. They used to log identically, which is how a function that threw
     # on every call passed for "the area is just quiet" for weeks.

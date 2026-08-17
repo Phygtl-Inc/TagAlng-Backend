@@ -4740,7 +4740,11 @@ def _try_block_log_intro_turn(
             else None,
         )
     except HTTPException as exc:
-        if "duplicate_intro" in str(exc.detail or "").lower():
+        _detail = str(exc.detail or "").lower()
+        # A pair cooldown is not a transient failure — falling through to the generic
+        # "try again in a moment" below told the user to retry something that cannot
+        # succeed for a week. Both cases mean "there's already something between you".
+        if "duplicate_intro" in _detail or "nudge_cooldown" in _detail:
             reply = format_duplicate_intro_reply(
                 peer=peer,
                 user_jwt=user_jwt,
@@ -5532,11 +5536,14 @@ def _show_activities_preview(
     block_label: str,
     msg: str = "",
     phone_verified: bool = False,
+    user_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     from app.i18n import session_lang as _session_lang
 
     weekend_only = bool(re.search(r"\bweekend\b", str(msg or ""), re.I))
-    events = fetch_preview_events_on_block(block_id, weekend_only=weekend_only)
+    events = fetch_preview_events_on_block(
+        block_id, weekend_only=weekend_only, exclude_host_id=user_id
+    )
     reply = format_activities_message(
         events, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
     )
@@ -6206,9 +6213,17 @@ def _format_event_when(raw: Any) -> str | None:
 
 def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for ev in events[:5]:
-        if not isinstance(ev, dict):
-            continue
+    rows = [ev for ev in events[:5] if isinstance(ev, dict)]
+    # A meet created FOR a community says so in the browse row too — resolved once per
+    # distinct community, not once per row.
+    from app.event_place import event_community
+
+    communities: dict[str, dict[str, Any] | None] = {}
+    for ev in rows:
+        ref = str(ev.get("circle_place_ref") or "").strip()
+        if ref and ref not in communities:
+            communities[ref] = event_community(ref, ev.get("host_id"))
+    for ev in rows:
         out.append(
             {
                 "activity_id": str(ev.get("id") or "") or None,
@@ -6219,6 +6234,7 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 "has_time": ev.get("has_time") is not False,
                 "starts_label": _format_event_when(ev.get("starts_at")),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
+                "community": communities.get(str(ev.get("circle_place_ref") or "").strip()),
                 "preview": True,
             }
         )
@@ -6231,6 +6247,7 @@ def fetch_preview_events_on_block(
     limit: int = 5,
     weekend_only: bool = False,
     pool: int | None = None,
+    exclude_host_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Upcoming open events on preview block (service role).
 
@@ -6238,6 +6255,9 @@ def fetch_preview_events_on_block(
     callers that filter the result downstream (date/host/topic) pass a larger pool so
     the candidate set isn't pre-truncated to just the soonest few. `with_host_name`
     attaches each host's nickname for host-aware filtering.
+
+    `exclude_host_id` drops the caller's own meets: browse offers every card as "tap to
+    RSVP", so without it Lana asked a host to RSVP to the event he had just created.
     """
     try:
         from app.event_publish import roll_recurring_events
@@ -6248,18 +6268,19 @@ def fetch_preview_events_on_block(
         roll_recurring_events()
         now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
         fetch_n = pool if pool and pool > 0 else limit * 3
-        res = (
+        q = (
             sb.table("events")
             .select(
-                "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, recurrence"
+                "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, "
+                "recurrence, circle_place_ref"
             )
             .eq("block_id", block_id)
             .eq("status", "open")
             .gte("starts_at", now_iso)
-            .order("starts_at")
-            .limit(fetch_n)
-            .execute()
         )
+        if exclude_host_id:
+            q = q.neq("host_id", exclude_host_id)
+        res = q.order("starts_at").limit(fetch_n).execute()
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
         if weekend_only:
             from datetime import timezone
@@ -8642,6 +8663,7 @@ def handle_discovery_turn(
             block_label=block_label,
             msg=msg,
             phone_verified=phone_verified,
+            user_id=user_id,
         )
 
     if not effective_snippet:

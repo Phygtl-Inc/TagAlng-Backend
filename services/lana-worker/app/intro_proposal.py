@@ -257,6 +257,17 @@ def propose_neighbor_intro(
     nudge_opener: str | None = None,
     joint_moment_id: str | None = None,
 ) -> dict[str, Any]:
+    # Already connected? Don't attempt the send. The RPC would nudge (still strangers to
+    # it) and die on the 7-day pair cooldown, which surfaces as a retry-forever error for
+    # a pair that has nothing left to send. Returns the 'duplicate' status every caller
+    # already branches on; format_duplicate_intro_reply words it from the real tier.
+    from app.auth import jwt_user_id
+    from app.peer_discovery_surface import _CONNECTED_TIERS, peer_tiers
+
+    _me = jwt_user_id(user_jwt)
+    if _me and peer_tiers(_me, [candidate_user_id]).get(candidate_user_id) in _CONNECTED_TIERS:
+        return {"status": "duplicate", "candidate_user_id": candidate_user_id}
+
     payload: dict[str, Any] = {
         "p_candidate_id": candidate_user_id,
         "p_match_reason": match_reason[:280],

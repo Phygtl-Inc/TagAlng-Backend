@@ -72,10 +72,18 @@ def _now_iso() -> str:
 # ── membership + place reads ──────────────────────────────────────────────────
 
 
-def caller_affiliation_at(user_id: str, place_id: str) -> dict[str, Any] | None:
+def caller_affiliation_at(
+    user_id: str,
+    place_id: str,
+    *,
+    statuses: tuple[str, ...] = ("confirmed",),
+) -> dict[str, Any] | None:
     """The caller's own confirmed row at `place_id` — the authorization for every
     read in this module. None means "not a member": the profile and the people
-    panel are for the places you belong to, not a directory of the neighborhood."""
+    panel are for the places you belong to, not a directory of the neighborhood.
+
+    `statuses` widens that to 'curious' for the profile head alone (§19): someone who
+    joined to watch the place can open it, but is not a member and gets no names."""
     if not user_id or not place_id:
         return None
     try:
@@ -84,11 +92,11 @@ def caller_affiliation_at(user_id: str, place_id: str) -> dict[str, Any] | None:
             .table("circle_affiliations")
             .select(
                 "id, circle_type, circle_key, detail, created_at, source, "
-                "confirmed_via, noun, emoji"
+                "confirmed_via, noun, emoji, status"
             )
             .eq("user_id", user_id)
             .eq("place_ref", place_id)
-            .eq("status", "confirmed")
+            .in_("status", list(statuses))
             .is_("dismissed_at", "null")
             .limit(1)
             .execute()
@@ -100,7 +108,13 @@ def caller_affiliation_at(user_id: str, place_id: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-def _resolve_place(user_id: str, *, affiliation_id: str | None, place_id: str | None) -> str:
+def _resolve_place(
+    user_id: str,
+    *,
+    affiliation_id: str | None,
+    place_id: str | None,
+    statuses: tuple[str, ...] = ("confirmed",),
+) -> str:
     """(affiliation_id | place_id) → place_id, membership proven. Raises ValueError."""
     if affiliation_id:
         try:
@@ -124,7 +138,7 @@ def _resolve_place(user_id: str, *, affiliation_id: str | None, place_id: str | 
     pid = str(place_id or "").strip()
     if not pid:
         raise ValueError("place_required")
-    if not caller_affiliation_at(user_id, pid):
+    if not caller_affiliation_at(user_id, pid, statuses=statuses):
         raise ValueError("not_a_member")
     return pid
 
@@ -354,14 +368,17 @@ def _feature_label(key: str, value: str | None, sub_group: str) -> str:
     return label[:48]
 
 
-def place_features(place_id: str) -> list[dict[str, Any]]:
+def place_features(place_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
     """What members volunteered about the place, best-attested first. Only what
-    somebody actually said — this list is never inferred from the place type."""
+    somebody actually said — this list is never inferred from the place type.
+
+    `mine` marks the rows `user_id` contributed — the only ones remove_feature will
+    delete, so it is what decides whether the card renders an × (issues #77)."""
     try:
         res = (
             service_client()
             .table("place_features")
-            .select("key, value, sub_group, confidence, source, emoji")
+            .select("key, value, sub_group, confidence, source, emoji, contributed_by")
             .eq("place_id", place_id)
             .order("confidence", desc=True)
             .limit(40)
@@ -393,6 +410,7 @@ def place_features(place_id: str) -> list[dict[str, Any]]:
                 "label": label,
                 "sub_group": str(r.get("sub_group") or "") or None,
                 "emoji": str(r.get("emoji") or "").strip() or None,
+                "mine": bool(user_id) and str(r.get("contributed_by") or "") == user_id,
             }
         )
         if len(out) >= _MAX_FEATURES:
@@ -629,11 +647,18 @@ def community_profile(
     phone_verified: bool = True,
 ) -> dict[str, Any]:
     """The place, for the people who go there. Raises ValueError('not_a_member' |
-    'affiliation_not_found' | 'place_required' | 'place_not_found')."""
-    pid = _resolve_place(user_id, affiliation_id=affiliation_id, place_id=place_id)
-    mine = caller_affiliation_at(user_id, pid)
+    'affiliation_not_found' | 'place_required' | 'place_not_found').
+
+    A 'curious' joiner (§19) opens the head — the place, what it has, how many people
+    — and no roster: she said she does not go here, so the names stay with the members."""
+    viewer = ("confirmed", "curious")
+    pid = _resolve_place(
+        user_id, affiliation_id=affiliation_id, place_id=place_id, statuses=viewer
+    )
+    mine = caller_affiliation_at(user_id, pid, statuses=viewer)
     if not mine:
         raise ValueError("not_a_member")
+    is_member = str(mine.get("status") or "confirmed") == "confirmed"
     place = _place_row(pid)
     if not place:
         raise ValueError("place_not_found")
@@ -643,13 +668,15 @@ def community_profile(
         mine.get("noun"),
         mine.get("circle_key"),
     )
-    features = place_features(pid)
+    features = place_features(pid, user_id)
     from app.place_activities import activities_at_place
 
     activities = activities_at_place(pid, user_id)
     members = _member_rows(pid)
     count = len(members)
-    preview = _member_preview(user_id, members, phone_verified=phone_verified)
+    preview = _member_preview(
+        user_id, members, phone_verified=phone_verified and is_member
+    )
     events, meets_this_week_count = _event_rows_for_profile(pid)
     return {
         "place_id": pid,
@@ -671,6 +698,9 @@ def community_profile(
             mine.get("circle_type") or place.get("place_type"), mine.get("emoji")
         ),
         "detail": str(mine.get("detail") or "").strip() or None,
+        # What the caller said she is to this place: 'member' counts and is counted,
+        # 'curious' is watching it (POST /lana/circles/membership flips it).
+        "membership": "member" if is_member else "curious",
         "member_count": count,
         "active": count >= 2,
         # Counted from the meets already fetched above — reading this place's events
@@ -696,9 +726,13 @@ def community_profile(
         # places.id), so the post-publish stamp lands on this same place_ref and the
         # meet shows up in this community's upcoming_events. Null = no google id on
         # file, so the FE lets the host flow ask for the venue as usual.
-        "create_event_venue": _create_event_venue(place) if phone_verified else None,
+        "create_event_venue": _create_event_venue(place)
+        if phone_verified and is_member
+        else None,
+        # Hosting and inviting are things members do here; a curious viewer gets the
+        # head and the FE's own Join.
         "actions": community_profile_actions(place_name=name, relation=relation)
-        if phone_verified
+        if phone_verified and is_member
         else [],
     }
 
@@ -736,12 +770,17 @@ def _member_preview(
     phone_verified: bool,
 ) -> list[dict[str, Any]]:
     """The avatar row on the profile card — the first few faces, never the whole
-    roster (that's the people panel, one tap away)."""
-    others = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "") != user_id]
-    if not others or not phone_verified:
+    roster (that's the people panel, one tap away).
+
+    The caller is IN this list, flagged `me` (§17): member_count has always counted her,
+    so leaving her out rendered "2 members" over one face."""
+    ids = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "")]
+    if not ids or not phone_verified:
         return []
-    blocked = _blocked_ids(user_id, others)
-    visible = [uid for uid in others if uid not in blocked][:5]
+    # Self goes in with the rest so a failed block read still fails closed — it hides
+    # every row, including hers, rather than rendering a roster of one.
+    blocked = _blocked_ids(user_id, ids)
+    visible = [uid for uid in ids if uid not in blocked][:5]
     users = _users_by_id(visible)
     out: list[dict[str, Any]] = []
     for uid in visible:
@@ -751,6 +790,7 @@ def _member_preview(
                 "peer_user_id": uid,
                 "nickname": str(u.get("nickname") or "").strip() or None,
                 "avatar_url": str(u.get("profile_photo_url") or "").strip() or None,
+                "me": uid == user_id,
             }
         )
     return out
@@ -794,9 +834,13 @@ def community_members(
             "has_more": False,
             "requires_phone_verification": True,
         }
-    others = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "") != user_id]
-    blocked = _blocked_ids(user_id, others)
-    visible = [uid for uid in others if uid not in blocked]
+    # The caller is one of the people here, so she is in the list, flagged `me` (§17):
+    # member_count counts her, and a roster one row short of its own count reads as a bug.
+    ids = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "")]
+    # Self goes in with the rest so a failed block read still fails closed — it hides
+    # every row, including hers, rather than rendering a roster of one.
+    blocked = _blocked_ids(user_id, ids)
+    visible = [uid for uid in ids if uid not in blocked]
     page = visible[max(offset, 0) : max(offset, 0) + max(limit, 1)]
     users = _users_by_id(page)
     shared = _shared_concepts(user_id) if page else {}
@@ -804,18 +848,21 @@ def community_members(
     for uid in page:
         u = users.get(uid) or {}
         nickname = str(u.get("nickname") or "").strip()
-        labels = shared.get(uid) or []
+        me = uid == user_id
+        # Nothing is "shared with" yourself, and you cannot nudge yourself.
+        labels = [] if me else (shared.get(uid) or [])
         row: dict[str, Any] = {
             "peer_user_id": uid,
             "nickname": nickname or None,
             "avatar_url": str(u.get("profile_photo_url") or "").strip() or None,
             "trait_tags": labels,
-            "shared_line": _shared_line(labels, relation),
+            "shared_line": None if me else _shared_line(labels, relation),
+            "me": me,
             # Deliberately absent: stars, band, badge, similarity. Nothing here
             # compared two people ([[truthful-peer-match-model]]).
-            "actions": [peer_card_nudge_action(nickname=nickname, peer_user_id=uid)]
-            if nickname
-            else [],
+            "actions": []
+            if me or not nickname
+            else [peer_card_nudge_action(nickname=nickname, peer_user_id=uid)],
         }
         rows.append(row)
     return {
