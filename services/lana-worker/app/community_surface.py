@@ -515,8 +515,8 @@ def _blurb_cached(
 # ── shared threads between the caller and the members ─────────────────────────
 
 
-def _shared_concepts(user_id: str) -> dict[str, list[str]]:
-    """peer user_id -> the identity concepts they and the caller both hold.
+def _shared_concepts(user_id: str) -> dict[str, list[tuple[str, str]]]:
+    """peer user_id -> [(label, subject_kind)] they and the caller both hold.
 
     Exact concept-id overlap from count_shared_concepts_for_user — public,
     non-dismissed claims only. Absent from this map = nothing PROVEN shared, which
@@ -544,17 +544,36 @@ def _shared_concepts(user_id: str) -> dict[str, list[str]]:
         labels = r.get("shared_concept_labels")
         if not uid or not isinstance(labels, list):
             continue
-        clean = [str(x).strip() for x in labels if str(x or "").strip()]
+        # shared_concept_subjects[i] belongs to labels[i] (20261022120000): a
+        # 'child' entry is a fact about their kids, not about them.
+        subjects = r.get("shared_concept_subjects")
+        subjects = list(subjects) if isinstance(subjects, list) else []
+        clean: list[tuple[str, str]] = [
+            (str(x).strip(), str(subjects[i] if i < len(subjects) else "self"))
+            for i, x in enumerate(labels)
+            if str(x or "").strip()
+        ]
         if clean:
             out[uid] = clean[:_MAX_SHARED_LABELS]
     return out
 
 
-def _shared_line(labels: list[str], relation: str) -> str:
+def _shared_line(labels: list[tuple[str, str]], relation: str) -> str:
     """The one honest line under a member's name. Shared threads when there are
-    any; otherwise the fact that IS true of every row here — you both go here."""
-    if labels:
-        return "You both: " + " · ".join(labels)
+    any; otherwise the fact that IS true of every row here — you both go here.
+
+    Threads held about a child get their own clause: "you both" must only ever
+    describe the two adults.
+    """
+    mine = [lb for lb, subject in labels if subject == "self"]
+    kids = [lb for lb, subject in labels if subject == "child"]
+    clauses = []
+    if mine:
+        clauses.append("You both: " + " · ".join(mine))
+    if kids:
+        clauses.append("Your kids both: " + " · ".join(kids))
+    if clauses:
+        return " · ".join(clauses)
     return f"You both go to this {relation}"
 
 
@@ -855,7 +874,8 @@ def community_members(
             "peer_user_id": uid,
             "nickname": nickname or None,
             "avatar_url": str(u.get("profile_photo_url") or "").strip() or None,
-            "trait_tags": labels,
+            # Tags are topic words for the chip row; the subject lives in the line.
+            "trait_tags": [lb for lb, _ in labels],
             "shared_line": None if me else _shared_line(labels, relation),
             "me": me,
             # Deliberately absent: stars, band, badge, similarity. Nothing here

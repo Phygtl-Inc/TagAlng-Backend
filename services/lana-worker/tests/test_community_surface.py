@@ -204,8 +204,21 @@ class TestFeatures(unittest.TestCase):
 class TestSharedLine(unittest.TestCase):
     def test_shared_threads_are_named(self) -> None:
         self.assertEqual(
-            _shared_line(["Runner", "Toddler stage"], "gym"),
+            _shared_line([("Runner", "self"), ("Toddler stage", "self")], "gym"),
             "You both: Runner · Toddler stage",
+        )
+
+    def test_a_childs_thread_never_reads_as_the_adults(self) -> None:
+        # "You both do karate" about two parents whose KIDS do karate is false.
+        self.assertEqual(
+            _shared_line([("Does karate", "child")], "gym"),
+            "Your kids both: Does karate",
+        )
+
+    def test_both_subjects_get_their_own_clause(self) -> None:
+        self.assertEqual(
+            _shared_line([("Runner", "self"), ("Does karate", "child")], "gym"),
+            "You both: Runner · Your kids both: Does karate",
         )
 
     def test_nothing_shared_claims_only_the_place(self) -> None:

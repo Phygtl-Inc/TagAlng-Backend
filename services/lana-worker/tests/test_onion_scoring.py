@@ -151,12 +151,27 @@ class TestOnionRowShaping(unittest.TestCase):
                 "same_type_bonus",
                 "shared_concept_count",
                 "shared_concept_labels",
+                "shared_child_concept_labels",
                 "shared_place_ref",
             },
         )
         self.assertEqual(cand["nickname"], "Daniel")
         self.assertEqual(cand["shared_concept_labels"], ["Gym enthusiast", "Runner"])
         self.assertEqual(cand["shared_place_ref"], "11111111-1111-1111-1111-111111111111")
+
+    def test_child_concepts_are_split_out_of_the_adults_labels(self) -> None:
+        row = dict(_ROW_SAME_PLACE)
+        row["shared_concept_labels"] = ["Does karate", "Runner"]
+        row["shared_concept_subjects"] = ["child", "self"]
+        cand = self._candidates([row])[0]
+        self.assertEqual(cand["shared_concept_labels"], ["Runner"])
+        self.assertEqual(cand["shared_child_concept_labels"], ["Does karate"])
+
+    def test_rows_without_subjects_stay_the_adults(self) -> None:
+        # Pre-20261022 rows carry no subjects array; nothing may silently become
+        # a claim about someone's child.
+        cand = self._candidates([dict(_ROW_SAME_PLACE)])[0]
+        self.assertEqual(cand["shared_child_concept_labels"], [])
 
     def test_sql_ranking_order_is_preserved(self) -> None:
         cands = self._candidates([dict(r) for r in _ALL_ROWS])

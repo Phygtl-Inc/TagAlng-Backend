@@ -94,6 +94,21 @@ def _sort_claims_for_display(claims: list[dict[str, Any]], *, limit: int = 18) -
     return ordered
 
 
+def claim_display_label(c: dict[str, Any]) -> str:
+    """The claim as the OWNER should read it back.
+
+    A child's thread carries who it is about — "Does karate" alone, listed under
+    the user's own name, says the user does karate.
+    """
+    label = str(c.get("label") or c.get("concept") or "").strip()
+    if not label or str(c.get("subject_kind") or "self") != "child":
+        return label
+    name = str(c.get("subject_name") or "").strip()
+    age = c.get("subject_age")
+    who = ", ".join(str(p) for p in (name, f"age {age}" if age else None) if p)
+    return f"{label} ({who})" if who else f"{label} (your child)"
+
+
 def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
     profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
     claims = dashboard.get("claims") if isinstance(dashboard.get("claims"), list) else []
@@ -116,9 +131,11 @@ def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
         for c in claims:
             if not isinstance(c, dict):
                 continue
-            label = str(c.get("label") or c.get("concept") or "").strip()
+            label = claim_display_label(c)
             if not label:
                 continue
+            # Keyed on the rendered label, so two children who both do karate
+            # stay two lines instead of one collapsing over the other.
             key = label.lower()
             if key in seen_labels:
                 continue

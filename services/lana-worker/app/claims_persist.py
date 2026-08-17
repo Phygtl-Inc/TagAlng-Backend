@@ -19,6 +19,7 @@ from app.models import ExtractedClaim
 from app.pii import redact_pii
 from app.vertex_extract import (
     parse_incremental_claims_data,
+    parse_subject_updates,
     incremental_claims_from_utterance,
     vertex_embed,
     vertex_extract_claims_from_utterance,
@@ -301,19 +302,31 @@ def fetch_active_claim_threads(user_id: str) -> list[dict[str, Any]]:
     Concepts let the model re-emit the SAME slug when a message adds to an existing
     thread (the upsert merge key); details let it skip facts already captured.
     """
-    try:
-        res = (
+    def _select(columns: str) -> Any:
+        return (
             service_client()
             .table("user_identity_claims")
-            .select("concept, label, details")
+            .select(columns)
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .limit(40)
             .execute()
         )
-    except Exception:
-        logger.exception("fetch_active_claim_threads_failed")
-        return []
+
+    try:
+        res = _select("concept, label, details, subject_kind, subject_name, subject_birth_year")
+    except Exception as exc:
+        if not _missing_subject_column(exc):
+            logger.exception("fetch_active_claim_threads_failed")
+            return []
+        # Without this the extractor sees zero existing threads and starts
+        # duplicating claims the user already has.
+        logger.warning("claim_subject_columns_absent — reading threads without them")
+        try:
+            res = _select("concept, label, details")
+        except Exception:
+            logger.exception("fetch_active_claim_threads_failed")
+            return []
     out: list[dict[str, Any]] = []
     for row in res.data or []:
         if not isinstance(row, dict):
@@ -325,7 +338,13 @@ def fetch_active_claim_threads(user_id: str) -> list[dict[str, Any]]:
         details = row.get("details") or []
         if not isinstance(details, list):
             details = []
-        out.append({"concept": concept, "label": label, "details": details})
+        thread: dict[str, Any] = {"concept": concept, "label": label, "details": details}
+        if str(row.get("subject_kind") or "self") != "self":
+            # Carried so a later "Sara is 9" can find the thread it belongs to.
+            thread["subject_kind"] = row.get("subject_kind")
+            thread["subject_name"] = row.get("subject_name")
+            thread["subject_birth_year"] = row.get("subject_birth_year")
+        out.append(thread)
     return out
 
 
@@ -663,6 +682,8 @@ def dedupe_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
     by_key: dict[str, ExtractedClaim] = {}
     for c in claims:
         key = _normalized_label_key(c.label) or str(c.concept or "").lower()
+        # Two children doing the same thing are two facts, not a duplicate.
+        key = f"{c.subject_kind}:{(c.subject_name or '').lower()}:{key}"
         winner = by_key.get(key)
         if winner is None:
             by_key[key] = c
@@ -1160,6 +1181,93 @@ def _resolve_concept_id(
         return None
 
 
+def apply_subject_updates(user_id: str, updates: list[dict[str, Any]]) -> int:
+    """Write a stated age onto every claim already held for that named child.
+
+    The age belongs to the child, not to one of their activities, so it lands on
+    all of their rows at once. Only fills gaps and corrections — it never creates
+    a row, because "my kid is 9" on its own is not something to match on.
+    """
+    if not updates:
+        return 0
+    sb = service_client()
+    touched = 0
+    for u in updates:
+        name = str(u.get("name") or "").strip()
+        birth_year = u.get("birth_year")
+        if not name or not birth_year:
+            continue
+        res = (
+            sb.table("user_identity_claims")
+            .update({"subject_birth_year": int(birth_year)})
+            .eq("user_id", user_id)
+            .eq("subject_kind", "child")
+            .eq("subject_name", name)
+            .is_("dismissed_at", "null")
+            .execute()
+        )
+        touched += len(res.data or [])
+    return touched
+
+
+_SUBJECT_COLUMNS = ("subject_kind", "subject_name", "subject_birth_year")
+# Flipped false the first time the DB rejects them, so an environment that has
+# not run 20261021120000 keeps saving claims instead of raising on every write.
+_subject_columns_present = True
+
+
+def _drop_subject_columns(rows: Any) -> Any:
+    if isinstance(rows, list):
+        return [_drop_subject_columns(r) for r in rows]
+    return {k: v for k, v in rows.items() if k not in _SUBJECT_COLUMNS}
+
+
+def _missing_subject_column(exc: Exception) -> bool:
+    """PostgREST 42703 naming one of our columns — not any other write failure."""
+    text = str(exc)
+    return "42703" in text and any(col in text for col in _SUBJECT_COLUMNS)
+
+
+def write_with_subject_fallback(write: Any, rows: Any) -> Any:
+    """Run a claim write; on a pre-20261021120000 schema, retry without the subject.
+
+    A claim missing its subject is a degraded claim. A claim that raised is a claim
+    the user told us and we threw away — that trade is never worth making, and it
+    was live for anyone running this code against an un-migrated database.
+    """
+    global _subject_columns_present
+    if not _subject_columns_present:
+        return write(_drop_subject_columns(rows))
+    try:
+        return write(rows)
+    except Exception as exc:
+        if not _missing_subject_column(exc):
+            raise
+        _subject_columns_present = False
+        logger.warning("claim_subject_columns_absent — writing without them; run 20261021120000")
+        return write(_drop_subject_columns(rows))
+
+
+def _same_thread_filter(query: Any, c: ExtractedClaim) -> Any:
+    """Narrow a claims query to the row this claim would upsert into.
+
+    The thread key is (concept, subject_kind, subject_name) — matching the DB's
+    unique index. On `concept` alone, a second child doing the same activity
+    would overwrite the first one's row.
+    """
+    query = query.eq("concept", c.concept).eq("subject_kind", c.subject_kind)
+    if c.subject_kind == "self":
+        return query
+    if c.subject_name:
+        return query.eq("subject_name", c.subject_name)
+    # ponytail: strict on purpose. Letting a named claim also match the un-named
+    # row would tidily merge "Sara does karate" into "my 7-year-old does karate"
+    # — and would just as silently staple Tom's name onto his sister's row when
+    # the message was "my son Tom does karate too". A visible duplicate beats an
+    # invisible wrong fact; collapse them properly once a child is an entity.
+    return query.is_("subject_name", "null")
+
+
 def _claim_row(user_id: str, c: ExtractedClaim, embedding: list[float] | None) -> dict[str, Any]:
     """Row shape for the user_identity_claims table."""
     row: dict[str, Any] = {
@@ -1174,6 +1282,11 @@ def _claim_row(user_id: str, c: ExtractedClaim, embedding: list[float] | None) -
         "source_quote": c.source_quote,
         "bucket": c.bucket,
         "transient": c.transient,
+        "subject_kind": c.subject_kind,
+        # Owner-only. Written raw on purpose — redact_pii runs on the text fields
+        # above so the name never reaches anything matchable or peer-facing.
+        "subject_name": c.subject_name if c.subject_kind != "self" else None,
+        "subject_birth_year": c.subject_birth_year if c.subject_kind != "self" else None,
     }
     if embedding is not None:
         row["embedding"] = embedding
@@ -1223,6 +1336,10 @@ def _merge_into_existing(c: ExtractedClaim, existing_row: dict[str, Any]) -> Ext
     )
     c.synonyms = list(dict.fromkeys([*old_syns, *c.synonyms]))[:MAX_CLAIM_SYNONYMS]
     c.details = _merge_details(old_details, c.details)
+    # A later mention usually carries less than the first ("Sara does karate"
+    # after "my 7-year-old does karate"). Never let it blank what we already know.
+    c.subject_name = c.subject_name or (existing_row.get("subject_name") or None)
+    c.subject_birth_year = c.subject_birth_year or (existing_row.get("subject_birth_year") or None)
     return c
 
 
@@ -1240,10 +1357,15 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
         if c.confidence < MIN_CLAIM_CONFIDENCE:
             continue
         existing = (
-            sb.table("user_identity_claims")
-            .select("id, confidence, synonyms, details, label, source_quote, bucket")
-            .eq("user_id", user_id)
-            .eq("concept", c.concept)
+            _same_thread_filter(
+                sb.table("user_identity_claims")
+                .select(
+                    "id, confidence, synonyms, details, label, source_quote, bucket, "
+                    "subject_name, subject_birth_year"
+                )
+                .eq("user_id", user_id),
+                c,
+            )
             .is_("dismissed_at", "null")
             .limit(1)
             .execute()
@@ -1267,21 +1389,28 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
                 # Text unchanged, so the STORED vector stays put — but concept resolution
                 # below still needs one to match against. Computed, not written.
                 embedding = _embed_claim(merged)
-            sb.table("user_identity_claims").update(row).eq("id", claim_id).execute()
+            write_with_subject_fallback(
+                lambda r: sb.table("user_identity_claims").update(r).eq("id", claim_id).execute(),
+                row,
+            )
         else:
             embedding = _embed_claim(c)
             row = _claim_row(user_id, c, embedding)
-            res = sb.table("user_identity_claims").insert(row).execute()
+            res = write_with_subject_fallback(
+                lambda r: sb.table("user_identity_claims").insert(r).execute(), row
+            )
             claim_id = None
             if res.data and len(res.data) > 0:
                 claim_id = res.data[0].get("id")
             if not claim_id:
                 try:
                     resel = (
-                        sb.table("user_identity_claims")
-                        .select("id")
-                        .eq("user_id", user_id)
-                        .eq("concept", c.concept)
+                        _same_thread_filter(
+                            sb.table("user_identity_claims")
+                            .select("id")
+                            .eq("user_id", user_id),
+                            c,
+                        )
                         .is_("dismissed_at", "null")
                         .limit(1)
                         .execute()
@@ -1306,7 +1435,9 @@ def replace_all_claims(user_id: str, claims: list[ExtractedClaim]) -> None:
     embeddings = [_embed_claim(c) for c in claims]
     rows = [_claim_row(user_id, c, emb) for c, emb in zip(claims, embeddings)]
     if rows:
-        res = sb.table("user_identity_claims").insert(rows).execute()
+        res = write_with_subject_fallback(
+            lambda r: sb.table("user_identity_claims").insert(r).execute(), rows
+        )
         if _identity_concept_link_enabled():
             inserted = res.data if res.data else None
             if inserted is None:
@@ -1465,6 +1596,12 @@ def try_upsert_claims_from_message(
         return ClaimExtractResult(nickname=stated_nick)
     # Circles Stage 1 (extract-and-park, §H.1): persist circle / place-feature candidates
     # from the same extractor pass. Best-effort and additive — must never affect claims.
+    # "Sara is 9" — a name/age with no activity. Applies to every row already held
+    # for that child; never becomes a claim of its own.
+    try:
+        apply_subject_updates(user_id, parse_subject_updates(data))
+    except Exception:
+        logger.exception("subject_updates_failed")
     circles_captured = 0
     try:
         from app.circles_capture import run_circle_capture

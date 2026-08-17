@@ -94,8 +94,19 @@ def compose_match_reason(row: dict[str, Any]) -> tuple[str | None, list[str]]:
     shared = _clean_tags(
         [str(s) for s in raw_shared] if isinstance(raw_shared, list) else [], max_tags=3
     )
-    if shared:
-        return "You both: " + " · ".join(shared), shared
+    raw_kids = row.get("shared_child_labels")
+    kids = _clean_tags(
+        [str(s) for s in raw_kids] if isinstance(raw_kids, list) else [], max_tags=3
+    )
+    if shared or kids:
+        # Two subjects, two clauses. A claim held about a child says nothing
+        # about the adult reading it, so it never rides on "You both".
+        clauses = []
+        if shared:
+            clauses.append("You both: " + " · ".join(shared))
+        if kids:
+            clauses.append("Your kids both: " + " · ".join(kids))
+        return " · ".join(clauses), shared + kids
     my_label = str(row.get("matching_my_label") or "").strip()
     peer_label = str(row.get("matching_peer_label") or "").strip()
     if not my_label or not peer_label:
@@ -123,10 +134,17 @@ def enrich_peer_match_row(row: dict[str, Any]) -> dict[str, Any]:
         out["trait_tags"] = []
         return out
     raw_shared = out.get("shared_labels")
+    raw_kids = out.get("shared_child_labels")
     shared_count = len(
-        _clean_tags([str(s) for s in raw_shared], max_tags=10)
-        if isinstance(raw_shared, list)
-        else []
+        _clean_tags(
+            [
+                str(s)
+                for key in (raw_shared, raw_kids)
+                if isinstance(key, list)
+                for s in key
+            ],
+            max_tags=10,
+        )
     )
     if not shared_count and bool(out.get("has_exact_concept_match")):
         shared_count = 1  # legacy rows without shared_labels: the best pair is exact

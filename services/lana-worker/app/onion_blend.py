@@ -106,8 +106,12 @@ def _merged_labels(
 
 
 def _proof_count(row: dict[str, Any]) -> int:
-    labels = row.get("shared_labels")
-    return len(labels) if isinstance(labels, list) else 0
+    total = 0
+    for key in ("shared_labels", "shared_child_labels"):
+        labels = row.get(key)
+        if isinstance(labels, list):
+            total += len(labels)
+    return total
 
 
 def blend_onion_matches(
@@ -170,6 +174,13 @@ def blend_onion_matches(
             by_uid[uid] = row
             appended += 1
         row["shared_labels"] = _merged_labels(row.get("shared_labels"), place_tag, concept_labels)
+        # Kept separate all the way to the sentence: these are facts about the
+        # two households' CHILDREN, and "you both do karate" would be false.
+        child_labels = [str(s) for s in (cand.get("shared_child_concept_labels") or [])]
+        if child_labels:
+            row["shared_child_labels"] = _merged_labels(
+                row.get("shared_child_labels"), None, child_labels
+            )
         if int(cand.get("shared_concept_count") or 0) > 0:
             row["has_exact_concept_match"] = True
         row["onion_match"] = True

@@ -52,6 +52,20 @@ def _shape(row: dict[str, Any]) -> dict[str, Any]:
     """One RPC row -> one candidate dict. Pass-through: no re-ranking, no
     re-weighting, no derived score of any kind."""
     labels = row.get("shared_concept_labels")
+    labels = list(labels) if isinstance(labels, list) else []
+    # shared_concept_subjects[i] describes shared_concept_labels[i] (20261022120000).
+    # Split here so no downstream copy has to guess whose fact it is: "you both
+    # run" and "your kids both do karate" are different sentences.
+    subjects = row.get("shared_concept_subjects")
+    subjects = list(subjects) if isinstance(subjects, list) else []
+    self_labels = [
+        lb for i, lb in enumerate(labels)
+        if (subjects[i] if i < len(subjects) else "self") == "self"
+    ]
+    child_labels = [
+        lb for i, lb in enumerate(labels)
+        if (subjects[i] if i < len(subjects) else "self") == "child"
+    ]
     return {
         "user_id": str(row.get("peer_user_id") or ""),
         "nickname": row.get("nickname"),
@@ -60,7 +74,8 @@ def _shape(row: dict[str, Any]) -> dict[str, Any]:
         "same_place_bonus": int(row.get("same_place_bonus") or 0),
         "same_type_bonus": int(row.get("same_type_bonus") or 0),
         "shared_concept_count": int(row.get("shared_concept_count") or 0),
-        "shared_concept_labels": list(labels) if isinstance(labels, list) else [],
+        "shared_concept_labels": self_labels,
+        "shared_child_concept_labels": child_labels,
         "shared_place_ref": row.get("shared_place_ref"),
     }
 

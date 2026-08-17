@@ -413,6 +413,11 @@ class IdentityClaimRow(BaseModel):
     disclosure: str | None = None
     bucket: str | None = None
     source_quote: str | None = None
+    # Whose thread this is. Owner-facing card only — get_peer_profile never
+    # projects the name, so these can't reach another user.
+    subject_kind: str | None = None
+    subject_name: str | None = None
+    subject_age: int | None = None
 
 
 class IdentityProfilePayload(BaseModel):
@@ -826,6 +831,14 @@ class ExtractedClaim(BaseModel):
     # Short user-visible sub-facts accumulated across turns for the same thread
     # ("Swims every weekend"). Merged append-dedup on upsert, capped at 5.
     details: list[str] = Field(default_factory=list)
+    # Who the claim is about. "self" for the speaker; "child" when they said it
+    # about their kid ("my 7-year-old does karate"). The name is OWNER-ONLY —
+    # it is never written into label/source_quote/synonyms (those stay redacted)
+    # and no peer-facing surface reads it.
+    subject_kind: str = "self"
+    subject_name: str | None = None
+    # Stored as a birth year, not an age: an age written today is wrong in a year.
+    subject_birth_year: int | None = None
 
 
 class CompleteSessionResponse(BaseModel):
