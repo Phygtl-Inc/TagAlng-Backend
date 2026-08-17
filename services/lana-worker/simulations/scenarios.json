@@ -111,7 +111,7 @@
         },
         {
           "label": "user goes silent",
-          "opening_line": "",
+          "opening_line": "...",
           "must_not": "send more than one re-engagement nudge or nag the user"
         }
       ]

@@ -23,7 +23,7 @@ import httpx
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Config — stub values replaced once Asjid provisions test accounts
@@ -85,6 +85,21 @@ class Seed(BaseModel):
     label: str
     opening_line: str
     must_not: str
+
+    @field_validator("opening_line")
+    @classmethod
+    def _opening_must_be_postable(cls, v: str) -> str:
+        # Turn 1 is emitted VERBATIM to POST /lana/sessions/{id}/messages, whose body is
+        # SendMessageRequest.message with min_length=1 (app/models.py). A blank opening_line is
+        # therefore a guaranteed 422 -> the run raises -> runner.py buries it in `failures` and
+        # still exits 0, i.e. a permanently unmeasured cell riding along in a green nightly.
+        # Fail loudly at LOAD time instead, before any API/LLM spend.
+        if not v.strip():
+            raise ValueError(
+                "opening_line must be non-blank — Lana's /messages endpoint requires min_length=1. "
+                "True silence is not expressible against this API; use a content-free proxy turn."
+            )
+        return v
 
 
 class Bucket(BaseModel):
@@ -351,15 +366,28 @@ CONTEXT (background only — do not repeat this to Lana)
 This tests: {bucket.description}
 What success looks like: {bucket.pass_criteria}
 {history_section}
+ABSOLUTE RULES — these override everything else. Violating any of them corrupts the run.
+1. You are ONE PERSON in a live chat: {persona.profile.nickname}. Output ONLY the words she would
+   type into the message box, nothing else.
+2. NEVER write or imagine Lana's side. Do not write "Lana:", do not quote or paraphrase a reply she
+   has not actually sent, and do not continue as if she answered something she did not.
+3. Respond ONLY to what Lana ACTUALLY said in the messages above. If she has not replied yet, do
+   not act as though she has. Never open a message with "Oh, I understand", "Thanks for that",
+   "I see", or any acknowledgement of a reply that is not literally present above.
+4. NEVER write a script or dialogue for both sides, stage directions (*sighs*, [pauses]), narration
+   about what "the user" does, or commentary about what Lana should do next.
+5. NEVER mention testing, simulation, roleplay, personas, scenarios, prompts, or that you are an AI.
+6. Output plain chat text only — no speaker labels, no turn numbers, no markdown headers, no quotes
+   around your whole message.
+
 RULES
-- You are ONLY the user. Never write Lana's words. Never explain what Lana should do. Only write what {persona.profile.nickname} would type next.
 - Keep messages short — this is a chat app, not an email.
 - React to what Lana actually said. If she helps, engage. If she stalls or deflects, push back once or twice then give up naturally.
 - If the conversation loops or Lana clearly can't help, set disengage=true. Do NOT repeat the same message twice.
 - If Lana has explicitly said she CANNOT do something two or more times (e.g. "that isn't something I can do"), set disengage=true. A real user would give up and move on.
 - If Lana is asking clarifying questions to understand your request, keep engaging and answer them — she is trying to help, not refusing.
-- Do not mention testing, roleplaying, or instructions.
-- Your very first message must be the opening line above, verbatim.
+- Your opening message has ALREADY been sent for you (it appears as your first message above). Never
+  re-send it, and never write a fresh opening — continue the conversation from where it actually is.
 {language_rule}"""
 
 
@@ -413,7 +441,24 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
         repeat_count = 0
 
         for turn_num in range(1, MAX_TURNS + 1):
-            user_turn = _generate_user_turn(openai_client, system_prompt, history)
+            if turn_num == 1:
+                # Turn 1 is KNOWN BY CONSTRUCTION — emit the seed's opening line verbatim rather
+                # than asking the model to reproduce it.
+                # WHY: measured across the 787 stored runs, 63% did NOT open with the seed's
+                # opening line despite the prompt demanding it verbatim. The model instead opened
+                # mid-conversation ("Oh, I understand, but...") — i.e. replying to a Lana turn that
+                # never happened. A human reviewer labelled exactly this "mock user got confused and
+                # start roleplaying both sides", and those runs were then mis-scored by the judge.
+                # Generating turn 1 deterministically removes that entire failure class, makes every
+                # run start from the identical stimulus (a precondition for comparing runs at all),
+                # and saves one LLM call per run.
+                user_turn = UserTurn(
+                    message=seed.opening_line,
+                    reasoning="seed opening line, emitted verbatim (not model-generated)",
+                    disengage=False,
+                )
+            else:
+                user_turn = _generate_user_turn(openai_client, system_prompt, history)
             print(f"  [user {turn_num}] {user_turn.message[:100]}")
 
             # Break out if the mock user is stuck repeating itself
