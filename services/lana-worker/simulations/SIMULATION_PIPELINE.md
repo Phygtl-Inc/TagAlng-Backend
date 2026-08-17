@@ -1,5 +1,5 @@
 # Lana Simulation Pipeline
-*Tim Chen · last updated 2026-06-30*
+*Tim Chen · last updated 2026-07-28*
 
 ---
 
@@ -11,20 +11,33 @@ Two downstream consumers per run:
 - **HITL review** — Tim confirms or flips judge verdicts in `/admin/sims`
 - **SFT fine-tuning** — high-scoring transcripts are stored in OpenAI messages-array format, exportable as JSONL for future model training
 
+> This is the **conversational** pipeline (the `simulations/` root). It's now one of four eval
+> harnesses in this suite — see the siblings `rapport/` (claim-extraction), `circles_zip/`
+> (onion matcher + ZIP-unlock), and `policy_eval/` (conversational-policy decisions + lingo +
+> safety), each with its own `README.md`. Suite-wide conventions (mechanical-vs-judged, the
+> stub/live seam, the `# GUESSED` + handoff-doc pattern, the eval-only role boundary) live in
+> `CLAUDE.md` in this directory.
+
 ---
 
 ## Folder layout
 
 ```
 services/lana-worker/simulations/
-├── personas.json           ← 6 mock-user personas (P1–P6), all provisioned
-├── scenarios.json          ← 4 buckets × 17 seeds total
-├── simulation.py           ← drives Lana API, produces transcript dict
-├── evaluation.py           ← judge LLM scores transcript, writes to Supabase
-├── runner.py               ← CLI entry point, iterates persona × seed matrix
-├── gate_check.py           ← CI regression check, called by sim-gate.yml
-├── scratch/                ← gitignored, local run logs (JSON)
-└── SIMULATION_PIPELINE.md  ← this file
+├── personas.json               ← 6 mock-user personas (P1–P6), all provisioned
+├── scenarios.json              ← 7 buckets × 32 seeds total
+├── simulation.py               ← drives Lana API, produces transcript dict (full raw payload)
+├── evaluation.py               ← judge LLM scores transcript, writes to Supabase (2 rubric systems)
+├── qa_analyze.py               ← deterministic mechanical checks (verify-walls, leaks, latency p50/p90/p99)
+├── runner.py                   ← CLI entry point, iterates persona × seed matrix
+├── gate_check.py               ← CI regression check, called by sim-gate.yml
+├── compare_beat_strictness.py  ← one-off: strict-vs-lenient five-beat diff
+├── rapport/                    ← claim-extraction eval harness (README inside)
+├── circles_zip/                ← onion matcher + ZIP-unlock harness (stub/live seam; README inside)
+├── policy_eval/                ← conversational-policy + lingo + safety harness (stub/live; README inside)
+├── scratch/                    ← gitignored, local run logs (JSON)
+├── CLAUDE.md                   ← suite-wide conventions for AI agents
+└── SIMULATION_PIPELINE.md      ← this file
 
 .github/workflows/
 ├── sim-nightly.yml         ← cron: runs full matrix at 02:00 EDT every night
@@ -83,12 +96,23 @@ python runner.py --persona P1
 # All personas for one bucket
 python runner.py --bucket out_of_scope_rejection
 
-# Full 102-run matrix
+# Full 192-run matrix (6-way parallel across personas by default) — this is the NIGHTLY
 python runner.py
 
-# Validate matrix without calling any API
+# PR gate: must-have buckets only (pr_gate=true) — refusals/safety, PII/privacy, core, routing
+python runner.py --pr
+
+# Force fully sequential (old behavior) / tune parallelism
+python runner.py --concurrency 1
+
+# Validate matrix without calling any API (prints the parallel plan)
 python runner.py --dry-run
 ```
+
+> **Parallelism:** runs execute one worker per persona, concurrent across personas (a persona's
+> own seeds stay sequential — claims-seeding is per-user and would otherwise race). Verified ~5.6×.
+> Run `python ci_timing.py --estimate` for the per-bucket timing model, or `--tier pr|full` to
+> measure it live.
 
 `runner.py` loads `.env.local` via `python-dotenv` automatically — no manual env setup needed in the simulation terminal.
 
@@ -98,7 +122,7 @@ Run logs are saved to `scratch/run_<timestamp>Z.json` (gitignored).
 
 ## Test matrix
 
-**6 personas × 17 seeds = 102 runs per nightly cycle.**
+**6 personas × 32 seeds = 192 runs per nightly cycle** (the runner iterates the persona × seed matrix).
 
 ### Personas
 
@@ -115,12 +139,20 @@ All 6 accounts are provisioned in Supabase with `home_block_id = 8a2a1072b59ffff
 
 ### Scenario buckets
 
-| Bucket | Seeds | What it tests |
-|--------|-------|---------------|
-| `in_scope_success` | 4 | Clean happy-path tool execution — intent recognized, correct tool fired, outcome delivered |
-| `out_of_scope_rejection` | 4 | All 5 beats of the refusal pattern land (acknowledge → name → not-yet → log signal → redirect) |
-| `ambiguous_clarity` | 5 | Lana counter-asks before routing; no tool call on turn 1 is a failure |
-| `edge_cases` | 4 | Zero-claims cold start, ASR garble, language switch mid-convo, user silence |
+The first four buckets use the original 4-axis judge rubric; the last three (`find_coverage`,
+`host_confirm`, `edge_trust`) are the **QA-derived buckets**, routed by exact bucket name
+(`evaluation.QA_BUCKET_NAMES`) to a 1–5-per-axis rubric normalized to the same PASS/SOFT/HARD
+convention, plus the mechanical checks in `qa_analyze.py`.
+
+| Bucket | Seeds | Rubric | What it tests |
+|--------|-------|--------|---------------|
+| `in_scope_success` | 4 | 4-axis | Clean happy-path tool execution — intent recognized, correct tool fired, outcome delivered |
+| `out_of_scope_rejection` | 4 | 4-axis | The refusal-pattern beats land (acknowledge → name → not-yet → log signal → redirect); the `medical advice` seed uses a 4-beat health-safety redirect instead |
+| `ambiguous_clarity` | 5 | 4-axis | Lana counter-asks before routing; no tool call on turn 1 is a failure |
+| `edge_cases` | 4 | 4-axis | Zero-claims cold start, ASR garble, language switch mid-convo, user silence |
+| `find_coverage` | 6 | QA (find) | Refinement narrows results, verify-wall only on write actions, coverage/zip-widening, intent persists through side quests |
+| `host_confirm` | 4 | QA (host) | "Yes" advances the draft, relative dates grounded, recurring schedules, venue-is-a-place-not-a-zip |
+| `edge_trust` | 5 | QA (edge) | Safety question gets a real answer, privacy pushback respected, language mirrored, no debug strings leak, kid-PII not echoed |
 
 ---
 
@@ -139,6 +171,12 @@ Each axis: **PASS** (1.0) / **SOFT_FAIL** (0.5) / **HARD_FAIL** (0.0)
 - `weighted_score >= 0.85` AND zero HARD_FAILs → `sft_eligible = true`
 - Any HARD_FAIL on `goal_completion` or `no_hallucination` → flagged for HITL
 - PR gate blocks if any axis regresses >5% vs baseline or HARD_FAIL count increases
+
+The three QA buckets add a parallel **1–5-per-axis** rubric (find/host/edge), each normalized
+back to PASS/SOFT/HARD, plus cross-conversation batch synthesis (`evaluation.score_qa_batch`) and
+deterministic mechanical checks (`qa_analyze.py`: verify-walls, ZIP dead-ends/loops, kid-PII echo,
+language mismatch, debug-string leaks, latency p50/p90/p99). Known gap: `gate_check.py` reports the
+QA-bucket axes but does not yet regression-gate them.
 
 ---
 
@@ -240,10 +278,16 @@ The nightly cron and PR gate run in GitHub CI — they have no access to `.env.l
 
 ## Status
 
+> The table below is the **original rollout** checklist (2026-06-30). Since then the suite has
+> expanded: the 3 QA-rubric buckets + `qa_analyze.py`, and the `rapport/`, `circles_zip/`, and
+> `policy_eval/` sibling harnesses. The Supabase migration and GitHub secrets were provisioned by
+> Asjid during the CI-gate bring-up; the `circles_zip`/`policy_eval` harnesses have their own
+> handoff docs at repo root for their outstanding backend items.
+
 | Item | Status |
 |------|--------|
 | `personas.json` | ✅ All 6 personas, real user IDs, home_block_id confirmed |
-| `scenarios.json` | ✅ 4 buckets, 17 seeds |
+| `scenarios.json` | ✅ 7 buckets, 32 seeds (incl. 3 QA-rubric buckets) |
 | `simulation.py` | ✅ Claims seeding, password-grant auth, corpus feedback loop |
 | `evaluation.py` | ✅ Judge scoring, HITL fields, SFT messages |
 | `runner.py` | ✅ CLI, error isolation, run log to scratch/ |
