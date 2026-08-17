@@ -11,20 +11,39 @@
 # Fixture fields:
 #   input               — the raw user message sent to the extractor
 #   existing_labels     — optional list[str], simulates _existing_claims_block dedup context
-#   expect_claims       — list of {bucket, concept, label_has, confidence_min, disclosure?,
-#                          transient?, vague?}. `label_has` is a case-insensitive substring
-#                          match against the returned claim's `label`. `concept` is NOT
+#   recent_questions    — optional list[str], simulates _recent_questions_block (questions Lana
+#                          has already asked). The extractor is told its followup must not
+#                          repeat/near-duplicate these. "Near-duplicate" needs judgment, so the
+#                          harness asserts ONLY the by-construction part: the followup must not
+#                          be an exact repeat (modulo case/punctuation) of a listed question.
+#                          Fixtures using this deliberately omit expect_followup — the prompt
+#                          explicitly allows the extractor to return null rather than reuse an
+#                          angle, so asserting presence would be a false failure.
+#   expect_claims       — list of {bucket, concept, label_has|label_has_any, confidence_min,
+#                          disclosure?, transient?, vague?}. `label_has` is a case-insensitive
+#                          substring match against the returned claim's `label`;
+#                          `label_has_any` is a list of alternatives, matching if ANY is a
+#                          substring (for inputs whose English-canonical label has several
+#                          valid phrasings). Both may be given — then both must hold. An
+#                          expectation with an empty `label_has` and no `label_has_any` is
+#                          REJECTED at load time: it degenerates to "any claim in this bucket",
+#                          an inert matcher that scores a vacuous pass. `concept` is NOT
 #                          matched exactly by the harness — only its regex shape is fixed
 #                          by the extractor (^[a-z][a-z0-9_]{1,63}$), the exact slug is the
 #                          model's free choice ("karate_practice" vs "karate" are both valid
 #                          for the same thread); it's recorded here for readability only.
-#                          Matching is bucket + label_has + confidence_min (+ any of
-#                          disclosure/transient/vague present). Precision = every returned
-#                          claim matches some expected claim; recall = every expected claim
-#                          is matched by some returned one.
+#                          Matching is bucket + label_has/label_has_any + confidence_min
+#                          (+ any of disclosure/transient/vague present), resolved as a
+#                          ONE-TO-ONE maximum matching: a returned claim can satisfy at most
+#                          one expectation and vice versa. Precision = returned claims that
+#                          got assigned an expectation; recall = expectations that got
+#                          assigned a distinct claim. So a duplicated thread is a precision
+#                          miss, and two expectations can never both be paid by one claim.
 #   expect_no_claims    — true when the message should produce zero claims (greetings, vague,
 #                          profanity, negations, forbidden categories). Mutually exclusive with
-#                          expect_claims.
+#                          a non-empty expect_claims: `expect_no_claims: true` + expect_claims
+#                          is rejected at load time. (`expect_no_claims: false` alongside
+#                          expect_claims is fine and deliberate — see rapport_006.)
 #   expect_kids_count   — int or null; kids_count is NEVER a claim, checked separately.
 #   expect_followup     — true/false; whether followup_question should be non-null. The
 #                          question text itself is AI-authored per turn and NOT asserted
@@ -173,7 +192,12 @@ fixtures:
   - id: rapport_012
     input: "estou cansada, cheguei aqui semana passada"
     expect_claims:
-      - {bucket: vicinity, concept: recently_moved, label_has: "", confidence_min: 0.6}
+      # GUESSED: the label is English-canonical even for a PT-only input, but WHICH English
+      # phrasing the model picks for "cheguei aqui semana passada" is its free choice, so this
+      # lists the plausible stems instead of one. Previously `label_has: ""`, which made the
+      # expectation inert (it matched ANY vicinity claim, including a mis-filed "cansada" one).
+      - {bucket: vicinity, concept: recently_moved,
+         label_has_any: ["moved", "arrived", "relocat", "new to"], confidence_min: 0.6}
     expect_kids_count: null
     expect_followup: true
     notes: >
@@ -181,6 +205,9 @@ fixtures:
       mood/emotional state, not durable identity — must NOT surface as a claim at all
       (there is no emotional bucket in the real taxonomy; the closest failure mode would be
       misfiling it under general). Only the relocation thread should produce a claim.
+      label_has_any (not label_has) because the arrival can be labeled several equally
+      correct ways in English; anything outside that set is a genuine finding, not a
+      fixture bug — widen the list only after observing the real label.
 
   - id: rapport_013
     input: "I sprained my ankle last week, can barely walk"
@@ -321,3 +348,26 @@ fixtures:
       existing_labels, the heritage restatement must NOT re-emit as a new/duplicate claim —
       only the genuinely new soccer thread should land. Precision fails if a duplicate
       heritage claim appears.
+
+  - id: rapport_027
+    input: "I've gotten really into pottery this year"
+    recent_questions:
+      - "What got you into pottery?"
+      - "Do you have a favorite thing to make?"
+    expect_claims:
+      # GUESSED: bucket=activity by analogy with rapport_023 (running) — hobbies land in
+      # "activity", "interest" is reserved for languages per the prompt's explicit rule.
+      - {bucket: activity, concept: pottery, label_has: "pottery", confidence_min: 0.8}
+    expect_kids_count: null
+    notes: >
+      The ONLY fixture exercising the third extractor parameter, recent_questions
+      (_recent_questions_block in vertex_extract.py), which was previously never passed by
+      this harness and therefore wholly uncovered. Fresh single-thread input on purpose —
+      bolting recent_questions onto an existing fixture would perturb that fixture's
+      precision/recall. The two listed questions are the two most natural follow-ups to this
+      exact input, so the extractor is genuinely forced off its first choice.
+      expect_followup is deliberately ABSENT: the prompt permits "a DIFFERENT angle, OR
+      null", so asserting a followup exists would be a false failure. The only thing true by
+      construction is that the followup must not be an exact repeat of a listed question —
+      that, and nothing stronger, is what the harness asserts (near-duplicate detection needs
+      judgment and belongs to the gap-quality judge, not a mechanical gate).
