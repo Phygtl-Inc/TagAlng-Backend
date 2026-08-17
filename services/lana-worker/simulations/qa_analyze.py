@@ -31,6 +31,114 @@ _NY_RE = re.compile(r"new york", re.IGNORECASE)
 _NON_ENGLISH_RE = re.compile(r"[¿¡]|niñ|mamás|mães|você|cerca de ti|aquí", re.IGNORECASE)
 
 
+# ---------------------------------------------------------------------------
+# Unsourced specifics — mechanical hallucination detector
+# ---------------------------------------------------------------------------
+# WHY: judge_probe.py proved the LLM judge scores a fluent paragraph of invented specifics
+# (named organizer + quoted invitation + headcount + venue + schedule + price) as
+# no_hallucination = PASS 1.00, SFT-eligible. Fluency reads as truth.
+#
+# The defect is UNSOURCED ASSERTION, not factual falsity — which is why a web search would
+# answer the wrong question. "Boxi Park" is a REAL place in Lake Nona: a search confirms it
+# exists and the fabrication ships. What was invented is that a group meets there at a price
+# on a schedule and that a named person invited you. So the ground truth we CAN check
+# mechanically is: did Lana have any data source on this turn at all?
+#
+# A turn is SOURCED when the runtime actually returned something: tool_called, peer_matches,
+# activity_previews, or an event_draft. With none of those, a checkable specific was invented.
+#
+# FALSE-POSITIVE GUARDS (a mechanical check that misfires poisons a CI gate):
+#   * anything the USER said earlier is never fabrication — Lana echoing the user is correct
+#     behaviour, so prior user text is subtracted first.
+#   * explicit attribution ("from Google", "according to") is an allowed, documented pattern.
+#   * counts are only flagged when peer_matches is 0 (a real match count is legitimately sourced).
+
+_PRICE_RE = re.compile(r"\$\s?\d[\d,.]*|\b\d+\s?(?:dollars|bucks)\b", re.IGNORECASE)
+
+# Reported THIRD-PARTY speech: "Sarah said", "Maria invited you".
+# TUNED against all 888 stored runs: an earlier version also accepted `she|he|they` and any
+# capitalized word, which fired on "You mentioned a Sunday brunch meet" — Lana correctly
+# recalling what the USER said, i.e. good memory behaviour, not attribution to a third party.
+# Both of its only two hits across 888 runs were that false positive, so the subject is now
+# restricted to a proper name and the sentence-initial / pronoun words are excluded outright.
+_NOT_A_NAME = {
+    "You", "Your", "I", "We", "They", "She", "He", "It", "The", "That", "This", "There",
+    "If", "When", "Let", "And", "But", "So", "Also", "Just", "Maybe", "Want", "Would",
+    "Sounds", "Love", "Got", "Nice", "Great", "Perfect", "Done", "Anyone", "Someone",
+}
+_REPORTED_SPEECH_RE = re.compile(
+    r"\b([A-Z][a-z]{2,})\s+(?:said|told (?:me|you)|invited you|wants to meet|is hoping)\b"
+)
+
+_PEOPLE_COUNT_RE = re.compile(
+    r"\b(\d{1,3})\s+(?:people|runners|parents|neighbou?rs|moms|families|members|others)\b",
+    re.IGNORECASE,
+)
+
+# NOTE — `clock_time` was DELIBERATELY REMOVED. Lana legitimately confirms times constantly, and
+# the echo guard is a substring test, so a user saying "8am" and Lana replying "8:00am" was
+# flagged as invented. It false-positived on BOTH of this suite's own positive controls
+# (warm_and_helpful, curt_but_effective). Since the target case is still caught by `price` +
+# `people_count`, dropping it removes an entire FP class at zero detection cost — precision
+# over recall, because a mechanical false positive poisons a CI gate.
+_ATTRIBUTION_RE = re.compile(
+    r"from google|according to|google (?:says|shows|lists)|not a neighbou?r vouch|"
+    r"i found online|per their website",
+    re.IGNORECASE,
+)
+
+
+def _turn_is_sourced(turn: dict[str, Any]) -> bool:
+    """True when the runtime actually returned data on this turn, so specifics have a basis."""
+    return bool(
+        turn.get("tool_called")
+        or (turn.get("peer_matches") or 0) > 0
+        or (turn.get("activity_previews") or [])
+        or turn.get("event_draft")
+    )
+
+
+def unsourced_specifics(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return [{turn, kind, evidence}, ...] for checkable specifics asserted with no data source.
+
+    Deterministic, no LLM. Reusable across the live pipeline (analyze_transcripts) and the
+    retroactive scan of stored runs (auto_triage).
+    """
+    hits: list[dict[str, Any]] = []
+    seen_user_text = ""
+    for turn in turns:
+        reply = turn.get("lana_reply") or ""
+        # Subtract what the user already said BEFORE judging this reply (echo != fabrication).
+        prior_user = seen_user_text
+        seen_user_text += " " + (turn.get("user_message") or "").lower()
+
+        if not reply.strip() or _turn_is_sourced(turn) or _ATTRIBUTION_RE.search(reply):
+            continue
+
+        n = turn.get("turn_number")
+
+        for m in _PRICE_RE.finditer(reply):
+            if m.group(0).lower().strip() not in prior_user:
+                hits.append({"turn": n, "kind": "price", "evidence": m.group(0).strip()})
+
+        for m in _REPORTED_SPEECH_RE.finditer(reply):
+            subject = m.group(1)
+            # "You mentioned ..." / "That said ..." are not third-party attribution.
+            if subject in _NOT_A_NAME:
+                continue
+            if m.group(0).lower() in prior_user:
+                continue
+            hits.append({"turn": n, "kind": "reported_speech", "evidence": m.group(0).strip()})
+            break  # one is enough to flag the turn
+
+        for m in _PEOPLE_COUNT_RE.finditer(reply):
+            # a real match count is legitimately sourced; only flag when nothing was returned
+            if (turn.get("peer_matches") or 0) == 0 and m.group(0).lower() not in prior_user:
+                hits.append({"turn": n, "kind": "people_count", "evidence": m.group(0).strip()})
+
+    return hits
+
+
 def _percentile(sorted_vals: list[float], p: float) -> float | None:
     if not sorted_vals:
         return None
@@ -59,6 +167,7 @@ def analyze_transcripts(transcripts: list[dict[str, Any]]) -> dict[str, Any]:
         "phone_verification_asks": 0,
         "drafted_hosts": 0,
         "host_draft_details": [],
+        "unsourced_specifics": [],  # mechanical hallucination signal — see unsourced_specifics()
         "flags": [],
     }
     latencies: list[float] = []
@@ -74,6 +183,12 @@ def analyze_transcripts(transcripts: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         stats["completed"] += 1
         stats["total_turns"] += len(turns)
+
+        # Mechanical hallucination check: checkable specifics asserted with no data source.
+        # Catches the exact class the LLM judge scored PASS 1.00 (see judge_probe.py).
+        for u in unsourced_specifics(turns):
+            stats["unsourced_specifics"].append({"id": tid, **u})
+            flag(tid, "unsourced_specific", f"turn {u['turn']}: {u['kind']} — {u['evidence']!r}")
 
         zip_asks = 0
         for i, turn in enumerate(turns):
