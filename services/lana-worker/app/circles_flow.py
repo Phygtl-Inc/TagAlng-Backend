@@ -1922,17 +1922,53 @@ def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
 
     if _blocked_ids(viewer_id, [user_id]):
         return []
+    also_mine = _my_place_refs(viewer_id, [str(r.get("place_id") or "") for r in rows])
     out: list[dict[str, Any]] = []
     for r in rows:
         row = {k: r.get(k) for k in _PUBLIC_CIRCLE_FIELDS}
+        # Does the VIEWER go here too — the "you both go here" pill, and the reason
+        # these rows lead the list.
+        row["shared"] = str(r.get("place_id") or "") in also_mine
         # `mine` on an activity means the LIST OWNER does it, which on the viewer's
-        # screen reads as her own. Drop the flag rather than re-read the table.
+        # screen would read as her own. Same flag, honest name: `theirs` is "what this
+        # person does here", the rest is what anyone here does.
         row["activities"] = [
-            {k: a.get(k) for k in ("concept", "label", "member_count")}
+            {
+                "concept": a.get("concept"),
+                "label": a.get("label"),
+                "member_count": a.get("member_count"),
+                "theirs": bool(a.get("mine")),
+            }
             for a in (r.get("activities") or [])
         ]
         out.append(row)
+    # Stable: shared places first, newest-first within each group (the order
+    # get_peer_profile.communities used before this endpoint took that field over).
+    out.sort(key=lambda r: not r["shared"])
     return out
+
+
+def _my_place_refs(user_id: str, place_ids: list[str]) -> set[str]:
+    """Which of these places the user is confirmed at, in one query."""
+    ids = [p for p in dict.fromkeys(place_ids) if p]
+    if not ids:
+        return set()
+    try:
+        res = (
+            service_client()
+            .table("circle_affiliations")
+            .select("place_ref")
+            .eq("user_id", user_id)
+            .in_("place_ref", ids)
+            .eq("status", "confirmed")
+            .is_("dismissed_at", "null")
+            .limit(200)
+            .execute()
+        )
+    except Exception:
+        logger.exception("my_place_refs_failed user=%s places=%s", user_id, len(ids))
+        return set()
+    return {str(r["place_ref"]) for r in res.data or [] if r.get("place_ref")}
 
 
 def add_circle(

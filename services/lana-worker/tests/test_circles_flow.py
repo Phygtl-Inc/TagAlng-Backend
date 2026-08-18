@@ -411,9 +411,10 @@ class TestListCirclesForViewer(unittest.TestCase):
         rows.return_value = self.OWN
         self.assertEqual(list_circles("u1", "u1"), self.OWN)
 
+    @patch("app.circles_flow._my_place_refs", return_value=set())
     @patch("app.community_surface._blocked_ids", return_value=set())
     @patch("app.circles_flow.list_my_circles")
-    def test_visitor_gets_place_head_without_her_words(self, rows, _blocked) -> None:
+    def test_visitor_gets_place_head_without_her_words(self, rows, _blocked, _mine) -> None:
         rows.return_value = self.OWN
         row = list_circles("u1", "u2")[0]
         # Enough to render the row and open the profile...
@@ -424,12 +425,26 @@ class TestListCirclesForViewer(unittest.TestCase):
         # ...and nothing that is hers alone.
         for private in ("detail", "added_at", "joined_via_label", "google_place_id"):
             self.assertNotIn(private, row)
-        # `mine` would read as the VIEWER's own activity on her screen.
+        # `mine` would read as the VIEWER's own activity on her screen — same flag,
+        # honest name. This is what the peer profile shows as "what she does here".
         self.assertEqual(
-            row["activities"], [{"concept": "spin", "label": "Spin", "member_count": 2}]
+            row["activities"],
+            [{"concept": "spin", "label": "Spin", "member_count": 2, "theirs": True}],
         )
+        self.assertFalse(row["shared"])
 
     @patch("app.community_surface._blocked_ids", return_value={"u1"})
     @patch("app.circles_flow.list_my_circles", return_value=OWN)
     def test_blocked_either_way_lists_nothing(self, _rows, _blocked) -> None:
         self.assertEqual(list_circles("u1", "u2"), [])
+
+    @patch("app.circles_flow._my_place_refs", return_value={"p2"})
+    @patch("app.community_surface._blocked_ids", return_value=set())
+    @patch("app.circles_flow.list_my_circles")
+    def test_places_the_viewer_shares_lead_the_list(self, rows, _blocked, _mine) -> None:
+        # This replaced get_peer_profile.communities, which ordered shared rows first —
+        # they are the ones worth opening ("you both go here").
+        rows.return_value = self.OWN + [dict(self.OWN[0], id="a2", place_id="p2")]
+        out = list_circles("u1", "u2")
+        self.assertEqual([r["place_id"] for r in out], ["p2", "p1"])
+        self.assertEqual([r["shared"] for r in out], [True, False])
