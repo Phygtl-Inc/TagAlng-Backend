@@ -95,8 +95,31 @@ def intro_offer_actions(
     *,
     nickname: str | None = None,
     peer_user_id: str | None = None,
+    intro_state: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Lana offered to introduce user to a shown neighbor."""
+    """Lana offered to introduce user to a shown neighbor.
+
+    `intro_state` ("intro_sent" / "connected") means there is no intro left to send —
+    the card renders a "✓ Sent" badge instead of a Nudge button, and a send chip here
+    is a tap that can only fail the 7-day pair cooldown (QA 2026-08-18). The offer
+    becomes the move that remains: look at someone else. The `send` text is a
+    self-contained request so the peers engine handles it, not this offer's accept path.
+    """
+    if str(intro_state or "").strip():
+        return [
+            _action(
+                action_id="intro_look_elsewhere",
+                label="Find someone else",
+                message="find someone else nearby",
+                style="primary",
+            ),
+            _action(
+                action_id="intro_pass",
+                label="Not yet",
+                message="not now",
+                style="secondary",
+            ),
+        ]
     nick = str(nickname or "them").strip() or "them"
     return [
         _action(
@@ -639,6 +662,7 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
             return intro_offer_actions(
                 nickname=str(offer.get("candidate_nickname") or ""),
                 peer_user_id=str(offer.get("candidate_user_id") or "") or None,
+                intro_state=str(offer.get("intro_state") or "") or None,
             )
         return intro_offer_actions()
 

@@ -497,19 +497,21 @@ def communities_chat_turn(
 
     facts: list[str] = []
     if mine:
+        # COUNT + one name, not the roll-call. Handing the model six names and four more
+        # made it read every one out, and the cards under the message then repeated all
+        # ten: a ten-line wall answering a one-line question (QA 2026-08-18).
         facts.append(
-            "Communities they are already in: "
-            + " · ".join(f"{c['place_name']} ({_members_phrase(c)})" for c in mine[:6])
+            f"Communities they are already in: {len(mine)} "
+            f"(one of them: {mine[0]['place_name']}, {_members_phrase(mine[0])})"
         )
     else:
         facts.append("They are not in any community yet")
     if nearby:
         facts.append(
-            "Nearby communities they could join (real member counts, cards are shown "
-            "below your message): "
-            + " · ".join(
-                f"{c['place_name']} — {c['status_line']}" for c in nearby
-            )
+            f"Nearby communities they could join: {len(nearby)} "
+            f"(closest: {nearby[0]['place_name']} — {nearby[0]['status_line']}). "
+            "The cards under your message list all of them with real member counts, "
+            "so your text must NOT name them one by one"
         )
     else:
         facts.append(
@@ -519,10 +521,12 @@ def communities_chat_turn(
 
     if nearby:
         goal = (
-            "Answer what they asked: the communities near them. Name the ones in the "
-            "facts (the cards below repeat them) and, if they already belong to any, "
-            "mention that first in one short clause. End by offering to join one — "
-            "joining is instant and reversible, so no warnings needed."
+            "Answer what they asked: the communities near them. TWO SHORT SENTENCES, and "
+            "never a list — the cards under your message carry every name, so a name-by-name "
+            "roll-call in the text is the same information twice and unreadable on a phone. "
+            "Give the counts, anchor with at most ONE name from the facts, and end by "
+            "offering to add them to any — joining is instant and reversible, no warnings "
+            "needed."
         )
         fallback = _nearby_fallback(mine, nearby)
     elif mine:
@@ -555,7 +559,8 @@ def communities_chat_turn(
         fallback=fallback,
         session_ctx=session_ctx,
         user_message=message,
-        max_sentences=3,
+        # Two, not three: the cards are the list, so the text is a summary + an offer.
+        max_sentences=2,
     )
 
 
@@ -703,11 +708,17 @@ def _members_phrase(community: dict[str, Any]) -> str:
 
 
 def _nearby_fallback(mine: list[dict[str, Any]], nearby: list[dict[str, Any]]) -> str:
-    listed = ", ".join(f"{c['place_name']} ({c['status_line']})" for c in nearby[:3])
+    """Counts and one anchor name — the cards below carry the full list."""
+    n = len(nearby)
+    more = f" and {n - 1} more" if n > 1 else ""
     head = (
-        f"You're already in {mine[0]['place_name']}. Nearby: {listed}."
+        f"You're in {len(mine)} already, and there {'is' if n == 1 else 'are'} {n} more "
+        f"near you — {nearby[0]['place_name']}{more}."
         if mine
-        else f"Near you: {listed}."
+        else (
+            f"{n} near you — {nearby[0]['place_name']} ({nearby[0]['status_line']})"
+            f"{more}."
+        )
     )
     return f"{head} Want me to add you to any of them?"
 
@@ -737,7 +748,7 @@ def _after_join(
         from app.circles_flow import _place_affinity_question
         from app.rapport_gaps import open_semantic_gap
 
-        question, teaser = _place_affinity_question(place_name)
+        question, teaser, chips = _place_affinity_question(place_name)
         open_semantic_gap(
             user_id,
             None,
@@ -746,6 +757,7 @@ def _after_join(
             bucket="interest",
             teaser=teaser,
             place_ref=place_id,
+            answer_options=chips,
         )
     except Exception:
         logger.exception("community_join_enrichment_failed place=%s", place_id)

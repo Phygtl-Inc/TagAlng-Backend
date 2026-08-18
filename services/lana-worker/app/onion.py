@@ -77,6 +77,11 @@ def _shape(row: dict[str, Any]) -> dict[str, Any]:
         "shared_concept_labels": self_labels,
         "shared_child_concept_labels": child_labels,
         "shared_place_ref": row.get("shared_place_ref"),
+        # Relationship state, stamped on the raw row by drop_connected_peers below. It has
+        # to survive this reshape: without it the featured-match copy offered an intro to
+        # someone whose card already read "✓ Sent" (QA 2026-08-18) — the card gets the
+        # state from a later backstop, the reply writer only ever sees this dict.
+        "connection": row.get("connection"),
     }
 
 

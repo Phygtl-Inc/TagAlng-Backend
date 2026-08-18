@@ -567,5 +567,74 @@ class TestAskReason(unittest.TestCase):
         self.assertFalse(kick.call_args.kwargs["grounding"])
 
 
+# ── suggested one-tap answers on an ask ───────────────────────────────────────
+class TestAnswerOptions(unittest.TestCase):
+    """The place-affinity ask offers chips; a blank prompt made the user invent the
+    shape of the answer (QA 2026-08-18)."""
+
+    def test_open_stores_at_most_three_clean_chips(self):
+        store = _store()
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
+            rapport_gaps.open_semantic_gap(
+                "u1", None, "What do you enjoy most at Orlando Public Library?",
+                label="Orlando Public Library", bucket="interest", place_ref="p1",
+                answer_options=["  The quiet  ", "", "The kids' story hour", "The people", "A 4th"],
+            )
+        row = [r for (_t, r) in store["inserts"]][0]
+        self.assertEqual(
+            row["answer_options"], ["The quiet", "The kids' story hour", "The people"]
+        )
+
+    def test_no_chips_stores_no_column(self):
+        # Free text still works, and the pre-column environment keeps inserting.
+        store = _store()
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
+            rapport_gaps.open_semantic_gap("u1", None, "Which mornings do you run?")
+        self.assertNotIn("answer_options", [r for (_t, r) in store["inserts"]][0])
+
+    def test_ranker_serves_the_chips(self):
+        row = {
+            "gap_row_id": "g1", "gap_id": "deepen:library", "parent_bucket": "interest",
+            "why_frame": "about the library…", "why_reason": "so I can introduce you.",
+            "question": "What do you enjoy most at Orlando Public Library?",
+            "answer_options": ["The quiet", "The people"],
+        }
+        with patch.object(rapport_ranker, "_heal_reason"):
+            built = rapport_ranker._build(row, None)
+        self.assertEqual(built["answer_options"], ["The quiet", "The people"])
+
+    def test_translated_chips_win(self):
+        row = {
+            "gap_row_id": "g2", "gap_id": "deepen:library", "parent_bucket": "interest",
+            "why_frame": "about the library…", "why_reason": "so I can introduce you.",
+            "question": "What do you enjoy most at Orlando Public Library?",
+            "answer_options": ["The quiet", "The people"],
+            "question_i18n": {"es": {
+                "question": "¿Qué disfrutas más en la Biblioteca?",
+                "why_frame": "sobre la biblioteca…", "why_reason": "Así puedo presentarte.",
+                "answer_options": ["El silencio", "La gente"],
+            }},
+        }
+        with patch.object(rapport_ranker, "_heal_reason"):
+            built = rapport_ranker._build(row, None, "es")
+        self.assertEqual(built["answer_options"], ["El silencio", "La gente"])
+
+    def test_affinity_question_parses_chips_and_falls_back_empty(self):
+        from app import circles_flow
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), \
+             patch("app.orchestrator.llm.llm_json", return_value={
+                 "question": "What do you enjoy most at Rec Center?",
+                 "teaser": "about Rec Center…",
+                 "suggestions": ["The early classes", "  ", "The people", "The pool", "Extra"],
+             }):
+            _q, _t, chips = circles_flow._place_affinity_question("Rec Center")
+        self.assertEqual(chips, ["The early classes", "The people", "The pool"])
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            _q, _t, none = circles_flow._place_affinity_question("Rec Center")
+        self.assertEqual(none, [])
+
+
 if __name__ == "__main__":
     unittest.main()

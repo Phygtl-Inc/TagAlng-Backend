@@ -234,6 +234,15 @@ def pick_peer_for_intro(
         if nick and len(nick) > 2 and nick in lower:
             return p
 
+    # An offer carrying intro_state named a peer who CANNOT receive an intro, so it must
+    # not be the target of one. "Find someone else nearby" (the chip that offer ships) was
+    # read by the classifier as propose_intro, which forced this lane, and the pending
+    # branch below then handed back the same peer — the tap answered "you've already sent
+    # Tommaso an intro" instead of finding anyone (QA 2026-08-18). An explicitly NAMED
+    # request never reaches here: target id, list index and nickname all return above.
+    if pending and str(pending.get("intro_state") or "").strip():
+        pending = None
+
     if pending:
         pid = str(pending.get("candidate_user_id") or "").strip()
         if pid:
@@ -259,6 +268,14 @@ def pick_peer_for_intro(
     # the message itself asks for one; otherwise return None so the caller
     # clarifies instead of guessing.
     if wants_neighbor_intro(msg) or accepts_intro_offer(msg):
+        # Someone who can still RECEIVE one comes first. Ranking put the strongest match
+        # on top, but if an intro to them is already out, auto-picking them again spends
+        # the turn re-reporting that instead of introducing anyone.
+        for p in identified:
+            if not str(p.get("connection") or "").strip():
+                return p
+        # Everyone shown already has one out: keep the old behaviour so the caller's
+        # duplicate/cooldown branch says so truthfully, rather than dead-ending.
         return identified[0]
     return None
 
@@ -341,8 +358,62 @@ def format_intro_offer_reply(peer: dict[str, Any], match_reason: str) -> str:
     )
 
 
+def intro_state_of(peer: dict[str, Any]) -> str | None:
+    """"intro_sent" / "connected" for a peer who cannot be newly introduced, else None.
+
+    Stamped on the row upstream (peer_discovery_surface). The card renders it as a
+    "✓ Sent" badge with no button, so any copy or chip that offers an intro here
+    contradicts what the user is looking at — QA 2026-08-18 pitched "Would you like me
+    to introduce you two?" with a "Send Tommaso a nudge" chip over a Sent badge, and
+    the tap could only fail the 7-day pair cooldown.
+    """
+    return str(peer.get("connection") or "").strip() or None
+
+
+def _intro_state_phrases(nick: str, state: str) -> tuple[str, str]:
+    """(what is true now, what can still be done) for an un-introducible match."""
+    if state == "connected":
+        return (f"You and {nick} are already connected", "so there is nothing to send")
+    return (
+        f"Your intro to {nick} is already out and waiting on them",
+        "so a second one can't go until they reply",
+    )
+
+
+def format_intro_sent_offer_turn(peer: dict[str, Any], match_reason: str, state: str) -> str:
+    """The featured match is someone we've already introduced them to.
+
+    Still shown — they asked for their best match and this IS it — but the turn owns up
+    to the state and offers the move that remains: look at someone else.
+    """
+    nick = str(peer.get("nickname") or peer.get("matching_peer_label") or "them").strip()
+    reason = str(match_reason or "").strip().rstrip(".")
+    truth, why = _intro_state_phrases(nick, state)
+    return compose_reply(
+        goal=(
+            "Their strongest match nearby is someone you have ALREADY introduced them to "
+            "(or who they already know) — the card says so with a 'Sent' badge. Name the "
+            "match and why they fit, then own the state plainly from the facts: NEVER "
+            "offer an intro, a nudge, or to introduce them, because that is the one thing "
+            "already done and the tap would fail. End by offering the move that is left: "
+            "looking at someone else nearby."
+        ),
+        facts=[
+            f"The neighbor: {nick}",
+            f"Why they fit: {reason}" if reason else "No shared trait was proven",
+            f"{truth} — {why}",
+        ],
+        fallback=f"{nick} is still your closest fit{f' — {reason}' if reason else ''}. "
+        f"{truth}, {why}. Want me to look at someone else nearby?",
+        max_sentences=3,
+    )
+
+
 def format_intro_offer_turn(peer: dict[str, Any], match_reason: str) -> str:
     """C-8 single featured match — replaces the multi-neighbor preview list in copy."""
+    state = intro_state_of(peer)
+    if state:
+        return format_intro_sent_offer_turn(peer, match_reason, state)
     nick = str(peer.get("nickname") or "").strip()
     label = str(peer.get("matching_peer_label") or "a neighbor near you").strip()
     who = nick or label
@@ -405,6 +476,11 @@ def stamp_intro_offer_ctx(
         "match_reason": match_reason[:280],
         "match_score": peer.get("similarity_score"),
         "matching_peer_concept": peer.get("matching_peer_concept"),
+        # The offer still arms (the card and the intent are unchanged), but it carries
+        # WHICH offer this is: an intro that can be sent, or a state that can only be
+        # reported. ui_actions picks the chips off this, and the accept path below
+        # answers instead of firing an RPC that can only fail.
+        "intro_state": intro_state_of(peer),
     }
     ctx["active_intent"] = INTENT_PROPOSE_INTRO
 
@@ -428,6 +504,22 @@ def try_propose_intro_from_preview(
         and not wants_neighbor_intro(msg)
         and not (pending and accepts_intro_offer(msg))
     ):
+        return None
+
+    # An offer carrying intro_state asked "want me to look at someone else nearby?" — so a
+    # yes means SHOW someone else, and this lane sends. Decline the turn: normal routing
+    # runs the search the question promised. Sending to whoever ranks next instead would
+    # be an outward-facing action taken on a one-word answer to a different question.
+    # A NAMED request ("introduce me to Sofia") is not this and keeps going.
+    if (
+        isinstance(pending, dict)
+        and str(pending.get("intro_state") or "").strip()
+        and not force
+        and accepts_intro_offer(msg)
+    ):
+        from app.intro_list import clear_intro_offer_ctx
+
+        clear_intro_offer_ctx(session_ctx)  # spent — it must not be re-read next turn
         return None
 
     peer = pick_peer_for_intro(

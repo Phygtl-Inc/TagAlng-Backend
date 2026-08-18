@@ -91,21 +91,29 @@ just pinned a community place they belong to. Goal: learn what they personally v
 — the answer becomes a matchable interest (e.g. "the Saturday long runs", "the pool", \
 "the coffee after class").
 
-Output ONLY JSON: {"question": "...", "teaser": "about <place>…"}
+Output ONLY JSON: {"question": "...", "teaser": "about <place>…", "suggestions": ["...", "...", "..."]}
 
 Rules:
 - Name the concrete place. Short (<120 chars), warm, open — never yes/no.
 - Ask what they enjoy / are into THERE (activity, program, rhythm) — a matchable facet, \
 not an opinion poll or origin story.
 - teaser: 2-5 word lead-in ending with "…".
+- suggestions: 2-3 tappable answers in the USER's voice ("The early classes", "The people"), \
+each under 28 characters. They are guesses the user confirms, so keep them true of THIS KIND \
+of place — never invent a specific schedule, program name, coach or staff member.
 - English only (rendered into the user's language downstream)."""
 
 
-def _place_affinity_question(place_name: str) -> tuple[str, str]:
-    """AI-authored per the lingo rules; the spec's own example line as fallback."""
+def _place_affinity_question(place_name: str) -> tuple[str, str, list[str]]:
+    """AI-authored per the lingo rules; the spec's own example line as fallback.
+
+    Third element is the tappable answers the card offers as chips — a blank prompt
+    made the user invent the shape of the answer. Empty list = free text only, which
+    is what an LLM-less environment (and every pre-chip gap row) falls back to."""
     fallback = (
         f"What do you enjoy most at {place_name}?",
         f"about {place_name}…",
+        [],
     )
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
@@ -121,8 +129,14 @@ def _place_affinity_question(place_name: str) -> tuple[str, str]:
         )
         question = str((data or {}).get("question") or "").strip()
         teaser = str((data or {}).get("teaser") or "").strip()
+        raw = (data or {}).get("suggestions")
+        chips = [
+            " ".join(str(s).split())[:48]
+            for s in (raw if isinstance(raw, list) else [])
+            if str(s or "").strip() and _lexicon_clean(str(s))
+        ][:3]
         if question and _lexicon_clean(question, teaser):
-            return question[:160], (teaser or fallback[1])[:80]
+            return question[:160], (teaser or fallback[1])[:80], chips
     except Exception:
         logger.exception("place_affinity_question_llm_failed")
     return fallback
@@ -527,7 +541,7 @@ def prune_grounded_gaps(
         affs = (
             service_client()
             .table("circle_affiliations")
-            .select("id, circle_key, circle_type, place_ref")
+            .select("id, circle_key, circle_type, place_ref, noun")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .limit(100)
@@ -553,6 +567,8 @@ def prune_grounded_gaps(
                 str(aff.get("circle_type") or ""),
                 str(g.get("circle_key") or ""),
                 str(g.get("circle_type") or ""),
+                a_noun=aff.get("noun"),
+                b_noun=g.get("noun"),
             )
             for g in grounded
         ):
@@ -639,7 +655,7 @@ def ground_affiliation(
         try:
             from app.rapport_gaps import open_semantic_gap
 
-            question, teaser = _place_affinity_question(details["name"])
+            question, teaser, chips = _place_affinity_question(details["name"])
             open_semantic_gap(
                 user_id,
                 None,
@@ -648,6 +664,7 @@ def ground_affiliation(
                 bucket="interest",
                 teaser=teaser,
                 place_ref=place_id,
+                answer_options=chips,
             )
         except Exception:
             logger.exception("place_affinity_gap_open_failed")
@@ -1870,6 +1887,51 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 ),
             }
         )
+    return out
+
+
+# What a viewer sees of SOMEONE ELSE's community list: the place and what happens
+# there. Her own words for it (detail), how and when she joined, and the place-as-venue
+# block are hers; the place head itself is already public to anyone who opens it
+# (app/community_surface.community_profile).
+_PUBLIC_CIRCLE_FIELDS = (
+    "id",
+    "circle_type",
+    "grounded",
+    "place_id",
+    "place_name",
+    "place_address",
+    "relation",
+    "emoji",
+    "member_count",
+    "active",
+)
+
+
+def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
+    """Any user's communities as `viewer_id` may see them (POST /lana/circles/list).
+
+    Own list → the full profile row. Someone else's → the public head of each place,
+    carrying `place_id` so the row opens /lana/circles/profile — which is where the
+    tier gating for the PEOPLE lives (§F protects the people, not the place). Empty
+    when either has blocked the other."""
+    rows = list_my_circles(user_id)
+    if user_id == viewer_id:
+        return rows
+    from app.community_surface import _blocked_ids
+
+    if _blocked_ids(viewer_id, [user_id]):
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        row = {k: r.get(k) for k in _PUBLIC_CIRCLE_FIELDS}
+        # `mine` on an activity means the LIST OWNER does it, which on the viewer's
+        # screen reads as her own. Drop the flag rather than re-read the table.
+        row["activities"] = [
+            {k: a.get(k) for k in ("concept", "label", "member_count")}
+            for a in (r.get("activities") or [])
+        ]
+        out.append(row)
     return out
 
 

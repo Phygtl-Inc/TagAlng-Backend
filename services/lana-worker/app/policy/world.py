@@ -57,10 +57,10 @@ def _zip_snapshot(home_zip: str | None) -> dict[str, Any]:
         return {}
 
 
-_CIRCLE_FIELDS = "circle_key, circle_type, grounded, status, detail, place_ref"
+_CIRCLE_FIELDS = "circle_key, circle_type, grounded, status, detail, place_ref, noun"
 # Pre-20260906 environments miss place_ref; retry without it rather than
 # degrade the whole circles list to empty.
-_CIRCLE_FIELDS_LEGACY = "circle_key, circle_type, grounded, status, detail"
+_CIRCLE_FIELDS_LEGACY = "circle_key, circle_type, grounded, status, detail, noun"
 
 
 def _circles(user_id: str) -> list[dict[str, Any]]:
@@ -151,6 +151,9 @@ def world_state(user_id: str) -> dict[str, Any]:
             {
                 "key": c.get("circle_key"),
                 "type": c.get("circle_type"),
+                # What this community IS ("gym", "library regulars") — a bare-category
+                # key alone can't tell a library from a gaming zone (see same_community).
+                "noun": c.get("noun"),
                 "grounded": bool(c.get("grounded")),
                 "confirmed": str(c.get("status") or "") == "confirmed",
                 "place": place_names.get(str(c.get("place_ref") or "")) or None,

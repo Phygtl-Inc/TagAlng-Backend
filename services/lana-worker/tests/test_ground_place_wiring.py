@@ -154,5 +154,84 @@ class TestLookMeetRelevanceFloor(unittest.TestCase):
         self.assertEqual(len(out), 2)
 
 
+class TestNamedSpotIsAnsweredNotReAsked(unittest.TestCase):
+    """QA 2026-08-18: "I go to OrangeTheory Narcoossee" was answered with "which spot
+    at OrangeTheory is it?" and no card — circle capture rides the background extractor,
+    so on that turn there was no affiliation to hang real candidates on."""
+
+    _NAMED = {**_AFF_ROW, "id": "aff9", "circle_key": "orangetheory",
+              "circle_type": "fitness", "detail": "OrangeTheory Narcoossee",
+              "place_name": "OrangeTheory Narcoossee"}
+    _MATCH = [{"name": "OrangeTheory Narcoossee", "address": "3 Oak St",
+               "google_place_id": "gp9", "suggested": False}]
+
+    def _run(self, rows, places, message, *, goal_id=None):
+        action = _Action(goal_id=goal_id, utterance="Which spot at OrangeTheory is it?")
+        ctx: dict = {}
+        captured = []
+
+        def _capture(user_id, msg, **_kw):
+            captured.append(msg)
+            rows.append(dict(self._NAMED))
+            return None
+
+        with patch("app.auth.service_client", return_value=_SB(rows)), \
+             patch("app.claims_persist.try_upsert_claims_from_message", side_effect=_capture), \
+             patch("app.circles_flow.ground_options", return_value=list(places)), \
+             patch("app.circles_flow._home_block_id", return_value="blk1"), \
+             patch("app.reply_compose.compose_reply",
+                   return_value="Found it — OrangeTheory Narcoossee. Is that the one?"):
+            _wire_ground_place_action(
+                action, user_id="u1", session_ctx=ctx, user_message=message
+            )
+        return action, ctx, captured
+
+    def test_capture_runs_inline_and_the_card_offers_the_named_spot(self) -> None:
+        action, ctx, captured = self._run(
+            [], self._MATCH, "I go to OrangeTheory Narcoossee"
+        )
+        self.assertEqual(captured, ["I go to OrangeTheory Narcoossee"])
+        # The same extractor pass, moved forward — main.py must not run it again.
+        self.assertTrue(ctx["skip_claims_background_extract"])
+        self.assertEqual(ctx["rapport_grounding"]["affiliation_id"], "aff9")
+        card = ctx["grounding_card"]
+        self.assertEqual([o["google_place_id"] for o in card["options"]], ["gp9"])
+        # And the question is a confirm, not the same ask over again.
+        self.assertNotIn("which spot", action.utterance.lower())
+        self.assertIn("OrangeTheory Narcoossee", card["question"])
+
+    def test_several_ungrounded_circles_no_longer_dead_end(self) -> None:
+        # Two ungrounded rows and no goal key used to return early (ambiguous).
+        rows = [dict(_AFF_ROW), {**_AFF_ROW, "id": "aff2", "circle_key": "karate"}]
+        _action, ctx, captured = self._run(
+            rows, self._MATCH, "I go to OrangeTheory Narcoossee"
+        )
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(ctx["rapport_grounding"]["affiliation_id"], "aff9")
+
+    def test_guesses_are_never_confirmed_as_theirs(self) -> None:
+        # Two nearby same-kind places: still a pick-one list, question left alone.
+        guesses = [
+            {"name": "Gym A", "google_place_id": "g1", "suggested": True},
+            {"name": "Gym B", "google_place_id": "g2", "suggested": True},
+        ]
+        action, ctx, _c = self._run(
+            [], guesses, "I go to OrangeTheory Narcoossee"
+        )
+        self.assertEqual(action.utterance, "Which spot at OrangeTheory is it?")
+        self.assertEqual(len(ctx["grounding_card"]["options"]), 2)
+
+    def test_capture_is_not_run_twice_in_one_turn(self) -> None:
+        action = _Action(goal_id=None)
+        ctx = {"skip_claims_background_extract": True}
+        with patch("app.auth.service_client", return_value=_SB([])), \
+             patch("app.claims_persist.try_upsert_claims_from_message") as cap:
+            _wire_ground_place_action(
+                action, user_id="u1", session_ctx=ctx, user_message="I go to OrangeTheory"
+            )
+        cap.assert_not_called()
+        self.assertEqual(action.chips, [])
+
+
 if __name__ == "__main__":
     unittest.main()

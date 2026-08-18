@@ -34,6 +34,13 @@ def _chain(data=None, count=None):
     return m
 
 
+def _chain_seq(*datas):
+    """A table read more than once in one call, answering differently each time."""
+    m = _chain([])
+    m.execute.side_effect = [MagicMock(data=d, count=None) for d in datas]
+    return m
+
+
 def _sb(tables: dict, rpc_data=None):
     sb = MagicMock()
     sb.table.side_effect = lambda name: tables.get(name, _chain([]))
@@ -143,12 +150,51 @@ class TestCommunitiesCard(unittest.TestCase):
 
 
 class TestMembership(unittest.TestCase):
+    @patch("app.community_surface._blurb", return_value=None)
     @patch("app.community_surface.service_client")
-    def test_non_member_cannot_read_a_profile(self, sb) -> None:
-        sb.return_value = _sb({"circle_affiliations": _chain([])})
+    def test_a_visitor_opens_the_head_without_the_people(self, sb, _blurb) -> None:
+        # She belongs to nothing here — reached the place from a peer's profile. The head
+        # opens (discovery already names it to her); the roster does not.
+        affs = _chain_seq([], [{"user_id": "u2", "circle_type": "fitness"}])
+        sb.return_value = _sb({
+            "circle_affiliations": affs,
+            "places": _chain([{"id": "p1", "name": "OrangeTheory"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain([{"id": "u2", "nickname": "mapleluz", "profile_photo_url": None}]),
+            "user_blocks": _chain([]),
+        })
+        out = community_profile("u1", place_id="p1")
+        self.assertEqual(out["membership"], "visitor")
+        self.assertEqual(out["place_name"], "OrangeTheory")
+        self.assertEqual(out["member_count"], 1)
+        # The three members-only parts, all empty.
+        self.assertEqual(out["member_preview"], [])
+        self.assertEqual(out["actions"], [])
+        self.assertIsNone(out["create_event_venue"])
+        self.assertIsNone(out["detail"])
+        self.assertEqual(out["affiliation_id"], "")
+        # "just you so far" would be a lie — she is not one of the people counted.
+        self.assertEqual(out["status_line"], "1 person")
+
+    @patch("app.community_surface._blurb", return_value=None)
+    @patch("app.community_surface.service_client")
+    def test_a_place_only_blocked_people_go_to_does_not_open(self, sb, _blurb) -> None:
+        # discover_communities_near drops it from the list; opening it by id must agree.
+        affs = _chain_seq([], [{"user_id": "u2", "circle_type": "fitness"}])
+        sb.return_value = _sb({
+            "circle_affiliations": affs,
+            "places": _chain([{"id": "p1", "name": "OrangeTheory"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain([]),
+            "user_blocks": _chain([{"blocker": "u1", "blocked": "u2"}]),
+        })
         with self.assertRaises(ValueError) as err:
             community_profile("u1", place_id="p1")
-        self.assertEqual(str(err.exception), "not_a_member")
+        self.assertEqual(str(err.exception), "place_not_found")
 
     @patch("app.community_surface.service_client")
     def test_non_member_cannot_list_members(self, sb) -> None:
@@ -174,6 +220,28 @@ class TestFeatures(unittest.TestCase):
         self.assertEqual(_feature_label("has_childcare", "true", ""), "Childcare")
         self.assertEqual(_feature_label("class_schedule", "full", ""), "Class schedule: full")
         self.assertEqual(_feature_label("has_pool", None, "toddler_swim"), "Pool (toddler swim)")
+
+    def test_a_stored_label_wins_over_the_slug(self) -> None:
+        # The key cannot round-trip casing, digits or punctuation — 20261030 stores the
+        # member's own words next to it, and they win.
+        self.assertEqual(_feature_label("has_byob", None, "", "BYOB"), "BYOB")
+        self.assertEqual(_feature_label("has_24_7_access", None, "", "24/7 access"), "24/7 access")
+        # Null label (chat-learned, or written before the column) still derives.
+        self.assertEqual(_feature_label("has_byob", None, "", None), "Byob")
+        self.assertEqual(_feature_label("has_byob", None, "", "   "), "Byob")
+        # The value and sub_group qualifiers still decorate a stored label.
+        self.assertEqual(_feature_label("has_byob", "true", "", "BYOB"), "BYOB")
+        self.assertEqual(_feature_label("has_byob", None, "patio", "BYOB"), "BYOB (patio)")
+
+    @patch("app.community_surface.service_client")
+    def test_features_read_steps_down_before_the_label_migration(self, sb) -> None:
+        # Deployed ahead of the migration, the first select 400s on the unknown column.
+        # Losing the label is fine; losing every chip on the card is not.
+        rows = [{"key": "has_pool", "value": None, "sub_group": "", "confidence": 0.9}]
+        feats = _chain(rows)
+        feats.execute.side_effect = [RuntimeError("column does not exist"), MagicMock(data=rows)]
+        sb.return_value = _sb({"place_features": feats})
+        self.assertEqual([f["label"] for f in place_features("p1")], ["Pool"])
 
     @patch("app.community_surface.service_client")
     def test_low_confidence_features_are_not_repeated(self, sb) -> None:
@@ -301,6 +369,74 @@ class TestCommunityMembers(unittest.TestCase):
         sb.return_value = _sb(tables)
         out = community_members("u1", place_id="p1")
         self.assertEqual(out["members"], [])
+
+
+class TestMembershipKindAndActivities(unittest.TestCase):
+    """The roster's two chip kinds: what someone IS here (member / curious) and what
+    they DO here. Curious joiners are listed but never counted as members (§19)."""
+
+    def _tables(self):
+        return {
+            "circle_affiliations": _chain(
+                [
+                    {"id": "a1", "circle_type": "fitness", "user_id": "u1",
+                     "status": "confirmed", "created_at": "2026-01-01"},
+                    {"user_id": "u2", "circle_type": "fitness",
+                     "status": "confirmed", "created_at": "2026-01-02"},
+                    {"user_id": "u4", "circle_type": "fitness",
+                     "status": "curious", "created_at": "2026-01-03"},
+                ]
+            ),
+            "places": _chain([{"id": "p1", "name": "OrangeTheory", "place_type": "fitness"}]),
+            "users": _chain(
+                [
+                    {"id": "u2", "nickname": "coral88", "profile_photo_url": None},
+                    {"id": "u4", "nickname": "mapleluz", "profile_photo_url": None},
+                ]
+            ),
+            "user_blocks": _chain([]),
+            "place_activities": _chain(
+                [
+                    {"user_id": "u2", "label": "CrossFit"},
+                    {"user_id": "u2", "label": "Spin"},
+                    {"user_id": "u2", "label": "CrossFit"},  # a repeat is one chip
+                ]
+            ),
+        }
+
+    @patch("app.community_surface.service_client")
+    @patch("app.place_activities.service_client")
+    def test_rows_say_member_or_curious_and_what_they_do(self, acts_sb, sb) -> None:
+        tables = self._tables()
+        sb.return_value = _sb(tables)
+        acts_sb.return_value = _sb(tables)
+        out = community_members("u1", place_id="p1")
+        rows = {r["peer_user_id"]: r for r in out["members"]}
+        self.assertEqual(rows["u2"]["membership"], "member")
+        self.assertEqual(rows["u4"]["membership"], "curious")
+        self.assertEqual(rows["u2"]["activities"], ["CrossFit", "Spin"])
+        # Members lead the roster; curious joiners follow, so paging keeps the sections.
+        self.assertEqual(
+            [r["peer_user_id"] for r in out["members"]], ["u1", "u2", "u4"]
+        )
+
+    @patch("app.community_surface.service_client")
+    @patch("app.place_activities.service_client")
+    def test_curious_joiners_are_counted_apart(self, acts_sb, sb) -> None:
+        tables = self._tables()
+        sb.return_value = _sb(tables)
+        acts_sb.return_value = _sb(tables)
+        out = community_members("u1", place_id="p1")
+        # "3 people · 2 go here in real life" — member_count keeps its old meaning.
+        self.assertEqual(out["member_count"], 2)
+        self.assertEqual(out["curious_count"], 1)
+
+    @patch("app.community_surface.service_client")
+    def test_unverified_caller_still_gets_both_counts(self, sb) -> None:
+        sb.return_value = _sb(self._tables())
+        out = community_members("u1", place_id="p1", phone_verified=False)
+        self.assertEqual(out["members"], [])
+        self.assertEqual((out["member_count"], out["curious_count"]), (2, 1))
 
 
 class TestCommunityProfile(unittest.TestCase):

@@ -29,7 +29,11 @@ import threading
 from typing import Any
 
 from app.auth import service_client
-from app.i18n import _ai_render, normalize_lang_code  # noqa: PLC2701 — same-package renderer
+from app.i18n import (  # noqa: PLC2701 — same-package renderer
+    _ai_render,
+    localize_labels,
+    normalize_lang_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,8 @@ def render_gap_texts(
     why_frame: str | None,
     lang: str,
     why_reason: str | None = None,
-) -> dict[str, str] | None:
+    answer_options: list[str] | None = None,
+) -> dict[str, Any] | None:
     """AI-render a gap's question + teaser + why-line into ``lang``.
 
     Returns ``{"question": ..., "why_frame": ..., "why_reason": ...}`` or None when
@@ -62,7 +67,31 @@ def render_gap_texts(
     reason = str(why_reason or "").strip()
     if reason:
         out["why_reason"] = _ai_render(reason, code) or reason
+    chips = [str(c).strip() for c in (answer_options or []) if str(c or "").strip()]
+    if chips:
+        # The card's one-tap answers are button labels, so they go through the batched,
+        # cached chip renderer rather than one _ai_render call each.
+        out["answer_options"] = localize_labels(chips, code)
     return out
+
+
+def _row_answer_options(gap_row_id: str) -> list[str]:
+    """The row's English answer chips, so every render path translates them without
+    threading them through five signatures. Absent column / row → no chips."""
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("answer_options")
+            .eq("gap_row_id", gap_row_id)
+            .limit(1)
+            .execute()
+        )
+        chips = ((res.data or [{}])[0] or {}).get("answer_options")
+        return [str(c) for c in chips if str(c or "").strip()] if isinstance(chips, list) else []
+    except Exception:  # noqa: BLE001 — untranslated chips beat a failed render
+        logger.debug("rapport-i18n: answer_options read failed for %s", gap_row_id)
+        return []
 
 
 def localize_gap_row(
@@ -77,7 +106,9 @@ def localize_gap_row(
     code = normalize_lang_code(lang)
     if not gap_row_id or not code or code == "en":
         return False
-    rendered = render_gap_texts(question, why_frame, code, why_reason)
+    rendered = render_gap_texts(
+        question, why_frame, code, why_reason, _row_answer_options(gap_row_id)
+    )
     if not rendered:
         return False
     merged = dict(existing_i18n) if isinstance(existing_i18n, dict) else {}

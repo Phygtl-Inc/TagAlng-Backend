@@ -386,6 +386,43 @@ class TestCommunitiesChatTurn(unittest.TestCase):
         self.assertIn("do not", facts)
         self.assertIn("first", kwargs["fallback"].lower())
 
+    @patch("app.community_surface.communities_card", return_value=None)
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply")
+    def test_the_prose_summarises_and_the_cards_do_the_listing(
+        self, compose, mine, discover, _card
+    ) -> None:
+        """QA 2026-08-18: six communities named, then four more, then the cards repeated
+        all ten — a ten-line wall answering a one-line question."""
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [
+            {"place_id": f"m{i}", "place_name": name, "member_count": 2}
+            for i, name in enumerate(
+                ["Fitness CF", "The Man Cave", "Life Time", "Lp Fit", "FIT 407", "St. Luke's"]
+            )
+        ]
+        discover.return_value = [
+            {
+                "place_id": f"n{i}", "place_name": name, "member_count": 1,
+                "status_line": "1 person · 2 mi away", "is_member": False,
+            }
+            for i, name in enumerate(["Mizu Sushi", "Trinity Church", "Crunch Fitness"])
+        ]
+        compose.return_value = "composed"
+        communities_chat_turn("u1", message="can u show me communities around me", session_ctx={})
+        kwargs = compose.call_args.kwargs
+        facts = " ".join(kwargs["facts"])
+        # Counts + ONE anchor name each side; the roll-call is what made it unreadable.
+        self.assertIn("already in: 6", facts)
+        self.assertIn("could join: 3", facts)
+        for name in ("The Man Cave", "Life Time", "FIT 407", "Trinity Church", "Crunch Fitness"):
+            self.assertNotIn(name, facts)
+        self.assertIn("must NOT name them one by one", facts)
+        self.assertNotIn("Trinity Church", kwargs["fallback"])
+        self.assertEqual(kwargs["max_sentences"], 2)
+
     @patch("app.community_discovery.discover_communities", return_value=[])
     @patch("app.community_discovery._my_communities", return_value=_MINE)
     @patch("app.community_surface.communities_card", return_value=None)

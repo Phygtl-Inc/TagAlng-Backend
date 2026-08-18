@@ -5,6 +5,7 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
+from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -2791,7 +2792,8 @@ def reverse_geocode_endpoint(
 
 
 class CirclesListBody(_BaseModel):
-    pass
+    # Whose communities to list. Omitted = the caller's own.
+    user_id: str | None = None
 
 
 class CircleAddBody(_BaseModel):
@@ -2822,15 +2824,25 @@ class CircleGroundBody(_BaseModel):
     google_place_id: str
 
 
-@app.post("/lana/circles/mine")
-def post_circles_mine(
+@app.post("/lana/circles/list")
+def post_circles_list(
     body: CirclesListBody | None = None,
     authorization: str | None = Header(default=None),
 ):
+    """Any user's grounded communities (replaces /lana/circles/mine). No `user_id` =
+    the caller's own list, with her detail and provenance; another user's comes back as
+    the public head of each place — hand a row's `place_id` to /lana/circles/profile to
+    open it. Empty `circles` when the two have blocked each other."""
     auth = verify_auth(authorization)
-    from app.circles_flow import list_my_circles
+    from app.circles_flow import list_circles
 
-    return {"circles": list_my_circles(auth.user_id)}
+    owner = ((body.user_id if body else None) or "").strip() or auth.user_id
+    if owner != auth.user_id:
+        try:
+            UUID(owner)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid_user_id") from None
+    return {"user_id": owner, "circles": list_circles(owner, auth.user_id)}
 
 
 @app.post("/lana/circles/add")
@@ -2941,7 +2953,7 @@ def post_circles_ground(
 
 
 class CommunityProfileBody(_BaseModel):
-    # Either identifier works: the affiliation row from /lana/circles/mine, or the
+    # Either identifier works: the affiliation row from /lana/circles/list, or the
     # canonical place id it carries. Membership is re-checked either way.
     affiliation_id: str | None = None
     place_id: str | None = None
@@ -3144,9 +3156,12 @@ def post_circles_profile(
     """One community's profile (C-CIRCLE-COMM-PROFILE): who's there, what members said
     it has, what's coming up, and the create-a-meet / invite CTAs.
 
-    Members-only by construction — the caller must hold a confirmed, non-dismissed
-    affiliation at the place, or this 404s `not_a_member` (§F: a place is named to the
-    people who go there, never browsed as a directory)."""
+    Opens for any caller. The head is the same thing discover_communities_near already
+    names to a neighbour, so `membership` reports which viewer this is and the members-only
+    parts come back empty for 'curious' and 'visitor': no roster, no detail, no host/invite
+    actions (§F protects the people, not the place). The FULL roster stays members-only —
+    /lana/circles/members still 404s `not_a_member`. 404 here means the place is gone, or
+    every member of it has blocked the caller."""
     auth = verify_auth(authorization)
     from app.community_surface import community_profile
 
@@ -3248,12 +3263,15 @@ def post_circles_members(
         place_id=str(data["place_id"]),
         place_name=data.get("place_name"),
         member_count=int(data.get("member_count") or 0),
+        curious_count=int(data.get("curious_count") or 0),
         members=[
             CommunityMemberRow(
                 peer_user_id=str(m.get("peer_user_id") or ""),
                 nickname=m.get("nickname"),
                 avatar_url=m.get("avatar_url"),
                 trait_tags=[str(t) for t in (m.get("trait_tags") or [])][:6],
+                membership=str(m.get("membership") or "member"),
+                activities=[str(a) for a in (m.get("activities") or [])][:3],
                 shared_line=m.get("shared_line"),
                 me=bool(m.get("me")),
                 connection=str(m.get("connection") or "") or None,

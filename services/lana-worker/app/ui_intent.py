@@ -57,6 +57,13 @@ PEER_DISCOVERY_ACTIVE_INTENTS = frozenset({
     "discovery.find_in_block",
     "discovery.show_peer_profile",
     "discovery.explain_peer_match",
+    # An intro turn IS a peer turn. Missing here, peer cards on a propose-intro turn
+    # rendered ONLY because pending_intro_offer was armed (offer_neighbor_intro is a peer
+    # surface) — so the moment a stale offer was correctly dropped, a turn holding four
+    # real peer rows fell through to `chat` and shipped prose naming Sofia with no card
+    # and no chips at all (2026-08-18). The cards must stand on the intent, never on an
+    # offer that may or may not be armed.
+    "social.propose_intro",
     # The recommendation cascade puts neighbors who posted a matching tip on peer rows
     # (with the rec itself) — those are peer cards on a looking.tip turn.
     "looking.tip",

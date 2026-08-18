@@ -7,6 +7,7 @@ from app.circles_flow import (
     add_circle,
     ground_affiliation,
     ground_options,
+    list_circles,
     list_my_circles,
     tag_claim_place_from_gap,
     upsert_canonical_place,
@@ -98,7 +99,7 @@ class TestGroundAffiliation(unittest.TestCase):
             ground_affiliation("u1", "a1", "gpid1")
 
     @patch("app.rapport_gaps.open_semantic_gap")
-    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…"))
+    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…", ["The people"]))
     @patch("app.circles_flow._flush_parked_features", return_value=0)
     @patch("app.circles_flow.upsert_canonical_place", return_value="p1")
     @patch("app.places.place_details", return_value=dict(_DETAILS))
@@ -126,7 +127,7 @@ class TestGroundAffiliation(unittest.TestCase):
 
     @patch("app.rapport_gaps.mark_answered")
     @patch("app.rapport_gaps.open_semantic_gap")
-    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…"))
+    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…", ["The people"]))
     @patch("app.circles_flow._flush_parked_features", return_value=0)
     @patch("app.circles_flow.upsert_canonical_place", return_value="p1")
     @patch("app.places.place_details", return_value=dict(_DETAILS))
@@ -333,7 +334,7 @@ class TestOneCommunityPerPlace(unittest.TestCase):
         self.assertEqual(_member_counts(["p1", "p2"]), {"p1": 2, "p2": 1})
 
     @patch("app.rapport_gaps.open_semantic_gap")
-    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…"))
+    @patch("app.circles_flow._place_affinity_question", return_value=("Q?", "about X…", ["The people"]))
     @patch("app.circles_flow._close_grounding_gap")
     @patch("app.circles_flow._flush_parked_features", return_value=0)
     @patch("app.circles_flow.upsert_canonical_place", return_value="p1")
@@ -377,3 +378,58 @@ class TestTagClaimPlace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestListCirclesForViewer(unittest.TestCase):
+    """POST /lana/circles/list serves anyone's list: yours whole, someone else's as the
+    public head of each place."""
+
+    OWN = [
+        {
+            "id": "a1",
+            "circle_type": "fitness",
+            "grounded": True,
+            "place_id": "p1",
+            "place_name": "OrangeTheory",
+            "place_address": "123 Elm",
+            "relation": "gym",
+            "emoji": "💪",
+            "detail": "my 6am class",
+            "google_place_id": "gpid1",
+            "added_at": "2026-07-01",
+            "joined_via_label": "told Lana about it",
+            "member_count": 3,
+            "active": True,
+            "activities": [
+                {"concept": "spin", "label": "Spin", "member_count": 2, "mine": True}
+            ],
+        }
+    ]
+
+    @patch("app.circles_flow.list_my_circles")
+    def test_own_list_is_untouched(self, rows) -> None:
+        rows.return_value = self.OWN
+        self.assertEqual(list_circles("u1", "u1"), self.OWN)
+
+    @patch("app.community_surface._blocked_ids", return_value=set())
+    @patch("app.circles_flow.list_my_circles")
+    def test_visitor_gets_place_head_without_her_words(self, rows, _blocked) -> None:
+        rows.return_value = self.OWN
+        row = list_circles("u1", "u2")[0]
+        # Enough to render the row and open the profile...
+        self.assertEqual(row["place_id"], "p1")
+        self.assertEqual(row["place_name"], "OrangeTheory")
+        self.assertEqual(row["relation"], "gym")
+        self.assertEqual(row["member_count"], 3)
+        # ...and nothing that is hers alone.
+        for private in ("detail", "added_at", "joined_via_label", "google_place_id"):
+            self.assertNotIn(private, row)
+        # `mine` would read as the VIEWER's own activity on her screen.
+        self.assertEqual(
+            row["activities"], [{"concept": "spin", "label": "Spin", "member_count": 2}]
+        )
+
+    @patch("app.community_surface._blocked_ids", return_value={"u1"})
+    @patch("app.circles_flow.list_my_circles", return_value=OWN)
+    def test_blocked_either_way_lists_nothing(self, _rows, _blocked) -> None:
+        self.assertEqual(list_circles("u1", "u2"), [])

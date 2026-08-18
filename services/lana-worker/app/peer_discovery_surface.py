@@ -315,6 +315,12 @@ def drop_connected_peers(
     gone, an exhausted search takes the real "nobody new yet" branch instead of pitching
     an intro to someone the user already knows. 'nudge' rows stay — one is genuinely out
     awaiting a reply, which the card labels intro_sent instead of offering Nudge again.
+
+    Those surviving 'nudge' rows are STAMPED here, not only on the card. The tier lookup
+    is already paid for, and stamp_connection_state runs after the reply is composed — so
+    the card showed Daniel with a "✓ Sent" badge under prose reading "Want an intro?"
+    (2026-08-18). The reply writer needs the same fact the button has, at the one place
+    every peer source passes through.
     """
     if not user_id or not rows:
         return rows
@@ -324,12 +330,18 @@ def drop_connected_peers(
     )
     if not tiers:
         return rows
-    return [
-        r
-        for r in rows
-        if not isinstance(r, dict)
-        or tiers.get(str(r.get("peer_user_id") or "")) not in _CONNECTED_TIERS
-    ]
+    kept: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            kept.append(r)
+            continue
+        tier = tiers.get(str(r.get("peer_user_id") or ""))
+        if tier in _CONNECTED_TIERS:
+            continue
+        if tier == "nudge" and not r.get("connection"):
+            r["connection"] = "intro_sent"
+        kept.append(r)
+    return kept
 
 
 def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
@@ -359,6 +371,47 @@ def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
             row["connection"] = "intro_sent"
 
 
+def drop_stale_intro_offer(ctx: dict[str, Any], rows: list[Any]) -> None:
+    """A single-peer intro offer cannot outlive the turn that showed that one peer.
+
+    `pending_intro_offer` is deliberately cross-turn state — the accept ("yes") arrives a
+    turn after the offer. But derive_ui_intent returns offer_neighbor_intro whenever it is
+    armed, which renders the SINGLE-card intro surface. So a later turn that ships a real
+    list drew one card under prose counting three, and the card belonged to the old offer
+    (QA 2026-08-18: "There are 3 people near you…" over one Sofia card with her nudge
+    chips, session ctx holding three rows).
+
+    The rule: the offer survives only while the turn shows exactly its own candidate.
+    Anything else — a list, a different peer, a recommendation strip — means the surface
+    moved on and the offer goes with it. Enforced here rather than in any one lane because
+    the turn that exposed this came through the orchestrator's find_peers tool, which
+    never touches the offer at all; every path that ships peer rows passes through this
+    function on its way to derive_ui_intent.
+
+    A turn with NO peer rows clears nothing (the caller returns before this) — that is the
+    accept window, and the offer has to still be there to be accepted.
+    """
+    offer = ctx.get("pending_intro_offer")
+    if not isinstance(offer, dict):
+        return
+    candidate = str(offer.get("candidate_user_id") or "").strip()
+    ids = [
+        str(r.get("peer_user_id") or "").strip()
+        for r in rows
+        if isinstance(r, dict) and r.get("peer_user_id")
+    ]
+    if candidate and ids == [candidate]:
+        return
+    import logging
+
+    from app.intro_list import clear_intro_offer_ctx
+
+    clear_intro_offer_ctx(ctx)
+    logging.getLogger(__name__).info(
+        "stale_intro_offer_dropped candidate=%s rows=%d", candidate or None, len(ids)
+    )
+
+
 def stamp_peer_discovery_ctx(
     ctx: dict[str, Any], *, phone_verified: bool, user_id: str = ""
 ) -> None:
@@ -366,6 +419,9 @@ def stamp_peer_discovery_ctx(
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list) or not raw:
         return
+    # Ahead of every early return below: a tip-rec strip or an unverified list moves the
+    # surface just as much as a peer list does.
+    drop_stale_intro_offer(ctx, raw)
     if any(isinstance(r, dict) and r.get("tip_rec") for r in raw):
         # Recommendation-cascade turn: the rows and their counts strip were built by
         # tip_rec_cascade, which ranks by the rec, not by claim affinity. Re-ranking them

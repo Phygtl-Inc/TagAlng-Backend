@@ -812,6 +812,41 @@ def format_attr_peers_reply(
         )
     # The cards carry names + shared traits — the text stays to the count + next step.
     n = len(peers)
+    # Every match already has an intro out (or is already connected) — their cards render
+    # a "✓ Sent" badge, not a Nudge button, so offering an intro contradicts what the user
+    # is looking at. QA 2026-08-18: "One person near you mentioned 'sport' in their own
+    # words. Want an intro?" over a single row badged Sent — the only next step Lana
+    # offered was one she had already taken. `connection` is stamped at the peer dispatch
+    # (peer_discovery_surface.drop_connected_peers), so it is here before the cards are.
+    # A MIXED list is left alone on purpose: the offer is still true for the new rows, and
+    # the cards say which are which.
+    if all(isinstance(p, dict) and p.get("connection") for p in peers):
+        # The two moves named here are the two PILLS under this message
+        # (ui_actions.peer_seek_offer_actions, armed by _attr_search_is_spent) — the copy
+        # must say what they say, or the person is told to type what they could tap.
+        return compose_reply(
+            goal=(
+                "You already introduced the user to every neighbor whose claims match this "
+                "search — the intros are out and waiting on a reply, and the cards below say "
+                "so. Never offer an intro here: it is the one thing you have already done. "
+                "Say warmly that they are already introduced and that you will tell them the "
+                "moment someone replies. Then offer the two real options, which are the pills "
+                "under your message: you can keep listening and tell them when a NEW matching "
+                "neighbor joins (the pill says 'Yes, notify me'), or drop this filter and show "
+                "everyone nearby (the pill says 'Show everyone nearby')."
+            ),
+            facts=[
+                f'What they searched for: "{filter_text}"',
+                f"Neighbors whose own claims match that search: {n}",
+                f"Intros already sent and awaiting a reply: {n} of {n}",
+            ],
+            fallback=(
+                f"The {'one neighbor' if n == 1 else f'{n} neighbors'} near you matching "
+                f"\"{filter_text}\" already {'has' if n == 1 else 'have'} an intro from me "
+                "waiting — I'll tell you the moment there's a reply. I can notify you when "
+                "someone new matches, or show everyone nearby instead."
+            ),
+        )
     if all(p.get("semantic_match") for p in peers if isinstance(p, dict)):
         # Meaning-based hits: stay truthful — nobody literally lists the user's word,
         # the cards show the actual claims that came close.

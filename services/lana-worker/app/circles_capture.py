@@ -221,7 +221,30 @@ def _key_tokens(key: str) -> set[str]:
     return {p for p in parts if p not in _GENERIC_KEYS and len(p) > 1}
 
 
-def same_community(a_key: str, a_type: str, b_key: str, b_type: str) -> bool:
+# Words that say "a bunch of people", not WHICH bunch — dropped before two nouns
+# are compared, or "library regulars" and "gaming zone regulars" would look alike.
+_NOUN_NOISE = frozenset({
+    "group", "groups", "crew", "regulars", "members", "member", "friends", "folks",
+    "people", "buddies", "goers", "goer", "enthusiasts", "fans", "community", "the",
+    "my", "a", "an", "of", "at", "and",
+})
+
+
+def _noun_tokens(noun: Any) -> set[str]:
+    """What a community's own noun is ABOUT ("library regulars" -> {library})."""
+    parts = re.split(r"[^a-z0-9]+", str(noun or "").lower())
+    return {p for p in parts if p and len(p) > 1 and p not in _NOUN_NOISE}
+
+
+def same_community(
+    a_key: str,
+    a_type: str,
+    b_key: str,
+    b_type: str,
+    *,
+    a_noun: str | None = None,
+    b_noun: str | None = None,
+) -> bool:
     """Are these two circle keys the SAME real-world community?
 
     Capture creates one row per phrasing, so a single gym accumulated four:
@@ -231,22 +254,54 @@ def same_community(a_key: str, a_type: str, b_key: str, b_type: str) -> bool:
     asked about a gym that was ALREADY pinned (2026-08-07).
 
     Deliberately conservative and deterministic — merging two genuinely different
-    communities is worse than leaving a duplicate, so only two cases count:
-      · same type and one side is a bare category ("gym" ~ "fitness_cf")
+    communities is worse than leaving a duplicate, so only these cases count:
       · same type and one side's words contain the other's
         ("fitness_cf" ~ "fitness_cf_st_cloud")
+      · same type, one side is a bare category, and the two NOUNS agree on what
+        the community is ("gym"/"gym" ~ "fitness_cf"/"gym crew")
+
+    The bare-category case used to return True on the category alone, which merged
+    any two same-type circles as soon as one was a plain word: a new `library`
+    mention was folded into an existing `gaming_zone`, and `orangetheory` into an
+    already-pinned `gym` (prod 2026-08-18). A category is only evidence about the
+    KIND of place; the nouns are what say which community it is, so with no noun on
+    either side this now answers no — a duplicate row is recoverable, a swallowed
+    community is not.
     """
     if not a_key or not b_key or a_type != b_type:
         return False
     a, b = str(a_key).lower(), str(b_key).lower()
     if a == b:
         return True
-    if a in _GENERIC_KEYS or b in _GENERIC_KEYS:
-        return True
     ta, tb = _key_tokens(a), _key_tokens(b)
+    if a in _GENERIC_KEYS or b in _GENERIC_KEYS:
+        generic, other = (a, b) if a in _GENERIC_KEYS else (b, a)
+        # Raw parts, not _key_tokens: the category word is exactly what that strips.
+        if generic in set(other.split("_")):  # "gym" ~ "gym_st_cloud"
+            return True
+        na, nb = _noun_tokens(a_noun), _noun_tokens(b_noun)
+        return bool(na and nb and (na & nb))
     if not ta or not tb:
         return False
     return ta <= tb or tb <= ta
+
+
+def _names_a_different_place(cand: CircleCandidate, row: dict[str, Any]) -> bool:
+    """True when the candidate names a venue this row is demonstrably NOT about.
+
+    "I go to OrangeTheory Narcoossee" was merged into a `gym` row already pinned to
+    another gym: the venue the user finally named was dropped on the floor, and the
+    grounding ask had nothing ungrounded left to resolve (prod 2026-08-18). A named
+    venue that disagrees with a pinned one is a second community, not a re-mention.
+    """
+    named = _noun_tokens(cand.place_name)
+    if not named:
+        return False  # no venue named — the noun/key rules decide
+    row_named = _noun_tokens(row.get("place_name"))
+    if row_named:
+        return not (named & row_named)
+    # Pinned to a place we can't name here: treat the new name as new information.
+    return bool(row.get("place_ref"))
 
 
 def _fetch_same_community(
@@ -280,7 +335,9 @@ def _fetch_same_community(
         if same_community(
             cand.circle_key, cand.circle_type, str(r.get("circle_key") or ""),
             str(r.get("circle_type") or ""),
+            a_noun=cand.noun, b_noun=str(r.get("noun") or ""),
         )
+        and not _names_a_different_place(cand, r)
     ]
     if not hits:
         return None
@@ -370,6 +427,7 @@ def upsert_place_feature(
     source: str = "rapport",
     contributed_by: str | None = None,
     emoji: str = "",
+    label: str = "",
 ) -> bool:
     """One truth per (place, key, sub_group). Write policy (documented on the table):
     overwrite only when the new confidence >= stored; source='owner' rows are never
@@ -401,9 +459,12 @@ def upsert_place_feature(
             "source": source,
             "contributed_by": contributed_by,
         }
-        # Never blank an emoji the row already has: the chat path doesn't pick one.
+        # Never blank an emoji or a label the row already has: the chat path supplies
+        # neither, and it must not erase what a member typed in the panel.
         if emoji:
             patch["emoji"] = emoji
+        if label:
+            patch["label"] = label
         sb.table("place_features").update(patch).eq("id", existing["id"]).execute()
         return True
     sb.table("place_features").insert(
@@ -416,6 +477,7 @@ def upsert_place_feature(
             "source": source,
             "contributed_by": contributed_by,
             "emoji": emoji or None,
+            "label": label or None,
         }
     ).execute()
     return True

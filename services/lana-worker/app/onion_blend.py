@@ -163,6 +163,9 @@ def blend_onion_matches(
                 "peer_user_id": uid,
                 "nickname": cand.get("nickname"),
                 "avatar_url": cand.get("avatar_url"),
+                # An intro may already be out to this peer — carried from the scored row so
+                # the reply writer and the card agree (see onion._shape).
+                "connection": cand.get("connection"),
                 # No cosine was computed for this pair — never invent one.
                 "similarity_score": None,
                 "matching_peer_label": place_tag,

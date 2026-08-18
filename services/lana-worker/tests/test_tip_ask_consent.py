@@ -384,10 +384,10 @@ class TestPolicyGate(unittest.TestCase):
     """
 
     def _is_tip_ask(self, slots):
-        from app.lana_unified_pipeline import _turn_is_tip_ask
+        from app.lana_unified_pipeline import _turn_is_engine_action
 
         with patch("app.discovery_slots.discovery_slots_for_turn", return_value=slots):
-            return _turn_is_tip_ask(
+            return _turn_is_engine_action(
                 {"routing_phase": "listening"},
                 "recommend me a doctor nearby",
                 history=[],
@@ -415,13 +415,13 @@ class TestPolicyGate(unittest.TestCase):
         self.assertFalse(self._is_tip_ask(_tip_slots(confidence=0.3)))
 
     def test_classifier_failure_leaves_the_gate_unchanged(self) -> None:
-        from app.lana_unified_pipeline import _turn_is_tip_ask
+        from app.lana_unified_pipeline import _turn_is_engine_action
 
         with patch(
             "app.discovery_slots.discovery_slots_for_turn", side_effect=RuntimeError("boom")
         ):
             self.assertFalse(
-                _turn_is_tip_ask(
+                _turn_is_engine_action(
                     {}, "recommend me a doctor", history=[], home_block_id=None, phone_verified=True
                 )
             )

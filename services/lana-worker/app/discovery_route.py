@@ -1009,14 +1009,29 @@ def _maybe_attach_intro_offer(
 ) -> str:
     if str(ctx.get("active_intent") or "") in (INTENT_SHOW_BLOCK_LOG, "discovery.block_log"):
         return reply
-    if ctx.get("intro_offer_shown") or ctx.get("intro_proposal") or ctx.get("pending_intro_offer"):
+    # An offer armed on an EARLIER turn is stale the moment a fresh list is rendered — this
+    # function runs once per turn, so anything here came from a previous one. derive_ui_intent
+    # still reads it and returns offer_neighbor_intro, which renders the single-card intro
+    # surface: prose that had just counted three neighbours shipped over ONE card, and the
+    # card belonged to the old offer's lane (QA 2026-08-18). Clear before the guards below,
+    # so the count and the cards are the same fact whether or not a new offer is armed.
+    if ctx.get("pending_intro_offer") or ctx.get("intro_offer_shown"):
+        clear_intro_offer_ctx(ctx)
+    if ctx.get("intro_proposal"):
         return reply
     if msg and (is_profile_acknowledgment(msg) or (_is_affirmative(msg) and not wants_peer_find(msg))):
         return reply
     active = str(ctx.get("active_intent") or "")
     if active == "discovery.find_by_attrs" and msg and not _ATTR_REFINE_RE.search(str(msg)):
         return reply
-    peer = next((p for p in peers if p.get("peer_user_id")), None)
+    # Feature someone who can still RECEIVE an intro. Ranking put the strongest match on
+    # top, but if an intro to them is already out, featuring them spends the turn on the one
+    # thing that cannot be done — which is how "find someone else" led back to a Sent badge.
+    # Only when nobody in the list is reachable does an already-introduced peer feature, and
+    # then format_intro_offer_turn owns up to it instead of offering.
+    peer = next(
+        (p for p in peers if p.get("peer_user_id") and not p.get("connection")), None
+    ) or next((p for p in peers if p.get("peer_user_id")), None)
     if not peer:
         return reply
     if not peer_matches_identity_snippet(peer, identity_snippet):
@@ -2094,7 +2109,7 @@ def _try_layer1_intent_turn(
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
         ctx["skip_claims_background_extract"] = True
         ctx.pop("activity_previews", None)
-        if not peers:
+        if _attr_search_is_spent(peers):
             _stamp_peer_seek_offer(ctx, display_filter)
         return reply, ctx, ctx["last_routing"], peer_rows
 
@@ -2779,6 +2794,22 @@ def _stamp_peer_seek_offer(ctx: dict[str, Any], display_filter: str) -> None:
     ctx["peer_seek_offer_pending"] = {"filter": display_filter}
 
 
+def _attr_search_is_spent(peers: list[dict[str, Any]]) -> bool:
+    """Is there nothing left to DO with this result?
+
+    True for an empty list, and equally true when every match already has an intro out:
+    both leave the person with a filter that cannot produce an introduction. Only the
+    empty case armed the notify/widen pills, so the exhausted case shipped prose offering
+    "a different interest or people beyond your area" with nothing to tap — and typing it
+    re-ran the identical filter and returned the identical sentence (QA 2026-08-18).
+    """
+    if not peers:
+        return True
+    return all(
+        isinstance(p, dict) and str(p.get("connection") or "").strip() for p in peers
+    )
+
+
 def _try_community_join_reply_turn(
     *,
     msg: str,
@@ -2823,8 +2854,9 @@ def _try_peer_seek_offer_reply_turn(
     phone_verified: bool,
     home_block_id: str | None,
     user_id: str | None = None,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    """Reply to the offer under an empty peers search. The offer is one-turn:
+    """Reply to the offer under a spent peers search. The offer is one-turn:
     whatever comes next consumes it. Accept → save a seek signal so the "I'll
     notify you" promise is real (same machinery as the browse lane's 'listen for
     me'); widen → drop the attr filter and show neighbors nearby on their own
@@ -2839,9 +2871,22 @@ def _try_peer_seek_offer_reply_turn(
         return None
     widen = bool(_PEER_SEEK_WIDEN_RE.search(msg_s))
     accept = bool(_PEER_SEEK_ACCEPT_RE.search(msg_s)) and not widen
+    filter_text = str(pending.get("filter") or "").strip()
+    if not accept and not widen and isinstance(slots, dict):
+        # "search for more people" / "find more people" is the widen pill in their own
+        # words. Read off the classifier's verdict rather than growing the word list: a
+        # peers ask that adds NO new trait, arriving on a spent search, can only mean
+        # "look past that filter" — and re-running the same filter answered it with the
+        # identical sentence twice (QA 2026-08-18). A search that DOES name a new trait
+        # falls through here and runs as its own search, which is what it is.
+        linear = slots_linear_intent(slots)
+        new_filter = str(slots.get("attr_filter") or "").strip().lower()
+        if linear in ("discovery.find_peers", "discovery.find_by_attrs") and (
+            not new_filter or new_filter == filter_text.lower()
+        ):
+            widen = True
     if not accept and not widen:
         return None
-    filter_text = str(pending.get("filter") or "").strip()
     block_id = _resolve_block_id_for_turn(
         session_ctx=session_ctx,
         home_block_id=home_block_id,
@@ -2971,7 +3016,7 @@ def _try_attr_refine_turn(
     ctx["peer_matches"] = peer_rows
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
     ctx.pop("activity_previews", None)
-    if not peers:
+    if _attr_search_is_spent(peers):
         _stamp_peer_seek_offer(ctx, display_filter)
     return reply, ctx, ctx["last_routing"], peer_rows
 
@@ -8242,6 +8287,7 @@ def handle_discovery_turn(
             phone_verified=phone_verified,
             home_block_id=home_block_id,
             user_id=user_id,
+            slots=enriched_slots,
         )
         if seek_offer_turn is not None:
             reply, ctx, routing, peers = seek_offer_turn

@@ -391,8 +391,9 @@ class CommunityProfileResponse(BaseModel):
     relation: str | None = None
     emoji: str | None = None
     detail: str | None = None
-    # The caller's own relationship to the place: 'member', or 'curious' — she joined to
-    # watch it, so she gets this head, no roster and no host/invite actions (§19).
+    # The caller's own relationship to the place: 'member'; 'curious' — she joined to watch
+    # it (§19); or 'visitor' — she has no row here and opened it from a peer's profile or
+    # discovery. Only 'member' gets a roster and the host/invite actions.
     membership: str = "member"
     member_count: int = 0
     active: bool = False
@@ -421,6 +422,11 @@ class CommunityMemberRow(BaseModel):
     nickname: str | None = None
     avatar_url: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
+    # What this person is to the place: "member" (they go here) or "curious" (§19 —
+    # joined to watch it, not counted in member_count). The roster groups on it.
+    membership: str = "member"
+    # What they do HERE, member-curated (place_activities): the row's second chip kind.
+    activities: list[str] = Field(default_factory=list)
     shared_line: str | None = None
     # The caller's own row: no shared line (nothing is shared with yourself) and no
     # Nudge. Rows rendered now equal member_count (§17).
@@ -436,6 +442,9 @@ class CommunityMembersResponse(BaseModel):
     place_id: str
     place_name: str | None = None
     member_count: int = 0
+    # Curious joiners are listed too but never counted as members — the header split
+    # ("34 people · 28 go here in real life") is member_count + curious_count.
+    curious_count: int = 0
     members: list[CommunityMemberRow] = Field(default_factory=list)
     has_more: bool = False
     # True for an unverified caller: the count is real, the names are withheld.

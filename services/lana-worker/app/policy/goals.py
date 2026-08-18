@@ -231,8 +231,11 @@ def _grounding_goals(world: dict[str, Any]) -> list[dict[str, Any]]:
         # pinned to Fitness CF - St. Cloud — a question we could already answer,
         # asked because capture had made a second row for the same gym.
         if any(
-            same_community(key, str(c.get("type") or ""), str(g.get("key") or ""),
-                           str(g.get("type") or ""))
+            same_community(
+                key, str(c.get("type") or ""), str(g.get("key") or ""),
+                str(g.get("type") or ""),
+                a_noun=c.get("noun"), b_noun=g.get("noun"),
+            )
             for g in grounded
         ):
             logger.info("grounding_skipped_sibling_pinned key=%s", key)
