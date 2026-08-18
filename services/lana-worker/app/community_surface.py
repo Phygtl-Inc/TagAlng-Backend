@@ -35,10 +35,11 @@ here" instead of listing a shared thread.
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.auth import service_client
@@ -60,6 +61,9 @@ _MAX_SHARED_LABELS = 3
 _FEATURE_MIN_CONFIDENCE = 0.5
 _MAX_FEATURES = 8
 _MAX_PROFILE_EVENTS = 5
+# Portraits warmed per roster read. A page of 20 strangers is not worth 20 model calls
+# in one go; the next open picks up where this left off.
+_MAX_PORTRAIT_WARMS = 5
 
 _FEATURE_PREFIX_RE = re.compile(r"^(has|is|offers|allows)_")
 _TRUTHY_VALUES = {"true", "yes", "y", "1"}
@@ -72,10 +76,18 @@ def _now_iso() -> str:
 # ── membership + place reads ──────────────────────────────────────────────────
 
 
-def caller_affiliation_at(user_id: str, place_id: str) -> dict[str, Any] | None:
+def caller_affiliation_at(
+    user_id: str,
+    place_id: str,
+    *,
+    statuses: tuple[str, ...] = ("confirmed",),
+) -> dict[str, Any] | None:
     """The caller's own confirmed row at `place_id` — the authorization for every
     read in this module. None means "not a member": the profile and the people
-    panel are for the places you belong to, not a directory of the neighborhood."""
+    panel are for the places you belong to, not a directory of the neighborhood.
+
+    `statuses` widens that to 'curious' for the profile head alone (§19): someone who
+    joined to watch the place can open it, but is not a member and gets no names."""
     if not user_id or not place_id:
         return None
     try:
@@ -84,11 +96,11 @@ def caller_affiliation_at(user_id: str, place_id: str) -> dict[str, Any] | None:
             .table("circle_affiliations")
             .select(
                 "id, circle_type, circle_key, detail, created_at, source, "
-                "confirmed_via, noun, emoji"
+                "confirmed_via, noun, emoji, status"
             )
             .eq("user_id", user_id)
             .eq("place_ref", place_id)
-            .eq("status", "confirmed")
+            .in_("status", list(statuses))
             .is_("dismissed_at", "null")
             .limit(1)
             .execute()
@@ -100,8 +112,19 @@ def caller_affiliation_at(user_id: str, place_id: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-def _resolve_place(user_id: str, *, affiliation_id: str | None, place_id: str | None) -> str:
-    """(affiliation_id | place_id) → place_id, membership proven. Raises ValueError."""
+def _resolve_place(
+    user_id: str,
+    *,
+    affiliation_id: str | None,
+    place_id: str | None,
+    statuses: tuple[str, ...] = ("confirmed",),
+    out_affiliation: dict[str, Any] | None = None,
+) -> str:
+    """(affiliation_id | place_id) → place_id, membership proven. Raises ValueError.
+
+    `out_affiliation` receives the caller's row when this resolved by place_id, so the
+    caller can skip re-reading what the membership check just fetched — a wasted network
+    round trip on every profile and roster open."""
     if affiliation_id:
         try:
             res = (
@@ -124,26 +147,55 @@ def _resolve_place(user_id: str, *, affiliation_id: str | None, place_id: str | 
     pid = str(place_id or "").strip()
     if not pid:
         raise ValueError("place_required")
-    if not caller_affiliation_at(user_id, pid):
+    mine = caller_affiliation_at(user_id, pid, statuses=statuses)
+    if not mine:
         raise ValueError("not_a_member")
+    if out_affiliation is not None:
+        out_affiliation.update(mine)
     return pid
 
 
+_PLACE_FIELDS = (
+    "id, name, address, place_type, zip, google_place_id, lat, lng, blurb, blurb_key"
+)
+# Pre-20261024 environments have no blurb columns; step down rather than fail the whole
+# place read (the profile would 404 on a place that is perfectly fine).
+_PLACE_FIELDS_NO_BLURB = "id, name, address, place_type, zip, google_place_id, lat, lng"
+
+
 def _place_row(place_id: str) -> dict[str, Any]:
-    try:
-        res = (
-            service_client()
-            .table("places")
-            .select("id, name, address, place_type, zip, google_place_id, lat, lng")
-            .eq("id", place_id)
-            .limit(1)
-            .execute()
-        )
+    for fields in (_PLACE_FIELDS, _PLACE_FIELDS_NO_BLURB):
+        try:
+            res = (
+                service_client()
+                .table("places")
+                .select(fields)
+                .eq("id", place_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            continue
         rows = res.data if isinstance(res.data, list) else []
-    except Exception:
-        logger.exception("community_place_read_failed place=%s", place_id)
-        return {}
-    return rows[0] if rows else {}
+        return rows[0] if rows else {}
+    logger.exception("community_place_read_failed place=%s", place_id)
+    return {}
+
+
+_READ_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="community-read")
+
+
+def _gather(**thunks: Any) -> dict[str, Any]:
+    """Run independent reads at once and return them by name.
+
+    These surfaces are a handful of tiny queries that were merely QUEUED behind each
+    other: measured against prod, every hop costs ~300ms of round trip from a laptop
+    and the roster spent 1.6s doing nothing but waiting six times in a row. Each read
+    already swallows its own errors and returns a safe default, so a failure here is
+    the same empty list it would have been serially.
+    """
+    futures = {name: _READ_POOL.submit(fn) for name, fn in thunks.items()}
+    return {name: f.result() for name, f in futures.items()}
 
 
 def _member_rows(place_id: str) -> list[dict[str, Any]]:
@@ -176,6 +228,38 @@ def _member_rows(place_id: str) -> list[dict[str, Any]]:
     return out
 
 
+def shared_community_name(user_id: str, peer_user_id: str) -> str | None:
+    """The place these two both belong to, named — or None if there isn't one.
+
+    The proven tie behind a nudge sent from a community roster. Two members of one
+    gym are routinely on different blocks, so "a neighbor close by" is not what is
+    true about them ([[truthful-peer-match-model]]) — the shared place is."""
+    if not user_id or not peer_user_id or user_id == peer_user_id:
+        return None
+    try:
+        rows = (
+            service_client()
+            .table("circle_affiliations")
+            .select("user_id, place_ref")
+            .in_("user_id", [user_id, peer_user_id])
+            .eq("status", "confirmed")
+            .is_("dismissed_at", "null")
+            .not_.is_("place_ref", "null")
+            .limit(200)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("shared_community_lookup_failed peer=%s", peer_user_id)
+        return None
+    mine = {str(r["place_ref"]) for r in rows if str(r.get("user_id")) == user_id}
+    theirs = {str(r["place_ref"]) for r in rows if str(r.get("user_id")) == peer_user_id}
+    both = mine & theirs
+    if not both:
+        return None
+    name = str(_place_row(sorted(both)[0]).get("name") or "").strip()
+    return name or None
+
+
 def _blocked_ids(user_id: str, candidates: list[str]) -> set[str]:
     """Mutual-block filter (the Python side of lana_is_blocked)."""
     if not candidates:
@@ -204,22 +288,57 @@ def _blocked_ids(user_id: str, candidates: list[str]) -> set[str]:
     return blocked
 
 
+_USER_FIELDS = "id, nickname, profile_photo_url, public_portrait"
+# Pre-20261026 environments have no portrait column; step down rather than lose the
+# roster over a line of prose.
+_USER_FIELDS_NO_PORTRAIT = "id, nickname, profile_photo_url"
+
+
 def _users_by_id(user_ids: list[str]) -> dict[str, dict[str, Any]]:
     if not user_ids:
         return {}
-    try:
-        res = (
-            service_client()
-            .table("users")
-            .select("id, nickname, profile_photo_url")
-            .in_("id", user_ids)
-            .execute()
-        )
+    rows: list[dict[str, Any]] = []
+    for fields in (_USER_FIELDS, _USER_FIELDS_NO_PORTRAIT):
+        try:
+            res = (
+                service_client()
+                .table("users")
+                .select(fields)
+                .in_("id", user_ids)
+                .execute()
+            )
+        except Exception:
+            continue
         rows = res.data if isinstance(res.data, list) else []
-    except Exception:
+        break
+    else:
         logger.exception("community_users_read_failed n=%d", len(user_ids))
         return {}
+    # Self-healing: anyone here without a public portrait gets one written behind this
+    # request. Their own claim writes are the normal trigger, but a member who never
+    # says another word to Lana would never get one — and peers read get_peer_profile
+    # straight from Supabase, so no viewer can warm it from the client side. The first
+    # person to open a community fixes it for everyone who opens it after.
+    _warm_missing_portraits(rows)
     return {str(r["id"]): r for r in rows if isinstance(r, dict) and r.get("id")}
+
+
+def _warm_missing_portraits(rows: list[dict[str, Any]]) -> None:
+    """Queue a portrait write for listed people who have none. Background, never blocks."""
+    missing = [
+        str(r["id"])
+        for r in rows
+        if isinstance(r, dict) and r.get("id") and not str(r.get("public_portrait") or "").strip()
+    ]
+    if not missing:
+        return
+    try:
+        from app.profile_portrait import schedule_portrait_refresh
+
+        for uid in missing[:_MAX_PORTRAIT_WARMS]:
+            schedule_portrait_refresh(uid)
+    except Exception:  # noqa: BLE001 — prose is an upgrade, never a blocker
+        logger.exception("portrait_warm_failed n=%d", len(missing))
 
 
 def member_count(place_id: str) -> int:
@@ -273,7 +392,7 @@ def _events_at_place(place_id: str, *, limit: int, within_days: int | None = Non
         q = (
             service_client()
             .table("events")
-            .select("id, title, starts_at, has_time, venue_name, host_id")
+            .select("id, title, starts_at, has_time, venue_name, host_id, cover_emoji")
         )
         q = (
             q.or_(f"place_ref.eq.{place_id},circle_place_ref.eq.{place_id}")
@@ -329,6 +448,10 @@ def _event_rows_for_profile(place_id: str) -> tuple[list[dict[str, Any]], int]:
             "has_time": r.get("has_time") is not False,
             "venue_name": str(r.get("venue_name") or "").strip() or None,
             "going_count": int(counts.get(str(r.get("id") or ""), 0)),
+            # The meet's own cover glyph, the same one its card and the Radar show. The
+            # FE has rendered this field all along and fell back to a calendar because
+            # nothing ever sent it, so one meet wore two faces (2026-08-18).
+            "cover_emoji": str(r.get("cover_emoji") or "").strip() or None,
         }
         for r in raw
         if str(r.get("title") or "").strip()
@@ -354,14 +477,17 @@ def _feature_label(key: str, value: str | None, sub_group: str) -> str:
     return label[:48]
 
 
-def place_features(place_id: str) -> list[dict[str, Any]]:
+def place_features(place_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
     """What members volunteered about the place, best-attested first. Only what
-    somebody actually said — this list is never inferred from the place type."""
+    somebody actually said — this list is never inferred from the place type.
+
+    `mine` marks the rows `user_id` contributed — the only ones remove_feature will
+    delete, so it is what decides whether the card renders an × (issues #77)."""
     try:
         res = (
             service_client()
             .table("place_features")
-            .select("key, value, sub_group, confidence, source, emoji")
+            .select("key, value, sub_group, confidence, source, emoji, contributed_by")
             .eq("place_id", place_id)
             .order("confidence", desc=True)
             .limit(40)
@@ -393,6 +519,7 @@ def place_features(place_id: str) -> list[dict[str, Any]]:
                 "label": label,
                 "sub_group": str(r.get("sub_group") or "") or None,
                 "emoji": str(r.get("emoji") or "").strip() or None,
+                "mine": bool(user_id) and str(r.get("contributed_by") or "") == user_id,
             }
         )
         if len(out) >= _MAX_FEATURES:
@@ -417,6 +544,17 @@ schedule, or how good the place is — if a fact isn't listed, it doesn't exist.
 - English only (rendered into the user's language downstream)."""
 
 
+def _blurb_fingerprint(
+    *, place_name: str, relation: str, area: str | None, features: list[str], members: int
+) -> str:
+    """What the description was written FROM. A different fingerprint means a fact moved
+    (a feature volunteered, the second member arriving) and the line is rewritten."""
+    facts = "|".join(
+        [place_name, relation, area or "", ",".join(features[:6]), str(members)]
+    )
+    return hashlib.sha256(facts.encode("utf-8")).hexdigest()[:32]
+
+
 def _blurb(
     *,
     place_name: str,
@@ -424,26 +562,87 @@ def _blurb(
     area: str | None,
     features: list[str],
     members: int,
+    # The place row's stored line and what it was written from. Absent (or an
+    # unmigrated environment, where the columns don't exist) simply means the
+    # template ships and nothing is written back.
+    place_id: str = "",
+    stored: str | None = None,
+    stored_key: str | None = None,
 ) -> str | None:
     """AI-authored from true facts, with a factual template as the floor
     ([[ai-authored-copy-not-canned]]). None when we know nothing to say.
 
-    Cached on its facts: the same place, features and member count always describe the
-    same thing, and the card can't render until this returns — an uncached call was ~1.6s
-    of every profile open, paid again on every re-open. A changed fact (a new feature, the
-    second member arriving) is a different key, so the copy still follows the truth.
-    """
-    return _blurb_cached(
-        place_name=place_name,
-        relation=relation,
-        area=area,
-        features=tuple(features or ()),  # hashable
-        members=members,
+    Written ONCE and kept on the place (migration 20261024). The model call is ~1.6s and
+    the card cannot render until the description returns, so it never happens in a
+    reader's request: a stored line whose fingerprint still matches is served straight
+    from the row we already fetched, and anything else serves the factual template now
+    while the authored line is written behind (landing for the next open).
+
+    The previous in-process lru_cache hid this locally and hid nothing in production —
+    it died with the process and every pod paid its own miss for the same sentence."""
+    key = _blurb_fingerprint(
+        place_name=place_name, relation=relation, area=area,
+        features=features, members=members,
     )
+    text = str(stored or "").strip()
+    if text and str(stored_key or "") == key:
+        return text
+    if place_id and key not in _BLURB_INFLIGHT:
+        _BLURB_INFLIGHT.add(key)
+        _BLURB_POOL.submit(
+            _author_blurb,
+            place_id,
+            key,
+            dict(
+                place_name=place_name,
+                relation=relation,
+                area=area,
+                features=tuple(features or ()),
+                members=members,
+            ),
+        )
+    # A stale line still describes this place better than nothing, but it can name a
+    # feature that has since been removed — the template is the one that is always true.
+    return _blurb_fallback(relation=relation, area=area, features=features)
 
 
-@lru_cache(maxsize=512)
-def _blurb_cached(
+# One worker: authoring is best-effort, and a single thread keeps a burst of profile
+# opens from fanning out into parallel model calls.
+_BLURB_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="blurb")
+# Fingerprints being authored right now, so two concurrent opens (or React's double
+# effect) don't buy the same sentence twice.
+_BLURB_INFLIGHT: set[str] = set()
+
+
+def _author_blurb(place_id: str, key: str, facts: dict[str, Any]) -> None:
+    """Write the description for these facts onto the place. Background only."""
+    try:
+        text = _compose_blurb(**facts)
+        if not text:
+            return
+        service_client().table("places").update(
+            {"blurb": text, "blurb_key": key}
+        ).eq("id", place_id).execute()
+    except Exception:  # noqa: BLE001 — the template already shipped; this is an upgrade
+        logger.exception("community_blurb_author_failed place=%s", place_id)
+    finally:
+        _BLURB_INFLIGHT.discard(key)
+
+
+def _blurb_fallback(
+    *, relation: str, area: str | None, features: list[str]
+) -> str | None:
+    """The true sentence, from facts alone — the floor under every authored line."""
+    if features:
+        joined = ", ".join(f.lower() for f in features[:3])
+        where = f" in {area}" if area else ""
+        return f"A {relation}{where} — {joined}."
+    if area:
+        return f"A {relation} in {area}."
+    return None
+
+
+def _compose_blurb(
     *,
     place_name: str,
     relation: str,
@@ -451,14 +650,8 @@ def _blurb_cached(
     features: tuple[str, ...],
     members: int,
 ) -> str | None:
+    """The authored sentence, or None if we could not write one. Background callers only."""
     features = list(features)
-    fallback: str | None = None
-    if features:
-        joined = ", ".join(f.lower() for f in features[:3])
-        where = f" in {area}" if area else ""
-        fallback = f"A {relation}{where} — {joined}."
-    elif area:
-        fallback = f"A {relation} in {area}."
     facts = [f"Place name: {place_name}", f"What it is, in the members' words: {relation}"]
     if area:
         facts.append(f"Area: {area}")
@@ -475,10 +668,9 @@ def _blurb_cached(
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
         if not llm_configured():
-            return fallback
-        # Router tier on purpose: one 140-token sentence from facts we hand it. The synth
-        # model spent seconds on it and the profile card can't render until it returns —
-        # this is the whole reason opening a community felt slow.
+            return None
+        # Router tier on purpose: one 140-token sentence from facts we hand it — the synth
+        # model spent seconds on the same job.
         data = llm_json(
             model=router_model(),
             system=_BLURB_PROMPT,
@@ -491,14 +683,16 @@ def _blurb_cached(
             return text[:220]
     except Exception:
         logger.exception("community_blurb_failed place=%s", place_name)
-    return fallback
+    # None, never the template: the caller already shipped that, and storing it would
+    # stamp a fingerprint that stops us retrying once the model is reachable again.
+    return None
 
 
 # ── shared threads between the caller and the members ─────────────────────────
 
 
-def _shared_concepts(user_id: str) -> dict[str, list[str]]:
-    """peer user_id -> the identity concepts they and the caller both hold.
+def _shared_concepts(user_id: str) -> dict[str, list[tuple[str, str]]]:
+    """peer user_id -> [(label, subject_kind)] they and the caller both hold.
 
     Exact concept-id overlap from count_shared_concepts_for_user — public,
     non-dismissed claims only. Absent from this map = nothing PROVEN shared, which
@@ -526,17 +720,36 @@ def _shared_concepts(user_id: str) -> dict[str, list[str]]:
         labels = r.get("shared_concept_labels")
         if not uid or not isinstance(labels, list):
             continue
-        clean = [str(x).strip() for x in labels if str(x or "").strip()]
+        # shared_concept_subjects[i] belongs to labels[i] (20261022120000): a
+        # 'child' entry is a fact about their kids, not about them.
+        subjects = r.get("shared_concept_subjects")
+        subjects = list(subjects) if isinstance(subjects, list) else []
+        clean: list[tuple[str, str]] = [
+            (str(x).strip(), str(subjects[i] if i < len(subjects) else "self"))
+            for i, x in enumerate(labels)
+            if str(x or "").strip()
+        ]
         if clean:
             out[uid] = clean[:_MAX_SHARED_LABELS]
     return out
 
 
-def _shared_line(labels: list[str], relation: str) -> str:
+def _shared_line(labels: list[tuple[str, str]], relation: str) -> str:
     """The one honest line under a member's name. Shared threads when there are
-    any; otherwise the fact that IS true of every row here — you both go here."""
-    if labels:
-        return "You both: " + " · ".join(labels)
+    any; otherwise the fact that IS true of every row here — you both go here.
+
+    Threads held about a child get their own clause: "you both" must only ever
+    describe the two adults.
+    """
+    mine = [lb for lb, subject in labels if subject == "self"]
+    kids = [lb for lb, subject in labels if subject == "child"]
+    clauses = []
+    if mine:
+        clauses.append("You both: " + " · ".join(mine))
+    if kids:
+        clauses.append("Your kids both: " + " · ".join(kids))
+    if clauses:
+        return " · ".join(clauses)
     return f"You both go to this {relation}"
 
 
@@ -629,28 +842,50 @@ def community_profile(
     phone_verified: bool = True,
 ) -> dict[str, Any]:
     """The place, for the people who go there. Raises ValueError('not_a_member' |
-    'affiliation_not_found' | 'place_required' | 'place_not_found')."""
-    pid = _resolve_place(user_id, affiliation_id=affiliation_id, place_id=place_id)
-    mine = caller_affiliation_at(user_id, pid)
+    'affiliation_not_found' | 'place_required' | 'place_not_found').
+
+    A 'curious' joiner (§19) opens the head — the place, what it has, how many people
+    — and no roster: she said she does not go here, so the names stay with the members."""
+    viewer = ("confirmed", "curious")
+    resolved: dict[str, Any] = {}
+    pid = _resolve_place(
+        user_id,
+        affiliation_id=affiliation_id,
+        place_id=place_id,
+        statuses=viewer,
+        out_affiliation=resolved,
+    )
+    mine = resolved or caller_affiliation_at(user_id, pid, statuses=viewer)
     if not mine:
         raise ValueError("not_a_member")
-    place = _place_row(pid)
+    is_member = str(mine.get("status") or "confirmed") == "confirmed"
+    from app.place_activities import activities_at_place
+
+    # Five reads about the same place, none of which needs another's answer. Serially
+    # they were five round trips the card waited through one at a time.
+    got = _gather(
+        place=lambda: _place_row(pid),
+        features=lambda: place_features(pid, user_id),
+        activities=lambda: activities_at_place(pid, user_id),
+        members=lambda: _member_rows(pid),
+        events=lambda: _event_rows_for_profile(pid),
+    )
+    place = got["place"]
     if not place:
         raise ValueError("place_not_found")
+    features, activities, members = got["features"], got["activities"], got["members"]
+    events, meets_this_week_count = got["events"]
     name = str(place.get("name") or "").strip()
     relation = place_relation_noun(
         mine.get("circle_type") or place.get("place_type"),
         mine.get("noun"),
         mine.get("circle_key"),
     )
-    features = place_features(pid)
-    from app.place_activities import activities_at_place
-
-    activities = activities_at_place(pid, user_id)
-    members = _member_rows(pid)
     count = len(members)
-    preview = _member_preview(user_id, members, phone_verified=phone_verified)
-    events, meets_this_week_count = _event_rows_for_profile(pid)
+    # Needs the roster, so it follows it — its own three reads are the next wave.
+    preview = _member_preview(
+        user_id, members, phone_verified=phone_verified and is_member
+    )
     return {
         "place_id": pid,
         "affiliation_id": str(mine.get("id") or ""),
@@ -671,17 +906,28 @@ def community_profile(
             mine.get("circle_type") or place.get("place_type"), mine.get("emoji")
         ),
         "detail": str(mine.get("detail") or "").strip() or None,
+        # What the caller said she is to this place: 'member' counts and is counted,
+        # 'curious' is watching it (POST /lana/circles/membership flips it).
+        "membership": "member" if is_member else "curious",
         "member_count": count,
         "active": count >= 2,
         # Counted from the meets already fetched above — reading this place's events
         # twice was a wasted round trip on every profile open.
         "status_line": _status_line(count, meets_this_week_count),
+        # Read off the place row we already fetched — no model call in this request.
+        # The noun here is the PLACE's, not `relation` (which is the caller's own word
+        # for it): the description is stored once for everyone, so keying it on a
+        # per-member noun made two members with different words overwrite each other's
+        # line on every open — the per-open model call this exists to remove.
         "description": _blurb(
+            place_id=pid,
             place_name=name,
-            relation=relation,
+            relation=place_relation_noun(place.get("place_type")),
             area=str(place.get("zip") or "").strip() or None,
             features=[f["label"] for f in features],
             members=count,
+            stored=place.get("blurb"),
+            stored_key=place.get("blurb_key"),
         ),
         "features": features,
         # Everything anyone does here, `mine` marking the caller's own — one list
@@ -696,9 +942,13 @@ def community_profile(
         # places.id), so the post-publish stamp lands on this same place_ref and the
         # meet shows up in this community's upcoming_events. Null = no google id on
         # file, so the FE lets the host flow ask for the venue as usual.
-        "create_event_venue": _create_event_venue(place) if phone_verified else None,
+        "create_event_venue": _create_event_venue(place)
+        if phone_verified and is_member
+        else None,
+        # Hosting and inviting are things members do here; a curious viewer gets the
+        # head and the FE's own Join.
         "actions": community_profile_actions(place_name=name, relation=relation)
-        if phone_verified
+        if phone_verified and is_member
         else [],
     }
 
@@ -736,12 +986,17 @@ def _member_preview(
     phone_verified: bool,
 ) -> list[dict[str, Any]]:
     """The avatar row on the profile card — the first few faces, never the whole
-    roster (that's the people panel, one tap away)."""
-    others = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "") != user_id]
-    if not others or not phone_verified:
+    roster (that's the people panel, one tap away).
+
+    The caller is IN this list, flagged `me` (§17): member_count has always counted her,
+    so leaving her out rendered "2 members" over one face."""
+    ids = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "")]
+    if not ids or not phone_verified:
         return []
-    blocked = _blocked_ids(user_id, others)
-    visible = [uid for uid in others if uid not in blocked][:5]
+    # Self goes in with the rest so a failed block read still fails closed — it hides
+    # every row, including hers, rather than rendering a roster of one.
+    blocked = _blocked_ids(user_id, ids)
+    visible = [uid for uid in ids if uid not in blocked][:5]
     users = _users_by_id(visible)
     out: list[dict[str, Any]] = []
     for uid in visible:
@@ -751,6 +1006,7 @@ def _member_preview(
                 "peer_user_id": uid,
                 "nickname": str(u.get("nickname") or "").strip() or None,
                 "avatar_url": str(u.get("profile_photo_url") or "").strip() or None,
+                "me": uid == user_id,
             }
         )
     return out
@@ -773,9 +1029,23 @@ def community_members(
     Unverified callers get the count and nothing else — names and nudges are for
     people who have verified, exactly like the peer cards.
     """
-    pid = _resolve_place(user_id, affiliation_id=affiliation_id, place_id=place_id)
-    place = _place_row(pid)
-    mine = caller_affiliation_at(user_id, pid)
+    resolved: dict[str, Any] = {}
+    pid = _resolve_place(
+        user_id,
+        affiliation_id=affiliation_id,
+        place_id=place_id,
+        out_affiliation=resolved,
+    )
+    # The place, the roster and the caller's concepts don't depend on each other —
+    # only membership (already proven above) gates them. Shared concepts are fetched
+    # only for a caller who can actually be shown names.
+    got = _gather(
+        place=lambda: _place_row(pid),
+        members=lambda: _member_rows(pid),
+        **({"shared": lambda: _shared_concepts(user_id)} if phone_verified else {}),
+    )
+    place, members = got["place"], got["members"]
+    mine = resolved or caller_affiliation_at(user_id, pid)
     if not mine:
         raise ValueError("not_a_member")
     relation = place_relation_noun(
@@ -783,7 +1053,6 @@ def community_members(
         mine.get("noun"),
         mine.get("circle_key"),
     )
-    members = _member_rows(pid)
     total = len(members)
     if not phone_verified:
         return {
@@ -794,30 +1063,51 @@ def community_members(
             "has_more": False,
             "requires_phone_verification": True,
         }
-    others = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "") != user_id]
-    blocked = _blocked_ids(user_id, others)
-    visible = [uid for uid in others if uid not in blocked]
+    # The caller is one of the people here, so she is in the list, flagged `me` (§17):
+    # member_count counts her, and a roster one row short of its own count reads as a bug.
+    ids = [str(m.get("user_id")) for m in members if str(m.get("user_id") or "")]
+    # Self goes in with the rest so a failed block read still fails closed — it hides
+    # every row, including hers, rather than rendering a roster of one.
+    blocked = _blocked_ids(user_id, ids)
+    visible = [uid for uid in ids if uid not in blocked]
     page = visible[max(offset, 0) : max(offset, 0) + max(limit, 1)]
     users = _users_by_id(page)
-    shared = _shared_concepts(user_id) if page else {}
+    shared = got.get("shared") or {}
     rows: list[dict[str, Any]] = []
     for uid in page:
         u = users.get(uid) or {}
         nickname = str(u.get("nickname") or "").strip()
-        labels = shared.get(uid) or []
+        me = uid == user_id
+        # Nothing is "shared with" yourself, and you cannot nudge yourself.
+        labels = [] if me else (shared.get(uid) or [])
         row: dict[str, Any] = {
             "peer_user_id": uid,
             "nickname": nickname or None,
             "avatar_url": str(u.get("profile_photo_url") or "").strip() or None,
-            "trait_tags": labels,
-            "shared_line": _shared_line(labels, relation),
+            # Tags are topic words for the chip row; the subject lives in the line.
+            "trait_tags": [lb for lb, _ in labels],
+            "shared_line": None if me else _shared_line(labels, relation),
+            "me": me,
             # Deliberately absent: stars, band, badge, similarity. Nothing here
             # compared two people ([[truthful-peer-match-model]]).
-            "actions": [peer_card_nudge_action(nickname=nickname, peer_user_id=uid)]
-            if nickname
-            else [],
+            "actions": [],  # filled below, once we know who is already connected
         }
         rows.append(row)
+    # An intro already on its way, or a connection already made, is a STATUS — not a
+    # control inviting the same action again. The roster kept offering Nudge next to
+    # someone Lana had just introduced you to, and the only thing a second tap could
+    # do was fail the 7-day pair cooldown (2026-08-18). Same helper and same tiers the
+    # peer cards use, so both surfaces agree on what "already done" means.
+    from app.peer_discovery_surface import stamp_connection_state
+
+    stamp_connection_state(rows, user_id=user_id)
+    for row in rows:
+        nickname = str(row.get("nickname") or "").strip()
+        if row.get("me") or not nickname or row.get("connection"):
+            continue
+        row["actions"] = [
+            peer_card_nudge_action(nickname=nickname, peer_user_id=str(row["peer_user_id"]))
+        ]
     return {
         "place_id": pid,
         "place_name": str(place.get("name") or "").strip() or None,

@@ -404,3 +404,65 @@ survive the filter.
   widen offer on an empty result yet.
 - **Junk `places` cleanup** — the filter hides address-shaped rows from discovery but
   does not remove them; the ones already grounded stay in the table.
+
+---
+
+# Second drop — the join question, the caller's own row, feature ownership
+
+Answers backend asks §15, §17, §18, §19, §20 (issues #77, #81, #83, #84, #86). All
+additive; nothing already shipped changes shape.
+
+## "I'm a member" vs "just curious" (§19)
+
+`POST /lana/circles/join` takes `membership: 'member' | 'curious'` (default `'member'`, so
+today's callers are unchanged), and the sheet can also answer after the tap:
+
+```
+POST /lana/circles/membership { affiliation_id, membership }
+  → { affiliation_id, place_id, membership }
+  400 place_required (an ungrounded candidate is not a community) · 404 affiliation_not_found
+```
+
+`curious` is deliberately **not** membership: the row is stored as
+`circle_affiliations.status = 'curious'`, which every member count, roster, peer profile and
+matcher already excludes by filtering `status = 'confirmed'`. So she does not move
+`member_count`, does not appear in `member_preview` / `members`, and never becomes a match
+candidate — while the place stays in her own `/lana/circles/mine` list.
+
+`POST /lana/circles/profile` opens for a curious joiner and carries `membership: 'curious'`:
+the head, the count, the features and the activities, with `member_preview: []`,
+`actions: []` and `create_event_venue: null` — the names belong to the people who go there.
+`/lana/circles/members` still 404s `not_a_member` for her. Either answer can be changed
+later through the same endpoint; tapping Join again as a member promotes the same row.
+
+## The caller is in her own community's roster (§17)
+
+`members[]` and `member_preview[]` now include the caller, flagged `me: true` (no
+`shared_line`, no trait tags, no Nudge — nothing is shared with yourself). Rows rendered
+now equal `member_count`, so the client-side splice can go. Everyone else's rows are
+unchanged, and a failed block read still hides the whole list rather than leaving one row.
+
+## Features say who added them (§15)
+
+Each `features[]` row carries `mine: boolean` — true exactly when
+`/lana/circles/features/remove` will succeed for the caller. Render the × on those and only
+those; the session-state workaround can go.
+
+## Supabase RPCs
+
+- `get_peer_profile` claim rows gain **`bucket`** and **`created_at`** (§14a), so the
+  neighbour's timeline groups by category and restores the recency rail.
+- `get_peer_profile.communities[]` rows gain **`place_id`** (our `places.id`) under the same
+  gate as `place_name` (§18): matched, or the viewer belongs to that place. A locked row
+  ("A gym") has `place_id: null` — there is nothing to open. Drop the name-matching bridge.
+- **`set_my_nickname(p_nickname) → { nickname }`** (§20), the twin of `set_my_handle`.
+  The rule is **1–30 characters after trimming** — confirmed, not guessed: the extraction
+  path has always truncated at 30. Over or empty raises a matchable `nickname_invalid`
+  instead of truncating. Renames are **not** rate limited (neither is the handle); if a
+  cooldown ever lands it will raise `nickname_rename_too_soon:<seconds>` so the UI can say
+  when. No uniqueness — `nickname` is the real first name Lana speaks, `handle` is the
+  unique public one.
+
+Migrations: `20261017120000_membership_intent.sql`, `20261018120000_peer_profile_claim_fields.sql`,
+`20261019120000_set_my_nickname.sql`. The three RPC/DB items above need the push; the
+worker fields need the worker deploy.

@@ -33,6 +33,9 @@ TURN_SCOPED_SURFACES = frozenset({
     "rec_widen_noun",
     # Tap-able answers for a clarify question — only valid on the turn that asked it.
     "clarify_options",
+    # The "which spot is it?" card. Owns the turn that asked; the ANSWER turn must not
+    # re-render it (the pending state in rapport_grounding is what survives, not the UI).
+    "grounding_card",
     # decide_turn policy chips — one-turn CTAs authored by the policy call.
     # (policy_chip_msgs is NOT here: the next turn reads it to recognize a tap
     # on the policy's own chip, then the next policy turn re-stamps it.)

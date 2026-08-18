@@ -63,8 +63,30 @@ _BUCKET_ORDER = (
 
 
 def fetch_identity_dashboard(user_jwt: str) -> dict[str, Any]:
+    """The caller's own profile + threads, with the portrait line filled in.
+
+    The RPC's `mapped_summary` comes off a completed profile_intake session, so a
+    profile built in chat has none — every reader (the drawer, the claims card) then
+    showed only the label list. Composing it here means one implementation for all of
+    them; it's cached on the thread set, so a re-read costs nothing.
+    """
     raw = call_rpc(user_jwt, "get_my_profile_dashboard", {})
-    return raw if isinstance(raw, dict) else {}
+    dashboard = raw if isinstance(raw, dict) else {}
+    if not str(dashboard.get("mapped_summary") or "").strip():
+        from app.profile_portrait import portrait_from_claims, schedule_portrait_refresh
+
+        claims = [c for c in dashboard.get("claims") or [] if isinstance(c, dict)]
+        profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
+        # No stored line yet — a profile whose threads all predate 20261026, or one
+        # whose write-path refresh hasn't landed. Compose it for THIS reader and queue
+        # the write, so the next open (and every peer's) reads the column instead.
+        dashboard["mapped_summary"] = portrait_from_claims(
+            claims,
+            area=str(profile.get("block_display_name") or profile.get("home_zip") or "") or None,
+        )
+        if claims:
+            schedule_portrait_refresh(str(profile.get("id") or profile.get("user_id") or ""))
+    return dashboard
 
 
 def _sort_claims_for_display(claims: list[dict[str, Any]], *, limit: int = 18) -> list[dict[str, Any]]:
@@ -94,6 +116,21 @@ def _sort_claims_for_display(claims: list[dict[str, Any]], *, limit: int = 18) -
     return ordered
 
 
+def claim_display_label(c: dict[str, Any]) -> str:
+    """The claim as the OWNER should read it back.
+
+    A child's thread carries who it is about — "Does karate" alone, listed under
+    the user's own name, says the user does karate.
+    """
+    label = str(c.get("label") or c.get("concept") or "").strip()
+    if not label or str(c.get("subject_kind") or "self") != "child":
+        return label
+    name = str(c.get("subject_name") or "").strip()
+    age = c.get("subject_age")
+    who = ", ".join(str(p) for p in (name, f"age {age}" if age else None) if p)
+    return f"{label} ({who})" if who else f"{label} (your child)"
+
+
 def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
     profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
     claims = dashboard.get("claims") if isinstance(dashboard.get("claims"), list) else []
@@ -116,9 +153,11 @@ def format_identity_profile_reply(dashboard: dict[str, Any]) -> str:
         for c in claims:
             if not isinstance(c, dict):
                 continue
-            label = str(c.get("label") or c.get("concept") or "").strip()
+            label = claim_display_label(c)
             if not label:
                 continue
+            # Keyed on the rendered label, so two children who both do karate
+            # stay two lines instead of one collapsing over the other.
             key = label.lower()
             if key in seen_labels:
                 continue
@@ -286,14 +325,29 @@ def _call_peer_rpc(user_jwt: str, base: str, args: dict[str, Any]) -> Any:
     """
     name, payload = radius_rpc(base, args)
     if name == base:
-        return call_rpc(user_jwt, name, payload)
+        return _without_connected(user_jwt, call_rpc(user_jwt, name, payload))
     try:
-        return call_rpc(user_jwt, name, payload)
+        return _without_connected(user_jwt, call_rpc(user_jwt, name, payload))
     except Exception:
         logging.getLogger(__name__).exception(
             "peer_radius_rpc_failed rpc=%s — falling back to block scope", name
         )
-        return call_rpc(user_jwt, base, args)
+        return _without_connected(user_jwt, call_rpc(user_jwt, base, args))
+
+
+def _without_connected(user_jwt: str, raw: Any) -> Any:
+    """Strip peers the caller already connected with from a peer-search result.
+
+    Applied at the dispatch every find_peers_* RPC goes through, so no downstream
+    row builder or reply composer ever sees an already-connected neighbor as a fresh
+    candidate. See peer_discovery_surface.drop_connected_peers.
+    """
+    if not isinstance(raw, list):
+        return raw
+    from app.auth import jwt_user_id
+    from app.peer_discovery_surface import drop_connected_peers
+
+    return drop_connected_peers(raw, user_id=jwt_user_id(user_jwt))
 
 
 def _fetch_peers_single_attr(user_jwt: str, token: str, *, limit: int = 20) -> list[dict[str, Any]]:

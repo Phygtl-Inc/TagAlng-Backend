@@ -94,8 +94,19 @@ def compose_match_reason(row: dict[str, Any]) -> tuple[str | None, list[str]]:
     shared = _clean_tags(
         [str(s) for s in raw_shared] if isinstance(raw_shared, list) else [], max_tags=3
     )
-    if shared:
-        return "You both: " + " · ".join(shared), shared
+    raw_kids = row.get("shared_child_labels")
+    kids = _clean_tags(
+        [str(s) for s in raw_kids] if isinstance(raw_kids, list) else [], max_tags=3
+    )
+    if shared or kids:
+        # Two subjects, two clauses. A claim held about a child says nothing
+        # about the adult reading it, so it never rides on "You both".
+        clauses = []
+        if shared:
+            clauses.append("You both: " + " · ".join(shared))
+        if kids:
+            clauses.append("Your kids both: " + " · ".join(kids))
+        return " · ".join(clauses), shared + kids
     my_label = str(row.get("matching_my_label") or "").strip()
     peer_label = str(row.get("matching_peer_label") or "").strip()
     if not my_label or not peer_label:
@@ -123,10 +134,17 @@ def enrich_peer_match_row(row: dict[str, Any]) -> dict[str, Any]:
         out["trait_tags"] = []
         return out
     raw_shared = out.get("shared_labels")
+    raw_kids = out.get("shared_child_labels")
     shared_count = len(
-        _clean_tags([str(s) for s in raw_shared], max_tags=10)
-        if isinstance(raw_shared, list)
-        else []
+        _clean_tags(
+            [
+                str(s)
+                for key in (raw_shared, raw_kids)
+                if isinstance(key, list)
+                for s in key
+            ],
+            max_tags=10,
+        )
     )
     if not shared_count and bool(out.get("has_exact_concept_match")):
         shared_count = 1  # legacy rows without shared_labels: the best pair is exact
@@ -255,13 +273,71 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
 _CONNECTED_TIERS = frozenset({"acquaintance", "direct", "irl_peer"})
 
 
+def peer_tiers(user_id: str, peer_ids: list[str]) -> dict[str, str]:
+    """{peer_user_id: relationship tier} for the caller. {} on any failure.
+
+    Fail-open by design: every caller degrades to today's behaviour when the lookup
+    breaks, rather than hiding neighbors or blocking an intro on an infra blip.
+    """
+    ids = [i for i in dict.fromkeys(str(p) for p in peer_ids) if i]
+    if not user_id or not ids:
+        return {}
+    try:
+        from app.auth import service_client
+
+        res = service_client().rpc(
+            "get_relationship_tiers_for_user",
+            {"p_user_id": user_id, "p_other_user_ids": ids},
+        ).execute()
+        return {
+            str(r["other_user_id"]): str(r.get("tier") or "stranger")
+            for r in (res.data or [])
+            if r.get("other_user_id")
+        }
+    except Exception:  # noqa: BLE001 - never let a tier lookup break a search or a card
+        import logging
+
+        logging.getLogger(__name__).exception("relationship_tier_lookup_failed")
+        return {}
+
+
+def drop_connected_peers(
+    rows: list[dict[str, Any]], *, user_id: str | None
+) -> list[dict[str, Any]]:
+    """Peers the caller already connected with are not candidates — filter at the source.
+
+    No peer source consults user_relationships: they match on claims and proximity and
+    filter blocked users only. So an accepted nudge never stopped Lana re-offering the
+    same neighbor as a fresh intro, and the send then died on the 7-day pair cooldown
+    ("I couldn't send that nudge right now — try again in a moment", forever).
+
+    Dropping here rather than on the card is what keeps her prose honest: with the row
+    gone, an exhausted search takes the real "nobody new yet" branch instead of pitching
+    an intro to someone the user already knows. 'nudge' rows stay — one is genuinely out
+    awaiting a reply, which the card labels intro_sent instead of offering Nudge again.
+    """
+    if not user_id or not rows:
+        return rows
+    tiers = peer_tiers(
+        user_id,
+        [str(r.get("peer_user_id") or "") for r in rows if isinstance(r, dict)],
+    )
+    if not tiers:
+        return rows
+    return [
+        r
+        for r in rows
+        if not isinstance(r, dict)
+        or tiers.get(str(r.get("peer_user_id") or "")) not in _CONNECTED_TIERS
+    ]
+
+
 def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
     """Mark rows the caller already has a relationship with, in place.
 
-    The tier is recorded (user_relationships, promoted on nudge/accept) but no peer-search
-    path reads it — they filter blocked users only. So Lana kept re-offering an intro to
-    someone the user had already nudged, accepted and messaged, and the send then failed.
-    Best-effort: a lookup failure just leaves the cards as they were.
+    Backstop to drop_connected_peers for rows that reached a card without passing a
+    peer source (stale session ctx, orchestrator tool results): the Nudge button comes
+    off, because a nudge here can only fail the pair cooldown.
     """
     ids = [
         str(r["peer_user_id"])
@@ -270,22 +346,8 @@ def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
     ]
     if not user_id or not ids:
         return
-    try:
-        from app.auth import service_client
-
-        res = service_client().rpc(
-            "get_relationship_tiers_for_user",
-            {"p_user_id": user_id, "p_other_user_ids": list(dict.fromkeys(ids))},
-        ).execute()
-        tiers = {
-            str(r["other_user_id"]): str(r.get("tier") or "stranger")
-            for r in (res.data or [])
-            if r.get("other_user_id")
-        }
-    except Exception:  # noqa: BLE001 - cards must render even if the tier lookup fails
-        import logging
-
-        logging.getLogger(__name__).exception("relationship_tier_lookup_failed")
+    tiers = peer_tiers(user_id, ids)
+    if not tiers:
         return
     for row in rows:
         if not isinstance(row, dict) or row.get("connection"):

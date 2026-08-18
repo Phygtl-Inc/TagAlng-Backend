@@ -141,6 +141,14 @@ RESEND_FROM: "${RESEND_FROM:-}"
 APP_BASE_URL: "${APP_BASE_URL:-}"
 EOF
 
+# Warm-instance policy, chosen by the caller — this script's own defaults are exactly
+# what dev has always used (scale to zero, no boot boost: nobody waits on dev, and an
+# idle service should cost nothing). deploy-lana-worker-prod.sh overrides both, because
+# at a floor of 0 the next person to open the app pays a container cold start before
+# their first query even runs. See that script for the full reasoning.
+MIN_INSTANCES="${MIN_INSTANCES:-0}"
+CPU_BOOST="${CPU_BOOST:-}"   # any non-empty value adds --cpu-boost
+
 gcloud run deploy "$SERVICE" \
   --source "$ROOT/services/lana-worker" \
   --project "$PROJECT" \
@@ -153,7 +161,8 @@ gcloud run deploy "$SERVICE" \
   --cpu 1 \
   --timeout 120 \
   --concurrency 20 \
-  --min-instances 0 \
+  --min-instances "$MIN_INSTANCES" \
+  ${CPU_BOOST:+--cpu-boost} \
   --max-instances 10 \
   --env-vars-file "$ENV_VARS_FILE"
 

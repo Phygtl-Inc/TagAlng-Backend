@@ -118,6 +118,8 @@ from app.models import (
     CommunityMembersResponse,
     CommunityProfileResponse,
     ExtractedClaim,
+    GroundingCardOption,
+    GroundingCardPayload,
     HighlightSpan,
     JointMomentCandidate,
     JointMomentPayload,
@@ -189,6 +191,7 @@ from app.vertex_extract import vertex_extract_from_transcript
 from app.vertex_lana import lana_opening, lana_turn
 
 from app.analytics import track as amplitude_track
+from app.event_place import community_label, community_line
 from app.feedback import record_feedback as record_lana_feedback
 from app.notifications import email_html, notify_user, recipient_lang, recipient_langs
 from app.rapport_gaps import (
@@ -475,13 +478,27 @@ def _ui_from_dict(raw: dict[str, Any] | None) -> LanaTurnUi:
     )
 
 
-def _draft_from_dict(raw: dict[str, Any] | None) -> EventDraft | None:
+def _draft_from_dict(raw: dict[str, Any] | None, user_id: str | None = None) -> EventDraft | None:
     if not raw:
         return None
     draft = EventDraft(**raw)
     if draft.cohort_tags and not draft.cohort_tag_labels:
         draft.cohort_tag_labels = cohort_tag_labels_for(draft.cohort_tags)
+    # Every card built from the draft (review, "it's all set", the celebration card) shows
+    # the community the meet is for, and the draft stores only its place id.
+    # ponytail: one lookup per host-flow turn — cache on the session draft if it shows up
+    # in the latency traces.
+    if draft.circle_place_id and not draft.community:
+        from app.event_place import event_community
+
+        draft.community = event_community(draft.circle_place_id, user_id)
     return draft
+
+
+def _community_note(label: str | None, lang: str | None) -> str | None:
+    """"Community · 🏋️ Fitness CF" for a meet created for a community — the one line every
+    event notification carries so the mail and push match what the cards show."""
+    return t("notify.community_note", lang, name=label) if label else None
 
 
 def _item_draft_from_dict(raw: dict[str, Any] | None) -> ItemDraft | None:
@@ -740,6 +757,35 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
     return out
 
 
+def _grounding_card_from_ctx(ctx: dict[str, Any]) -> GroundingCardPayload | None:
+    """The place-grounding card this turn asked for, if it did (turn-scoped key)."""
+    raw = ctx.get("grounding_card")
+    if not isinstance(raw, dict) or not str(raw.get("affiliation_id") or "").strip():
+        return None
+    options = [
+        GroundingCardOption(
+            label=str(o.get("label") or "").strip(),
+            address=(str(o["address"]).strip() or None) if o.get("address") else None,
+            google_place_id=str(o.get("google_place_id") or "") or None,
+            send=str(o.get("send") or "").strip(),
+            suggested=bool(o.get("suggested")),
+        )
+        for o in (raw.get("options") if isinstance(raw.get("options"), list) else [])
+        if isinstance(o, dict) and str(o.get("label") or "").strip()
+    ]
+    return GroundingCardPayload(
+        question=str(raw.get("question") or "").strip(),
+        affiliation_id=str(raw["affiliation_id"]).strip(),
+        options=options,
+        circle_type=str(raw.get("circle_type") or "") or None,
+        relation_noun=str(raw.get("relation_noun") or "") or None,
+        emoji=str(raw.get("emoji") or "") or None,
+        place_name=str(raw.get("place_name") or "") or None,
+        detail=str(raw.get("detail") or "") or None,
+        unmatched_name=str(raw.get("unmatched_name") or "") or None,
+    )
+
+
 def _ask_draft_from_ctx(ctx: dict[str, Any]) -> AskDraftPayload | None:
     raw = ctx.get("ask_draft")
     if not isinstance(raw, dict) or not str(raw.get("title") or "").strip():
@@ -846,6 +892,7 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
                 has_time=row.get("has_time") is not False,
                 starts_label=str(row.get("starts_label") or "") or None,
                 venue_name=str(row.get("venue_name") or "") or None,
+                community=row.get("community") if isinstance(row.get("community"), dict) else None,
                 preview=bool(row.get("preview", True)),
             )
         )
@@ -1251,7 +1298,7 @@ def create_lana_session(
             ready = status == "ready_to_complete"
             ob = _onboarding_fields(merged_ctx, auth, ready_to_complete=ready)
             ui = _ui_from_dict(ui_raw)
-            event_draft = _draft_from_dict(draft_raw)
+            event_draft = _draft_from_dict(draft_raw, auth.user_id)
             return CreateSessionResponse(
                 session_id=session_id,
                 purpose=purpose,
@@ -1462,7 +1509,7 @@ def create_lana_session(
             core_block=session_ctx.get("core_block"),
         )
         ui = _ui_from_dict(ui_raw)
-        event_draft = _draft_from_dict(draft_raw)
+        event_draft = _draft_from_dict(draft_raw, auth.user_id)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1714,6 +1761,13 @@ def _run_lana_message(
             "gap_row_id": (body.rapport_gap_row_id or "").strip() or None,
             "question": (body.rapport_question or "").strip() or None,
         }
+    # A tapped Nudge names its target outright. Re-stamped (None clears) every turn, never
+    # popped — a popped key gets resurrected by the stored-context merge and the next
+    # unrelated intro would go to whoever was nudged last.
+    if purpose == "lana":
+        session_ctx_in["nudge_peer_user_id"] = (body.peer_user_id or "").strip() or None
+        # Same rule for a grounding card's pick — one turn only, cleared with None.
+        session_ctx_in["ground_place_id"] = (body.ground_place_id or "").strip() or None
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -1864,7 +1918,7 @@ def _run_lana_message(
                 assistant_msg_id = msg_future.result()
                 session_future.result()
         ui = _ui_from_dict(ui_raw)
-        event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"))
+        event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"), auth.user_id)
         item_draft = _item_draft_from_dict(merged.get("item_draft"))
         tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
         look_draft = _look_draft_from_dict(merged.get("look_draft"))
@@ -2001,6 +2055,9 @@ def _run_lana_message(
                 getattr(event_draft, "title", None) or "your meet"
             ) if event_draft else "your meet"
             _lang = recipient_lang(auth.user_id)
+            _cnote = _community_note(
+                community_line(getattr(event_draft, "community", None)), _lang
+            )
             notify_user(
                 auth.user_id,
                 title=t("notify.event_live.title", _lang),
@@ -2012,7 +2069,9 @@ def _run_lana_message(
                     t("notify.event_live.email_body", _lang, title=_etitle),
                     cta_label=t("notify.event_live.cta", _lang),
                     cta_path=f"/meet/{_eid}",
+                    note=_cnote,
                 ),
+                note=_cnote,
             )
     elif _ui == "signal_saved":
         _sig = merged.get("signal_saved") if isinstance(merged.get("signal_saved"), dict) else {}
@@ -2036,6 +2095,7 @@ def _run_lana_message(
         tip_draft=tip_draft,
         look_draft=look_draft,
         ask_draft=_ask_draft_from_ctx(merged),
+        grounding=_grounding_card_from_ctx(merged),
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
@@ -2331,7 +2391,12 @@ def hook_event_join(
         return {"ok": False}
     try:
         ev = (
-            sb.table("events").select("title,host_id").eq("id", body.event_id).single().execute().data
+            sb.table("events")
+            .select("title,host_id,circle_place_ref")
+            .eq("id", body.event_id)
+            .single()
+            .execute()
+            .data
             or {}
         )
         req = (
@@ -2353,6 +2418,8 @@ def hook_event_join(
     _, joiner_nick = _user_contact(auth.user_id)
     who = joiner_nick or "A neighbor"
     eid = body.event_id
+    # One lookup for the whole fan-out; each recipient's line is rendered in their language.
+    clabel = community_label(ev.get("circle_place_ref"), host_id)
 
     # → host
     if host_id and host_id != auth.user_id:
@@ -2368,7 +2435,9 @@ def hook_event_join(
                     t("notify.joined_host.subject", _hl, who=who, title=title),
                     t("notify.joined_host.email_body", _hl, who=who),
                     t("notify.joined_host.cta", _hl), f"/meet/{eid}/requests",
+                    note=_community_note(clabel, _hl),
                 ),
+                note=_community_note(clabel, _hl),
             )
         else:
             _hl = recipient_lang(host_id)
@@ -2382,7 +2451,9 @@ def hook_event_join(
                     t("notify.join_request.title", _hl),
                     t("notify.join_request.email_body", _hl, who=who, title=title),
                     t("notify.join_request.cta", _hl), f"/meet/{eid}/requests",
+                    note=_community_note(clabel, _hl),
                 ),
+                note=_community_note(clabel, _hl),
             )
 
     # → joiner
@@ -2398,7 +2469,9 @@ def hook_event_join(
                 t("notify.youre_in.title", _jl),
                 t("notify.youre_in.email_self", _jl, title=title),
                 t("notify.event_live.cta", _jl), f"/meet/{eid}",
+                note=_community_note(clabel, _jl),
             ),
+            note=_community_note(clabel, _jl),
         )
     else:
         _jl = recipient_lang(auth.user_id)
@@ -2412,7 +2485,9 @@ def hook_event_join(
                 t("notify.request_sent.title", _jl),
                 t("notify.request_sent.email_body", _jl, title=title),
                 t("notify.event_live.cta", _jl), f"/meet/{eid}",
+                note=_community_note(clabel, _jl),
             ),
+            note=_community_note(clabel, _jl),
         )
     return {"ok": True}
 
@@ -2448,12 +2523,21 @@ def hook_event_decision(
     if not requester_id or not eid:
         return {"ok": False}
     try:
-        ev = sb.table("events").select("title,host_id").eq("id", eid).single().execute().data or {}
+        ev = (
+            sb.table("events")
+            .select("title,host_id,circle_place_ref")
+            .eq("id", eid)
+            .single()
+            .execute()
+            .data
+            or {}
+        )
     except Exception:  # noqa: BLE001
         return {"ok": False}
     if ev.get("host_id") != auth.user_id:  # only the host may trigger this
         return {"ok": False}
     title = ev.get("title") or "a meet"
+    clabel = community_label(ev.get("circle_place_ref"), ev.get("host_id"))
     if status == "approved":
         _rl = recipient_lang(requester_id)
         notify_user(
@@ -2466,7 +2550,9 @@ def hook_event_decision(
                 t("notify.youre_in.title", _rl),
                 t("notify.youre_in.email_approved", _rl, title=title),
                 t("notify.event_live.cta", _rl), f"/meet/{eid}",
+                note=_community_note(clabel, _rl),
             ),
+            note=_community_note(clabel, _rl),
         )
     elif status == "declined":
         _rl = recipient_lang(requester_id)
@@ -2475,6 +2561,7 @@ def hook_event_decision(
             title=t("notify.declined.title", _rl, title=title),
             body=t("notify.declined.body", _rl),
             url=f"/meet/{eid}",
+            note=_community_note(clabel, _rl),
         )
     return {"ok": True}
 
@@ -2497,7 +2584,7 @@ def hook_event_cancel(
     try:
         ev = (
             sb.table("events")
-            .select("title,host_id,status")
+            .select("title,host_id,status,circle_place_ref")
             .eq("id", body.event_id)
             .single()
             .execute()
@@ -2512,6 +2599,7 @@ def hook_event_cancel(
         return {"ok": False}
 
     title = ev.get("title") or "a meet"
+    clabel = community_label(ev.get("circle_place_ref"), ev.get("host_id"))
     eid = body.event_id
     try:
         rows = (
@@ -2543,7 +2631,9 @@ def hook_event_cancel(
                 t("notify.cancelled.title", lang, title=title),
                 t("notify.cancelled.email_body", lang),
                 t("notify.cancelled.cta", lang), "/",
+                note=_community_note(clabel, lang),
             ),
+            note=_community_note(clabel, lang),
         )
     return {"ok": True, "notified": len(roster)}
 
@@ -2582,7 +2672,15 @@ def hook_event_skip(
     if sb is None:
         return {"ok": True, "next_starts_at": next_raw, "notified": 0}
     try:
-        ev = sb.table("events").select("title").eq("id", body.event_id).single().execute().data or {}
+        ev = (
+            sb.table("events")
+            .select("title,host_id,circle_place_ref")
+            .eq("id", body.event_id)
+            .single()
+            .execute()
+            .data
+            or {}
+        )
         rows = (
             sb.table("event_requests")
             .select("requester_id")
@@ -2597,6 +2695,7 @@ def hook_event_skip(
         return {"ok": True, "next_starts_at": next_raw, "notified": 0}
 
     title = ev.get("title") or "a meet"
+    clabel = community_label(ev.get("circle_place_ref"), ev.get("host_id"))
     roster = {r.get("requester_id") for r in rows} - {None, auth.user_id}
     langs = recipient_langs([str(u) for u in roster])
     for uid in roster:
@@ -2618,7 +2717,9 @@ def hook_event_skip(
                 line,
                 t("notify.skipped.cta", lang),
                 f"/meet/{body.event_id}",
+                note=_community_note(clabel, lang),
             ),
+            note=_community_note(clabel, lang),
         )
     return {"ok": True, "next_starts_at": next_raw, "notified": len(roster)}
 
@@ -2870,6 +2971,14 @@ class CommunityJoinBody(_BaseModel):
     # The joiner's own framing, if the UI asked ("it's my gym"). Defaults to the
     # place's advisory type — the user's framing is never taken from other members.
     circle_type: str | None = None
+    # "I'm a member — I go here" (default) vs "Not yet — just curious for now". Curious
+    # is NOT membership: see /lana/circles/membership below.
+    membership: str = "member"
+
+
+class CommunityMembershipBody(_BaseModel):
+    affiliation_id: str
+    membership: str  # 'member' | 'curious'
 
 
 @app.post("/lana/circles/discover", response_model=CommunityDiscoveryResponse)
@@ -2937,6 +3046,7 @@ def post_circles_join(
             auth.user_id,
             (body.place_id or "").strip(),
             circle_type=(body.circle_type or "").strip().lower() or None,
+            membership=(body.membership or "member").strip().lower(),
         )
     except ValueError as exc:
         detail = str(exc)
@@ -2952,6 +3062,10 @@ def post_circles_join(
                 "source": result.get("source"),
                 "confirmed_via": result.get("confirmed_via"),
                 "promoted_from_candidate": bool(result.get("promoted_from_candidate")),
+                # Does the join sheet's question change who joins? (§19)
+                "membership": "curious"
+                if str(result.get("status") or "") == "curious"
+                else "member",
             },
         )
     return CommunityJoinResponse(
@@ -2959,6 +3073,7 @@ def post_circles_join(
         place_id=str(result.get("place_id") or ""),
         place_name=result.get("place_name"),
         status=str(result.get("status") or "confirmed"),
+        membership="curious" if str(result.get("status") or "") == "curious" else "member",
         already_member=bool(result.get("already_member")),
         source=result.get("source"),
         confirmed_via=result.get("confirmed_via"),
@@ -2967,6 +3082,58 @@ def post_circles_join(
         ),
         promoted_from_candidate=bool(result.get("promoted_from_candidate")),
     )
+
+
+@app.post("/lana/circles/membership")
+def post_circles_membership(
+    body: CommunityMembershipBody,
+    authorization: str | None = Header(default=None),
+):
+    """The join sheet's answer, posted after the join (§19): "I'm a member — I go here"
+    or "Not yet — just curious for now".
+
+    Curious is deliberately not membership — the row stays hers to see and is excluded
+    from member counts, rosters and matching, so a stranger never becomes a match
+    candidate for people she has never met. Idempotent; either answer can be changed."""
+    auth = verify_auth(authorization)
+    from app.community_discovery import set_membership
+
+    try:
+        result = set_membership(
+            auth.user_id,
+            (body.affiliation_id or "").strip(),
+            (body.membership or "").strip().lower(),
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 400 if detail in ("place_required", "membership_write_failed") else 404
+        raise HTTPException(status_code=status, detail=detail) from exc
+    amplitude_track(
+        "circle_membership_set",
+        user_id=auth.user_id,
+        event_properties={
+            "place_id": result.get("place_id"),
+            "membership": result.get("membership"),
+        },
+    )
+    return result
+
+
+@app.post("/lana/profile/portrait")
+def post_profile_portrait(authorization: str | None = Header(default=None)):
+    """The prose line above the caller's own identity threads.
+
+    The profile drawer loads its dashboard straight from the RPC, which only carries
+    `mapped_summary` for a profile that came out of an onboarding intake. This serves
+    the same line for a profile built in chat — one extra call the drawer makes only
+    when the RPC came back without one, so it never blocks the box from rendering.
+    """
+    jwt = _bearer_token(authorization)
+    verify_auth(authorization)
+    from app.layer1_handlers import fetch_identity_dashboard
+
+    dashboard = fetch_identity_dashboard(jwt)
+    return {"portrait": dashboard.get("mapped_summary") or None}
 
 
 @app.post("/lana/circles/profile", response_model=CommunityProfileResponse)
@@ -3002,6 +3169,7 @@ def post_circles_profile(
         relation=data.get("relation"),
         emoji=data.get("emoji"),
         detail=data.get("detail"),
+        membership=str(data.get("membership") or "member"),
         member_count=int(data.get("member_count") or 0),
         active=bool(data.get("active")),
         status_line=data.get("status_line"),
@@ -3012,6 +3180,7 @@ def post_circles_profile(
                 label=str(f.get("label") or ""),
                 sub_group=str(f.get("sub_group") or "") or None,
                 emoji=str(f.get("emoji") or "") or None,
+                mine=bool(f.get("mine")),
             )
             for f in (data.get("features") or [])
             if isinstance(f, dict) and str(f.get("label") or "").strip()
@@ -3031,6 +3200,7 @@ def post_circles_profile(
                 peer_user_id=str(m.get("peer_user_id") or ""),
                 nickname=m.get("nickname"),
                 avatar_url=m.get("avatar_url"),
+                me=bool(m.get("me")),
             )
             for m in (data.get("member_preview") or [])
             if isinstance(m, dict) and str(m.get("peer_user_id") or "").strip()
@@ -3043,6 +3213,7 @@ def post_circles_profile(
                 has_time=e.get("has_time") is not False,
                 venue_name=e.get("venue_name"),
                 going_count=int(e.get("going_count") or 0),
+                cover_emoji=e.get("cover_emoji"),
             )
             for e in (data.get("upcoming_events") or [])
             if isinstance(e, dict) and str(e.get("event_id") or "").strip()
@@ -3084,6 +3255,8 @@ def post_circles_members(
                 avatar_url=m.get("avatar_url"),
                 trait_tags=[str(t) for t in (m.get("trait_tags") or [])][:6],
                 shared_line=m.get("shared_line"),
+                me=bool(m.get("me")),
+                connection=str(m.get("connection") or "") or None,
                 actions=_ui_action_rows_from_raw(m.get("actions")),
             )
             for m in (data.get("members") or [])
@@ -3551,7 +3724,7 @@ def get_lana_session(
         context=sess_ctx,
         mapped_summary=sess_ctx.get("mapped_summary"),
         spans=sess_ctx.get("spans") or [],
-        event_draft=_draft_from_dict(sess_ctx.get("event_draft")),
+        event_draft=_draft_from_dict(sess_ctx.get("event_draft"), user_id),
         messages=[
             {
                 "id": m.get("id"),

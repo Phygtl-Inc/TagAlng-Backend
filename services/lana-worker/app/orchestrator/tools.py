@@ -101,6 +101,20 @@ def _send_nudge(*, user_jwt: str | None, args: dict[str, Any]) -> dict[str, Any]
     if not recipient:
         return {"status": "error", "tool": "send_nudge", "reason": "to_user_id_required"}
     context_msg = args.get("context_message")
+    # Nudging someone you already connected with can only fail the 7-day pair cooldown.
+    # Report it as the relationship it is, so the synthesizer says "you two are already
+    # connected" instead of narrating a send error.
+    from app.auth import jwt_user_id
+    from app.peer_discovery_surface import _CONNECTED_TIERS, peer_tiers
+
+    me = jwt_user_id(jwt)
+    if me and peer_tiers(me, [str(recipient)]).get(str(recipient)) in _CONNECTED_TIERS:
+        return {
+            "status": "error",
+            "tool": "send_nudge",
+            "reason": "already_connected",
+            "to_user_id": str(recipient),
+        }
     try:
         nudge_id = call_rpc(
             jwt,

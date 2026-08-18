@@ -77,6 +77,9 @@ class ActivityPreviewRow(BaseModel):
     has_time: bool | None = None
     starts_label: str | None = None
     venue_name: str | None = None
+    # The community this meet was created for, when it has one — same shape as everywhere
+    # else, so the browse row names it beside the venue.
+    community: dict[str, Any] | None = None
     preview: bool = True
 
 
@@ -193,6 +196,48 @@ class AskDraftPayload(BaseModel):
     ready: bool = False
 
 
+class GroundingCardOption(BaseModel):
+    """One real place on a grounding card. `suggested` marks a nearby place of the right
+    KIND rather than one bearing the name the user gave — copy must ask, never assert."""
+
+    label: str
+    address: str | None = None
+    google_place_id: str | None = None
+    send: str
+    suggested: bool = False
+
+
+class GroundingCardPayload(BaseModel):
+    """The "which spot is it?" card, on a CHAT turn (C-CIRCLE-GROUND).
+
+    Deliberately the same shape the home tile's ask already has, so the FE renders the
+    one component both places: pick-one grid, Google search box, non-punishing skip.
+    Chat used to get bare chips, so a user whose place wasn't in the list had no way to
+    search for it and the two surfaces disagreed about the same question (2026-08-18).
+
+    The tile-only fields are stubs here: this ask is a live turn, not a queued gap, so
+    there is no gap row to answer or skip — the card posts a normal message back."""
+
+    kind: str = "place_grounding"
+    gap_row_id: str = ""
+    gap_id: str = "chat_grounding"
+    parent_bucket: str = "vicinity"
+    why_frame: str = ""
+    sensitivity_tier: str = "LOW"
+    chip_color_token: str = "sky"
+    question: str
+    affiliation_id: str
+    options: list[GroundingCardOption] = Field(default_factory=list)
+    circle_type: str | None = None
+    relation_noun: str | None = None
+    emoji: str | None = None
+    place_name: str | None = None
+    detail: str | None = None
+    # The name we searched for and could not find — the card leads with it instead of
+    # showing an empty grid.
+    unmatched_name: str | None = None
+
+
 class CommunityCardRow(BaseModel):
     """One of the caller's communities on the look screen (C-CIRCLE-LOOK-COMMS).
 
@@ -267,6 +312,9 @@ class CommunityJoinResponse(BaseModel):
     place_id: str
     place_name: str | None = None
     status: str = "confirmed"
+    # What the joiner said she is to the place: 'member' (counted, named, matched) or
+    # 'curious' (hers to watch, excluded from counts, rosters and matching).
+    membership: str = "member"
     already_member: bool = False
     source: str | None = None
     confirmed_via: str | None = None
@@ -285,6 +333,9 @@ class CommunityFeatureRow(BaseModel):
     sub_group: str | None = None
     # Picked when the feature was written; null on rows learned before 20261010.
     emoji: str | None = None
+    # The caller contributed this one, so /features/remove will take it back — the
+    # only rows the card should render an × on (issues #77).
+    mine: bool = False
 
 
 class CommunityActivityRow(BaseModel):
@@ -307,12 +358,18 @@ class CommunityEventRow(BaseModel):
     venue_name: str | None = None
     # The real going roster — the only thing "popular" is ordered on.
     going_count: int = 0
+    # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
+    # own card. None falls back to the FE's calendar.
+    cover_emoji: str | None = None
 
 
 class CommunityMemberPreviewRow(BaseModel):
     peer_user_id: str
     nickname: str | None = None
     avatar_url: str | None = None
+    # The caller's own face. member_count has always counted her, so she travels in the
+    # list too and the flag keeps neighbour-only affordances off her row (§17).
+    me: bool = False
 
 
 class CommunityProfileResponse(BaseModel):
@@ -334,6 +391,9 @@ class CommunityProfileResponse(BaseModel):
     relation: str | None = None
     emoji: str | None = None
     detail: str | None = None
+    # The caller's own relationship to the place: 'member', or 'curious' — she joined to
+    # watch it, so she gets this head, no roster and no host/invite actions (§19).
+    membership: str = "member"
     member_count: int = 0
     active: bool = False
     status_line: str | None = None
@@ -362,6 +422,13 @@ class CommunityMemberRow(BaseModel):
     avatar_url: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
     shared_line: str | None = None
+    # The caller's own row: no shared line (nothing is shared with yourself) and no
+    # Nudge. Rows rendered now equal member_count (§17).
+    me: bool = False
+    # "intro_sent" (an intro is already on its way) or "connected" (they already know
+    # each other). Either way the row shows a status, never a Nudge — the same rule the
+    # peer cards follow, since a second nudge can only hit the 7-day pair cooldown.
+    connection: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
@@ -395,6 +462,11 @@ class IdentityClaimRow(BaseModel):
     disclosure: str | None = None
     bucket: str | None = None
     source_quote: str | None = None
+    # Whose thread this is. Owner-facing card only — get_peer_profile never
+    # projects the name, so these can't reach another user.
+    subject_kind: str | None = None
+    subject_name: str | None = None
+    subject_age: int | None = None
 
 
 class IdentityProfilePayload(BaseModel):
@@ -441,6 +513,10 @@ class EventDraft(BaseModel):
     # The community this meet is for (setup card 2/5) — the canonical place id of one of
     # the host's own communities. None = a plain neighborhood meet, which is the default.
     circle_place_id: str | None = None
+    # Display form of that community — {place_ref, name, emoji, circle_type, detail}, the
+    # same shape every event-reading RPC returns. Stamped for the turn (see
+    # main._draft_from_dict); the id above stays the stored value.
+    community: dict[str, Any] | None = None
     # AI-tailored quick-setup card config (capacity/sharing/approval/bring labels + bring
     # suggestions), so the FE renders one scrollable carousel of questions fit to THIS event.
     event_setup: dict[str, Any] | None = None
@@ -690,6 +766,16 @@ class SendMessageRequest(BaseModel):
     # the tile's question, so the worker closes the gap and gives the profile engine context.
     rapport_gap_row_id: str | None = None
     rapport_question: str | None = None
+    # WHO a tapped Nudge means, when the card already knows. The button posts a normal
+    # message ("introduce me to Rust") so the turn lives in the transcript, but the name
+    # alone only resolves against the last find-peers run — a community roster or any
+    # other surface answered "I don't see Rust in your neighbor matches" and sent nothing
+    # (2026-08-18). The id is authoritative; the text still carries the conversation.
+    peer_user_id: str | None = None
+    # WHICH place a grounding card's pick is, when the user chose it from the card's
+    # own Google search. Those places are in no cached candidate list, so matching the
+    # posted text ("It's Fitness CF St. Cloud") would only re-search for them.
+    ground_place_id: str | None = None
 
 
 class TurnRouting(BaseModel):
@@ -741,6 +827,9 @@ class SendMessageResponse(BaseModel):
     # Seek-side ask card on a looking.tip turn (§12d). Absent on every other turn, so the
     # FE renders nothing until it arrives.
     ask_draft: AskDraftPayload | None = None
+    # The "which spot is it?" card, when this turn asked a place-grounding question.
+    # Absent on every other turn.
+    grounding: GroundingCardPayload | None = None
     routing: TurnRouting | None = None
     # See CreateSessionResponse.preferred_language — echoed every turn so the FE
     # can follow a mid-chat language switch (auto-persisted after 2 diverging turns).
@@ -804,6 +893,14 @@ class ExtractedClaim(BaseModel):
     # Short user-visible sub-facts accumulated across turns for the same thread
     # ("Swims every weekend"). Merged append-dedup on upsert, capped at 5.
     details: list[str] = Field(default_factory=list)
+    # Who the claim is about. "self" for the speaker; "child" when they said it
+    # about their kid ("my 7-year-old does karate"). The name is OWNER-ONLY —
+    # it is never written into label/source_quote/synonyms (those stay redacted)
+    # and no peer-facing surface reads it.
+    subject_kind: str = "self"
+    subject_name: str | None = None
+    # Stored as a birth year, not an age: an age written today is wrong in a year.
+    subject_birth_year: int | None = None
 
 
 class CompleteSessionResponse(BaseModel):

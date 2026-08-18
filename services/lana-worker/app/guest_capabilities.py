@@ -42,7 +42,12 @@ def fetch_peer_matches(user_jwt: str, *, limit: int = 5) -> list[dict[str, Any]]
         {"p_limit": limit, "p_min_similarity": 0.70},
     )
     if isinstance(raw, list):
-        return [r for r in raw if isinstance(r, dict)]
+        from app.auth import jwt_user_id
+        from app.peer_discovery_surface import drop_connected_peers
+
+        return drop_connected_peers(
+            [r for r in raw if isinstance(r, dict)], user_id=jwt_user_id(user_jwt)
+        )
     return []
 
 

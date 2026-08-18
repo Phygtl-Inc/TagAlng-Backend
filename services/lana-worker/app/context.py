@@ -35,6 +35,17 @@ _USER_GRAM_GENDER: ContextVar[str | None] = ContextVar(
 )
 
 # How each role sharpens address (§3.3). Unlisted/unknown roles stay neutral.
+#
+# These are DEFAULTS for referring to the household in general. They must never
+# overwrite the words the user just used for a specific person: a stored
+# role=grandparent turned "my 7 year old does karate" into "other grandkids who
+# do the same" — Lana correcting the user about her own family.
+_ROLE_OVERRIDE_GUARD = (
+    "This is how to refer to their family in GENERAL. When the user names "
+    "someone their own way in this turn (\"my 7 year old\", \"my son\", \"my "
+    "daughter\"), mirror THEIR words for that person — never re-label them from "
+    "the stored role."
+)
 _ROLE_FRAMING = {
     "parent": 'their family is "your kids" / "your family"',
     "expecting": 'be gentle — the baby is not here yet; say "when the baby comes"',
@@ -65,7 +76,8 @@ def address_guidance() -> str:
     if role in _ROLE_FRAMING:
         lines.append(
             f"USER CONTEXT — household role: {role}; {_ROLE_FRAMING[role]}. "
-            "Role sharpens warmth only — never announce it or attach it to them as a label."
+            "Role sharpens warmth only — never announce it or attach it to them as a label. "
+            + _ROLE_OVERRIDE_GUARD
         )
     if gender in ("feminine", "masculine"):
         lines.append(
@@ -165,14 +177,29 @@ def load_user_context(user_id: str) -> dict[str, Any]:
 
     def _claims() -> list[dict[str, Any]]:
         sb = service_client()
-        claims_row = (
-            sb.table("user_identity_claims")
-            .select("concept, label, disclosure")
-            .eq("user_id", user_id)
-            .is_("dismissed_at", "null")
-            .execute()
-        )
-        return claims_row.data or []
+
+        def _select(columns: str) -> list[dict[str, Any]]:
+            return (
+                sb.table("user_identity_claims")
+                .select(columns)
+                .eq("user_id", user_id)
+                .is_("dismissed_at", "null")
+                .execute()
+            ).data or []
+
+        try:
+            # subject_* is owner-only: this context is built for one user and
+            # feeds only their own turn, so Lana can say "how's Sara's karate?"
+            # to the parent. It must never be copied into a peer-facing payload.
+            return _select(
+                "concept, label, disclosure, subject_kind, subject_name, subject_birth_year"
+            )
+        except Exception:
+            # An environment without 20261021120000 rejects the whole select, and
+            # Lana then walks into the turn believing the user has told her
+            # nothing. Everything she already knew matters more than the subject.
+            logger.warning("claims_subject_columns_absent — falling back user=%s", user_id)
+            return _select("concept, label, disclosure")
 
     # Only the user→block chain and the tier lookup have ordering constraints; the
     # rest are independent reads. Tiers still runs after peers+network (its inputs).

@@ -222,6 +222,9 @@ class TestClaimRowShape(unittest.TestCase):
             "user_id", "concept", "label", "tone", "confidence",
             "disclosure", "synonyms", "details", "source_quote", "bucket",
             "transient", "embedding",
+            # Who the claim is about — 'self' + two nulls for everything that
+            # isn't a child claim (20261021120000_child_subject_claims).
+            "subject_kind", "subject_name", "subject_birth_year",
         }
         self.assertEqual(set(row.keys()), expected_keys)
         self.assertEqual(row["concept"], "italian_heritage")

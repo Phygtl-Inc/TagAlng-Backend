@@ -255,6 +255,29 @@ def format_duplicate_intro_reply(
     else:
         nick = "that neighbor"
     peer_id = str(peer.get("peer_user_id") or "")
+    # An accepted nudge leaves no `intros` row at all (the connection lives in
+    # user_relationships), so without this the pair fell through to the "recent intro,
+    # maybe expired or declined" copy below — which reads as a failure to someone who
+    # is simply already connected. Ask the relationship, not the intro log.
+    from app.auth import jwt_user_id
+    from app.peer_discovery_surface import _CONNECTED_TIERS, peer_tiers
+
+    _me = jwt_user_id(user_jwt)
+    if peer_id and _me and peer_tiers(_me, [peer_id]).get(peer_id) in _CONNECTED_TIERS:
+        return compose_reply(
+            goal=(
+                "The user asked to be introduced to a neighbor they are already "
+                "connected with. Tell them they're already connected — no intro "
+                "needed — and that they can just message them, or you can look "
+                "for someone new instead."
+            ),
+            facts=[f"The neighbor: {nick}"],
+            fallback=(
+                f"You and {nick} are already connected — no intro needed. "
+                "You can message them directly, or I can look for someone new."
+            ),
+            max_sentences=2,
+        )
     try:
         intros = fetch_my_intros(user_jwt, direction="all")
     except HTTPException:

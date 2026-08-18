@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from app.lana_ui import normalize_bucket, parse_mapped_spans
@@ -49,7 +50,7 @@ Rules:
 - spans: 3-8 phrases covering the mapped_summary for frontend color highlights
 - concept must match ^[a-z][a-z0-9_]{1,63}$
 - NEVER extract race, exact age, sex/gender demographics, street address
-- NEVER make parenting/kids into a claim, and never capture a child's name, age, or school
+- A fact about the user's CHILD is a claim about the child: subject "child", subject_name when they name them, subject_age when they state it. The label describes the ACTIVITY, never the child ("Does karate", not "Sara does karate")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 
 Transcript:
@@ -79,9 +80,13 @@ Output ONLY valid JSON (no markdown):
       "source_quote": "exact short quote from this message",
       "bucket": "heritage",
       "vague": false,
-      "transient": false
+      "transient": false,
+      "subject": "self | child — who the claim is ABOUT, default self",
+      "subject_name": "the child's first name IF they said it, else null",
+      "subject_age": null
     }
   ],
+  "subject_updates": [{"name": "child's first name", "age": 9}],
   "retracted_concepts": ["exact concept slug from ALREADY ON PROFILE the user is walking back — usually empty"],
   "circle_candidates": [
     {
@@ -124,7 +129,7 @@ followup_topic are ALSO English — they are stored canonically and AI-rendered 
 language at display time, so a later language switch re-renders the whole queue.
 - Max 6 claims from this message only
 - If no identity content (greetings, "ok", ZIP, phone), return {"nickname": null, "nickname_quote": null, "nickname_is_rename": false, "kids_count": null, "claims": [], "circle_candidates": [], "place_feature_candidates": [], "followup_question": null}
-- Split distinct threads — capture EACH one, do not collapse (e.g. "pakistani dad, married 10 years, speak 5 languages, do triathlon" → pakistani_heritage + multilingual + married_ten_years + triathlon; "dad" and kid count go to kids_count, never a claim)
+- Split distinct threads — capture EACH one, do not collapse (e.g. "pakistani dad, married 10 years, speak 5 languages, do triathlon" → pakistani_heritage + multilingual + married_ten_years + triathlon; "dad" and kid count go to role/kids_count, never a claim)
 - Capture LANGUAGES spoken as one claim, bucket "interest" (e.g. "speak 7 languages" → concept "multilingual", label "Speaks 7 languages")
 - Capture RELATIONSHIP status as a claim, bucket "stage" (e.g. "married 10 years" → concept "long_married", label "Married 10 years")
 - Capture occupation/work as a claim, bucket "activity" or "interest" (e.g. "work in tech" → tech_worker). Mark it "vague": true when it is coarse and a specific would help (e.g. "tech worker", "athlete", "in finance")
@@ -139,13 +144,15 @@ language at display time, so a later language switch re-renders the whole queue.
 - EVERY claim must be a facet a NEARBY NEIGHBOR COULD SHARE. Apply the same test the followup_question must pass: "would knowing this change who they connect with?" Activities, hobbies, teams, cuisines, heritage, faith, languages, life stage, occupation, local spots, weekly rhythm — all pass. Pure aesthetic or consumer preferences do NOT: a favorite color, brand, phone, app, streaming service, car ("my favorite color is blue", "I'm an iPhone person" → capture NOTHING). Nobody meets a neighbor over a color, and a stored fact with no matchable angle can only ever produce a pointless question later. When the preference is attached to something DOABLE, capture the doable thing instead: "I collect blue pottery" → pottery_collector; "I paint, mostly blues" → painter; "I love steakhouses" → steak_lover (food is a real local facet — a color is not).
 - Do NOT emit the SAME thread twice with different wording — one claim per distinct thread
 - "details": short third-person sub-facts (2-6 words each, max 3 per claim) that ADD texture beyond the label — rhythm, level, setting, sub-type (e.g. label "State-level swimmer" + details ["Swims every weekend"]). Empty [] when the label already says everything. Never restate the label as a detail.
-- kids_count: an integer ONLY when the user states HOW MANY children they have ("2 sons" → 2, "three kids" → 3). null otherwise. This is private and never a claim. NEVER capture a child's name, age, gender, school, or photo — only the count.
+- kids_count: an integer ONLY when the user states HOW MANY children they have ("2 sons" → 2, "three kids" → 3). null otherwise. Private, never a claim. It is a COUNT only — the child's name and age ride on the claim itself (see "subject" below), never here.
+- subject / subject_name / subject_age — WHO a claim is about. Default "self". Use "child" for anything the user says about their kid, and carry what they told you: "my 7-year-old does karate" → subject "child", subject_age 7, subject_name null; "my daughter Sara swims Tuesdays" → subject "child", subject_name "Sara", subject_age null; "Sara is 7 and does karate" → both. ONE claim per child-fact — a second child doing the same thing is a SEPARATE claim with that child's own name. HARD RULES: (a) the label and source_quote must NOT contain the child's name — the name lives ONLY in subject_name (write label "Does karate", quote "does karate"); (b) subject_age is the age they STATED, a plain integer 0-25, null when they didn't say it — never guess it from a school grade or a photo; (c) still NEVER capture a child's school as a claim label — schools go to circle_candidates, exactly as before; (d) a fact about anyone else (spouse, parent, neighbour) stays subject "self" only when it genuinely describes the USER, otherwise skip it.
 - role: the user's household role ONLY when they state it about THEMSELVES: "parent" ("my kids", "I'm a dad"), "expecting" ("baby on the way"), "grandparent" ("my grandkids"), "caregiver" ("the family I care for"), "guardian", "relative" ("my nephew lives with us"). null otherwise — never infer from what they search for. Private, never a claim.
 - grammatical_gender: "feminine" or "masculine" ONLY from the user's own gendered SELF-reference in a gendered language ("estoy cansada" → feminine, "estou animado" → masculine) or an explicit self-label ("I'm his mom" → feminine, "I'm their dad" → masculine). null otherwise — NEVER guess from a name, and never from a third party. Used only for grammatical agreement, never shown.
 - NEVER extract race, exact age, sex/gender demographics, street address
 - NEVER extract negative or exclusion claims ("not Brazilian", "no Italian", "without X")
 - RETRACTIONS — the user can take something back, and we must let them. When this message says a thread on their profile is NO LONGER TRUE ("blue isn't really my favorite anymore", "I stopped playing squash", "we moved away from Lake Nona", "I don't do triathlon these days", "actually I'm not a teacher, I'm a nurse"), put the EXACT concept slug from ALREADY ON PROFILE into "retracted_concepts". Do NOT emit it as a claim, and do NOT emit a negated claim about it. A correction that also states the NEW truth does both: retract the old slug AND emit the new claim ("not a teacher, I'm a nurse" → retracted_concepts ["teacher"] + a nurse claim). Only ever list slugs that appear in ALREADY ON PROFILE, copied exactly — never invent one, and never retract on a mere doubt ("not sure I still like it"), only on a plain statement that it is over.
-- NEVER make parenting/kids into a claim — only kids_count carries it
+- The user's OWN parenting status is not a claim (that is `role` + kids_count). What a CHILD does IS a claim — with subject "child".
+- subject_updates: a child's name/age with NO activity attached ("Sara is 9", "the little one's name is Tom", "my oldest just turned 12"). These are NOT claims — a child is not an interest. Emit {"name": …, "age": …} here (either field may be null) and leave "claims" empty for that fact. NEVER attach the age to an unrelated thread the child happens to have. Empty [] when the message states no such thing.
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
 - nickname — ONLY when the user is telling you what THEY want to be called ("I'm Brinda", "call me \
@@ -267,6 +274,64 @@ def _vertex_client():
     return _gemini_client()
 
 
+_SUBJECT_KINDS = {"self", "child", "parent", "spouse", "sibling", "grandparent", "household", "other"}
+
+
+def _parse_subject(item: dict[str, Any]) -> tuple[str, str | None, int | None]:
+    """(subject_kind, subject_name, subject_birth_year) from one raw claim.
+
+    A stated age is converted to a birth year here, once, against the year of
+    capture — storing the age itself would silently rot every January.
+    """
+    kind = str(item.get("subject") or item.get("subject_kind") or "self").strip().lower()
+    if kind not in _SUBJECT_KINDS:
+        kind = "self"
+    if kind == "self":
+        # The DB CHECK enforces this too; drop it here so a stray name from the
+        # model can't reach a row where nothing is expecting one.
+        return "self", None, None
+    raw_name = str(item.get("subject_name") or "").strip()[:40]
+    # A name is a name — anything with digits or punctuation is the model
+    # improvising ("my kid", "7yo"), and improvised names are worse than none.
+    # Letters only (any script) plus apostrophe/hyphen/space: "7yo", "kid 2" and
+    # "x1" are the model improvising, and an improvised name is worse than none.
+    name = raw_name if raw_name and re.match(r"^[^\W\d_][^\d_]{0,39}$", raw_name, re.UNICODE) else None
+    birth_year: int | None = None
+    raw_age = item.get("subject_age")
+    try:
+        age = int(raw_age) if raw_age is not None and str(raw_age).strip() != "" else None
+    except (TypeError, ValueError):
+        age = None
+    if age is not None and 0 <= age <= 25:
+        birth_year = datetime.now(timezone.utc).year - age
+    return kind, name, birth_year
+
+
+def parse_subject_updates(data: Any) -> list[dict[str, Any]]:
+    """Name/age facts about a child that carry no activity of their own.
+
+    Kept OUT of `claims` deliberately: a child is not an interest, and letting the
+    model park an age on whichever thread it liked produced "Sara does karate" from
+    a message that only said "Sara is 9". Returned as {name, birth_year} for the
+    persist layer to apply to that child's existing rows.
+    """
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("subject_updates")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw[:4]:
+        if not isinstance(item, dict):
+            continue
+        _, name, birth_year = _parse_subject(
+            {"subject": "child", "subject_name": item.get("name"), "subject_age": item.get("age")}
+        )
+        if name and birth_year:
+            out.append({"name": name, "birth_year": birth_year})
+    return out
+
+
 def _parse_claims(data: Any) -> list[ExtractedClaim]:
     if not isinstance(data, dict):
         return []
@@ -300,6 +365,7 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
         bucket = normalize_bucket(item.get("bucket"))
         transient = bool(item.get("transient", False))
         vague = bool(item.get("vague", False))
+        subject_kind, subject_name, birth_year = _parse_subject(item)
         out.append(
             ExtractedClaim(
                 concept=concept,
@@ -313,6 +379,9 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
                 transient=transient,
                 vague=vague,
                 details=details,
+                subject_kind=subject_kind,
+                subject_name=subject_name,
+                subject_birth_year=birth_year,
             )
         )
     return out[:8]
@@ -390,6 +459,16 @@ def _existing_claims_block(existing_labels: list[Any] | None) -> str:
             if not (concept or label):
                 continue
             line = f"{concept or '?'} — {label}"
+            subject_kind = str(item.get("subject_kind") or "self")
+            if subject_kind != "self":
+                who = str(item.get("subject_name") or "").strip() or "unnamed"
+                birth_year = item.get("subject_birth_year")
+                age = (
+                    f", age {datetime.now(timezone.utc).year - int(birth_year)}"
+                    if birth_year
+                    else ", age unknown"
+                )
+                line += f" [about their {subject_kind}: {who}{age}]"
             if details:
                 line += f" (details: {details})"
             lines.append(line)
@@ -411,7 +490,10 @@ def _existing_claims_block(existing_labels: list[Any] | None) -> str:
         "with nothing new ('I swim' when swimmer is already listed) still counts: "
         "re-emit that concept unchanged (same label, empty details) — it is "
         "corroboration and raises confidence. Threads the message does not touch are "
-        "NOT re-emitted. Only genuinely new topics get a new concept:\n"
+        "NOT re-emitted. Only genuinely new topics get a new concept. Threads marked "
+        "[about their child: …] belong to a child, not to the user — never re-emit one "
+        "just because the message mentions that child; a bare name or age goes to "
+        "subject_updates, never to claims:\n"
         + "\n".join(lines[:40])
         + "\n\n"
     )

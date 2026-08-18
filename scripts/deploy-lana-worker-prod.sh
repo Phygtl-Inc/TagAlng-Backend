@@ -21,4 +21,13 @@ fi
 export ENV_FILE
 export CLOUD_RUN_SERVICE="${CLOUD_RUN_SERVICE:-tagalng-lana-worker-prod}"
 
+# Real users open this one. Keep an instance warm: at min-instances 0 the service scaled
+# to zero after a quiet spell and whoever opened the app next waited through a container
+# boot (Python + supabase/openai/vertex imports) before their first query even ran —
+# which is why prod felt slower than a laptop hitting the same database (2026-08-18).
+# It also keeps post-response background writes (place blurbs) alive long enough to land.
+# Dev stays at 0: nothing there is worth paying for an idle instance.
+export MIN_INSTANCES="${MIN_INSTANCES:-1}"
+export CPU_BOOST="${CPU_BOOST:-1}"
+
 exec "$ROOT/scripts/deploy-lana-worker.sh"

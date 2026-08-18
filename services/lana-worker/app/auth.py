@@ -27,6 +27,21 @@ class AuthSession:
     grammatical_gender: str | None = None
 
 
+def jwt_user_id(jwt: str | None) -> str | None:
+    """The JWT's `sub` (user id), decoded locally — no crypto: the token was
+    verified upstream this request. For read-side gates only, never for auth."""
+    try:
+        import base64
+        import json
+
+        payload = str(jwt or "").split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        sub = json.loads(base64.urlsafe_b64decode(payload)).get("sub")
+        return str(sub) if sub else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def verify_auth(authorization: str | None) -> AuthSession:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing_bearer_token")

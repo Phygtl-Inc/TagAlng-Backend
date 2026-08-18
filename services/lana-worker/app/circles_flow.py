@@ -502,6 +502,68 @@ def _close_grounding_gap(affiliation_id: str) -> None:
         logger.exception("close_grounding_gap_failed aff=%s", affiliation_id)
 
 
+def prune_grounded_gaps(
+    user_id: str, rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Drop (and close) grounding asks whose place is already pinned.
+
+    `ensure_grounding_gaps` checks `place_ref IS NULL` at CREATE time only, and
+    `_close_grounding_gap` closes by affiliation id — so anything that grounds the
+    place through a DIFFERENT row leaves the ask queued: a duplicate capture of the
+    same gym ("fitness_cf" beside the pinned "fitness_cf_st_cloud"), a Radar add, an
+    invite or discovery join. The tile then asks "which Fitness CF is yours?" — with
+    three unrelated gyms as options — about a community the user is already a member
+    of (2026-08-18). Checked at SERVE time because that's the only moment that knows
+    the affiliation's state right now.
+
+    A gap whose affiliation vanished (deleted or dismissed) is stale for the same
+    reason and closed too. Best-effort: on any read failure the rows pass through
+    unchanged — an extra ask beats an empty tile."""
+    refs = {str(r.get("affiliation_ref") or "") for r in rows}
+    refs.discard("")
+    if not user_id or not refs:
+        return rows
+    try:
+        affs = (
+            service_client()
+            .table("circle_affiliations")
+            .select("id, circle_key, circle_type, place_ref")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(100)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("prune_grounded_gaps_load_failed user=%s", user_id)
+        return rows
+
+    from app.circles_capture import same_community
+
+    by_id = {str(a.get("id") or ""): a for a in affs if isinstance(a, dict)}
+    grounded = [a for a in by_id.values() if a.get("place_ref")]
+    stale: set[str] = set()
+    for ref in refs:
+        aff = by_id.get(ref)
+        if aff is None or aff.get("place_ref"):
+            stale.add(ref)
+            continue
+        if any(
+            same_community(
+                str(aff.get("circle_key") or ""),
+                str(aff.get("circle_type") or ""),
+                str(g.get("circle_key") or ""),
+                str(g.get("circle_type") or ""),
+            )
+            for g in grounded
+        ):
+            stale.add(ref)
+    for ref in stale:
+        _close_grounding_gap(ref)
+    if not stale:
+        return rows
+    return [r for r in rows if str(r.get("affiliation_ref") or "") not in stale]
+
+
 def ground_affiliation(
     user_id: str,
     affiliation_id: str,
@@ -897,6 +959,36 @@ def _home_block_id(user_id: str) -> str | None:
         return None
 
 
+def grounding_chip_options(
+    user_id: str, affiliation: dict[str, Any], *, block_id: str | None
+) -> tuple[list[dict[str, Any]], str]:
+    """Places honest enough to offer as a pick-one list, and the name we missed.
+
+    A pick-one grid has no room for "these are guesses", so the two weak kinds
+    `ground_options` returns must not reach it:
+
+      · CONSOLATIONS (the user named a venue we couldn't find) — dropped. Showing
+        them answers "which Fitness CF?" with three gyms that are not Fitness CF,
+        which reads as "these are its branches". The returned name is what the
+        caller must lead with instead.
+      · a LONE suggestion — dropped. One nearby place of the right kind, offered
+        by itself, reads as a claim about them. Two or three read as a choice.
+
+    Lives here, not in either caller, because BOTH surfaces ask this question and
+    only the tile enforced the rules: the chat path shipped raw `ground_options`
+    and asked "which Fitness CF in St. Cloud do you go to?" over three Lake Nona
+    gyms (2026-08-18). Same question, same data, same truth bar."""
+    rows = ground_options(user_id, affiliation, block_id=block_id)
+    unmatched = next(
+        (str(o.get("unmatched_name") or "") for o in rows if o.get("unmatched_name")),
+        "",
+    )
+    kept = [o for o in rows if not o.get("unmatched_name")]
+    if len(kept) == 1 and kept[0].get("suggested"):
+        kept = []
+    return kept, unmatched
+
+
 def _chip(option: dict[str, Any]) -> dict[str, Any]:
     """One grounding option in the shape both surfaces consume: the tile taps
     google_place_id straight into /lana/circles/ground; a chat chip posts `send`."""
@@ -1004,24 +1096,13 @@ def grounding_payload_for_gap(user_id: str, gap_row: dict[str, Any]) -> dict[str
     try:
         if not affiliation:
             return payload
-        # Tile rules differ from chat's, because PlaceGroundingCard renders options
-        # as a pick-one place grid — with no room for "these are guesses", and with
-        # a LONE option shown as "the place she mentioned — pin it?". So:
-        #   · consolations are dropped. The question names the place ("which
-        #     Fitness CF?"), and tiles that don't bear that name are the whole bug.
-        #     Zero options opens the card's own search box, which is the honest move.
-        #   · a lone suggestion is dropped too — "which gym?" answered with one
-        #     nearby gym reads as a claim about her. Two or three read as a choice,
-        #     which is what the grid is for, so those stay.
-        #   · no escape chip: the card already ships "Search another" and a skip,
-        #     and an id-less chip would render as a place tile.
-        rows = [
-            o
-            for o in ground_options(user_id, affiliation, block_id=_home_block_id(user_id))
-            if not o.get("unmatched_name")
-        ]
-        if len(rows) == 1 and rows[0].get("suggested"):
-            rows = []
+        # Zero options opens the card's own search box, which is the honest move
+        # when the shared truth bar (grounding_chip_options) leaves nothing to show.
+        # No escape chip either: the card already ships "Search another" and a skip,
+        # and an id-less chip would render as a place tile.
+        rows, _unmatched = grounding_chip_options(
+            user_id, affiliation, block_id=_home_block_id(user_id)
+        )
         options = [_chip(o) for o in rows]
         service_client().table("rapport_gaps").update(
             {"grounding_options": options}
@@ -1505,9 +1586,15 @@ def handle_grounding_confirmation(
     *,
     session_ctx: dict[str, Any] | None = None,
     abandon: bool = False,
+    place_id: str | None = None,
 ) -> dict[str, Any]:
     """A turn while grounding chips are pending. Same return shape as
-    handle_grounding_answer. The caller has already ruled out a pivot/release."""
+    handle_grounding_answer. The caller has already ruled out a pivot/release.
+
+    `place_id` is a place the USER picked on a card (chat's grounding card, whose
+    search box reaches places no cached candidate covers). An id is not a guess:
+    it grounds outright, skipping the name matching that exists only to turn text
+    back into one of these."""
     affiliation_id = str(state.get("affiliation_id") or "")
     candidates = state.get("candidates") if isinstance(state.get("candidates"), list) else []
     attempts = int(state.get("attempts") or 1)
@@ -1516,6 +1603,16 @@ def handle_grounding_confirmation(
     # re-offering it.
     pending_action = str(state.get("pending_action") or "").strip() or None
     msg = str(message or "").strip()
+
+    picked_id = str(place_id or "").strip()
+    if picked_id:
+        return ground_and_confirm(
+            user_id,
+            affiliation_id,
+            picked_id,
+            session_ctx=session_ctx,
+            pending_action=pending_action,
+        )
 
     matched = match_grounding_candidate(candidates, msg)
     if matched:

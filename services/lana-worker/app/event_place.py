@@ -152,6 +152,66 @@ def stamp_event_community_async(
     threading.Thread(target=_run, daemon=True, name=f"event-circle-{eid[:8]}").start()
 
 
+def event_community(
+    place_ref: str | None, host_id: str | None = None
+) -> dict[str, Any] | None:
+    """The community a meet was created for — {place_ref, name, emoji, circle_type, detail}
+    — or None for a plain neighborhood meet.
+
+    Thin wrapper over the SQL function of the same name (20261015120000) so the card in
+    chat, the invite link, the similar-meets sheet and the notification copy all name the
+    community identically. Best-effort: a failure just drops the tag."""
+    pid = str(place_ref or "").strip()
+    if not pid:
+        return None
+    try:
+        res = service_client().rpc(
+            "event_community",
+            {"p_place_ref": pid, "p_host_id": str(host_id) if host_id else None},
+        ).execute()
+    except Exception:  # noqa: BLE001 - a missing tag must never break a turn or an email
+        logger.exception("event_community.lookup_failed place=%s", pid)
+        return None
+    row = res.data if isinstance(res.data, dict) else None
+    return row if row and row.get("name") else None
+
+
+def community_line(community: dict[str, Any] | None) -> str | None:
+    """One-line form of an already-resolved community, for prose surfaces (emails, push):
+    "🏋️ Fitness CF"."""
+    if not community or not community.get("name"):
+        return None
+    return " ".join(
+        str(part) for part in (community.get("emoji"), community.get("name")) if part
+    ).strip() or None
+
+
+def community_label(place_ref: str | None, host_id: str | None = None) -> str | None:
+    """`community_line` straight from a place id."""
+    return community_line(event_community(place_ref, host_id))
+
+
+def community_label_for_event(event_id: str | None) -> str | None:
+    """`community_label` for an already-published meet — the notification hooks know the
+    event id, not its community. None when the meet has no community."""
+    eid = str(event_id or "").strip()
+    if not eid:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("events")
+            .select("circle_place_ref, host_id")
+            .eq("id", eid)
+            .limit(1)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    row = (res.data or [None])[0] or {}
+    return community_label(row.get("circle_place_ref"), row.get("host_id"))
+
+
 def invite_suggestions(user_id: str, event_id: str) -> dict[str, Any]:
     """Confirmed members of the event's place, for "N people already go here —
     invite them?" (§5.2). Host-only. First names only — that is what the ladder

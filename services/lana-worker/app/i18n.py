@@ -825,6 +825,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
     },
 
+    # One context line on every event notification whose meet was created FOR a community
+    # (20261015120000) — the same "Community · X" tag the cards show.
+    "notify.community_note": {
+        "en": "Community · {name}",
+        "es": "Comunidad · {name}",
+        "pt": "Comunidade · {name}",
+    },
+
     "notify.cancelled.title": {
         "en": "“{title}” was cancelled",
         "es": "“{title}” se canceló",

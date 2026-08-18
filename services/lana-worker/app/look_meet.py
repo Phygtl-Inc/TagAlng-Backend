@@ -397,18 +397,9 @@ def _affinity_tags(draft: dict[str, Any]) -> list[str]:
 
 
 def _jwt_sub(jwt: str | None) -> str | None:
-    """The JWT's `sub` (user id), decoded locally — no crypto: the token was
-    verified upstream this request; this is only for a read-side display gate."""
-    try:
-        import base64
-        import json as _json
+    from app.auth import jwt_user_id
 
-        payload = str(jwt or "").split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        sub = _json.loads(base64.urlsafe_b64decode(payload)).get("sub")
-        return str(sub) if sub else None
-    except Exception:  # noqa: BLE001
-        return None
+    return jwt_user_id(jwt)
 
 
 def _find_block_events(

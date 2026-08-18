@@ -200,10 +200,15 @@ def _fetch_block_events(
     if not block_id:
         return []
     try:
+        from app.auth import jwt_user_id
         from app.discovery_route import fetch_preview_events_on_block
 
         events = fetch_preview_events_on_block(
-            block_id, limit=_BROWSE_POOL, pool=_BROWSE_POOL, weekend_only=weekend_only
+            block_id,
+            limit=_BROWSE_POOL,
+            pool=_BROWSE_POOL,
+            weekend_only=weekend_only,
+            exclude_host_id=jwt_user_id(user_jwt),
         )
         _attach_host_names(events)
         return events
