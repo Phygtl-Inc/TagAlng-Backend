@@ -118,6 +118,8 @@ from app.models import (
     CommunityMembersResponse,
     CommunityProfileResponse,
     ExtractedClaim,
+    GroundingCardOption,
+    GroundingCardPayload,
     HighlightSpan,
     JointMomentCandidate,
     JointMomentPayload,
@@ -753,6 +755,35 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
             )
         )
     return out
+
+
+def _grounding_card_from_ctx(ctx: dict[str, Any]) -> GroundingCardPayload | None:
+    """The place-grounding card this turn asked for, if it did (turn-scoped key)."""
+    raw = ctx.get("grounding_card")
+    if not isinstance(raw, dict) or not str(raw.get("affiliation_id") or "").strip():
+        return None
+    options = [
+        GroundingCardOption(
+            label=str(o.get("label") or "").strip(),
+            address=(str(o["address"]).strip() or None) if o.get("address") else None,
+            google_place_id=str(o.get("google_place_id") or "") or None,
+            send=str(o.get("send") or "").strip(),
+            suggested=bool(o.get("suggested")),
+        )
+        for o in (raw.get("options") if isinstance(raw.get("options"), list) else [])
+        if isinstance(o, dict) and str(o.get("label") or "").strip()
+    ]
+    return GroundingCardPayload(
+        question=str(raw.get("question") or "").strip(),
+        affiliation_id=str(raw["affiliation_id"]).strip(),
+        options=options,
+        circle_type=str(raw.get("circle_type") or "") or None,
+        relation_noun=str(raw.get("relation_noun") or "") or None,
+        emoji=str(raw.get("emoji") or "") or None,
+        place_name=str(raw.get("place_name") or "") or None,
+        detail=str(raw.get("detail") or "") or None,
+        unmatched_name=str(raw.get("unmatched_name") or "") or None,
+    )
 
 
 def _ask_draft_from_ctx(ctx: dict[str, Any]) -> AskDraftPayload | None:
@@ -1730,6 +1761,13 @@ def _run_lana_message(
             "gap_row_id": (body.rapport_gap_row_id or "").strip() or None,
             "question": (body.rapport_question or "").strip() or None,
         }
+    # A tapped Nudge names its target outright. Re-stamped (None clears) every turn, never
+    # popped — a popped key gets resurrected by the stored-context merge and the next
+    # unrelated intro would go to whoever was nudged last.
+    if purpose == "lana":
+        session_ctx_in["nudge_peer_user_id"] = (body.peer_user_id or "").strip() or None
+        # Same rule for a grounding card's pick — one turn only, cleared with None.
+        session_ctx_in["ground_place_id"] = (body.ground_place_id or "").strip() or None
 
     timing_ms: dict[str, int] | None = None
     assistant_msg_id: str | None = None
@@ -2057,6 +2095,7 @@ def _run_lana_message(
         tip_draft=tip_draft,
         look_draft=look_draft,
         ask_draft=_ask_draft_from_ctx(merged),
+        grounding=_grounding_card_from_ctx(merged),
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
@@ -3080,6 +3119,23 @@ def post_circles_membership(
     return result
 
 
+@app.post("/lana/profile/portrait")
+def post_profile_portrait(authorization: str | None = Header(default=None)):
+    """The prose line above the caller's own identity threads.
+
+    The profile drawer loads its dashboard straight from the RPC, which only carries
+    `mapped_summary` for a profile that came out of an onboarding intake. This serves
+    the same line for a profile built in chat — one extra call the drawer makes only
+    when the RPC came back without one, so it never blocks the box from rendering.
+    """
+    jwt = _bearer_token(authorization)
+    verify_auth(authorization)
+    from app.layer1_handlers import fetch_identity_dashboard
+
+    dashboard = fetch_identity_dashboard(jwt)
+    return {"portrait": dashboard.get("mapped_summary") or None}
+
+
 @app.post("/lana/circles/profile", response_model=CommunityProfileResponse)
 def post_circles_profile(
     body: CommunityProfileBody,
@@ -3157,6 +3213,7 @@ def post_circles_profile(
                 has_time=e.get("has_time") is not False,
                 venue_name=e.get("venue_name"),
                 going_count=int(e.get("going_count") or 0),
+                cover_emoji=e.get("cover_emoji"),
             )
             for e in (data.get("upcoming_events") or [])
             if isinstance(e, dict) and str(e.get("event_id") or "").strip()
@@ -3199,6 +3256,7 @@ def post_circles_members(
                 trait_tags=[str(t) for t in (m.get("trait_tags") or [])][:6],
                 shared_line=m.get("shared_line"),
                 me=bool(m.get("me")),
+                connection=str(m.get("connection") or "") or None,
                 actions=_ui_action_rows_from_raw(m.get("actions")),
             )
             for m in (data.get("members") or [])

@@ -809,6 +809,12 @@ def dismiss_retracted_concepts(user_id: str, concepts: list[str]) -> int:
         if not ids:
             return 0
         _dismiss_claims_by_ids(sb, ids)
+        # A portrait naming a thread they just took back is not stale, it is FALSE —
+        # so both stored lines are dropped now and rewritten behind. The thread list
+        # is the honest thing to show for the moment that takes.
+        from app.profile_portrait import clear_portraits
+
+        clear_portraits(user_id)
         # The gap that produced this claim must not treat it as answered any more
         # — otherwise the topic is both gone and unaskable.
         logger.info(
@@ -1422,6 +1428,13 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
         if _identity_concept_link_enabled() and claim_id:
             _link_claim_to_concept(sb, claim_id, c, embedding)
     reconcile_heritage_claims(user_id, heritage_batch)
+    if saved:
+        # The profile prose is written FROM these threads, so it moves when they do.
+        # Behind the turn: it costs a model call, and nobody is waiting on it (the
+        # stored line stays readable until the new one lands).
+        from app.profile_portrait import schedule_portrait_refresh
+
+        schedule_portrait_refresh(user_id)
     return saved
 
 

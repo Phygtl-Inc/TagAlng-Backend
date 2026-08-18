@@ -234,7 +234,7 @@ def _place_extras(row: dict[str, Any]) -> dict[str, Any]:
 
 def _load_open_rows(user_id: str) -> list[dict[str, Any]]:
     try:
-        return (
+        rows = (
             service_client()
             .table("rapport_gaps")
             .select("*")
@@ -245,6 +245,15 @@ def _load_open_rows(user_id: str) -> list[dict[str, Any]]:
     except Exception:
         logger.exception("rapport: candidate load failed for %s", user_id)
         return []
+    if not any(r.get("affiliation_ref") for r in rows):
+        return rows
+    try:
+        from app.circles_flow import prune_grounded_gaps
+
+        return prune_grounded_gaps(user_id, rows)
+    except Exception:  # noqa: BLE001 — a stale ask beats no ask
+        logger.exception("rapport: grounded-gap prune failed for %s", user_id)
+        return rows
 
 
 def _build_candidates(
@@ -368,7 +377,10 @@ def _pending_is_stale(row: dict[str, Any]) -> bool:
 
 
 def _pending_ask(user_id: str) -> dict[str, Any] | None:
-    """A gap already shown and awaiting the user's action — re-show it verbatim."""
+    """A gap already shown and awaiting the user's action — re-show it verbatim.
+
+    Unless it's a grounding ask for a place that has since been pinned: the pending
+    ask is re-shown on every render, so that one would repeat forever."""
     try:
         res = (
             service_client()
@@ -380,10 +392,19 @@ def _pending_ask(user_id: str) -> dict[str, Any] | None:
             .limit(1)
             .execute()
         )
-        return (res.data or [None])[0]
+        row = (res.data or [None])[0]
     except Exception:
         logger.exception("rapport: pending-ask lookup failed for %s", user_id)
         return None
+    if not row or not row.get("affiliation_ref"):
+        return row
+    try:
+        from app.circles_flow import prune_grounded_gaps
+
+        return (prune_grounded_gaps(user_id, [row]) or [None])[0]
+    except Exception:  # noqa: BLE001 — a stale ask beats no ask
+        logger.exception("rapport: grounded-gap prune failed for %s", user_id)
+        return row
 
 
 def next_ask(

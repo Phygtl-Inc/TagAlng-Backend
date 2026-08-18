@@ -63,8 +63,30 @@ _BUCKET_ORDER = (
 
 
 def fetch_identity_dashboard(user_jwt: str) -> dict[str, Any]:
+    """The caller's own profile + threads, with the portrait line filled in.
+
+    The RPC's `mapped_summary` comes off a completed profile_intake session, so a
+    profile built in chat has none — every reader (the drawer, the claims card) then
+    showed only the label list. Composing it here means one implementation for all of
+    them; it's cached on the thread set, so a re-read costs nothing.
+    """
     raw = call_rpc(user_jwt, "get_my_profile_dashboard", {})
-    return raw if isinstance(raw, dict) else {}
+    dashboard = raw if isinstance(raw, dict) else {}
+    if not str(dashboard.get("mapped_summary") or "").strip():
+        from app.profile_portrait import portrait_from_claims, schedule_portrait_refresh
+
+        claims = [c for c in dashboard.get("claims") or [] if isinstance(c, dict)]
+        profile = dashboard.get("profile") if isinstance(dashboard.get("profile"), dict) else {}
+        # No stored line yet — a profile whose threads all predate 20261026, or one
+        # whose write-path refresh hasn't landed. Compose it for THIS reader and queue
+        # the write, so the next open (and every peer's) reads the column instead.
+        dashboard["mapped_summary"] = portrait_from_claims(
+            claims,
+            area=str(profile.get("block_display_name") or profile.get("home_zip") or "") or None,
+        )
+        if claims:
+            schedule_portrait_refresh(str(profile.get("id") or profile.get("user_id") or ""))
+    return dashboard
 
 
 def _sort_claims_for_display(claims: list[dict[str, Any]], *, limit: int = 18) -> list[dict[str, Any]]:

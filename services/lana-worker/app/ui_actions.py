@@ -156,13 +156,16 @@ def community_profile_actions(*, place_name: str, relation: str) -> list[dict[st
         _action(
             action_id="community_create_event",
             label="Create an event",
-            # "a meet", not "something": looks_like_host_event_entry needs a host verb
+            # "an event", not "something": looks_like_host_event_entry needs a host verb
             # AND an event noun to enter hosting without the classifier. "host something
             # at <venue>" missed it, so the tap fell through to discovery and came back
             # as "there aren't any activities by them in your area" — a search result for
             # a button that means "I am hosting". The FE also sends intent_hint, but the
             # message must stand on its own: any client posting this text gets hosting.
-            message=f"I want to host a meet at {name}",
+            # "related to", not "at": the meet belongs to this community (the FE stamps
+            # its place AND circle id before posting), which is not the same claim as
+            # being held at its address.
+            message=f"I want to host an event related to {name}",
             style="primary",
         ),
     ]

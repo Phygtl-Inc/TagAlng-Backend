@@ -310,7 +310,12 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
     action.chips = []
     try:
         from app.auth import service_client
-        from app.circles_flow import _chip, _home_block_id, _with_escape, ground_options
+        from app.circles_flow import (
+            _chip,
+            _home_block_id,
+            _with_escape,
+            grounding_chip_options,
+        )
 
         key = ""
         gid = str(getattr(action, "goal_id", None) or "")
@@ -319,7 +324,10 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
         q = (
             service_client()
             .table("circle_affiliations")
-            .select("id, circle_type, circle_key, detail, status, place_ref, place_name")
+            .select(
+                "id, circle_type, circle_key, detail, status, place_ref, place_name, "
+                "noun, emoji"
+            )
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .is_("place_ref", "null")
@@ -333,10 +341,32 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
         if not rows or (not key and len(rows) > 1):
             return  # not captured yet / ambiguous — leave a free-text ask
         aff = rows[0]
-        options = ground_options(
-            user_id, aff, block_id=_home_block_id(user_id), query=None
+        options, unmatched = grounding_chip_options(
+            user_id, aff, block_id=_home_block_id(user_id)
         )
         candidates = [{**_chip(o), "name": o.get("name")} for o in options]
+        if unmatched and not candidates:
+            # They named a venue and the map doesn't have it near them. The policy
+            # wrote "which Fitness CF in St. Cloud do you go to?" — a question that
+            # only makes sense if we found some, and asking it over nothing (or over
+            # nearby strangers) claims knowledge we don't have. Say the miss, then
+            # ask for something searchable; a typed answer re-searches on that text.
+            from app.reply_compose import compose_reply
+
+            action.utterance = compose_reply(
+                goal=(
+                    "You looked for the place the user named and could not find it "
+                    "on the map near them. Say that plainly in one sentence — name "
+                    "what you searched for — then ask for the full name or the "
+                    "street it's on so you can look again. Offer no other places: "
+                    "you have none to offer."
+                ),
+                facts=[f"The place they named: {unmatched}"],
+                fallback=(
+                    f"I can't find {unmatched} on the map near you — what's the "
+                    "full name, or the street it's on?"
+                ),
+            )
         # Escape hatch rides along as a chip but never as a candidate — a wrong
         # list must always have a way out (2026-08-03).
         chips = [
@@ -359,6 +389,25 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
         session_ctx["rapport_offer_pending"] = False
         session_ctx["rapport_pending_action"] = None
         action.chips = chips
+        # The same card the home tile renders for this question — a pick-one grid over
+        # the SAME candidates, plus its Google search box for the place we didn't find.
+        # Chat used to get chips alone, which is why a user whose gym wasn't on the list
+        # had no way to say so (2026-08-18). Chips still ship for clients that don't
+        # render the card; the card replaces them where it does.
+        session_ctx["grounding_card"] = {
+            "kind": "place_grounding",
+            "affiliation_id": str(aff.get("id") or ""),
+            "question": str(getattr(action, "utterance", "") or ""),
+            "options": candidates,
+            "circle_type": aff.get("circle_type"),
+            "relation_noun": aff.get("noun"),
+            "emoji": aff.get("emoji"),
+            "place_name": aff.get("place_name"),
+            "detail": aff.get("detail"),
+            # The name we searched for and missed, so the card can lead with it
+            # rather than showing an empty grid with no explanation.
+            "unmatched_name": unmatched or None,
+        }
         logging.getLogger(__name__).info(
             "ground_place_wired aff=%s key=%s candidates=%d pending_action=%s",
             aff.get("id"), aff.get("circle_key"), len(candidates),
@@ -1361,6 +1410,15 @@ def run_lana_unified_pipeline(
             logging.getLogger(__name__).exception("ctx_prefetch_spawn_failed")
             ctx_prefetch = None
 
+    # A turn the user aimed at ONE person is not an answer to anything Lana asked. A
+    # tapped Nudge carries its target's id, and the bridge offer left over from grounding
+    # ("want me to find people at your gym?") read "introduce me to Rust" as YES and
+    # dispatched a peer search: the intro never ran, and the turn paid for two classifier
+    # passes on the rewritten message (2026-08-18). Cleared BEFORE the rapport state is
+    # read, so nothing downstream sees the stale capture.
+    if session_ctx.get("nudge_peer_user_id"):
+        _reset_rapport_state(session_ctx)
+
     # A "By the way…" tile answer owns the turn: save the claim, close the gap, and reply via
     # the concierge engine (acknowledge her answer + one grounded follow-up), NOT the classifier
     # — a bare answer ("I love trying new restaurants") would be misread as a fresh chat intent.
@@ -1388,7 +1446,12 @@ def run_lana_unified_pipeline(
                 match_grounding_candidate,
             )
 
-            matched = match_grounding_candidate(grounding.get("candidates"), user_message)
+            # A card pick carries the place's id, which needs no matching and no
+            # classification — it IS the answer (see handle_grounding_confirmation).
+            picked_place = str(session_ctx.get("ground_place_id") or "").strip()
+            matched = picked_place or match_grounding_candidate(
+                grounding.get("candidates"), user_message
+            )
             abandon = False
             release = False
             if not matched:
@@ -1418,6 +1481,7 @@ def run_lana_unified_pipeline(
                     user_message,
                     session_ctx=session_ctx,
                     abandon=abandon,
+                    place_id=picked_place or None,
                 )
                 auto_offer = (
                     result.get("offer") if isinstance(result.get("offer"), dict) else None

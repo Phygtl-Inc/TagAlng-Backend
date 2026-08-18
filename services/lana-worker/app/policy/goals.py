@@ -35,12 +35,14 @@ CHAT_ASK_COOLDOWN_HOURS = 24
 
 _GAP_FIELDS = (
     "gap_row_id, gap_id, question, covers_concept, why_frame, why_reason, "
-    "unlock_score, chat_asked_at"
+    "unlock_score, chat_asked_at, affiliation_ref"
 )
 # Pre-20260930 / pre-20260928 environments lack why_reason / chat_asked_at; step down
-# rather than degrade the whole rapport queue to empty.
+# rather than degrade the whole rapport queue to empty. The last tier also drops
+# affiliation_ref (pre-circles), which only costs the grounded-gap prune below.
 _GAP_FIELDS_NO_REASON = (
-    "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score, chat_asked_at"
+    "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score, "
+    "chat_asked_at, affiliation_ref"
 )
 _GAP_FIELDS_LEGACY = (
     "gap_row_id, gap_id, question, covers_concept, why_frame, unlock_score"
@@ -176,7 +178,19 @@ def _rapport_goals(user_id: str) -> list[dict[str, Any]]:
     else:
         logger.warning("goals_rapport_failed user=%s", user_id)
         return []
-    rows = [r for r in rows if not _asked_in_chat_recently(r)][:_MAX_PER_QUEUE]
+    rows = [r for r in rows if not _asked_in_chat_recently(r)]
+    # A grounding gap whose place has since been pinned is not a question any more —
+    # the chat path has its own gap queue, so the tile-side prune doesn't reach it and
+    # Lana asked "which Fitness CF is yours?" about a community she was showing members
+    # of (2026-08-18). Before the cap: a dead ask must not hold a slot either.
+    if any(r.get("affiliation_ref") for r in rows):
+        try:
+            from app.circles_flow import prune_grounded_gaps
+
+            rows = prune_grounded_gaps(user_id, rows)
+        except Exception:  # noqa: BLE001 — a stale ask beats an empty queue
+            logger.exception("goals_grounded_prune_failed user=%s", user_id)
+    rows = rows[:_MAX_PER_QUEUE]
     return [
         {
             "id": f"gap:{r.get('gap_row_id')}",

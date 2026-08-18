@@ -41,7 +41,7 @@
       "Bash(env)",
       "Bash(pg_isready)",
       "Bash(/usr/local/opt/postgresql@17/bin/pg_isready)",
-      "Bash(.venv/bin/python -c \"import app.context, app.layer1_handlers, app.peer_radius, app.discovery_route; print\\('imports OK \u2014 no circular import'\\)\")",
+      "Bash(.venv/bin/python -c \"import app.context, app.layer1_handlers, app.peer_radius, app.discovery_route; print\\('imports OK — no circular import'\\)\")",
       "Bash(rg -n \"google_place_id\" -B6 -A6 src/lib/*.ts src/lib/**/*.ts)",
       "Bash(.venv/bin/python -m pytest tests/test_circle_grounding.py -q)",
       "Bash(rg -rn \"groundCircle|groundOptions\" src/features src/lib)",
@@ -89,7 +89,8 @@
       "Bash(kill:*)",
       "Bash(wait:*)",
       "Bash(tail:*)",
-      "Bash(ps:*)"
+      "Bash(ps:*)",
+      "Bash(ln -s /Users/dev/Downloads/tagalng-pwa-main/node_modules node_modules)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",

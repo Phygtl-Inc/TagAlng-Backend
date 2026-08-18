@@ -73,6 +73,13 @@ def build_match_reason(
     # Lingo rule 4: a person is never "a match" and Lana never "matched you with"
     # someone — say an intro / someone to meet. Persisted to intros.match_reason,
     # which the reply-path guard never scans, so this must be clean at the source.
+    #
+    # A shared community outranks every inference below it: it is the one thing the DB
+    # PROVES about these two, and it is why the Nudge button was on their row. Nothing
+    # here may claim they are neighbours — roster members cross blocks by design.
+    shared_place = str(peer.get("shared_place_name") or "").strip()
+    if shared_place:
+        return f"You both go to {shared_place}."
     label = _trait_label(peer)
     snippet = str(identity_snippet or "").strip()
     # The fallback snippet can be several messages joined with "; " — only echo the
@@ -182,6 +189,7 @@ def pick_peer_for_intro(
     peer_name: str | None = None,
     pending: dict[str, Any] | None = None,
     list_index: int | None = None,
+    peer_user_id: str | None = None,
 ) -> dict[str, Any] | None:
     requested = str(peer_name or "").strip().lower() or None
     if not requested:
@@ -190,6 +198,14 @@ def pick_peer_for_intro(
     identified = [p for p in peers if p.get("peer_user_id")]
     if not identified:
         return None
+
+    # The card that was tapped said WHO. No name heuristic can beat that, and two
+    # neighbors sharing a first name make the heuristic wrong, not just redundant.
+    target = str(peer_user_id or "").strip()
+    if target:
+        for p in identified:
+            if str(p.get("peer_user_id") or "") == target:
+                return p
 
     lower = str(msg or "").lower()
 
@@ -403,6 +419,7 @@ def try_propose_intro_from_preview(
     force: bool = False,
     peer_name: str | None = None,
     list_index: int | None = None,
+    peer_user_id: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Return (reply, intro_payload) or None if cannot propose."""
     pending = session_ctx.get("pending_intro_offer")
@@ -419,6 +436,7 @@ def try_propose_intro_from_preview(
         peer_name=peer_name,
         pending=pending if isinstance(pending, dict) else None,
         list_index=list_index,
+        peer_user_id=peer_user_id,
     )
     if not peer or not peer.get("peer_user_id"):
         return None
