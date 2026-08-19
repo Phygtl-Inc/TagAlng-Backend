@@ -414,11 +414,12 @@ class CommunityProfileResponse(BaseModel):
 
 class CommunityMemberRow(BaseModel):
     """A neighbour at the place. Deliberately carries NO stars, band, badge or
-    similarity: nothing here compared two people. `shared_line` states what is proven
+    similarity: nothing here compared two people. `attribute_line` states what is proven
     about THEM — their own public threads, with the ones the caller holds too marked
     ", like you" ("Gardens · Runner, like you"). Null when nothing true is on file:
     the old fallback ("You both go to this gym") was true of every row and so said
-    nothing. Name kept for the field so the PWA schema does not have to move."""
+    nothing — which is also why the field is not called `shared_line` any more: most
+    of what it lists is theirs alone."""
 
     peer_user_id: str
     nickname: str | None = None
@@ -429,8 +430,8 @@ class CommunityMemberRow(BaseModel):
     membership: str = "member"
     # What they do HERE, member-curated (place_activities): the row's second chip kind.
     activities: list[str] = Field(default_factory=list)
-    shared_line: str | None = None
-    # The caller's own row: no shared line (nothing is shared with yourself) and no
+    attribute_line: str | None = None
+    # The caller's own row: no line (she is not described back to herself) and no
     # Nudge. Rows rendered now equal member_count (§17).
     me: bool = False
     # "intro_sent" (an intro is already on its way) or "connected" (they already know

@@ -339,11 +339,11 @@ class TestCommunityMembers(unittest.TestCase):
         )
         out = community_members("u1", place_id="p1")
         rows = {r["peer_user_id"]: r for r in out["members"]}
-        self.assertEqual(rows["u2"]["shared_line"], "Gardens · Runs, like you")
+        self.assertEqual(rows["u2"]["attribute_line"], "Gardens · Runs, like you")
         self.assertEqual(rows["u2"]["actions"][0]["id"], "peer_card_nudge")
         # Nothing shared and nothing public on file → no line at all, and still no
         # fake score.
-        self.assertIsNone(rows["u3"]["shared_line"])
+        self.assertIsNone(rows["u3"]["attribute_line"])
         for row in out["members"]:
             for invented in ("match_stars", "match_band", "match_badge", "similarity_score"):
                 self.assertNotIn(invented, row)
@@ -359,9 +359,9 @@ class TestCommunityMembers(unittest.TestCase):
         )
         sb.return_value = _sb(tables)
         rows = {r["peer_user_id"]: r for r in community_members("u1", place_id="p1")["members"]}
-        self.assertEqual(rows["u3"]["shared_line"], "Colombian roots · Loves to cook")
+        self.assertEqual(rows["u3"]["attribute_line"], "Colombian roots · Loves to cook")
         # The caller is never described back to herself.
-        self.assertIsNone(rows["u1"]["shared_line"])
+        self.assertIsNone(rows["u1"]["attribute_line"])
 
     @patch("app.community_surface.service_client")
     def test_the_caller_is_in_the_list_and_the_blocked_are_not(self, sb) -> None:
@@ -374,7 +374,7 @@ class TestCommunityMembers(unittest.TestCase):
         self.assertEqual(len(out["members"]), out["member_count"] - 1)  # 'blocked' aside
         me = next(r for r in out["members"] if r["peer_user_id"] == "u1")
         self.assertTrue(me["me"])
-        self.assertIsNone(me["shared_line"])
+        self.assertIsNone(me["attribute_line"])
         self.assertEqual(me["actions"], [])
         self.assertFalse(any(r["me"] for r in out["members"] if r["peer_user_id"] != "u1"))
 

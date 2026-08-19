@@ -3243,7 +3243,7 @@ def post_circles_members(
     authorization: str | None = Header(default=None),
 ):
     """Every neighbour at one of the caller's communities (C-CIRCLE-COMM-PEOPLE), each
-    with one truthful shared line and a Nudge. Paginated; mutual blocks filtered out.
+    with one truthful line of their own attributes and a Nudge. Paginated; mutual blocks filtered out.
     An unverified caller gets the count and no names, exactly like the peer cards."""
     auth = verify_auth(authorization)
     from app.community_surface import community_members
@@ -3272,7 +3272,7 @@ def post_circles_members(
                 trait_tags=[str(t) for t in (m.get("trait_tags") or [])][:6],
                 membership=str(m.get("membership") or "member"),
                 activities=[str(a) for a in (m.get("activities") or [])][:3],
-                shared_line=m.get("shared_line"),
+                attribute_line=m.get("attribute_line"),
                 me=bool(m.get("me")),
                 connection=str(m.get("connection") or "") or None,
                 actions=_ui_action_rows_from_raw(m.get("actions")),

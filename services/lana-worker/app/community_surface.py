@@ -53,7 +53,8 @@ CARD_TOP_N = 3
 # Members per page on the people panel.
 MEMBERS_PAGE = 20
 # How wide we ask the shared-concept RPC to look. It ranks by shared count and
-# truncates, so a member below the cut simply has no shared line — never a wrong one.
+# truncates, so a member below the cut simply loses the ", like you" tail — never a
+# wrong shared thread.
 _SHARED_CONCEPT_FETCH = 200
 # Shared threads listed on one member row before it stops being scannable.
 _MAX_SHARED_LABELS = 3
@@ -1135,7 +1136,7 @@ def community_members(
     offset: int = 0,
     phone_verified: bool = True,
 ) -> dict[str, Any]:
-    """Every neighbour at the place, each with one honest shared line and a Nudge.
+    """Every neighbour at the place, each with one honest attribute line and a Nudge.
 
     Unverified callers get the count and nothing else — names and nudges are for
     people who have verified, exactly like the peer cards.
@@ -1212,7 +1213,7 @@ def community_members(
             ),
             "activities": list(activities.get(uid) or []),
             # Their own threads, with ", like you" where the caller holds one too.
-            "shared_line": None if me else _member_line(public_labels.get(uid) or [], labels),
+            "attribute_line": None if me else _member_line(public_labels.get(uid) or [], labels),
             "me": me,
             # Deliberately absent: stars, band, badge, similarity. Nothing here
             # compared two people ([[truthful-peer-match-model]]).
