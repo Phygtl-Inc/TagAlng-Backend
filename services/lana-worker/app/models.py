@@ -415,8 +415,10 @@ class CommunityProfileResponse(BaseModel):
 class CommunityMemberRow(BaseModel):
     """A neighbour at the place. Deliberately carries NO stars, band, badge or
     similarity: nothing here compared two people. `shared_line` states what is proven
-    — the identity threads you both hold, or else the one fact every row here shares
-    ("You both go to this gym")."""
+    about THEM — their own public threads, with the ones the caller holds too marked
+    ", like you" ("Gardens · Runner, like you"). Null when nothing true is on file:
+    the old fallback ("You both go to this gym") was true of every row and so said
+    nothing. Name kept for the field so the PWA schema does not have to move."""
 
     peer_user_id: str
     nickname: str | None = None

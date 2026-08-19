@@ -913,6 +913,29 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "message about how they FEEL, a symptom, distress or danger is ALWAYS its own "
             "safety lane, never an offer reply"
         )
+    # An empty peers search arms a notify/widen offer, then reported active_capture=none:
+    # "find me people who like pizza" came back empty, the follow-up fragment ("a pizza
+    # lover") was classified cold, and the word pizza handed the turn to tip_seek — Lana
+    # answered a PEOPLE search with Google pizzerias (dev QA 2026-08-18). Same shape as the
+    # rapport line: a bare trait phrase under a peers search describes WHO to look for.
+    peer_offer = session_ctx.get("peer_seek_offer_pending")
+    if isinstance(peer_offer, dict):
+        want = str(peer_offer.get("filter") or "").strip()
+        want_line = f' They were looking for: "{want[:80]}".' if want else ""
+        return (
+            "peer_seek — Lana just ran a search for NEIGHBORS matching a trait, found none "
+            "on the block, and offered to keep an ear out or widen the search."
+            + want_line
+            + " The latest message is most likely their answer to that offer (an accept, a "
+            "decline, or a widen) — goal=continue. A bare TRAIT or TASTE noun phrase "
+            "('a pizza lover', 'runners', 'someone into chess') RE-STATES who they are "
+            "looking for: goal=peers, discovery.find_by_attrs, attr_filter set from it. "
+            "*** Such a reply is NEVER tip_seek / looking.tip. *** They asked for PEOPLE; a "
+            "food, sport or hobby word inside the trait is what those people LIKE, not a "
+            "place to send them to — answering it with venue recommendations is the inverse "
+            "of what they asked. Only an explicit request for a PLACE or SERVICE ('where can "
+            "we get pizza then?', 'recommend a pizzeria') is a PIVOT — classify that fresh"
+        )
     # The share capture asks tailored follow-ups ("What type of doctor is Dr. Mitchel?") and
     # gets bare fragments back ("family doctor"). With active_capture=none the router read
     # that fragment as a fresh tip_seek — the classifier is told a share must NAME a provider

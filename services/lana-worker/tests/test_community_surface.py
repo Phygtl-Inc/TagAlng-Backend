@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from app.community_surface import (
     _feature_label,
-    _shared_line,
+    _member_line,
     _status_line,
     caller_affiliation_at,
     communities_card,
@@ -269,29 +269,39 @@ class TestFeatures(unittest.TestCase):
         self.assertFalse(any(f["mine"] for f in place_features("p1")))
 
 
-class TestSharedLine(unittest.TestCase):
-    def test_shared_threads_are_named(self) -> None:
+class TestMemberLine(unittest.TestCase):
+    def test_their_own_threads_carry_the_line(self) -> None:
+        # Nothing shared: what they hold, said plainly — no "you both" anything.
         self.assertEqual(
-            _shared_line([("Runner", "self"), ("Toddler stage", "self")], "gym"),
-            "You both: Runner · Toddler stage",
+            _member_line(["Colombian roots", "Loves to cook"], []),
+            "Colombian roots · Loves to cook",
+        )
+
+    def test_shared_threads_come_last_and_are_marked(self) -> None:
+        self.assertEqual(
+            _member_line(["Gardens", "Runner"], [("Runner", "self")]),
+            "Gardens · Runner, like you",
         )
 
     def test_a_childs_thread_never_reads_as_the_adults(self) -> None:
-        # "You both do karate" about two parents whose KIDS do karate is false.
+        # "you both do karate" about two parents whose KIDS do karate is false.
         self.assertEqual(
-            _shared_line([("Does karate", "child")], "gym"),
+            _member_line([], [("Does karate", "child")]),
             "Your kids both: Does karate",
         )
-
-    def test_both_subjects_get_their_own_clause(self) -> None:
         self.assertEqual(
-            _shared_line([("Runner", "self"), ("Does karate", "child")], "gym"),
-            "You both: Runner · Your kids both: Does karate",
+            _member_line(["Gardens"], [("Runner", "self"), ("Does karate", "child")]),
+            "Gardens · Runner, like you · your kids both: Does karate",
         )
 
-    def test_nothing_shared_claims_only_the_place(self) -> None:
-        # The one fact that IS true of every row here — never an invented affinity.
-        self.assertEqual(_shared_line([], "gym"), "You both go to this gym")
+    def test_nothing_known_gets_no_line(self) -> None:
+        # No canned filler: "You both go to this gym" was true of every row and so
+        # said nothing ([[ai-authored-copy-not-canned]]).
+        self.assertIsNone(_member_line([], []))
+
+    def test_the_line_stays_scannable(self) -> None:
+        line = _member_line(["A", "B", "C", "D"], [("E", "self")])
+        self.assertEqual(line, "C · D · E, like you")
 
 
 class TestCommunityMembers(unittest.TestCase):
@@ -329,13 +339,29 @@ class TestCommunityMembers(unittest.TestCase):
         )
         out = community_members("u1", place_id="p1")
         rows = {r["peer_user_id"]: r for r in out["members"]}
-        self.assertEqual(rows["u2"]["shared_line"], "You both: Gardens · Runs")
+        self.assertEqual(rows["u2"]["shared_line"], "Gardens · Runs, like you")
         self.assertEqual(rows["u2"]["actions"][0]["id"], "peer_card_nudge")
-        # No shared concepts → the honest place-only line, and still no fake score.
-        self.assertEqual(rows["u3"]["shared_line"], "You both go to this gym")
+        # Nothing shared and nothing public on file → no line at all, and still no
+        # fake score.
+        self.assertIsNone(rows["u3"]["shared_line"])
         for row in out["members"]:
             for invented in ("match_stars", "match_band", "match_badge", "similarity_score"):
                 self.assertNotIn(invented, row)
+
+    @patch("app.community_surface.service_client")
+    def test_a_members_own_public_threads_carry_their_line(self, sb) -> None:
+        tables = self._tables()
+        tables["user_identity_claims"] = _chain(
+            [
+                {"user_id": "u3", "label": "Colombian roots", "confidence": 0.9},
+                {"user_id": "u3", "label": "Loves to cook", "confidence": 0.8},
+            ]
+        )
+        sb.return_value = _sb(tables)
+        rows = {r["peer_user_id"]: r for r in community_members("u1", place_id="p1")["members"]}
+        self.assertEqual(rows["u3"]["shared_line"], "Colombian roots · Loves to cook")
+        # The caller is never described back to herself.
+        self.assertIsNone(rows["u1"]["shared_line"])
 
     @patch("app.community_surface.service_client")
     def test_the_caller_is_in_the_list_and_the_blocked_are_not(self, sb) -> None:

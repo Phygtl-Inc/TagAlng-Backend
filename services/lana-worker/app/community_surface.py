@@ -28,8 +28,8 @@ names, no addresses of people, nothing about non-members.
 DB-only (no migration). Members come from `circle_affiliations` by `place_ref`,
 shared concepts from the existing `count_shared_concepts_for_user` RPC, so this
 ships without a `db push` — the cost is the RPC's own top-N cap (see
-`_SHARED_CONCEPT_FETCH`), which only ever means a member reads as "You both go
-here" instead of listing a shared thread.
+`_SHARED_CONCEPT_FETCH`), which only ever means a member's line reads as their
+own threads without the ", like you" tail.
 """
 
 from __future__ import annotations
@@ -57,6 +57,10 @@ MEMBERS_PAGE = 20
 _SHARED_CONCEPT_FETCH = 200
 # Shared threads listed on one member row before it stops being scannable.
 _MAX_SHARED_LABELS = 3
+# Threads on one member's line — theirs plus the shared ones — same reason.
+_MAX_MEMBER_LABELS = 3
+# One read for the whole page; each member keeps only their strongest few.
+_PUBLIC_LABEL_FETCH = 400
 # Features are volunteered in conversation; below this confidence we don't repeat them.
 _FEATURE_MIN_CONFIDENCE = 0.5
 _MAX_FEATURES = 8
@@ -771,23 +775,69 @@ def _shared_concepts(user_id: str) -> dict[str, list[tuple[str, str]]]:
     return out
 
 
-def _shared_line(labels: list[tuple[str, str]], relation: str) -> str:
-    """The one honest line under a member's name. Shared threads when there are
-    any; otherwise the fact that IS true of every row here — you both go here.
+def _public_labels(user_ids: list[str]) -> dict[str, list[str]]:
+    """peer user_id -> their own PUBLIC threads, strongest first.
 
-    Threads held about a child get their own clause: "you both" must only ever
-    describe the two adults.
+    Same trust boundary the public portrait uses: `disclosure='public'`,
+    `subject_kind='self'`, not dismissed. Nothing else may be said about a member
+    to another member.
     """
-    mine = [lb for lb, subject in labels if subject == "self"]
-    kids = [lb for lb, subject in labels if subject == "child"]
-    clauses = []
-    if mine:
-        clauses.append("You both: " + " · ".join(mine))
+    if not user_ids:
+        return {}
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("user_id, label, concept, confidence")
+            .in_("user_id", user_ids)
+            .eq("disclosure", "public")
+            .eq("subject_kind", "self")
+            .is_("dismissed_at", "null")
+            .order("confidence", desc=True)
+            .limit(_PUBLIC_LABEL_FETCH)
+            .execute()
+        )
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        # Prose is an upgrade, never a blocker: the roster still renders names,
+        # chips and nudges without it.
+        logger.exception("community_public_labels_failed n=%d", len(user_ids))
+        return {}
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        uid = str(r.get("user_id") or "")
+        label = str(r.get("label") or r.get("concept") or "").strip()
+        if not uid or not label:
+            continue
+        bucket = out.setdefault(uid, [])
+        if len(bucket) < _MAX_MEMBER_LABELS and label.lower() not in {b.lower() for b in bucket}:
+            bucket.append(label)
+    return out
+
+
+def _member_line(own: list[str], shared: list[tuple[str, str]]) -> str | None:
+    """The one line under a member's name: what THEY hold, with the threads the
+    caller holds too last so ", like you" sits next to them.
+
+    No canned filler — a member we know nothing true about gets no line at all,
+    never "You both go to this gym" (which was true of every row and so said
+    nothing). Threads about a child keep their own clause: "like you" must only
+    ever describe the two adults.
+    """
+    shared_self = [lb for lb, subject in shared if subject == "self"]
+    seen = {lb.lower() for lb in shared_self}
+    theirs = [lb for lb in own if lb.lower() not in seen]
+    parts = theirs + shared_self
+    line = " · ".join(parts[-_MAX_MEMBER_LABELS:])
+    if line and shared_self:
+        line += ", like you"
+    kids = [lb for lb, subject in shared if subject == "child"]
     if kids:
-        clauses.append("Your kids both: " + " · ".join(kids))
-    if clauses:
-        return " · ".join(clauses)
-    return f"You both go to this {relation}"
+        clause = "your kids both: " + " · ".join(kids[:2])
+        line = f"{line} · {clause}" if line else clause[0].upper() + clause[1:]
+    return line or None
 
 
 # ── surface 1: the look-screen card ───────────────────────────────────────────
@@ -1109,11 +1159,6 @@ def community_members(
     mine = resolved or caller_affiliation_at(user_id, pid)
     if not mine:
         raise ValueError("not_a_member")
-    relation = place_relation_noun(
-        mine.get("circle_type") or place.get("place_type"),
-        mine.get("noun"),
-        mine.get("circle_key"),
-    )
     # `member_count` stays what it always was — the people who actually go here — so
     # the header can read "34 people · 28 go here in real life" without a second call.
     status_by_uid = {
@@ -1144,6 +1189,9 @@ def community_members(
     from app.place_activities import activities_by_member
 
     activities = activities_by_member(pid)
+    # What each member holds themselves — the line is about them, not about the
+    # one fact every row here shares.
+    public_labels = _public_labels([uid for uid in page if uid != user_id])
     rows: list[dict[str, Any]] = []
     for uid in page:
         u = users.get(uid) or {}
@@ -1163,7 +1211,8 @@ def community_members(
                 "member" if status_by_uid.get(uid, "confirmed") == "confirmed" else "curious"
             ),
             "activities": list(activities.get(uid) or []),
-            "shared_line": None if me else _shared_line(labels, relation),
+            # Their own threads, with ", like you" where the caller holds one too.
+            "shared_line": None if me else _member_line(public_labels.get(uid) or [], labels),
             "me": me,
             # Deliberately absent: stars, band, badge, similarity. Nothing here
             # compared two people ([[truthful-peer-match-model]]).

@@ -509,3 +509,28 @@ class TestLegacyPathStillAvailable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPeerSeekCaptureLine(unittest.TestCase):
+    """An empty peers search must not release the lane to tip_seek (dev QA 2026-08-18)."""
+
+    def _capture(self, ctx: dict) -> str:
+        from app.discovery_slots import _active_capture_context
+
+        return _active_capture_context(ctx)
+
+    def test_no_peer_offer_is_inert(self) -> None:
+        self.assertEqual(self._capture({"peer_seek_offer_pending": None}), "none")
+
+    def test_armed_peer_offer_blocks_tip_seek(self) -> None:
+        line = self._capture({"peer_seek_offer_pending": {"filter": "likes pizza"}})
+        self.assertTrue(line.startswith("peer_seek"))
+        self.assertIn("likes pizza", line)
+        self.assertIn("NEVER tip_seek", line)
+        self.assertIn("find_by_attrs", line)
+
+    def test_rapport_still_wins_over_peer_offer(self) -> None:
+        line = self._capture(
+            {"rapport_active": True, "peer_seek_offer_pending": {"filter": "likes pizza"}}
+        )
+        self.assertTrue(line.startswith("rapport"))
