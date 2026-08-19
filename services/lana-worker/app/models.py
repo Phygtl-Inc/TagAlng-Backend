@@ -414,12 +414,10 @@ class CommunityProfileResponse(BaseModel):
 
 class CommunityMemberRow(BaseModel):
     """A neighbour at the place. Deliberately carries NO stars, band, badge or
-    similarity: nothing here compared two people. `attribute_line` states what is proven
-    about THEM — their own public threads, with the ones the caller holds too marked
-    ", like you" ("Gardens · Runner, like you"). Null when nothing true is on file:
-    the old fallback ("You both go to this gym") was true of every row and so said
-    nothing — which is also why the field is not called `shared_line` any more: most
-    of what it lists is theirs alone."""
+    similarity: nothing here compared two people. `attributes` states what is proven
+    about THEM — their own public threads, the ones the caller holds too first. Empty
+    when nothing true is on file: the old `shared_line` fallback ("You both go to this
+    gym") was true of every row and so said nothing."""
 
     peer_user_id: str
     nickname: str | None = None
@@ -430,9 +428,11 @@ class CommunityMemberRow(BaseModel):
     membership: str = "member"
     # What they do HERE, member-curated (place_activities): the row's second chip kind.
     activities: list[str] = Field(default_factory=list)
-    attribute_line: str | None = None
-    # The caller's own row: no line (she is not described back to herself) and no
-    # Nudge. Rows rendered now equal member_count (§17).
+    # Their own public threads ("Colombian roots", "Loves to cook"), strongest
+    # first. Self-subject only — a child's thread would read as theirs.
+    attributes: list[str] = Field(default_factory=list)
+    # The caller's own row: no attributes (she is not described back to herself) and
+    # no Nudge. Rows rendered now equal member_count (§17).
     me: bool = False
     # "intro_sent" (an intro is already on its way) or "connected" (they already know
     # each other). Either way the row shows a status, never a Nudge — the same rule the

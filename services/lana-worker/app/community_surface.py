@@ -28,8 +28,8 @@ names, no addresses of people, nothing about non-members.
 DB-only (no migration). Members come from `circle_affiliations` by `place_ref`,
 shared concepts from the existing `count_shared_concepts_for_user` RPC, so this
 ships without a `db push` — the cost is the RPC's own top-N cap (see
-`_SHARED_CONCEPT_FETCH`), which only ever means a member's line reads as their
-own threads without the ", like you" tail.
+`_SHARED_CONCEPT_FETCH`), which only ever means a member below the cut is listed
+by their own threads, with the shared ones not sorted first.
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ CARD_TOP_N = 3
 # Members per page on the people panel.
 MEMBERS_PAGE = 20
 # How wide we ask the shared-concept RPC to look. It ranks by shared count and
-# truncates, so a member below the cut simply loses the ", like you" tail — never a
-# wrong shared thread.
+# truncates, so a member below the cut is listed by their own threads alone — the
+# shared ones simply don't sort first.
 _SHARED_CONCEPT_FETCH = 200
 # Shared threads listed on one member row before it stops being scannable.
 _MAX_SHARED_LABELS = 3
@@ -818,27 +818,18 @@ def _public_labels(user_ids: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def _member_line(own: list[str], shared: list[tuple[str, str]]) -> str | None:
-    """The one line under a member's name: what THEY hold, with the threads the
-    caller holds too last so ", like you" sits next to them.
+def _member_attributes(own: list[str], shared: list[tuple[str, str]]) -> list[str]:
+    """The threads shown under a member's name: what THEY hold, the ones the caller
+    holds too first.
 
-    No canned filler — a member we know nothing true about gets no line at all,
-    never "You both go to this gym" (which was true of every row and so said
-    nothing). Threads about a child keep their own clause: "like you" must only
-    ever describe the two adults.
+    Self-subject only. A thread about their child ("Does karate") would read as
+    theirs in a flat list, and "they do karate" about a parent whose KID does karate
+    is false — those are dropped rather than mislabelled.
     """
     shared_self = [lb for lb, subject in shared if subject == "self"]
     seen = {lb.lower() for lb in shared_self}
     theirs = [lb for lb in own if lb.lower() not in seen]
-    parts = theirs + shared_self
-    line = " · ".join(parts[-_MAX_MEMBER_LABELS:])
-    if line and shared_self:
-        line += ", like you"
-    kids = [lb for lb, subject in shared if subject == "child"]
-    if kids:
-        clause = "your kids both: " + " · ".join(kids[:2])
-        line = f"{line} · {clause}" if line else clause[0].upper() + clause[1:]
-    return line or None
+    return (shared_self + theirs)[:_MAX_MEMBER_LABELS]
 
 
 # ── surface 1: the look-screen card ───────────────────────────────────────────
@@ -1136,7 +1127,7 @@ def community_members(
     offset: int = 0,
     phone_verified: bool = True,
 ) -> dict[str, Any]:
-    """Every neighbour at the place, each with one honest attribute line and a Nudge.
+    """Every neighbour at the place, each with their own honest threads and a Nudge.
 
     Unverified callers get the count and nothing else — names and nudges are for
     people who have verified, exactly like the peer cards.
@@ -1190,8 +1181,8 @@ def community_members(
     from app.place_activities import activities_by_member
 
     activities = activities_by_member(pid)
-    # What each member holds themselves — the line is about them, not about the
-    # one fact every row here shares.
+    # What each member holds themselves — the row is about them, not about the one
+    # fact every row here shares.
     public_labels = _public_labels([uid for uid in page if uid != user_id])
     rows: list[dict[str, Any]] = []
     for uid in page:
@@ -1212,8 +1203,9 @@ def community_members(
                 "member" if status_by_uid.get(uid, "confirmed") == "confirmed" else "curious"
             ),
             "activities": list(activities.get(uid) or []),
-            # Their own threads, with ", like you" where the caller holds one too.
-            "attribute_line": None if me else _member_line(public_labels.get(uid) or [], labels),
+            # Their own threads, the ones the caller holds too first. Empty when
+            # nothing public is on file — the row simply says less.
+            "attributes": [] if me else _member_attributes(public_labels.get(uid) or [], labels),
             "me": me,
             # Deliberately absent: stars, band, badge, similarity. Nothing here
             # compared two people ([[truthful-peer-match-model]]).
