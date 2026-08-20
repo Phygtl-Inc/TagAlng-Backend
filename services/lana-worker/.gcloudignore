@@ -1,0 +1,10 @@
+# Upload context for `gcloud run deploy --source`. Without this file gcloud ships the
+# whole directory to Cloud Build — including anything secret that lands here later.
+.env*
+*.pem
+*-sa.json
+gcp*.json
+.venv
+__pycache__
+.pytest_cache
+.git

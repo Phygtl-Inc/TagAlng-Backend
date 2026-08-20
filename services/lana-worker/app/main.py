@@ -1233,6 +1233,12 @@ def health():
         "openai_timeout_sec": _openai_timeout_sec(),
         "vertex_timeout_sec": _vertex_timeout_sec(),
         "openai_max_retries": _openai_max_retries(),
+        # Mail was undiagnosable without shell access to the container: an unset key or
+        # a RESEND_FROM whose domain is not verified on the account silently drops every
+        # email app-wide. The sender is reported (it is not a secret), the key is not.
+        "email_configured": bool(os.environ.get("RESEND_API_KEY", "").strip()),
+        "email_from": os.environ.get("RESEND_FROM", "").strip() or None,
+        "push_configured": bool(os.environ.get("VAPID_PRIVATE_KEY", "").strip()),
     }
 
 

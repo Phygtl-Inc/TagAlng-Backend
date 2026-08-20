@@ -53,10 +53,25 @@ def stamp_event_place_async(event_id: str, google_place_id: str | None, user_id:
     threading.Thread(target=_run, daemon=True, name=f"event-place-{eid[:8]}").start()
 
 
-# How many of a community's members one meet may email. Big communities are rare today;
-# the cap is here so a publish can never turn into an unbounded mail-out.
-# ponytail: hard cap, move to a queued digest if communities outgrow it.
-_COMMUNITY_MAIL_CAP = 200
+def _when_line(starts_at: str | None, has_time: bool) -> str:
+    """"Sat, Aug 22 · 7:00 AM" — the meet's own timezone, human-first. A date-only meet
+    (#56 midnight placeholder) says so rather than claiming 12:00 AM."""
+    from datetime import datetime, timezone
+
+    from app.event_publish import event_tz
+
+    raw = str(starts_at or "").strip()
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    local = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(event_tz())
+    day = local.strftime("%a, %b %d").replace(" 0", " ")
+    if not has_time:
+        return f"{day} · time to be set"
+    return f"{day} · {local.strftime('%I:%M %p').lstrip('0')}"
 
 
 def stamp_event_community(
@@ -90,44 +105,43 @@ def stamp_event_community(
         sb.table("places").select("name").eq("id", circle_place_id).limit(1).execute()
     )
     place_name = ((place.data or [{}])[0] or {}).get("name") or ""
-    rows = (
-        sb.table("circle_affiliations")
-        .select("user_id")
-        .eq("place_ref", circle_place_id)
-        .eq("status", "confirmed")
-        .is_("dismissed_at", "null")
-        .neq("user_id", host_id)
-        .limit(_COMMUNITY_MAIL_CAP)
+    # When and where, in the mail itself: a meet invite that makes somebody open the app
+    # just to learn the date is an invite most people never open.
+    row = (
+        sb.table("events")
+        .select("starts_at,has_time,venue_name,cover_emoji")
+        .eq("id", event_id)
+        .limit(1)
         .execute()
     )
-    member_ids = list(
-        dict.fromkeys(str(r["user_id"]) for r in (rows.data or []) if r.get("user_id"))
-    )
-    if not member_ids:
-        return 0
-
+    event = (row.data or [{}])[0] or {}
+    when = _when_line(event.get("starts_at"), bool(event.get("has_time")))
+    where = str(event.get("venue_name") or "").strip()
     from app.i18n import t
-    from app.notifications import _user_contact, email_html, recipient_langs, send_email
+    from app.notifications import _user_contact, email_html, mail_community_members
 
-    # Each member reads in their OWN language — one query for the whole roster.
-    langs = recipient_langs(member_ids)
-    sent = 0
-    for uid in member_ids:
-        email, _ = _user_contact(uid)
-        if not email:
-            continue
-        lang = langs.get(uid)
-        send_email(
-            email,
-            subject=t("notify.community_event.subject", lang, place=place_name),
-            html=email_html(
+    _, host_name = _user_contact(host_id)
+
+    def render(lang: str | None) -> tuple[str, str]:
+        return (
+            t("notify.community_event.subject", lang, place=place_name),
+            email_html(
                 t("notify.community_event.title", lang, title=title, place=place_name),
                 t("notify.community_event.body", lang, place=place_name),
                 t("notify.community_event.cta", lang),
                 f"/meet/{event_id}",
+                preheader=when or None,
+                badge=str(event.get("cover_emoji") or "").strip() or "📍",
+                kicker=t("notify.community_note", lang, name=place_name),
+                facts=[
+                    (t("notify.facts.when", lang), when),
+                    (t("notify.facts.where", lang), where),
+                    (t("notify.facts.host", lang), host_name or ""),
+                ],
             ),
         )
-        sent += 1
+
+    sent = mail_community_members(circle_place_id, exclude_user_id=host_id, render=render)
     logger.info(
         "event_community.mailed event=%s place=%s sent=%s", event_id, circle_place_id, sent
     )

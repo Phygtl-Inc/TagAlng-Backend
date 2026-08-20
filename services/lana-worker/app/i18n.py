@@ -825,6 +825,48 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
     },
 
+    # The (label, value) rows in a notification email — "When / Where / Host".
+    "notify.facts.when": {"en": "When", "es": "Cuándo", "pt": "Quando"},
+    "notify.facts.where": {"en": "Where", "es": "Dónde", "pt": "Onde"},
+    "notify.facts.host": {"en": "Host", "es": "Anfitrión", "pt": "Anfitrião"},
+    "notify.facts.community": {"en": "Community", "es": "Comunidad", "pt": "Comunidade"},
+    "notify.facts.members": {"en": "Members", "es": "Miembros", "pt": "Membros"},
+    "notify.facts.member_count": {
+        "en": "{n} now", "es": "{n} ahora", "pt": "{n} agora",
+    },
+
+    # Somebody new joined a community the recipient is a confirmed member of. {name} is
+    # the joiner's nickname — the whole point of the mail — and falls back to a neutral
+    # word when they have not set one yet.
+    # The name carries the subject line — "Someone new joined X" is the same words every
+    # time and reads as a system notice. {name} falls back to the neutral word below.
+    "notify.community_join.subject": {
+        "en": "{name} joined {place}",
+        "es": "{name} se unió a {place}",
+        "pt": "{name} entrou em {place}",
+    },
+    "notify.community_join.title": {
+        "en": "{name} joined {place}",
+        "es": "{name} se unió a {place}",
+        "pt": "{name} entrou em {place}",
+    },
+    "notify.community_join.body": {
+        "en": "Your {place} community just grew. Say hi, or start a meet there — they will hear about it.",
+        "es": "Tu comunidad de {place} acaba de crecer. Saluda o crea un plan allí — se enterarán.",
+        "pt": "Sua comunidade de {place} acabou de crescer. Diga olá ou crie um encontro lá — eles vão saber.",
+    },
+    "notify.community_join.preheader": {
+        "en": "{name} is in — say hi.",
+        "es": "{name} ya está — saluda.",
+        "pt": "{name} entrou — diga olá.",
+    },
+    "notify.community_join.cta": {
+        "en": "Open Lana", "es": "Abrir Lana", "pt": "Abrir a Lana",
+    },
+    "notify.community_join.somebody": {
+        "en": "A new neighbor", "es": "Un vecino nuevo", "pt": "Uma pessoa da vizinhança",
+    },
+
     # One context line on every event notification whose meet was created FOR a community
     # (20261015120000) — the same "Community · X" tag the cards show.
     "notify.community_note": {

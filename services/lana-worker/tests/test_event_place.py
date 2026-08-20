@@ -10,7 +10,7 @@ from app.event_place import (
 
 def _chain(data=None):
     m = MagicMock()
-    for method in ("select", "eq", "neq", "is_", "in_", "limit", "insert", "update"):
+    for method in ("select", "eq", "neq", "is_", "in_", "limit", "insert", "update", "single"):
         getattr(m, method).return_value = m
     m.execute.return_value = MagicMock(data=data or [])
     return m
@@ -77,10 +77,10 @@ class TestStampEventCommunity(unittest.TestCase):
         return sb, events
 
     @patch("app.notifications.send_email")
-    @patch("app.notifications.recipient_langs", return_value={})
-    @patch("app.notifications._user_contact", return_value=("m@x.com", "Ada"))
+    @patch("app.notifications.service_client")
     @patch("app.event_place.service_client")
-    def test_non_member_cannot_tag_or_mail(self, sb, _contact, _langs, mail) -> None:
+    def test_non_member_cannot_tag_or_mail(self, sb, notif_sb, mail) -> None:
+        notif_sb.return_value = self._sb([])[0]
         client, events = self._sb([])
         sb.return_value = client
         self.assertEqual(stamp_event_community("e1", "p1", "u1", "Coffee walk"), 0)
@@ -88,16 +88,33 @@ class TestStampEventCommunity(unittest.TestCase):
         mail.assert_not_called()
 
     @patch("app.notifications.send_email")
-    @patch("app.notifications.recipient_langs", return_value={})
-    @patch("app.notifications._user_contact", return_value=("m@x.com", "Ada"))
+    @patch("app.notifications.service_client")
     @patch("app.event_place.service_client")
-    def test_member_tags_and_mails_roster(self, sb, _contact, _langs, mail) -> None:
+    def test_member_tags_and_mails_roster(self, sb, notif_sb, mail) -> None:
         client, events = self._sb([{"user_id": "m1"}, {"user_id": "m2"}, {"user_id": "m1"}])
         sb.return_value = client
+        notif = MagicMock()
+        notif_tables = {
+            # _user_contact(host) resolves the "Host" fact row off this same client.
+            "circle_affiliations": _chain(
+                [{"user_id": "m1"}, {"user_id": "m2"}, {"user_id": "m1"}]
+            ),
+            # Deduped to two ids, so two contact rows come back — one mail each.
+            "users": _chain(
+                [
+                    {"id": "m1", "email": "m1@x.com", "locale": None},
+                    {"id": "m2", "email": "m2@x.com", "locale": "es"},
+                ]
+            ),
+        }
+        notif.table.side_effect = lambda name: notif_tables[name]
+        notif_sb.return_value = notif
         sent = stamp_event_community("e1", "p1", "u1", "Coffee walk")
         events.update.assert_called_once_with({"circle_place_ref": "p1"})
         self.assertEqual(sent, 2)  # deduped
         self.assertIn("Lake Nona YMCA", mail.call_args.kwargs["subject"])
+        # Each member read it in their own language — es for m2.
+        self.assertIn("Nuevo plan", mail.call_args.kwargs["subject"])
 
     @patch("app.notifications.send_email")
     @patch("app.event_place.service_client")

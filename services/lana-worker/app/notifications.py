@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -42,35 +43,117 @@ def app_url(path: str = "/") -> str:
     return base + path
 
 
+_BRAND = "#c2410c"       # Lana's warm orange — the button and the rule under the header
+_INK = "#1f2937"
+_MUTED = "#6b7280"
+_CARD = "#ffffff"
+_PAGE = "#f6f4f1"        # warm paper, so the card has an edge in light mode
+_HAIR = "#e7e2dc"
+
+
 def email_html(
     heading: str,
     body: str,
     cta_label: str | None = None,
     cta_path: str | None = None,
     note: str | None = None,
+    *,
+    preheader: str | None = None,
+    badge: str | None = None,
+    kicker: str | None = None,
+    facts: list[tuple[str, str]] | None = None,
 ) -> str:
-    """Minimal branded email body. cta_* renders a button linking into the app; `note` is
-    one muted context line under the body — the meet's community, for event mail."""
-    cta = ""
-    if cta_label and cta_path:
-        cta = (
-            f'<a href="{app_url(cta_path)}" style="display:inline-block;margin-top:16px;'
-            'padding:10px 20px;background:#c2410c;color:#fff;border-radius:9999px;'
-            f'text-decoration:none;font-weight:600">{cta_label}</a>'
+    """One branded transactional email. The only email layout in the app — every
+    notification renders through here, so it is worth the inline CSS.
+
+    heading/body are the message. Everything else is optional and stays out of the way
+    when unused, which is what keeps the older callers unchanged:
+      preheader  the grey line the inbox shows next to the subject. Unset and the client
+                 grabs the first words of the body instead, which reads like a leak.
+      badge      one emoji in the header disc — the thing the eye lands on first.
+      kicker     small caps line above the heading ("Community · Lake Nona YMCA").
+      facts      (label, value) rows in a bordered block — when, where, who. A meet
+                 invite that makes someone open the app to learn the date has failed.
+      note       one muted line under the body.
+
+    Layout is a single centred table (Outlook ignores max-width on divs) holding one
+    card. Colors are set explicitly on every block: a client that flips to dark mode
+    inverts what it can guess and leaves the rest, and half-inverted mail is unreadable.
+    """
+    def _row(label: str, value: str) -> str:
+        return (
+            f'<tr><td style="padding:7px 0;font-size:13px;color:{_MUTED};'
+            f'white-space:nowrap;vertical-align:top">{label}</td>'
+            f'<td style="padding:7px 0 7px 14px;font-size:14px;color:{_INK};'
+            f'font-weight:600;vertical-align:top">{value}</td></tr>'
         )
+
+    hidden_preheader = (
+        f'<div style="display:none;max-height:0;overflow:hidden;opacity:0;'
+        f'mso-hide:all">{preheader}</div>' if preheader else ""
+    )
+    disc = (
+        f'<td width="40" style="width:40px;padding-right:12px"><div style="width:40px;'
+        f'height:40px;line-height:40px;border-radius:20px;background:#fdf1ea;'
+        f'text-align:center;font-size:20px">{badge}</div></td>' if badge else ""
+    )
+    kicker_html = (
+        f'<p style="margin:0 0 6px;font-size:11px;letter-spacing:.09em;'
+        f'text-transform:uppercase;color:{_BRAND};font-weight:700">{kicker}</p>'
+        if kicker else ""
+    )
+    facts_html = (
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        f'width="100%" style="margin:18px 0 0;border-top:1px solid {_HAIR};'
+        f'border-bottom:1px solid {_HAIR}">'
+        + "".join(_row(label, value) for label, value in facts if value)
+        + "</table>"
+        if facts and any(v for _, v in facts) else ""
+    )
+    note_html = (
+        f'<p style="margin:16px 0 0;font-size:13px;line-height:1.5;color:{_MUTED}">'
+        f'{note}</p>' if note else ""
+    )
+    cta_html = (
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        f'style="margin:22px 0 0"><tr><td style="border-radius:9999px;'
+        f'background:{_BRAND}"><a href="{app_url(cta_path)}" '
+        f'style="display:inline-block;padding:13px 30px;font-size:15px;font-weight:600;'
+        f'color:#ffffff;text-decoration:none">{cta_label} &nbsp;&rarr;</a>'
+        f"</td></tr></table>" if cta_label and cta_path else ""
+    )
     return (
-        '<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px;'
-        'margin:0 auto;padding:24px;color:#1a1a1a">'
-        f'<h1 style="font-size:20px;margin:0 0 8px">{heading}</h1>'
-        f'<p style="font-size:15px;line-height:1.5;color:#444;margin:0">{body}</p>'
-        + (
-            f'<p style="font-size:13px;color:#666;margin:10px 0 0">{note}</p>'
-            if note
-            else ""
-        )
-        + f"{cta}"
-        '<p style="font-size:12px;color:#999;margin-top:28px">Lana · your block concierge</p>'
-        "</div>"
+        f'<div style="background:{_PAGE};padding:28px 12px;'
+        'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,'
+        'Arial,sans-serif">'
+        + hidden_preheader
+        + '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'align="center" width="100%" style="max-width:520px;margin:0 auto">'
+        f'<tr><td style="background:{_CARD};border:1px solid {_HAIR};'
+        'border-radius:16px;padding:28px 26px 30px">'
+        # Header: badge disc + wordmark, over a hairline rule.
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'width="100%"><tr>'
+        + disc
+        + f'<td style="vertical-align:middle"><span style="font-size:17px;'
+        f'font-weight:700;color:{_INK};letter-spacing:-.01em">Lana</span>'
+        f'<span style="font-size:13px;color:{_MUTED}"> · your block concierge</span>'
+        "</td></tr></table>"
+        f'<div style="height:1px;background:{_HAIR};margin:18px 0 20px"></div>'
+        + kicker_html
+        + f'<h1 style="margin:0 0 10px;font-size:21px;line-height:1.3;'
+        f'color:{_INK};font-weight:700;letter-spacing:-.01em">{heading}</h1>'
+        + f'<p style="margin:0;font-size:15px;line-height:1.6;color:#4b5563">{body}</p>'
+        + facts_html
+        + note_html
+        + cta_html
+        + "</td></tr>"
+        f'<tr><td style="padding:18px 26px 0;font-size:12px;line-height:1.5;'
+        f'color:{_MUTED};text-align:center">You are getting this because you joined a '
+        f'community in Lana.<br>'
+        f'<a href="{app_url("/")}" style="color:{_MUTED};text-decoration:underline">'
+        "Open Lana</a> to change what you hear about.</td></tr>"
+        "</table></div>"
     )
 
 
@@ -170,6 +253,64 @@ def send_email(to: str | None, *, subject: str, html: str, text: str | None = No
         threading.Thread(target=_email_send, args=(api_key, payload), daemon=True).start()
     except Exception:  # noqa: BLE001
         pass
+
+
+# How many of a community's members one event may email. Big communities are rare
+# today; the cap is here so one publish or join can never become an unbounded mail-out.
+# ponytail: hard cap, move to a queued digest if communities outgrow it.
+COMMUNITY_MAIL_CAP = 200
+
+
+def mail_community_members(
+    place_id: str,
+    *,
+    exclude_user_id: str | None = None,
+    render: Callable[[str | None], tuple[str, str]],
+    cap: int = COMMUNITY_MAIL_CAP,
+) -> int:
+    """Email a community's confirmed members, each in their own language. Returns how
+    many were mailed.
+
+    `render(lang)` builds (subject, html) for one recipient's locale. Two queries for the
+    whole roster — a fan-out must never issue a lookup per person. Best-effort: any
+    failure mails nobody rather than raising into the caller's flow.
+    """
+    pid = str(place_id or "").strip()
+    sb = service_client()
+    if not pid or sb is None:
+        return 0
+    try:
+        q = (
+            sb.table("circle_affiliations")
+            .select("user_id")
+            .eq("place_ref", pid)
+            .eq("status", "confirmed")
+            .is_("dismissed_at", "null")
+        )
+        if exclude_user_id:
+            q = q.neq("user_id", str(exclude_user_id))
+        rows = q.limit(cap).execute().data or []
+    except Exception:  # noqa: BLE001
+        _log.warning("community_mail_roster_failed place=%s", pid, exc_info=True)
+        return 0
+    ids = list(dict.fromkeys(str(r["user_id"]) for r in rows if r.get("user_id")))
+    if not ids:
+        return 0
+    try:
+        contacts = sb.table("users").select("id,email,locale").in_("id", ids).execute().data or []
+    except Exception:  # noqa: BLE001
+        _log.warning("community_mail_contacts_failed place=%s", pid, exc_info=True)
+        return 0
+    sent = 0
+    for row in contacts:
+        email = str(row.get("email") or "").strip()
+        if not email:
+            continue
+        subject, html = render(str(row.get("locale") or "").strip() or None)
+        send_email(email, subject=subject, html=html)
+        sent += 1
+    _log.info("community_mailed place=%s roster=%s sent=%s", pid, len(ids), sent)
+    return sent
 
 
 def _user_contact(user_id: str | None) -> tuple[str | None, str | None]:

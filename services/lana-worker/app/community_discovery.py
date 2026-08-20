@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from typing import Any
 
 from app.auth import service_client
@@ -373,6 +374,8 @@ def join_community(
     # most about it would be Lana not listening.
     if joined_status == "confirmed":
         _after_join(user_id, affiliation_id, candidate, place_id, str(place.get("name") or ""))
+        # The members already there hear about it — same roster the community's meets mail.
+        notify_members_of_join(place_id, str(place.get("name") or ""), user_id)
 
     logger.info(
         "community_joined user=%s place=%s source=%s promoted=%s",
@@ -721,6 +724,77 @@ def _nearby_fallback(mine: list[dict[str, Any]], nearby: list[dict[str, Any]]) -
         )
     )
     return f"{head} Want me to add you to any of them?"
+
+
+def _confirmed_member_count(place_id: str) -> int:
+    """How many people are confirmed members here — the one fact that makes a "somebody
+    joined" mail feel like a community growing. 0 on any failure, and the row is dropped
+    rather than showing a wrong number."""
+    try:
+        res = (
+            service_client()
+            .table("circle_affiliations")
+            .select("id", count="exact")
+            .eq("place_ref", place_id)
+            .eq("status", "confirmed")
+            .is_("dismissed_at", "null")
+            .limit(1)
+            .execute()
+        )
+        return int(res.count or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def mail_join_to_members(place_id: str, place_name: str, joiner_id: str) -> int:
+    """Email the community's existing confirmed members that somebody new joined.
+    Same roster the community's meets mail. Returns how many were mailed."""
+    from app.i18n import t
+    from app.notifications import _user_contact, email_html, mail_community_members
+
+    _, nickname = _user_contact(joiner_id)
+    members = _confirmed_member_count(place_id)
+
+    def render(lang: str | None) -> tuple[str, str]:
+        name = nickname or t("notify.community_join.somebody", lang)
+        return (
+            t("notify.community_join.subject", lang, name=name, place=place_name),
+            email_html(
+                t("notify.community_join.title", lang, name=name, place=place_name),
+                t("notify.community_join.body", lang, place=place_name),
+                t("notify.community_join.cta", lang),
+                "/",
+                preheader=t("notify.community_join.preheader", lang, name=name),
+                badge="👋",
+                kicker=t("notify.community_note", lang, name=place_name),
+                facts=[
+                    (t("notify.facts.community", lang), place_name),
+                    (
+                        t("notify.facts.members", lang),
+                        t("notify.facts.member_count", lang, n=members) if members else "",
+                    ),
+                ],
+            ),
+        )
+
+    return mail_community_members(place_id, exclude_user_id=joiner_id, render=render)
+
+
+def notify_members_of_join(place_id: str, place_name: str, joiner_id: str) -> None:
+    """Fire-and-forget wrapper — the join tap never waits on a mail-out, and never
+    fails because of one. An unnamed community has nothing to say, so it stays quiet."""
+    if not place_id or not place_name:
+        return
+
+    def _run() -> None:
+        try:
+            mail_join_to_members(place_id, place_name, joiner_id)
+        except Exception:
+            logger.exception("community_join_mail_failed place=%s", place_id)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f"circle-join-{str(place_id)[:8]}"
+    ).start()
 
 
 def _after_join(

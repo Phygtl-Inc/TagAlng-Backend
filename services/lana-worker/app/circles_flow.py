@@ -648,6 +648,13 @@ def ground_affiliation(
         {"place_ref": place_id, "status": "confirmed", "confirmed_via": confirmed_via}
     ).eq("id", affiliation["id"]).execute()
 
+    # Grounding is how most people become a member — the Join tap is the rarer path — so
+    # the "somebody new joined" mail has to fire from HERE too, not only from
+    # join_community. Local import: community_discovery imports this module.
+    from app.community_discovery import notify_members_of_join
+
+    notify_members_of_join(place_id, str(details["name"] or ""), user_id)
+
     _flush_parked_features(user_id, affiliation, place_id)
     _close_grounding_gap(affiliation_id)
 

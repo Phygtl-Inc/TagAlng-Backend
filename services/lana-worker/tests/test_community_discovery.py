@@ -8,6 +8,8 @@ from app.community_discovery import (
     discover_communities,
     join_community,
     joined_via_label,
+    mail_join_to_members,
+    notify_members_of_join,
     set_membership,
 )
 
@@ -284,6 +286,115 @@ class TestMembershipIntent(unittest.TestCase):
             set_membership("u1", "a1", "member")
         self.assertEqual(str(err.exception), "affiliation_not_found")
         self.assertIn(("user_id", "u1"), [c.args for c in affs.eq.call_args_list])
+
+
+class TestJoinTellsTheMembers(unittest.TestCase):
+    """Joining is news to the people already there — the same fan-out the meets use."""
+
+    def _notif_sb(self, roster, contacts):
+        from tests.test_event_place import _chain as chain
+
+        sb = MagicMock()
+        tables = {
+            "circle_affiliations": chain(roster),
+            "users": chain(contacts),
+        }
+        sb.table.side_effect = lambda name: tables[name]
+        return sb
+
+    def _count_sb(self, count):
+        """The member-count query lives on community_discovery's own client."""
+        from tests.test_event_place import _chain as chain
+
+        sb = MagicMock()
+        row = chain([])
+        row.execute.return_value = MagicMock(data=[], count=count)
+        sb.table.return_value = row
+        return sb
+
+    @patch("app.community_discovery.service_client")
+    @patch("app.notifications.send_email")
+    @patch("app.notifications.service_client")
+    @patch("app.notifications._user_contact", return_value=("j@x.com", "Ada"))
+    def test_members_are_mailed_in_their_own_language(self, _contact, sb, mail, count_sb) -> None:
+        count_sb.return_value = self._count_sb(3)
+        sb.return_value = self._notif_sb(
+            [{"user_id": "m1"}, {"user_id": "m2"}],
+            [
+                {"id": "m1", "email": "m1@x.com", "locale": None},
+                {"id": "m2", "email": "m2@x.com", "locale": "es"},
+            ],
+        )
+        self.assertEqual(mail_join_to_members("p1", "Lake Nona YMCA", "u1"), 2)
+        subjects = [c.kwargs["subject"] for c in mail.call_args_list]
+        # The joiner's nickname carries the subject line, in each reader's language.
+        self.assertIn("Ada joined Lake Nona YMCA", subjects)
+        self.assertIn("Ada se unió a Lake Nona YMCA", subjects)
+        html = mail.call_args_list[0].kwargs["html"]
+        self.assertIn("Ada joined Lake Nona YMCA", html)
+        self.assertIn("3 now", html)  # the member count is what makes it feel like growth
+        self.assertIn("Ada is in — say hi.", html)  # inbox preheader, not a body leak
+
+    @patch("app.community_discovery.service_client")
+    @patch("app.notifications.send_email")
+    @patch("app.notifications.service_client")
+    @patch("app.notifications._user_contact", return_value=("j@x.com", None))
+    def test_a_joiner_without_a_nickname_is_still_announced(self, _c, sb, mail, count_sb) -> None:
+        count_sb.return_value = self._count_sb(1)
+        sb.return_value = self._notif_sb(
+            [{"user_id": "m1"}], [{"id": "m1", "email": "m1@x.com", "locale": None}]
+        )
+        self.assertEqual(mail_join_to_members("p1", "Lake Nona YMCA", "u1"), 1)
+        self.assertIn("A new neighbor joined", mail.call_args.kwargs["html"])
+        self.assertEqual(
+            mail.call_args.kwargs["subject"], "A new neighbor joined Lake Nona YMCA"
+        )
+
+    @patch("app.community_discovery.service_client")
+    @patch("app.notifications.send_email")
+    @patch("app.notifications.service_client")
+    @patch("app.notifications._user_contact", return_value=("j@x.com", "Ada"))
+    def test_members_without_an_email_are_skipped(self, _c, sb, mail, count_sb) -> None:
+        count_sb.return_value = self._count_sb(1)
+        sb.return_value = self._notif_sb(
+            [{"user_id": "m1"}], [{"id": "m1", "email": None, "locale": None}]
+        )
+        self.assertEqual(mail_join_to_members("p1", "Lake Nona YMCA", "u1"), 0)
+        mail.assert_not_called()
+
+    @patch("app.community_discovery.threading.Thread")
+    def test_an_unnamed_community_says_nothing(self, thread) -> None:
+        notify_members_of_join("p1", "", "u1")
+        notify_members_of_join("", "Lake Nona YMCA", "u1")
+        thread.assert_not_called()
+
+    @patch("app.community_discovery.notify_members_of_join")
+    @patch("app.community_discovery._after_join")
+    @patch("app.community_discovery.service_client")
+    def test_a_curious_tap_is_not_announced(self, sb, _after, notify) -> None:
+        affs = _chain([], insert_data=[{"id": "new1"}])
+        sb.return_value = _sb(
+            {
+                "places": _chain([{"id": "p1", "name": "OrangeTheory", "place_type": "fitness"}]),
+                "circle_affiliations": affs,
+            }
+        )
+        join_community("u1", "p1", membership="curious")
+        notify.assert_not_called()
+
+    @patch("app.community_discovery.notify_members_of_join")
+    @patch("app.community_discovery._after_join")
+    @patch("app.community_discovery.service_client")
+    def test_a_real_join_is_announced(self, sb, _after, notify) -> None:
+        affs = _chain([], insert_data=[{"id": "new1"}])
+        sb.return_value = _sb(
+            {
+                "places": _chain([{"id": "p1", "name": "OrangeTheory", "place_type": "fitness"}]),
+                "circle_affiliations": affs,
+            }
+        )
+        join_community("u1", "p1")
+        notify.assert_called_once_with("p1", "OrangeTheory", "u1")
 
 
 class TestJoinablePlaceNames(unittest.TestCase):
