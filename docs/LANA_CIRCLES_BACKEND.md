@@ -16,7 +16,7 @@ canonical place (DB check `circle_affiliations_confirmed_has_place`, migration
 
 - `/lana/circles/add` **requires** `google_place_id` (400 `place_required`
   otherwise) and creates the community grounded + confirmed in one step.
-- `/lana/circles/mine` returns **grounded rows only**. Ungrounded rows are
+- `/lana/circles/list` returns **grounded rows only**. Ungrounded rows are
   internal grounding candidates — chat-captured mentions and invite
   self-confirms — that surface exclusively through Lana's "which spot is it?"
   ask, never as communities. (FE note: the Communities panel's "pick the spot"
@@ -118,9 +118,17 @@ deterministically, a decline closes warmly with no re-pitch.
 ## Worker endpoints (all POST, Bearer auth — same conventions as /lana/rapport/*)
 
 ### Circles profile surface (§G)
-- `POST /lana/circles/mine` → `{circles:[{id, circle_type, status, grounded,
-  place_name, place_address, detail, member_count, active, added_at}]}`
-  (own circles — always fully visible to the owner)
+- `POST /lana/circles/list` `{user_id?}` → `{user_id, circles:[{id, circle_type,
+  status, grounded, place_id, place_name, place_address, relation, emoji, detail,
+  activities, member_count, active, added_at, joined_via_label}]}`
+  (replaces `/lana/circles/mine`, removed 2026-08-18). No `user_id` = the caller's own
+  list, always fully visible to her. ANOTHER user's id returns the public head of each
+  place only — `id, circle_type, grounded, place_id, place_name, place_address,
+  relation, emoji, member_count, active, activities` (no `mine` flag): her own words for
+  it, how and when she joined, and the place-as-venue block stay hers. `circles` is
+  empty when the two have blocked each other; 400 `invalid_user_id` on a non-uuid.
+  Every row's `place_id` opens `POST /lana/circles/profile`, which is where the tier
+  gating for the PEOPLE lives.
 - `POST /lana/circles/add` `{circle_type, detail?, google_place_id}` — place
   REQUIRED (400 `place_required` without it); creates grounded + confirmed
 - `POST /lana/circles/update` `{affiliation_id, detail?}`

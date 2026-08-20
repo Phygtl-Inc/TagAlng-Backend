@@ -149,6 +149,7 @@ from app.supabase_rpc import call_rpc
 from app.layer1_handlers import (
     HELP_WHAT_CAN_YOU_DO,
     HELP_WHO_ARE_YOU,
+    KNOWN_TIERS,
     fetch_block_summary,
     fetch_identity_dashboard,
     fetch_peers_by_attr_filter,
@@ -2802,11 +2803,19 @@ def _attr_search_is_spent(peers: list[dict[str, Any]]) -> bool:
     empty case armed the notify/widen pills, so the exhausted case shipped prose offering
     "a different interest or people beyond your area" with nothing to tap — and typing it
     re-ran the identical filter and returned the identical sentence (QA 2026-08-18).
+
+    A match the user ALREADY KNOWS is not spent — it is the answer. Those rows are kept
+    now rather than dropped, and arming "Yes, notify me" under "there's 1 person and
+    you're already connected" reads as a contradiction: the pill offers to watch for
+    what is on screen (2026-08-19).
     """
     if not peers:
         return True
     return all(
-        isinstance(p, dict) and str(p.get("connection") or "").strip() for p in peers
+        isinstance(p, dict)
+        and str(p.get("connection") or "").strip()
+        and str(p.get("connection")).strip() not in KNOWN_TIERS
+        for p in peers
     )
 
 
@@ -3181,17 +3190,73 @@ def _search_tip_places(
     """Google Places search for the tip fallback — best-effort, [] on any failure. When
     `included_type` is set we hard-restrict (strictTypeFiltering) so the type is a real
     filter, not a hint; `required_attrs` are pulled back for post-hoc verification."""
+    from app.place_local_signal import (
+        communities_for_request,
+        merge_communities_first,
+        stamp_local_signal,
+    )
     from app.places import search_places
 
     try:
-        return search_places(
+        places = search_places(
             query=query, zip_code=zip_for_bias or None, block_id=block_id, user_id=user_id,
             limit=limit, included_type=included_type, strict_type=bool(included_type),
             attr_fields=required_attrs or None,
         )
     except Exception:  # noqa: BLE001 — fallback must never break the saved-signal reply
         logging.getLogger(__name__).exception("tip_places_search_failed")
-        return []
+        # NOT an early return: Google being down is no reason to withhold the communities
+        # we hold ourselves, which are the better answer anyway.
+        places = []
+    # Stamped at the FETCH, not on the way to the wire: the reply is composed before the
+    # payload is shaped, so stamping later left Lana saying "not a neighbor vouch" over a
+    # spot the user is a member of — true about recommendations, misleading about what
+    # she knows. Every google_place_suggestions row comes through here.
+    stamp_local_signal(places, user_id=user_id)
+    # A row we have a local signal for leads. Prod 2026-08-19: Lana said "you're already
+    # part of Mizu Sushi" and then listed it THIRD, under two strangers' listings — and
+    # the page only shows three, so the one place with a real signal was the one below
+    # the fold. Re-ordering only: nothing is added, dropped, or re-scored (the same rule
+    # the tip re-rank follows), and Google's order survives among equals.
+    places.sort(key=lambda p: not (isinstance(p, dict) and (p.get("community") or {}).get("member_count")))
+    # Stamping can only mark what Google returned. Asked for a reading spot it returned
+    # three coffee shops, so the library neighbors actually read at was never in the list
+    # (prod 2026-08-19). Ask our own communities directly — matched on what members DO
+    # there, because nothing in "Orlando Public Library" contains the word "read".
+    return merge_communities_first(
+        places, communities_for_request(query, user_id=user_id, limit=2)
+    )
+
+
+def _local_signal_note(places: list[dict[str, Any]]) -> str:
+    """One clause naming a suggestion the user's own neighborhood already touches, or "".
+
+    "From Google — not a neighbor vouch" is true about RECOMMENDATIONS and misleading
+    about what Lana knows: prod 2026-08-19 put that header over the sushi place the asker
+    is a member of, with the activity they had told her about sitting unused. Nobody
+    recommended it, so the vouch line stays — this adds the fact next to it.
+
+    First matching row only. Two of these stacked would bury the answer, and the cards
+    carry the rest.
+    """
+    for p in places or []:
+        signal = p.get("community") if isinstance(p, dict) else None
+        if not isinstance(signal, dict) or not signal.get("member_count"):
+            continue
+        name = str(p.get("name") or "").strip()
+        if not name:
+            continue
+        # The activity that actually scored, when the finder matched one — "they read
+        # there" is a reason, where the full label list is only context.
+        matched = str(signal.get("matched_label") or "").strip()
+        labels = [matched] if matched else [str(x) for x in (signal.get("activity_labels") or [])][:2]
+        doing = f" ({', '.join(labels).lower()})" if labels else ""
+        if signal.get("is_member"):
+            return f" You're already part of {name}{doing}, if that counts."
+        n = int(signal["member_count"])
+        who = "1 neighbor goes" if n == 1 else f"{n} neighbors go"
+        return f" {who} to {name}{doing}, for what it's worth."
+    return ""
 
 
 def _verify_places(
@@ -3268,23 +3333,27 @@ def _tip_seek_fallback_reply(
         if not places:
             return ""
         ctx["google_place_suggestions"] = places[:3]
+        local = _local_signal_note(places[:3])
         if reason_widen:
             if not posted:
-                return f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH})."
+                return (
+                    f"Okay — widening it. Here's everything nearby (from Google, "
+                    f"{_TIP_VOUCH}).{local}"
+                )
             return (
-                f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}). "
+                f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}).{local} "
                 "Your ask is still posted for neighbors, so I'll ping you the moment a neighbor "
                 "recommends one."
             )
         if not posted:
             return (
                 f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
-                f"{_TIP_VOUCH})."
+                f"{_TIP_VOUCH}).{local}"
             )
         return (
             f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
-            f"{_TIP_VOUCH}). I've also posted your ask for neighbors — I'll ping you the moment "
-            "a neighbor recommends one."
+            f"{_TIP_VOUCH}).{local} I've also posted your ask for neighbors — I'll ping you the "
+            "moment a neighbor recommends one."
         )
 
     # Plain path: widen tap, personalization off, or an anonymous user (no claims to lean on).
@@ -3367,15 +3436,19 @@ def _tip_seek_fallback_reply(
         )
         ctx["rec_chips"] = chips
         reframe = chosen.get("reframe") or f"Focused on {chosen.get('label', 'a good fit').lower()} spots."
+        local = _local_signal_note(verified[:3])
         if not posted:
             # No "want me to widen?" here — the caller ends this turn with the ask-neighbors
             # offer, and two questions in one breath is the ask-stacking bug
             # ([[rapport-ask-stacking-and-tile-context]]). The widen stays available as a chip.
-            return f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH})."
+            return (
+                f"{reframe} These are from Google, filtered to genuinely match "
+                f"({_TIP_VOUCH}).{local}"
+            )
         return (
-            f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}), "
-            "and I've posted your ask for neighbors — I'll ping you the moment a neighbor "
-            "recommends one. Want me to widen the search?"
+            f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}),"
+            f"{local} and I've posted your ask for neighbors — I'll ping you the moment a "
+            "neighbor recommends one. Want me to widen the search?"
         )
 
     # 'Only verified': nothing Google-confirmed for this angle — say so honestly and fall
@@ -3388,14 +3461,15 @@ def _tip_seek_fallback_reply(
     ctx["google_place_suggestions"] = fallback[:3]
     ctx["rec_widen_noun"] = noun
     label = str(chosen.get("label") or "").strip().lower() or "matching"
+    local = _local_signal_note(fallback[:3])
     if not posted:
         return (
             f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
-            f"({_TIP_VOUCH})."
+            f"({_TIP_VOUCH}).{local}"
         )
     return (
         f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
-        f"({_TIP_VOUCH}). Your ask is posted for neighbors — I'll ping you the moment a "
+        f"({_TIP_VOUCH}).{local} Your ask is posted for neighbors — I'll ping you the moment a "
         "neighbor recommends one."
     )
 

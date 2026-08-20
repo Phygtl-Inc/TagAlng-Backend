@@ -81,6 +81,21 @@ def synthesizer_model() -> str:
     return "claude-sonnet-4-6" if provider() == "claude" else "gemini-2.5-pro"
 
 
+def composer_model() -> str:
+    """Model for WORDING-ONLY calls: reply_compose's one warm line (111 call
+    sites) and i18n's render-into-session-language. Both take facts the engines
+    already decided and phrase or translate them — no judgement, no schema
+    depth. They sat on the synth tier (gpt-4.1), ~5x the mini price to write one
+    sentence, and gpt-4.1 was 50% of this project's August OpenAI spend.
+
+    Deliberately NOT applied to orchestrator/synthesizer (Lana's actual voice on
+    non-policy turns) nor to extractor_model (measured field-dropping on mini —
+    see the note below). LANA_COMPOSER_MODEL pins it; unset = router tier.
+    """
+    override = os.environ.get("LANA_COMPOSER_MODEL", "").strip()
+    return override or router_model()
+
+
 def extractor_model() -> str:
     """Provider-correct model for every structured EXTRACTION call.
 

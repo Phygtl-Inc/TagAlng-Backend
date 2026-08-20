@@ -66,7 +66,7 @@ def compose_reply(
                     memoizes per (goal, language) like i18n's render cache.
     """
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+        from app.orchestrator.llm import composer_model, llm_configured, llm_json
 
         if not _enabled() or not llm_configured():
             return fallback
@@ -111,7 +111,7 @@ def compose_reply(
             + ("\n".join(f"- {f}" for f in fact_lines) if fact_lines else "- (none)")
         )
         data = llm_json(
-            model=synthesizer_model(),
+            model=composer_model(),
             system=system,
             user_payload=payload,
             max_tokens=200,

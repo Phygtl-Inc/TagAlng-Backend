@@ -27,7 +27,7 @@ The turn that answers *Find a meet* (`intent_hint: "look_meet"`, the one that re
 "communities": {
   "items": [
     {
-      "affiliation_id": "…",         // the circle_affiliations row (also from /circles/mine)
+      "affiliation_id": "…",         // the circle_affiliations row (also from /circles/list)
       "place_id": "…",               // what the profile + people endpoints are keyed on
       "place_name": "OrangeTheory Narcoossee",
       "place_address": "9145 Narcoossee Rd",
@@ -61,7 +61,7 @@ turn is not a looking-open turn, so it is `null` there.
 
 ## Panel 2 — all communities (*View more*)
 
-No new endpoint: `POST /lana/circles/mine` already returns every grounded community.
+No new endpoint: `POST /lana/circles/list` already returns every grounded community.
 Two fields were **added** to each row for these panels:
 
 | Field | Why |
@@ -265,7 +265,8 @@ POST /lana/circles/members
   "members": [
     { "peer_user_id": "…", "nickname": "mapleluz", "avatar_url": "…",
       "trait_tags": ["Gardens", "Runs"],
-      "shared_line": "You both: Gardens · Runs",
+      "activities": ["Spin", "Pilates"],
+      "attributes": ["Runs", "Loves to cook"],
       "actions": [{ "id": "peer_card_nudge", "label": "Nudge",
                     "message": "introduce me to mapleluz", "style": "primary",
                     "peer_user_id": "…" }] }
@@ -278,10 +279,14 @@ POST /lana/circles/members
 **What a row claims, and what it never claims.** No `match_stars`, `match_band`,
 `match_badge` or `similarity_score` — nothing here compared two people, so there is
 nothing to score. `trait_tags` are the identity concepts the caller and that neighbour
-**both** hold (exact concept overlap, public claims only). With no overlap the tags are
-empty and `shared_line` states the one thing that IS true of every row on this panel:
-**"You both go to this gym"**. Render `shared_line` as the line under the name; the tags
-are the same facts as chips.
+**both** hold (exact concept overlap, public claims only); with no overlap they are empty.
+
+`attributes` is what goes under the name, and it is about **them**: their own public
+threads (max 3), the ones the caller holds too first. Render them joined or as chips,
+your call. Self-subject only — a thread about their child is dropped rather than listed
+as theirs. **Empty when nothing true is on file**; render nothing in that case. There is
+no filler line any more: the old `shared_line` ("You both go to this gym") was true of
+every row and so said nothing.
 
 Self and mutual blocks are excluded from `members` (`member_count` is the raw roster, so
 it can exceed what you can page through). Paginate with `offset` while `has_more`.
@@ -312,7 +317,8 @@ rule as the peer cards.
 | No meets at the place | `upcoming_events: []`, `meets_this_week: 0` |
 | Nobody else there yet | `active: false`, `status_line: "just you so far"`, `members: []` |
 | Blocks table unreadable | The people panel returns no names (fails closed, on purpose) |
-| A member is past the shared-concept fetch cap (200) | Their row reads "You both go to this …" — never a wrong shared thread |
+| A member is past the shared-concept fetch cap (200) | Their own threads are listed, the shared ones just don't sort first — never a wrong shared thread |
+| A member has no public claims | `attributes: []` — nothing listed, never a filler line |
 | Migration 20261004 not applied | `/discover` returns `communities: []` (RPC missing → logged, empty) and `/join` returns `400 join_failed`. Everything else is unaffected |
 | Caller has no block **and** no ZIP | `/discover` returns `[]` — there is no honest scope to search |
 | Nobody nearby has a community yet | `[]` with `radius_meters` set, so the empty state can say "nothing within ~5 miles yet" |
@@ -320,9 +326,10 @@ rule as the peer cards.
 ## Language
 
 Cards are English on the wire, like every other card surface (`final-mile-localization`:
-the AI-rendered reply text is localized, cards and progress are not yet). `status_line`
-and `shared_line` are the two composed strings here — if you'd rather localize, build
-them from the numeric fields instead.
+the AI-rendered reply text is localized, cards and progress are not yet). `status_line` is
+the only composed string left here — if you'd rather localize it, build it from the
+numeric fields instead. `attributes` are stored concept labels (English-canonical in the
+DB), not composed copy.
 
 ## Where this lives
 
@@ -427,7 +434,7 @@ POST /lana/circles/membership { affiliation_id, membership }
 `circle_affiliations.status = 'curious'`, which every member count, roster, peer profile and
 matcher already excludes by filtering `status = 'confirmed'`. So she does not move
 `member_count`, does not appear in `member_preview` / `members`, and never becomes a match
-candidate — while the place stays in her own `/lana/circles/mine` list.
+candidate — while the place stays in her own `/lana/circles/list` list.
 
 `POST /lana/circles/profile` opens for a curious joiner and carries `membership: 'curious'`:
 the head, the count, the features and the activities, with `member_preview: []`,
@@ -438,7 +445,7 @@ later through the same endpoint; tapping Join again as a member promotes the sam
 ## The caller is in her own community's roster (§17)
 
 `members[]` and `member_preview[]` now include the caller, flagged `me: true` (no
-`shared_line`, no trait tags, no Nudge — nothing is shared with yourself). Rows rendered
+`attributes`, no trait tags, no Nudge — she is not described back to herself). Rows rendered
 now equal `member_count`, so the client-side splice can go. Everyone else's rows are
 unchanged, and a failed block read still hides the whole list rather than leaving one row.
 
@@ -452,9 +459,14 @@ those; the session-state workaround can go.
 
 - `get_peer_profile` claim rows gain **`bucket`** and **`created_at`** (§14a), so the
   neighbour's timeline groups by category and restores the recency rail.
-- `get_peer_profile.communities[]` rows gain **`place_id`** (our `places.id`) under the same
-  gate as `place_name` (§18): matched, or the viewer belongs to that place. A locked row
-  ("A gym") has `place_id: null` — there is nothing to open. Drop the name-matching bridge.
+- `get_peer_profile.communities[]` is **GONE** (migration `20261101120000`, 2026-08-18).
+  Two surfaces were answering "what communities is this user in?" with different rules —
+  the RPC hid a place's name/id unless matched-or-shared, while `POST /lana/circles/list
+  {user_id}` names every place to anyone. The worker endpoint owns it alone now. Its rows
+  carry `shared` (the viewer is at that place too), `activities[].theirs` (what THIS person
+  does there — the old `sub_groups`), and shared-places-first ordering. `detail` is not
+  sent at all: a member's own words for her place stay hers. Every named row opens, since
+  `/lana/circles/profile` serves visitors.
 - **`set_my_nickname(p_nickname) → { nickname }`** (§20), the twin of `set_my_handle`.
   The rule is **1–30 characters after trimming** — confirmed, not guessed: the extraction
   path has always truncated at 30. Over or empty raises a matchable `nickname_invalid`
@@ -464,5 +476,5 @@ those; the session-state workaround can go.
   unique public one.
 
 Migrations: `20261017120000_membership_intent.sql`, `20261018120000_peer_profile_claim_fields.sql`,
-`20261019120000_set_my_nickname.sql`. The three RPC/DB items above need the push; the
+`20261019120000_set_my_nickname.sql`, `20261101120000_peer_profile_drop_communities.sql`. The three RPC/DB items above need the push; the
 worker fields need the worker deploy.

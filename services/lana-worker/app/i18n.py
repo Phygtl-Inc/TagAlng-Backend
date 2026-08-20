@@ -299,13 +299,13 @@ def localize_labels(labels: list[str], lang: str | None) -> list[str]:
     if not misses:
         return out
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+        from app.orchestrator.llm import composer_model, llm_configured, llm_json
 
         if not llm_configured():
             return out
         label_name = _LANG_LABEL.get(code) or f"the language with ISO code '{code}'"
         data = llm_json(
-            model=synthesizer_model(),
+            model=composer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. Rewrite each short UI "
                 f"button label ENTIRELY in {label_name}. Keep each label SHORT (a "
@@ -993,14 +993,14 @@ def _ai_render(en_text: str, lang: str) -> str | None:
     es/pt table below is only the offline fallback. Returns None when no LLM
     is configured (tests, local dev) so callers fall back deterministically."""
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+        from app.orchestrator.llm import composer_model, llm_configured, llm_json
 
         if not llm_configured():
             return None
         label = _LANG_LABEL.get(lang) or f"the language with ISO code '{lang}'"
         register = _REGISTER.get(lang, "warm, neighborly — natural informal register")
         data = llm_json(
-            model=synthesizer_model(),
+            model=composer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. Rewrite the given chat "
                 f"message ENTIRELY in {label} ({register}). Same meaning, same length, "

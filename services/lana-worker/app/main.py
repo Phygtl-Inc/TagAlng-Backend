@@ -561,7 +561,12 @@ def _intro_proposal_from_dict(raw: dict[str, Any] | None) -> IntroProposalPayloa
 
 def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     """Google Places fallback for an empty tip-seek → tappable cards. maps_url opens the
-    spot in Google Maps (by place_id when available, else a name+address search)."""
+    spot in Google Maps (by place_id when available, else a name+address search).
+
+    `community` is stamped upstream at the Places fetch (discovery_route._search_tip_places)
+    so the reply writer sees it too — by the time a turn reaches here the prose is already
+    composed. This function only passes the field through.
+    """
     from urllib.parse import quote_plus
 
     raw = ctx.get("google_place_suggestions")
@@ -582,7 +587,13 @@ def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
             maps_url = "https://www.google.com/maps/search/?api=1&query=" + quote_plus(
                 f"{name} {addr}".strip()
             )
-        out.append({"name": name, "address": addr, "place_id": pid or None, "maps_url": maps_url})
+        row = {"name": name, "address": addr, "place_id": pid or None, "maps_url": maps_url}
+        community = p.get("community")
+        if isinstance(community, dict) and community.get("member_count"):
+            # Structured, never a sentence: the count and the labels are facts, the
+            # phrasing ("3 neighbors go here") is the surface's to write and translate.
+            row["community"] = community
+        out.append(row)
     return out
 
 
