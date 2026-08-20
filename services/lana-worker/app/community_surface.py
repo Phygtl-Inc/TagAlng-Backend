@@ -984,8 +984,12 @@ def community_profile(
     )
     count = len(members)
     # Needs the roster, so it follows it — its own three reads are the next wave.
+    # A link-holder sees the faces too (§27/LANA-58): she is neither a member nor
+    # phone-verified, and gating her out rendered a real count over a toneless stack.
     preview = _member_preview(
-        user_id, members, phone_verified=phone_verified and is_member
+        user_id,
+        members,
+        phone_verified=(phone_verified and is_member) or _holds_invite_here(user_id, pid),
     )
     return {
         "place_id": pid,
@@ -1080,6 +1084,34 @@ def _joined_via_label(affiliation: dict[str, Any]) -> str | None:
     from app.community_discovery import joined_via_label
 
     return joined_via_label(affiliation.get("confirmed_via"), affiliation.get("source"))
+
+
+def _holds_invite_here(user_id: str, place_id: str) -> bool:
+    """Did this caller open an invite that names THIS place? (§27/LANA-58.)
+
+    The disclosure the ruling allows is "the owner deliberately sent her the link" —
+    and redemption is already recorded server-side (circle_invite_redemptions, written
+    by redeem_invite), so the token never has to travel to this endpoint and no client
+    has to change. Every other non-member still gets the head with no names: §F gates
+    the PEOPLE on membership, and this is the one narrow exception to it.
+
+    Fails closed — a read error hides the faces rather than showing them."""
+    if not user_id or not place_id:
+        return False
+    try:
+        res = (
+            service_client()
+            .table("circle_invite_redemptions")
+            .select("invite_id, circle_invites!inner(place_ref)")
+            .eq("user_id", user_id)
+            .eq("circle_invites.place_ref", place_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        logger.exception("invite_holder_check_failed user=%s place=%s", user_id, place_id)
+        return False
 
 
 def _member_preview(

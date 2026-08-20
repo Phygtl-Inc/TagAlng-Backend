@@ -71,6 +71,7 @@ class TestRedeem(unittest.TestCase):
         out = redeem_invite("owner", "tok")
         self.assertFalse(out["confirm_prompt"])
         self.assertIsNone(out["place_id"])
+        self.assertIsNone(out["inviter_user_id"])
 
     @patch("app.circle_invites._rate_limited", return_value=True)
     @patch("app.circle_invites._active_invite", return_value=dict(_INVITE))
@@ -79,12 +80,16 @@ class TestRedeem(unittest.TestCase):
             redeem_invite("u2", "tok")
         self.assertEqual(str(ctx.exception), "invite_rate_limited")
 
+    @patch(
+        "app.community_surface._users_by_id",
+        return_value={"owner": {"nickname": "Priya", "profile_photo_url": "https://x/p.jpg"}},
+    )
     @patch("app.zip_unlock.recount_zip")
     @patch("app.circle_invites._rate_limited", return_value=False)
     @patch("app.circle_invites._active_invite", return_value=dict(_INVITE))
     @patch("app.circle_invites.service_client")
     def test_redeem_sets_invited_by_once_and_recounts(
-        self, sb, _inv, _rl, recount
+        self, sb, _inv, _rl, recount, _nick
     ) -> None:
         users = _chain([{"invited_by": None, "home_zip": "32827"}])
         redemptions = _chain()
@@ -97,16 +102,24 @@ class TestRedeem(unittest.TestCase):
         self.assertEqual(out["circle_type"], "faith")
         # The community the link is FOR — without it there is nothing to join.
         self.assertEqual(out["place_id"], "p1")
+        # And who sent it, so the card can say so.
+        self.assertEqual(out["inviter_user_id"], "owner")
+        self.assertEqual(out["inviter_name"], "Priya")
+        self.assertEqual(out["inviter_avatar_url"], "https://x/p.jpg")
         self.assertEqual(users.update.call_args[0][0], {"invited_by": "owner"})
         # Suppressed: attribution counts, but a redemption must not broadcast the
         # open transition to a whole ZIP. Announcing needs a deliberate owner.
         recount.assert_called_once_with("32827", notify_on_open=False)
 
+    @patch(
+        "app.community_surface._users_by_id",
+        return_value={"owner": {"nickname": "Priya", "profile_photo_url": "https://x/p.jpg"}},
+    )
     @patch("app.zip_unlock.recount_zip")
     @patch("app.circle_invites._rate_limited", return_value=False)
     @patch("app.circle_invites._active_invite", return_value=dict(_INVITE))
     @patch("app.circle_invites.service_client")
-    def test_first_inviter_wins(self, sb, _inv, _rl, _recount) -> None:
+    def test_first_inviter_wins(self, sb, _inv, _rl, _recount, _nick) -> None:
         users = _chain([{"invited_by": "someone_else", "home_zip": None}])
         redemptions = _chain()
         sb.return_value.table.side_effect = lambda name: {
@@ -122,7 +135,11 @@ class TestRedeem(unittest.TestCase):
         return_value={**_INVITE, "circle_type": None, "place_ref": None},
     )
     @patch("app.circle_invites.service_client")
-    def test_unlabeled_invite_no_prompt(self, sb, _inv, _rl) -> None:
+    @patch(
+        "app.community_surface._users_by_id",
+        return_value={"owner": {"nickname": "Priya", "profile_photo_url": "https://x/p.jpg"}},
+    )
+    def test_unlabeled_invite_no_prompt(self, _users, sb, _inv, _rl) -> None:
         users = _chain([{"invited_by": None, "home_zip": None}])
         sb.return_value.table.side_effect = lambda name: {
             "circle_invite_redemptions": _chain(),
@@ -132,6 +149,8 @@ class TestRedeem(unittest.TestCase):
         self.assertFalse(out["confirm_prompt"])
         self.assertIsNone(out["circle_type"])
         self.assertIsNone(out["place_id"])
+        # An unlabeled link still has a sender.
+        self.assertEqual(out["inviter_user_id"], "owner")
 
 
 class TestSelfConfirm(unittest.TestCase):
