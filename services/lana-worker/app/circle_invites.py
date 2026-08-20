@@ -2,10 +2,11 @@
 
 The one rule everything here protects: AN INVITE IS NOT MEMBERSHIP. Redeeming a
 link records the growth edge (users.invited_by, set once) and moves the ZIP
-counter — unconditionally. A circle row is written ONLY when the joiner
-self-confirms her OWN place via the generic prompt, which NEVER names the
-inviter's place (a forwarded link must stay harmless: it can grow a ZIP, it can
-never pollute a circle).
+counter — unconditionally; no circle row is ever written here. Redeem discloses
+the invite's place_ref so the joiner can JOIN that community deliberately
+(/lana/circles/join — the same self-claim its profile offers anyone); an
+unlabeled link discloses nothing and still falls back to the generic
+self-confirm prompt.
 
 Rate limiting (§I.1) rides circle_invite_redemptions: per-invite hourly cap here;
 per-IP throttling belongs at the edge.
@@ -111,7 +112,7 @@ def redeem_invite(user_id: str, token: str) -> dict[str, Any]:
     owner_id = str(invite["owner_user_id"])
     if owner_id == user_id:
         # Self-taps happen (owner previewing her own link) — no edge, no prompt.
-        return {"ok": True, "confirm_prompt": False, "circle_type": None}
+        return {"ok": True, "confirm_prompt": False, "circle_type": None, "place_id": None}
     if _rate_limited(str(invite["id"])):
         raise ValueError("invite_rate_limited")
 
@@ -144,12 +145,16 @@ def redeem_invite(user_id: str, token: str) -> dict[str, Any]:
     except Exception:
         logger.exception("invite_attribution_failed user=%s", user_id)
 
-    # The generic prompt hint: type only, NEVER the inviter's place (§A.2 M6).
+    # place_id names the community the link is FOR, so the joiner can join it
+    # instead of self-confirming a lookalike of her own (LANA-57). §A.2 M6 stays
+    # intact: /circles/join is a self-claim anyone seeing the profile can make,
+    # reversible via /circles/remove and answerable as 'curious'.
     circle_type = invite.get("circle_type")
     return {
         "ok": True,
         "confirm_prompt": bool(circle_type and circle_type in CIRCLE_TYPES),
         "circle_type": circle_type if circle_type in CIRCLE_TYPES else None,
+        "place_id": invite.get("place_ref"),
     }
 
 

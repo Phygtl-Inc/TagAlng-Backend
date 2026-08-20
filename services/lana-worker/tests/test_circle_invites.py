@@ -70,6 +70,7 @@ class TestRedeem(unittest.TestCase):
     def test_self_redeem_is_noop(self, _inv) -> None:
         out = redeem_invite("owner", "tok")
         self.assertFalse(out["confirm_prompt"])
+        self.assertIsNone(out["place_id"])
 
     @patch("app.circle_invites._rate_limited", return_value=True)
     @patch("app.circle_invites._active_invite", return_value=dict(_INVITE))
@@ -94,6 +95,8 @@ class TestRedeem(unittest.TestCase):
         out = redeem_invite("u2", "tok")
         self.assertTrue(out["confirm_prompt"])
         self.assertEqual(out["circle_type"], "faith")
+        # The community the link is FOR — without it there is nothing to join.
+        self.assertEqual(out["place_id"], "p1")
         self.assertEqual(users.update.call_args[0][0], {"invited_by": "owner"})
         # Suppressed: attribution counts, but a redemption must not broadcast the
         # open transition to a whole ZIP. Announcing needs a deliberate owner.
@@ -116,7 +119,7 @@ class TestRedeem(unittest.TestCase):
     @patch("app.circle_invites._rate_limited", return_value=False)
     @patch(
         "app.circle_invites._active_invite",
-        return_value={**_INVITE, "circle_type": None},
+        return_value={**_INVITE, "circle_type": None, "place_ref": None},
     )
     @patch("app.circle_invites.service_client")
     def test_unlabeled_invite_no_prompt(self, sb, _inv, _rl) -> None:
@@ -128,6 +131,7 @@ class TestRedeem(unittest.TestCase):
         out = redeem_invite("u2", "tok")
         self.assertFalse(out["confirm_prompt"])
         self.assertIsNone(out["circle_type"])
+        self.assertIsNone(out["place_id"])
 
 
 class TestSelfConfirm(unittest.TestCase):
