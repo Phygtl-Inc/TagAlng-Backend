@@ -469,6 +469,13 @@ _SYSTEM = (
     "asking about places, not about neighbors whose trait is 'community'. Asking to be "
     "introduced to PEOPLE stays find_peers; asking what's HAPPENING (events, this weekend) "
     "stays find_activities. "
+    "WHO IS IN a NAMED community ('who is in Mizu Sushi', 'who are the members of the Mizu "
+    "Sushi community', 'show me who else goes to my gym', 'who else is in there') is ALSO "
+    "discovery.communities — set community_name to the place they named. It is the roster of "
+    "one named place, so it is NEVER find_peers/find_by_attrs: routing it to a peer search "
+    "answered 'who is in Mizu Sushi' with an unrelated neighbour matched on an interest and "
+    "dropped the place name entirely (QA 2026-08-20). 'Introduce me to someone' with no place "
+    "named stays find_peers. "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
     "identity.add_claim, goal=chat, in_discovery=false, identity_snippet=null "
@@ -600,6 +607,8 @@ def _empty_slots() -> dict[str, Any]:
         "intro_list_index": None,
         "zip": None,
         "identity_snippet": None,
+        "community_name": None,
+        "community_ask": None,
         "profile_photo_action": "none",
         "signal_intent": None,
         "signal_detail": None,
@@ -734,6 +743,17 @@ def ai_parse_discovery_turn(
                     attr_terms_s.append(terms)
         peer_name = raw.get("peer_name")
         peer_name_s = str(peer_name).strip()[:80] if peer_name else None
+        # The community the user NAMED, so a "who is in <place>" ask can be answered
+        # about that place instead of the neighborhood at large (QA 2026-08-20: the name
+        # in the question was dropped and the turn became an interest-based peer search).
+        community_name = raw.get("community_name")
+        community_name_s = str(community_name).strip()[:120] if community_name else None
+        # Which SIDE of that community they asked about. "who is in it" wants the roster;
+        # "what kind of place is it / how big is it / what's there" wants the profile the
+        # community screen renders. Answering the first for both returned a roster refusal
+        # to someone asking what kind of place it was (QA 2026-08-21).
+        community_ask = str(raw.get("community_ask") or "").strip().lower()
+        community_ask_s = community_ask if community_ask in ("people", "about") else None
         intro_direction = raw.get("intro_direction")
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
@@ -814,6 +834,8 @@ def ai_parse_discovery_turn(
             "attr_filter": attr_filter_s,
             "attr_terms": attr_terms_s,
             "peer_name": peer_name_s,
+            "community_name": community_name_s,
+            "community_ask": community_ask_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
             "clarify_options": clarify_options,
@@ -1053,6 +1075,12 @@ def _discovery_slot_payload(
         '  "attr_filter": "string or null",\n'
         '  "attr_terms": [["lowercase word forms of one required trait"], ...] with attr_filter, else null,\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
+        '  "community_name": "the place/community the user named, verbatim as they said it '
+        '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community, else null",\n'
+        '  "community_ask": "people"|"about"|null — with community_name: "people" when they want '
+        'WHO is there (who is in it, the members, who else goes), "about" when they want anything '
+        'else about the place itself (what kind of place it is, what it has, how big it is, what '
+        'is happening there, where it is). null when no community is named,\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
         'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'
@@ -1124,6 +1152,28 @@ def slots_want_propose_intro(slots: dict[str, Any]) -> bool:
     if goal != "propose_intro" and linear != "social.propose_intro":
         return False
     return float(slots.get("confidence", 0.0)) >= 0.5
+
+
+def slots_community_ask(slots: dict[str, Any] | None) -> str:
+    """"people" (the roster) or "about" (the place itself). Defaults to "about": a
+    question we could not classify is answered from the place's own facts, which is the
+    read that works for a non-member too."""
+    if not slots:
+        return "about"
+    return "people" if str(slots.get("community_ask") or "") == "people" else "about"
+
+
+def slots_community_name(slots: dict[str, Any] | None) -> str | None:
+    """The community the user named, from AI slots (not utterance regex —
+    [[no-new-regex-use-ai-signals]]). Bare nouns carry no place, so they are dropped."""
+    if not slots:
+        return None
+    name = str(slots.get("community_name") or "").strip()
+    if len(name) < 2 or name.lower() in (
+        "a", "an", "the", "community", "communities", "group", "place", "here", "it", "them",
+    ):
+        return None
+    return name
 
 
 def slots_peer_name(slots: dict[str, Any] | None) -> str | None:

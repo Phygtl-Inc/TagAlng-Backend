@@ -61,6 +61,30 @@ class TestPromptLexicon(unittest.TestCase):
         self.assertEqual(violations, [], "\n".join(violations))
 
 
+class TestGuardCoversEveryHardRule(unittest.TestCase):
+    def test_rule_three_bans_group_not_only_circle(self) -> None:
+        """The constitution bans "circle(s)" AND "group" for a community; only "circle"
+        was in the guard's pattern, so "I can add you to the group" shipped (QA
+        2026-08-21)."""
+        from app.lingo_guard import find_violations, naive_clean
+
+        for text in (
+            "I can add you to the group so you hear about future get-togethers.",
+            "Te puedo agregar al grupo.",
+        ):
+            self.assertTrue(find_violations(text), text)
+            cleaned = naive_clean(text)
+            self.assertFalse(find_violations(cleaned), cleaned)
+        self.assertIn("community", naive_clean("I can add you to the group."))
+
+    def test_the_banned_words_in_the_constitution_are_all_enforced(self) -> None:
+        # Every word rule 3 names, checked against the pattern rather than trusting it.
+        from app.lingo_guard import find_violations
+
+        for word in ("circle", "circles", "group", "groups"):
+            self.assertTrue(find_violations(f"your {word} nearby"), word)
+
+
 class TestAddressGuidance(unittest.TestCase):
     """§3.3/§4: role/gender stamped per turn reach every constitution-bearing prompt."""
 

@@ -15,7 +15,9 @@ from app.identity_ask import (
 def _claims_client(rows: list[dict]) -> MagicMock:
     sb = MagicMock()
     chain = sb.table.return_value.select.return_value.eq.return_value.eq.return_value
-    chain = chain.is_.return_value.order.return_value.limit.return_value
+    # Two .order() hops: confidence, then created_at as the stable tie-break — an
+    # unordered tie re-ordered the user's own identity line between turns.
+    chain = chain.is_.return_value.order.return_value.order.return_value.limit.return_value
     chain.execute.return_value = MagicMock(data=rows)
     return sb
 

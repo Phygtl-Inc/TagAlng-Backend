@@ -548,6 +548,742 @@ class TestCommunitiesChatTurn(unittest.TestCase):
         self.assertIn("Lp Fit", compose.call_args.kwargs["fallback"])
 
 
+class TestNamedRosterTurn(unittest.TestCase):
+    """"Who is in Mizu Sushi" — the ask that returned the member COUNT four times while
+    the UI rendered all seven names one tap away (QA 2026-08-20)."""
+
+    _MIZU = {"place_id": "pMizu", "place_name": "Mizu Sushi & Steakhouse", "member_count": 6}
+
+    def _roster(self, **over):
+        base = {
+            "place_id": "pMizu",
+            "place_name": "Mizu Sushi & Steakhouse",
+            "member_count": 3,
+            "curious_count": 0,
+            "members": [
+                {"peer_user_id": "u1", "nickname": "jake", "me": True, "attributes": []},
+                {
+                    "peer_user_id": "u2",
+                    "nickname": "Natasha",
+                    "avatar_url": None,
+                    "attributes": ["Reads the newspaper", "Registered Nurse", "Plays badminton"],
+                    "actions": [{"id": "nudge", "label": "Nudge", "message": "nudge Natasha"}],
+                },
+                {"peer_user_id": "u3", "nickname": "Rust", "attributes": [], "actions": []},
+            ],
+        }
+        base.update(over)
+        return base
+
+    @patch("app.community_surface.community_members")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_named_community_returns_the_people_not_the_count(
+        self, compose, mine, _disc, members
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._MIZU]
+        members.return_value = self._roster()
+        ctx: dict = {}
+        out = communities_chat_turn(
+            "u1",
+            message="who are the members of the Mizu Sushi community",
+            session_ctx=ctx,
+            community_name="Mizu Sushi",
+            community_ask="people",
+        )
+        self.assertEqual(out, "composed")
+        # The people reached the card surface, self excluded.
+        rows = ctx["peer_matches"]
+        self.assertEqual([r["nickname"] for r in rows], ["Natasha", "Rust"])
+        # Their own threads ride as the label + chips, and nothing invented a similarity.
+        self.assertEqual(rows[0]["matching_peer_label"], "Reads the newspaper")
+        self.assertEqual(rows[0]["trait_tags"], ["Registered Nurse", "Plays badminton"])
+        self.assertIsNone(rows[0]["similarity_score"])
+        # Somebody with nothing public still says something true.
+        self.assertEqual(rows[1]["matching_peer_label"], "Goes to Mizu Sushi & Steakhouse")
+        # Marked final, so stamp_peer_discovery_ctx leaves the chips alone.
+        self.assertTrue(all(r["community_roster"] for r in rows))
+        # The names are the composer's to anchor on, and a roster turn is not a join offer.
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("Natasha", facts)
+        self.assertIsNone(ctx["community_join_pending"])
+        # member_count counts the caller and excludes curious joiners; the cards do the
+        # opposite. Both numbers are stated so the reply can't put one over the other.
+        self.assertIn("People who go here: 3", facts)
+        self.assertIn("Cards under your message: 2", facts)
+
+    @patch("app.community_surface.community_members")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_curious_joiners_are_named_as_such_not_folded_in(
+        self, compose, mine, _disc, members
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._MIZU]
+        members.return_value = self._roster(member_count=2, curious_count=1)
+        communities_chat_turn(
+            "u1", message="who is in Mizu Sushi", session_ctx={}, community_name="Mizu Sushi", community_ask="people"
+        )
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("People who go here: 2", facts)
+        self.assertIn("Cards under your message: 2", facts)
+        self.assertIn("curious, not members", facts)
+
+    @patch("app.community_surface.community_members", side_effect=ValueError("not_a_member"))
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_non_member_is_told_the_limit_and_offered_the_join(
+        self, compose, _mine, disc, _members
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [dict(self._MIZU, is_member=False)]
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1", message="who is in Mizu Sushi", session_ctx=ctx, community_name="Mizu Sushi", community_ask="people"
+        )
+        kwargs = compose.call_args.kwargs
+        # §9: the limit is stated, not redirected around — and the join is armed so a
+        # "yes" is the answer rather than a dead end.
+        self.assertIn("NOT in it", " ".join(kwargs["facts"]))
+        self.assertIn("can't show", kwargs["fallback"].lower())
+        self.assertEqual(ctx["community_join_pending"]["places"][0]["place_id"], "pMizu")
+
+    @patch("app.community_surface.community_members")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_only_member_is_not_told_the_place_is_dead(
+        self, compose, mine, _disc, members
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._MIZU]
+        members.return_value = self._roster(
+            member_count=1,
+            members=[{"peer_user_id": "u1", "nickname": "jake", "me": True, "attributes": []}],
+        )
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1", message="who else is in there", session_ctx=ctx, community_name="Mizu Sushi", community_ask="people"
+        )
+        self.assertNotIn("peer_matches", ctx)
+        self.assertIn("only one", " ".join(compose.call_args.kwargs["facts"]).lower())
+
+    @patch("app.community_surface.communities_card", return_value=None)
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_unknown_name_says_so_instead_of_listing_something_else(
+        self, compose, _mine, _disc, _card
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        communities_chat_turn(
+            "u1",
+            message="who is in the Pickleball Barn",
+            session_ctx={},
+            community_name="Pickleball Barn",
+        )
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("Pickleball Barn", facts)
+        self.assertIn("NO community by that name", facts)
+
+    def test_roster_rows_survive_the_response_gate(self) -> None:
+        """The rows reached the FE only once discovery.communities was allowlisted.
+
+        Built, stamped, then filtered to [] by main._onboarding_fields, so Lana's line
+        promised "cards for Tommaso db and Natasha just below" over an empty screen —
+        the same drop social.propose_intro hit in 2026-08-18.
+        """
+        from app.ui_intent import PEER_DISCOVERY_ACTIVE_INTENTS
+
+        rows = [{"peer_user_id": "u2"}]
+        active = "discovery.communities"
+        self.assertTrue(bool(rows) and active in PEER_DISCOVERY_ACTIVE_INTENTS)
+
+    @patch("app.community_surface.communities_card", return_value=None)
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_list_turn_clears_a_previous_roster_cards(
+        self, _compose, _mine, _disc, _card
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        # peer_matches is not turn-scoped, and this intent now renders it.
+        ctx = {"peer_matches": [{"peer_user_id": "u2"}], "discovery_surface": {"x": 1}}
+        communities_chat_turn("u1", message="what communities am i in", session_ctx=ctx)
+        self.assertIsNone(ctx["peer_matches"])
+        self.assertIsNone(ctx["discovery_surface"])
+
+    @patch("app.community_surface.community_members")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_roster_drops_a_stale_scored_strip(self, _c, mine, _d, members) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._MIZU]
+        members.return_value = self._roster()
+        ctx = {"discovery_surface": {"strong_count": 3, "status_label": "3 strong"}}
+        communities_chat_turn(
+            "u1", message="who is in Mizu Sushi", session_ctx=ctx, community_name="Mizu Sushi", community_ask="people"
+        )
+        # Nothing here compared two people, so there is no strip to show.
+        self.assertIsNone(ctx["discovery_surface"])
+        self.assertTrue(ctx["peer_matches"])
+
+    @patch("app.community_surface.community_members")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_curious_rows_carry_their_tag_to_the_card(
+        self, _compose, mine, _disc, members
+    ) -> None:
+        # The community screen has always tagged a curious joiner; the chat card rendered
+        # them as a member because the field never left the roster row.
+        mine.return_value = [self._MIZU]
+        members.return_value = self._roster(
+            member_count=2,
+            curious_count=1,
+            members=[
+                {"peer_user_id": "u1", "nickname": "jake", "me": True, "attributes": []},
+                {"peer_user_id": "u2", "nickname": "Natasha", "membership": "member",
+                 "attributes": ["Reads the newspaper"]},
+                {"peer_user_id": "u3", "nickname": "Pouya", "membership": "curious",
+                 "attributes": ["Likes steakhouses"]},
+            ],
+        )
+        ctx: dict = {}
+        communities_chat_turn = __import__(
+            "app.community_discovery", fromlist=["communities_chat_turn"]
+        ).communities_chat_turn
+        communities_chat_turn(
+            "u1", message="who is in Mizu Sushi", session_ctx=ctx, community_name="Mizu Sushi", community_ask="people"
+        )
+        self.assertEqual(
+            {r["nickname"]: r["membership"] for r in ctx["peer_matches"]},
+            {"Natasha": "member", "Pouya": "curious"},
+        )
+
+    @patch("app.community_surface.community_members")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_roster_bigger_than_the_wire_says_so(
+        self, compose, mine, _disc, members
+    ) -> None:
+        """main._peer_matches_from_ctx ships at most 8 rows. Claiming 11 cards below 8 of
+        them is the same count-vs-roster mismatch, one layer up."""
+        from app.community_discovery import _ROSTER_CARDS_MAX, communities_chat_turn
+
+        mine.return_value = [self._MIZU]
+        roster = [{"peer_user_id": "u1", "nickname": "jake", "me": True, "attributes": []}]
+        roster += [
+            {"peer_user_id": f"u{i}", "nickname": f"N{i}", "membership": "member",
+             "attributes": [f"Does thing {i}"]}
+            for i in range(2, 14)
+        ]
+        members.return_value = self._roster(member_count=13, members=roster)
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1", message="who is in Mizu Sushi", session_ctx=ctx, community_name="Mizu Sushi", community_ask="people"
+        )
+        self.assertEqual(len(ctx["peer_matches"]), _ROSTER_CARDS_MAX)
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn(f"Cards under your message: {_ROSTER_CARDS_MAX}", facts)
+        # 12 others, 8 shown — the remainder is stated, never silently dropped.
+        self.assertIn("4 more are here without a card", facts)
+
+    def test_ampersand_and_filler_name_the_same_place(self) -> None:
+        """The bug in the wild, 2026-08-21: they typed "mizu sushi and steakhouse", the row
+        is "Mizu Sushi & Steakhouse", raw containment missed, and the reply said it could
+        not find a community it then said they were already in."""
+        from app.community_discovery import _same_place_name
+
+        row = "Mizu Sushi & Steakhouse"
+        for said in (
+            "mizu sushi and steakhouse",
+            "Mizu Sushi",
+            "the Mizu Sushi & Steakhouse community",
+            "mizu-sushi steakhouse",
+            "MIZU SUSHI AND STEAKHOUSE",
+        ):
+            self.assertTrue(_same_place_name(said, row), said)
+        # And it still refuses the places that merely share a word.
+        self.assertFalse(_same_place_name("Trinity Church", row))
+        self.assertFalse(_same_place_name("Lp Fit", "FIT 407 Lake Nona"))
+        # Whole words only. Unpadded containment let "a" match "and" and "fit" match
+        # "Fitness", so any short fragment claimed a specific place.
+        self.assertFalse(_same_place_name("a", row))
+        self.assertFalse(_same_place_name("on", "Crunch Fitness - Lake Nona"))
+        self.assertFalse(_same_place_name("fit", "Crunch Fitness - Lake Nona"))
+        # An exact word still counts.
+        self.assertTrue(_same_place_name("fit", "FIT 407 Lake Nona"))
+
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_near_miss_asks_which_one_with_tapable_names(
+        self, compose, _mine, disc
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [
+            {"place_id": "p1", "place_name": "FIT 407 Lake Nona", "member_count": 1},
+            {"place_id": "p2", "place_name": "Crunch Fitness - Lake Nona", "member_count": 1},
+            {"place_id": "p3", "place_name": "Mizu Sushi & Steakhouse", "member_count": 7},
+        ]
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1",
+            message="who is in the lake nona gym",
+            session_ctx=ctx,
+            community_name="Lake Nona gym",
+            community_ask="people",
+        )
+        # Both Lake Nona places are candidates; Mizu shares no word and is not offered.
+        chips = ctx["policy_chips"]
+        self.assertEqual(
+            [c["label"] for c in chips], ["FIT 407 Lake Nona", "Crunch Fitness - Lake Nona"]
+        )
+        # The tap posts the EXACT row name AND their own question back, so the next turn
+        # matches without guessing and without changing what they asked.
+        self.assertEqual(chips[0]["send"], "who is in FIT 407 Lake Nona")
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("do NOT know which", facts.replace("You ", ""))
+
+    @patch("app.community_surface.communities_card", return_value=None)
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_name_sharing_nothing_still_says_it_plainly(
+        self, compose, _mine, _disc, _card
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        communities_chat_turn(
+            "u1",
+            message="who is in the Pickleball Barn",
+            session_ctx={},
+            community_name="Pickleball Barn",
+        )
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("NO community by that name", facts)
+
+    def test_name_matches_either_direction(self) -> None:
+        from app.community_discovery import _resolve_named_community
+
+        with patch("app.community_discovery._my_communities", return_value=[self._MIZU]), patch(
+            "app.community_discovery.discover_communities", return_value=[]
+        ):
+            # Shorter than the row, and longer than it — both are the same place.
+            for said in ("Mizu Sushi", "the Mizu Sushi & Steakhouse community", "MIZU SUSHI"):
+                self.assertEqual(
+                    (_resolve_named_community("u1", said, locale="en") or {}).get("place_id"),
+                    "pMizu",
+                    said,
+                )
+            self.assertIsNone(_resolve_named_community("u1", "Trinity Church", locale="en"))
+
+
+class TestAboutACommunity(unittest.TestCase):
+    """"What type of community is this barnes and nobel" — the screen shows the type, the
+    description, what it has and what is on; chat answered with a roster refusal and then
+    a list of other communities, and the clarifier looped three times (QA 2026-08-21)."""
+
+    _BN = {"place_id": "pBN", "place_name": "Barnes & Noble", "member_count": 1}
+
+    _PROFILE = {
+        "place_name": "Barnes & Noble",
+        "place_address": "123 Main St, Orlando, FL",
+        "relation": "bookstore",
+        "description": "A local bookstore with a cafe.",
+        "membership": "visitor",
+        "member_count": 1,
+        "curious_count": 0,
+        "features": [{"label": "Cafe"}, {"label": "Reading nooks"}],
+        "upcoming_events": [{"title": "Author talk", "starts_at": "2026-09-01T18:00:00Z"}],
+    }
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_the_place_facts_reach_the_composer(self, compose, mine, _disc, prof) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._BN]
+        prof.return_value = dict(self._PROFILE, membership="member")
+        ctx: dict = {}
+        out = communities_chat_turn(
+            "u1",
+            message="what type of community is Barnes & Noble",
+            session_ctx=ctx,
+            community_name="Barnes & Noble",
+            community_ask="about",
+        )
+        self.assertEqual(out, "composed")
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        for expected in ("bookstore", "A local bookstore with a cafe.", "Cafe", "Author talk"):
+            self.assertIn(expected, facts)
+        # An about-turn shows no faces.
+        self.assertIsNone(ctx["peer_matches"])
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_non_member_still_gets_told_what_the_place_is(
+        self, compose, _mine, disc, prof
+    ) -> None:
+        # You do not have to join a bookstore to be told it is a bookstore — the profile
+        # head opens for a visitor, unlike the roster.
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [dict(self._BN, is_member=False)]
+        prof.return_value = dict(self._PROFILE)
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1",
+            message="what kind of place is Barnes & Noble",
+            session_ctx=ctx,
+            community_name="Barnes & Noble",
+            community_ask="about",
+        )
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("bookstore", facts)
+        self.assertIn("NOT in this community", facts)
+        # ...and a "yes" after it means something.
+        self.assertEqual(ctx["community_join_pending"]["places"][0]["place_id"], "pBN")
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_typo_with_one_candidate_is_answered_not_re_asked(
+        self, compose, mine, _disc, prof
+    ) -> None:
+        """The loop: "barnes and nobel" produced "did you mean Barnes & Noble?" three
+        times in a row, because nothing consumed the answer."""
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._BN]
+        prof.return_value = dict(self._PROFILE, membership="member")
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1",
+            message="what type of community is this barnes and nobel",
+            session_ctx=ctx,
+            community_name="barnes and nobel",
+            community_ask="about",
+        )
+        # Answered, not clarified.
+        self.assertNotIn("policy_chips", ctx)
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("bookstore", facts)
+        # And it must NAME the place it chose, since the name was not exact.
+        self.assertIn("barnes and nobel", facts)
+        self.assertIn("name it in your reply", facts)
+
+    @patch("app.community_surface.community_members")
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_people_still_go_to_the_roster(
+        self, _compose, mine, _disc, prof, members
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._BN]
+        members.return_value = {
+            "member_count": 2,
+            "curious_count": 0,
+            "members": [
+                {"peer_user_id": "u1", "me": True, "attributes": []},
+                {"peer_user_id": "u2", "nickname": "Ann", "membership": "member",
+                 "attributes": ["Reads a lot"]},
+            ],
+        }
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1",
+            message="who is in Barnes & Noble",
+            session_ctx=ctx,
+            community_name="Barnes & Noble",
+            community_ask="people",
+        )
+        prof.assert_not_called()
+        self.assertEqual([r["nickname"] for r in ctx["peer_matches"]], ["Ann"])
+
+
+class TestTheClarifierAsksTheirQuestion(unittest.TestCase):
+    """Two bugs from one screenshot, 2026-08-21."""
+
+    _BN = {"place_id": "pBN", "place_name": "Barnes & Noble", "member_count": 1}
+    _MIZU = {"place_id": "pMizu", "place_name": "Mizu Sushi & Steakhouse", "member_count": 7}
+
+    def test_and_is_not_a_name_word(self) -> None:
+        """_name_tokens turns "&" into "and", so "Mizu Sushi & Steakhouse" shared the word
+        "and" with "barnes and nobel" — a sushi restaurant offered as a candidate for a
+        bookstore, and two candidates then stalled into a clarifier."""
+        from app.community_discovery import _near_name_candidates
+
+        found = _near_name_candidates("barnes and nobel", [[self._BN, self._MIZU]])
+        self.assertEqual([c["place_id"] for c in found], ["pBN"])
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_typo_among_other_places_is_still_answered(
+        self, compose, _mine, disc, prof
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [self._BN, self._MIZU]
+        prof.return_value = {
+            "place_name": "Barnes & Noble", "relation": "bookstore", "membership": "visitor",
+            "member_count": 1, "curious_count": 0, "features": [], "upcoming_events": [],
+        }
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1",
+            message="what type of community is barnes and nobel",
+            session_ctx=ctx,
+            community_name="barnes and nobel",
+            community_ask="about",
+        )
+        # Answered about the bookstore — not asked which of two unrelated places.
+        self.assertIn(
+            "What kind of place it is: bookstore", compose.call_args.kwargs["facts"]
+        )
+        self.assertEqual(
+            [c["label"] for c in ctx["policy_chips"]], ["Add me", "Show me others"]
+        )
+
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_the_chip_re_asks_their_question_not_the_roster(self, _c, _mine, disc) -> None:
+        """Tapping a candidate posted "who is in X" whatever they had asked, so someone
+        asking what kind of place it was got the roster question put in their mouth."""
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [
+            {"place_id": "p1", "place_name": "FIT 407 Lake Nona", "member_count": 1},
+            {"place_id": "p2", "place_name": "Crunch Fitness - Lake Nona", "member_count": 1},
+        ]
+        sends = {}
+        for ask in ("about", "people"):
+            ctx: dict = {}
+            communities_chat_turn(
+                "u1",
+                message="the lake nona gym",
+                session_ctx=ctx,
+                community_name="Lake Nona gym",
+                community_ask=ask,
+            )
+            sends[ask] = [c["send"] for c in ctx["policy_chips"]]
+        self.assertEqual(sends["about"][0], "what kind of place is FIT 407 Lake Nona")
+        self.assertEqual(sends["people"][0], "who is in FIT 407 Lake Nona")
+
+
+class TestCommunityEventsRender(unittest.TestCase):
+    """"Are there any events on sushi and social" named the meet in prose with nothing on
+    screen, and the follow-up "show me that event" re-searched the whole area and returned
+    an unrelated one (QA 2026-08-21)."""
+
+    _MIZU = {"place_id": "pM", "place_name": "Mizu Sushi & Steakhouse", "member_count": 7}
+    _PROF = {
+        "place_name": "Mizu Sushi & Steakhouse", "relation": "restaurant",
+        "membership": "member", "member_count": 7, "curious_count": 1,
+        "features": [{"label": "Charging station"}],
+        "upcoming_events": [
+            {"event_id": "e1", "title": "Sushi & Social Meetup",
+             "starts_at": "2026-08-22T18:00:00Z", "has_time": True,
+             "venue_name": "Mizu Sushi & Steakhouse", "going_count": 3}
+        ],
+    }
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_the_meet_ships_as_a_card_with_its_id(self, compose, mine, _d, prof) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._MIZU]
+        prof.return_value = self._PROF
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1", message="are there any events on sushi and social", session_ctx=ctx,
+            community_name="Sushi & Social", community_ask="about",
+        )
+        cards = ctx["activity_previews"]
+        self.assertEqual([c["title"] for c in cards], ["Sushi & Social Meetup"])
+        # The id is what makes the card openable — without it there is nothing to tap.
+        self.assertEqual(cards[0]["activity_id"], "e1")
+        # And the reply must point at it instead of describing it.
+        self.assertIn("right below", " ".join(compose.call_args.kwargs["facts"]))
+
+    def test_the_response_gate_lets_them_through(self) -> None:
+        """main._onboarding_fields drops activity_previews unless the intent is this one."""
+        from app.ui_intent import UI_INTENT_SHOW_ACTIVITY_PREVIEW, derive_ui_intent
+
+        ctx = {"active_intent": "discovery.communities"}
+        self.assertEqual(
+            derive_ui_intent(ctx, activity_count=1, phone_verified=True),
+            UI_INTENT_SHOW_ACTIVITY_PREVIEW,
+        )
+        # No events on the turn → no claim on the surface.
+        self.assertNotEqual(
+            derive_ui_intent(ctx, activity_count=0, phone_verified=True),
+            UI_INTENT_SHOW_ACTIVITY_PREVIEW,
+        )
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities", return_value=[])
+    @patch("app.community_discovery._my_communities")
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_a_place_with_no_meets_clears_a_previous_turns_cards(
+        self, _c, mine, _d, prof
+    ) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        mine.return_value = [self._MIZU]
+        prof.return_value = dict(self._PROF, upcoming_events=[])
+        # activity_previews is not turn-scoped, so a browse lane's events would ride in.
+        ctx: dict = {"activity_previews": [{"title": "Florida Game Room Social"}]}
+        communities_chat_turn(
+            "u1", message="what is Mizu Sushi", session_ctx=ctx,
+            community_name="Mizu Sushi", community_ask="about",
+        )
+        self.assertIsNone(ctx["activity_previews"])
+
+
+class TestEveryOfferIsTapable(unittest.TestCase):
+    """"Want me to add you?" with nothing to press is not an offer (QA 2026-08-21)."""
+
+    _BN = {"place_id": "pBN", "place_name": "Barnes & Noble", "member_count": 1}
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_about_turn_offer_carries_a_join_chip(self, _c, _mine, disc, prof) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [dict(self._BN, is_member=False)]
+        prof.return_value = {
+            "place_name": "Barnes & Noble", "relation": "bookstore", "membership": "visitor",
+            "member_count": 1, "curious_count": 0, "features": [], "upcoming_events": [],
+        }
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1", message="what is Barnes & Noble", session_ctx=ctx,
+            community_name="Barnes & Noble", community_ask="about",
+        )
+        chips = ctx["policy_chips"]
+        # "Join <name>" is what the join lane already reads, so the tap lands.
+        self.assertEqual(chips[0]["send"], "Join Barnes & Noble")
+        self.assertEqual(ctx["community_join_pending"]["places"][0]["place_id"], "pBN")
+
+    @patch("app.community_surface.community_members", side_effect=ValueError("not_a_member"))
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_roster_refusal_offer_carries_a_join_chip(self, _c, _mine, disc, _m) -> None:
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [dict(self._BN, is_member=False)]
+        ctx: dict = {}
+        communities_chat_turn(
+            "u1", message="who is in Barnes & Noble", session_ctx=ctx,
+            community_name="Barnes & Noble", community_ask="people",
+        )
+        self.assertEqual(ctx["policy_chips"][0]["send"], "Join Barnes & Noble")
+
+    @patch("app.community_surface.community_profile")
+    @patch("app.community_discovery.discover_communities")
+    @patch("app.community_discovery._my_communities", return_value=[])
+    @patch("app.reply_compose.compose_reply", return_value="composed")
+    def test_an_empty_calendar_is_a_fact_not_a_failed_lookup(self, compose, _m, disc, prof):
+        from app.community_discovery import communities_chat_turn
+
+        disc.return_value = [dict(self._BN, is_member=False)]
+        prof.return_value = {
+            "place_name": "Barnes & Noble", "relation": "bookstore", "membership": "visitor",
+            "member_count": 1, "curious_count": 0, "features": [], "upcoming_events": [],
+        }
+        communities_chat_turn(
+            "u1", message="any events at Barnes & Noble?", session_ctx={},
+            community_name="Barnes & Noble", community_ask="about",
+        )
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("Nothing is scheduled there", facts)
+        self.assertIn("never as something you were unable to look up", facts)
+
+
+class TestRoutingKeepsTheTurnsSurfaces(unittest.TestCase):
+    """_routing_ctx calls clear_turn_surfaces, so anything this lane stamps has to be
+    re-attached by name. The "did you mean Barnes & Noble?" clarifier shipped its question
+    with no tap-able answers because policy_chips was not on that list (2026-08-21)."""
+
+    @patch("app.discovery_route.intent_confidence_met", return_value=True)
+    @patch("app.discovery_route.slots_linear_intent", return_value="discovery.communities")
+    @patch("app.community_discovery.communities_chat_turn")
+    def test_every_surface_the_lane_stamps_survives(self, chat, _linear, _met) -> None:
+        from app.discovery_route import _try_layer1_intent_turn
+        from app.turn_surfaces import TURN_SCOPED_SURFACES
+
+        stamped = {
+            "policy_chips": [{"label": "Barnes & Noble", "send": "who is in Barnes & Noble"}],
+            "community_discovery": {"communities": [], "total": 0},
+            "communities_card": {"items": [{"affiliation_id": "a1"}]},
+            "peer_matches": [{"peer_user_id": "u2"}],
+        }
+
+        def _stamp(
+            user_id, *, message, session_ctx, locale="en", community_name=None,
+            community_ask="about",
+        ):
+            session_ctx.update(stamped)
+            return "composed"
+
+        chat.side_effect = _stamp
+        out = _try_layer1_intent_turn(
+            msg="who is in Barnes and Noble",
+            slots={},
+            session_ctx={},
+            user_jwt="jwt",
+            phone_verified=True,
+            home_block_id=None,
+            phase="listening",
+            user_id="u1",
+        )
+        self.assertIsNotNone(out)
+        _reply, ctx, _routing, _actions = out
+        # The invariant: what the lane stamped is what the turn ships.
+        for key, value in stamped.items():
+            self.assertEqual(ctx.get(key), value, key)
+        # And the reason three of them need naming: clear_turn_surfaces nulls them.
+        # peer_matches is deliberately NOT turn-scoped (it is cross-turn state, cleared by
+        # hand on the paths that must not show cards), so it survives on its own.
+        self.assertIn("policy_chips", TURN_SCOPED_SURFACES)
+        self.assertIn("communities_card", TURN_SCOPED_SURFACES)
+        self.assertIn("community_discovery", TURN_SCOPED_SURFACES)
+        self.assertNotIn("peer_matches", TURN_SCOPED_SURFACES)
+
+
 class TestJoinReply(unittest.TestCase):
     """Tap (or type) an answer to "want to join one of these?"."""
 

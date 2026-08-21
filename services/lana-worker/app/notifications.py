@@ -36,8 +36,10 @@ _log = logging.getLogger(__name__)
 # ── URL + email helpers ──────────────────────────────────────────────────────
 def app_url(path: str = "/") -> str:
     """Absolute app URL for email links (push can use relative paths). APP_BASE_URL env
-    sets the PWA origin; falls back to the deployed Vercel host."""
-    base = os.environ.get("APP_BASE_URL", "https://tag-alng-backend.vercel.app").strip().rstrip("/")
+    sets the PWA origin; the fallback is the public production domain, since a link in a
+    mail somebody already received cannot be fixed later — a preview host in an inbox is
+    a dead link the day that preview rotates."""
+    base = os.environ.get("APP_BASE_URL", "https://get.lana.help").strip().rstrip("/")
     if not path.startswith("/"):
         path = "/" + path
     return base + path

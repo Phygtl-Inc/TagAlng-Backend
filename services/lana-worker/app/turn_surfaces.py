@@ -74,6 +74,16 @@ TURN_SCOPED_SURFACES = frozenset({
 
 
 def clear_turn_surfaces(ctx: dict[str, Any]) -> None:
-    """Mark turn surfaces absent so session merge drops stale cards."""
+    """Mark turn surfaces absent so session merge drops stale cards.
+
+    Records what it actually took away under `_wiped_turn_surfaces`. Lanes that stamp a
+    turn surface and then build their outgoing ctx through this have to re-attach it by
+    name, and forgetting one is silent: the "did you mean?" clarifier shipped its question
+    with its answer buttons nulled a line after they were set (2026-08-21). The list lets
+    the serialization boundary say so out loud — see main._warn_surface_dropped.
+    """
+    wiped = [k for k in TURN_SCOPED_SURFACES if ctx.get(k)]
     for key in TURN_SCOPED_SURFACES:
         ctx[key] = None
+    # Not itself a surface, and re-stamped on every call, so it never goes stale.
+    ctx["_wiped_turn_surfaces"] = wiped

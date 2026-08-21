@@ -422,11 +422,16 @@ def stamp_peer_discovery_ctx(
     # Ahead of every early return below: a tip-rec strip or an unverified list moves the
     # surface just as much as a peer list does.
     drop_stale_intro_offer(ctx, raw)
-    if any(isinstance(r, dict) and r.get("tip_rec") for r in raw):
+    if any(
+        isinstance(r, dict) and (r.get("tip_rec") or r.get("community_roster")) for r in raw
+    ):
         # Recommendation-cascade turn: the rows and their counts strip were built by
         # tip_rec_cascade, which ranks by the rec, not by claim affinity. Re-ranking them
         # here (shared_count / stars, none of which these rows have) would scramble the
         # order the user was just shown.
+        # A community roster is the same contract: built by community_members, ordered
+        # members-then-curious, and carrying the members' own threads as chips — the
+        # unscored branch below would wipe those chips and invent nothing in their place.
         if not phone_verified:
             for row in raw:
                 if isinstance(row, dict):

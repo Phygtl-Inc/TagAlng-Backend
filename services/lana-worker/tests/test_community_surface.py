@@ -567,6 +567,50 @@ class TestCommunityProfile(unittest.TestCase):
 
     @patch("app.community_surface._blurb", return_value=None)
     @patch("app.community_surface.service_client")
+    def test_head_counts_goers_only_and_reports_curious_apart(self, sb, _blurb) -> None:
+        """The Mizu Sushi split (QA 2026-08-20): six confirmed + one curious joiner read
+        as "7 people" on this head while chat, the communities card, discovery and the
+        join mail all said 6. The head is the one that was wrong."""
+        tables = {
+            "circle_affiliations": _chain(
+                [
+                    {"id": "a1", "circle_type": "other", "user_id": "u1",
+                     "status": "confirmed", "created_at": "2026-01-01"},
+                    {"user_id": "u2", "circle_type": "other",
+                     "status": "confirmed", "created_at": "2026-01-02"},
+                    {"user_id": "u3", "circle_type": "other",
+                     "status": "curious", "created_at": "2026-01-03"},
+                ]
+            ),
+            "places": _chain([{"id": "p1", "name": "Mizu Sushi & Steakhouse"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain(
+                [
+                    {"id": "u1", "nickname": "jake", "profile_photo_url": None},
+                    {"id": "u2", "nickname": "asjid", "profile_photo_url": None},
+                    {"id": "u3", "nickname": "pouya", "profile_photo_url": None},
+                ]
+            ),
+            "user_blocks": _chain([]),
+        }
+        sb.return_value = _sb(tables)
+        out = community_profile("u1", place_id="p1")
+        self.assertEqual((out["member_count"], out["curious_count"]), (2, 1))
+        # Faces come off the same list as the count — a curious face over a count that
+        # excludes her is the "2 members over one face" bug in reverse.
+        self.assertEqual(
+            [f["peer_user_id"] for f in out["member_preview"]], ["u1", "u2"]
+        )
+
+    def test_a_place_only_curious_people_watch_says_so(self) -> None:
+        # count is confirmed-only now, so 0 is reachable — and "0 people" is true and
+        # unreadable.
+        self.assertEqual(_status_line(0, 0, is_member=False), "nobody goes here yet")
+
+    @patch("app.community_surface._blurb", return_value=None)
+    @patch("app.community_surface.service_client")
     def test_a_member_reads_as_one(self, sb, _blurb) -> None:
         tables = {
             "circle_affiliations": _chain(

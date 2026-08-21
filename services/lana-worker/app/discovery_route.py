@@ -1609,18 +1609,32 @@ def _try_layer1_intent_turn(
                 [],
             )
         from app.community_discovery import communities_chat_turn
+        from app.discovery_slots import slots_community_ask, slots_community_name
 
         reply = communities_chat_turn(
             user_id,
             message=msg,
             session_ctx=ctx_base,
             locale=str(session_ctx.get("preferred_lang") or "en"),
+            # "who is in <place>" arrives here now, so the turn needs the place they named
+            # and which side of it they asked about (its people, or the place itself).
+            community_name=slots_community_name(slots),
+            community_ask=slots_community_ask(slots),
         )
         ctx = _routing_ctx(
             ctx_base, phase=phase or "listening", active_intent="discovery.communities"
         )
-        # _routing_ctx wipes turn-scoped surfaces; re-attach the two this turn stamped.
-        for key in ("community_discovery", "communities_card"):
+        # _routing_ctx wipes turn-scoped surfaces; re-attach the ones this turn stamped.
+        # policy_chips belongs here too: the "did you mean Barnes & Noble?" clarifier
+        # stamped its tap-able names and clear_turn_surfaces nulled them one line later,
+        # so the question shipped with no way to answer it.
+        for key in (
+            "community_discovery",
+            "communities_card",
+            "peer_matches",
+            "policy_chips",
+            "activity_previews",
+        ):
             if ctx_base.get(key):
                 ctx[key] = ctx_base[key]
         ctx["last_routing"] = _discovery_routing_stub(

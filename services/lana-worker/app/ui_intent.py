@@ -64,6 +64,12 @@ PEER_DISCOVERY_ACTIVE_INTENTS = frozenset({
     # and no chips at all (2026-08-18). The cards must stand on the intent, never on an
     # offer that may or may not be armed.
     "social.propose_intro",
+    # A community roster IS a peer turn: "who is in Mizu Sushi" answers with the members'
+    # cards. Missing here, the rows were built, stamped and then filtered to [] by
+    # main._onboarding_fields, so Lana's line said "you'll spot cards for Tommaso db and
+    # Natasha just below" over an empty screen — the same failure social.propose_intro
+    # hit above, promising people the FE never received.
+    "discovery.communities",
     # The recommendation cascade puts neighbors who posted a matching tip on peer rows
     # (with the rec itself) — those are peer cards on a looking.tip turn.
     "looking.tip",
@@ -151,6 +157,14 @@ def derive_ui_intent(
         return UI_INTENT_SHOW_ACTIVITY_PREVIEW
 
     active = str(ctx.get("active_intent") or "").strip()
+
+    # A community's own upcoming meets. main._onboarding_fields drops activity_previews
+    # unless the intent is this one, so without it Lana named "Sushi & Social Meetup" in
+    # prose over an empty screen and the follow-up "show me that event" had nothing to
+    # anchor on and re-searched the whole area (QA 2026-08-21). Same drop peer_matches
+    # hit on this lane, one surface over.
+    if active == "discovery.communities" and activity_count > 0:
+        return UI_INTENT_SHOW_ACTIVITY_PREVIEW
 
     if ctx.get("signal_saved") and (
         active.startswith(_SIGNAL_ACTIVE_PREFIXES) or active == "signal.capture"

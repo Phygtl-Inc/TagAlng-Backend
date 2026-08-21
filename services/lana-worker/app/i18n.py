@@ -825,6 +825,63 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
     },
 
+    # Somebody reached out through Lana (a nudge). {name} is the sender's nickname — the
+    # reason to open it — and the context message is their own words, shown as a quote.
+    "notify.nudge.subject": {
+        "en": "{name} wants to connect",
+        "es": "{name} quiere conectar",
+        "pt": "{name} quer se conectar",
+    },
+    "notify.nudge.title": {
+        "en": "{name} nudged you",
+        "es": "{name} te dio un toque",
+        "pt": "{name} te chamou",
+    },
+    "notify.nudge.body": {
+        "en": "They found you through Lana and want to say hello. Accept and your chat opens — decline and they never hear about it.",
+        "es": "Te encontró a través de Lana y quiere saludarte. Acepta y se abre el chat — si no, nunca lo sabrá.",
+        "pt": "Encontrou você pela Lana e quer dizer olá. Aceite e o chat abre — recuse e a pessoa nunca fica sabendo.",
+    },
+    "notify.nudge.cta": {
+        "en": "See who it is", "es": "Ver quién es", "pt": "Ver quem é",
+    },
+    "notify.nudge.preheader": {
+        "en": "One tap to accept or pass.",
+        "es": "Un toque para aceptar o pasar.",
+        "pt": "Um toque para aceitar ou passar.",
+    },
+    "notify.nudge.push_title": {
+        "en": "{name} nudged you", "es": "{name} te dio un toque", "pt": "{name} te chamou",
+    },
+    "notify.nudge.said": {"en": "They said", "es": "Dijo", "pt": "Disse"},
+
+    # The other half: the nudge you sent came back a yes. The chat is the whole payoff,
+    # so the CTA goes straight there rather than to a list.
+    "notify.nudge_accepted.subject": {
+        "en": "{name} said yes — your chat is open",
+        "es": "{name} dijo sí — tu chat está abierto",
+        "pt": "{name} disse sim — seu chat está aberto",
+    },
+    "notify.nudge_accepted.title": {
+        "en": "{name} accepted your nudge",
+        "es": "{name} aceptó tu toque",
+        "pt": "{name} aceitou seu chamado",
+    },
+    "notify.nudge_accepted.body": {
+        "en": "You two are connected. The first message is the hard part — a time and a place beats a hello.",
+        "es": "Ya están conectados. El primer mensaje es lo difícil — una hora y un lugar valen más que un hola.",
+        "pt": "Vocês dois estão conectados. A primeira mensagem é a parte difícil — um horário e um lugar valem mais que um olá.",
+    },
+    "notify.nudge_accepted.cta": {
+        "en": "Open the chat", "es": "Abrir el chat", "pt": "Abrir o chat",
+    },
+    "notify.nudge_accepted.preheader": {
+        "en": "Say something before the moment cools.",
+        "es": "Di algo antes de que se enfríe el momento.",
+        "pt": "Diga algo antes que o momento esfrie.",
+    },
+    "notify.facts.neighbor": {"en": "Neighbor", "es": "Vecino", "pt": "Vizinho"},
+
     # The (label, value) rows in a notification email — "When / Where / Host".
     "notify.facts.when": {"en": "When", "es": "Cuándo", "pt": "Quando"},
     "notify.facts.where": {"en": "Where", "es": "Dónde", "pt": "Onde"},

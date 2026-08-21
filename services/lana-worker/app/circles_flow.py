@@ -45,7 +45,7 @@ _TYPE_SEARCH: dict[str, tuple[str | None, str]] = {
     "kids_activity": (None, "kids activity center"),
     "neighborhood": (None, "community center"),
     "hobby": (None, "club"),
-    "support": (None, "community support group"),
+    "support": (None, "community support center"),
     "heritage": (None, "cultural center"),
     "friends": (None, "cafe"),
     "other": (None, ""),
@@ -740,8 +740,8 @@ _GROUND_NOUN: dict[str, str] = {
     "school": "school",
     "kids_activity": "kids' activity",
     "neighborhood": "neighborhood spot",
-    "hobby": "hobby group",
-    "support": "group",
+    "hobby": "hobby club",
+    "support": "support community",
     "heritage": "community",
     "friends": "go-to spot",
     "other": "spot",
@@ -1420,7 +1420,7 @@ def ground_and_confirm(
             goal = (
                 "Tell them their community at this place is saved on their profile "
                 "now — one warm sentence — then offer ONE next step: setting up a "
-                "small get-together there they can share with their own group. "
+                "small get-together there they can share with their own people. "
                 "Nobody else is confirmed at this spot yet, so never claim or "
                 "imply people are waiting — creating and inviting is how their area "
                 "comes alive. End on the offer question; the chip below is the tap. "
@@ -1434,7 +1434,7 @@ def ground_and_confirm(
             ]
             fallback = (
                 f"Done — {place_name} is saved to your communities now. Want to set "
-                f"up {thing} there you can share with your group?"
+                f"up {thing} there you can share with your people?"
             )
         session_ctx["_grounding_offer_done"] = True
 

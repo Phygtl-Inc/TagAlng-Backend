@@ -528,7 +528,10 @@ def place_features(place_id: str, user_id: str | None = None) -> list[dict[str, 
                 .table("place_features")
                 .select(fields)
                 .eq("place_id", place_id)
+                # Oldest-first inside a confidence tie. Without it the chips reshuffle
+                # between opens — see _public_labels for the same defect, reported.
                 .order("confidence", desc=True)
+                .order("created_at")
                 .limit(40)
                 .execute()
             )
@@ -794,7 +797,14 @@ def _public_labels(user_ids: list[str]) -> dict[str, list[str]]:
             .eq("disclosure", "public")
             .eq("subject_kind", "self")
             .is_("dismissed_at", "null")
+            # A tie in confidence is UNORDERED in Postgres, and this keeps only the
+            # first _MAX_MEMBER_LABELS per person: Natasha holds nine public claims all at
+            # 1.0, so each open showed a different three of them and members' interest
+            # lines appeared to rewrite themselves (QA 2026-08-20). Oldest-established
+            # first inside a tie — stable across renders, and the same key place_features
+            # and the portrait now use.
             .order("confidence", desc=True)
+            .order("created_at")
             .limit(_PUBLIC_LABEL_FETCH)
             .execute()
         )
@@ -838,6 +848,11 @@ def _member_attributes(own: list[str], shared: list[tuple[str, str]]) -> list[st
 def _status_line(count: int, meets: int, *, is_member: bool = True) -> str:
     if is_member:
         people = "just you so far" if count <= 1 else f"{count} people"
+    elif count <= 0:
+        # Everyone here is curious — nobody has said they actually go. Reachable now
+        # that `count` is confirmed-only, and "0 people" is a true sentence nobody
+        # wants to read.
+        people = "nobody goes here yet"
     else:
         # A curious joiner and a visitor are not in `count` — "just you" would be a lie.
         people = "1 person" if count == 1 else f"{count} people"
@@ -982,13 +997,21 @@ def community_profile(
         mine.get("noun"),
         mine.get("circle_key"),
     )
-    count = len(members)
+    # 'curious' is not membership (§19) — it is excluded from counts, rosters and
+    # matching everywhere else, and the profile head was the one surface still adding
+    # it in. Chat, the YOUR COMMUNITIES card, discover_communities_near and the join
+    # mail all count confirmed only, so a head reading "7 people" over their 6 is the
+    # count disagreeing with itself (QA 2026-08-20). Missing status reads as confirmed,
+    # exactly as the roster's own status map does.
+    goers = [m for m in members if str(m.get("status") or "confirmed") == "confirmed"]
+    count = len(goers)
+    curious_count = len(members) - count
     # Needs the roster, so it follows it — its own three reads are the next wave.
     # A link-holder sees the faces too (§27/LANA-58): she is neither a member nor
     # phone-verified, and gating her out rendered a real count over a toneless stack.
     preview = _member_preview(
         user_id,
-        members,
+        goers,
         phone_verified=(phone_verified and is_member) or _holds_invite_here(user_id, pid),
     )
     return {
@@ -1017,6 +1040,9 @@ def community_profile(
         # this to offer Join.
         "membership": "member" if is_member else "curious" if mine else "visitor",
         "member_count": count,
+        # The people watching this place without claiming they go here. Served so the
+        # head can show them without a second call; never folded into member_count.
+        "curious_count": curious_count,
         "active": count >= 2,
         # Counted from the meets already fetched above — reading this place's events
         # twice was a wasted round trip on every profile open.

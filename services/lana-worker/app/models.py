@@ -39,6 +39,12 @@ class PeerMatchRow(BaseModel):
     # Lana saying "I just sent your intro" must not sit above a control inviting the same
     # action, and nudging an existing connection can only hit the 7-day pair cooldown.
     connection: str | None = None
+    # "member" | "curious" on a community-roster row (app/community_discovery.py). The
+    # community screen tags a curious joiner and chat could not: the field is on the
+    # roster row already, but had nowhere to land here, so pydantic dropped it and a
+    # watcher rendered identically to someone who actually goes there. None on every
+    # other kind of row — nothing outside a roster has a membership to state.
+    membership: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
     # ── The recommendation cascade (§12a/b) ──────────────────────────────────────────
     # What this neighbor actually recommended, in their own words, and the tip_share row
@@ -666,6 +672,21 @@ class EventSetupRequest(BaseModel):
     # Community card: the place id of the community picked in the dropdown, or None for
     # "None" (just the host's own meet). Members are emailed at publish.
     circle_place_id: str | None = None
+
+
+class NudgeHookRequest(BaseModel):
+    """FE calls this right after send_nudge / accept_nudge / accept_intro. Only the id
+    travels — the worker reads the row to decide who to tell, so a client cannot aim a
+    notification.
+
+    Exactly one id is meaningful per call. Both halves live on one endpoint because
+    propose_intro writes a nudges row AND an intros row at the same instant: the Chats
+    drawer accepts whichever kind the item is, and either has to reach the person waiting
+    to hear back.
+    """
+
+    nudge_id: str | None = None
+    intro_id: str | None = None
 
 
 class EventJoinHookRequest(BaseModel):
