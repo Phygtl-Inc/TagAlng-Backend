@@ -170,6 +170,17 @@ class TestLayer1IntentCatalog(unittest.TestCase):
         self.assertIn("pakistani", tokens)
         self.assertIn("mom", tokens)
 
+    def test_attr_filter_tokens_drop_conversational_filler(self) -> None:
+        # Every token is ANDed against claim labels, so filler words are fatal:
+        # "anyone" sank a real "Laser tag" claim, and the plural "talks" missed the
+        # claim "Author talk". Both live prod misses (2026-08-19).
+        self.assertEqual(attr_filter_tokens("anyone who plays laser tag"), ["laser", "tag"])
+        self.assertEqual(attr_filter_tokens("who does author talks"), ["author", "talk"])
+        self.assertEqual(
+            attr_filter_tokens("find me people into interactive programs"),
+            ["interactive", "program"],
+        )
+
     def test_enrich_slots_maps_looking_swap(self) -> None:
         slots = enrich_slots({
             "linear_intent": "looking.swap",

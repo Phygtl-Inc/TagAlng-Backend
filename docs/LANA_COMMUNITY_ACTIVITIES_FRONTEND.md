@@ -19,7 +19,7 @@ community does **not** delete the interest: they still do it, just not here.
 
 ## 1. Reads (fields added to endpoints you already use)
 
-### `POST /lana/circles/mine` — each row gains `activities`
+### `POST /lana/circles/list` — each row gains `activities`
 
 ```jsonc
 {

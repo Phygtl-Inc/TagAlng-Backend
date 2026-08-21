@@ -302,9 +302,17 @@ def peer_tiers(user_id: str, peer_ids: list[str]) -> dict[str, str]:
 
 
 def drop_connected_peers(
-    rows: list[dict[str, Any]], *, user_id: str | None
+    rows: list[dict[str, Any]], *, user_id: str | None, keep_connected: bool = False
 ) -> list[dict[str, Any]]:
     """Peers the caller already connected with are not candidates — filter at the source.
+
+    `keep_connected=True` for a FACTUAL search ("who plays laser tag?"): the answer to a
+    question about the neighborhood is not an intro pitch, so dropping the one neighbor
+    who matches made Lana say "nobody has popped up for laser tag yet" about someone the
+    user already knows who does exactly that (prod, 2026-08-19). Those rows are kept and
+    stamped `connection` instead, which takes the Nudge button off and lets her say "you
+    two already know each other" rather than nothing at all.
+
 
     No peer source consults user_relationships: they match on claims and proximity and
     filter blocked users only. So an accepted nudge never stopped Lana re-offering the
@@ -337,8 +345,10 @@ def drop_connected_peers(
             continue
         tier = tiers.get(str(r.get("peer_user_id") or ""))
         if tier in _CONNECTED_TIERS:
-            continue
-        if tier == "nudge" and not r.get("connection"):
+            if not keep_connected:
+                continue
+            r.setdefault("connection", tier)
+        elif tier == "nudge" and not r.get("connection"):
             r["connection"] = "intro_sent"
         kept.append(r)
     return kept

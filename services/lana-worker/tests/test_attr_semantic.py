@@ -212,12 +212,20 @@ class TestAttrTermsFilters(unittest.TestCase):
         self.assertIn("stage", buckets)
 
     def test_fallback_general_tokens_are_anded_not_ored(self) -> None:
-        filters = parse_claim_filters("likes to swim")
-        # "like/likes" fold into one requirement, "swim" is another — AND across them,
-        # so a peer with only "Likes Parks" no longer qualifies.
+        filters = parse_claim_filters("brazilian who runs")
+        # Two real requirements, ANDed — a peer with only one no longer qualifies.
+        # The heritage group used to swallow the ask and drop "run" on the floor.
         self.assertEqual(len(filters), 2)
-        self.assertEqual(filters[0].terms, ["like", "likes"])
-        self.assertEqual(filters[1].terms, ["swim"])
+        self.assertEqual(filters[0].bucket, "heritage")
+        self.assertIn("brazilian", filters[0].terms)
+        self.assertEqual(filters[1].terms, ["run"])
+
+    def test_fallback_drops_generic_verbs(self) -> None:
+        # "likes" is filler the classifier prompt already calls a non-requirement, so
+        # the no-AI fallback must not turn it into a requirement of its own.
+        filters = parse_claim_filters("likes to swim")
+        self.assertEqual(len(filters), 1)
+        self.assertEqual(filters[0].terms, ["swim"])
 
 
 class TestSemanticIntroGate(unittest.TestCase):

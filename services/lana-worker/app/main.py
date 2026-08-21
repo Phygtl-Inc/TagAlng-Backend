@@ -137,6 +137,7 @@ from app.models import (
     PeerMatchRow,
     SendMessageRequest,
     SendMessageResponse,
+    SharedCircleRow,
     SessionDetailResponse,
     TurnDebug,
     TurnRouting,
@@ -568,7 +569,13 @@ def _intro_proposal_from_dict(raw: dict[str, Any] | None) -> IntroProposalPayloa
 
 def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     """Google Places fallback for an empty tip-seek → tappable cards. maps_url opens the
-    spot in Google Maps (by place_id when available, else a name+address search)."""
+    spot in Google Maps (by place_id when available, else a name+address search).
+
+    `community` is stamped upstream at the Places fetch (discovery_route._search_tip_places)
+    and only passed through here. It is what the surface groups on: rows carrying it render
+    under "From your circles", the rest under "From Google · not a neighbor vouch", which
+    was printed over a community row until the two sources got their own headings.
+    """
     from urllib.parse import quote_plus
 
     raw = ctx.get("google_place_suggestions")
@@ -589,7 +596,13 @@ def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
             maps_url = "https://www.google.com/maps/search/?api=1&query=" + quote_plus(
                 f"{name} {addr}".strip()
             )
-        out.append({"name": name, "address": addr, "place_id": pid or None, "maps_url": maps_url})
+        row = {"name": name, "address": addr, "place_id": pid or None, "maps_url": maps_url}
+        community = p.get("community")
+        if isinstance(community, dict) and community.get("member_count"):
+            # Structured, never a sentence: the count and the labels are facts, the
+            # phrasing ("3 neighbors go here") is the surface's to write and translate.
+            row["community"] = community
+        out.append(row)
     return out
 
 
@@ -762,9 +775,34 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 tip_text=str(row.get("tip_text") or "") or None,
                 tip_signal_id=str(row.get("tip_signal_id") or "") or None,
                 distance_text=str(row.get("distance_text") or "") or None,
+                # Circle provenance (C-FIND-V2) — the grouping the results screen renders.
+                shared_circles=_shared_circle_rows(row.get("shared_circles")),
+                same_block=bool(row.get("same_block")),
+                group_key=str(row.get("group_key") or "") or None,
+                group_label=str(row.get("group_label") or "") or None,
+                group_kind=str(row.get("group_kind") or "") or None,
             )
         )
     return out
+
+
+def _shared_circle_rows(raw: Any) -> list[SharedCircleRow]:
+    out: list[SharedCircleRow] = []
+    for c in raw if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        pid = str(c.get("place_id") or "").strip()
+        name = str(c.get("name") or "").strip()
+        if not pid or not name:
+            continue
+        out.append(
+            SharedCircleRow(
+                place_id=pid,
+                name=name,
+                circle_type=str(c.get("circle_type") or "") or None,
+            )
+        )
+    return out[:3]
 
 
 def _grounding_card_from_ctx(ctx: dict[str, Any]) -> GroundingCardPayload | None:

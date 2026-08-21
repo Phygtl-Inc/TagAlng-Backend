@@ -52,6 +52,47 @@ def _strength(row: dict[str, Any]) -> float:
         return 0.0
 
 
+def _shared_circles(raw: Any, *, limit: int = 3) -> list[dict[str, Any]]:
+    """The places both the caller and this recommender belong to (find_neighbor_tips v3)."""
+    out: list[dict[str, Any]] = []
+    for c in raw if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "").strip()
+        pid = str(c.get("place_id") or "").strip()
+        if not name or not pid:
+            continue
+        out.append(
+            {
+                "place_id": pid,
+                "name": name,
+                "circle_type": str(c.get("circle_type") or "").strip() or None,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _group(circles: list[dict[str, Any]], same_block: bool) -> dict[str, Any]:
+    """Which heading this rec sits under (C-FIND-V2: "the grouping IS the explanation").
+
+    A named shared circle wins over the block: "St Mary's Church" says more about why the
+    rec is trustworthy than "lives near you" does. `block` and `nearby` are KEYS, not copy
+    — the surface writes and translates the heading, the same rule the place cards follow.
+    """
+    if circles:
+        first = circles[0]
+        return {
+            "group_key": first["place_id"],
+            "group_label": first["name"],
+            "group_kind": "circle",
+        }
+    if same_block:
+        return {"group_key": "block", "group_label": None, "group_kind": "block"}
+    return {"group_key": "nearby", "group_label": None, "group_kind": "nearby"}
+
+
 def peer_rows_from_neighbor_tips(
     tips: list[dict[str, Any]],
     *,
@@ -69,6 +110,7 @@ def peer_rows_from_neighbor_tips(
         if not text or not peer_id:
             continue
         nickname = str(tip.get("neighbor_label") or "").strip() or "A neighbor"
+        circles = _shared_circles(tip.get("shared_circles"))
         row: dict[str, Any] = {
             "peer_user_id": peer_id,
             "nickname": nickname,
@@ -78,16 +120,26 @@ def peer_rows_from_neighbor_tips(
             "distance_text": str(tip.get("distance_text") or "").strip() or None,
             "trait_tags": _clean_tags(tip.get("affinity_tags")),
             "match_strength": _strength(tip),
+            # C-FIND-V2 groups results by the circle shared with the recommender, and
+            # C-FIND-V2-DETAIL lists those circles on the voucher card. Shared only —
+            # never this person's other memberships.
+            "shared_circles": circles,
+            "same_block": bool(tip.get("same_block")),
             # Marks this as a rec row for the peer-surface enricher and the FE.
             "tip_rec": True,
             "preview": False,
         }
+        row.update(_group(circles, bool(tip.get("same_block"))))
         if phone_verified:
             row["actions"] = [
                 peer_card_nudge_action(nickname=nickname, peer_user_id=peer_id)
             ]
         rows.append(row)
-    rows.sort(key=lambda r: -_strength(r))
+    # Shared-circle rows first, then same-block, then the rest — within each, best match.
+    # The list arrives in the order the C-FIND-V2 headings render, so the surface groups by
+    # walking it rather than sorting rows it was handed unordered.
+    _RANK = {"circle": 0, "block": 1, "nearby": 2}
+    rows.sort(key=lambda r: (_RANK.get(str(r.get("group_kind")), 3), -_strength(r)))
     return rows
 
 

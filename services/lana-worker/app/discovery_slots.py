@@ -730,7 +730,11 @@ def ai_parse_discovery_turn(
         attr_filter_s = str(attr_filter).strip()[:200] if attr_filter else None
         attr_terms_s: list[list[str]] = []
         raw_terms = raw.get("attr_terms")
-        if attr_filter_s and isinstance(raw_terms, list):
+        # NOT gated on attr_filter: the model sometimes returns the substantive term
+        # groups and no filter phrase, and discarding them dropped the search back onto
+        # the raw sentence — "anyone who plays laser tag" then required a neighbor whose
+        # claim contains "anyone". The groups ARE the requirement; the phrase is display.
+        if isinstance(raw_terms, list):
             for group in raw_terms[:4]:
                 if not isinstance(group, list):
                     continue
