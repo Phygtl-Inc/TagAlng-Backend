@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -125,6 +126,33 @@ class TestMergeCommunitiesFirst(unittest.TestCase):
     def test_no_communities_leaves_google_untouched(self):
         rows = [{"name": "Cafe", "place_id": "g1"}]
         self.assertEqual(mod.merge_communities_first(rows, []), rows)
+
+
+class TestPlaceRadius(unittest.TestCase):
+    """8 km is the PEER radius — who lives near me. A community is a place you drive to,
+    and 8 km silently excluded both real prod answers (Florida Game Rooms 16.1 km,
+    Orlando Public Library 23.0 km) while Google was shown for the same asks at 20 km."""
+
+    def test_default_reaches_past_the_peer_radius(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("LANA_PLACE_RADIUS_METERS", None)
+            self.assertGreaterEqual(mod._radius_meters(), 23_000)
+
+    def test_env_override_and_bad_value(self):
+        with patch.dict("os.environ", {"LANA_PLACE_RADIUS_METERS": "40000"}):
+            self.assertEqual(mod._radius_meters(), 40000.0)
+        with patch.dict("os.environ", {"LANA_PLACE_RADIUS_METERS": "junk"}):
+            self.assertEqual(mod._radius_meters(), 25000.0)
+
+    def test_radius_is_actually_sent_to_the_rpc(self):
+        sb = _sb([])
+        with patch.object(mod, "service_client", return_value=sb), patch(
+            "app.layer1_handlers._embed_attr_filter", return_value=[0.1] * 768
+        ):
+            mod.communities_for_request("pool hall", user_id="u1")
+        args = sb.rpc.call_args[0][1]
+        self.assertIn("p_radius_meters", args)
+        self.assertGreaterEqual(args["p_radius_meters"], 23_000)
 
 if __name__ == "__main__":
     unittest.main()

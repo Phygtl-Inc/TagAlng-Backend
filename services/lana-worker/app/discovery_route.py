@@ -3208,10 +3208,12 @@ def _search_tip_places(
         # NOT an early return: Google being down is no reason to withhold the communities
         # we hold ourselves, which are the better answer anyway.
         places = []
-    # Stamped at the FETCH, not on the way to the wire: the reply is composed before the
-    # payload is shaped, so stamping later left Lana saying "not a neighbor vouch" over a
-    # spot the user is a member of — true about recommendations, misleading about what
-    # she knows. Every google_place_suggestions row comes through here.
+    # Stamped at the FETCH so the ROW carries its own provenance. It used to be stamped on
+    # the way to the wire, which left Lana narrating the fact in prose ("1 neighbor goes to
+    # Florida Game Rooms…") on top of an already-long reply, under a heading reading "FROM
+    # GOOGLE · NOT A NEIGHBOR VOUCH" — false about that row, which came from our own
+    # circles. The surface groups the two sources under their own headings instead
+    # (C-FIND-V2: the grouping is the explanation), so the prose says neither.
     stamp_local_signal(places, user_id=user_id)
     # A row we have a local signal for leads. Prod 2026-08-19: Lana said "you're already
     # part of Mizu Sushi" and then listed it THIRD, under two strangers' listings — and
@@ -3226,37 +3228,6 @@ def _search_tip_places(
     return merge_communities_first(
         places, communities_for_request(query, user_id=user_id, limit=2)
     )
-
-
-def _local_signal_note(places: list[dict[str, Any]]) -> str:
-    """One clause naming a suggestion the user's own neighborhood already touches, or "".
-
-    "From Google — not a neighbor vouch" is true about RECOMMENDATIONS and misleading
-    about what Lana knows: prod 2026-08-19 put that header over the sushi place the asker
-    is a member of, with the activity they had told her about sitting unused. Nobody
-    recommended it, so the vouch line stays — this adds the fact next to it.
-
-    First matching row only. Two of these stacked would bury the answer, and the cards
-    carry the rest.
-    """
-    for p in places or []:
-        signal = p.get("community") if isinstance(p, dict) else None
-        if not isinstance(signal, dict) or not signal.get("member_count"):
-            continue
-        name = str(p.get("name") or "").strip()
-        if not name:
-            continue
-        # The activity that actually scored, when the finder matched one — "they read
-        # there" is a reason, where the full label list is only context.
-        matched = str(signal.get("matched_label") or "").strip()
-        labels = [matched] if matched else [str(x) for x in (signal.get("activity_labels") or [])][:2]
-        doing = f" ({', '.join(labels).lower()})" if labels else ""
-        if signal.get("is_member"):
-            return f" You're already part of {name}{doing}, if that counts."
-        n = int(signal["member_count"])
-        who = "1 neighbor goes" if n == 1 else f"{n} neighbors go"
-        return f" {who} to {name}{doing}, for what it's worth."
-    return ""
 
 
 def _verify_places(
@@ -3333,26 +3304,25 @@ def _tip_seek_fallback_reply(
         if not places:
             return ""
         ctx["google_place_suggestions"] = places[:3]
-        local = _local_signal_note(places[:3])
         if reason_widen:
             if not posted:
                 return (
                     f"Okay — widening it. Here's everything nearby (from Google, "
-                    f"{_TIP_VOUCH}).{local}"
+                    f"{_TIP_VOUCH})."
                 )
             return (
-                f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}).{local} "
+                f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}). "
                 "Your ask is still posted for neighbors, so I'll ping you the moment a neighbor "
                 "recommends one."
             )
         if not posted:
             return (
                 f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
-                f"{_TIP_VOUCH}).{local}"
+                f"{_TIP_VOUCH})."
             )
         return (
             f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
-            f"{_TIP_VOUCH}).{local} I've also posted your ask for neighbors — I'll ping you the "
+            f"{_TIP_VOUCH}). I've also posted your ask for neighbors — I'll ping you the "
             "moment a neighbor recommends one."
         )
 
@@ -3436,18 +3406,17 @@ def _tip_seek_fallback_reply(
         )
         ctx["rec_chips"] = chips
         reframe = chosen.get("reframe") or f"Focused on {chosen.get('label', 'a good fit').lower()} spots."
-        local = _local_signal_note(verified[:3])
         if not posted:
             # No "want me to widen?" here — the caller ends this turn with the ask-neighbors
             # offer, and two questions in one breath is the ask-stacking bug
             # ([[rapport-ask-stacking-and-tile-context]]). The widen stays available as a chip.
             return (
                 f"{reframe} These are from Google, filtered to genuinely match "
-                f"({_TIP_VOUCH}).{local}"
+                f"({_TIP_VOUCH})."
             )
         return (
             f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}),"
-            f"{local} and I've posted your ask for neighbors — I'll ping you the moment a "
+            f" and I've posted your ask for neighbors — I'll ping you the moment a "
             "neighbor recommends one. Want me to widen the search?"
         )
 
@@ -3461,15 +3430,14 @@ def _tip_seek_fallback_reply(
     ctx["google_place_suggestions"] = fallback[:3]
     ctx["rec_widen_noun"] = noun
     label = str(chosen.get("label") or "").strip().lower() or "matching"
-    local = _local_signal_note(fallback[:3])
     if not posted:
         return (
             f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
-            f"({_TIP_VOUCH}).{local}"
+            f"({_TIP_VOUCH})."
         )
     return (
         f"I couldn't confirm any {label} spots nearby on Google, so here's what's nearby "
-        f"({_TIP_VOUCH}).{local} Your ask is posted for neighbors — I'll ping you the moment a "
+        f"({_TIP_VOUCH}). Your ask is posted for neighbors — I'll ping you the moment a "
         "neighbor recommends one."
     )
 

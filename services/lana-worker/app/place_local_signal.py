@@ -64,10 +64,50 @@ def local_signal_for(
 
 
 def _min_similarity() -> float:
+    """0.50, not the 0.55 the peer matcher uses — measured, not guessed.
+
+    text-embedding-005 on prod's own rows (2026-08-21), ask vs activity claim:
+
+        pool hall            -> Snooker                 0.644   want
+        place to play pool   -> Snooker                 0.609   want
+        sushi place          -> Sushi Making Classes    0.699   want
+        place to read w/kids -> Weekly reading session  0.530   want, 0.55 rejected it
+        pool hall            -> Laser tag               0.479   reject
+        pool hall            -> Sushi Making Classes    0.409   reject
+
+    A short activity label against a conversational ask scores lower than the peer
+    matcher's claim-to-claim comparison, so 0.55 dropped a real match. The nearest true
+    negative is 0.479, which leaves 0.50 with room on both sides.
+    """
     try:
-        return float(os.environ.get("LANA_PLACE_ACTIVITY_MIN_SIM", "0.55"))
+        return float(os.environ.get("LANA_PLACE_ACTIVITY_MIN_SIM", "0.50"))
     except ValueError:
-        return 0.55
+        return 0.50
+
+
+def _radius_meters() -> float:
+    """25 km, NOT the 8 km peer radius — a place you drive to is not a neighbor.
+
+    The peer radius answers "who lives near me", and 8 km is right for that. A community
+    is a PLACE, and the same 8 km silently excluded both real answers on prod (2026-08-21):
+
+        Mizu Sushi & Steakhouse    4.5 km   inside — the only case that ever worked
+        Florida Game Rooms        16.1 km   excluded
+        Orlando Public Library    23.0 km   excluded
+
+    Google was meanwhile being shown for the SAME asks at 16-20 km (search_places biases
+    to 16 km and returns past it), so we were listing a stranger's pool hall 20 km away
+    while refusing to mention our own community at 16. The member whose activity matched
+    still lives on the caller's block; only the venue is a drive.
+    """
+    raw = os.environ.get("LANA_PLACE_RADIUS_METERS", "").strip()
+    if not raw:
+        return 25000.0
+    try:
+        return max(1000.0, min(float(raw), 200000.0))
+    except ValueError:
+        logger.warning("place_radius_bad_env value=%r — using default", raw)
+        return 25000.0
 
 
 def communities_for_request(
@@ -99,6 +139,7 @@ def communities_for_request(
             {
                 "p_user_id": user_id,
                 "p_query_embedding": literal,
+                "p_radius_meters": _radius_meters(),
                 "p_min_similarity": _min_similarity(),
                 "p_limit": max(1, min(int(limit or 2), 5)),
             },

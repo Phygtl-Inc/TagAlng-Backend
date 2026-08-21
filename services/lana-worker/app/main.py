@@ -136,6 +136,7 @@ from app.models import (
     PeerMatchRow,
     SendMessageRequest,
     SendMessageResponse,
+    SharedCircleRow,
     SessionDetailResponse,
     TurnDebug,
     TurnRouting,
@@ -564,8 +565,9 @@ def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     spot in Google Maps (by place_id when available, else a name+address search).
 
     `community` is stamped upstream at the Places fetch (discovery_route._search_tip_places)
-    so the reply writer sees it too — by the time a turn reaches here the prose is already
-    composed. This function only passes the field through.
+    and only passed through here. It is what the surface groups on: rows carrying it render
+    under "From your circles", the rest under "From Google · not a neighbor vouch", which
+    was printed over a community row until the two sources got their own headings.
     """
     from urllib.parse import quote_plus
 
@@ -764,9 +766,34 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 tip_text=str(row.get("tip_text") or "") or None,
                 tip_signal_id=str(row.get("tip_signal_id") or "") or None,
                 distance_text=str(row.get("distance_text") or "") or None,
+                # Circle provenance (C-FIND-V2) — the grouping the results screen renders.
+                shared_circles=_shared_circle_rows(row.get("shared_circles")),
+                same_block=bool(row.get("same_block")),
+                group_key=str(row.get("group_key") or "") or None,
+                group_label=str(row.get("group_label") or "") or None,
+                group_kind=str(row.get("group_kind") or "") or None,
             )
         )
     return out
+
+
+def _shared_circle_rows(raw: Any) -> list[SharedCircleRow]:
+    out: list[SharedCircleRow] = []
+    for c in raw if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        pid = str(c.get("place_id") or "").strip()
+        name = str(c.get("name") or "").strip()
+        if not pid or not name:
+            continue
+        out.append(
+            SharedCircleRow(
+                place_id=pid,
+                name=name,
+                circle_type=str(c.get("circle_type") or "") or None,
+            )
+        )
+    return out[:3]
 
 
 def _grounding_card_from_ctx(ctx: dict[str, Any]) -> GroundingCardPayload | None:

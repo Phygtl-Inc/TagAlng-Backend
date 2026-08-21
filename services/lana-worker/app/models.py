@@ -51,6 +51,28 @@ class PeerMatchRow(BaseModel):
     # humanize_distance_text. None whenever either side's coarse point is unknown —
     # never a guess, and never confused with matching_peer_label (a shared thread).
     distance_text: str | None = None
+    # ── Circle provenance on a rec (C-FIND-V2) ───────────────────────────────────────
+    # The places BOTH the viewer and this recommender belong to. The results screen groups
+    # by these ("ST MARY'S CHURCH" over the rec, "YOUR BLOCK" over one with no shared
+    # place) because the shared circle is WHY the rec is worth trusting — a stranger's
+    # recommendation and one from someone you sit next to are not the same claim.
+    # Shared only: never this person's other memberships, which are theirs to disclose.
+    shared_circles: list["SharedCircleRow"] = Field(default_factory=list)
+    same_block: bool = False
+    # Which heading the row sits under. `group_key` is a place id for a circle, else the
+    # literal "block" / "nearby"; `group_label` is the place's own name, and null for the
+    # other two so the surface writes and translates that heading itself.
+    group_key: str | None = None
+    group_label: str | None = None
+    group_kind: str | None = None
+
+
+class SharedCircleRow(BaseModel):
+    """One place the viewer and a recommender both belong to."""
+
+    place_id: str
+    name: str
+    circle_type: str | None = None
 
 
 class DiscoveryWeakPeerRow(BaseModel):
