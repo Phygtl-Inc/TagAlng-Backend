@@ -393,6 +393,11 @@ def _apply_ask_ceiling(action: NextAction, streak: int) -> NextAction:
 
 _ASK_KINDS_ALL = ("ask_gap", "ground_place", "bridge_offer")
 
+# Kinds whose QUESTION is pasted in after decide_turn returns, so the utterance the
+# model writes is a lead-in with no "?" in it by design. Nothing that inspects the
+# utterance for a question may judge these — see the dead-end backstop below.
+_APPENDED_ASK_KINDS = ("ask_gap", "ground_place")
+
 
 def _revision_note(action: NextAction, *, streak: int) -> str | None:
     """The one corrective retry, shared by every shape violation.
@@ -456,6 +461,19 @@ def _revision_note(action: NextAction, *, streak: int) -> str | None:
         # A distress turn is ALLOWED to end without a question or a chip — that
         # silence IS the decision, and this note would push a question back onto it.
         and not action.distress_turn
+        # ...and so is an ask_gap/ground_place, whose question does not exist yet.
+        # Both kinds are CONTRACTUALLY a bare lead-in: the prompt tells the model
+        # "the system DELETES your question and sends the goal's stored question in
+        # its place", and _wire_ask_gap_action / _wire_ground_place_action append it
+        # AFTER decide_turn returns. Judged on "is there a '?'", every correct
+        # ask_gap looked like a dead end, so this note retried it away — the model
+        # complied by switching to kind='reply' with goal_id null, _wire_ask_gap_action
+        # then early-returned on the kind, and the vetted question was never pasted.
+        # The user read a warm lead-in and nothing else (prod 2026-08-21 14:48:53:
+        # Tim answered the kids' indoor-activities tile and got "That sounds like a
+        # good mix — Lego for the younger one, and online games…", full stop, while
+        # the audit `why` still said it was asking the queued Lego question).
+        and action.kind not in _APPENDED_ASK_KINDS
         and not action.chips
         and not any(ch in str(action.utterance or "") for ch in ("?", "؟"))
     ):
@@ -465,11 +483,18 @@ def _revision_note(action: NextAction, *, streak: int) -> str | None:
         return (
             "Your decision for this turn was " + decision + " — it ends the "
             "conversation with no question, no chips and no actionable offer: a dead "
-            "end. Revise it: keep the warm acknowledgement, but end on either ONE "
-            "gentle follow-up question or ONE concrete offer (with a chip) drawn from "
-            "CANDIDATE GOALS / AVAILABLE CAPABILITIES. Only if the person explicitly "
-            "declined, said goodbye, or closed the conversation themselves may a plain "
-            "close stand — in that case return it unchanged."
+            "end. Revise it: keep the warm acknowledgement, then continue the thread. "
+            "In order of preference: (1) kind=follow_thread — ONE question about the "
+            "very thing THEY just told you, in your own words, no goal_id needed; this "
+            "is always available and is the right move when nothing stored genuinely "
+            "fits. (2) kind=ask_gap with its goal_id — ONLY when a CANDIDATE GOAL is "
+            "about the same specific thing they just raised; a stored question on a "
+            "different subject is worse than no question, because they will read it as "
+            "you not listening. (3) kind=bridge_offer with a chip — ONE concrete thing "
+            "you can actually do for them from AVAILABLE CAPABILITIES. Never manufacture "
+            "an offer or grab the nearest unrelated goal just to avoid closing. Only if "
+            "the person explicitly declined, said goodbye, or closed the conversation "
+            "themselves may a plain close stand — in that case return it unchanged."
         )
     return None
 

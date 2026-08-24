@@ -247,12 +247,23 @@ _ATTR_REFINE_RE = re.compile(
     re.I,
 )
 _VERIFY_HELP_RE = re.compile(
-    r"\b(how (?:do|can) i verify|verify (?:my |me|a )?phone|phone verif|get verified|"
-    r"unlock (?:names|matches)|need to verify)\b",
+    # "get ME verified" is the imperative form of "how do I get verified", and it
+    # missed for want of the pronoun slot — the same hole _RSVP_RE had. Tim asked
+    # three times on 2026-08-21; the two interrogative forms matched here and the
+    # imperative one did not (prod 14:59:58).
+    r"\b(how (?:do|can) i verify|verify (?:my |me|a )?phone|phone verif|"
+    r"get (?:me |us )?verified|unlock (?:names|matches)|need to verify)\b",
     re.I,
 )
 _RSVP_RE = re.compile(
-    r"\b(rsvp|sign up for|join|take part in|attend|going to|i want to go|count me in)\b",
+    # "sign ME up for" / "sign US up for" carry the same intent as the bare form and
+    # are how people actually phrase it. Without the pronoun slot they matched NEITHER
+    # this nor _SIGNUP_INTENT_RE (whose lookahead excludes "... for"), so the turn fell
+    # through to the AI slots, came back activity_browse, and an explicit RSVP command
+    # was answered with the browse list — indistinguishable from success (prod
+    # 2026-08-21 14:52:59, "sign me up for the badminton").
+    r"\b(rsvp|sign\s+(?:me\s+|us\s+)?up\s+for|join|take part in|attend|going to|"
+    r"i want to go|count me in)\b",
     re.I,
 )
 
@@ -6358,21 +6369,6 @@ def fetch_preview_peers_on_block(
         return []
 
 
-def redact_peers_for_preview(peers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for p in peers[:5]:
-        out.append(
-            {
-                **p,
-                "peer_user_id": None,
-                "nickname": None,
-                "avatar_url": None,
-                "preview": True,
-            }
-        )
-    return out
-
-
 def _format_event_when(raw: Any) -> str | None:
     s = str(raw or "").strip()
     if not s:
@@ -6609,16 +6605,24 @@ def format_preview_message(
     where = clean_block_label(block_label) or "your area"
     if not peers:
         return t("discovery.peers_empty", lang, where=where)
-    if len(peers) == 1:
-        lines = [t("discovery.peers_header_one", lang, where=where)]
-    else:
-        lines = [t("discovery.peers_header_many", lang, n=len(peers), where=where)]
+    key = "discovery.peers_header_one" if len(peers) == 1 else "discovery.peers_header_many"
+    header = t(key, lang, n=len(peers), where=where)
     # Block-preview peers carry no computed similarity — list who they are (when
-    # the caller may see names) but never invent a per-peer shared trait.
-    for p in peers[:3]:
-        nick = str(p.get("nickname") or "").strip()
-        if nick:
-            lines.append(f"• {nick}")
+    # the caller may see names) but never invent a per-peer shared trait. The
+    # "when" was a comment, not code: every name was listed regardless, so an
+    # unverified reader got the names the tail line promised they'd get by
+    # verifying. Same gate as peers_to_match_rows — prose and payload must agree.
+    names = (
+        [n for p in peers[:3] if (n := str(p.get("nickname") or "").strip())]
+        if phone_verified
+        else []
+    )
+    # The header ends in a colon in every locale because a list follows it. With no
+    # names to list it dangled — "I found 1 neighbor near your area:" then an
+    # unrelated sentence, which read as a missing branch (Tim's #9). Same defect,
+    # same fix: no list, no colon.
+    lines = [header if names else header.rstrip(":")]
+    lines.extend(f"• {n}" for n in names)
     if phone_verified:
         lines.append(t("discovery.peers_tail_verified", lang))
     else:
@@ -8877,12 +8881,54 @@ def handle_discovery_turn(
         events = fetch_preview_events_on_block(block_id)
         event_title = _match_event_title(events, msg)
         if phone_verified:
-            return None
+            # RSVP-by-utterance is not wired: set_event_rsvp is auth.uid()-scoped and
+            # only the card's button calls it. This used to `return None`, which let the
+            # turn fall through to generic routing and come back as the browse list —
+            # an action command answered with a search result, indistinguishable from
+            # success (prod 2026-08-21 14:52:59). Say the one true sentence instead and
+            # point at the control that does work.
+            label = f'"{event_title}"' if event_title else "that one"
+            return (
+                compose_reply(
+                    goal=(
+                        "The user asked you to sign them up for "
+                        f"{label}. You CANNOT RSVP for them — only the RSVP button on "
+                        "the card can. In ONE short sentence say plainly that you "
+                        "can't do it from chat, and tell them to tap RSVP on the card "
+                        "below. Do NOT offer to search, narrow, or show anything else."
+                    ),
+                    fallback=(
+                        f"I can't RSVP you to {label} from here — tap RSVP on the "
+                        "card and you're in."
+                    ),
+                ),
+                _routing_ctx(ctx_base, phase=phase or "listening", active_intent="rsvp"),
+                _discovery_routing_stub(phase or "listening", "rsvp_not_supported"),
+                [],
+            )
         return _verify_gate_reply(
             session_ctx=session_ctx,
             ctx_base=ctx_base,
             block_id=block_id,
             event_label=f'"{event_title}"' if event_title else "that activity",
+        )
+
+    # BEFORE the preview branch, not 250 lines below it. Someone unverified who asks
+    # outright how to verify is not asking for neighbours: in PHASE_PREVIEW the peers
+    # handler claimed the turn first (classified find_peers) and returned, so the gate
+    # at the bottom of this function was never reached and Lana answered three straight
+    # asks with "follow the app's prompts" for prompts that were never shown (prod
+    # 2026-08-21 14:59–15:00). Only the EXPLICIT signals are hoisted —
+    # wants_more_peer_detail stays below, where preview drill-down still owns it.
+    if (
+        not phone_verified
+        and not _signup_verify_in_flight(session_ctx, phase)
+        and (wants_verify_help(msg) or goal == "verify")
+    ):
+        return _verify_gate_reply(
+            session_ctx=session_ctx,
+            ctx_base=ctx_base,
+            block_id=block_id,
         )
 
     if phase == PHASE_PREVIEW:
@@ -9133,7 +9179,11 @@ def handle_discovery_turn(
     if (
         not phone_verified
         and not _signup_verify_in_flight(session_ctx, phase)
-        and (wants_verify_help(msg) or goal == "verify" or wants_more_peer_detail(msg))
+        # Explicit verify intent is handled above, before the preview branch can
+        # claim the turn; what remains here is the implicit route — someone asking
+        # for more about a locked neighbour, which the gate answers by offering to
+        # unlock it.
+        and wants_more_peer_detail(msg)
     ):
         return _verify_gate_reply(
             session_ctx=session_ctx,
