@@ -384,10 +384,10 @@ class TestPolicyGate(unittest.TestCase):
     """
 
     def _is_tip_ask(self, slots):
-        from app.lana_unified_pipeline import _turn_is_tip_ask
+        from app.lana_unified_pipeline import _turn_is_engine_action
 
         with patch("app.discovery_slots.discovery_slots_for_turn", return_value=slots):
-            return _turn_is_tip_ask(
+            return _turn_is_engine_action(
                 {"routing_phase": "listening"},
                 "recommend me a doctor nearby",
                 history=[],
@@ -415,13 +415,13 @@ class TestPolicyGate(unittest.TestCase):
         self.assertFalse(self._is_tip_ask(_tip_slots(confidence=0.3)))
 
     def test_classifier_failure_leaves_the_gate_unchanged(self) -> None:
-        from app.lana_unified_pipeline import _turn_is_tip_ask
+        from app.lana_unified_pipeline import _turn_is_engine_action
 
         with patch(
             "app.discovery_slots.discovery_slots_for_turn", side_effect=RuntimeError("boom")
         ):
             self.assertFalse(
-                _turn_is_tip_ask(
+                _turn_is_engine_action(
                     {}, "recommend me a doctor", history=[], home_block_id=None, phone_verified=True
                 )
             )
@@ -509,3 +509,28 @@ class TestLegacyPathStillAvailable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPeerSeekCaptureLine(unittest.TestCase):
+    """An empty peers search must not release the lane to tip_seek (dev QA 2026-08-18)."""
+
+    def _capture(self, ctx: dict) -> str:
+        from app.discovery_slots import _active_capture_context
+
+        return _active_capture_context(ctx)
+
+    def test_no_peer_offer_is_inert(self) -> None:
+        self.assertEqual(self._capture({"peer_seek_offer_pending": None}), "none")
+
+    def test_armed_peer_offer_blocks_tip_seek(self) -> None:
+        line = self._capture({"peer_seek_offer_pending": {"filter": "likes pizza"}})
+        self.assertTrue(line.startswith("peer_seek"))
+        self.assertIn("likes pizza", line)
+        self.assertIn("NEVER tip_seek", line)
+        self.assertIn("find_by_attrs", line)
+
+    def test_rapport_still_wins_over_peer_offer(self) -> None:
+        line = self._capture(
+            {"rapport_active": True, "peer_seek_offer_pending": {"filter": "likes pizza"}}
+        )
+        self.assertTrue(line.startswith("rapport"))

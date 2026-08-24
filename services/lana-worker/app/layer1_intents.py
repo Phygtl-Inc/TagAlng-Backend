@@ -225,6 +225,13 @@ _ATTR_FILTER_STOP = frozenset({
     "find", "a", "an", "the", "with", "on", "my", "block", "which", "are", "of",
     "near", "me", "who", "speak", "for", "to", "looking", "lookingfor", "some",
     "any", "good", "know", "want", "please", "can", "you", "help",
+    # The classifier prompt already declares these NOT requirements ("likes/enjoys/
+    # loves/plays/who/any/people"). This list was the stale second copy of that rule,
+    # so "anyone who plays laser tag" searched for a neighbor whose profile contains
+    # the word "anyone" — every token is ANDed, so one pronoun sank the whole search.
+    "anyone", "anybody", "someone", "somebody", "people", "person", "neighbor",
+    "neighbour", "into", "does", "do", "is", "that", "here", "around", "there",
+    "like", "likes", "enjoy", "enjoys", "love", "loves", "play", "plays", "playing",
 })
 
 
@@ -268,17 +275,46 @@ def attr_filter_tokens(filter_text: str) -> list[str]:
         if len(w) < 2 or w in _ATTR_FILTER_STOP:
             continue
         if w.endswith("s") and len(w) > 3:
+            # Singular ONLY — every token is ANDed and matched as a substring, so
+            # emitting both forms made "author talks" require "talks", which the
+            # claim "Author talk" does not contain. The singular matches both.
             singular = w[:-1]
-            if singular not in _ATTR_FILTER_STOP and singular not in out:
-                out.append(singular)
+            if singular not in _ATTR_FILTER_STOP:
+                if singular not in out:
+                    out.append(singular)
+                continue
         if w not in out:
             out.append(w)
     return out[:8]
 
 
+def _ai_attr_terms_text(slots: dict[str, Any] | None) -> str:
+    """The classifier's own substantive terms, one representative per AND group.
+
+    It already strips the filler ("likes/enjoys/loves/plays/who/any/people are NOT
+    requirements" is in its prompt), so this is the authoritative filter text. One term
+    per group, not the whole group: groups are ORed synonyms, and joining them would
+    turn "swim OR swimming" into a search requiring both.
+    """
+    groups = (slots or {}).get("attr_terms")
+    if not isinstance(groups, list):
+        return ""
+    picked: list[str] = []
+    for group in groups[:4]:
+        if not isinstance(group, list):
+            continue
+        terms = [str(t).strip().lower() for t in group if str(t or "").strip()]
+        if terms:
+            picked.append(min(terms, key=len))
+    return " ".join(picked)
+
+
 def normalize_attr_filter_text(msg: str, slots: dict[str, Any] | None = None) -> str:
     raw = ""
     if slots:
+        # AI first — the word list below is only the no-classifier fallback.
+        raw = _ai_attr_terms_text(slots)
+    if not raw and slots:
         raw = str(slots.get("attr_filter") or slots.get("identity_snippet") or "").strip()
     if not raw:
         raw = str(msg or "").strip()

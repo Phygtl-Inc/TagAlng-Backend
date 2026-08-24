@@ -302,9 +302,17 @@ def peer_tiers(user_id: str, peer_ids: list[str]) -> dict[str, str]:
 
 
 def drop_connected_peers(
-    rows: list[dict[str, Any]], *, user_id: str | None
+    rows: list[dict[str, Any]], *, user_id: str | None, keep_connected: bool = False
 ) -> list[dict[str, Any]]:
     """Peers the caller already connected with are not candidates — filter at the source.
+
+    `keep_connected=True` for a FACTUAL search ("who plays laser tag?"): the answer to a
+    question about the neighborhood is not an intro pitch, so dropping the one neighbor
+    who matches made Lana say "nobody has popped up for laser tag yet" about someone the
+    user already knows who does exactly that (prod, 2026-08-19). Those rows are kept and
+    stamped `connection` instead, which takes the Nudge button off and lets her say "you
+    two already know each other" rather than nothing at all.
+
 
     No peer source consults user_relationships: they match on claims and proximity and
     filter blocked users only. So an accepted nudge never stopped Lana re-offering the
@@ -315,6 +323,12 @@ def drop_connected_peers(
     gone, an exhausted search takes the real "nobody new yet" branch instead of pitching
     an intro to someone the user already knows. 'nudge' rows stay — one is genuinely out
     awaiting a reply, which the card labels intro_sent instead of offering Nudge again.
+
+    Those surviving 'nudge' rows are STAMPED here, not only on the card. The tier lookup
+    is already paid for, and stamp_connection_state runs after the reply is composed — so
+    the card showed Daniel with a "✓ Sent" badge under prose reading "Want an intro?"
+    (2026-08-18). The reply writer needs the same fact the button has, at the one place
+    every peer source passes through.
     """
     if not user_id or not rows:
         return rows
@@ -324,12 +338,20 @@ def drop_connected_peers(
     )
     if not tiers:
         return rows
-    return [
-        r
-        for r in rows
-        if not isinstance(r, dict)
-        or tiers.get(str(r.get("peer_user_id") or "")) not in _CONNECTED_TIERS
-    ]
+    kept: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            kept.append(r)
+            continue
+        tier = tiers.get(str(r.get("peer_user_id") or ""))
+        if tier in _CONNECTED_TIERS:
+            if not keep_connected:
+                continue
+            r.setdefault("connection", tier)
+        elif tier == "nudge" and not r.get("connection"):
+            r["connection"] = "intro_sent"
+        kept.append(r)
+    return kept
 
 
 def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
@@ -359,6 +381,47 @@ def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
             row["connection"] = "intro_sent"
 
 
+def drop_stale_intro_offer(ctx: dict[str, Any], rows: list[Any]) -> None:
+    """A single-peer intro offer cannot outlive the turn that showed that one peer.
+
+    `pending_intro_offer` is deliberately cross-turn state — the accept ("yes") arrives a
+    turn after the offer. But derive_ui_intent returns offer_neighbor_intro whenever it is
+    armed, which renders the SINGLE-card intro surface. So a later turn that ships a real
+    list drew one card under prose counting three, and the card belonged to the old offer
+    (QA 2026-08-18: "There are 3 people near you…" over one Sofia card with her nudge
+    chips, session ctx holding three rows).
+
+    The rule: the offer survives only while the turn shows exactly its own candidate.
+    Anything else — a list, a different peer, a recommendation strip — means the surface
+    moved on and the offer goes with it. Enforced here rather than in any one lane because
+    the turn that exposed this came through the orchestrator's find_peers tool, which
+    never touches the offer at all; every path that ships peer rows passes through this
+    function on its way to derive_ui_intent.
+
+    A turn with NO peer rows clears nothing (the caller returns before this) — that is the
+    accept window, and the offer has to still be there to be accepted.
+    """
+    offer = ctx.get("pending_intro_offer")
+    if not isinstance(offer, dict):
+        return
+    candidate = str(offer.get("candidate_user_id") or "").strip()
+    ids = [
+        str(r.get("peer_user_id") or "").strip()
+        for r in rows
+        if isinstance(r, dict) and r.get("peer_user_id")
+    ]
+    if candidate and ids == [candidate]:
+        return
+    import logging
+
+    from app.intro_list import clear_intro_offer_ctx
+
+    clear_intro_offer_ctx(ctx)
+    logging.getLogger(__name__).info(
+        "stale_intro_offer_dropped candidate=%s rows=%d", candidate or None, len(ids)
+    )
+
+
 def stamp_peer_discovery_ctx(
     ctx: dict[str, Any], *, phone_verified: bool, user_id: str = ""
 ) -> None:
@@ -366,11 +429,19 @@ def stamp_peer_discovery_ctx(
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list) or not raw:
         return
-    if any(isinstance(r, dict) and r.get("tip_rec") for r in raw):
+    # Ahead of every early return below: a tip-rec strip or an unverified list moves the
+    # surface just as much as a peer list does.
+    drop_stale_intro_offer(ctx, raw)
+    if any(
+        isinstance(r, dict) and (r.get("tip_rec") or r.get("community_roster")) for r in raw
+    ):
         # Recommendation-cascade turn: the rows and their counts strip were built by
         # tip_rec_cascade, which ranks by the rec, not by claim affinity. Re-ranking them
         # here (shared_count / stars, none of which these rows have) would scramble the
         # order the user was just shown.
+        # A community roster is the same contract: built by community_members, ordered
+        # members-then-curious, and carrying the members' own threads as chips — the
+        # unscored branch below would wipe those chips and invent nothing in their place.
         if not phone_verified:
             for row in raw:
                 if isinstance(row, dict):

@@ -182,7 +182,9 @@ def _claims_for(user_id: str) -> list[dict[str, Any]]:
             .select("label, concept, disclosure, subject_kind, confidence")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
+            # Stable tie-break — the portrait is authored from this order.
             .order("confidence", desc=True)
+            .order("created_at")
             .limit(200)
             .execute()
         ).data or []

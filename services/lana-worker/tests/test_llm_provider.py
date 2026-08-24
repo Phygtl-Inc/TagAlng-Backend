@@ -2,6 +2,7 @@ import os
 import unittest
 
 from app.orchestrator.llm import (
+    composer_model,
     llm_configured,
     openai_configured,
     provider,
@@ -20,6 +21,7 @@ class TestLlmProvider(unittest.TestCase):
             "GCP_VERTEX_PROJECT",
             "OPENAI_ROUTER_MODEL",
             "OPENAI_SYNTH_MODEL",
+            "LANA_COMPOSER_MODEL",
         ):
             self._saved[key] = os.environ.get(key)
 
@@ -47,6 +49,24 @@ class TestLlmProvider(unittest.TestCase):
         os.environ["OPENAI_SYNTH_MODEL"] = "gpt-4o-2024-08-06"
         self.assertEqual(router_model(), "gpt-4o-mini-2024-07-18")
         self.assertEqual(synthesizer_model(), "gpt-4o-2024-08-06")
+
+    def test_composer_defaults_to_router_not_synth(self) -> None:
+        """Wording-only calls must NOT ride the synth tier — that was 50% of the
+        August OpenAI bill for one-sentence replies."""
+        os.environ["LANA_LLM_PROVIDER"] = "openai"
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        os.environ["OPENAI_ROUTER_MODEL"] = "gpt-4.1-mini"
+        os.environ["OPENAI_SYNTH_MODEL"] = "gpt-4.1"
+        os.environ.pop("LANA_COMPOSER_MODEL", None)
+        self.assertEqual(composer_model(), "gpt-4.1-mini")
+        self.assertNotEqual(composer_model(), synthesizer_model())
+
+    def test_composer_override_can_revert_to_synth(self) -> None:
+        os.environ["LANA_LLM_PROVIDER"] = "openai"
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        os.environ["OPENAI_ROUTER_MODEL"] = "gpt-4.1-mini"
+        os.environ["LANA_COMPOSER_MODEL"] = "gpt-4.1"
+        self.assertEqual(composer_model(), "gpt-4.1")
 
     def test_gemini_when_vertex_only(self) -> None:
         os.environ["LANA_LLM_PROVIDER"] = "gemini"

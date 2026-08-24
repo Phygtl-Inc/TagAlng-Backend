@@ -315,6 +315,12 @@ def fetch_block_summary(user_jwt: str, *, block_id: str | None = None) -> dict[s
     }
 
 
+# `connection` values that mean "they already know each other", as stamped by
+# peer_discovery_surface.drop_connected_peers. Distinct from "intro_sent"/"connected",
+# which mean an intro is out and waiting — a different sentence entirely.
+KNOWN_TIERS = frozenset({"acquaintance", "direct", "irl_peer"})
+
+
 def _call_peer_rpc(user_jwt: str, base: str, args: dict[str, Any]) -> Any:
     """Dispatch a peer search, radius twin first when enabled.
 
@@ -336,18 +342,21 @@ def _call_peer_rpc(user_jwt: str, base: str, args: dict[str, Any]) -> Any:
 
 
 def _without_connected(user_jwt: str, raw: Any) -> Any:
-    """Strip peers the caller already connected with from a peer-search result.
+    """Mark peers the caller already connected with, in a peer-search result.
 
     Applied at the dispatch every find_peers_* RPC goes through, so no downstream
-    row builder or reply composer ever sees an already-connected neighbor as a fresh
-    candidate. See peer_discovery_surface.drop_connected_peers.
+    row builder or reply composer ever offers an already-connected neighbor a fresh
+    intro. These are the ATTRIBUTE searches — "who plays laser tag?" is a question
+    about the neighborhood, not a request for an intro, so a connected match is kept
+    and stamped rather than dropped: answering "nobody" about someone the user knows
+    who matches is simply false. See peer_discovery_surface.drop_connected_peers.
     """
     if not isinstance(raw, list):
         return raw
     from app.auth import jwt_user_id
     from app.peer_discovery_surface import drop_connected_peers
 
-    return drop_connected_peers(raw, user_id=jwt_user_id(user_jwt))
+    return drop_connected_peers(raw, user_id=jwt_user_id(user_jwt), keep_connected=True)
 
 
 def _fetch_peers_single_attr(user_jwt: str, token: str, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -469,7 +478,11 @@ def _semantic_query_texts(filter_text: str, slots: dict[str, Any] | None) -> lis
             ]
             if terms:
                 texts.append(" ".join(terms))
-    return texts or [str(filter_text or "").strip()]
+    if texts:
+        return texts
+    # No AI groups — strip the filler ourselves rather than embedding the whole ask.
+    fallback = str(filter_text or "").strip()
+    return [" ".join(attr_filter_tokens(fallback)) or fallback]
 
 
 def _fetch_peers_semantic_single(
@@ -591,6 +604,10 @@ def peers_to_match_rows(
                 "matching_peer_concept": row.get("matching_peer_concept"),
                 "has_exact_concept_match": bool(row.get("has_exact_concept_match")),
                 "semantic_match": bool(row.get("semantic_match")),
+                # Carried, not re-derived: the dispatch already paid for the tier lookup,
+                # and the card needs it to drop the Nudge button on someone the user
+                # already knows.
+                "connection": row.get("connection"),
                 "preview": not phone_verified or not nick,
             }
         )
@@ -812,6 +829,65 @@ def format_attr_peers_reply(
         )
     # The cards carry names + shared traits — the text stays to the count + next step.
     n = len(peers)
+    # Every match already has an intro out (or is already connected) — their cards render
+    # a "✓ Sent" badge, not a Nudge button, so offering an intro contradicts what the user
+    # is looking at. QA 2026-08-18: "One person near you mentioned 'sport' in their own
+    # words. Want an intro?" over a single row badged Sent — the only next step Lana
+    # offered was one she had already taken. `connection` is stamped at the peer dispatch
+    # (peer_discovery_surface.drop_connected_peers), so it is here before the cards are.
+    # A MIXED list is left alone on purpose: the offer is still true for the new rows, and
+    # the cards say which are which.
+    if all(
+        isinstance(p, dict) and p.get("connection") in KNOWN_TIERS for p in peers
+    ):
+        # Already-connected matches are KEPT now (drop_connected_peers keep_connected),
+        # because "nobody plays laser tag" was false about a neighbor the user knows who
+        # does. No intro to offer and none pending — just the true answer.
+        return compose_reply(
+            goal=(
+                "Answer the question truthfully: neighbors near them DO match this search, "
+                "and they already know each other — no intro to offer, none pending. Name "
+                "the count, say they are already connected, and stop. Do not pitch an "
+                "intro and do not imply an intro is waiting on a reply."
+            ),
+            facts=[
+                f'What they searched for: "{filter_text}"',
+                f"Neighbors whose own claims match that search: {n}",
+                f"Already connected with the user: {n} of {n}",
+            ],
+            fallback=(
+                f"{'One neighbor' if n == 1 else f'{n} neighbors'} near you "
+                f"{'matches' if n == 1 else 'match'} \"{filter_text}\" — and you two "
+                "already know each other."
+            ),
+        )
+    if all(isinstance(p, dict) and p.get("connection") for p in peers):
+        # The two moves named here are the two PILLS under this message
+        # (ui_actions.peer_seek_offer_actions, armed by _attr_search_is_spent) — the copy
+        # must say what they say, or the person is told to type what they could tap.
+        return compose_reply(
+            goal=(
+                "You already introduced the user to every neighbor whose claims match this "
+                "search — the intros are out and waiting on a reply, and the cards below say "
+                "so. Never offer an intro here: it is the one thing you have already done. "
+                "Say warmly that they are already introduced and that you will tell them the "
+                "moment someone replies. Then offer the two real options, which are the pills "
+                "under your message: you can keep listening and tell them when a NEW matching "
+                "neighbor joins (the pill says 'Yes, notify me'), or drop this filter and show "
+                "everyone nearby (the pill says 'Show everyone nearby')."
+            ),
+            facts=[
+                f'What they searched for: "{filter_text}"',
+                f"Neighbors whose own claims match that search: {n}",
+                f"Intros already sent and awaiting a reply: {n} of {n}",
+            ],
+            fallback=(
+                f"The {'one neighbor' if n == 1 else f'{n} neighbors'} near you matching "
+                f"\"{filter_text}\" already {'has' if n == 1 else 'have'} an intro from me "
+                "waiting — I'll tell you the moment there's a reply. I can notify you when "
+                "someone new matches, or show everyone nearby instead."
+            ),
+        )
     if all(p.get("semantic_match") for p in peers if isinstance(p, dict)):
         # Meaning-based hits: stay truthful — nobody literally lists the user's word,
         # the cards show the actual claims that came close.

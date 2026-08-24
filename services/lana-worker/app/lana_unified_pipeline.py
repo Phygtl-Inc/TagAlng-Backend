@@ -287,7 +287,55 @@ def _merge_vetted_question(utterance: str, question: str) -> str:
     return f"{head} {question}".strip() if head else question
 
 
-def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[str, Any]) -> None:
+def _capture_named_place_now(
+    user_id: str, user_message: str, session_ctx: dict[str, Any]
+) -> bool:
+    """Run this turn's circle capture INLINE, so a place named this turn is real now.
+
+    Circle capture rides the background claim extractor, which fires after the reply
+    is sent. On the turn someone first names their spot ("I go to OrangeTheory
+    Narcoossee") there is therefore no affiliation to resolve, so the ask went out
+    bare — asking which spot they meant when they had just said it (QA 2026-08-18).
+    Extracting here costs this one turn the extractor call it was going to make
+    anyway: main.py is told to skip the background pass, not to run a second one.
+    """
+    msg = str(user_message or "").strip()
+    if not msg or session_ctx.get("skip_claims_background_extract"):
+        return False
+    try:
+        from app.claims_persist import try_upsert_claims_from_message
+
+        try_upsert_claims_from_message(user_id, msg, allow_rapport_gap=False)
+    except Exception:  # noqa: BLE001 — a bare ask still goes out, as it did before
+        logging.getLogger(__name__).exception("ground_place_inline_capture_failed")
+        return False
+    session_ctx["skip_claims_background_extract"] = True
+    return True
+
+
+def _confirm_the_named_spot(action: Any, name: str) -> None:
+    """Replace "which spot is it?" with a confirm, once we've found the one they named.
+
+    The policy authors its question before any Places lookup, so it asks which spot
+    even when the card underneath already shows the exact venue and a Pin it button.
+    """
+    from app.reply_compose import compose_reply
+
+    action.utterance = compose_reply(
+        goal=(
+            "The user just named the place they go to, and you found it on the map. "
+            "In ONE short sentence, say you found it and ask them to confirm it is "
+            "the right one — the card below shows the place with a Pin it button. "
+            "Do NOT ask which spot they mean: they already told you."
+        ),
+        facts=[f"The place found on the map: {name}"],
+        fallback=f"Found it — {name}. Is that the one?",
+    )
+
+
+def _wire_ground_place_action(
+    action: Any, *, user_id: str, session_ctx: dict[str, Any], user_message: str = ""
+) -> None:
     """Connect a policy `ground_place` decision to the REAL grounding rails.
 
     The policy LLM authors the question but its chips are fiction — it has no
@@ -321,24 +369,38 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
         gid = str(getattr(action, "goal_id", None) or "")
         if gid.startswith("circle:"):
             key = gid.split(":", 1)[1].strip()
-        q = (
-            service_client()
-            .table("circle_affiliations")
-            .select(
-                "id, circle_type, circle_key, detail, status, place_ref, place_name, "
-                "noun, emoji"
+        def _ungrounded() -> list[dict[str, Any]]:
+            q = (
+                service_client()
+                .table("circle_affiliations")
+                .select(
+                    "id, circle_type, circle_key, detail, status, place_ref, place_name, "
+                    "noun, emoji"
+                )
+                .eq("user_id", user_id)
+                .is_("dismissed_at", "null")
+                .is_("place_ref", "null")
             )
-            .eq("user_id", user_id)
-            .is_("dismissed_at", "null")
-            .is_("place_ref", "null")
-        )
-        if key:
-            q = q.eq("circle_key", key)
-        rows = [
-            r for r in (q.order("created_at", desc=True).limit(2).execute().data or [])
-            if isinstance(r, dict)
-        ]
+            if key:
+                q = q.eq("circle_key", key)
+            return [
+                r for r in (q.order("created_at", desc=True).limit(2).execute().data or [])
+                if isinstance(r, dict)
+            ]
+
+        rows = _ungrounded()
+        just_captured = False
         if not rows or (not key and len(rows) > 1):
+            # Nothing resolvable (capture hasn't landed) or several ungrounded circles
+            # and no goal key to pick between them. Either way the venue is in the
+            # message we are answering, so capture it now and take the row that
+            # appeared — the place they just named — rather than ask them again.
+            before = {str(r.get("id") or "") for r in rows}
+            if _capture_named_place_now(user_id, user_message, session_ctx):
+                fresh = [r for r in _ungrounded() if str(r.get("id") or "") not in before]
+                if fresh:
+                    rows, just_captured = fresh[:1], True
+        if not rows or (not key and not just_captured and len(rows) > 1):
             return  # not captured yet / ambiguous — leave a free-text ask
         aff = rows[0]
         options, unmatched = grounding_chip_options(
@@ -367,6 +429,11 @@ def _wire_ground_place_action(action: Any, *, user_id: str, session_ctx: dict[st
                     "full name, or the street it's on?"
                 ),
             )
+        exact = [c for c in candidates if not c.get("suggested")]
+        if len(exact) == 1 and not unmatched:
+            # They named it, we found it: the card renders that one spot with Pin it,
+            # so the question above it has to be a confirm, not "which spot?".
+            _confirm_the_named_spot(action, str(exact[0].get("name") or ""))
         # Escape hatch rides along as a chip but never as a candidate — a wrong
         # list must always have a way out (2026-08-03).
         chips = [
@@ -430,7 +497,20 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
         session_ctx[k] = None
 
 
-def _turn_is_tip_ask(
+# Linear intents whose whole answer is engine work — a real read or write the policy
+# can only describe, never perform. decide_turn runs BEFORE the engines, so an intent
+# missing from here gets an AI-composed reply and its handler never runs at all
+# (2026-08-18: "can you show me communities around me" came back as "I can look for
+# people and activities around you — want me to find nearby people?", the closest
+# capability on the policy's menu, while communities_chat_turn sat unreached).
+# ADD NEW ACTION INTENTS HERE — the prompt is told to hand them off and does not
+# reliably comply, and a one-off helper per intent is how the last one was missed.
+POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
+    "discovery.communities",
+})
+
+
+def _turn_is_engine_action(
     ctx: dict[str, Any],
     msg: str,
     *,
@@ -439,16 +519,17 @@ def _turn_is_tip_ask(
     phone_verified: bool,
     timer: TurnTimer | None = None,
 ) -> bool:
-    """Is this turn a place/service recommendation ask (looking.tip)?
+    """Does this turn belong to an engine rather than to decide_turn?
 
-    Used to keep decide_turn off recommendation turns. Reads the classifier's verdict,
-    which is cached per user message — the same parse handle_discovery_turn reuses, so this
-    costs no extra model call. Fails CLOSED (False) so a classifier hiccup leaves the policy
-    gate exactly as it was rather than diverting every turn to the engines.
+    True for a place/service recommendation ask (looking.tip) and for every intent in
+    POLICY_ENGINE_ONLY_INTENTS. Reads the classifier's verdict, which is cached per user
+    message — the same parse handle_discovery_turn reuses, so this costs no extra model
+    call. Fails CLOSED (False) so a classifier hiccup leaves the policy gate exactly as
+    it was rather than diverting every turn to the engines.
     """
     try:
         from app.discovery_slots import discovery_slots_for_turn
-        from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR
+        from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR, intent_confidence_met
 
         slots = discovery_slots_for_turn(
             ctx,
@@ -464,10 +545,53 @@ def _turn_is_tip_ask(
             return False
         linear = str(slots.get("linear_intent") or "")
         sig = str(slots.get("signal_intent") or "") or SIGNAL_INTENT_BY_LINEAR.get(linear, "")
-        return sig == "tip_seek" and float(slots.get("confidence") or 0.0) >= 0.5
+        if sig == "tip_seek":
+            return float(slots.get("confidence") or 0.0) >= 0.5
+        # The engine's OWN bar, not a second one: escaping the policy below the threshold
+        # its handler needs would leave the turn to neither of them.
+        return linear in POLICY_ENGINE_ONLY_INTENTS and intent_confidence_met(slots, linear)
     except Exception:  # noqa: BLE001 — a gate helper must never break the turn
-        logging.getLogger(__name__).exception("tip_ask_policy_gate_failed")
+        logging.getLogger(__name__).exception("engine_action_policy_gate_failed")
         return False
+
+
+def policy_pitch_for(action: Any) -> str | None:
+    """What the policy pitched this turn, if it pitched an app move at all.
+
+    The capability id when the offer named one, else the bare kind — the accept has to
+    leave the policy either way, and `audit_offer_goal` exists precisely because a
+    bridge_offer ships with goal_id=None often enough to matter (prod 2026-08-06 pitched
+    sharing.host with no goal id). Keyed on the pitch, not on identifying it correctly.
+    """
+    if getattr(action, "kind", None) != "bridge_offer" or not getattr(action, "chips", None):
+        return None
+    goal = str(getattr(action, "goal_id", None) or "")
+    return goal.split(":", 1)[1].strip() if goal.startswith("cap:") else "bridge_offer"
+
+
+def _policy_pitch_accepted(ctx: dict[str, Any], msg: str) -> bool:
+    """Did they just tap ACCEPT on something the policy pitched last turn?
+
+    A pitch is made by the policy and can only be RUN by an engine, so the accept has
+    to leave the policy — otherwise decide_turn reads the tap as a fresh conversational
+    turn and pitches the same thing again. That is the loop QA hit on 2026-08-18: two
+    taps on "Find nearby people", two more "want me to…?" offers, no search.
+
+    The chip's `send` is authored as a self-contained request (`_revision_note` enforces
+    that), so the engines simply classify it like any typed message — no forced intent,
+    which is what keeps a named interest ("…who like sports") from being flattened.
+
+    Clears the pitch on the way out: an accept converts once.
+    """
+    pitch = str(ctx.get("policy_pitch") or "").strip()
+    if not pitch:
+        return False
+    text = str(msg or "").strip()
+    if not text or text not in (ctx.get("policy_chip_msgs") or []):
+        return False
+    ctx["policy_pitch"] = None  # None, never pop — a popped key resurrects on merge
+    logging.getLogger(__name__).info("policy_pitch_accept pitch=%s send=%r", pitch, text[:80])
+    return True
 
 
 def _policy_rapport_reply(
@@ -532,7 +656,9 @@ def _policy_rapport_reply(
     _reset_rapport_state(session_ctx)
     # A ground_place ask must be backed by real place candidates + armed state,
     # or the answer turn dead-ends (re-arms AFTER the reset above, on purpose).
-    _wire_ground_place_action(action, user_id=user_id, session_ctx=session_ctx)
+    _wire_ground_place_action(
+        action, user_id=user_id, session_ctx=session_ctx, user_message=user_message
+    )
     session_ctx["policy_chips"] = action.chips or None
     session_ctx["policy_chip_msgs"] = [c["send"] for c in action.chips] or None
     session_ctx["last_routing"] = action.routing_dict()
@@ -2154,14 +2280,18 @@ def run_lana_unified_pipeline(
             and str(session_ctx.get("_discovery_slots_for") or "")
             == str(user_message or "").strip()
         )
-        # A recommendation ask ("recommend me a doctor nearby") is an ACTION turn: it runs
-        # a real neighbor-tip + Places lookup and can post the ask to neighbors. The policy
-        # prompt is told to hand those off, but on QA 2026-08-04 it answered one with
-        # "I'll keep an ear out and let you know if a neighbor recommends a doctor" — a
-        # listening promise nothing had armed, with no places and no offer, while the
-        # engine (handler=None in the turn log) never ran. Skip deterministically on the
-        # classifier's own verdict rather than trusting the prompt.
-        and not _turn_is_tip_ask(
+        # Accepting an app move the policy itself pitched last turn. The pitch was the
+        # policy's to make; running it never was — see _policy_pitch_accepted.
+        and not _policy_pitch_accepted(session_ctx, user_message)
+        # An ACTION turn: a recommendation ask ("recommend me a doctor nearby") runs a real
+        # neighbor-tip + Places lookup and can post the ask to neighbors; a communities ask
+        # reads real circle rows. The policy prompt is told to hand those off, but on QA
+        # 2026-08-04 it answered one with "I'll keep an ear out and let you know if a
+        # neighbor recommends a doctor" — a listening promise nothing had armed, with no
+        # places and no offer, while the engine (handler=None in the turn log) never ran.
+        # Skip deterministically on the classifier's own verdict rather than trusting the
+        # prompt.
+        and not _turn_is_engine_action(
             session_ctx, user_message,
             history=history, home_block_id=home_block_id,
             phone_verified=phone_verified, timer=timer,
@@ -2187,9 +2317,17 @@ def run_lana_unified_pipeline(
             )
             # A ground_place ask must be backed by real place candidates + armed
             # grounding state, or the answer turn dead-ends (QA 2026-07-30).
-            _wire_ground_place_action(_action, user_id=user_id, session_ctx=session_ctx)
+            _wire_ground_place_action(
+                _action, user_id=user_id, session_ctx=session_ctx,
+                user_message=user_message,
+            )
             session_ctx["policy_chips"] = _action.chips or None
             session_ctx["policy_chip_msgs"] = [c["send"] for c in _action.chips] or None
+            # A pitched app move, remembered for exactly one turn: the accept has to reach
+            # the engine that can run it (_policy_pitch_accepted). Only bridge_offer — a
+            # rapport question or a place-grounding chip is answered by the policy itself
+            # and must stay with it.
+            session_ctx["policy_pitch"] = policy_pitch_for(_action)
             session_ctx["last_routing"] = _action.routing_dict()
             session_ctx["_orchestrator_turn"] = False
             session_ctx["timing_ms"] = timer.to_dict()

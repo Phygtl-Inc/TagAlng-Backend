@@ -90,7 +90,8 @@
       "Bash(wait:*)",
       "Bash(tail:*)",
       "Bash(ps:*)",
-      "Bash(ln -s /Users/dev/Downloads/tagalng-pwa-main/node_modules node_modules)"
+      "Bash(ln -s /Users/dev/Downloads/tagalng-pwa-main/node_modules node_modules)",
+      "Bash(grep \"^SUPABASE_URL\" .env.local | sed 's|https://||'; cd /Users/dev/Downloads/TagAlng-backend && cat supabase/.temp/project-ref 2>/dev/null; echo)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",

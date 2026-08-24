@@ -137,7 +137,10 @@ def parse_claim_filters(query: str, slots: dict[str, Any] | None = None) -> list
     if language_terms:
         # language often stored as interest/general — search any bucket
         filters.append(ClaimFilter(bucket=None, terms=language_terms))
-    if general_terms and not filters:
+    if general_terms:
+        # NOT `and not filters`: a recognised heritage/stage used to swallow the rest of
+        # the ask, so "pakistani mom who swims" searched for a Pakistani mom and dropped
+        # swimming entirely — a requirement silently discarded, then reported as a match.
         # One filter per token (AND) — a single OR'd group let "likes to swim" match any
         # "Likes X" claim. Singular/plural forms of a word stay together as one requirement.
         groups: list[list[str]] = []

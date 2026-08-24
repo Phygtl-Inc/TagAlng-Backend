@@ -100,6 +100,43 @@ def activities_at_place(place_id: str, viewer_id: str | None = None) -> list[dic
     return activities_for_places([place_id], viewer_id).get(str(place_id), [])
 
 
+def activities_by_member(
+    place_id: str, *, per_member: int = 3
+) -> dict[str, list[str]]:
+    """user_id -> what they do at this place, for the roster's chip row.
+
+    One read for the whole page (the roster renders every row's pills from it).
+    A member with nothing listed is simply absent from the map."""
+    pid = str(place_id or "").strip()
+    if not pid:
+        return {}
+    try:
+        res = (
+            service_client()
+            .table("place_activities")
+            .select("user_id, label")
+            .eq("place_id", pid)
+            .limit(2000)
+            .execute()
+        )
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        logger.exception("place_activities_by_member_failed place=%s", pid)
+        return {}
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        uid = str(r.get("user_id") or "")
+        label = _clean_label(r.get("label"))
+        if not uid or not label:
+            continue
+        got = out.setdefault(uid, [])
+        if label not in got and len(got) < max(1, per_member):
+            got.append(label)
+    return out
+
+
 def add_activity(
     user_id: str,
     *,
@@ -221,6 +258,8 @@ def add_feature(
         source="rapport",
         contributed_by=user_id,
         emoji=feature_emoji(clean),
+        # The key is a slug and cannot round-trip "BYOB" or "24/7 access" (20261030).
+        label=clean,
     )
     return {"place_id": pid, "key": key, "label": clean, "written": written}
 
@@ -256,13 +295,16 @@ def remove_feature(
         sb.table("place_features").delete().eq("id", r["id"]).execute()
 
 
-_EMOJI_PROMPT = """You pick ONE emoji for a facility a local place has \
-("pool", "childcare", "sauna", "free parking").
+_EMOJI_PROMPT = """You pick ONE emoji for something a local place has or allows \
+("pool", "childcare", "sauna", "free parking", "BYOB", "24/7 access", "cool stuff").
 
 Output ONLY JSON: {"emoji": "X"}
-- Exactly one emoji, the most literal depiction of the thing itself.
-- No text, no skin tones, no flags, no faces.
-- If nothing fits, {"emoji": ""}."""
+- ALWAYS pick one. Every chip gets an emoji — never answer {"emoji": ""}.
+- The closest depiction of the thing. For an abbreviation or a policy, depict what it
+  refers to: BYOB -> 🍺, 24/7 access -> 🕓, no-contract -> 📄.
+- For a vague label that names nothing specific ("cool stuff", "nice extras"), pick a
+  neutral marker: ✨.
+- Exactly one emoji. No text, no skin tones, no flags, no faces."""
 
 
 def feature_emoji(label: str) -> str:

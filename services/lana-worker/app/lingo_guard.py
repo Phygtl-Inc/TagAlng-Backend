@@ -30,7 +30,7 @@ _BANNED_RE = re.compile(
     r"\b("
     r"moms?|mommy|mommies|mamas?|mums?|mam[aá]|mam[ãa]e"  # rule 1 (en/es/pt)
     r"|blocks?|cuadra|quadra"                              # rule 2
-    r"|circles?|c[ií]rculos?"                              # rule 3
+    r"|circles?|c[ií]rculos?|groups?|grupos?"              # rule 3
     r"|leaderboards?|streaks?|level\s*up"                  # rule 6
     r")\b",
     re.IGNORECASE,
@@ -66,6 +66,10 @@ _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:cuadra|quadra)\b", re.I), "zona"),
     (re.compile(r"\bcircles?\b", re.I), "community"),
     (re.compile(r"\bc[ií]rculos?\b", re.I), "comunidad"),
+    # Rule 3 bans "group" as well as "circle", but only "circle" was in the pattern, so
+    # "I can add you to the group" shipped straight past the guard (QA 2026-08-21).
+    (re.compile(r"\bgroups?\b", re.I), "community"),
+    (re.compile(r"\bgrupos?\b", re.I), "comunidad"),
     (re.compile(r"\bleaderboards?\b", re.I), "neighborhood"),
     (re.compile(r"\bstreaks?\b", re.I), "progress"),
     (re.compile(r"\blevel\s*up\b", re.I), "grow"),

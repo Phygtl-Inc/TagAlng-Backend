@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.circles_capture import same_community
+from app.circles_capture import (
+    CircleCandidate,
+    _names_a_different_place,
+    same_community,
+)
 from app.policy.goals import (
     _grounding_goals,
     filter_place_goals,
@@ -28,34 +32,78 @@ from app.policy.goals import (
 
 
 @pytest.mark.parametrize(
-    "a,b",
+    "a,a_noun,b,b_noun",
     [
-        ("gym", "fitness_cf"),                    # bare category vs the real gym
-        ("fitness_cf", "fitness_cf_st_cloud"),    # subset of the same words
-        ("restaurant", "piazza_italia"),
-        ("church", "lagoinha_visitor"),
+        # bare category vs the real gym — the NOUNS are what say it's one community
+        ("gym", "gym", "fitness_cf", "gym crew"),
+        ("fitness_cf", None, "fitness_cf_st_cloud", None),   # subset of the same words
+        ("gym", None, "gym_st_cloud", None),                 # category inside the key
+        ("restaurant", "restaurant", "piazza_italia", "restaurant regulars"),
+        ("church", "church", "lagoinha_visitor", "church group"),
     ],
 )
-def test_duplicate_phrasings_are_the_same_community(a: str, b: str) -> None:
-    assert same_community(a, "fitness", b, "fitness") or same_community(
-        a, "other", b, "other"
-    )
+def test_duplicate_phrasings_are_the_same_community(
+    a: str, a_noun: str | None, b: str, b_noun: str | None
+) -> None:
+    assert same_community(
+        a, "fitness", b, "fitness", a_noun=a_noun, b_noun=b_noun
+    ) or same_community(a, "other", b, "other", a_noun=a_noun, b_noun=b_noun)
 
 
 @pytest.mark.parametrize(
-    "a,b",
+    "a,a_noun,b,b_noun",
     [
-        ("fitness_cf", "crossfit_st_cloud"),   # two genuinely different places
-        ("table_tennis_group", "futsal"),
+        ("fitness_cf", None, "crossfit_st_cloud", None),  # two genuinely different places
+        ("table_tennis_group", None, "futsal", None),
+        # prod 2026-08-18: a bare category merged ANY two same-type circles, so a new
+        # library mention was folded into an existing gaming zone and OrangeTheory into
+        # an already-pinned gym. The nouns disagree; they are separate communities.
+        ("library", "library regulars", "gaming_zone", "gaming zone"),
+        ("orangetheory", "fitness studio", "gym", "gym"),
+        # No noun on either side is not evidence of sameness — answer no.
+        ("gym", None, "orangetheory", None),
     ],
 )
-def test_different_communities_stay_separate(a: str, b: str) -> None:
+def test_different_communities_stay_separate(
+    a: str, a_noun: str | None, b: str, b_noun: str | None
+) -> None:
     """Merging two real communities is worse than leaving a duplicate."""
-    assert not same_community(a, "fitness", b, "fitness")
+    assert not same_community(
+        a, "fitness", b, "fitness", a_noun=a_noun, b_noun=b_noun
+    )
+    assert not same_community(a, "hobby", b, "hobby", a_noun=a_noun, b_noun=b_noun)
 
 
 def test_a_different_type_is_never_merged() -> None:
     assert not same_community("gym", "fitness", "church", "faith")
+
+
+# --- a named venue is never folded into a row pinned somewhere else --------
+
+
+def _cand(place_name: str) -> CircleCandidate:
+    return CircleCandidate(
+        circle_type="fitness", circle_key="orangetheory", raw_phrase="x",
+        confidence=0.9, place_name=place_name, noun="fitness studio", emoji="",
+    )
+
+
+def test_named_venue_is_not_folded_into_a_place_pinned_elsewhere() -> None:
+    assert _names_a_different_place(
+        _cand("OrangeTheory Narcoossee"),
+        {"place_name": "Crunch Fitness - Lake Nona", "place_ref": "p1"},
+    )
+
+
+def test_the_same_venue_still_corroborates() -> None:
+    assert not _names_a_different_place(
+        _cand("OrangeTheory Narcoossee"),
+        {"place_name": "Orangetheory Fitness Narcoossee", "place_ref": "p1"},
+    )
+
+
+def test_no_venue_named_leaves_the_decision_to_the_nouns() -> None:
+    assert not _names_a_different_place(_cand(""), {"place_name": "", "place_ref": "p1"})
 
 
 # --- a pinned sibling silences the duplicate's question -------------------
@@ -66,9 +114,9 @@ def test_grounding_is_skipped_when_a_sibling_is_pinned() -> None:
     world = {
         "circles": [
             {"key": "fitness_cf", "type": "fitness", "grounded": True, "confirmed": True,
-             "place": "Fitness CF - St. Cloud"},
+             "place": "Fitness CF - St. Cloud", "noun": "gym"},
             {"key": "fitness_cf_st_cloud", "type": "fitness", "grounded": False},
-            {"key": "gym", "type": "fitness", "grounded": False},
+            {"key": "gym", "type": "fitness", "grounded": False, "noun": "gym"},
         ]
     }
     ids = {g["id"] for g in _grounding_goals(world)}

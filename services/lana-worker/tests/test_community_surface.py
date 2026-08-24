@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from app.community_surface import (
     _feature_label,
-    _shared_line,
+    _member_attributes,
     _status_line,
     caller_affiliation_at,
     communities_card,
@@ -31,6 +31,13 @@ def _chain(data=None, count=None):
     ):
         getattr(m, method).return_value = m
     m.execute.return_value = MagicMock(data=data if data is not None else [], count=count)
+    return m
+
+
+def _chain_seq(*datas):
+    """A table read more than once in one call, answering differently each time."""
+    m = _chain([])
+    m.execute.side_effect = [MagicMock(data=d, count=None) for d in datas]
     return m
 
 
@@ -143,12 +150,51 @@ class TestCommunitiesCard(unittest.TestCase):
 
 
 class TestMembership(unittest.TestCase):
+    @patch("app.community_surface._blurb", return_value=None)
     @patch("app.community_surface.service_client")
-    def test_non_member_cannot_read_a_profile(self, sb) -> None:
-        sb.return_value = _sb({"circle_affiliations": _chain([])})
+    def test_a_visitor_opens_the_head_without_the_people(self, sb, _blurb) -> None:
+        # She belongs to nothing here — reached the place from a peer's profile. The head
+        # opens (discovery already names it to her); the roster does not.
+        affs = _chain_seq([], [{"user_id": "u2", "circle_type": "fitness"}])
+        sb.return_value = _sb({
+            "circle_affiliations": affs,
+            "places": _chain([{"id": "p1", "name": "OrangeTheory"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain([{"id": "u2", "nickname": "mapleluz", "profile_photo_url": None}]),
+            "user_blocks": _chain([]),
+        })
+        out = community_profile("u1", place_id="p1")
+        self.assertEqual(out["membership"], "visitor")
+        self.assertEqual(out["place_name"], "OrangeTheory")
+        self.assertEqual(out["member_count"], 1)
+        # The three members-only parts, all empty.
+        self.assertEqual(out["member_preview"], [])
+        self.assertEqual(out["actions"], [])
+        self.assertIsNone(out["create_event_venue"])
+        self.assertIsNone(out["detail"])
+        self.assertEqual(out["affiliation_id"], "")
+        # "just you so far" would be a lie — she is not one of the people counted.
+        self.assertEqual(out["status_line"], "1 person")
+
+    @patch("app.community_surface._blurb", return_value=None)
+    @patch("app.community_surface.service_client")
+    def test_a_place_only_blocked_people_go_to_does_not_open(self, sb, _blurb) -> None:
+        # discover_communities_near drops it from the list; opening it by id must agree.
+        affs = _chain_seq([], [{"user_id": "u2", "circle_type": "fitness"}])
+        sb.return_value = _sb({
+            "circle_affiliations": affs,
+            "places": _chain([{"id": "p1", "name": "OrangeTheory"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain([]),
+            "user_blocks": _chain([{"blocker": "u1", "blocked": "u2"}]),
+        })
         with self.assertRaises(ValueError) as err:
             community_profile("u1", place_id="p1")
-        self.assertEqual(str(err.exception), "not_a_member")
+        self.assertEqual(str(err.exception), "place_not_found")
 
     @patch("app.community_surface.service_client")
     def test_non_member_cannot_list_members(self, sb) -> None:
@@ -174,6 +220,28 @@ class TestFeatures(unittest.TestCase):
         self.assertEqual(_feature_label("has_childcare", "true", ""), "Childcare")
         self.assertEqual(_feature_label("class_schedule", "full", ""), "Class schedule: full")
         self.assertEqual(_feature_label("has_pool", None, "toddler_swim"), "Pool (toddler swim)")
+
+    def test_a_stored_label_wins_over_the_slug(self) -> None:
+        # The key cannot round-trip casing, digits or punctuation — 20261030 stores the
+        # member's own words next to it, and they win.
+        self.assertEqual(_feature_label("has_byob", None, "", "BYOB"), "BYOB")
+        self.assertEqual(_feature_label("has_24_7_access", None, "", "24/7 access"), "24/7 access")
+        # Null label (chat-learned, or written before the column) still derives.
+        self.assertEqual(_feature_label("has_byob", None, "", None), "Byob")
+        self.assertEqual(_feature_label("has_byob", None, "", "   "), "Byob")
+        # The value and sub_group qualifiers still decorate a stored label.
+        self.assertEqual(_feature_label("has_byob", "true", "", "BYOB"), "BYOB")
+        self.assertEqual(_feature_label("has_byob", None, "patio", "BYOB"), "BYOB (patio)")
+
+    @patch("app.community_surface.service_client")
+    def test_features_read_steps_down_before_the_label_migration(self, sb) -> None:
+        # Deployed ahead of the migration, the first select 400s on the unknown column.
+        # Losing the label is fine; losing every chip on the card is not.
+        rows = [{"key": "has_pool", "value": None, "sub_group": "", "confidence": 0.9}]
+        feats = _chain(rows)
+        feats.execute.side_effect = [RuntimeError("column does not exist"), MagicMock(data=rows)]
+        sb.return_value = _sb({"place_features": feats})
+        self.assertEqual([f["label"] for f in place_features("p1")], ["Pool"])
 
     @patch("app.community_surface.service_client")
     def test_low_confidence_features_are_not_repeated(self, sb) -> None:
@@ -201,29 +269,35 @@ class TestFeatures(unittest.TestCase):
         self.assertFalse(any(f["mine"] for f in place_features("p1")))
 
 
-class TestSharedLine(unittest.TestCase):
-    def test_shared_threads_are_named(self) -> None:
+class TestMemberAttributes(unittest.TestCase):
+    def test_their_own_threads_are_listed(self) -> None:
         self.assertEqual(
-            _shared_line([("Runner", "self"), ("Toddler stage", "self")], "gym"),
-            "You both: Runner · Toddler stage",
+            _member_attributes(["Colombian roots", "Loves to cook"], []),
+            ["Colombian roots", "Loves to cook"],
         )
 
-    def test_a_childs_thread_never_reads_as_the_adults(self) -> None:
-        # "You both do karate" about two parents whose KIDS do karate is false.
+    def test_shared_threads_come_first_and_are_not_duplicated(self) -> None:
         self.assertEqual(
-            _shared_line([("Does karate", "child")], "gym"),
-            "Your kids both: Does karate",
+            _member_attributes(["Gardens", "Runner"], [("Runner", "self")]),
+            ["Runner", "Gardens"],
         )
 
-    def test_both_subjects_get_their_own_clause(self) -> None:
+    def test_a_childs_thread_is_never_listed_as_theirs(self) -> None:
+        # "they do karate" about a parent whose KID does karate is false.
+        self.assertEqual(_member_attributes([], [("Does karate", "child")]), [])
         self.assertEqual(
-            _shared_line([("Runner", "self"), ("Does karate", "child")], "gym"),
-            "You both: Runner · Your kids both: Does karate",
+            _member_attributes(["Gardens"], [("Runner", "self"), ("Does karate", "child")]),
+            ["Runner", "Gardens"],
         )
 
-    def test_nothing_shared_claims_only_the_place(self) -> None:
-        # The one fact that IS true of every row here — never an invented affinity.
-        self.assertEqual(_shared_line([], "gym"), "You both go to this gym")
+    def test_nothing_known_lists_nothing(self) -> None:
+        self.assertEqual(_member_attributes([], []), [])
+
+    def test_the_row_stays_scannable(self) -> None:
+        # Shared first, so their own threads are the ones the cap drops.
+        self.assertEqual(
+            _member_attributes(["A", "B", "C"], [("E", "self")]), ["E", "A", "B"]
+        )
 
 
 class TestCommunityMembers(unittest.TestCase):
@@ -261,13 +335,29 @@ class TestCommunityMembers(unittest.TestCase):
         )
         out = community_members("u1", place_id="p1")
         rows = {r["peer_user_id"]: r for r in out["members"]}
-        self.assertEqual(rows["u2"]["shared_line"], "You both: Gardens · Runs")
+        self.assertEqual(rows["u2"]["attributes"], ["Gardens", "Runs"])
         self.assertEqual(rows["u2"]["actions"][0]["id"], "peer_card_nudge")
-        # No shared concepts → the honest place-only line, and still no fake score.
-        self.assertEqual(rows["u3"]["shared_line"], "You both go to this gym")
+        # Nothing shared and nothing public on file → nothing listed, and still no
+        # fake score.
+        self.assertEqual(rows["u3"]["attributes"], [])
         for row in out["members"]:
             for invented in ("match_stars", "match_band", "match_badge", "similarity_score"):
                 self.assertNotIn(invented, row)
+
+    @patch("app.community_surface.service_client")
+    def test_a_members_own_public_threads_carry_their_line(self, sb) -> None:
+        tables = self._tables()
+        tables["user_identity_claims"] = _chain(
+            [
+                {"user_id": "u3", "label": "Colombian roots", "confidence": 0.9},
+                {"user_id": "u3", "label": "Loves to cook", "confidence": 0.8},
+            ]
+        )
+        sb.return_value = _sb(tables)
+        rows = {r["peer_user_id"]: r for r in community_members("u1", place_id="p1")["members"]}
+        self.assertEqual(rows["u3"]["attributes"], ["Colombian roots", "Loves to cook"])
+        # The caller is never described back to herself.
+        self.assertEqual(rows["u1"]["attributes"], [])
 
     @patch("app.community_surface.service_client")
     def test_the_caller_is_in_the_list_and_the_blocked_are_not(self, sb) -> None:
@@ -280,7 +370,7 @@ class TestCommunityMembers(unittest.TestCase):
         self.assertEqual(len(out["members"]), out["member_count"] - 1)  # 'blocked' aside
         me = next(r for r in out["members"] if r["peer_user_id"] == "u1")
         self.assertTrue(me["me"])
-        self.assertIsNone(me["shared_line"])
+        self.assertEqual(me["attributes"], [])
         self.assertEqual(me["actions"], [])
         self.assertFalse(any(r["me"] for r in out["members"] if r["peer_user_id"] != "u1"))
 
@@ -301,6 +391,74 @@ class TestCommunityMembers(unittest.TestCase):
         sb.return_value = _sb(tables)
         out = community_members("u1", place_id="p1")
         self.assertEqual(out["members"], [])
+
+
+class TestMembershipKindAndActivities(unittest.TestCase):
+    """The roster's two chip kinds: what someone IS here (member / curious) and what
+    they DO here. Curious joiners are listed but never counted as members (§19)."""
+
+    def _tables(self):
+        return {
+            "circle_affiliations": _chain(
+                [
+                    {"id": "a1", "circle_type": "fitness", "user_id": "u1",
+                     "status": "confirmed", "created_at": "2026-01-01"},
+                    {"user_id": "u2", "circle_type": "fitness",
+                     "status": "confirmed", "created_at": "2026-01-02"},
+                    {"user_id": "u4", "circle_type": "fitness",
+                     "status": "curious", "created_at": "2026-01-03"},
+                ]
+            ),
+            "places": _chain([{"id": "p1", "name": "OrangeTheory", "place_type": "fitness"}]),
+            "users": _chain(
+                [
+                    {"id": "u2", "nickname": "coral88", "profile_photo_url": None},
+                    {"id": "u4", "nickname": "mapleluz", "profile_photo_url": None},
+                ]
+            ),
+            "user_blocks": _chain([]),
+            "place_activities": _chain(
+                [
+                    {"user_id": "u2", "label": "CrossFit"},
+                    {"user_id": "u2", "label": "Spin"},
+                    {"user_id": "u2", "label": "CrossFit"},  # a repeat is one chip
+                ]
+            ),
+        }
+
+    @patch("app.community_surface.service_client")
+    @patch("app.place_activities.service_client")
+    def test_rows_say_member_or_curious_and_what_they_do(self, acts_sb, sb) -> None:
+        tables = self._tables()
+        sb.return_value = _sb(tables)
+        acts_sb.return_value = _sb(tables)
+        out = community_members("u1", place_id="p1")
+        rows = {r["peer_user_id"]: r for r in out["members"]}
+        self.assertEqual(rows["u2"]["membership"], "member")
+        self.assertEqual(rows["u4"]["membership"], "curious")
+        self.assertEqual(rows["u2"]["activities"], ["CrossFit", "Spin"])
+        # Members lead the roster; curious joiners follow, so paging keeps the sections.
+        self.assertEqual(
+            [r["peer_user_id"] for r in out["members"]], ["u1", "u2", "u4"]
+        )
+
+    @patch("app.community_surface.service_client")
+    @patch("app.place_activities.service_client")
+    def test_curious_joiners_are_counted_apart(self, acts_sb, sb) -> None:
+        tables = self._tables()
+        sb.return_value = _sb(tables)
+        acts_sb.return_value = _sb(tables)
+        out = community_members("u1", place_id="p1")
+        # "3 people · 2 go here in real life" — member_count keeps its old meaning.
+        self.assertEqual(out["member_count"], 2)
+        self.assertEqual(out["curious_count"], 1)
+
+    @patch("app.community_surface.service_client")
+    def test_unverified_caller_still_gets_both_counts(self, sb) -> None:
+        sb.return_value = _sb(self._tables())
+        out = community_members("u1", place_id="p1", phone_verified=False)
+        self.assertEqual(out["members"], [])
+        self.assertEqual((out["member_count"], out["curious_count"]), (2, 1))
 
 
 class TestCommunityProfile(unittest.TestCase):
@@ -406,6 +564,50 @@ class TestCommunityProfile(unittest.TestCase):
         self.assertEqual(out["member_preview"], [])
         self.assertEqual(out["actions"], [])
         self.assertIsNone(out["create_event_venue"])
+
+    @patch("app.community_surface._blurb", return_value=None)
+    @patch("app.community_surface.service_client")
+    def test_head_counts_goers_only_and_reports_curious_apart(self, sb, _blurb) -> None:
+        """The Mizu Sushi split (QA 2026-08-20): six confirmed + one curious joiner read
+        as "7 people" on this head while chat, the communities card, discovery and the
+        join mail all said 6. The head is the one that was wrong."""
+        tables = {
+            "circle_affiliations": _chain(
+                [
+                    {"id": "a1", "circle_type": "other", "user_id": "u1",
+                     "status": "confirmed", "created_at": "2026-01-01"},
+                    {"user_id": "u2", "circle_type": "other",
+                     "status": "confirmed", "created_at": "2026-01-02"},
+                    {"user_id": "u3", "circle_type": "other",
+                     "status": "curious", "created_at": "2026-01-03"},
+                ]
+            ),
+            "places": _chain([{"id": "p1", "name": "Mizu Sushi & Steakhouse"}]),
+            "place_features": _chain([]),
+            "events": _chain([]),
+            "event_requests": _chain([]),
+            "users": _chain(
+                [
+                    {"id": "u1", "nickname": "jake", "profile_photo_url": None},
+                    {"id": "u2", "nickname": "asjid", "profile_photo_url": None},
+                    {"id": "u3", "nickname": "pouya", "profile_photo_url": None},
+                ]
+            ),
+            "user_blocks": _chain([]),
+        }
+        sb.return_value = _sb(tables)
+        out = community_profile("u1", place_id="p1")
+        self.assertEqual((out["member_count"], out["curious_count"]), (2, 1))
+        # Faces come off the same list as the count — a curious face over a count that
+        # excludes her is the "2 members over one face" bug in reverse.
+        self.assertEqual(
+            [f["peer_user_id"] for f in out["member_preview"]], ["u1", "u2"]
+        )
+
+    def test_a_place_only_curious_people_watch_says_so(self) -> None:
+        # count is confirmed-only now, so 0 is reachable — and "0 people" is true and
+        # unreadable.
+        self.assertEqual(_status_line(0, 0, is_member=False), "nobody goes here yet")
 
     @patch("app.community_surface._blurb", return_value=None)
     @patch("app.community_surface.service_client")

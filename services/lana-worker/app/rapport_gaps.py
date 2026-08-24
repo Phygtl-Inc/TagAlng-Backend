@@ -132,6 +132,7 @@ def open_semantic_gap(
     affiliation_ref: str | None = None,
     gap_id: str | None = None,
     unlock_score: float = 0.8,
+    answer_options: list[str] | None = None,
 ) -> bool:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
 
@@ -186,15 +187,31 @@ def open_semantic_gap(
         # A place-grounding question: the answer path grounds this affiliation instead
         # of persisting an identity claim (see circles_flow.handle_grounding_answer).
         row["affiliation_ref"] = str(affiliation_ref)
+    chips = [
+        " ".join(str(o).split())[:48] for o in (answer_options or []) if str(o or "").strip()
+    ][:3]
+    if chips:
+        # Tappable answers for the card. A tap posts the chip text through the normal
+        # answer path, so nothing downstream needs to know they existed.
+        row["answer_options"] = chips
     literal = to_pgvector(embedding)
     if literal:
         row["question_embedding"] = literal
     try:
         res = service_client().table("rapport_gaps").insert(row).execute()
     except Exception:
-        # unique(user_id, gap_id) violation = already open for this topic — fine
-        logger.debug("rapport: semantic gap %s exists/race", gap_id)
-        return False
+        # unique(user_id, gap_id) violation = already open for this topic — fine.
+        # An environment without answer_options (pre-20261029) also lands here, so
+        # retry once without the chips rather than lose the whole question.
+        if "answer_options" not in row:
+            logger.debug("rapport: semantic gap %s exists/race", gap_id)
+            return False
+        row.pop("answer_options")
+        try:
+            res = service_client().table("rapport_gaps").insert(row).execute()
+        except Exception:
+            logger.debug("rapport: semantic gap %s exists/race", gap_id)
+            return False
     gap_row_id = str(((res.data or [{}])[0] or {}).get("gap_row_id") or "")
     # The ⓘ line on the ask card explains WHY this question helps ("so I can introduce
     # you to neighbors who…") rather than just naming the topic. AI-authored per gap,

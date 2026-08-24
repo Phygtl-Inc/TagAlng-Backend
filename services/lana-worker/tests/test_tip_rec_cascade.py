@@ -484,3 +484,56 @@ class TestWireProjection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSharedCircleGrouping(unittest.TestCase):
+    """C-FIND-V2 groups recs under the circle shared with the recommender, because "the
+    grouping IS the explanation" — a stranger's rec and one from someone you sit next to
+    at St Mary's are not the same claim, and the wire could not tell them apart."""
+
+    def _rows(self):
+        return peer_rows_from_neighbor_tips([
+            {
+                "signal_id": "s3", "detail_text": "Some place", "peer_user_id": "p3",
+                "neighbor_label": "Zed", "match_strength": 0.95,
+                "shared_circles": [], "same_block": False,
+            },
+            {
+                "signal_id": "s2", "detail_text": "Walk-in friendly", "peer_user_id": "p2",
+                "neighbor_label": "Rosa", "match_strength": 0.9,
+                "shared_circles": [], "same_block": True,
+            },
+            {
+                "signal_id": "s1", "detail_text": "Gentle, quick appts", "peer_user_id": "p1",
+                "neighbor_label": "coral88", "match_strength": 0.8,
+                "shared_circles": [
+                    {"place_id": "pl-mary", "name": "St Mary's Church", "circle_type": "faith"}
+                ],
+                "same_block": False,
+            },
+        ])
+
+    def test_a_shared_circle_names_the_group(self):
+        row = next(r for r in self._rows() if r["nickname"] == "coral88")
+        self.assertEqual(row["group_kind"], "circle")
+        self.assertEqual(row["group_key"], "pl-mary")
+        self.assertEqual(row["group_label"], "St Mary's Church")
+
+    def test_no_shared_circle_falls_to_the_block(self):
+        row = next(r for r in self._rows() if r["nickname"] == "Rosa")
+        self.assertEqual(row["group_kind"], "block")
+        # No copy from the backend: "Your block" is the surface's heading to translate.
+        self.assertIsNone(row["group_label"])
+
+    def test_circle_rows_outrank_a_stronger_stranger(self):
+        # Zed matches best (0.95) but shares nothing — provenance leads the list, which is
+        # the order the headings render in.
+        self.assertEqual([r["group_kind"] for r in self._rows()], ["circle", "block", "nearby"])
+
+    def test_malformed_circles_are_dropped_not_rendered_blank(self):
+        rows = peer_rows_from_neighbor_tips([{
+            "signal_id": "s", "detail_text": "x", "peer_user_id": "p", "neighbor_label": "n",
+            "shared_circles": [{"name": "no id"}, {"place_id": "no-name"}, "junk"],
+        }])
+        self.assertEqual(rows[0]["shared_circles"], [])
+        self.assertEqual(rows[0]["group_kind"], "nearby")

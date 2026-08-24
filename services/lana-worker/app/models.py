@@ -39,6 +39,12 @@ class PeerMatchRow(BaseModel):
     # Lana saying "I just sent your intro" must not sit above a control inviting the same
     # action, and nudging an existing connection can only hit the 7-day pair cooldown.
     connection: str | None = None
+    # "member" | "curious" on a community-roster row (app/community_discovery.py). The
+    # community screen tags a curious joiner and chat could not: the field is on the
+    # roster row already, but had nowhere to land here, so pydantic dropped it and a
+    # watcher rendered identically to someone who actually goes there. None on every
+    # other kind of row — nothing outside a roster has a membership to state.
+    membership: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
     # ── The recommendation cascade (§12a/b) ──────────────────────────────────────────
     # What this neighbor actually recommended, in their own words, and the tip_share row
@@ -51,6 +57,28 @@ class PeerMatchRow(BaseModel):
     # humanize_distance_text. None whenever either side's coarse point is unknown —
     # never a guess, and never confused with matching_peer_label (a shared thread).
     distance_text: str | None = None
+    # ── Circle provenance on a rec (C-FIND-V2) ───────────────────────────────────────
+    # The places BOTH the viewer and this recommender belong to. The results screen groups
+    # by these ("ST MARY'S CHURCH" over the rec, "YOUR BLOCK" over one with no shared
+    # place) because the shared circle is WHY the rec is worth trusting — a stranger's
+    # recommendation and one from someone you sit next to are not the same claim.
+    # Shared only: never this person's other memberships, which are theirs to disclose.
+    shared_circles: list["SharedCircleRow"] = Field(default_factory=list)
+    same_block: bool = False
+    # Which heading the row sits under. `group_key` is a place id for a circle, else the
+    # literal "block" / "nearby"; `group_label` is the place's own name, and null for the
+    # other two so the surface writes and translates that heading itself.
+    group_key: str | None = None
+    group_label: str | None = None
+    group_kind: str | None = None
+
+
+class SharedCircleRow(BaseModel):
+    """One place the viewer and a recommender both belong to."""
+
+    place_id: str
+    name: str
+    circle_type: str | None = None
 
 
 class DiscoveryWeakPeerRow(BaseModel):
@@ -391,8 +419,9 @@ class CommunityProfileResponse(BaseModel):
     relation: str | None = None
     emoji: str | None = None
     detail: str | None = None
-    # The caller's own relationship to the place: 'member', or 'curious' — she joined to
-    # watch it, so she gets this head, no roster and no host/invite actions (§19).
+    # The caller's own relationship to the place: 'member'; 'curious' — she joined to watch
+    # it (§19); or 'visitor' — she has no row here and opened it from a peer's profile or
+    # discovery. Only 'member' gets a roster and the host/invite actions.
     membership: str = "member"
     member_count: int = 0
     active: bool = False
@@ -413,17 +442,25 @@ class CommunityProfileResponse(BaseModel):
 
 class CommunityMemberRow(BaseModel):
     """A neighbour at the place. Deliberately carries NO stars, band, badge or
-    similarity: nothing here compared two people. `shared_line` states what is proven
-    — the identity threads you both hold, or else the one fact every row here shares
-    ("You both go to this gym")."""
+    similarity: nothing here compared two people. `attributes` states what is proven
+    about THEM — their own public threads, the ones the caller holds too first. Empty
+    when nothing true is on file: the old `shared_line` fallback ("You both go to this
+    gym") was true of every row and so said nothing."""
 
     peer_user_id: str
     nickname: str | None = None
     avatar_url: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
-    shared_line: str | None = None
-    # The caller's own row: no shared line (nothing is shared with yourself) and no
-    # Nudge. Rows rendered now equal member_count (§17).
+    # What this person is to the place: "member" (they go here) or "curious" (§19 —
+    # joined to watch it, not counted in member_count). The roster groups on it.
+    membership: str = "member"
+    # What they do HERE, member-curated (place_activities): the row's second chip kind.
+    activities: list[str] = Field(default_factory=list)
+    # Their own public threads ("Colombian roots", "Loves to cook"), strongest
+    # first. Self-subject only — a child's thread would read as theirs.
+    attributes: list[str] = Field(default_factory=list)
+    # The caller's own row: no attributes (she is not described back to herself) and
+    # no Nudge. Rows rendered now equal member_count (§17).
     me: bool = False
     # "intro_sent" (an intro is already on its way) or "connected" (they already know
     # each other). Either way the row shows a status, never a Nudge — the same rule the
@@ -436,6 +473,9 @@ class CommunityMembersResponse(BaseModel):
     place_id: str
     place_name: str | None = None
     member_count: int = 0
+    # Curious joiners are listed too but never counted as members — the header split
+    # ("34 people · 28 go here in real life") is member_count + curious_count.
+    curious_count: int = 0
     members: list[CommunityMemberRow] = Field(default_factory=list)
     has_more: bool = False
     # True for an unverified caller: the count is real, the names are withheld.
@@ -654,6 +694,21 @@ class EventSetupRequest(BaseModel):
     # Community card: the place id of the community picked in the dropdown, or None for
     # "None" (just the host's own meet). Members are emailed at publish.
     circle_place_id: str | None = None
+
+
+class NudgeHookRequest(BaseModel):
+    """FE calls this right after send_nudge / accept_nudge / accept_intro. Only the id
+    travels — the worker reads the row to decide who to tell, so a client cannot aim a
+    notification.
+
+    Exactly one id is meaningful per call. Both halves live on one endpoint because
+    propose_intro writes a nudges row AND an intros row at the same instant: the Chats
+    drawer accepts whichever kind the item is, and either has to reach the person waiting
+    to hear back.
+    """
+
+    nudge_id: str | None = None
+    intro_id: str | None = None
 
 
 class EventJoinHookRequest(BaseModel):

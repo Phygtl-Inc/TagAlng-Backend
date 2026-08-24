@@ -2,3 +2,7 @@
 __pycache__
 *.pyc
 .git
+.env*
+*.pem
+*-sa.json
+gcp*.json

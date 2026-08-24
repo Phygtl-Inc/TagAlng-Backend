@@ -299,13 +299,13 @@ def localize_labels(labels: list[str], lang: str | None) -> list[str]:
     if not misses:
         return out
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+        from app.orchestrator.llm import composer_model, llm_configured, llm_json
 
         if not llm_configured():
             return out
         label_name = _LANG_LABEL.get(code) or f"the language with ISO code '{code}'"
         data = llm_json(
-            model=synthesizer_model(),
+            model=composer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. Rewrite each short UI "
                 f"button label ENTIRELY in {label_name}. Keep each label SHORT (a "
@@ -825,6 +825,105 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "See the meet", "es": "Ver el plan", "pt": "Ver o encontro",
     },
 
+    # Somebody reached out through Lana (a nudge). {name} is the sender's nickname — the
+    # reason to open it — and the context message is their own words, shown as a quote.
+    "notify.nudge.subject": {
+        "en": "{name} wants to connect",
+        "es": "{name} quiere conectar",
+        "pt": "{name} quer se conectar",
+    },
+    "notify.nudge.title": {
+        "en": "{name} nudged you",
+        "es": "{name} te dio un toque",
+        "pt": "{name} te chamou",
+    },
+    "notify.nudge.body": {
+        "en": "They found you through Lana and want to say hello. Accept and your chat opens — decline and they never hear about it.",
+        "es": "Te encontró a través de Lana y quiere saludarte. Acepta y se abre el chat — si no, nunca lo sabrá.",
+        "pt": "Encontrou você pela Lana e quer dizer olá. Aceite e o chat abre — recuse e a pessoa nunca fica sabendo.",
+    },
+    "notify.nudge.cta": {
+        "en": "See who it is", "es": "Ver quién es", "pt": "Ver quem é",
+    },
+    "notify.nudge.preheader": {
+        "en": "One tap to accept or pass.",
+        "es": "Un toque para aceptar o pasar.",
+        "pt": "Um toque para aceitar ou passar.",
+    },
+    "notify.nudge.push_title": {
+        "en": "{name} nudged you", "es": "{name} te dio un toque", "pt": "{name} te chamou",
+    },
+    "notify.nudge.said": {"en": "They said", "es": "Dijo", "pt": "Disse"},
+
+    # The other half: the nudge you sent came back a yes. The chat is the whole payoff,
+    # so the CTA goes straight there rather than to a list.
+    "notify.nudge_accepted.subject": {
+        "en": "{name} said yes — your chat is open",
+        "es": "{name} dijo sí — tu chat está abierto",
+        "pt": "{name} disse sim — seu chat está aberto",
+    },
+    "notify.nudge_accepted.title": {
+        "en": "{name} accepted your nudge",
+        "es": "{name} aceptó tu toque",
+        "pt": "{name} aceitou seu chamado",
+    },
+    "notify.nudge_accepted.body": {
+        "en": "You two are connected. The first message is the hard part — a time and a place beats a hello.",
+        "es": "Ya están conectados. El primer mensaje es lo difícil — una hora y un lugar valen más que un hola.",
+        "pt": "Vocês dois estão conectados. A primeira mensagem é a parte difícil — um horário e um lugar valem mais que um olá.",
+    },
+    "notify.nudge_accepted.cta": {
+        "en": "Open the chat", "es": "Abrir el chat", "pt": "Abrir o chat",
+    },
+    "notify.nudge_accepted.preheader": {
+        "en": "Say something before the moment cools.",
+        "es": "Di algo antes de que se enfríe el momento.",
+        "pt": "Diga algo antes que o momento esfrie.",
+    },
+    "notify.facts.neighbor": {"en": "Neighbor", "es": "Vecino", "pt": "Vizinho"},
+
+    # The (label, value) rows in a notification email — "When / Where / Host".
+    "notify.facts.when": {"en": "When", "es": "Cuándo", "pt": "Quando"},
+    "notify.facts.where": {"en": "Where", "es": "Dónde", "pt": "Onde"},
+    "notify.facts.host": {"en": "Host", "es": "Anfitrión", "pt": "Anfitrião"},
+    "notify.facts.community": {"en": "Community", "es": "Comunidad", "pt": "Comunidade"},
+    "notify.facts.members": {"en": "Members", "es": "Miembros", "pt": "Membros"},
+    "notify.facts.member_count": {
+        "en": "{n} now", "es": "{n} ahora", "pt": "{n} agora",
+    },
+
+    # Somebody new joined a community the recipient is a confirmed member of. {name} is
+    # the joiner's nickname — the whole point of the mail — and falls back to a neutral
+    # word when they have not set one yet.
+    # The name carries the subject line — "Someone new joined X" is the same words every
+    # time and reads as a system notice. {name} falls back to the neutral word below.
+    "notify.community_join.subject": {
+        "en": "{name} joined {place}",
+        "es": "{name} se unió a {place}",
+        "pt": "{name} entrou em {place}",
+    },
+    "notify.community_join.title": {
+        "en": "{name} joined {place}",
+        "es": "{name} se unió a {place}",
+        "pt": "{name} entrou em {place}",
+    },
+    "notify.community_join.body": {
+        "en": "Your {place} community just grew. Say hi, or start a meet there — they will hear about it.",
+        "es": "Tu comunidad de {place} acaba de crecer. Saluda o crea un plan allí — se enterarán.",
+        "pt": "Sua comunidade de {place} acabou de crescer. Diga olá ou crie um encontro lá — eles vão saber.",
+    },
+    "notify.community_join.preheader": {
+        "en": "{name} is in — say hi.",
+        "es": "{name} ya está — saluda.",
+        "pt": "{name} entrou — diga olá.",
+    },
+    "notify.community_join.cta": {
+        "en": "Open Lana", "es": "Abrir Lana", "pt": "Abrir a Lana",
+    },
+    "notify.community_join.somebody": {
+        "en": "A new neighbor", "es": "Un vecino nuevo", "pt": "Uma pessoa da vizinhança",
+    },
+
     # One context line on every event notification whose meet was created FOR a community
     # (20261015120000) — the same "Community · X" tag the cards show.
     "notify.community_note": {
@@ -993,14 +1092,14 @@ def _ai_render(en_text: str, lang: str) -> str | None:
     es/pt table below is only the offline fallback. Returns None when no LLM
     is configured (tests, local dev) so callers fall back deterministically."""
     try:
-        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+        from app.orchestrator.llm import composer_model, llm_configured, llm_json
 
         if not llm_configured():
             return None
         label = _LANG_LABEL.get(lang) or f"the language with ISO code '{lang}'"
         register = _REGISTER.get(lang, "warm, neighborly — natural informal register")
         data = llm_json(
-            model=synthesizer_model(),
+            model=composer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. Rewrite the given chat "
                 f"message ENTIRELY in {label} ({register}). Same meaning, same length, "

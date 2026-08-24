@@ -104,6 +104,18 @@ class TestDropConnectedPeers(unittest.TestCase):
                 drop_connected_peers([{"peer_user_id": "tim", "nickname": "Tim"}], user_id=_ME), []
             )
 
+    def test_factual_search_keeps_a_known_peer_and_stamps_the_tier(self):
+        # "Who plays laser tag?" is a question about the neighbourhood, not an intro
+        # request. Prod 2026-08-19: the only laser-tag neighbour was an acquaintance, so
+        # dropping the row made Lana answer "nobody has popped up for laser tag yet" —
+        # false. Kept + stamped instead, so the card drops Nudge and the prose is true.
+        with patch("app.auth.service_client", return_value=_sb_with_tiers({"tim": "acquaintance"})):
+            out = drop_connected_peers(
+                [{"peer_user_id": "tim", "nickname": "Tim"}], user_id=_ME, keep_connected=True
+            )
+        self.assertEqual([r["peer_user_id"] for r in out], ["tim"])
+        self.assertEqual(out[0]["connection"], "acquaintance")
+
     def test_fails_open_when_the_lookup_breaks(self):
         sb = MagicMock()
         sb.rpc.side_effect = RuntimeError("postgrest down")

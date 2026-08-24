@@ -52,7 +52,10 @@ def identity_from_saved_claims(user_id: str | None, *, max_claims: int = 4) -> s
             .eq("user_id", user_id)
             .eq("disclosure", "public")
             .is_("dismissed_at", "null")
+            # Stable tie-break: this line is read back to the user, and an unordered
+            # tie re-ordered their own identity between turns.
             .order("confidence", desc=True)
+            .order("created_at")
             .limit(max_claims)
             .execute()
         )

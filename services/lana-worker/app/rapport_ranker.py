@@ -146,6 +146,14 @@ def _build(
                 why_reason = ""
         elif question:
             _kick_i18n(row, question, why_frame, lang, i18n, why_reason)
+    chips = row.get("answer_options")
+    chips = [str(c) for c in chips if str(c or "").strip()] if isinstance(chips, list) else []
+    if chips and lang and lang != "en":
+        i18n = row.get("question_i18n")
+        entry = i18n.get(lang) if isinstance(i18n, dict) else None
+        rendered = entry.get("answer_options") if isinstance(entry, dict) else None
+        if isinstance(rendered, list) and len(rendered) == len(chips):
+            chips = [str(c) for c in rendered]
     built = {
         "gap_row_id": row["gap_row_id"],
         "gap_id": row["gap_id"],
@@ -155,6 +163,7 @@ def _build(
         "question": question,
         "sensitivity_tier": gap.get("sensitivity_tier", "LOW"),
         "chip_color_token": f"--d-{row['parent_bucket']}",
+        "answer_options": chips,
     }
     built.update(_place_extras(row))
     if not why_reason:

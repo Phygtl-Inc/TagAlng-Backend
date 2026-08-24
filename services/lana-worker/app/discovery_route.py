@@ -149,6 +149,7 @@ from app.supabase_rpc import call_rpc
 from app.layer1_handlers import (
     HELP_WHAT_CAN_YOU_DO,
     HELP_WHO_ARE_YOU,
+    KNOWN_TIERS,
     fetch_block_summary,
     fetch_identity_dashboard,
     fetch_peers_by_attr_filter,
@@ -1009,14 +1010,29 @@ def _maybe_attach_intro_offer(
 ) -> str:
     if str(ctx.get("active_intent") or "") in (INTENT_SHOW_BLOCK_LOG, "discovery.block_log"):
         return reply
-    if ctx.get("intro_offer_shown") or ctx.get("intro_proposal") or ctx.get("pending_intro_offer"):
+    # An offer armed on an EARLIER turn is stale the moment a fresh list is rendered — this
+    # function runs once per turn, so anything here came from a previous one. derive_ui_intent
+    # still reads it and returns offer_neighbor_intro, which renders the single-card intro
+    # surface: prose that had just counted three neighbours shipped over ONE card, and the
+    # card belonged to the old offer's lane (QA 2026-08-18). Clear before the guards below,
+    # so the count and the cards are the same fact whether or not a new offer is armed.
+    if ctx.get("pending_intro_offer") or ctx.get("intro_offer_shown"):
+        clear_intro_offer_ctx(ctx)
+    if ctx.get("intro_proposal"):
         return reply
     if msg and (is_profile_acknowledgment(msg) or (_is_affirmative(msg) and not wants_peer_find(msg))):
         return reply
     active = str(ctx.get("active_intent") or "")
     if active == "discovery.find_by_attrs" and msg and not _ATTR_REFINE_RE.search(str(msg)):
         return reply
-    peer = next((p for p in peers if p.get("peer_user_id")), None)
+    # Feature someone who can still RECEIVE an intro. Ranking put the strongest match on
+    # top, but if an intro to them is already out, featuring them spends the turn on the one
+    # thing that cannot be done — which is how "find someone else" led back to a Sent badge.
+    # Only when nobody in the list is reachable does an already-introduced peer feature, and
+    # then format_intro_offer_turn owns up to it instead of offering.
+    peer = next(
+        (p for p in peers if p.get("peer_user_id") and not p.get("connection")), None
+    ) or next((p for p in peers if p.get("peer_user_id")), None)
     if not peer:
         return reply
     if not peer_matches_identity_snippet(peer, identity_snippet):
@@ -1594,18 +1610,32 @@ def _try_layer1_intent_turn(
                 [],
             )
         from app.community_discovery import communities_chat_turn
+        from app.discovery_slots import slots_community_ask, slots_community_name
 
         reply = communities_chat_turn(
             user_id,
             message=msg,
             session_ctx=ctx_base,
             locale=str(session_ctx.get("preferred_lang") or "en"),
+            # "who is in <place>" arrives here now, so the turn needs the place they named
+            # and which side of it they asked about (its people, or the place itself).
+            community_name=slots_community_name(slots),
+            community_ask=slots_community_ask(slots),
         )
         ctx = _routing_ctx(
             ctx_base, phase=phase or "listening", active_intent="discovery.communities"
         )
-        # _routing_ctx wipes turn-scoped surfaces; re-attach the two this turn stamped.
-        for key in ("community_discovery", "communities_card"):
+        # _routing_ctx wipes turn-scoped surfaces; re-attach the ones this turn stamped.
+        # policy_chips belongs here too: the "did you mean Barnes & Noble?" clarifier
+        # stamped its tap-able names and clear_turn_surfaces nulled them one line later,
+        # so the question shipped with no way to answer it.
+        for key in (
+            "community_discovery",
+            "communities_card",
+            "peer_matches",
+            "policy_chips",
+            "activity_previews",
+        ):
             if ctx_base.get(key):
                 ctx[key] = ctx_base[key]
         ctx["last_routing"] = _discovery_routing_stub(
@@ -2094,7 +2124,7 @@ def _try_layer1_intent_turn(
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
         ctx["skip_claims_background_extract"] = True
         ctx.pop("activity_previews", None)
-        if not peers:
+        if _attr_search_is_spent(peers):
             _stamp_peer_seek_offer(ctx, display_filter)
         return reply, ctx, ctx["last_routing"], peer_rows
 
@@ -2779,6 +2809,30 @@ def _stamp_peer_seek_offer(ctx: dict[str, Any], display_filter: str) -> None:
     ctx["peer_seek_offer_pending"] = {"filter": display_filter}
 
 
+def _attr_search_is_spent(peers: list[dict[str, Any]]) -> bool:
+    """Is there nothing left to DO with this result?
+
+    True for an empty list, and equally true when every match already has an intro out:
+    both leave the person with a filter that cannot produce an introduction. Only the
+    empty case armed the notify/widen pills, so the exhausted case shipped prose offering
+    "a different interest or people beyond your area" with nothing to tap — and typing it
+    re-ran the identical filter and returned the identical sentence (QA 2026-08-18).
+
+    A match the user ALREADY KNOWS is not spent — it is the answer. Those rows are kept
+    now rather than dropped, and arming "Yes, notify me" under "there's 1 person and
+    you're already connected" reads as a contradiction: the pill offers to watch for
+    what is on screen (2026-08-19).
+    """
+    if not peers:
+        return True
+    return all(
+        isinstance(p, dict)
+        and str(p.get("connection") or "").strip()
+        and str(p.get("connection")).strip() not in KNOWN_TIERS
+        for p in peers
+    )
+
+
 def _try_community_join_reply_turn(
     *,
     msg: str,
@@ -2823,8 +2877,9 @@ def _try_peer_seek_offer_reply_turn(
     phone_verified: bool,
     home_block_id: str | None,
     user_id: str | None = None,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
-    """Reply to the offer under an empty peers search. The offer is one-turn:
+    """Reply to the offer under a spent peers search. The offer is one-turn:
     whatever comes next consumes it. Accept → save a seek signal so the "I'll
     notify you" promise is real (same machinery as the browse lane's 'listen for
     me'); widen → drop the attr filter and show neighbors nearby on their own
@@ -2839,9 +2894,22 @@ def _try_peer_seek_offer_reply_turn(
         return None
     widen = bool(_PEER_SEEK_WIDEN_RE.search(msg_s))
     accept = bool(_PEER_SEEK_ACCEPT_RE.search(msg_s)) and not widen
+    filter_text = str(pending.get("filter") or "").strip()
+    if not accept and not widen and isinstance(slots, dict):
+        # "search for more people" / "find more people" is the widen pill in their own
+        # words. Read off the classifier's verdict rather than growing the word list: a
+        # peers ask that adds NO new trait, arriving on a spent search, can only mean
+        # "look past that filter" — and re-running the same filter answered it with the
+        # identical sentence twice (QA 2026-08-18). A search that DOES name a new trait
+        # falls through here and runs as its own search, which is what it is.
+        linear = slots_linear_intent(slots)
+        new_filter = str(slots.get("attr_filter") or "").strip().lower()
+        if linear in ("discovery.find_peers", "discovery.find_by_attrs") and (
+            not new_filter or new_filter == filter_text.lower()
+        ):
+            widen = True
     if not accept and not widen:
         return None
-    filter_text = str(pending.get("filter") or "").strip()
     block_id = _resolve_block_id_for_turn(
         session_ctx=session_ctx,
         home_block_id=home_block_id,
@@ -2971,7 +3039,7 @@ def _try_attr_refine_turn(
     ctx["peer_matches"] = peer_rows
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
     ctx.pop("activity_previews", None)
-    if not peers:
+    if _attr_search_is_spent(peers):
         _stamp_peer_seek_offer(ctx, display_filter)
     return reply, ctx, ctx["last_routing"], peer_rows
 
@@ -3136,17 +3204,44 @@ def _search_tip_places(
     """Google Places search for the tip fallback — best-effort, [] on any failure. When
     `included_type` is set we hard-restrict (strictTypeFiltering) so the type is a real
     filter, not a hint; `required_attrs` are pulled back for post-hoc verification."""
+    from app.place_local_signal import (
+        communities_for_request,
+        merge_communities_first,
+        stamp_local_signal,
+    )
     from app.places import search_places
 
     try:
-        return search_places(
+        places = search_places(
             query=query, zip_code=zip_for_bias or None, block_id=block_id, user_id=user_id,
             limit=limit, included_type=included_type, strict_type=bool(included_type),
             attr_fields=required_attrs or None,
         )
     except Exception:  # noqa: BLE001 — fallback must never break the saved-signal reply
         logging.getLogger(__name__).exception("tip_places_search_failed")
-        return []
+        # NOT an early return: Google being down is no reason to withhold the communities
+        # we hold ourselves, which are the better answer anyway.
+        places = []
+    # Stamped at the FETCH so the ROW carries its own provenance. It used to be stamped on
+    # the way to the wire, which left Lana narrating the fact in prose ("1 neighbor goes to
+    # Florida Game Rooms…") on top of an already-long reply, under a heading reading "FROM
+    # GOOGLE · NOT A NEIGHBOR VOUCH" — false about that row, which came from our own
+    # circles. The surface groups the two sources under their own headings instead
+    # (C-FIND-V2: the grouping is the explanation), so the prose says neither.
+    stamp_local_signal(places, user_id=user_id)
+    # A row we have a local signal for leads. Prod 2026-08-19: Lana said "you're already
+    # part of Mizu Sushi" and then listed it THIRD, under two strangers' listings — and
+    # the page only shows three, so the one place with a real signal was the one below
+    # the fold. Re-ordering only: nothing is added, dropped, or re-scored (the same rule
+    # the tip re-rank follows), and Google's order survives among equals.
+    places.sort(key=lambda p: not (isinstance(p, dict) and (p.get("community") or {}).get("member_count")))
+    # Stamping can only mark what Google returned. Asked for a reading spot it returned
+    # three coffee shops, so the library neighbors actually read at was never in the list
+    # (prod 2026-08-19). Ask our own communities directly — matched on what members DO
+    # there, because nothing in "Orlando Public Library" contains the word "read".
+    return merge_communities_first(
+        places, communities_for_request(query, user_id=user_id, limit=2)
+    )
 
 
 def _verify_places(
@@ -3225,7 +3320,10 @@ def _tip_seek_fallback_reply(
         ctx["google_place_suggestions"] = places[:3]
         if reason_widen:
             if not posted:
-                return f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH})."
+                return (
+                    f"Okay — widening it. Here's everything nearby (from Google, "
+                    f"{_TIP_VOUCH})."
+                )
             return (
                 f"Okay — widening it. Here's everything nearby (from Google, {_TIP_VOUCH}). "
                 "Your ask is still posted for neighbors, so I'll ping you the moment a neighbor "
@@ -3238,8 +3336,8 @@ def _tip_seek_fallback_reply(
             )
         return (
             f"No neighbor has recommended one yet, so here's what's nearby (from Google — "
-            f"{_TIP_VOUCH}). I've also posted your ask for neighbors — I'll ping you the moment "
-            "a neighbor recommends one."
+            f"{_TIP_VOUCH}). I've also posted your ask for neighbors — I'll ping you the "
+            "moment a neighbor recommends one."
         )
 
     # Plain path: widen tap, personalization off, or an anonymous user (no claims to lean on).
@@ -3326,11 +3424,14 @@ def _tip_seek_fallback_reply(
             # No "want me to widen?" here — the caller ends this turn with the ask-neighbors
             # offer, and two questions in one breath is the ask-stacking bug
             # ([[rapport-ask-stacking-and-tile-context]]). The widen stays available as a chip.
-            return f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH})."
+            return (
+                f"{reframe} These are from Google, filtered to genuinely match "
+                f"({_TIP_VOUCH})."
+            )
         return (
-            f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}), "
-            "and I've posted your ask for neighbors — I'll ping you the moment a neighbor "
-            "recommends one. Want me to widen the search?"
+            f"{reframe} These are from Google, filtered to genuinely match ({_TIP_VOUCH}),"
+            f" and I've posted your ask for neighbors — I'll ping you the moment a "
+            "neighbor recommends one. Want me to widen the search?"
         )
 
     # 'Only verified': nothing Google-confirmed for this angle — say so honestly and fall
@@ -8242,6 +8343,7 @@ def handle_discovery_turn(
             phone_verified=phone_verified,
             home_block_id=home_block_id,
             user_id=user_id,
+            slots=enriched_slots,
         )
         if seek_offer_turn is not None:
             reply, ctx, routing, peers = seek_offer_turn

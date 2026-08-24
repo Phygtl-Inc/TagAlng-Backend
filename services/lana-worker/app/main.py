@@ -5,6 +5,7 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
+from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -91,6 +92,7 @@ from app.models import (
     EventDecisionHookRequest,
     EventDraft,
     EventJoinHookRequest,
+    NudgeHookRequest,
     EventSetupRequest,
     EventSkipRequest,
     EventVenueRequest,
@@ -135,6 +137,7 @@ from app.models import (
     PeerMatchRow,
     SendMessageRequest,
     SendMessageResponse,
+    SharedCircleRow,
     SessionDetailResponse,
     TurnDebug,
     TurnRouting,
@@ -193,7 +196,13 @@ from app.vertex_lana import lana_opening, lana_turn
 from app.analytics import track as amplitude_track
 from app.event_place import community_label, community_line
 from app.feedback import record_feedback as record_lana_feedback
-from app.notifications import email_html, notify_user, recipient_lang, recipient_langs
+from app.notifications import (
+    app_url,
+    email_html,
+    notify_user,
+    recipient_lang,
+    recipient_langs,
+)
 from app.rapport_gaps import (
     mark_answered as rapport_mark_answered,
     mute_gap as rapport_mute_gap,
@@ -560,7 +569,13 @@ def _intro_proposal_from_dict(raw: dict[str, Any] | None) -> IntroProposalPayloa
 
 def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     """Google Places fallback for an empty tip-seek → tappable cards. maps_url opens the
-    spot in Google Maps (by place_id when available, else a name+address search)."""
+    spot in Google Maps (by place_id when available, else a name+address search).
+
+    `community` is stamped upstream at the Places fetch (discovery_route._search_tip_places)
+    and only passed through here. It is what the surface groups on: rows carrying it render
+    under "From your circles", the rest under "From Google · not a neighbor vouch", which
+    was printed over a community row until the two sources got their own headings.
+    """
     from urllib.parse import quote_plus
 
     raw = ctx.get("google_place_suggestions")
@@ -581,7 +596,13 @@ def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
             maps_url = "https://www.google.com/maps/search/?api=1&query=" + quote_plus(
                 f"{name} {addr}".strip()
             )
-        out.append({"name": name, "address": addr, "place_id": pid or None, "maps_url": maps_url})
+        row = {"name": name, "address": addr, "place_id": pid or None, "maps_url": maps_url}
+        community = p.get("community")
+        if isinstance(community, dict) and community.get("member_count"):
+            # Structured, never a sentence: the count and the labels are facts, the
+            # phrasing ("3 neighbors go here") is the surface's to write and translate.
+            row["community"] = community
+        out.append(row)
     return out
 
 
@@ -746,15 +767,42 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 match_badge=str(row.get("match_badge") or "") or None,
                 trait_tags=[str(t) for t in tags[:6]],
                 connection=str(row.get("connection") or "") or None,
+                # Roster rows only — see PeerMatchRow.membership.
+                membership=str(row.get("membership") or "") or None,
                 actions=_ui_action_rows_from_raw(row.get("actions")),
                 # Cascade fields — present only when the row came with a neighbor's rec
                 # (looking.tip) or a resolved distance; None everywhere else.
                 tip_text=str(row.get("tip_text") or "") or None,
                 tip_signal_id=str(row.get("tip_signal_id") or "") or None,
                 distance_text=str(row.get("distance_text") or "") or None,
+                # Circle provenance (C-FIND-V2) — the grouping the results screen renders.
+                shared_circles=_shared_circle_rows(row.get("shared_circles")),
+                same_block=bool(row.get("same_block")),
+                group_key=str(row.get("group_key") or "") or None,
+                group_label=str(row.get("group_label") or "") or None,
+                group_kind=str(row.get("group_kind") or "") or None,
             )
         )
     return out
+
+
+def _shared_circle_rows(raw: Any) -> list[SharedCircleRow]:
+    out: list[SharedCircleRow] = []
+    for c in raw if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        pid = str(c.get("place_id") or "").strip()
+        name = str(c.get("name") or "").strip()
+        if not pid or not name:
+            continue
+        out.append(
+            SharedCircleRow(
+                place_id=pid,
+                name=name,
+                circle_type=str(c.get("circle_type") or "") or None,
+            )
+        )
+    return out[:3]
 
 
 def _grounding_card_from_ctx(ctx: dict[str, Any]) -> GroundingCardPayload | None:
@@ -871,6 +919,25 @@ def _community_discovery_from_ctx(ctx: dict[str, Any]) -> CommunityDiscoveryResp
     if not rows:
         return None
     return CommunityDiscoveryResponse(communities=rows, radius_meters=0)
+
+
+def _warn_surface_dropped(kind: str, rows: int, *, ui_intent: str, active: str) -> None:
+    """A lane built a surface and a gate below it threw the rows away.
+
+    Four times in one QA session (2026-08-21) a lane stamped rows correctly and something
+    downstream discarded them silently: peer_matches and activity_previews to the intent
+    allowlists here, policy_chips to clear_turn_surfaces, and PeerMatchRow.membership to
+    the model's own field list. Every one of them surfaced the same way — Lana's prose
+    promised cards the screen did not have, found by screenshot.
+
+    Warning, never an exception: a mismatched surface must not cost someone their turn.
+    When this fires the fix is almost always adding the intent to the allowlist that
+    dropped it, not changing the lane.
+    """
+    _LOG.warning(
+        "surface_dropped kind=%s rows=%d ui_intent=%s active_intent=%s",
+        kind, rows, ui_intent or "?", active or "?",
+    )
 
 
 def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]:
@@ -1104,6 +1171,10 @@ def _onboarding_fields(
         bool(peers_raw) and active in PEER_DISCOVERY_ACTIVE_INTENTS
     )
     peers = peers_raw if show_peers else []
+    if peers_raw and not peers:
+        _warn_surface_dropped(
+            "peer_matches", len(peers_raw), ui_intent=ui_intent, active=active
+        )
     if ui_intent == UI_INTENT_OFFER_NEIGHBOR_INTRO and peers:
         offer = ctx.get("pending_intro_offer")
         candidate_id = (
@@ -1117,9 +1188,22 @@ def _onboarding_fields(
         else:
             peers = peers[:1]
     if ui_intent != UI_INTENT_SHOW_ACTIVITY_PREVIEW:
+        if activities:
+            _warn_surface_dropped(
+                "activity_previews", len(activities), ui_intent=ui_intent, active=active
+            )
         activities = []
-    discovery_surface = _discovery_surface_from_ctx(ctx) if show_peers else None
+    surface_raw = _discovery_surface_from_ctx(ctx)
+    discovery_surface = surface_raw if show_peers else None
+    if surface_raw and not discovery_surface:
+        _warn_surface_dropped("discovery_surface", 1, ui_intent=ui_intent, active=active)
     ui_actions = _ui_actions_from_ctx(ctx, ui_intent)
+    # A turn surface this turn had, that clear_turn_surfaces took away and the lane never
+    # put back. Zero false positives by construction: a lane that re-attached it has a
+    # truthy value here, so only the genuinely forgotten ones report.
+    for key in ctx.get("_wiped_turn_surfaces") or []:
+        if not ctx.get(key):
+            _warn_surface_dropped("wiped:" + str(key), 0, ui_intent=ui_intent, active=active)
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
@@ -1232,6 +1316,15 @@ def health():
         "openai_timeout_sec": _openai_timeout_sec(),
         "vertex_timeout_sec": _vertex_timeout_sec(),
         "openai_max_retries": _openai_max_retries(),
+        # Mail was undiagnosable without shell access to the container: an unset key or
+        # a RESEND_FROM whose domain is not verified on the account silently drops every
+        # email app-wide. The sender is reported (it is not a secret), the key is not.
+        "email_configured": bool(os.environ.get("RESEND_API_KEY", "").strip()),
+        "email_from": os.environ.get("RESEND_FROM", "").strip() or None,
+        # Where every email link points. A stale value here sends real users to a dead
+        # preview host, and the mail cannot be recalled — so it is reported, not guessed at.
+        "app_base_url": app_url("/"),
+        "push_configured": bool(os.environ.get("VAPID_PRIVATE_KEY", "").strip()),
     }
 
 
@@ -2724,6 +2817,139 @@ def hook_event_skip(
     return {"ok": True, "next_starts_at": next_raw, "notified": len(roster)}
 
 
+@app.post("/hooks/nudge")
+def hook_nudge(
+    body: NudgeHookRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Called by the client right after send_nudge or accept_nudge. ONE endpoint for both
+    halves: the row's own status says which just happened, so the client cannot claim an
+    acceptance that never occurred, or aim a notification at somebody it isn't a party to.
+
+      status pending  → the sender just sent it   → tell the RECIPIENT
+      status accepted → the recipient just said yes → tell the SENDER
+
+    A declined nudge notifies nobody, by design: "I'll let them know you're not ready"
+    is the one promise Lana makes to the person who declined.
+    """
+    auth = verify_auth(authorization)
+    from app.auth import service_client
+    from app.notifications import _user_contact
+
+    sb = service_client()
+    if sb is None:
+        return {"ok": False}
+
+    def _accepted_reply(to_user_id: str, by_user_id: str) -> dict[str, Any]:
+        """Tell whoever reached out that the answer was yes. Shared by both kinds: an
+        accepted intro and an accepted nudge are the same news to the person waiting."""
+        lang = recipient_lang(to_user_id)
+        _, nick = _user_contact(by_user_id)
+        who = nick or t("notify.community_join.somebody", lang)
+        notify_user(
+            to_user_id,
+            title=t("notify.nudge_accepted.title", lang, name=who),
+            body=t("notify.nudge_accepted.body", lang),
+            url="/chat",
+            email_subject=t("notify.nudge_accepted.subject", lang, name=who),
+            email_html=email_html(
+                t("notify.nudge_accepted.title", lang, name=who),
+                t("notify.nudge_accepted.body", lang),
+                t("notify.nudge_accepted.cta", lang),
+                "/chat",
+                preheader=t("notify.nudge_accepted.preheader", lang),
+                badge="🎉",
+                facts=[(t("notify.facts.neighbor", lang), who)],
+            ),
+        )
+        return {"ok": True, "notified": "sender"}
+
+    # An accepted INTRO. propose_intro already mails the candidate when it is proposed
+    # (notify.intro.*); this is the reply half, which nothing covered — the initiator was
+    # told "your intro is on its way" and then never heard the outcome.
+    if body.intro_id:
+        try:
+            intro = (
+                sb.table("intros")
+                .select("initiator_id,candidate_id,status")
+                .eq("id", body.intro_id)
+                .single()
+                .execute()
+                .data
+                or {}
+            )
+        except Exception:  # noqa: BLE001
+            return {"ok": False}
+        initiator = str(intro.get("initiator_id") or "")
+        candidate = str(intro.get("candidate_id") or "")
+        if not initiator or not candidate:
+            return {"ok": False}
+        if auth.user_id not in (initiator, candidate):
+            raise HTTPException(status_code=403, detail="not_your_intro")
+        if str(intro.get("status") or "").strip().lower() == "accepted" and (
+            auth.user_id == candidate
+        ):
+            return _accepted_reply(initiator, candidate)
+        return {"ok": True, "notified": None}
+
+    if not body.nudge_id:
+        return {"ok": False}
+    try:
+        row = (
+            sb.table("nudges")
+            .select("sender_id,recipient_id,status,context_message")
+            .eq("id", body.nudge_id)
+            .single()
+            .execute()
+            .data
+            or {}
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+
+    sender_id = str(row.get("sender_id") or "")
+    recipient_id = str(row.get("recipient_id") or "")
+    status = str(row.get("status") or "").strip().lower()
+    if not sender_id or not recipient_id:
+        return {"ok": False}  # deleted, or an id that never existed — not a 403
+    if auth.user_id not in (sender_id, recipient_id):
+        raise HTTPException(status_code=403, detail="not_your_nudge")
+
+    if status == "pending" and auth.user_id == sender_id:
+        # → the person who was nudged. Their own words travel with it: a nudge with a
+        # message is a person reaching out, one without is a notification.
+        lang = recipient_lang(recipient_id)
+        _, nick = _user_contact(sender_id)
+        who = nick or t("notify.community_join.somebody", lang)
+        said = str(row.get("context_message") or "").strip()
+        notify_user(
+            recipient_id,
+            title=t("notify.nudge.push_title", lang, name=who),
+            body=said or t("notify.nudge.body", lang),
+            url="/chat",
+            email_subject=t("notify.nudge.subject", lang, name=who),
+            email_html=email_html(
+                t("notify.nudge.title", lang, name=who),
+                t("notify.nudge.body", lang),
+                t("notify.nudge.cta", lang),
+                "/chat",
+                preheader=t("notify.nudge.preheader", lang),
+                badge="✋",
+                facts=[
+                    (t("notify.facts.neighbor", lang), who),
+                    (t("notify.nudge.said", lang), f"“{said}”" if said else ""),
+                ],
+            ),
+        )
+        return {"ok": True, "notified": "recipient"}
+
+    if status == "accepted" and auth.user_id == recipient_id:
+        # → back to whoever sent it: the yes is the whole point of having sent one.
+        return _accepted_reply(sender_id, recipient_id)
+
+    return {"ok": True, "notified": None}
+
+
 @app.post("/hooks/signal-matches")
 def hook_signal_matches(
     older_than_minutes: int = 10,
@@ -2791,7 +3017,8 @@ def reverse_geocode_endpoint(
 
 
 class CirclesListBody(_BaseModel):
-    pass
+    # Whose communities to list. Omitted = the caller's own.
+    user_id: str | None = None
 
 
 class CircleAddBody(_BaseModel):
@@ -2822,15 +3049,25 @@ class CircleGroundBody(_BaseModel):
     google_place_id: str
 
 
-@app.post("/lana/circles/mine")
-def post_circles_mine(
+@app.post("/lana/circles/list")
+def post_circles_list(
     body: CirclesListBody | None = None,
     authorization: str | None = Header(default=None),
 ):
+    """Any user's grounded communities (replaces /lana/circles/mine). No `user_id` =
+    the caller's own list, with her detail and provenance; another user's comes back as
+    the public head of each place — hand a row's `place_id` to /lana/circles/profile to
+    open it. Empty `circles` when the two have blocked each other."""
     auth = verify_auth(authorization)
-    from app.circles_flow import list_my_circles
+    from app.circles_flow import list_circles
 
-    return {"circles": list_my_circles(auth.user_id)}
+    owner = ((body.user_id if body else None) or "").strip() or auth.user_id
+    if owner != auth.user_id:
+        try:
+            UUID(owner)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid_user_id") from None
+    return {"user_id": owner, "circles": list_circles(owner, auth.user_id)}
 
 
 @app.post("/lana/circles/add")
@@ -2941,7 +3178,7 @@ def post_circles_ground(
 
 
 class CommunityProfileBody(_BaseModel):
-    # Either identifier works: the affiliation row from /lana/circles/mine, or the
+    # Either identifier works: the affiliation row from /lana/circles/list, or the
     # canonical place id it carries. Membership is re-checked either way.
     affiliation_id: str | None = None
     place_id: str | None = None
@@ -3144,9 +3381,12 @@ def post_circles_profile(
     """One community's profile (C-CIRCLE-COMM-PROFILE): who's there, what members said
     it has, what's coming up, and the create-a-meet / invite CTAs.
 
-    Members-only by construction — the caller must hold a confirmed, non-dismissed
-    affiliation at the place, or this 404s `not_a_member` (§F: a place is named to the
-    people who go there, never browsed as a directory)."""
+    Opens for any caller. The head is the same thing discover_communities_near already
+    names to a neighbour, so `membership` reports which viewer this is and the members-only
+    parts come back empty for 'curious' and 'visitor': no roster, no detail, no host/invite
+    actions (§F protects the people, not the place). The FULL roster stays members-only —
+    /lana/circles/members still 404s `not_a_member`. 404 here means the place is gone, or
+    every member of it has blocked the caller."""
     auth = verify_auth(authorization)
     from app.community_surface import community_profile
 
@@ -3228,7 +3468,7 @@ def post_circles_members(
     authorization: str | None = Header(default=None),
 ):
     """Every neighbour at one of the caller's communities (C-CIRCLE-COMM-PEOPLE), each
-    with one truthful shared line and a Nudge. Paginated; mutual blocks filtered out.
+    with their own truthful attributes and a Nudge. Paginated; mutual blocks filtered out.
     An unverified caller gets the count and no names, exactly like the peer cards."""
     auth = verify_auth(authorization)
     from app.community_surface import community_members
@@ -3248,13 +3488,16 @@ def post_circles_members(
         place_id=str(data["place_id"]),
         place_name=data.get("place_name"),
         member_count=int(data.get("member_count") or 0),
+        curious_count=int(data.get("curious_count") or 0),
         members=[
             CommunityMemberRow(
                 peer_user_id=str(m.get("peer_user_id") or ""),
                 nickname=m.get("nickname"),
                 avatar_url=m.get("avatar_url"),
                 trait_tags=[str(t) for t in (m.get("trait_tags") or [])][:6],
-                shared_line=m.get("shared_line"),
+                membership=str(m.get("membership") or "member"),
+                activities=[str(a) for a in (m.get("activities") or [])][:3],
+                attributes=[str(a) for a in (m.get("attributes") or [])][:3],
                 me=bool(m.get("me")),
                 connection=str(m.get("connection") or "") or None,
                 actions=_ui_action_rows_from_raw(m.get("actions")),

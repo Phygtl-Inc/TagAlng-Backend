@@ -45,7 +45,7 @@ _TYPE_SEARCH: dict[str, tuple[str | None, str]] = {
     "kids_activity": (None, "kids activity center"),
     "neighborhood": (None, "community center"),
     "hobby": (None, "club"),
-    "support": (None, "community support group"),
+    "support": (None, "community support center"),
     "heritage": (None, "cultural center"),
     "friends": (None, "cafe"),
     "other": (None, ""),
@@ -91,21 +91,29 @@ just pinned a community place they belong to. Goal: learn what they personally v
 — the answer becomes a matchable interest (e.g. "the Saturday long runs", "the pool", \
 "the coffee after class").
 
-Output ONLY JSON: {"question": "...", "teaser": "about <place>…"}
+Output ONLY JSON: {"question": "...", "teaser": "about <place>…", "suggestions": ["...", "...", "..."]}
 
 Rules:
 - Name the concrete place. Short (<120 chars), warm, open — never yes/no.
 - Ask what they enjoy / are into THERE (activity, program, rhythm) — a matchable facet, \
 not an opinion poll or origin story.
 - teaser: 2-5 word lead-in ending with "…".
+- suggestions: 2-3 tappable answers in the USER's voice ("The early classes", "The people"), \
+each under 28 characters. They are guesses the user confirms, so keep them true of THIS KIND \
+of place — never invent a specific schedule, program name, coach or staff member.
 - English only (rendered into the user's language downstream)."""
 
 
-def _place_affinity_question(place_name: str) -> tuple[str, str]:
-    """AI-authored per the lingo rules; the spec's own example line as fallback."""
+def _place_affinity_question(place_name: str) -> tuple[str, str, list[str]]:
+    """AI-authored per the lingo rules; the spec's own example line as fallback.
+
+    Third element is the tappable answers the card offers as chips — a blank prompt
+    made the user invent the shape of the answer. Empty list = free text only, which
+    is what an LLM-less environment (and every pre-chip gap row) falls back to."""
     fallback = (
         f"What do you enjoy most at {place_name}?",
         f"about {place_name}…",
+        [],
     )
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
@@ -121,8 +129,14 @@ def _place_affinity_question(place_name: str) -> tuple[str, str]:
         )
         question = str((data or {}).get("question") or "").strip()
         teaser = str((data or {}).get("teaser") or "").strip()
+        raw = (data or {}).get("suggestions")
+        chips = [
+            " ".join(str(s).split())[:48]
+            for s in (raw if isinstance(raw, list) else [])
+            if str(s or "").strip() and _lexicon_clean(str(s))
+        ][:3]
         if question and _lexicon_clean(question, teaser):
-            return question[:160], (teaser or fallback[1])[:80]
+            return question[:160], (teaser or fallback[1])[:80], chips
     except Exception:
         logger.exception("place_affinity_question_llm_failed")
     return fallback
@@ -527,7 +541,7 @@ def prune_grounded_gaps(
         affs = (
             service_client()
             .table("circle_affiliations")
-            .select("id, circle_key, circle_type, place_ref")
+            .select("id, circle_key, circle_type, place_ref, noun")
             .eq("user_id", user_id)
             .is_("dismissed_at", "null")
             .limit(100)
@@ -553,6 +567,8 @@ def prune_grounded_gaps(
                 str(aff.get("circle_type") or ""),
                 str(g.get("circle_key") or ""),
                 str(g.get("circle_type") or ""),
+                a_noun=aff.get("noun"),
+                b_noun=g.get("noun"),
             )
             for g in grounded
         ):
@@ -632,6 +648,13 @@ def ground_affiliation(
         {"place_ref": place_id, "status": "confirmed", "confirmed_via": confirmed_via}
     ).eq("id", affiliation["id"]).execute()
 
+    # Grounding is how most people become a member — the Join tap is the rarer path — so
+    # the "somebody new joined" mail has to fire from HERE too, not only from
+    # join_community. Local import: community_discovery imports this module.
+    from app.community_discovery import notify_members_of_join
+
+    notify_members_of_join(place_id, str(details["name"] or ""), user_id)
+
     _flush_parked_features(user_id, affiliation, place_id)
     _close_grounding_gap(affiliation_id)
 
@@ -639,7 +662,7 @@ def ground_affiliation(
         try:
             from app.rapport_gaps import open_semantic_gap
 
-            question, teaser = _place_affinity_question(details["name"])
+            question, teaser, chips = _place_affinity_question(details["name"])
             open_semantic_gap(
                 user_id,
                 None,
@@ -648,6 +671,7 @@ def ground_affiliation(
                 bucket="interest",
                 teaser=teaser,
                 place_ref=place_id,
+                answer_options=chips,
             )
         except Exception:
             logger.exception("place_affinity_gap_open_failed")
@@ -716,8 +740,8 @@ _GROUND_NOUN: dict[str, str] = {
     "school": "school",
     "kids_activity": "kids' activity",
     "neighborhood": "neighborhood spot",
-    "hobby": "hobby group",
-    "support": "group",
+    "hobby": "hobby club",
+    "support": "support community",
     "heritage": "community",
     "friends": "go-to spot",
     "other": "spot",
@@ -1396,7 +1420,7 @@ def ground_and_confirm(
             goal = (
                 "Tell them their community at this place is saved on their profile "
                 "now — one warm sentence — then offer ONE next step: setting up a "
-                "small get-together there they can share with their own group. "
+                "small get-together there they can share with their own people. "
                 "Nobody else is confirmed at this spot yet, so never claim or "
                 "imply people are waiting — creating and inviting is how their area "
                 "comes alive. End on the offer question; the chip below is the tap. "
@@ -1410,7 +1434,7 @@ def ground_and_confirm(
             ]
             fallback = (
                 f"Done — {place_name} is saved to your communities now. Want to set "
-                f"up {thing} there you can share with your group?"
+                f"up {thing} there you can share with your people?"
             )
         session_ctx["_grounding_offer_done"] = True
 
@@ -1871,6 +1895,87 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# What a viewer sees of SOMEONE ELSE's community list: the place and what happens
+# there. Her own words for it (detail), how and when she joined, and the place-as-venue
+# block are hers; the place head itself is already public to anyone who opens it
+# (app/community_surface.community_profile).
+_PUBLIC_CIRCLE_FIELDS = (
+    "id",
+    "circle_type",
+    "grounded",
+    "place_id",
+    "place_name",
+    "place_address",
+    "relation",
+    "emoji",
+    "member_count",
+    "active",
+)
+
+
+def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
+    """Any user's communities as `viewer_id` may see them (POST /lana/circles/list).
+
+    Own list → the full profile row. Someone else's → the public head of each place,
+    carrying `place_id` so the row opens /lana/circles/profile — which is where the
+    tier gating for the PEOPLE lives (§F protects the people, not the place). Empty
+    when either has blocked the other."""
+    rows = list_my_circles(user_id)
+    if user_id == viewer_id:
+        return rows
+    from app.community_surface import _blocked_ids
+
+    if _blocked_ids(viewer_id, [user_id]):
+        return []
+    also_mine = _my_place_refs(viewer_id, [str(r.get("place_id") or "") for r in rows])
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        row = {k: r.get(k) for k in _PUBLIC_CIRCLE_FIELDS}
+        # Does the VIEWER go here too — the "you both go here" pill, and the reason
+        # these rows lead the list.
+        row["shared"] = str(r.get("place_id") or "") in also_mine
+        # `mine` on an activity means the LIST OWNER does it, which on the viewer's
+        # screen would read as her own. Same flag, honest name: `theirs` is "what this
+        # person does here", the rest is what anyone here does.
+        row["activities"] = [
+            {
+                "concept": a.get("concept"),
+                "label": a.get("label"),
+                "member_count": a.get("member_count"),
+                "theirs": bool(a.get("mine")),
+            }
+            for a in (r.get("activities") or [])
+        ]
+        out.append(row)
+    # Stable: shared places first, newest-first within each group (the order
+    # get_peer_profile.communities used before this endpoint took that field over).
+    out.sort(key=lambda r: not r["shared"])
+    return out
+
+
+def _my_place_refs(user_id: str, place_ids: list[str]) -> set[str]:
+    """Which of these places the user is confirmed at, in one query."""
+    ids = [p for p in dict.fromkeys(place_ids) if p]
+    if not ids:
+        return set()
+    try:
+        res = (
+            service_client()
+            .table("circle_affiliations")
+            .select("place_ref")
+            .eq("user_id", user_id)
+            .in_("place_ref", ids)
+            .eq("status", "confirmed")
+            .is_("dismissed_at", "null")
+            .limit(200)
+            .execute()
+        )
+    except Exception:
+        logger.exception("my_place_refs_failed user=%s places=%s", user_id, len(ids))
+        return set()
+    return {str(r["place_ref"]) for r in res.data or [] if r.get("place_ref")}
 
 
 def add_circle(

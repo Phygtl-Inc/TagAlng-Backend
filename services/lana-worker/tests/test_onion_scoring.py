@@ -153,6 +153,10 @@ class TestOnionRowShaping(unittest.TestCase):
                 "shared_concept_labels",
                 "shared_child_concept_labels",
                 "shared_place_ref",
+                # Relationship state, carried through the reshape since 2026-08-18: the
+                # reply writer sees only this dict, and offering an intro to a peer whose
+                # card reads "✓ Sent" is a tap that can only fail the pair cooldown.
+                "connection",
             },
         )
         self.assertEqual(cand["nickname"], "Daniel")

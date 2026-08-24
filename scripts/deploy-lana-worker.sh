@@ -88,6 +88,15 @@ gcloud services enable \
   --project="$PROJECT" \
   --quiet
 
+# Last line of defence: never ship a secret baked into the source. .gcloudignore keeps
+# stray .env files out of the upload; this catches a key pasted into a .py/.md.
+if grep -rIlE --exclude-dir=.venv --exclude-dir=__pycache__ --exclude-dir=.pytest_cache \
+     '(sk-[A-Za-z0-9_-]{32,}|AIza[0-9A-Za-z_-]{35}|re_[A-Za-z0-9]{24,})' \
+     "$ROOT/services/lana-worker" ; then
+  echo "ABORT: API-key-shaped literal in the build context (files above). Move it to $ENV_FILE."
+  exit 1
+fi
+
 echo "Deploying from services/lana-worker ..."
 # Use env-vars-file — Claude model ids contain '@' which breaks --set-env-vars ^@^ delimiter.
 ENV_VARS_FILE="$(mktemp)"

@@ -34,7 +34,7 @@ A successful add now always comes back grounded + confirmed
 
 ## 2. Communities list — ungrounded rows are gone (automatic)
 
-`POST /lana/circles/mine` now returns **grounded rows only**. Chat-captured
+`POST /lana/circles/list` now returns **grounded rows only**. Chat-captured
 mentions that haven't been pinned to a place no longer appear — they're internal
 candidates, and Lana asks "which spot is it?" (rapport tile / chat) to convert
 them. Once grounded they show up here as normal.
