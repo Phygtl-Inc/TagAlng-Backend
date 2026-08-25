@@ -129,7 +129,7 @@ def intro_row_from_proposal(
         "nickname": nick,
         "avatar_url": peer.get("avatar_url"),
         "status": intro.get("status") or "proposed",
-        "match_reason": intro.get("match_reason") or peer.get("matching_peer_label"),
+        "match_reason": intro.get("match_reason"),
         "shared_dimensions": intro.get("shared_dimensions") or [],
         "direction": direction,
     }
