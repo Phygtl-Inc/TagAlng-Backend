@@ -58,8 +58,8 @@ _GENERIC_PEER_LABELS = frozenset(
 )
 
 
-def _trait_label(peer: dict[str, Any]) -> str | None:
-    label = str(peer.get("matching_peer_label") or "").strip()
+def _trait_label(peer: dict[str, Any], key: str = "matching_peer_label") -> str | None:
+    label = str(peer.get(key) or "").strip()
     if not label or label.lower().strip(" .!") in _GENERIC_PEER_LABELS:
         return None
     return label
@@ -80,34 +80,42 @@ def build_match_reason(
     shared_place = str(peer.get("shared_place_name") or "").strip()
     if shared_place:
         return f"You both go to {shared_place}."
-    label = _trait_label(peer)
+    # Two outcomes: a genuinely two-sided pair emits "You both: {label}" mirroring
+    # find_my_fellows at 20260820120000_truthful_peer_match.sql:316-323; anything
+    # else emits the neutral line already in production. peer_matches_identity_snippet
+    # still vetoes a two-sided emission to neutral when the current-turn snippet is
+    # off-topic — a truthful pair on an unrelated ask is unfair to assert this turn.
+    peer_label = _two_sided_label(peer)
     snippet = str(identity_snippet or "").strip()
-    # The fallback snippet can be several messages joined with "; " — only echo the
-    # first clause so the reason stays a clean sentence, not a merged dump.
-    first_clause = snippet.split(";")[0].strip()
-    if snippet and not peer_matches_identity_snippet(peer, snippet):
-        if label:
-            reason = f"You both fit {label.lower()}."
-        else:
-            reason = "A neighbor close by — Lana thinks you two would click."
-    elif first_clause and label:
-        # Skip the "you mentioned …" tail when it just restates the label.
-        low_clause, low_label = first_clause.lower(), label.lower()
-        if low_clause in low_label or low_label in low_clause:
-            reason = f"You both fit {low_label}."
-        else:
-            reason = f"You both fit {low_label} — you mentioned {first_clause[:120]}."
-    elif first_clause:
-        reason = f"You mentioned {first_clause[:160]} — strong overlap nearby."
-    elif label:
-        reason = f"You both fit {label.lower()}."
+    if peer_label and (not snippet or peer_matches_identity_snippet(peer, snippet)):
+        reason = f"You both: {peer_label}"
     else:
-        reason = "A neighbor close by — Lana thinks you two would click."
-    # The label/snippet echo the users' own claim words, which can carry the banned
+        reason = _NEUTRAL_REASON
+    # The label echoes the users' own claim words, which can carry the banned
     # lexicon ("Mom of two", "on my block"). This string is persisted, so scrub here.
     from app.lingo_guard import find_violations, naive_clean
 
     return naive_clean(reason) if find_violations(reason) else reason
+
+
+_NEUTRAL_REASON = "A neighbor close by — Lana thinks you two would click."
+
+
+def _two_sided_label(peer: dict[str, Any]) -> str | None:
+    """Peer label when both users genuinely share the trait, else None.
+
+    Mirrors find_my_fellows at 20260820120000_truthful_peer_match.sql:316-323:
+    exact concept match OR case-insensitive label equality after trimming, both
+    labels first passed through the generic-label filter."""
+    peer_label = _trait_label(peer, "matching_peer_label")
+    if not peer_label:
+        return None
+    if bool(peer.get("has_exact_concept_match")):
+        return peer_label
+    my_label = _trait_label(peer, "matching_my_label")
+    if my_label and peer_label.strip().lower() == my_label.strip().lower():
+        return peer_label
+    return None
 
 
 _INTRO_NAME_RE = re.compile(
@@ -539,7 +547,10 @@ def try_propose_intro_from_preview(
     )[:280]
     dims: list[str] = []
     concept = peer.get("matching_peer_concept")
-    if concept:
+    # Only claim the concept is shared when the DB says both users hold it. Phase 4
+    # uses shared_dimensions as its staleness pointer set; one-sided concepts here
+    # would point staleness detection at things that were never shared.
+    if concept and peer.get("has_exact_concept_match"):
         dims.append(str(concept))
 
     try:
