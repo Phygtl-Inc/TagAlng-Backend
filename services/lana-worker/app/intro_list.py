@@ -38,16 +38,122 @@ def fetch_my_intros(
     if not raw:
         return []
     if isinstance(raw, list):
-        return [r for r in raw if isinstance(r, dict)]
-    if isinstance(raw, dict):
-        return [raw]
-    return []
+        rows = [r for r in raw if isinstance(r, dict)]
+    elif isinstance(raw, dict):
+        rows = [raw]
+    else:
+        return []
+    _annotate_stale_reasons(rows, user_jwt)
+    return rows
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        return None
+
+
+def _annotate_stale_reasons(rows: list[dict[str, Any]], user_jwt: str) -> None:
+    """Mark each row `_stale_reason=True` when a claim from its shared_dimensions
+    was dismissed after the intro was created. One supplementary query for N rows.
+
+    Fails open (no annotation) on any error — a stale reason surviving one turn
+    is worth less than a broken inbox list."""
+    import logging
+    from app.auth import jwt_user_id, service_client
+
+    if not rows:
+        return
+    try:
+        caller_id = jwt_user_id(user_jwt) or ""
+    except Exception:
+        return
+    if not caller_id:
+        return
+    concept_set: set[str] = set()
+    user_set: set[str] = {caller_id}
+    for row in rows:
+        other = str(row.get("other_user_id") or "").strip()
+        if other:
+            user_set.add(other)
+        dims = row.get("shared_dimensions")
+        if isinstance(dims, list):
+            for d in dims:
+                if isinstance(d, str) and d.strip():
+                    concept_set.add(d.strip())
+    if not concept_set:
+        return
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("user_id, concept, dismissed_at")
+            .in_("user_id", sorted(user_set))
+            .in_("concept", sorted(concept_set))
+            .execute()
+        )
+        claim_rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        logging.getLogger(__name__).exception("fetch_dismissed_claims_failed")
+        return
+    dismissed_map: dict[tuple[str, str], datetime] = {}
+    for cr in claim_rows:
+        if not isinstance(cr, dict):
+            continue
+        d_at = _parse_iso(cr.get("dismissed_at"))
+        if d_at is None:
+            continue
+        uid = str(cr.get("user_id") or "")
+        concept = str(cr.get("concept") or "")
+        if not uid or not concept:
+            continue
+        key = (uid, concept)
+        existing = dismissed_map.get(key)
+        if existing is None or d_at > existing:
+            dismissed_map[key] = d_at
+    if not dismissed_map:
+        return
+    for row in rows:
+        created = _parse_iso(row.get("created_at"))
+        if created is None:
+            continue
+        dims = row.get("shared_dimensions")
+        if not isinstance(dims, list) or not dims:
+            continue
+        row_users = {caller_id}
+        other = str(row.get("other_user_id") or "").strip()
+        if other:
+            row_users.add(other)
+        stale = False
+        for uid in row_users:
+            for d in dims:
+                if not isinstance(d, str):
+                    continue
+                d_at = dismissed_map.get((uid, d.strip()))
+                if d_at is not None and d_at > created:
+                    stale = True
+                    break
+            if stale:
+                break
+        if stale:
+            row["_stale_reason"] = True
 
 
 def normalize_intro_row(row: dict[str, Any]) -> dict[str, Any]:
     dims = row.get("shared_dimensions")
     if not isinstance(dims, list):
         dims = []
+    # Read-layer staleness: fetch_my_intros flags rows whose shared_dimensions were
+    # dismissed after the intro was created. Blank the reason so
+    # format_intros_list_reply's `if reason:` guard skips the tail.
+    match_reason = "" if row.get("_stale_reason") else row.get("match_reason")
     return {
         "intro_id": row.get("id"),
         "other_user_id": row.get("other_user_id"),
@@ -56,7 +162,7 @@ def normalize_intro_row(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "expires_at": row.get("expires_at"),
         "status": row.get("status") or "proposed",
-        "match_reason": row.get("match_reason"),
+        "match_reason": match_reason,
         "shared_dimensions": [str(d) for d in dims[:8]],
         "direction": row.get("direction"),
     }
