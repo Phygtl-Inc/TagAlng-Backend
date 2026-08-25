@@ -384,6 +384,37 @@ class TestRevisionNote(unittest.TestCase):
             )
         )
 
+    def test_ask_gap_lead_in_is_not_a_dead_end(self) -> None:
+        """The regression that shipped a bare acknowledgement (prod 2026-08-21).
+
+        An ask_gap utterance carries NO "?" by contract — _wire_ask_gap_action
+        pastes the vetted question on afterwards. Flagged as a dead end, the retry
+        talked the model out of the ask entirely and the question was lost.
+        """
+        for kind in ("ask_gap", "ground_place"):
+            with self.subTest(kind=kind):
+                self.assertIsNone(
+                    _revision_note(
+                        NextAction(
+                            kind=kind,
+                            utterance="That sounds like a good mix — Lego for the "
+                            "younger one, and online games for the older one.",
+                        ),
+                        streak=0,
+                    )
+                )
+
+    def test_dead_end_note_prefers_a_question_on_their_own_words(self) -> None:
+        """A bare `reply` must still be retried — and steered to follow_thread first,
+        not to whichever stored gap happens to be queued."""
+        note = _revision_note(
+            NextAction(kind="reply", utterance="Thanks for sharing your go-to spot."),
+            streak=0,
+        )
+        assert note is not None
+        self.assertIn("follow_thread", note)
+        self.assertIn("same specific thing", note)
+
 
 if __name__ == "__main__":
     unittest.main()

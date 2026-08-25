@@ -588,11 +588,23 @@ def peers_to_match_rows(
         if not isinstance(row, dict):
             continue
         nick = str(row.get("nickname") or "").strip() or None
+        # THE verify gate for peer identity, enforced once here so all nine call
+        # sites inherit it. `preview: True` was only ever a hint, and the card reads
+        # `nickname ?? (preview ? locked : …)` — so a nickname sent to an unverified
+        # viewer wins over the lock and the name renders. It also shipped in the API
+        # payload, which is the actual disclosure. Meanwhile the guest tail line has
+        # always promised "Verify your email to see names", and Lana told Tim "I keep
+        # details private until verification" — both false in the same breath
+        # (prod 2026-08-21 14:57). Null them and the copy becomes true; the FE already
+        # guards on `peerId &&` for the profile link and Nudge button, so dropping the
+        # id cleanly removes the actions an unverified viewer should not have.
+        if not phone_verified:
+            nick = None
         out.append(
             {
-                "peer_user_id": row.get("peer_user_id"),
+                "peer_user_id": row.get("peer_user_id") if phone_verified else None,
                 "nickname": nick,
-                "avatar_url": row.get("avatar_url"),
+                "avatar_url": row.get("avatar_url") if phone_verified else None,
                 # The badge the card renders, derived by the SAME helper the card uses, so
                 # Lana's prose describes what is actually on screen. Without it she fell
                 # back to quoting similarity_score as a percentage the card never shows.
