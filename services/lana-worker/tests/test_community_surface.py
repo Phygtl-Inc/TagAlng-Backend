@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from app.community_surface import (
     _feature_label,
+    community_meets,
     _member_attributes,
     _status_line,
     caller_affiliation_at,
@@ -134,6 +135,7 @@ def _meet(eid: str, title: str, days: int) -> dict:
 
 
 class TestCommunitiesCard(unittest.TestCase):
+    @patch("app.community_surface._going_rosters", return_value={"e1": ["u2", "u3"]})
     @patch(
         "app.community_surface._events_at_place",
         side_effect=lambda pid, **_: [
@@ -145,7 +147,7 @@ class TestCommunitiesCard(unittest.TestCase):
         else [],
     )
     @patch("app.circles_flow.list_my_circles")
-    def test_top_three_and_more_count(self, circles, _events) -> None:
+    def test_top_three_and_more_count(self, circles, _events, _rosters) -> None:
         circles.return_value = list(_CIRCLES)
         card = communities_card("u1")
         self.assertEqual(len(card["items"]), 3)
@@ -163,6 +165,8 @@ class TestCommunitiesCard(unittest.TestCase):
         )
         self.assertEqual(card["items"][0]["meets"][0]["title"], "Saturday run")
         self.assertEqual(card["items"][0]["upcoming_count"], 3)
+        # A real going figure, not the hard 0 the field used to ship (#97a).
+        self.assertEqual(card["items"][0]["meets"][0]["going_count"], 2)
         # Nothing coming up at the others — listed, with no meets invented.
         self.assertEqual(card["items"][1]["meets"], [])
 
@@ -196,6 +200,113 @@ class TestCommunitiesCard(unittest.TestCase):
         ctx: dict = {}
         stamp_communities_card(ctx, "u1")
         self.assertEqual(ctx, {})
+
+
+class TestCommunityMeets(unittest.TestCase):
+    """C-CIRCLE-COMMS-ALL: every meet across her communities, outside a turn."""
+
+    def _events(self, pid: str, **_) -> list[dict]:
+        if pid != "p1":
+            return []
+        return [
+            {
+                "id": "e1",
+                "title": "Saturday run",
+                "description": "Easy 5k, all paces welcome.",
+                "starts_at": _soon(1),
+                "has_time": True,
+                "venue_name": "Laureate Park",
+                "cover_emoji": "🏃",
+            },
+            {
+                "id": "e2",
+                "title": "Sunday spin meet",
+                "starts_at": _soon(2),
+                "has_time": True,
+                "venue_name": "Studio A",
+                "cover_emoji": "🚴",
+            },
+            {"id": "e3", "title": "Member social", "starts_at": _soon(5), "has_time": True},
+        ]
+
+    _ROSTERS = {"e1": ["u2", "u3", "u4", "u5", "u6", "u7"], "e2": ["u2"]}
+
+    @patch("app.community_surface._users_by_id")
+    @patch("app.community_surface._blocked_ids", return_value=set())
+    @patch("app.community_surface._going_rosters")
+    @patch("app.circles_flow.list_my_circles")
+    def test_one_group_per_place_with_something_on(self, circles, rosters, _blocked, users) -> None:
+        circles.return_value = list(_CIRCLES)
+        rosters.return_value = dict(self._ROSTERS)
+        users.return_value = {
+            uid: {"nickname": uid, "profile_photo_url": None} for uid in self._ROSTERS["e1"]
+        }
+        with patch("app.community_surface._events_at_place", side_effect=self._events):
+            out = community_meets("u1")
+        # Three of her four communities have nothing on, so they are not groups here.
+        self.assertEqual(len(out["communities"]), 1)
+        # `total` stays every community she holds — "1 of your 4 has something on".
+        self.assertEqual(out["total"], 4)
+        group = out["communities"][0]
+        self.assertEqual(group["place_name"], "OrangeTheory Narcoossee")
+        self.assertEqual(group["upcoming_count"], 3)
+        # A week being scanned: dates ascending, not popularity — e3 has nobody going
+        # and still comes last because it is last.
+        self.assertEqual([m["event_id"] for m in group["meets"]], ["e1", "e2", "e3"])
+        # Real counts, and the avatar stack capped without lying about the count.
+        self.assertEqual(group["meets"][0]["going_count"], 6)
+        self.assertEqual(len(group["meets"][0]["going_preview"]), 5)
+        self.assertEqual(group["meets"][0]["going_preview"][0]["user_id"], "u2")
+        self.assertEqual(group["meets"][0]["description"], "Easy 5k, all paces welcome.")
+        # A host who wrote no copy gets no invented line.
+        self.assertIsNone(group["meets"][1]["description"])
+        self.assertEqual(group["meets"][2]["going_count"], 0)
+        self.assertEqual(group["meets"][2]["going_preview"], [])
+
+    @patch("app.community_surface._users_by_id")
+    @patch("app.community_surface._blocked_ids", return_value=set())
+    @patch("app.community_surface._going_rosters")
+    @patch("app.circles_flow.list_my_circles")
+    def test_readable_twice_without_a_turn(self, circles, rosters, _blocked, users) -> None:
+        circles.return_value = list(_CIRCLES)
+        rosters.return_value = dict(self._ROSTERS)
+        users.return_value = {"u2": {"nickname": "Priya", "profile_photo_url": None}}
+        with patch("app.community_surface._events_at_place", side_effect=self._events):
+            first = community_meets("u1")
+            second = community_meets("u1")
+        # No turn state in it at all — the same payload, twice in a row.
+        self.assertEqual(first, second)
+
+    @patch("app.community_surface._blocked_ids", return_value=set())
+    @patch("app.community_surface._going_rosters")
+    @patch("app.circles_flow.list_my_circles")
+    def test_unverified_caller_gets_counts_but_no_faces(self, circles, rosters, _blocked) -> None:
+        circles.return_value = list(_CIRCLES)
+        rosters.return_value = dict(self._ROSTERS)
+        with patch("app.community_surface._events_at_place", side_effect=self._events):
+            out = community_meets("u1", phone_verified=False)
+        meet = out["communities"][0]["meets"][0]
+        self.assertEqual(meet["going_count"], 6)
+        self.assertEqual(meet["going_preview"], [])
+
+    @patch("app.community_surface._users_by_id", return_value={})
+    @patch("app.community_surface._blocked_ids", return_value={"u2", "u3", "u4", "u5", "u6", "u7"})
+    @patch("app.community_surface._going_rosters")
+    @patch("app.circles_flow.list_my_circles")
+    def test_a_blocked_pair_never_shows_a_face(self, circles, rosters, _blocked, _users) -> None:
+        circles.return_value = list(_CIRCLES)
+        rosters.return_value = dict(self._ROSTERS)
+        with patch("app.community_surface._events_at_place", side_effect=self._events):
+            out = community_meets("u1")
+        self.assertEqual(out["communities"][0]["meets"][0]["going_preview"], [])
+
+    @patch("app.circles_flow.list_my_circles", return_value=[])
+    def test_no_communities_means_nothing(self, _circles) -> None:
+        self.assertEqual(community_meets("u1"), {"communities": [], "total": 0})
+
+    @patch("app.circles_flow.list_my_circles", side_effect=RuntimeError("db down"))
+    def test_never_raises(self, _circles) -> None:
+        self.assertEqual(community_meets("u1"), {"communities": [], "total": 0})
 
 
 class TestMembership(unittest.TestCase):
@@ -544,7 +655,15 @@ class TestCommunityProfile(unittest.TestCase):
                 [{"key": "has_pool", "value": None, "sub_group": "", "confidence": 0.8}]
             ),
             "events": events,
-            "event_requests": _chain([{"event_id": "e1"}, {"event_id": "e1"}, {"event_id": "e2"}]),
+            # A going row is a PERSON going — the roster read carries user_id now, so the
+            # all-meets avatar stack and this count come out of one query.
+            "event_requests": _chain(
+                [
+                    {"event_id": "e1", "user_id": "u2"},
+                    {"event_id": "e1", "user_id": "u3"},
+                    {"event_id": "e2", "user_id": "u2"},
+                ]
+            ),
             "users": _chain([{"id": "u2", "nickname": "mapleluz", "profile_photo_url": None}]),
             "user_blocks": _chain([]),
         }

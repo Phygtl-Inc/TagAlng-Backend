@@ -42,7 +42,8 @@ on `/stream`):
       "meets_this_week": 3,
       "meets": [                     // what's ON there, soonest first — tap = open the meet
         { "event_id": "…", "title": "Saturday run", "starts_at": "2026-08-29T07:00:00",
-          "has_time": true, "venue_name": "Laureate Park", "cover_emoji": "🏃" }
+          "has_time": true, "venue_name": "Laureate Park", "cover_emoji": "🏃",
+          "going_count": 6 }           // the real roster; 0 = nobody yet, so render nothing
       ],
       "upcoming_count": 3,           // everything upcoming; `meets` is the first two
       "active": true,                // 2+ people confirmed there
@@ -70,6 +71,60 @@ a dressed-up count.
 
 `CreateSessionResponse` carries the same field for symmetry; in practice the opening
 turn is not a looking-open turn, so it is `null` there.
+
+`going_count` is a real roster read (one query for every meet on the card, not one per
+place) — it shipped as a hard `0` for a day, which is why a client that saw `0` rendered
+nothing rather than "0 going". Keep that: nobody going yet is said by not saying it.
+
+## Panel 3 — every meet across her communities (`C-CIRCLE-COMMS-ALL`)
+
+The card above cannot fill this screen: it is capped at three places × two meets, and
+it is **turn-scoped** (`app/turn_surfaces.py`), so it cannot be re-read without spending
+a turn. One read-only endpoint serves it, callable any time:
+
+```jsonc
+POST /lana/circles/meets
+{ "limit": 50 }                        // meets read per community; a screen cap, never the truth
+```
+
+```jsonc
+{
+  "communities": [
+    {
+      "affiliation_id": "…",
+      "place_id": "…",
+      "place_name": "OrangeTheory Narcoossee",
+      "circle_type": "fitness",
+      "emoji": "🏋️",
+      "upcoming_count": 3,             // the group's "3 meets" badge
+      "meets": [
+        { "event_id": "…", "title": "Saturday run", "starts_at": "2026-08-29T07:00:00",
+          "has_time": true, "venue_name": "Laureate Park", "cover_emoji": "🏃",
+          "description": "Easy 5k, all paces welcome.",
+          "going_count": 6,
+          "going_preview": [{ "user_id": "…", "nickname": "Priya", "profile_photo_url": null }] }
+      ]
+    }
+  ],
+  "total": 7                           // every community she holds → "1 of your 7 has something on"
+}
+```
+
+**Soonest first**, inside each group and between them — this screen is a week being
+scanned, not a popularity ranking (which is what the profile's `upcoming_events` is, and
+why fanning that out per community was never the answer). Every community she holds a
+confirmed, grounded affiliation at is eligible; the ones with **nothing upcoming are
+omitted** — this screen is about meets, and the place list is already `/circles/list`.
+
+`description` is the host's own copy, `null` when they never wrote one — never
+synthesised. `going_preview` is the same Stranger-tier `{nickname, profile_photo_url}`
+the member cards show, capped at 5 faces over a whole `going_count`, so the avatar stack
+needs no second call.
+
+**§F, same bar as every roster here.** `going_preview` names people: an unverified caller
+gets real counts and **no faces**, an anonymous caller gets `{"communities": [], "total": 0}`,
+and mutual blocks are filtered out of the stack. Two reads serve the whole screen
+(everyone going to any of these meets, then those people) — no N+1 per meet.
 
 ## Panel 2 — all communities (*View more*)
 

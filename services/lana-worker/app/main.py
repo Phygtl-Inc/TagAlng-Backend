@@ -113,6 +113,7 @@ from app.models import (
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
     CommunityEventRow,
+    CommunityMeetsResponse,
     CommunityJoinResponse,
     CommunityFeatureRow,
     CommunityMemberPreviewRow,
@@ -888,6 +889,7 @@ def _communities_from_ctx(ctx: dict[str, Any]) -> CommunitiesCardPayload | None:
                         has_time=m.get("has_time") is not False,
                         venue_name=str(m.get("venue_name") or "") or None,
                         cover_emoji=str(m.get("cover_emoji") or "") or None,
+                        going_count=int(m.get("going_count") or 0),
                     )
                     for m in (row.get("meets") if isinstance(row.get("meets"), list) else [])
                     if isinstance(m, dict) and str(m.get("event_id") or "").strip()
@@ -3284,6 +3286,12 @@ class CommunityProfileBody(_BaseModel):
     place_id: str | None = None
 
 
+class CommunityMeetsBody(_BaseModel):
+    # Meets read per community. A cap on the screen, never on the truth —
+    # `upcoming_count` counts what is actually there.
+    limit: int = 50
+
+
 class CommunityMembersBody(_BaseModel):
     affiliation_id: str | None = None
     place_id: str | None = None
@@ -3471,6 +3479,35 @@ def post_profile_portrait(authorization: str | None = Header(default=None)):
 
     dashboard = fetch_identity_dashboard(jwt)
     return {"portrait": dashboard.get("mapped_summary") or None}
+
+
+@app.post("/lana/circles/meets", response_model=CommunityMeetsResponse)
+def post_circles_meets(
+    body: CommunityMeetsBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Every meet across the caller's communities (C-CIRCLE-COMMS-ALL).
+
+    One group per community that has something on, each with ALL its upcoming meets
+    soonest first — the frame is a week being scanned. Read-only and callable outside a
+    turn, which is the point: the look card's `meets` are turn-scoped and capped at two
+    per place, so this screen could not be filled from them.
+
+    `going_preview` names people, so it follows the same §F bar as every roster here —
+    an unverified caller gets real counts and no faces. Anonymous callers get nothing:
+    who is going where is neighbours' data.
+    """
+    auth = verify_auth(authorization)
+    if auth.is_anonymous:
+        return CommunityMeetsResponse()
+    from app.community_surface import community_meets
+
+    data = community_meets(
+        auth.user_id,
+        limit=int((body.limit if body else 50) or 50),
+        phone_verified=auth.phone_verified,
+    )
+    return CommunityMeetsResponse(**data)
 
 
 @app.post("/lana/circles/profile", response_model=CommunityProfileResponse)

@@ -280,6 +280,45 @@ class CommunityEventRow(BaseModel):
     cover_emoji: str | None = None
 
 
+class MeetGoingPreviewRow(BaseModel):
+    """One face on a meet's avatar stack. Stranger-tier, the same two fields the member
+    cards show — and absent entirely for an unverified caller (§F)."""
+
+    user_id: str
+    nickname: str | None = None
+    profile_photo_url: str | None = None
+
+
+class CommunityMeetRow(CommunityEventRow):
+    """A meet on the all-meets screen: the card row plus the two things that screen
+    renders and no other surface needs — the host's own copy, and who is going."""
+
+    # None = the host never wrote one; never synthesised ([[event-description-gap]]).
+    description: str | None = None
+    going_preview: list[MeetGoingPreviewRow] = Field(default_factory=list)
+
+
+class CommunityMeetGroup(BaseModel):
+    """One community's collapsible group on C-CIRCLE-COMMS-ALL."""
+
+    affiliation_id: str
+    place_id: str | None = None
+    place_name: str | None = None
+    circle_type: str | None = None
+    emoji: str | None = None
+    upcoming_count: int = 0
+    meets: list[CommunityMeetRow] = Field(default_factory=list)
+
+
+class CommunityMeetsResponse(BaseModel):
+    """Every meet across the caller's communities, soonest first inside each group and
+    between them. Groups with nothing upcoming are omitted; `total` is how many
+    communities she holds, so "3 of your 7 have something on" is sayable."""
+
+    communities: list[CommunityMeetGroup] = Field(default_factory=list)
+    total: int = 0
+
+
 class CommunityCardRow(BaseModel):
     """One of the caller's communities on the look screen (C-CIRCLE-LOOK-COMMS).
 
