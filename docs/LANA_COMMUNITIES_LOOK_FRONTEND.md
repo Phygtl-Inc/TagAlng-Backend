@@ -18,10 +18,15 @@ returns an empty list and `/lana/circles/join` fails until it is applied.
 
 ## Panel 1 — the look screen card (`C-CIRCLE-LOOK-COMMS`)
 
+**Meet in your communities**, not "your communities": *Find a meet* answers with the
+meets actually happening at her places, not a list of places to go dig through. Each
+row is the community plus its next couple of meets, and **a meet row opens that meet**
+(`event_id` → the meet sheet, same as the profile's `upcoming_events`).
+
 The turn that answers *Find a meet* (`intent_hint: "look_meet"`, the one that replies
-"Love it — what kind of thing are you up for?") now carries a new top-level
-`communities` object on `POST /lana/sessions/{id}/messages` (and inside the terminal
-`result` frame on `/stream`):
+"Love it — what kind of thing are you up for?") carries a top-level `communities`
+object on `POST /lana/sessions/{id}/messages` (and inside the terminal `result` frame
+on `/stream`):
 
 ```jsonc
 "communities": {
@@ -35,6 +40,11 @@ The turn that answers *Find a meet* (`intent_hint: "look_meet"`, the one that re
       "relation": "gym",             // caller-relative noun — never the word "circle"
       "member_count": 34,
       "meets_this_week": 3,
+      "meets": [                     // what's ON there, soonest first — tap = open the meet
+        { "event_id": "…", "title": "Saturday run", "starts_at": "2026-08-29T07:00:00",
+          "has_time": true, "venue_name": "Laureate Park", "cover_emoji": "🏃" }
+      ],
+      "upcoming_count": 3,           // everything upcoming; `meets` is the first two
       "active": true,                // 2+ people confirmed there
       "status_line": "34 people · 3 meets this week"
     }
@@ -44,8 +54,10 @@ The turn that answers *Find a meet* (`intent_hint: "look_meet"`, the one that re
 }
 ```
 
-Ranked liveliest-first (people, then newest). Three items max; `more_count` is what's
-past them. `status_line` is only the two numbers already in the row — render it or
+Ranked by what's on: places with something upcoming first, then liveliest (people, then
+newest). Three items max; `more_count` is what's past them — **places**, not meets, so
+*View more* still opens the all-communities list. A place with nothing coming up is
+still listed, with `meets: []` — never a meet invented to fill the row. `status_line` is only the two numbers already in the row — render it or
 compose your own, but a place with nobody else there reads **"just you so far"**, never
 a dressed-up count.
 

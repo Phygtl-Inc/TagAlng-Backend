@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.activity_browse import (
@@ -198,9 +199,33 @@ class TestRunBrowseTurn(unittest.TestCase):
         self.assertIn("what kind of thing", reply.lower())
         self.assertTrue((ctx.get("browse_draft") or {}).get("_asked"))
 
-    @patch("app.community_surface.meets_this_week", return_value=2)
+    @patch(
+        "app.community_surface._events_at_place",
+        side_effect=lambda pid, **_: [
+            {
+                "id": "e1",
+                "title": "Saturday run",
+                "starts_at": (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+                    "%Y-%m-%dT%H:%M:%S"
+                ),
+                "has_time": True,
+                "venue_name": "Laureate Park",
+                "cover_emoji": "🏃",
+            },
+            {
+                "id": "e2",
+                "title": "Sunday spin meet",
+                "starts_at": (datetime.now(timezone.utc) + timedelta(days=2)).strftime(
+                    "%Y-%m-%dT%H:%M:%S"
+                ),
+                "has_time": True,
+                "venue_name": "Studio A",
+                "cover_emoji": "🚴",
+            },
+        ],
+    )
     @patch("app.circles_flow.list_my_circles")
-    def test_look_screen_carries_the_communities_card(self, circles, _meets) -> None:
+    def test_look_screen_carries_the_communities_card(self, circles, _events) -> None:
         # The look screen shows her own places while she decides what she's up for
         # (C-CIRCLE-LOOK-COMMS) — stamped on the P1 ask turn and nowhere else.
         circles.return_value = [
@@ -235,6 +260,8 @@ class TestRunBrowseTurn(unittest.TestCase):
         self.assertIsNotNone(card)
         self.assertEqual(card["items"][0]["place_name"], "OrangeTheory Narcoossee")
         self.assertEqual(card["items"][0]["status_line"], "34 people · 2 meets this week")
+        # "Meet in your communities": the meets ride along, each openable by event_id.
+        self.assertEqual([m["title"] for m in card["items"][0]["meets"]], ["Saturday run", "Sunday spin meet"])
 
     @patch("app.circles_flow.list_my_circles", return_value=[])
     def test_no_card_without_a_community(self, _circles) -> None:

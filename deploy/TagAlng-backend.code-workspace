@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../../lana-admin-portal"
+		},
+		{
+			"path": "../../lana-help-main"
 		}
 	],
 	"settings": {}

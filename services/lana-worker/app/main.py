@@ -880,6 +880,19 @@ def _communities_from_ctx(ctx: dict[str, Any]) -> CommunitiesCardPayload | None:
                 emoji=str(row.get("emoji") or "") or None,
                 member_count=int(row.get("member_count") or 0),
                 meets_this_week=int(row.get("meets_this_week") or 0),
+                meets=[
+                    CommunityEventRow(
+                        event_id=str(m.get("event_id") or ""),
+                        title=str(m.get("title") or ""),
+                        starts_at=str(m.get("starts_at") or "") or None,
+                        has_time=m.get("has_time") is not False,
+                        venue_name=str(m.get("venue_name") or "") or None,
+                        cover_emoji=str(m.get("cover_emoji") or "") or None,
+                    )
+                    for m in (row.get("meets") if isinstance(row.get("meets"), list) else [])
+                    if isinstance(m, dict) and str(m.get("event_id") or "").strip()
+                ],
+                upcoming_count=int(row.get("upcoming_count") or 0),
                 active=bool(row.get("active")),
                 status_line=str(row.get("status_line") or "") or None,
             )
@@ -3047,6 +3060,93 @@ class CircleGroundBody(_BaseModel):
     # The tapped option. Only the id crosses the wire — name/geo/address are fetched
     # server-side from Google (places.place_details), never taken from the client.
     google_place_id: str
+
+
+class TipFeedBody(_BaseModel):
+    # recent | circles | nearest. Unknown values fall back to recent rather than erroring:
+    # a tab a client shipped before we did is not a reason to show them nothing.
+    tab: str = "recent"
+    limit: int = 20
+
+
+class TipFeedbackBody(_BaseModel):
+    signal_id: str
+    # Desired state, not a toggle — a double tap on a flaky connection must not invert
+    # what the user chose (see 20261106120000).
+    on: bool = True
+
+
+@app.post("/lana/tips/recent")
+def post_tips_recent(
+    body: TipFeedBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """C-FIND-RECENT: recent recommendations near the caller.
+
+    `tab` picks the view — recent (newest first), circles (only people she shares a place
+    with, each row carrying that shared circle) or nearest. Same visibility rules as the
+    ask path: a tip hidden from a search stays hidden here.
+    """
+    auth = verify_auth(authorization)
+    if auth.is_anonymous:
+        # Reading what neighbours recommended is neighbours' data — same bar as the tile.
+        return {"tab": (body.tab if body else "recent"), "tips": []}
+    from app.tip_feed import recent_tips
+
+    tab = (body.tab if body else "recent") or "recent"
+    return {
+        "tab": tab,
+        "tips": recent_tips(
+            _bearer_token(authorization), tab=tab, limit=(body.limit if body else 20)
+        ),
+    }
+
+
+@app.post("/lana/tips/vouch")
+def post_tips_vouch(
+    body: TipFeedbackBody,
+    authorization: str | None = Header(default=None),
+):
+    """✓ I vouch — add the caller's own voice to someone else's recommendation.
+
+    Refused on your own tip (409): the tip already IS your voice, and counting it twice
+    would inflate the one number a stranger reads as social proof.
+    """
+    verify_auth(authorization)
+    from app.tip_feed import set_vouch
+
+    try:
+        count = set_vouch(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
+    except HTTPException as exc:
+        raise _tip_feedback_error(exc) from None
+    return {"signal_id": body.signal_id, "vouched": body.on, "vouch_count": count}
+
+
+@app.post("/lana/tips/helpful")
+def post_tips_helpful(
+    body: TipFeedbackBody,
+    authorization: str | None = Header(default=None),
+):
+    """👍 Helpful — this answer helped the reader. Says nothing about the place, so it is
+    deliberately a separate counter from the vouch."""
+    verify_auth(authorization)
+    from app.tip_feed import set_helpful
+
+    try:
+        count = set_helpful(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
+    except HTTPException as exc:
+        raise _tip_feedback_error(exc) from None
+    return {"signal_id": body.signal_id, "helpful": body.on, "helpful_count": count}
+
+
+def _tip_feedback_error(exc: HTTPException) -> HTTPException:
+    """Postgres' own refusals, as statuses a client can act on rather than a bare 500."""
+    detail = str(getattr(exc, "detail", "") or "")
+    if "cannot_vouch_own_tip" in detail:
+        return HTTPException(status_code=409, detail="cannot_vouch_own_tip")
+    if "tip_not_found" in detail:
+        return HTTPException(status_code=404, detail="tip_not_found")
+    return exc
 
 
 @app.post("/lana/circles/list")

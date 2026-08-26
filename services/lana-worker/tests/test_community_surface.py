@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from app.community_surface import (
@@ -117,10 +118,34 @@ class TestStatusLine(unittest.TestCase):
         self.assertEqual(_status_line(12, 0), "12 people")
 
 
+def _soon(days: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _meet(eid: str, title: str, days: int) -> dict:
+    return {
+        "id": eid,
+        "title": title,
+        "starts_at": _soon(days),
+        "has_time": True,
+        "venue_name": "Laureate Park",
+        "cover_emoji": "🏃",
+    }
+
+
 class TestCommunitiesCard(unittest.TestCase):
-    @patch("app.community_surface.meets_this_week", return_value=3)
+    @patch(
+        "app.community_surface._events_at_place",
+        side_effect=lambda pid, **_: [
+            _meet("e1", "Saturday run", 1),
+            _meet("e2", "Sunday spin meet", 2),
+            _meet("e3", "Member social", 3),
+        ]
+        if pid == "p1"
+        else [],
+    )
     @patch("app.circles_flow.list_my_circles")
-    def test_top_three_and_more_count(self, circles, _meets) -> None:
+    def test_top_three_and_more_count(self, circles, _events) -> None:
         circles.return_value = list(_CIRCLES)
         card = communities_card("u1")
         self.assertEqual(len(card["items"]), 3)
@@ -131,6 +156,30 @@ class TestCommunitiesCard(unittest.TestCase):
         self.assertEqual(card["items"][0]["place_id"], "p1")
         self.assertEqual(card["items"][0]["status_line"], "34 people · 3 meets this week")
         self.assertEqual(card["items"][0]["relation"], "gym")
+        # The card is about what's on: two meets listed, both openable, and the count
+        # says what they are a slice of.
+        self.assertEqual(
+            [m["event_id"] for m in card["items"][0]["meets"]], ["e1", "e2"]
+        )
+        self.assertEqual(card["items"][0]["meets"][0]["title"], "Saturday run")
+        self.assertEqual(card["items"][0]["upcoming_count"], 3)
+        # Nothing coming up at the others — listed, with no meets invented.
+        self.assertEqual(card["items"][1]["meets"], [])
+
+    @patch(
+        "app.community_surface._events_at_place",
+        side_effect=lambda pid, **_: [_meet("e9", "Latte morning", 1)] if pid == "p4" else [],
+    )
+    @patch("app.circles_flow.list_my_circles")
+    def test_a_place_with_a_meet_outranks_a_bigger_one_without(self, circles, _events) -> None:
+        circles.return_value = list(_CIRCLES)
+        card = communities_card("u1")
+        self.assertEqual(card["items"][0]["place_name"], "Corner Café")
+        # The rest keep the liveliest-first order behind it.
+        self.assertEqual(
+            [i["place_name"] for i in card["items"][1:]],
+            ["OrangeTheory Narcoossee", "St. Luke's"],
+        )
 
     @patch("app.circles_flow.list_my_circles", return_value=[])
     def test_no_communities_means_no_card(self, _circles) -> None:

@@ -266,6 +266,20 @@ class GroundingCardPayload(BaseModel):
     unmatched_name: str | None = None
 
 
+class CommunityEventRow(BaseModel):
+    event_id: str
+    title: str
+    starts_at: str | None = None
+    # False = the meet has no real clock time; render the date alone (#56).
+    has_time: bool = True
+    venue_name: str | None = None
+    # The real going roster — the only thing "popular" is ordered on.
+    going_count: int = 0
+    # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
+    # own card. None falls back to the FE's calendar.
+    cover_emoji: str | None = None
+
+
 class CommunityCardRow(BaseModel):
     """One of the caller's communities on the look screen (C-CIRCLE-LOOK-COMMS).
 
@@ -287,6 +301,11 @@ class CommunityCardRow(BaseModel):
     emoji: str | None = None
     member_count: int = 0
     meets_this_week: int = 0
+    # What's actually on at this place, soonest first — each row's event_id opens that
+    # meet. Empty when nothing is coming up; the row is still listed.
+    meets: list[CommunityEventRow] = Field(default_factory=list)
+    # Everything upcoming there, so a badge over `meets` (a slice of two) is truthful.
+    upcoming_count: int = 0
     active: bool = False
     status_line: str | None = None
 
@@ -375,20 +394,6 @@ class CommunityActivityRow(BaseModel):
     label: str
     member_count: int = 0
     mine: bool = False
-
-
-class CommunityEventRow(BaseModel):
-    event_id: str
-    title: str
-    starts_at: str | None = None
-    # False = the meet has no real clock time; render the date alone (#56).
-    has_time: bool = True
-    venue_name: str | None = None
-    # The real going roster — the only thing "popular" is ordered on.
-    going_count: int = 0
-    # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
-    # own card. None falls back to the FE's calendar.
-    cover_emoji: str | None = None
 
 
 class CommunityMemberPreviewRow(BaseModel):
