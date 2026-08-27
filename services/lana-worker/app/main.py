@@ -3589,6 +3589,7 @@ def post_circles_profile(
                 starts_at=e.get("starts_at"),
                 has_time=e.get("has_time") is not False,
                 venue_name=e.get("venue_name"),
+                description=e.get("description"),
                 going_count=int(e.get("going_count") or 0),
                 cover_emoji=e.get("cover_emoji"),
             )

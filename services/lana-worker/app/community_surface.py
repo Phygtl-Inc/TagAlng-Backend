@@ -501,6 +501,9 @@ def _event_rows_for_profile(place_id: str) -> tuple[list[dict[str, Any]], int]:
             "starts_at": str(r.get("starts_at") or "") or None,
             "has_time": r.get("has_time") is not False,
             "venue_name": str(r.get("venue_name") or "").strip() or None,
+            # Already selected by _events_at_place and dropped on the floor here: the public
+            # place page has room to say what a meet actually is.
+            "description": str(r.get("description") or "").strip() or None,
             "going_count": int(counts.get(str(r.get("id") or ""), 0)),
             # The meet's own cover glyph, the same one its card and the Radar show. The
             # FE has rendered this field all along and fell back to a calendar because

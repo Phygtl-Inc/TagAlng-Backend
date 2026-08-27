@@ -273,6 +273,8 @@ class CommunityEventRow(BaseModel):
     # False = the meet has no real clock time; render the date alone (#56).
     has_time: bool = True
     venue_name: str | None = None
+    # What the meet is, in the host's words — the public place page shows it under the title.
+    description: str | None = None
     # The real going roster — the only thing "popular" is ordered on.
     going_count: int = 0
     # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
