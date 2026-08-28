@@ -3331,7 +3331,24 @@ class FellowsBody(_BaseModel):
     limit: int = 12
 
 
-@app.post("/lana/fellows", response_model=FellowsResponse)
+# exclude_none: PeerMatchRow is the union of every peer-row shape (chat card, rec
+# cascade, community roster, radar), so a fellows row leaves most of it unset —
+# match_stars/match_band (this endpoint never computes a cosine band), the tip_* and
+# group_* recommendation fields, distance_text, membership. Sending ~12 explicit nulls
+# per row taught the client nothing. Dropping them on the wire keeps ONE row type and
+# one renderer shared with chat, instead of forking a second shape that can drift.
+#
+# matching_peer_concept is excluded outright rather than by null: nothing on any client
+# renders it (the only hits are generated RPC types), and a concept slug is the one field
+# redaction never covers — label/quote/synonyms/details are scrubbed, the slug keeps
+# whatever it was minted from. It stays in the shaped row because intro_proposal and
+# claim_search read it server-side out of stored session context; it just stops shipping.
+@app.post(
+    "/lana/fellows",
+    response_model=FellowsResponse,
+    response_model_exclude_none=True,
+    response_model_exclude={"fellows": {"__all__": {"matching_peer_concept"}}},
+)
 def post_fellows(
     body: FellowsBody | None = None,
     authorization: str | None = Header(default=None),

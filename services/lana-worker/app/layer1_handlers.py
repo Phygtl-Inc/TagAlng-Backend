@@ -594,6 +594,9 @@ def peers_to_match_rows(
     for row in peers[: max(1, max_rows)]:
         if not isinstance(row, dict):
             continue
+        # One enrichment per row: the badge, the truthful composed label and the
+        # per-claim tags all come out of the same pass.
+        enriched = enrich_peer_match_row(row)
         nick = str(row.get("nickname") or "").strip() or None
         # THE verify gate for peer identity, enforced once here so all nine call
         # sites inherit it. `preview: True` was only ever a hint, and the card reads
@@ -615,11 +618,24 @@ def peers_to_match_rows(
                 # The badge the card renders, derived by the SAME helper the card uses, so
                 # Lana's prose describes what is actually on screen. Without it she fell
                 # back to quoting similarity_score as a percentage the card never shows.
-                "match_badge": enrich_peer_match_row(row).get("match_badge"),
+                "match_badge": enriched.get("match_badge"),
                 # Unscored (lexical) rows stay unscored — no invented cosine; the
                 # truthful-match model shows them as fits by claim, not by percent.
                 "similarity_score": row.get("similarity_score"),
-                "matching_peer_label": str(row.get("matching_peer_label") or "shared traits"),
+                # The ENRICHED label, not the raw one. Taking only the badge off `enriched`
+                # left the two disagreeing: a row with two shared claims came back badged
+                # STRONG next to a single raw label ("Enjoys sports") and trait_tags: [],
+                # because compose_match_reason's output was computed and then dropped.
+                # Falls back to the raw label — enrich leaves it alone when it has no
+                # caller-side claim to stand on.
+                "matching_peer_label": str(
+                    enriched.get("matching_peer_label")
+                    or row.get("matching_peer_label")
+                    or "shared traits"
+                ),
+                # Every shared claim as its own string, for a caller that wants to render
+                # the affinities itself rather than parse them back out of the label.
+                "trait_tags": list(enriched.get("trait_tags") or []),
                 "matching_peer_concept": row.get("matching_peer_concept"),
                 "has_exact_concept_match": bool(row.get("has_exact_concept_match")),
                 "semantic_match": bool(row.get("semantic_match")),

@@ -111,6 +111,60 @@ class TestFellowsUsesTheChatLane(unittest.TestCase):
         fetch.assert_not_called()
 
 
+class TestAffinitiesSurvive(unittest.TestCase):
+    """The shared claims reach the caller as strings, and agree with the badge.
+
+    The shaper called enrich_peer_match_row and read ONLY match_badge off it, so the
+    composed label and the per-claim tags were computed and thrown away. Prod row,
+    2026-08-28: badge "STRONG" (two shared claims) beside matching_peer_label
+    "Enjoys sports" and trait_tags []. The badge and the label described different
+    things, and a client wanting the affinities had nothing to read.
+    """
+
+    def test_shared_claims_come_back_as_strings(self) -> None:
+        rows = peers_to_match_rows(
+            [_peer(1, shared=["Enjoys sports", "Badminton every Tuesday"])],
+            phone_verified=True,
+        )
+        self.assertEqual(rows[0]["trait_tags"], ["Enjoys sports", "Badminton every Tuesday"])
+
+    def test_label_and_badge_describe_the_same_overlap(self) -> None:
+        shared = ["Enjoys sports", "Badminton every Tuesday"]
+        row = peers_to_match_rows([_peer(1, shared=shared)], phone_verified=True)[0]
+        self.assertEqual(row["match_badge"], "STRONG")  # two shared claims
+        # Both of them, not one — the label is the joined truth behind the badge.
+        for claim in shared:
+            self.assertIn(claim, row["matching_peer_label"])
+
+    def test_a_row_with_nothing_shared_keeps_its_raw_label(self) -> None:
+        # enrich leaves the label alone when it has no caller-side claim to stand on;
+        # the fallback must not blank it out.
+        row = peers_to_match_rows([_peer(1)], phone_verified=True)[0]
+        self.assertEqual(row["matching_peer_label"], "You both: things")
+
+
+class TestWireIsLean(unittest.TestCase):
+    def _route(self):
+        from app.main import app as fastapi_app
+
+        return next(
+            r for r in fastapi_app.routes if getattr(r, "path", "") == "/lana/fellows"
+        )
+
+    def test_unset_row_fields_are_not_serialized(self) -> None:
+        # match_stars/match_band, the tip_* and group_* rec fields, distance_text and
+        # membership are structurally unreachable here — they belong to other peer
+        # surfaces sharing PeerMatchRow. They must not ship as ~12 nulls per row.
+        self.assertTrue(self._route().response_model_exclude_none)
+
+    def test_concept_slug_never_ships(self) -> None:
+        # No client renders it, and the slug is the one field redaction doesn't cover.
+        self.assertEqual(
+            self._route().response_model_exclude,
+            {"fellows": {"__all__": {"matching_peer_concept"}}},
+        )
+
+
 class TestShaperRowCap(unittest.TestCase):
     def test_default_still_a_card_worth(self) -> None:
         rows = peers_to_match_rows([_peer(i) for i in range(20)], phone_verified=True)
