@@ -42,6 +42,20 @@ _MATCH_PERSON_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Rule 6 also bans "points" and "rank", which _BANNED_RE could never carry: both
+# are ordinary English outside the score frame ("that points to the same spot",
+# "the highest-ranked taco place"). Scoped to the frame instead, the way rule 4
+# scopes "match". The live failure this was written for: asked "am I winning?
+# how many points do I have?", Lana answered "No points here — you're not being
+# scored" — denying the frame while speaking it (evals, 2026-08-25).
+_GAMIFICATION_RE = re.compile(
+    r"\b(?:no|any|my|your|their|how\s+many|earn(?:ed|ing)?|\d+)\s+points?\b"
+    r"|\bpoints?\s+(?:system|total|balance)\b"
+    r"|\b(?:my|your|their|the)\s+rank\b"
+    r"|\brank(?:ed|ing)?\s+(?:you\s+)?(?:up|higher|against)\b",
+    re.IGNORECASE,
+)
+
 # Features that DO NOT EXIST yet. The policy is told never to OFFER swapping, and
 # it obeys — but the word alone reads as the feature. A tester saw "if you ever
 # want to swap favorite spots" (she meant trading recommendations) and reasonably
@@ -73,6 +87,15 @@ _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bleaderboards?\b", re.I), "neighborhood"),
     (re.compile(r"\bstreaks?\b", re.I), "progress"),
     (re.compile(r"\blevel\s*up\b", re.I), "grow"),
+    # Last-resort only, and deliberately blunt: the real repair for a score frame
+    # is a reframe ("you're not being scored here"), which the LLM pass above
+    # does. These only guarantee the word never ships when that pass is down.
+    (re.compile(r"\b(?:no|any|my|your|their|how\s+many|earn(?:ed|ing)?|\d+)\s+points?\b", re.I),
+     "nothing to tally"),
+    (re.compile(r"\bpoints?\s+(?:system|total|balance)\b", re.I), "tally"),
+    (re.compile(r"\b(?:my|your|their|the)\s+rank\b", re.I), "your place"),
+    (re.compile(r"\brank(?:ed|ing)?\s+(?:you\s+)?(?:up|higher|against)\b", re.I),
+     "comparing you to"),
     # Neutral on purpose: "a match" may be a person OR an item pairing, and the
     # naive path can't tell — "a fit" is safe for both. The LLM rewrite (which
     # runs first) picks the right phrasing from context.
@@ -109,6 +132,7 @@ def find_violations(text: str) -> list[str]:
         return []
     hits = [m.group(0).lower() for m in _BANNED_RE.finditer(text)]
     hits += [m.group(0).lower() for m in _MATCH_PERSON_RE.finditer(text)]
+    hits += [m.group(0).lower() for m in _GAMIFICATION_RE.finditer(text)]
     hits += [m.group(0).lower() for m in _UNSHIPPED_FEATURE_RE.finditer(text)]
     seen: set[str] = set()
     out: list[str] = []
@@ -149,7 +173,8 @@ def _rewrite_clean(text: str, chip_labels: list[str], hits: list[str]) -> tuple[
                 "you'); block/cuadra/quadra (say 'your area', 'near you'); circle "
                 "(name the concrete community — 'your gym', 'your people'); calling "
                 "a person a 'match' (say 'someone to meet', 'an intro'); leaderboard/"
-                "streak/level up. Return JSON "
+                "streak/level up/points/rank — never adopt a score frame even to "
+                "deny it, say nobody is being scored here. Return JSON "
                 '{"reply": "...", "chips": ["..."]} with exactly one chip per input '
                 "chip, same order."
             ),
