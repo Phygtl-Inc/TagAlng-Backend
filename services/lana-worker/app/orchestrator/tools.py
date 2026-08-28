@@ -136,27 +136,96 @@ def _send_nudge(*, user_jwt: str | None, args: dict[str, Any]) -> dict[str, Any]
         return {"status": "error", "tool": "send_nudge", "reason": str(exc)}
 
 
+_PAIR_NEUTRAL_REASON = "A neighbor close by — Lana thinks you two would click."
+
+
+def _pair_claim_overlap(caller_id: str, candidate_id: str) -> dict[str, Any]:
+    """Service-role query of both users' active public claims; returns a peer-dict
+    for build_match_reason. Returns has_exact_concept_match=False on any error or
+    when the pair shares no exact concept."""
+    import logging
+
+    if not caller_id or not candidate_id:
+        return {"has_exact_concept_match": False}
+    try:
+        rows = (
+            service_client()
+            .table("user_identity_claims")
+            .select("user_id, concept, label")
+            .in_("user_id", [caller_id, candidate_id])
+            .eq("disclosure", "public")
+            .is_("dismissed_at", "null")
+            .execute()
+        ).data or []
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "pair_claim_overlap_failed caller=%s candidate=%s", caller_id, candidate_id
+        )
+        return {"has_exact_concept_match": False}
+    caller_claims = {
+        r["concept"]: r["label"]
+        for r in rows
+        if isinstance(r, dict) and str(r.get("user_id")) == caller_id and r.get("concept")
+    }
+    candidate_claims = {
+        r["concept"]: r["label"]
+        for r in rows
+        if isinstance(r, dict) and str(r.get("user_id")) == candidate_id and r.get("concept")
+    }
+    shared = set(caller_claims) & set(candidate_claims)
+    if shared:
+        concept = sorted(shared)[0]
+        return {
+            "matching_my_label": caller_claims[concept],
+            "matching_peer_label": candidate_claims[concept],
+            "matching_peer_concept": concept,
+            "has_exact_concept_match": True,
+        }
+    return {
+        "matching_my_label": None,
+        "matching_peer_label": None,
+        "matching_peer_concept": None,
+        "has_exact_concept_match": False,
+    }
+
+
 def _propose_intro(*, user_jwt: str | None, args: dict[str, Any]) -> dict[str, Any]:
-    from app.intro_proposal import propose_neighbor_intro
+    import logging
+    from app.auth import jwt_user_id
+    from app.intro_proposal import build_match_reason, propose_neighbor_intro
 
     jwt = _require_jwt(user_jwt)
     if not jwt:
         return {"status": "error", "tool": "propose_intro", "reason": "auth_required"}
     candidate = args.get("other_user_id") or args.get("candidate_user_id")
-    reason = str(args.get("match_reason") or args.get("reason") or "").strip()
     if not candidate:
         return {"status": "error", "tool": "propose_intro", "reason": "other_user_id_required"}
+    caller_id = jwt_user_id(jwt) or ""
+    peer = _pair_claim_overlap(caller_id, str(candidate))
+    reason = build_match_reason(identity_snippet=None, peer=peer)
     if len(reason) < 10:
-        return {"status": "error", "tool": "propose_intro", "reason": "match_reason_too_short"}
-    dimensions = args.get("shared_dimensions") or []
-    if not isinstance(dimensions, list):
-        dimensions = []
+        logging.getLogger(__name__).warning(
+            "pair_match_reason_too_short caller=%s candidate=%s reason=%r — substituting neutral",
+            caller_id, candidate, reason,
+        )
+        reason = _PAIR_NEUTRAL_REASON
+    concept = str(peer.get("matching_peer_concept") or "").strip()
+    dims = [concept] if concept and peer.get("has_exact_concept_match") else []
+    # Observability, not contract: the LLM's match_reason is discarded above; log
+    # both so we can measure how often the model is still fabricating reasons.
+    logging.getLogger(__name__).info(
+        "propose_intro_reason_source caller=%s candidate=%s llm_reason=%r server_reason=%r",
+        caller_id,
+        candidate,
+        str(args.get("match_reason") or args.get("reason") or ""),
+        reason,
+    )
     try:
         intro = propose_neighbor_intro(
             jwt,
             candidate_user_id=str(candidate),
             match_reason=reason,
-            shared_dimensions=[str(d)[:64] for d in dimensions[:8]],
+            shared_dimensions=dims,
             match_score=args.get("match_score"),
             joint_moment_id=args.get("joint_moment_id"),
         )
