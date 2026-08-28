@@ -384,6 +384,25 @@ class CommunityDiscoveryRow(BaseModel):
     status_line: str | None = None
 
 
+class FellowsResponse(BaseModel):
+    """The caller's matched fellows, ranked and badged exactly as Lana's chat cards.
+
+    Same rows, same shaper (peers_to_match_rows), so the fellows screen and the
+    conversation can never disagree about who matches or how strongly. Replaces the
+    direct find_my_fellows RPC, which read the vector arm alone: it saw neither the
+    onion (shared-place / exact-concept) matches nor the public+mutual disclosure split,
+    so a faith or sobriety overlap counted in chat and was invisible on the screen.
+    """
+
+    fellows: list[PeerMatchRow] = Field(default_factory=list)
+    # Everyone arrives with a session — the PWA signs guests in anonymously on first
+    # visit — so "signed out" is not the state that gates this surface; VERIFICATION is.
+    # The shaper nulls nickname/peer_user_id for an unverified caller, so the rows are
+    # real matches with their identities withheld. Named the same as the members
+    # endpoint's flag so both gated surfaces read alike.
+    requires_phone_verification: bool = False
+
+
 class CommunityDiscoveryResponse(BaseModel):
     communities: list[CommunityDiscoveryRow] = Field(default_factory=list)
     # The radius actually searched, in metres — so an empty list can be explained

@@ -580,11 +580,18 @@ def peers_to_match_rows(
     peers: list[dict[str, Any]],
     *,
     phone_verified: bool,
+    max_rows: int = 8,
 ) -> list[dict[str, Any]]:
+    """Shape peers into card rows: the verify gate, then the badge.
+
+    `max_rows` defaults to a chat card's worth. The fellows endpoint raises it — a
+    full-list surface asking for 12 and silently receiving 8 reads as "that's all
+    there is", which is a different statement than "here are the top 8".
+    """
     from app.peer_discovery_surface import enrich_peer_match_row
 
     out: list[dict[str, Any]] = []
-    for row in peers[:8]:
+    for row in peers[: max(1, max_rows)]:
         if not isinstance(row, dict):
             continue
         nick = str(row.get("nickname") or "").strip() or None

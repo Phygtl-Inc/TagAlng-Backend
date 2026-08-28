@@ -2086,14 +2086,21 @@ def _try_layer1_intent_turn(
         if (phase or "") == PHASE_NEED_IDENTITY:
             return None
         if not phone_verified:
+            # Demanding verification while reporting phase="listening" told the FE that
+            # nothing was needed: ui_intent came out `chat`, so the email step never
+            # opened and the ask was a dead end (QA 2026-08-28, tapped from the fellows
+            # card). PHASE_GATE_VERIFY is what maps to collect_email — every other
+            # verify gate sets it; this one was stamping the routing stub alone.
+            ctx = _routing_ctx(
+                ctx_base,
+                phase=PHASE_GATE_VERIFY,
+                active_intent="discovery.find_by_attrs",
+            )
+            ctx["requires_phone_verification"] = True
             return (
                 "Verify your email first — then I can search neighbors by those traits.",
-                _routing_ctx(
-                    ctx_base,
-                    phase=phase or "listening",
-                    active_intent="discovery.find_by_attrs",
-                ),
-                _discovery_routing_stub(phase or "listening", "find_by_attrs_need_verify"),
+                ctx,
+                _discovery_routing_stub(PHASE_GATE_VERIFY, "find_by_attrs_need_verify"),
                 [],
             )
         filter_text = normalize_attr_filter_text(msg, slots)

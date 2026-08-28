@@ -78,10 +78,25 @@ from app.pass_along import looks_like_pass_along_entry
 from app.tip_share import looks_like_tip_share_entry
 from app.models import (
     ActivityPreviewRow,
+    AskDraftChip,
+    AskDraftPayload,
     AuthActionPayload,
     BlockLogActionRequest,
     BlockLogEntryRow,
     BlockLogListResponse,
+    CommunitiesCardPayload,
+    CommunityActivityRow,
+    CommunityCardRow,
+    CommunityDiscoveryResponse,
+    CommunityDiscoveryRow,
+    CommunityEventRow,
+    CommunityFeatureRow,
+    CommunityJoinResponse,
+    CommunityMeetsResponse,
+    CommunityMemberPreviewRow,
+    CommunityMemberRow,
+    CommunityMembersResponse,
+    CommunityProfileResponse,
     CompleteSessionRequest,
     CompleteSessionResponse,
     CreateSessionRequest,
@@ -92,56 +107,42 @@ from app.models import (
     EventDecisionHookRequest,
     EventDraft,
     EventJoinHookRequest,
-    NudgeHookRequest,
     EventSetupRequest,
     EventSkipRequest,
     EventVenueRequest,
+    ExtractedClaim,
+    FellowsResponse,
+    GroundingCardOption,
+    GroundingCardPayload,
+    HighlightSpan,
+    HostingDraftPayload,
+    IdentityClaimRow,
+    IdentityProfilePayload,
+    IntroProposalPayload,
     ItemDraft,
+    JointMomentCandidate,
+    JointMomentPayload,
+    LanaTurnUi,
     LookDraft,
+    NudgeHookRequest,
+    PeerMatchRow,
+    PendingIntroRow,
     PlaceResult,
     PlaceSearchRequest,
     PlaceSearchResponse,
     ProfilePhotoUploadResponse,
     ReverseGeocodeRequest,
-    SignalPhotoUploadResponse,
-    TipDraft,
-    AskDraftChip,
-    AskDraftPayload,
-    CommunitiesCardPayload,
-    CommunityActivityRow,
-    CommunityCardRow,
-    CommunityDiscoveryResponse,
-    CommunityDiscoveryRow,
-    CommunityEventRow,
-    CommunityMeetsResponse,
-    CommunityJoinResponse,
-    CommunityFeatureRow,
-    CommunityMemberPreviewRow,
-    CommunityMemberRow,
-    CommunityMembersResponse,
-    CommunityProfileResponse,
-    ExtractedClaim,
-    GroundingCardOption,
-    GroundingCardPayload,
-    HighlightSpan,
-    JointMomentCandidate,
-    JointMomentPayload,
-    IdentityClaimRow,
-    IdentityProfilePayload,
-    IntroProposalPayload,
-    PendingIntroRow,
-    SignalSavedPayload,
-    HostingDraftPayload,
-    TipDraftPayload,
-    UiActionRow,
-    LanaTurnUi,
-    PeerMatchRow,
     SendMessageRequest,
     SendMessageResponse,
-    SharedCircleRow,
     SessionDetailResponse,
+    SharedCircleRow,
+    SignalPhotoUploadResponse,
+    SignalSavedPayload,
+    TipDraft,
+    TipDraftPayload,
     TurnDebug,
     TurnRouting,
+    UiActionRow,
 )
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
 from app.orchestrator.llm import (
@@ -3324,6 +3325,50 @@ class CommunityJoinBody(_BaseModel):
 class CommunityMembershipBody(_BaseModel):
     affiliation_id: str
     membership: str  # 'member' | 'curious'
+
+
+class FellowsBody(_BaseModel):
+    limit: int = 12
+
+
+@app.post("/lana/fellows", response_model=FellowsResponse)
+def post_fellows(
+    body: FellowsBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """The caller's matched fellows (C-FEL-LOOK-FELLOWS / C-FEL-FELLOWS-ALL).
+
+    Deliberately the SAME fetch + shaper the conversation uses, not a second matcher:
+    _fetch_verified_peer_matches blends the onion arm (shared place, exact concepts,
+    public+mutual ranking) over the vector arm, and peers_to_match_rows enforces the
+    verify gate and computes the badge. The screen previously called find_my_fellows
+    directly, which had the vector arm alone — two lists for one user.
+
+    `home_block_missing` is kept as a 400 (not an empty list): the UI has a real card
+    for it that asks for their area, and an empty list would read as "no neighbours".
+    """
+    auth = verify_auth(authorization)
+    if not auth.home_block_id:
+        raise HTTPException(status_code=400, detail="home_block_missing")
+    from app.discovery_route import _fetch_verified_peer_matches
+    from app.layer1_handlers import peers_to_match_rows
+
+    limit = max(1, min(int((body.limit if body else 12) or 12), 40))
+    peers = _fetch_verified_peer_matches(
+        _bearer_token(authorization),
+        user_id=auth.user_id,
+        block_id=auth.home_block_id,
+        limit=limit,
+    )
+    return FellowsResponse(
+        fellows=[
+            PeerMatchRow(**row)
+            for row in peers_to_match_rows(
+                peers, phone_verified=auth.phone_verified, max_rows=limit
+            )
+        ],
+        requires_phone_verification=not auth.phone_verified,
+    )
 
 
 @app.post("/lana/circles/discover", response_model=CommunityDiscoveryResponse)
