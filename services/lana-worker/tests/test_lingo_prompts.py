@@ -77,6 +77,31 @@ class TestGuardCoversEveryHardRule(unittest.TestCase):
             self.assertFalse(find_violations(cleaned), cleaned)
         self.assertIn("community", naive_clean("I can add you to the group."))
 
+    def test_rule_six_bans_points_and_rank_in_the_score_frame(self) -> None:
+        """Rule 6 names "points" and "rank"; the guard enforced only leaderboard/
+        streak/level up, so asked "how many points do I have?" Lana replied "No
+        points here — you're not being scored", speaking the frame she was
+        denying (evals, 2026-08-25). Both words are ordinary English outside that
+        frame, so the rule is scoped to the frame and the negatives matter as
+        much as the positives."""
+        from app.lingo_guard import find_violations, naive_clean
+
+        for text in (
+            "No points here, you're not being scored.",
+            "You have 12 points so far.",
+            "Want to see your rank?",
+            "Nobody is ranking you against your neighbors.",
+        ):
+            self.assertTrue(find_violations(text), text)
+            self.assertFalse(find_violations(naive_clean(text)), naive_clean(text))
+
+        for legal in (
+            "That points to the same spot you mentioned.",
+            "The highest-ranked taco place near you is Rosa's.",
+            "Meet them at the point by the lake.",
+        ):
+            self.assertFalse(find_violations(legal), legal)
+
     def test_the_banned_words_in_the_constitution_are_all_enforced(self) -> None:
         # Every word rule 3 names, checked against the pattern rather than trusting it.
         from app.lingo_guard import find_violations

@@ -34,11 +34,27 @@ class TestIntroProposalHelpers(unittest.TestCase):
         self.assertFalse(accepts_intro_offer("maybe later"))
 
     def test_build_match_reason(self) -> None:
+        # Two-sided (has_exact_concept_match) → "You both: {label}".
+        reason = build_match_reason(
+            identity_snippet="morning runs",
+            peer={
+                "matching_peer_label": "Morning runners",
+                "matching_my_label": "morning runner",
+                "has_exact_concept_match": True,
+            },
+        )
+        self.assertIn("you both:", reason.lower())
+        self.assertIn("morning runners", reason.lower())
+
+    def test_build_match_reason_one_sided_goes_neutral(self) -> None:
+        # No matching_my_label and no exact concept match → neutral line, no
+        # "You both" assertion of a one-sided trait.
         reason = build_match_reason(
             identity_snippet="morning runs",
             peer={"matching_peer_label": "Morning runners"},
         )
-        self.assertIn("morning runs", reason.lower())
+        self.assertNotIn("you both", reason.lower())
+        self.assertIn("click", reason.lower())
 
     def test_format_intro_offer_turn_single_match(self) -> None:
         text = format_intro_offer_turn(
@@ -52,18 +68,28 @@ class TestIntroProposalHelpers(unittest.TestCase):
     def test_format_intro_offer_turn_does_not_double_echo_label(self) -> None:
         # Regression: the label was appended as its own sentence AND embedded in the
         # reason, producing "Married 10 years. You both fit married 10 years ...".
-        peer = {"nickname": "Loka", "matching_peer_label": "Married 10 years"}
+        # Under two-outcomes rule the label only appears via "You both: X" on a
+        # genuinely two-sided pair.
+        peer = {
+            "nickname": "Loka",
+            "matching_peer_label": "Married 10 years",
+            "matching_my_label": "married 10 years",
+            "has_exact_concept_match": True,
+        }
         reason = build_match_reason(identity_snippet="married 10 years", peer=peer)
         text = format_intro_offer_turn(peer, reason)
         self.assertEqual(text.lower().count("married 10 years"), 1)
 
-    def test_build_match_reason_uses_first_clause_only(self) -> None:
+    def test_build_match_reason_ignores_snippet_when_not_two_sided(self) -> None:
+        # Snippet-echo phrasing is gone — a one-sided pair is always neutral,
+        # regardless of how many semicolon-joined clauses the snippet carries.
         reason = build_match_reason(
             identity_snippet="morning runs; married; two kids",
             peer={"matching_peer_label": "Morning runners"},
         )
-        self.assertIn("morning runs", reason.lower())
+        self.assertNotIn("morning runs", reason.lower())
         self.assertNotIn("two kids", reason.lower())
+        self.assertIn("click", reason.lower())
 
     def test_build_match_reason_never_says_matched_you_with(self) -> None:
         # Lingo rule 4 — persisted to intros.match_reason, which the reply guard

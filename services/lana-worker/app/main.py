@@ -78,10 +78,25 @@ from app.pass_along import looks_like_pass_along_entry
 from app.tip_share import looks_like_tip_share_entry
 from app.models import (
     ActivityPreviewRow,
+    AskDraftChip,
+    AskDraftPayload,
     AuthActionPayload,
     BlockLogActionRequest,
     BlockLogEntryRow,
     BlockLogListResponse,
+    CommunitiesCardPayload,
+    CommunityActivityRow,
+    CommunityCardRow,
+    CommunityDiscoveryResponse,
+    CommunityDiscoveryRow,
+    CommunityEventRow,
+    CommunityFeatureRow,
+    CommunityJoinResponse,
+    CommunityMeetsResponse,
+    CommunityMemberPreviewRow,
+    CommunityMemberRow,
+    CommunityMembersResponse,
+    CommunityProfileResponse,
     CompleteSessionRequest,
     CompleteSessionResponse,
     CreateSessionRequest,
@@ -92,55 +107,42 @@ from app.models import (
     EventDecisionHookRequest,
     EventDraft,
     EventJoinHookRequest,
-    NudgeHookRequest,
     EventSetupRequest,
     EventSkipRequest,
     EventVenueRequest,
+    ExtractedClaim,
+    FellowsResponse,
+    GroundingCardOption,
+    GroundingCardPayload,
+    HighlightSpan,
+    HostingDraftPayload,
+    IdentityClaimRow,
+    IdentityProfilePayload,
+    IntroProposalPayload,
     ItemDraft,
+    JointMomentCandidate,
+    JointMomentPayload,
+    LanaTurnUi,
     LookDraft,
+    NudgeHookRequest,
+    PeerMatchRow,
+    PendingIntroRow,
     PlaceResult,
     PlaceSearchRequest,
     PlaceSearchResponse,
     ProfilePhotoUploadResponse,
     ReverseGeocodeRequest,
-    SignalPhotoUploadResponse,
-    TipDraft,
-    AskDraftChip,
-    AskDraftPayload,
-    CommunitiesCardPayload,
-    CommunityActivityRow,
-    CommunityCardRow,
-    CommunityDiscoveryResponse,
-    CommunityDiscoveryRow,
-    CommunityEventRow,
-    CommunityJoinResponse,
-    CommunityFeatureRow,
-    CommunityMemberPreviewRow,
-    CommunityMemberRow,
-    CommunityMembersResponse,
-    CommunityProfileResponse,
-    ExtractedClaim,
-    GroundingCardOption,
-    GroundingCardPayload,
-    HighlightSpan,
-    JointMomentCandidate,
-    JointMomentPayload,
-    IdentityClaimRow,
-    IdentityProfilePayload,
-    IntroProposalPayload,
-    PendingIntroRow,
-    SignalSavedPayload,
-    HostingDraftPayload,
-    TipDraftPayload,
-    UiActionRow,
-    LanaTurnUi,
-    PeerMatchRow,
     SendMessageRequest,
     SendMessageResponse,
-    SharedCircleRow,
     SessionDetailResponse,
+    SharedCircleRow,
+    SignalPhotoUploadResponse,
+    SignalSavedPayload,
+    TipDraft,
+    TipDraftPayload,
     TurnDebug,
     TurnRouting,
+    UiActionRow,
 )
 from app.orchestrator import orchestrator_enabled, run_opening, run_turn
 from app.orchestrator.llm import (
@@ -880,6 +882,20 @@ def _communities_from_ctx(ctx: dict[str, Any]) -> CommunitiesCardPayload | None:
                 emoji=str(row.get("emoji") or "") or None,
                 member_count=int(row.get("member_count") or 0),
                 meets_this_week=int(row.get("meets_this_week") or 0),
+                meets=[
+                    CommunityEventRow(
+                        event_id=str(m.get("event_id") or ""),
+                        title=str(m.get("title") or ""),
+                        starts_at=str(m.get("starts_at") or "") or None,
+                        has_time=m.get("has_time") is not False,
+                        venue_name=str(m.get("venue_name") or "") or None,
+                        cover_emoji=str(m.get("cover_emoji") or "") or None,
+                        going_count=int(m.get("going_count") or 0),
+                    )
+                    for m in (row.get("meets") if isinstance(row.get("meets"), list) else [])
+                    if isinstance(m, dict) and str(m.get("event_id") or "").strip()
+                ],
+                upcoming_count=int(row.get("upcoming_count") or 0),
                 active=bool(row.get("active")),
                 status_line=str(row.get("status_line") or "") or None,
             )
@@ -3049,6 +3065,93 @@ class CircleGroundBody(_BaseModel):
     google_place_id: str
 
 
+class TipFeedBody(_BaseModel):
+    # recent | circles | nearest. Unknown values fall back to recent rather than erroring:
+    # a tab a client shipped before we did is not a reason to show them nothing.
+    tab: str = "recent"
+    limit: int = 20
+
+
+class TipFeedbackBody(_BaseModel):
+    signal_id: str
+    # Desired state, not a toggle — a double tap on a flaky connection must not invert
+    # what the user chose (see 20261106120000).
+    on: bool = True
+
+
+@app.post("/lana/tips/recent")
+def post_tips_recent(
+    body: TipFeedBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """C-FIND-RECENT: recent recommendations near the caller.
+
+    `tab` picks the view — recent (newest first), circles (only people she shares a place
+    with, each row carrying that shared circle) or nearest. Same visibility rules as the
+    ask path: a tip hidden from a search stays hidden here.
+    """
+    auth = verify_auth(authorization)
+    if auth.is_anonymous:
+        # Reading what neighbours recommended is neighbours' data — same bar as the tile.
+        return {"tab": (body.tab if body else "recent"), "tips": []}
+    from app.tip_feed import recent_tips
+
+    tab = (body.tab if body else "recent") or "recent"
+    return {
+        "tab": tab,
+        "tips": recent_tips(
+            _bearer_token(authorization), tab=tab, limit=(body.limit if body else 20)
+        ),
+    }
+
+
+@app.post("/lana/tips/vouch")
+def post_tips_vouch(
+    body: TipFeedbackBody,
+    authorization: str | None = Header(default=None),
+):
+    """✓ I vouch — add the caller's own voice to someone else's recommendation.
+
+    Refused on your own tip (409): the tip already IS your voice, and counting it twice
+    would inflate the one number a stranger reads as social proof.
+    """
+    verify_auth(authorization)
+    from app.tip_feed import set_vouch
+
+    try:
+        count = set_vouch(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
+    except HTTPException as exc:
+        raise _tip_feedback_error(exc) from None
+    return {"signal_id": body.signal_id, "vouched": body.on, "vouch_count": count}
+
+
+@app.post("/lana/tips/helpful")
+def post_tips_helpful(
+    body: TipFeedbackBody,
+    authorization: str | None = Header(default=None),
+):
+    """👍 Helpful — this answer helped the reader. Says nothing about the place, so it is
+    deliberately a separate counter from the vouch."""
+    verify_auth(authorization)
+    from app.tip_feed import set_helpful
+
+    try:
+        count = set_helpful(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
+    except HTTPException as exc:
+        raise _tip_feedback_error(exc) from None
+    return {"signal_id": body.signal_id, "helpful": body.on, "helpful_count": count}
+
+
+def _tip_feedback_error(exc: HTTPException) -> HTTPException:
+    """Postgres' own refusals, as statuses a client can act on rather than a bare 500."""
+    detail = str(getattr(exc, "detail", "") or "")
+    if "cannot_vouch_own_tip" in detail:
+        return HTTPException(status_code=409, detail="cannot_vouch_own_tip")
+    if "tip_not_found" in detail:
+        return HTTPException(status_code=404, detail="tip_not_found")
+    return exc
+
+
 @app.post("/lana/circles/list")
 def post_circles_list(
     body: CirclesListBody | None = None,
@@ -3184,6 +3287,12 @@ class CommunityProfileBody(_BaseModel):
     place_id: str | None = None
 
 
+class CommunityMeetsBody(_BaseModel):
+    # Meets read per community. A cap on the screen, never on the truth —
+    # `upcoming_count` counts what is actually there.
+    limit: int = 50
+
+
 class CommunityMembersBody(_BaseModel):
     affiliation_id: str | None = None
     place_id: str | None = None
@@ -3216,6 +3325,67 @@ class CommunityJoinBody(_BaseModel):
 class CommunityMembershipBody(_BaseModel):
     affiliation_id: str
     membership: str  # 'member' | 'curious'
+
+
+class FellowsBody(_BaseModel):
+    limit: int = 12
+
+
+# exclude_none: PeerMatchRow is the union of every peer-row shape (chat card, rec
+# cascade, community roster, radar), so a fellows row leaves most of it unset —
+# match_stars/match_band (this endpoint never computes a cosine band), the tip_* and
+# group_* recommendation fields, distance_text, membership. Sending ~12 explicit nulls
+# per row taught the client nothing. Dropping them on the wire keeps ONE row type and
+# one renderer shared with chat, instead of forking a second shape that can drift.
+#
+# matching_peer_concept is excluded outright rather than by null: nothing on any client
+# renders it (the only hits are generated RPC types), and a concept slug is the one field
+# redaction never covers — label/quote/synonyms/details are scrubbed, the slug keeps
+# whatever it was minted from. It stays in the shaped row because intro_proposal and
+# claim_search read it server-side out of stored session context; it just stops shipping.
+@app.post(
+    "/lana/fellows",
+    response_model=FellowsResponse,
+    response_model_exclude_none=True,
+    response_model_exclude={"fellows": {"__all__": {"matching_peer_concept"}}},
+)
+def post_fellows(
+    body: FellowsBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """The caller's matched fellows (C-FEL-LOOK-FELLOWS / C-FEL-FELLOWS-ALL).
+
+    Deliberately the SAME fetch + shaper the conversation uses, not a second matcher:
+    _fetch_verified_peer_matches blends the onion arm (shared place, exact concepts,
+    public+mutual ranking) over the vector arm, and peers_to_match_rows enforces the
+    verify gate and computes the badge. The screen previously called find_my_fellows
+    directly, which had the vector arm alone — two lists for one user.
+
+    `home_block_missing` is kept as a 400 (not an empty list): the UI has a real card
+    for it that asks for their area, and an empty list would read as "no neighbours".
+    """
+    auth = verify_auth(authorization)
+    if not auth.home_block_id:
+        raise HTTPException(status_code=400, detail="home_block_missing")
+    from app.discovery_route import _fetch_verified_peer_matches
+    from app.layer1_handlers import peers_to_match_rows
+
+    limit = max(1, min(int((body.limit if body else 12) or 12), 40))
+    peers = _fetch_verified_peer_matches(
+        _bearer_token(authorization),
+        user_id=auth.user_id,
+        block_id=auth.home_block_id,
+        limit=limit,
+    )
+    return FellowsResponse(
+        fellows=[
+            PeerMatchRow(**row)
+            for row in peers_to_match_rows(
+                peers, phone_verified=auth.phone_verified, max_rows=limit
+            )
+        ],
+        requires_phone_verification=not auth.phone_verified,
+    )
 
 
 @app.post("/lana/circles/discover", response_model=CommunityDiscoveryResponse)
@@ -3373,6 +3543,35 @@ def post_profile_portrait(authorization: str | None = Header(default=None)):
     return {"portrait": dashboard.get("mapped_summary") or None}
 
 
+@app.post("/lana/circles/meets", response_model=CommunityMeetsResponse)
+def post_circles_meets(
+    body: CommunityMeetsBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Every meet across the caller's communities (C-CIRCLE-COMMS-ALL).
+
+    One group per community that has something on, each with ALL its upcoming meets
+    soonest first — the frame is a week being scanned. Read-only and callable outside a
+    turn, which is the point: the look card's `meets` are turn-scoped and capped at two
+    per place, so this screen could not be filled from them.
+
+    `going_preview` names people, so it follows the same §F bar as every roster here —
+    an unverified caller gets real counts and no faces. Anonymous callers get nothing:
+    who is going where is neighbours' data.
+    """
+    auth = verify_auth(authorization)
+    if auth.is_anonymous:
+        return CommunityMeetsResponse()
+    from app.community_surface import community_meets
+
+    data = community_meets(
+        auth.user_id,
+        limit=int((body.limit if body else 50) or 50),
+        phone_verified=auth.phone_verified,
+    )
+    return CommunityMeetsResponse(**data)
+
+
 @app.post("/lana/circles/profile", response_model=CommunityProfileResponse)
 def post_circles_profile(
     body: CommunityProfileBody,
@@ -3452,6 +3651,7 @@ def post_circles_profile(
                 starts_at=e.get("starts_at"),
                 has_time=e.get("has_time") is not False,
                 venue_name=e.get("venue_name"),
+                description=e.get("description"),
                 going_count=int(e.get("going_count") or 0),
                 cover_emoji=e.get("cover_emoji"),
             )

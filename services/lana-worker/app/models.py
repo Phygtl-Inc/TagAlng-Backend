@@ -266,6 +266,61 @@ class GroundingCardPayload(BaseModel):
     unmatched_name: str | None = None
 
 
+class CommunityEventRow(BaseModel):
+    event_id: str
+    title: str
+    starts_at: str | None = None
+    # False = the meet has no real clock time; render the date alone (#56).
+    has_time: bool = True
+    venue_name: str | None = None
+    # What the meet is, in the host's words — the public place page shows it under the title.
+    description: str | None = None
+    # The real going roster — the only thing "popular" is ordered on.
+    going_count: int = 0
+    # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
+    # own card. None falls back to the FE's calendar.
+    cover_emoji: str | None = None
+
+
+class MeetGoingPreviewRow(BaseModel):
+    """One face on a meet's avatar stack. Stranger-tier, the same two fields the member
+    cards show — and absent entirely for an unverified caller (§F)."""
+
+    user_id: str
+    nickname: str | None = None
+    profile_photo_url: str | None = None
+
+
+class CommunityMeetRow(CommunityEventRow):
+    """A meet on the all-meets screen: the card row plus the two things that screen
+    renders and no other surface needs — the host's own copy, and who is going."""
+
+    # None = the host never wrote one; never synthesised ([[event-description-gap]]).
+    description: str | None = None
+    going_preview: list[MeetGoingPreviewRow] = Field(default_factory=list)
+
+
+class CommunityMeetGroup(BaseModel):
+    """One community's collapsible group on C-CIRCLE-COMMS-ALL."""
+
+    affiliation_id: str
+    place_id: str | None = None
+    place_name: str | None = None
+    circle_type: str | None = None
+    emoji: str | None = None
+    upcoming_count: int = 0
+    meets: list[CommunityMeetRow] = Field(default_factory=list)
+
+
+class CommunityMeetsResponse(BaseModel):
+    """Every meet across the caller's communities, soonest first inside each group and
+    between them. Groups with nothing upcoming are omitted; `total` is how many
+    communities she holds, so "3 of your 7 have something on" is sayable."""
+
+    communities: list[CommunityMeetGroup] = Field(default_factory=list)
+    total: int = 0
+
+
 class CommunityCardRow(BaseModel):
     """One of the caller's communities on the look screen (C-CIRCLE-LOOK-COMMS).
 
@@ -287,6 +342,11 @@ class CommunityCardRow(BaseModel):
     emoji: str | None = None
     member_count: int = 0
     meets_this_week: int = 0
+    # What's actually on at this place, soonest first — each row's event_id opens that
+    # meet. Empty when nothing is coming up; the row is still listed.
+    meets: list[CommunityEventRow] = Field(default_factory=list)
+    # Everything upcoming there, so a badge over `meets` (a slice of two) is truthful.
+    upcoming_count: int = 0
     active: bool = False
     status_line: str | None = None
 
@@ -322,6 +382,25 @@ class CommunityDiscoveryRow(BaseModel):
     distance_text: str | None = None
     is_member: bool = False
     status_line: str | None = None
+
+
+class FellowsResponse(BaseModel):
+    """The caller's matched fellows, ranked and badged exactly as Lana's chat cards.
+
+    Same rows, same shaper (peers_to_match_rows), so the fellows screen and the
+    conversation can never disagree about who matches or how strongly. Replaces the
+    direct find_my_fellows RPC, which read the vector arm alone: it saw neither the
+    onion (shared-place / exact-concept) matches nor the public+mutual disclosure split,
+    so a faith or sobriety overlap counted in chat and was invisible on the screen.
+    """
+
+    fellows: list[PeerMatchRow] = Field(default_factory=list)
+    # Everyone arrives with a session — the PWA signs guests in anonymously on first
+    # visit — so "signed out" is not the state that gates this surface; VERIFICATION is.
+    # The shaper nulls nickname/peer_user_id for an unverified caller, so the rows are
+    # real matches with their identities withheld. Named the same as the members
+    # endpoint's flag so both gated surfaces read alike.
+    requires_phone_verification: bool = False
 
 
 class CommunityDiscoveryResponse(BaseModel):
@@ -375,20 +454,6 @@ class CommunityActivityRow(BaseModel):
     label: str
     member_count: int = 0
     mine: bool = False
-
-
-class CommunityEventRow(BaseModel):
-    event_id: str
-    title: str
-    starts_at: str | None = None
-    # False = the meet has no real clock time; render the date alone (#56).
-    has_time: bool = True
-    venue_name: str | None = None
-    # The real going roster — the only thing "popular" is ordered on.
-    going_count: int = 0
-    # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
-    # own card. None falls back to the FE's calendar.
-    cover_emoji: str | None = None
 
 
 class CommunityMemberPreviewRow(BaseModel):

@@ -2,9 +2,14 @@
 
 Three surfaces, one module, all read-only:
 
-  * `communities_card`   — the "YOUR COMMUNITIES" card that rides along with the
-    looking-open turn: the caller's top three places with a real status line, plus
-    how many more there are ("View 4 more" → the Radar Communities tab).
+  * `communities_card`   — the "MEET IN YOUR COMMUNITIES" card that rides along with
+    the looking-open turn: the caller's top three places, each with the next couple of
+    meets happening there (tapping one opens that meet), a real status line, and how
+    many more places there are ("View 4 more" → the Radar Communities tab).
+  * `community_meets`    — the all-meets screen (C-CIRCLE-COMMS-ALL): every place she
+    belongs to that has something on, each with all its upcoming meets soonest first,
+    their descriptions and who is going. Read-only, and callable outside a turn — the
+    card above is turn-scoped and capped, so it could never fill this screen.
   * `community_profile`  — one place: its neighbours count, the features people
     actually volunteered about it, what's coming up there, and the two CTAs
     (create a meet there / invite people).
@@ -50,6 +55,18 @@ logger = logging.getLogger(__name__)
 
 # The look card shows three; everything past them is "View N more".
 CARD_TOP_N = 3
+# Meets listed under each community on that card. It is a chooser, not the meet list —
+# the rest are behind "View more".
+CARD_MEETS_PER_COMMUNITY = 2
+# The all-meets screen (C-CIRCLE-COMMS-ALL): meets read per place, and faces on one
+# meet's avatar stack. Both are caps on a screen, not on the truth — `upcoming_count`
+# and `going_count` stay whole either way.
+MEETS_PER_PLACE = 50
+_GOING_PREVIEW = 5
+# How many of the caller's communities we read meets for before ranking them. The card
+# is about what's ON, so a place with a meet must not be ranked out by a bigger place
+# with nothing coming up — but this stays bounded, one read per place.
+_CARD_MEET_SCAN = 8
 # Members per page on the people panel.
 MEMBERS_PAGE = 20
 # How wide we ask the shared-concept RPC to look. It ranks by shared count and
@@ -372,6 +389,10 @@ def member_count(place_id: str) -> int:
 
 
 def _going_counts(event_ids: list[str]) -> dict[str, int]:
+    return {eid: len(uids) for eid, uids in _going_rosters(event_ids).items()}
+
+
+def _going_rosters(event_ids: list[str]) -> dict[str, list[str]]:
     """Real going roster per event (same predicate the cancel fan-out uses)."""
     if not event_ids:
         return {}
@@ -379,7 +400,7 @@ def _going_counts(event_ids: list[str]) -> dict[str, int]:
         res = (
             service_client()
             .table("event_requests")
-            .select("event_id")
+            .select("event_id, user_id")
             .in_("event_id", event_ids)
             .in_("status", ["approved", "attended"])
             .eq("rsvp_status", "going")
@@ -390,15 +411,16 @@ def _going_counts(event_ids: list[str]) -> dict[str, int]:
     except Exception:
         logger.exception("community_going_counts_failed n=%d", len(event_ids))
         return {}
-    counts: dict[str, int] = {}
+    out: dict[str, list[str]] = {}
     for r in rows:
         eid = str((r or {}).get("event_id") or "")
-        if eid:
-            counts[eid] = counts.get(eid, 0) + 1
-    return counts
+        uid = str((r or {}).get("user_id") or "")
+        if eid and uid:
+            out.setdefault(eid, []).append(uid)
+    return out
 
 
-def _events_at_place(place_id: str, *, limit: int, within_days: int | None = None) -> list[dict]:
+def _events_at_place(place_id: str, *, limit: int) -> list[dict]:
     # Held here OR created for this community (setup card 2/5) — a school's picnic in the
     # park belongs on the school's screen even though the venue is the park. or_ takes a
     # formatted string, so the id must be a real uuid before it goes in: a caller-supplied
@@ -413,7 +435,9 @@ def _events_at_place(place_id: str, *, limit: int, within_days: int | None = Non
         q = (
             service_client()
             .table("events")
-            .select("id, title, starts_at, has_time, venue_name, host_id, cover_emoji")
+            .select(
+                "id, title, description, starts_at, has_time, venue_name, host_id, cover_emoji"
+            )
         )
         q = (
             q.or_(f"place_ref.eq.{place_id},circle_place_ref.eq.{place_id}")
@@ -421,19 +445,12 @@ def _events_at_place(place_id: str, *, limit: int, within_days: int | None = Non
             else q.eq("place_ref", place_id)
         )
         q = q.eq("status", "open").gte("starts_at", _now_iso())
-        if within_days:
-            until = datetime.now(timezone.utc) + timedelta(days=within_days)
-            q = q.lte("starts_at", until.strftime("%Y-%m-%dT%H:%M:%S"))
         res = q.order("starts_at").limit(max(limit, 1)).execute()
         rows = res.data if isinstance(res.data, list) else []
     except Exception:
         logger.exception("community_events_read_failed place=%s", place_id)
         return []
     return [r for r in rows if isinstance(r, dict)]
-
-
-def meets_this_week(place_id: str) -> int:
-    return len(_events_at_place(place_id, limit=20, within_days=7))
 
 
 def _this_week(rows: list[dict[str, Any]]) -> int:
@@ -454,6 +471,22 @@ def _this_week(rows: list[dict[str, Any]]) -> int:
     return n
 
 
+def _card_meet(r: dict[str, Any], *, going: int = 0) -> dict[str, Any]:
+    """One meet as a card row: enough to render it and to open it.
+
+    `going` is the real roster count, passed in because it is one read for every meet
+    on the card rather than one per place."""
+    return {
+        "event_id": str(r.get("id") or ""),
+        "title": str(r.get("title") or "").strip(),
+        "starts_at": str(r.get("starts_at") or "") or None,
+        "has_time": r.get("has_time") is not False,
+        "venue_name": str(r.get("venue_name") or "").strip() or None,
+        "cover_emoji": str(r.get("cover_emoji") or "").strip() or None,
+        "going_count": int(going),
+    }
+
+
 def _event_rows_for_profile(place_id: str) -> tuple[list[dict[str, Any]], int]:
     """Upcoming meets at the place, the best-attended first, plus how many are inside
     the next 7 days. "Popular" is a real going count — never a guess, and never an
@@ -468,6 +501,9 @@ def _event_rows_for_profile(place_id: str) -> tuple[list[dict[str, Any]], int]:
             "starts_at": str(r.get("starts_at") or "") or None,
             "has_time": r.get("has_time") is not False,
             "venue_name": str(r.get("venue_name") or "").strip() or None,
+            # Already selected by _events_at_place and dropped on the floor here: the public
+            # place page has room to say what a meet actually is.
+            "description": str(r.get("description") or "").strip() or None,
             "going_count": int(counts.get(str(r.get("id") or ""), 0)),
             # The meet's own cover glyph, the same one its card and the Radar show. The
             # FE has rendered this field all along and fell back to a calendar because
@@ -862,11 +898,13 @@ def _status_line(count: int, meets: int, *, is_member: bool = True) -> str:
 
 
 def communities_card(user_id: str, *, top: int = CARD_TOP_N) -> dict[str, Any] | None:
-    """The "YOUR COMMUNITIES" card for the looking-open turn.
+    """The "MEET IN YOUR COMMUNITIES" card for the looking-open turn.
 
-    Ranked by what's alive: the places with people, then with meets this week,
-    then the newest. None when the user has no community yet — the card is absent
-    from the turn rather than empty, so the FE renders nothing.
+    Each row is a place plus the next couple of meets actually happening there, so
+    *Find a meet* answers with meets instead of a list of places to go dig through.
+    Ranked by what's on: places with something upcoming first, then by people, then
+    the newest. None when the user has no community yet — the card is absent from the
+    turn rather than empty, so the FE renders nothing.
     """
     if not user_id:
         return None
@@ -883,17 +921,46 @@ def communities_card(user_id: str, *, top: int = CARD_TOP_N) -> dict[str, Any] |
     # list_my_circles is already newest-first; a stable sort on people-count keeps the
     # liveliest places on top and the newest of an equal-sized pair above the older one.
     grounded.sort(key=lambda c: -int(c.get("member_count") or 0))
-    shown = grounded[: max(top, 1)]
+    scanned = grounded[:_CARD_MEET_SCAN]
+    place_ids = [str(c.get("place_id") or c.get("place_ref") or "") for c in scanned]
+    # One read per place, at once rather than queued — see _gather's note on round trips.
+    reads = list(
+        _READ_POOL.map(lambda pid: _events_at_place(pid, limit=20) if pid else [], place_ids)
+    )
+    # A meet nobody named can't be a row, so it doesn't make a place look busy either.
+    titled = [[r for r in rows if str(r.get("title") or "").strip()] for rows in reads]
+    # "Meet in your communities": a place with something coming up outranks a bigger
+    # place with nothing on. sorted() is stable, so ties keep the liveliest-first order.
+    order = sorted(range(len(scanned)), key=lambda i: 0 if titled[i] else 1)[: max(top, 1)]
+    # One read for the going counts of every meet the card will show — a real "6 going"
+    # under a row, where the field used to ship a hard 0 (#97a).
+    counts = _going_counts(
+        [
+            str(r.get("id") or "")
+            for i in order
+            for r in titled[i][:CARD_MEETS_PER_COMMUNITY]
+            if r.get("id")
+        ]
+    )
     items: list[dict[str, Any]] = []
-    for c in shown:
-        place_id = c.get("place_id") or c.get("place_ref")
-        # Only the rows actually shown pay for a meets-this-week count.
-        meets = meets_this_week(str(place_id)) if place_id else 0
+    for i in order:
+        c, place_id = scanned[i], place_ids[i]
+        upcoming = [
+            _card_meet(r, going=counts.get(str(r.get("id") or ""), 0)) for r in titled[i]
+        ]
+        # The status line counts what is on the calendar, named or not.
+        meets = _this_week(reads[i])
         count = int(c.get("member_count") or 0)
         items.append(
             {
                 "affiliation_id": str(c["id"]),
-                "place_id": str(place_id or "") or None,
+                "place_id": place_id or None,
+                # What's actually on there — each row opens that meet. Soonest first,
+                # the way somebody scans a week, not by popularity.
+                "meets": upcoming[:CARD_MEETS_PER_COMMUNITY],
+                # Everything upcoming, so a badge and a "view more" can be truthful
+                # about what the two rows are a slice of.
+                "upcoming_count": len(upcoming),
                 "place_name": c.get("place_name"),
                 "place_address": c.get("place_address"),
                 "circle_type": c.get("circle_type"),
@@ -912,6 +979,102 @@ def communities_card(user_id: str, *, top: int = CARD_TOP_N) -> dict[str, Any] |
         "items": items,
         "total": total,
         "more_count": max(0, total - len(items)),
+    }
+
+
+def community_meets(
+    user_id: str, *, limit: int = MEETS_PER_PLACE, phone_verified: bool = True
+) -> dict[str, Any]:
+    """Every meet upcoming across the caller's communities (C-CIRCLE-COMMS-ALL).
+
+    One group per place she holds a confirmed, grounded affiliation at, each carrying
+    ALL its upcoming meets soonest first — the frame is a week being scanned, not a
+    popularity ranking, which is why this is not the profile's `upcoming_events` fanned
+    out. Places with nothing coming up are omitted: the screen is about meets, and the
+    place list is already /lana/circles/list. `total` counts her communities, so a
+    client can say "3 of your 7 have something on".
+
+    Read-only and callable outside a turn — the look card is turn-scoped and capped
+    three ways, so it could never be re-read to fill this screen.
+
+    §F, same bar as every other roster here: `going_preview` names people, so an
+    unverified caller gets the counts and no faces (see _member_preview), and mutual
+    blocks are filtered out of the stack.
+    """
+    empty: dict[str, Any] = {"communities": [], "total": 0}
+    if not user_id:
+        return empty
+    from app.circles_flow import list_my_circles
+
+    try:
+        circles = list_my_circles(user_id)
+    except Exception:
+        logger.exception("community_meets_list_failed user=%s", user_id)
+        return empty
+    grounded = [c for c in circles if c.get("place_name") and c.get("id")]
+    if not grounded:
+        return empty
+    cap = max(1, min(int(limit or MEETS_PER_PLACE), 100))
+    place_ids = [str(c.get("place_id") or c.get("place_ref") or "") for c in grounded]
+    reads = list(
+        _READ_POOL.map(lambda pid: _events_at_place(pid, limit=cap) if pid else [], place_ids)
+    )
+    live = [(c, pid, rows) for c, pid, rows in zip(grounded, place_ids, reads) if rows]
+    # Two reads for the whole screen, whatever it holds: everyone going to any of these
+    # meets, then those people. The alternative was N+1 per meet.
+    rosters = _going_rosters([str(r.get("id")) for _, _, rows in live for r in rows if r.get("id")])
+    faces = _going_faces(user_id, rosters, phone_verified=phone_verified)
+    communities: list[dict[str, Any]] = []
+    for c, pid, rows in live:
+        meets = [
+            {
+                **_card_meet(r, going=len(rosters.get(str(r.get("id") or ""), []))),
+                # The meet's own copy. Absent rather than invented when the host never
+                # wrote one ([[event-description-gap]]).
+                "description": str(r.get("description") or "").strip() or None,
+                "going_preview": [
+                    faces[uid]
+                    for uid in rosters.get(str(r.get("id") or ""), [])
+                    if uid in faces
+                ][:_GOING_PREVIEW],
+            }
+            for r in rows
+            if str(r.get("title") or "").strip()
+        ]
+        if not meets:
+            continue
+        communities.append(
+            {
+                "affiliation_id": str(c["id"]),
+                "place_id": pid or None,
+                "place_name": c.get("place_name"),
+                "circle_type": c.get("circle_type"),
+                "emoji": place_relation_emoji(c.get("circle_type"), c.get("emoji")),
+                "upcoming_count": len(meets),
+                "meets": meets,
+            }
+        )
+    # Soonest-first between the groups too — the same week being scanned.
+    communities.sort(key=lambda g: str(g["meets"][0].get("starts_at") or ""))
+    return {"communities": communities, "total": len(grounded)}
+
+
+def _going_faces(
+    user_id: str, rosters: dict[str, list[str]], *, phone_verified: bool
+) -> dict[str, dict[str, Any]]:
+    """Stranger-tier rows for everyone going to any of these meets, by user id."""
+    ids = sorted({uid for uids in rosters.values() for uid in uids})
+    if not ids or not phone_verified:
+        return {}
+    blocked = _blocked_ids(user_id, ids)
+    users = _users_by_id([uid for uid in ids if uid not in blocked])
+    return {
+        uid: {
+            "user_id": uid,
+            "nickname": str(u.get("nickname") or "").strip() or None,
+            "profile_photo_url": str(u.get("profile_photo_url") or "").strip() or None,
+        }
+        for uid, u in users.items()
     }
 
 

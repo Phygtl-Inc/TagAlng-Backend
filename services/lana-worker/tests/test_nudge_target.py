@@ -406,10 +406,17 @@ class TestNudgeReasonNamesTheRealTie(unittest.TestCase):
     def test_without_a_shared_place_nothing_changes(self) -> None:
         from app.intro_proposal import build_match_reason
 
+        # No shared_place_name, no matching_my_label, no has_exact_concept_match —
+        # the pair is not genuinely two-sided, so the reason must not assert a
+        # shared trait. Under the two-outcomes rule this falls to the neutral
+        # line, which is what "names the real tie or nothing" looks like when
+        # there is no real tie to name.
         reason = build_match_reason(
             identity_snippet=None, peer={"matching_peer_label": "runs at dawn"}
         )
-        self.assertEqual(reason, "You both fit runs at dawn.")
+        self.assertNotIn("you both fit", reason.lower())
+        self.assertNotIn("runs at dawn", reason.lower())
+        self.assertIn("click", reason.lower())
 
     def test_the_target_row_carries_the_place_it_shares(self) -> None:
         from app import discovery_route as dr
