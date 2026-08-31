@@ -510,6 +510,50 @@ POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
 })
 
 
+def _tip_share_slots(
+    ctx: dict[str, Any],
+    msg: str,
+    *,
+    history: list[dict[str, Any]] | None,
+    home_block_id: str | None,
+    phone_verified: bool,
+    timer: TurnTimer | None = None,
+) -> dict[str, Any] | None:
+    """The cached classifier read, or None on any failure — a routing helper must never
+    break the turn, and None simply leaves the capture unarmed."""
+    try:
+        from app.discovery_slots import discovery_slots_for_turn
+
+        slots = discovery_slots_for_turn(
+            ctx,
+            msg,
+            routing_phase=str(ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or ctx.get("preview_block_id")),
+            has_identity=bool(ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        return slots if isinstance(slots, dict) else None
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("tip_share_entry_slots_failed")
+        return None
+
+
+def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
+    """Is this turn SHARING a recommendation (the typed capture, C-4-RECO)?
+
+    The same condition discovery_route uses — signal-or-utterance, no confidence bar. Two
+    callers need it and they must agree: the policy gate (to let the turn through) and the
+    capture's own entry (to pick it up). They disagreed once and the turn reached neither.
+    """
+    from app.layer1_intents import enrich_slots, slots_indicate_tip_share_signal, utterance_indicates_tip_share
+
+    if isinstance(slots, dict) and slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg)):
+        return True
+    return utterance_indicates_tip_share(msg)
+
+
 def _turn_is_engine_action(
     ctx: dict[str, Any],
     msg: str,
@@ -521,9 +565,10 @@ def _turn_is_engine_action(
 ) -> bool:
     """Does this turn belong to an engine rather than to decide_turn?
 
-    True for a place/service recommendation ask (looking.tip) and for every intent in
-    POLICY_ENGINE_ONLY_INTENTS. Reads the classifier's verdict, which is cached per user
-    message — the same parse handle_discovery_turn reuses, so this costs no extra model
+    True for a place/service recommendation ask (looking.tip), for SHARING a
+    recommendation (sharing.tip — the typed capture that generates the question set), and
+    for every intent in POLICY_ENGINE_ONLY_INTENTS. Reads the classifier's verdict, which
+    is cached per user message — the same parse handle_discovery_turn reuses, so this costs no extra model
     call. Fails CLOSED (False) so a classifier hiccup leaves the policy gate exactly as
     it was rather than diverting every turn to the engines.
     """
@@ -547,6 +592,18 @@ def _turn_is_engine_action(
         sig = str(slots.get("signal_intent") or "") or SIGNAL_INTENT_BY_LINEAR.get(linear, "")
         if sig == "tip_seek":
             return float(slots.get("confidence") or 0.0) >= 0.5
+        # SHARING a recommendation is the capture engine's turn: it writes a signal row and
+        # drives the generated question set. Without this escape the policy answered the
+        # share conversationally — "Dr. Sarah in Lake Nona is so gentle with my toddler"
+        # came back as "That's a real relief to hear. What do you like most about Dr. Sarah
+        # with your toddler?" (dev 2026-08-31, handler=None ui=chat): a reasonable-sounding
+        # follow-up that captures nothing, generates no set, and never reaches the carousel.
+        #
+        # Matched on the SAME condition the engine itself uses in discovery_route
+        # (signal-or-utterance, no confidence bar) — a stricter bar here would leave the
+        # turn to neither of them, which is the failure this whole helper exists to avoid.
+        if _turn_is_tip_share(slots, msg):
+            return True
         # The engine's OWN bar, not a second one: escaping the policy below the threshold
         # its handler needs would leave the turn to neither of them.
         return linear in POLICY_ENGINE_ONLY_INTENTS and intent_confidence_met(slots, linear)
@@ -2042,13 +2099,34 @@ def run_lana_unified_pipeline(
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
     # Sticky "share a tip" capture — same self-contained pattern as pass-along.
-    if session_ctx.get("tip_share_active"):
+    #
+    # `tip_share_active` alone was the entry, which meant the capture only ever started
+    # from the "A tip to share" CTA or from main.py's entry regex ("recommend", "tip to
+    # share"). Somebody just SAYING the recommendation — "Dr. Sarah in Lake Nona is so
+    # gentle with my toddler" — was classified sharing.tip and then handled by the old
+    # four-phase signal cascade instead, so no question set was ever generated and the
+    # carousel never appeared (dev 2026-08-31). The classifier's own verdict arms it now.
+    if session_ctx.get("tip_share_active") or (
+        str(session_ctx.get("routing_phase") or "") in ("", "listening")
+        and not session_ctx.get("requires_phone_verification")
+        and not session_ctx.get("pending_signup_gate")
+        and _turn_is_tip_share(_tip_share_slots(
+            session_ctx, user_message, history=history,
+            home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+        ), user_message)
+    ):
         from app.discovery_slots import discovery_slots_for_turn
         from app.tip_share import (
             reset_tip_share_state,
             run_tip_share_turn,
             tip_share_should_release,
         )
+
+        if not session_ctx.get("tip_share_active"):
+            session_ctx["tip_share_active"] = True
+            session_ctx["tip_turns"] = 0
+            session_ctx["tip_ready"] = None
+            session_ctx["tip_enrich_count"] = 0
 
         pivot_slots = discovery_slots_for_turn(
             session_ctx,

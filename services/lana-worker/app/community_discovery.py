@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import threading
+from collections import Counter
 from typing import Any
 
 from app.auth import service_client
@@ -253,6 +254,40 @@ def _existing_rows(user_id: str) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)]
 
 
+def _place_noun_emoji(place_id: str) -> dict[str, str]:
+    """The noun/emoji this community already answers to, from its members' rows.
+
+    Only capture (the LLM) ever mints these; a Join tap never did, so joiners
+    inherit rather than guess. Most-used wins so one odd row cannot rename a
+    place. Empty dict on nothing stored or any error — the caller falls back to
+    the type word, exactly as before.
+    """
+    try:
+        res = (
+            service_client()
+            .table("circle_affiliations")
+            .select("noun, emoji")
+            .eq("place_ref", place_id)
+            .is_("dismissed_at", "null")
+            .limit(200)
+            .execute()
+        )
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        logger.exception("community_place_noun_read_failed place=%s", place_id)
+        return {}
+    out: dict[str, str] = {}
+    for field in ("noun", "emoji"):
+        counts = Counter(
+            str((r or {}).get(field) or "").strip()
+            for r in rows
+            if str((r or {}).get(field) or "").strip()
+        )
+        if counts:
+            out[field] = counts.most_common(1)[0][0]
+    return out
+
+
 def _unique_key(base: str, taken: set[str]) -> str:
     key = base or "spot"
     if key not in taken:
@@ -338,8 +373,19 @@ def join_community(
         "confidence": 1.0,  # a deliberate tap, not an inference
         "confirmed_via": CONFIRMED_VIA_JOIN,
     }
+    # A join never asked an LLM for a noun, so every joiner's row went in with
+    # noun NULL and place_relation_noun fell through to the TYPE word — which is
+    # "spot" for a place_type of 'other'. Seven neighbours joined one restaurant
+    # and every fellow card read "You both: your spot" (prod, 2026-08-31).
+    # The community already knows what it is called: take the noun/emoji a member
+    # who was asked at capture already stored. Blank when nobody has one — a wrong
+    # noun is worse than the bucket word.
+    inherited = _place_noun_emoji(place_id)
     if candidate:
         affiliation_id = str(candidate["id"])
+        for field, value in inherited.items():
+            if value and not str(candidate.get(field) or "").strip():
+                patch[field] = value
         try:
             sb.table("circle_affiliations").update(patch).eq("id", affiliation_id).execute()
         except Exception:
@@ -354,6 +400,7 @@ def join_community(
             "circle_type": resolved_type,
             "circle_key": _unique_key(base_key, taken),
             "source": CONFIRMED_VIA_JOIN,
+            **inherited,
             **patch,
         }
         try:

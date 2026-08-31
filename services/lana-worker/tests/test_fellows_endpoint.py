@@ -201,3 +201,45 @@ class TestAttrSearchVerifyGateOpensTheEmailStep(unittest.TestCase):
         from app.ui_intent import UI_INTENT_COLLECT_EMAIL, _PHASE_TO_INTENT
 
         self.assertNotEqual(_PHASE_TO_INTENT.get("listening"), UI_INTENT_COLLECT_EMAIL)
+
+
+class TestFellowsCommunityFilter(unittest.TestCase):
+    """`place_id` narrows the same list to one of the caller's communities."""
+
+    def _call(self, peers, *, members, mine=True, place_id="pl-1"):
+        with (
+            patch("app.main.verify_auth", return_value=_auth()),
+            patch("app.discovery_route._fetch_verified_peer_matches", return_value=peers) as fetch,
+            patch(
+                "app.community_surface.caller_affiliation_at",
+                return_value={"id": "a-1"} if mine else None,
+            ),
+            patch(
+                "app.community_surface._member_rows",
+                return_value=[{"user_id": u, "status": "confirmed"} for u in members],
+            ),
+        ):
+            return post_fellows(FellowsBody(place_id=place_id), authorization=AUTH), fetch
+
+    def test_keeps_only_members_of_that_place(self) -> None:
+        res, fetch = self._call([_peer(1), _peer(2), _peer(3)], members=["p-2", "u-caller"])
+        self.assertEqual([f.peer_user_id for f in res.fellows], ["p-2"])
+        # Filtering happens after ranking, so the fetch must go deeper than the page.
+        self.assertGreater(fetch.call_args.kwargs["limit"], 12)
+
+    def test_non_member_cannot_filter_by_a_place(self) -> None:
+        # Otherwise the filter is a membership oracle for any place id (§F).
+        with self.assertRaises(HTTPException) as caught:
+            self._call([_peer(1)], members=["p-1"], mine=False)
+        self.assertEqual(caught.exception.status_code, 403)
+
+    def test_no_place_id_is_the_unfiltered_list(self) -> None:
+        with (
+            patch("app.main.verify_auth", return_value=_auth()),
+            patch("app.discovery_route._fetch_verified_peer_matches", return_value=[_peer(1)]) as fetch,
+            patch("app.community_surface._member_rows") as members,
+        ):
+            res = post_fellows(FellowsBody(), authorization=AUTH)
+        self.assertEqual(len(res.fellows), 1)
+        self.assertEqual(members.call_count, 0)
+        self.assertEqual(fetch.call_args.kwargs["limit"], 12)

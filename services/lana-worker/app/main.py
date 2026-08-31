@@ -140,6 +140,7 @@ from app.models import (
     SignalSavedPayload,
     TipDraft,
     TipDraftPayload,
+    TipSetupRequest,
     TurnDebug,
     TurnRouting,
     UiActionRow,
@@ -2483,6 +2484,51 @@ def set_event_setup(
     return {"ok": True}
 
 
+@app.post("/lana/sessions/{session_id}/tip-setup")
+def set_tip_setup(
+    session_id: str,
+    body: TipSetupRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Stamp a whole carousel of recommendation answers onto the session's tip draft in one
+    shot — the "flip through cards" fork of the capture. Mirrors event-setup: the client
+    then sends one message, and the flow lands on the ready card with everything applied
+    instead of asking eight questions over eight turns.
+
+    Only fields belonging to the session's OWN generated step set are accepted, so this
+    cannot be used to write arbitrary keys into a draft.
+    """
+    auth = verify_auth(authorization)
+    session = get_session_for_user(session_id, auth.user_id)
+    ctx = dict(session.get("context") or {})
+    draft = dict(ctx.get("tip_draft") or {})
+    if not draft:
+        raise HTTPException(status_code=409, detail="no_tip_draft")
+
+    from app.reco_question_sets import missing_required
+    from app.tip_share import step_set_of
+
+    steps = step_set_of(draft)
+    allowed = {s["field"] for s in steps}
+    answers = dict(draft.get("answers") or {})
+    for field, value in (body.answers or {}).items():
+        key = str(field)
+        text = " ".join(str(value or "").split())[:280]
+        if key in allowed and text:
+            answers[key] = text
+    draft["answers"] = answers
+    ctx["tip_draft"] = draft
+    # Every step the carousel showed counts as offered, so the turn after this does not
+    # re-ask the optionals the user chose to leave blank — it goes to the ready card.
+    ctx["tip_asked_fields"] = sorted(allowed)
+    ctx["tip_pending_ask"] = None
+    ctx["tip_share_active"] = True
+    if not missing_required(steps, answers):
+        ctx["tip_ready"] = True
+    update_session_context(session_id, ctx)
+    return {"ok": True, "missing": missing_required(steps, answers)}
+
+
 @app.post("/hooks/event-join")
 def hook_event_join(
     body: EventJoinHookRequest,
@@ -3329,6 +3375,10 @@ class CommunityMembershipBody(_BaseModel):
 
 class FellowsBody(_BaseModel):
     limit: int = 12
+    # Narrow the list to people who go to ONE of the caller's communities. Membership
+    # is the caller's own, so this is a filter on a list they could already see — not
+    # a new way to read a roster they do not belong to (that gate is enforced below).
+    place_id: str | None = None
 
 
 # exclude_none: PeerMatchRow is the union of every peer-row shape (chat card, rec
@@ -3371,12 +3421,38 @@ def post_fellows(
     from app.layer1_handlers import peers_to_match_rows
 
     limit = max(1, min(int((body.limit if body else 12) or 12), 40))
+    place_id = str((body.place_id if body else None) or "").strip() or None
+
+    member_ids: set[str] | None = None
+    if place_id:
+        from app.community_surface import _member_rows, caller_affiliation_at
+
+        # Same authorization the roster uses: who is at a place stays members-only
+        # (§F). Without this the filter would be a membership oracle for any place id.
+        if not caller_affiliation_at(auth.user_id, place_id):
+            raise HTTPException(status_code=403, detail="not_a_member")
+        member_ids = {
+            str(m.get("user_id"))
+            for m in _member_rows(place_id)
+            if str(m.get("status")) == "confirmed" and str(m.get("user_id") or "")
+        } - {auth.user_id}
+        if not member_ids:
+            return FellowsResponse(
+                fellows=[], requires_phone_verification=not auth.phone_verified
+            )
+
+    # Filtering happens after the matcher ranked, so ask for a deeper list — a
+    # top-12 that is mostly non-members would otherwise return two rows.
     peers = _fetch_verified_peer_matches(
         _bearer_token(authorization),
         user_id=auth.user_id,
         block_id=auth.home_block_id,
-        limit=limit,
+        limit=min(limit * 4, 40) if member_ids is not None else limit,
     )
+    if member_ids is not None:
+        peers = [
+            p for p in peers if str((p or {}).get("peer_user_id") or "") in member_ids
+        ]
     return FellowsResponse(
         fellows=[
             PeerMatchRow(**row)

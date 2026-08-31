@@ -660,6 +660,30 @@ class ItemDraft(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+class RecoStep(BaseModel):
+    """One step of the recommendation's question set — a card in the C-4-EVENT-P2B swipe
+    carousel, or one turn of the side-Lana chat fork. Same list drives both.
+
+    The set is written per recommendation (Lana generates it; app.reco_question_sets owns the
+    floor, the guards and the two closing steps), so `field`/`label`/`question` are data on
+    the wire, never an enum the client can switch on. `kind` is the only thing the FE
+    branches on:
+      text   → free-type input, `placeholder` is the example hint under it
+      choice → `options` as tappable chips, still free-typeable
+      toggle → the consent step (mock 9/10)
+      agree  → "others also said", `options` are "<attr> ×<n>", multi-select
+    """
+
+    field: str
+    label: str
+    question: str
+    kind: str = "text"
+    placeholder: str | None = None
+    options: list[str] = Field(default_factory=list)
+    required: bool = False
+    answer: str | None = None
+
+
 class TipDraft(BaseModel):
     """In-chat "share a tip / recommendation" draft (the tip_share flow)."""
 
@@ -667,6 +691,9 @@ class TipDraft(BaseModel):
     category: str | None = None
     trait: str | None = None
     locality: str | None = None
+    reco_type: str | None = None
+    steps: list[RecoStep] = Field(default_factory=list)
+    answers: dict[str, str] = Field(default_factory=dict)
     chips: list[ItemChip] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     ready: bool = False
@@ -759,6 +786,18 @@ class EventSetupRequest(BaseModel):
     # Community card: the place id of the community picked in the dropdown, or None for
     # "None" (just the host's own meet). Members are emailed at publish.
     circle_place_id: str | None = None
+
+
+class TipSetupRequest(BaseModel):
+    """The carousel fork of the recommendation capture (C-4-EVENT-P1B-FORK, "flip through
+    cards"): every answer at once instead of one per turn.
+
+    Keys are the `field`s of the steps Lana generated for THIS recommendation, so this
+    request cannot be validated against a fixed enum — the endpoint intersects it with the
+    session's own step set instead, which is also what stops a client writing arbitrary
+    keys into the draft."""
+
+    answers: dict[str, str] = Field(default_factory=dict)
 
 
 class NudgeHookRequest(BaseModel):
