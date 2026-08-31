@@ -74,11 +74,24 @@ def _caller_place_tags(user_id: str) -> dict[str, str]:
         if not isinstance(r, dict):
             continue
         pid = str(r.get("place_ref") or "")
-        if pid and pid not in tags:
-            tags[pid] = (
-                "your "
-                f"{place_relation_noun(r.get('circle_type'), r.get('noun'), r.get('circle_key'))}"
-            )
+        if not pid or pid in tags:
+            continue
+        noun = str(r.get("noun") or "").strip()
+        if not noun:
+            # Rows created by a Join tap never had a noun asked for, so they render
+            # as their bucket word — "your spot" for anything the type map does not
+            # cover. Resolve it once (stored answer, else the model) and write it
+            # back; every later read, here and on every other surface, finds it set.
+            try:
+                from app.community_discovery import _place_noun_emoji
+
+                noun = _place_noun_emoji(pid).get("noun") or ""
+            except Exception:
+                logger.exception("onion_blend_place_noun_failed place=%s", pid)
+        tags[pid] = (
+            "your "
+            f"{place_relation_noun(r.get('circle_type'), noun, r.get('circle_key'))}"
+        )
     return tags
 
 

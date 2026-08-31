@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import json
 import threading
 from collections import Counter
 from typing import Any
@@ -254,19 +255,87 @@ def _existing_rows(user_id: str) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)]
 
 
-def _place_noun_emoji(place_id: str) -> dict[str, str]:
-    """The noun/emoji this community already answers to, from its members' rows.
+_PLACE_NOUN_PROMPT = """You name what a place IS to the people who go there. The word is \
+rendered as "your <noun>" on a neighbour's card ("your gym", "your church", "your sushi spot").
 
-    Only capture (the LLM) ever mints these; a Join tap never did, so joiners
-    inherit rather than guess. Most-used wins so one odd row cannot rename a
-    place. Empty dict on nothing stored or any error — the caller falls back to
-    the type word, exactly as before.
+Output ONLY JSON: {"noun": "...", "emoji": "..."}
+
+Rules:
+- noun: 1-3 lowercase words, a common noun for the KIND of place. Never the place's own \
+name, never a brand, never an address — "mizu sushi" is wrong, "sushi spot" is right.
+- Pick the word a regular would use: a CrossFit box is "gym", a parish hall is "church", \
+a branch library is "library", a taproom is "brewery".
+- emoji: exactly one, matching the kind of place.
+- English only."""
+
+
+def _llm_place_noun(place: dict[str, Any]) -> dict[str, str]:
+    """Ask the model what kind of place this is, once, when nobody has said.
+
+    The taxonomy cannot answer it: place_type collapses to 'other' for anything
+    outside _GOOGLE_TYPE_MAP (no food, drink or library types are in it), and the
+    type word for 'other' is "spot" — which is how seven neighbours who joined one
+    restaurant all read "You both: your spot" (prod, 2026-08-31).
+
+    Deliberately NOT given the disclosure escape hatch: the prompt forbids the
+    place's own name, so the answer stays a RELATION word and §F/O7 holds — the
+    viewer still learns only what kind of place they both go to.
+    """
+    name = str(place.get("name") or "").strip()
+    if not name:
+        return {}
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return {}
+        data = llm_json(
+            model=router_model(),
+            system=_PLACE_NOUN_PROMPT,
+            user_payload=json.dumps(
+                {
+                    "name": name,
+                    "address": str(place.get("address") or ""),
+                    "category": str(place.get("place_type") or ""),
+                }
+            ),
+            max_tokens=60,
+            temperature=0.1,
+        )
+    except Exception:
+        logger.exception("place_noun_llm_failed place=%s", place.get("id"))
+        return {}
+    from app.circles_capture import _clean_emoji, _clean_noun
+
+    noun = _clean_noun((data or {}).get("noun"))
+    # A model that echoed the venue back ("mizu sushi") is refused, not shipped:
+    # that is the one answer the disclosure rule does not allow.
+    if noun and noun in _slugify(name).replace("_", " "):
+        noun = ""
+    out: dict[str, str] = {}
+    if noun:
+        out["noun"] = noun
+    emoji = _clean_emoji((data or {}).get("emoji"))
+    if emoji:
+        out["emoji"] = emoji
+    return out
+
+
+def _place_noun_emoji(place_id: str, *, place: dict[str, Any] | None = None) -> dict[str, str]:
+    """The noun/emoji this community answers to — stored, else asked, else nothing.
+
+    Only capture ever minted these; a Join tap never did, so joiners inherit rather
+    than guess. Most-used wins so one odd row cannot rename a place. When NOBODY has
+    one the model is asked once and the answer is written back to every blank row at
+    the place, so the next reader (and every other surface — the roster, the profile,
+    the chat cards) finds it stored. Empty dict on any failure: the caller falls back
+    to the type word, exactly as before.
     """
     try:
         res = (
             service_client()
             .table("circle_affiliations")
-            .select("noun, emoji")
+            .select("id, noun, emoji")
             .eq("place_ref", place_id)
             .is_("dismissed_at", "null")
             .limit(200)
@@ -285,6 +354,28 @@ def _place_noun_emoji(place_id: str) -> dict[str, str]:
         )
         if counts:
             out[field] = counts.most_common(1)[0][0]
+    if out.get("noun"):
+        return out
+
+    asked = _llm_place_noun(place if place is not None else _place_row(place_id))
+    if not asked.get("noun"):
+        # ponytail: no negative cache — a place the model refuses is re-asked on the
+        # next read. Add one (places.features_jsonb) if that ever shows up in cost.
+        return out
+    out.update(asked)
+    blanks = [
+        str(r.get("id"))
+        for r in rows
+        if str(r.get("id") or "") and not str(r.get("noun") or "").strip()
+    ]
+    if blanks:
+        try:
+            # Fills BLANKS only — a member who told us what they call it keeps their word.
+            service_client().table("circle_affiliations").update(
+                {k: v for k, v in out.items() if v}
+            ).in_("id", blanks).execute()
+        except Exception:
+            logger.exception("community_place_noun_backfill_failed place=%s", place_id)
     return out
 
 
@@ -380,7 +471,7 @@ def join_community(
     # The community already knows what it is called: take the noun/emoji a member
     # who was asked at capture already stored. Blank when nobody has one — a wrong
     # noun is worse than the bucket word.
-    inherited = _place_noun_emoji(place_id)
+    inherited = _place_noun_emoji(place_id, place=place)
     if candidate:
         affiliation_id = str(candidate["id"])
         for field, value in inherited.items():

@@ -390,12 +390,47 @@ def _compose_area_warming_empty(
     )
 
 
+def _far_where(far: dict[str, Any] | None) -> str:
+    """Display name for the far area, ZIP included — the pill's text IS the next user
+    message, and the ZIP in it is what re-anchors the search (_need_zip consumes it)."""
+    if not far:
+        return ""
+    label = str(far.get("area_label") or "").strip()
+    zip5 = str(far.get("zip5") or "").strip()
+    if zip5 and zip5 not in label:
+        return f"{label} ({zip5})" if label else zip5
+    return label
+
+
+def _far_supply_facts(far: dict[str, Any] | None) -> list[str]:
+    """Honest facts about supply that exists but is out of reach (user's ask,
+    2026-08-31: "tell them these events exist but they are far from you").
+
+    Only ever describes ONE real row we actually read. Says nothing when the probe
+    found nothing — an unmeasured claim about elsewhere is the same bug as an
+    unmeasured claim about here."""
+    # No ZIP → no pill that can re-anchor the search, so make no offer we can't keep.
+    if not far or not far.get("miles") or not far.get("zip5"):
+        return []
+    where = _far_where(far)
+    what = far.get("title") or "a meet"
+    return [
+        f'Real activities DO exist further out — the nearest is "{what}" in {where}, '
+        f"about {far['miles']:,} miles away. Say this plainly: things are happening, "
+        "just not near them. Do NOT imply they can attend it.",
+        f"Option B is to look in {where} instead (the pill says 'Look in {where}') — "
+        "this REPLACES any offer to 'widen the search', which cannot cross that "
+        "distance and would be a false promise.",
+    ]
+
+
 def _compose_empty_seek_offer(
     interest: str,
     *,
     user_msg: str = "",
     lang: str | None = None,
     area_facts: list[str] | None = None,
+    far_facts: list[str] | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -423,10 +458,19 @@ def _compose_empty_seek_offer(
             "Zero matching activities exist on their block right now — that is the honest state",
             "Option A: you can keep an ear out and TEXT them the moment a matching one pops up "
             "(the pill under your message says 'Yes, listen for me')",
-            "Option B: they can widen the search to everything on the block "
-            "(the pill says 'Widen the search')",
             "Never invent or promise events, and never claim something is happening nearby",
         ]
+        # "Widen the search" only clears the TOPIC filter — it never changes the
+        # geography, so promising other areas with it is a lie the chip can't keep.
+        # When the probe found real far supply, name that instead.
+        facts.extend(
+            far_facts
+            or [
+                "Option B: they can widen the search to everything nearby, dropping the "
+                "topic (the pill says 'Widen the search'). This does NOT search other "
+                "areas — never offer it as a way to look somewhere else.",
+            ]
+        )
         if user_msg:
             facts.append(
                 f'What the user actually said: "{str(user_msg)[:200]}" — acknowledge their '
@@ -606,6 +650,42 @@ def _refine_suggestions(events: list[dict[str, Any]]) -> list[str]:
     return out[:4]
 
 
+def _far_offer(
+    user_jwt: str, block_id: str | None, draft: dict[str, Any], *, interest: str = ""
+) -> tuple[list[str], str]:
+    """(facts, pill text) for real supply outside the radius — ([], "") when there is
+    none. The pill's ZIP re-anchors the search next turn through the path browse
+    already uses for a typed ZIP; the interest carries over untouched.
+
+    The candidate area is only offered when its events survive the SAME filter this
+    search just ran (and the caller's own meets are dropped, exactly as browse drops
+    them). Offering an area and then landing the user on "nothing here" is a worse
+    dead end than the empty state it was meant to replace.
+    """
+    from app.auth import jwt_user_id
+    from app.discovery_route import activities_beyond_radius, far_activity_details
+
+    rows = activities_beyond_radius(
+        user_jwt, block_id, exclude_host_id=jwt_user_id(user_jwt)
+    )
+    if not rows:
+        return [], ""
+    matched, _label = _filter_events_by_query(rows, interest)
+    if not matched:
+        return [], ""
+    # _filter_events_by_query may reorder; the offer must still name the CLOSEST match.
+    nearest = min(matched, key=lambda r: float(r.get("distance_meters") or 0))
+    far = far_activity_details(nearest)
+    facts = _far_supply_facts(far)
+    if not facts:
+        return [], ""
+    # Deliberately does NOT set _need_zip. Arming it here made every non-ZIP reply
+    # ("Widen the search", a fresh interest, a question) get eaten as a malformed ZIP
+    # and answered with "share your 5-digit ZIP code" (QA 2026-08-31). The ZIP is
+    # consumed only when one actually arrives — see the seek-offer branch below.
+    return facts, f"Look in {_far_where(far)}"
+
+
 def _format_browse_message(
     events: list[dict[str, Any]],
     label: str | None,
@@ -694,7 +774,16 @@ def run_activity_browse_turn(
             # Either way the browse flow is done (clears activity_browse_active for next turn).
             reset_activity_browse_state(session_ctx)
             return reply
-        if _WIDEN_RE.search(msg):
+        # "Look in Foster City (94404)" — the far-supply pill. A ZIP in the reply is
+        # unambiguous here (the alternatives are "Yes, listen for me" and "Widen the
+        # search"), and re-anchoring is exactly the typed-ZIP path below, so hand it
+        # over rather than re-implementing the resolve. The interest carries over.
+        from app.discovery_route import extract_zip as _extract_zip
+
+        if _extract_zip(msg):
+            draft["_seek_offer"] = None
+            draft["_need_zip"] = True
+        elif _WIDEN_RE.search(msg):
             draft["interest"] = ""  # clear the filter → show everything below
             draft["_asked"] = True  # widening means show all — never re-ask P1
             draft["_seek_offer"] = None
@@ -743,6 +832,14 @@ def run_activity_browse_turn(
 
     def _set_preview_block(zip5: str, block: dict[str, Any]) -> str:
         bid = str(block.get("block_id") or "")
+        # The area THIS browse is reading. discovery_route.resolve_block_id returns
+        # home_block_id first and only falls back to preview_block_id, so for anyone
+        # with a home area the preview was resolved and then thrown away — asking to
+        # look somewhere else re-searched home, came up empty, and re-offered the same
+        # area forever (QA 2026-08-31, Foster City loop). Held on the browse draft, so
+        # it lasts exactly as long as this browse does and dies with
+        # reset_activity_browse_state.
+        draft["_area_block_id"] = bid
         session_ctx["preview_block_id"] = bid
         session_ctx["preview_zip"] = zip5
         session_ctx["preview_block_label"] = str(
@@ -843,7 +940,9 @@ def run_activity_browse_turn(
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
     # (session preview_block_id, or a pending out-of-coverage ZIP) counts, not just the
     # persisted profile block. Ask in-flow rather than dead-ending when none is known.
-    block_id = resolve_block_id(session_ctx, home_block_id)
+    block_id = str(draft.get("_area_block_id") or "") or resolve_block_id(
+        session_ctx, home_block_id
+    )
     if not block_id:
         zip5 = (
             _zip_from_turn()
@@ -888,7 +987,8 @@ def run_activity_browse_turn(
         short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
         draft["interest"] = short or interest
         draft["_seek_offer"] = True
-        draft["suggestions"] = ["Yes, listen for me", "Widen the search"]
+        far_facts, far_chip = _far_offer(user_jwt, block_id, draft, interest=interest)
+        draft["suggestions"] = ["Yes, listen for me", far_chip or "Widen the search"]
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
@@ -899,7 +999,9 @@ def run_activity_browse_turn(
             from app.zip_unlock import gate_framing_facts
 
             area_facts = gate_framing_facts(frame)
-        return _compose_empty_seek_offer(short, user_msg=msg, lang=lang, area_facts=area_facts)
+        return _compose_empty_seek_offer(
+            short, user_msg=msg, lang=lang, area_facts=area_facts, far_facts=far_facts
+        )
 
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
     # isn't open yet: the seed-forward framing instead of a bare "nothing found".
@@ -914,6 +1016,22 @@ def run_activity_browse_turn(
             session_ctx["activity_previews"] = []
             session_ctx["routing_phase"] = "listening"
             return _compose_area_warming_empty(msg, frame, session_ctx)
+
+    if not matched:
+        # Generic browse with an empty calendar. Same honesty as the named-interest
+        # branch: if real supply exists further out, name it and where, rather than
+        # closing with "nothing near you" and an offer that can't reach it.
+        far_facts, far_chip = _far_offer(user_jwt, block_id, draft, interest=interest)
+        if far_facts:
+            draft["_seek_offer"] = True
+            draft["suggestions"] = ["Yes, listen for me", far_chip]
+            session_ctx["browse_draft"] = draft
+            session_ctx["activity_browse_active"] = True
+            session_ctx["activity_previews"] = []
+            session_ctx["routing_phase"] = "listening"
+            return _compose_empty_seek_offer(
+                "", user_msg=msg, lang=lang, far_facts=far_facts
+            )
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)

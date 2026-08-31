@@ -1,6 +1,8 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from app import community_discovery as cd
 from app.community_discovery import (
     CONFIRMED_VIA_GROUNDING,
     CONFIRMED_VIA_JOIN,
@@ -1440,3 +1442,63 @@ class TestGroundingStampsProvenance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlaceNounResolution(unittest.TestCase):
+    """A Join tap never asked for a noun, so "your spot" was every joiner's tag."""
+
+    _ROWS = [
+        {"id": "a-1", "noun": None, "emoji": None},
+        {"id": "a-2", "noun": None, "emoji": None},
+    ]
+
+    def _run(self, rows, llm, place=None):
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.is_.return_value.limit.return_value.execute.return_value = SimpleNamespace(data=rows)
+        with (
+            patch("app.community_discovery.service_client", return_value=sb),
+            patch("app.community_discovery._llm_place_noun", return_value=llm) as asked,
+            patch("app.community_discovery._place_row", return_value=place or {"name": "Mizu"}),
+        ):
+            out = cd._place_noun_emoji("pl-1")
+        return out, asked, sb
+
+    def test_stored_noun_wins_and_never_asks(self) -> None:
+        out, asked, _ = self._run(
+            [{"id": "a-1", "noun": "gym", "emoji": "🏋️"}, {"id": "a-2", "noun": "gym"}],
+            {"noun": "fitness centre"},
+        )
+        self.assertEqual(out["noun"], "gym")
+        self.assertEqual(asked.call_count, 0)
+
+    def test_asks_when_nobody_has_one_and_backfills_blanks(self) -> None:
+        out, asked, sb = self._run(self._ROWS, {"noun": "sushi spot", "emoji": "🍣"})
+        self.assertEqual(out["noun"], "sushi spot")
+        self.assertEqual(asked.call_count, 1)
+        # Written back, so the next read (and every other surface) finds it stored.
+        update = sb.table.return_value.update
+        self.assertEqual(update.call_args.args[0], {"noun": "sushi spot", "emoji": "🍣"})
+        self.assertEqual(update.return_value.in_.call_args.args[1], ["a-1", "a-2"])
+
+    def test_refused_answer_falls_back_to_the_type_word(self) -> None:
+        out, _, sb = self._run(self._ROWS, {})
+        self.assertNotIn("noun", out)
+        self.assertEqual(sb.table.return_value.update.call_count, 0)
+
+
+class TestLlmPlaceNoun(unittest.TestCase):
+    def _ask(self, payload):
+        with patch(
+            "app.orchestrator.llm.llm_json", return_value=payload
+        ), patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.router_model", return_value="m"
+        ):
+            return cd._llm_place_noun({"name": "Mizu Sushi & Steakhouse", "place_type": "other"})
+
+    def test_returns_a_relation_word(self) -> None:
+        self.assertEqual(self._ask({"noun": "sushi spot", "emoji": "🍣"})["noun"], "sushi spot")
+
+    def test_refuses_the_venue_name_itself(self) -> None:
+        # §F/O7: the tag names the RELATION, never the place. A model that echoes the
+        # venue back would turn "your spot" into "your mizu sushi" — worse, not better.
+        self.assertEqual(self._ask({"noun": "mizu sushi"}), {})

@@ -31,7 +31,11 @@ class TestProfileStopRules(unittest.TestCase):
             topics_covered=["heritage", "activity"],
         )
         self.assertEqual(status, "ready_to_complete")
-        self.assertIn("Complete", msg)
+        # The status flips, but the copy must NOT invite a tap: the PWA has no
+        # Complete button (ready_to_complete only turns the status pill green), so
+        # the CTA this used to append pointed at nothing. QA 2026-08-31.
+        self.assertEqual(msg, "What else should neighbors know?")
+        self.assertNotIn("Complete", msg)
 
     def test_two_turns_with_heritage_and_interest(self) -> None:
         history = [
@@ -183,6 +187,20 @@ class TestContinuousMode(unittest.TestCase):
         self.assertNotIn("save your profile", msg)
         self.assertIn("What name should neighbors use?", msg)
         self.assertEqual(status, "continue")
+
+    def test_strips_model_authored_cta_without_continuous(self) -> None:
+        """The strip must not depend on continuous=True — NO caller passes it, so
+        gating on it meant a model-authored "tap Complete" reached the user."""
+        msg, _ = apply_profile_stop_rules(
+            "continue",
+            "Lovely. When you're ready, tap Complete to save your profile.",
+            history=self._long_history(),
+            ui={},
+            topics_covered=["heritage"],
+        )
+        self.assertNotIn("Complete", msg)
+        self.assertNotIn("save your profile", msg)
+        self.assertIn("Lovely", msg)
 
 
 if __name__ == "__main__":
