@@ -32,6 +32,14 @@ additional_redirect_urls = ["http://localhost:3000/admin"]
 jwt_expiry = 3600
 enable_signup = true
 
+[auth.email.template.magic_link]
+subject = "Your Lana sign-in code"
+content_path = "./supabase/templates/otp_code.html"
+
+[auth.email.template.confirmation]
+subject = "Your Lana sign-in code"
+content_path = "./supabase/templates/otp_code.html"
+
 [auth.sms]
 enable_signup = true
 # Local dev only — hosted tagalng-dev: set test phones in Dashboard → Auth → Phone

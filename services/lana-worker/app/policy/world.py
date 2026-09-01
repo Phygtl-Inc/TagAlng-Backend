@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from app.auth import service_client
+from app.zip_unlock import gate_mode
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +143,21 @@ def world_state(user_id: str) -> dict[str, Any]:
             "kids_count": user.get("kids_count"),
             "verified": "verified" in states,
         },
-        "area": {
-            "state": area.get("state"),
-            "count": area.get("count"),
-            "threshold": area.get("threshold"),
-        },
+        # Area state is withheld when the unlock gate is off. The gate is the ONE
+        # switch that decides whether area status may shape a turn, and the policy
+        # prompt reads a non-open state as "you can't act yet — pivot to hosting"
+        # (prime directive). Leaving the state in with the gate off let decide_turn
+        # keep authoring "your area is still coming alive" after every mechanical
+        # block had already been removed.
+        "area": (
+            {
+                "state": area.get("state"),
+                "count": area.get("count"),
+                "threshold": area.get("threshold"),
+            }
+            if gate_mode() != "off"
+            else {"state": None, "count": None, "threshold": None}
+        ),
         "circles": [
             {
                 "key": c.get("circle_key"),

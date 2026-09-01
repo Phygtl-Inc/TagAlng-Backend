@@ -140,6 +140,7 @@ from app.models import (
     SignalSavedPayload,
     TipDraft,
     TipDraftPayload,
+    TipSetupRequest,
     TurnDebug,
     TurnRouting,
     UiActionRow,
@@ -1605,6 +1606,11 @@ def create_lana_session(
                 if effective_lang:
                     opening = localize_text(opening, effective_lang)
 
+        # The community filter the app opened with (top-of-screen switcher), so the
+        # very first turn already reads inside it — app/community_scope.py.
+        from app.community_scope import apply_community_selection
+
+        apply_community_selection(session_ctx, body.community_id, user_id=auth.user_id)
         opening_msg_id = insert_message(
             session_id,
             "assistant",
@@ -1731,6 +1737,13 @@ def _run_lana_message(
     session_ctx_in["user_role"] = auth.role
     session_ctx_in["user_grammatical_gender"] = auth.grammatical_gender
     set_address_context(auth.role, auth.grammatical_gender)
+    # The community filter at the top of the screen. Stamped before anything routes,
+    # because every read this turn (neighbours, meets, recommendations) and anything
+    # created is scoped to it — app/community_scope.py.
+    from app.community_scope import apply_community_selection
+    from app.community_scope import here_place as community_here
+
+    apply_community_selection(session_ctx_in, body.community_id, user_id=auth.user_id)
     # A rename announcement is worth exactly one turn. Cleared with None, never
     # popped — a popped key gets resurrected by the stored-context merge and Lana
     # would re-announce the same name change on every later turn.
@@ -2059,6 +2072,9 @@ def _run_lana_message(
             message_id=user_msg_id,
             # Defer to the classifier: no rapport gap on safety/OOS/medical/crisis turns.
             allow_rapport_gap=_rapport_gap_allowed(merged),
+            # What "here" means: the community in the top filter. Without it "the pool
+            # here is too good" is about an unnamed place and the fact is dropped.
+            here_place=community_here(merged, auth.user_id),
         )
         # Close any gaps whose concept the user has since stated.
         background_tasks.add_task(rapport_reconcile_gaps, auth.user_id, user_msg_id)
@@ -2458,7 +2474,14 @@ def set_event_setup(
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
     # Community card: the carousel is a full submission, so an absent value is the "None"
     # option (just the host's own meet), not "leave what was there".
-    draft["circle_place_id"] = (body.circle_place_id or "").strip() or None
+    # An absent value means the "None" option (just the host's own meet) — UNLESS the
+    # top filter has a community selected, which is the user saying "I'm at CF Fitness"
+    # before they ever opened this card. app/community_scope.py.
+    from app.community_scope import active_community_id
+
+    draft["circle_place_id"] = (
+        (body.circle_place_id or "").strip() or active_community_id(ctx)
+    )
     from app.lana_ui import is_none_bring_item
 
     # A typed none-answer ("nothing", "no need") on the bring card is an empty list,
@@ -2481,6 +2504,51 @@ def set_event_setup(
     ctx["event_settings"] = settings
     update_session_context(session_id, ctx)
     return {"ok": True}
+
+
+@app.post("/lana/sessions/{session_id}/tip-setup")
+def set_tip_setup(
+    session_id: str,
+    body: TipSetupRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Stamp a whole carousel of recommendation answers onto the session's tip draft in one
+    shot — the "flip through cards" fork of the capture. Mirrors event-setup: the client
+    then sends one message, and the flow lands on the ready card with everything applied
+    instead of asking eight questions over eight turns.
+
+    Only fields belonging to the session's OWN generated step set are accepted, so this
+    cannot be used to write arbitrary keys into a draft.
+    """
+    auth = verify_auth(authorization)
+    session = get_session_for_user(session_id, auth.user_id)
+    ctx = dict(session.get("context") or {})
+    draft = dict(ctx.get("tip_draft") or {})
+    if not draft:
+        raise HTTPException(status_code=409, detail="no_tip_draft")
+
+    from app.reco_question_sets import missing_required
+    from app.tip_share import step_set_of
+
+    steps = step_set_of(draft)
+    allowed = {s["field"] for s in steps}
+    answers = dict(draft.get("answers") or {})
+    for field, value in (body.answers or {}).items():
+        key = str(field)
+        text = " ".join(str(value or "").split())[:280]
+        if key in allowed and text:
+            answers[key] = text
+    draft["answers"] = answers
+    ctx["tip_draft"] = draft
+    # Every step the carousel showed counts as offered, so the turn after this does not
+    # re-ask the optionals the user chose to leave blank — it goes to the ready card.
+    ctx["tip_asked_fields"] = sorted(allowed)
+    ctx["tip_pending_ask"] = None
+    ctx["tip_share_active"] = True
+    if not missing_required(steps, answers):
+        ctx["tip_ready"] = True
+    update_session_context(session_id, ctx)
+    return {"ok": True, "missing": missing_required(steps, answers)}
 
 
 @app.post("/hooks/event-join")
@@ -3070,6 +3138,10 @@ class TipFeedBody(_BaseModel):
     # a tab a client shipped before we did is not a reason to show them nothing.
     tab: str = "recent"
     limit: int = 20
+    # The community filter at the top of the app: only recommendations from people at
+    # this place (a places.id). Membership IS the tag — nothing is stamped at write
+    # time, so a rec becomes "from CF Fitness" the moment its author joins.
+    place_id: str | None = None
 
 
 class TipFeedbackBody(_BaseModel):
@@ -3097,12 +3169,25 @@ def post_tips_recent(
     from app.tip_feed import recent_tips
 
     tab = (body.tab if body else "recent") or "recent"
-    return {
-        "tab": tab,
-        "tips": recent_tips(
-            _bearer_token(authorization), tab=tab, limit=(body.limit if body else 20)
-        ),
-    }
+    place_id = str((body.place_id if body else None) or "").strip() or None
+    limit = (body.limit if body else 20) or 20
+    tips = recent_tips(
+        _bearer_token(authorization),
+        tab=tab,
+        # The filter runs after the feed read, so ask for a deeper page — a top-20 that
+        # is mostly non-members would otherwise return two rows.
+        limit=min(limit * 3, 50) if place_id else limit,
+    )
+    if place_id:
+        from app.community_scope import rows_by_members
+        from app.community_surface import caller_affiliation_at
+
+        # Same authorization the roster uses: who is at a place stays members-only (§F),
+        # so the filter can never become a membership oracle for an arbitrary place id.
+        if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
+            raise HTTPException(status_code=403, detail="not_a_member")
+        tips = rows_by_members(tips, place_id)[:limit]
+    return {"tab": tab, "tips": tips}
 
 
 @app.post("/lana/tips/vouch")
@@ -3329,6 +3414,10 @@ class CommunityMembershipBody(_BaseModel):
 
 class FellowsBody(_BaseModel):
     limit: int = 12
+    # Narrow the list to people who go to ONE of the caller's communities. Membership
+    # is the caller's own, so this is a filter on a list they could already see — not
+    # a new way to read a roster they do not belong to (that gate is enforced below).
+    place_id: str | None = None
 
 
 # exclude_none: PeerMatchRow is the union of every peer-row shape (chat card, rec
@@ -3371,12 +3460,45 @@ def post_fellows(
     from app.layer1_handlers import peers_to_match_rows
 
     limit = max(1, min(int((body.limit if body else 12) or 12), 40))
+    place_id = str((body.place_id if body else None) or "").strip() or None
+
+    member_ids: set[str] | None = None
+    if place_id:
+        from app.community_surface import _member_rows, caller_affiliation_at
+
+        # Same authorization the roster uses: who is at a place stays members-only
+        # (§F). Without this the filter would be a membership oracle for any place id.
+        if not caller_affiliation_at(auth.user_id, place_id):
+            raise HTTPException(status_code=403, detail="not_a_member")
+        member_ids = {
+            str(m.get("user_id"))
+            for m in _member_rows(place_id)
+            if str(m.get("status")) == "confirmed" and str(m.get("user_id") or "")
+        } - {auth.user_id}
+        if not member_ids:
+            return FellowsResponse(
+                fellows=[], requires_phone_verification=not auth.phone_verified
+            )
+
+    # Filtering happens after the matcher ranked, so ask for a deeper list — a
+    # top-12 that is mostly non-members would otherwise return two rows.
     peers = _fetch_verified_peer_matches(
         _bearer_token(authorization),
         user_id=auth.user_id,
         block_id=auth.home_block_id,
-        limit=limit,
+        limit=min(limit * 4, 40) if member_ids is not None else limit,
     )
+    if member_ids is not None:
+        peers = [
+            p for p in peers if str((p or {}).get("peer_user_id") or "") in member_ids
+        ]
+        # The matcher ranks the neighbourhood, so a member who isn't in its top slice
+        # is invisible to the filter above — at a place the caller belongs to, the
+        # roster itself is the honest answer. Same rows the community screen shows.
+        if not peers and place_id:
+            from app.community_scope import peers_in_community
+
+            peers = peers_in_community(auth.user_id, place_id, limit=limit)
     return FellowsResponse(
         fellows=[
             PeerMatchRow(**row)

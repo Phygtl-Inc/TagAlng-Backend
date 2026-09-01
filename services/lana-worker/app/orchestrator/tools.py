@@ -548,7 +548,7 @@ def _find_peers(
         fetch_preview_peers_on_block,
         resolve_block_id,
     )
-    from app.guest_capabilities import fetch_peer_matches, format_peer_matches
+    from app.guest_capabilities import format_peer_matches
 
     jwt = _require_jwt(user_jwt)
     if not jwt:
@@ -616,13 +616,26 @@ def _find_peers(
         kick_claim_embedding_backfill(user_id=user_id, block_id=bid)
     except Exception:
         pass
-    peers = fetch_peer_matches(jwt, limit=int(args.get("limit") or 5))
+    # The SAME fetch the chat lane and /lana/fellows use — not the bare vector RPC.
+    # It carries the radius arm, the onion arm and the community filter; calling
+    # match_peers_by_claim_vectors here meant one user got two different lists
+    # depending on which router won the turn, and the top-of-app filter was ignored
+    # on this one (QA 2026-09-01: picking Fitness CF still answered neighbourhood-wide).
+    from app.discovery_route import _fetch_verified_peer_matches
+
+    peers = _fetch_verified_peer_matches(
+        jwt,
+        user_id=user_id,
+        block_id=bid,
+        limit=int(args.get("limit") or 5),
+        session_ctx=session_ctx,
+    )
     return {
         "status": "ok",
         "tool": "find_peers",
         "preview": False,
         "peer_matches": peers,
-        "summary": format_peer_matches(peers),
+        "summary": format_peer_matches(peers, session_ctx),
         "block_id": bid,
         "routing_phase": "preview",
     }

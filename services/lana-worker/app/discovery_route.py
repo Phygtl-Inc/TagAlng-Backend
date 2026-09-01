@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Any
@@ -56,6 +57,7 @@ from app.guest_capabilities import (
     wants_host_activity,
     wants_peer_find,
 )
+from app.community_scope import active_community, community_name
 from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
 from app.tip_rec_cascade import WIDE_FETCH as WIDE_TIP_FETCH
 from app.tip_rec_cascade import stamp_tip_peer_surface
@@ -527,10 +529,26 @@ def _fetch_verified_peer_matches(
     user_id: str | None,
     block_id: str | None,
     limit: int = 5,
+    session_ctx: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Vector matches + self-heal: claims saved without embeddings (best-effort
     write-time embed) get re-embedded in the background so fuzzy matching is
-    whole by the next turn; exact-concept matches already work without vectors."""
+    whole by the next turn; exact-concept matches already work without vectors.
+
+    With a community selected in the top filter, the roster IS the search: "fellow
+    minded people" means fellow minded people HERE, and a block-scoped vector list
+    would answer with strangers from three ZIPs over. An empty community widens
+    back to the neighbourhood, but never silently — it stamps `community_widened_from`
+    so the reply names the community it found nobody in."""
+    from app.community_scope import active_community, peers_in_community
+
+    comm = active_community(session_ctx)
+    if comm and user_id:
+        scoped = peers_in_community(user_id, str(comm["place_id"]), limit=limit)
+        if scoped:
+            return scoped
+        if session_ctx is not None:
+            session_ctx["community_widened_from"] = comm.get("name")
     try:
         kick_claim_embedding_backfill(user_id=user_id, block_id=block_id)
     except Exception:
@@ -716,7 +734,8 @@ def _preview_peers_with_ids(
         )
         try:
             peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=None, block_id=block_id, limit=5
+                user_jwt, user_id=None, block_id=block_id, limit=5,
+                session_ctx=session_ctx,
             )
             if peers:
                 return peers
@@ -2069,8 +2088,23 @@ def _try_layer1_intent_turn(
             )
         ctx["ready_to_complete"] = True
         ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "complete_profile")
+        # No "tap Complete" here. `ready_to_complete` only turns the status pill green
+        # in the PWA — there is no Complete button anywhere in the unified chat, which
+        # is exactly why profile_intake._strip_complete_cta exists. This branch
+        # returned a raw string and so bypassed that stripper, sending every new user
+        # to a control that does not exist (QA 2026-08-31, signup on ZIP 90001).
         return (
-            "That's you — tap Complete when you're ready and I'll lock in your profile.",
+            compose_reply(
+                goal=(
+                    "Their profile is already saved — there is nothing left for them "
+                    "to tap or confirm. Say that in one short line, then offer ONE "
+                    "concrete next step: seeing neighbors near them, or hosting "
+                    "something. Never mention a button, tapping, or completing."
+                ),
+                fallback="Got it — you're all set. Want to see who's around you?",
+                session_ctx=ctx_base,
+                user_message=msg,
+            ),
             ctx,
             ctx["last_routing"],
             [],
@@ -2962,12 +2996,13 @@ def _try_peer_seek_offer_reply_turn(
     if block_id:
         try:
             peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
+                user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                session_ctx=session_ctx,
             )
         except Exception:  # noqa: BLE001
             peers = []
     if peers:
-        reply = format_peer_matches(peers)
+        reply = format_peer_matches(peers, session_ctx)
     else:
         if block_id:
             peers = fetch_preview_peers_on_block(
@@ -3578,6 +3613,19 @@ def _compose_neighbor_tip_reply(
     composer gets is one the row itself carries (who, what they recommended, how far), so
     the prose can never claim more than the cards do."""
     facts = [f"What they asked for: {_ask_excerpt(detail)}"]
+    # The community filter, either way round: these recommendations are all from people
+    # at the selected community, or nobody there had one and this list is the wider
+    # neighbourhood — which the user has to be told, not shown silently.
+    _scope = community_name(session_ctx)
+    _widened = str(session_ctx.get("community_widened_from") or "").strip()
+    if _widened:
+        session_ctx["community_widened_from"] = None  # one turn only
+        facts.append(
+            f"Nobody at {_widened} — the community they are filtered to — has recommended "
+            "anything matching yet, so these are from the wider neighbourhood. Say that first."
+        )
+    elif _scope:
+        facts.append(f"Every recommender below is at {_scope}, the community they are filtered to")
     lines: list[str] = []
     for row in tips[:3]:
         text = str(row.get("detail_text") or "").strip()
@@ -3767,6 +3815,21 @@ def _tip_seek_answer_turn(
         locale=str(session_ctx.get("preferred_lang") or "en"),
         radius_meters=radius_meters() if widen else None,
     )
+    # The community filter: a recommendation is only "from CF Fitness" when the person
+    # who made it is at CF Fitness. Nothing is tagged at write time — membership is the
+    # tag, and it stays true as people join. Empty falls through to the Google/offer
+    # cascade below, exactly as an empty neighbourhood read already does.
+    _comm = active_community(session_ctx)
+    if _comm and neighbor_tips:
+        from app.community_scope import rows_by_members
+
+        scoped_tips = rows_by_members(neighbor_tips, str(_comm["place_id"]))
+        if scoped_tips:
+            neighbor_tips = scoped_tips
+        else:
+            # Read (and cleared) by _compose_neighbor_tip_reply below, off the same
+            # incoming ctx it composes from.
+            session_ctx["community_widened_from"] = _comm.get("name")
     logging.getLogger(__name__).info(
         "tip_seek_answer.enter block=%s detail=%r category=%r neighbor_tips=%d wide=%s",
         block_id, detail, category, len(neighbor_tips), wide,
@@ -6417,6 +6480,152 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
     return out
 
 
+# Activity search radius (PR7 · 20260920120000_geolocation_aware_search). The old
+# .eq("block_id") equality meant a neighbour one ZIP over saw nothing at all —
+# get_activities_near_point is the radius-capped, block-agnostic read that migration
+# shipped for exactly this and never got a call site.
+_DEFAULT_ACTIVITY_RADIUS_M = 40000.0  # ~25 miles
+
+
+def activity_radius_meters() -> float:
+    raw = os.environ.get("LANA_ACTIVITY_RADIUS_METERS", "").strip()
+    try:
+        return float(raw) if raw else _DEFAULT_ACTIVITY_RADIUS_M
+    except ValueError:
+        return _DEFAULT_ACTIVITY_RADIUS_M
+
+
+def block_centroid(block_id: str) -> tuple[float, float] | None:
+    """Lat/lng for an area id. Auto-created blocks are `zip-<zip5>`, which is what
+    lets places._centroid resolve them off zip_centroids."""
+    from app.places import _centroid
+
+    zip5 = block_id[len("zip-"):] if block_id.startswith("zip-") else None
+    try:
+        return _centroid(zip5, block_id)
+    except Exception:
+        logging.getLogger(__name__).exception("block_centroid_failed block=%s", block_id)
+        return None
+
+
+def _event_area_label(event_id: str) -> tuple[str | None, str | None]:
+    """(area label, zip5) for one event — the RPC returns neither, and honest
+    far-supply copy needs a place name the user can recognise and act on."""
+    try:
+        sb = service_client()
+        ev = sb.table("events").select("block_id").eq("id", event_id).limit(1).execute()
+        bid = str(((ev.data or [{}])[0] or {}).get("block_id") or "")
+        if not bid:
+            return None, None
+        blk = sb.table("blocks").select("display_name").eq("id", bid).limit(1).execute()
+        label = clean_block_label(((blk.data or [{}])[0] or {}).get("display_name"))
+        zip5 = bid[len("zip-"):] if bid.startswith("zip-") else None
+        return label, zip5
+    except Exception:
+        logging.getLogger(__name__).exception("event_area_label_failed event=%s", event_id)
+        return None, None
+
+
+def activities_beyond_radius(
+    user_jwt: str, block_id: str | None, *, exclude_host_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Real open activities OUTSIDE the local radius, nearest first.
+
+    Uses get_nearby_activities on purpose — the UNCAPPED read. get_activities_near_point
+    clamps to 200 km in SQL, so from a ZIP thousands of km off the pilot it can never
+    reach the supply that does exist (90001 → Lake Nona is 3,555 km).
+
+    exclude_host_id mirrors what browse itself drops: offering an area on the strength
+    of the caller's OWN meet, then landing them on an empty list, is the same broken
+    promise as offering one with no matching events at all.
+    """
+    if not block_id:
+        return []
+    loc = block_centroid(block_id)
+    if not loc:
+        return []
+    radius = activity_radius_meters()
+    try:
+        from app.supabase_rpc import call_rpc
+
+        rows = call_rpc(
+            user_jwt,
+            "get_nearby_activities",
+            {"p_lat": loc[0], "p_lng": loc[1], "p_limit": 20},
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("far_activity_probe_failed block=%s", block_id)
+        return []
+    if not isinstance(rows, list):
+        return []
+    beyond = [
+        r
+        for r in rows
+        if isinstance(r, dict)
+        and r.get("id")
+        and r.get("distance_meters") is not None
+        and float(r["distance_meters"]) > radius
+        and not (exclude_host_id and str(r.get("host_id") or "") == str(exclude_host_id))
+    ]
+    return sorted(beyond, key=lambda r: float(r["distance_meters"]))
+
+
+def far_activity_details(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """{title, venue, miles, area_label, zip5} for one probe row — the place lookup the
+    RPC can't give us. None when the row can't be placed."""
+    if not isinstance(row, dict) or not row.get("id"):
+        return None
+    label, zip5 = _event_area_label(str(row["id"]))
+    return {
+        "title": str(row.get("title") or "").strip() or None,
+        "venue": str(row.get("venue_name") or "").strip() or None,
+        # Whole miles: the pilot is US-only and "3,555 km" reads as a bug to a user
+        # who was told everything else in miles.
+        "miles": int(round(float(row["distance_meters"]) / 1609.34)),
+        "area_label": label,
+        "zip5": zip5,
+    }
+
+
+def nearest_activity_beyond_radius(
+    user_jwt: str, block_id: str | None
+) -> dict[str, Any] | None:
+    """Nearest far activity, unfiltered. Callers that will OFFER the area should filter
+    by the user's actual search first — see activity_browse._far_offer."""
+    rows = activities_beyond_radius(user_jwt, block_id)
+    return far_activity_details(rows[0]) if rows else None
+
+
+def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
+    """Open event ids within activity_radius_meters of the block centroid.
+
+    [] means "nothing nearby" — a real answer. None means we could not place the
+    block (no centroid, or the RPC isn't deployed yet); callers fall back to the old
+    block-equality filter rather than showing an empty list they can't justify.
+    """
+    loc = block_centroid(block_id)
+    if not loc:
+        return None
+    try:
+        res = service_client().rpc(
+            "get_activities_near_point",
+            {
+                "p_lat": loc[0],
+                "p_lng": loc[1],
+                "p_radius_meters": activity_radius_meters(),
+                # The block read has no horizon; keep one generous enough that a
+                # radius switch never silently shortens what browse can see.
+                "p_window": "90 days",
+                "p_limit": max(1, min(50, limit)),
+            },
+        ).execute()
+    except Exception:
+        logging.getLogger(__name__).exception("events_near_block_failed block=%s", block_id)
+        return None
+    rows = res.data if isinstance(res.data, list) else []
+    return [str(r["id"]) for r in rows if isinstance(r, dict) and r.get("id")]
+
+
 def fetch_preview_events_on_block(
     block_id: str,
     *,
@@ -6450,10 +6659,19 @@ def fetch_preview_events_on_block(
                 "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, "
                 "recurrence, circle_place_ref"
             )
-            .eq("block_id", block_id)
             .eq("status", "open")
             .gte("starts_at", now_iso)
         )
+        # Radius, not ZIP equality. The id pre-filter keeps this select list intact
+        # (get_activities_near_point returns neither recurrence nor circle_place_ref,
+        # and the cards need both), and None falls back to the pre-PR7 behaviour.
+        near = event_ids_near_block(block_id, limit=max(fetch_n, 50))
+        if near is None:
+            q = q.eq("block_id", block_id)
+        elif not near:
+            return []
+        else:
+            q = q.in_("id", near)
         if exclude_host_id:
             q = q.neq("host_id", exclude_host_id)
         res = q.order("starts_at").limit(fetch_n).execute()
@@ -7403,7 +7621,9 @@ def handle_discovery_turn(
                     user_jwt, session_ctx=session_ctx, home_block_id=home_block_id
                 )
             _title = str(_ed.get("title") or "").strip()
-            event_id, publish_error = _pipe._auto_publish_event(user_id, user_jwt, _ed)
+            event_id, publish_error = _pipe._auto_publish_event(
+                user_id, user_jwt, _ed, session_ctx
+            )
             if event_id:
                 _release_host_mode(session_ctx)
                 ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
@@ -9144,7 +9364,8 @@ def handle_discovery_turn(
             return gated
         try:
             peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
+                user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                session_ctx=ctx_base,
             )
         except Exception:
             peers = []
@@ -9166,7 +9387,7 @@ def handle_discovery_turn(
                 peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
             )
         else:
-            reply = format_peer_matches(peers)
+            reply = format_peer_matches(peers, ctx_base)
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
         ctx.pop("pending_post_verify", None)
         ctx.pop("activity_previews", None)
@@ -9207,12 +9428,13 @@ def handle_discovery_turn(
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
             try:
                 peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
-            )
+                    user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                    session_ctx=ctx_base,
+                )
             except Exception:
                 peers = []
             if peers:
-                reply = format_peer_matches(peers)
+                reply = format_peer_matches(peers, ctx_base)
                 ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
                 ctx.pop("activity_previews", None)
                 identity = str(
@@ -9272,12 +9494,13 @@ def handle_discovery_turn(
         if phone_verified and effective_home:
             try:
                 peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
-            )
+                    user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                    session_ctx=ctx_base,
+                )
             except Exception:
                 peers = []
             if peers:
-                reply = format_peer_matches(peers)
+                reply = format_peer_matches(peers, ctx_base)
                 ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
                 ctx.pop("activity_previews", None)
                 identity = str(

@@ -62,7 +62,9 @@ Output ONLY valid JSON (no markdown):
 Rules:
 - assistant_message: **max 2 short sentences, under 240 characters** — complete sentences only; never trail off mid-thought.
 - status "continue" — still missing heritage, a second thread, or display name (when HOST CONTEXT says so).
-- status "ready_to_complete" — story is enough AND display name is on file or in profile_patch; invite tap Complete.
+- status "ready_to_complete" — story is enough AND display name is on file or in
+  profile_patch. There is NO Complete button: never tell them to tap or complete
+  anything — acknowledge and keep the thread going.
 - profile_patch: set nickname/full_name when the user tells you what to call them; otherwise null fields.
 - highlights: 1-4 short phrases from the USER's words, each with a bucket.
 - Keep JSON compact — short arrays, no commentary outside JSON.
@@ -312,7 +314,7 @@ def _strip_complete_cta(message: str) -> str:
     return " ".join(kept).strip() or text
 
 
-def apply_profile_stop_rules(
+def _stop_rules(
     status: str,
     assistant_message: str,
     *,
@@ -371,14 +373,24 @@ def apply_profile_stop_rules(
                 status = "continue"
         return assistant_message, status
 
+    # No Complete CTA is appended here. This used to add "When you're ready, tap
+    # Complete to save your profile" — there is no such control in the PWA
+    # (`ready_to_complete` only turns the status pill green), so it sent every user
+    # to a button that does not exist. Status still flips; the copy just stops lying.
     status = "ready_to_complete"
-    lower = assistant_message.lower()
-    if "complete" not in lower and "tap" not in lower and "save" not in lower:
-        assistant_message = (
-            assistant_message.rstrip()
-            + " When you're ready, tap Complete to save your profile."
-        )
     return assistant_message[:1200], status
+
+
+def apply_profile_stop_rules(*args: Any, **kwargs: Any) -> tuple[str, str]:
+    """_stop_rules, with the Complete CTA stripped on every return path.
+
+    The strip used to be reachable only via continuous=True — and NO caller ever
+    passed it (synthesizer.py and profile_turn both take the default), so the guard
+    never ran and a model-authored "tap Complete" reached the user unchallenged.
+    There is no Complete button on any surface, so this holds regardless of caller.
+    """
+    message, status = _stop_rules(*args, **kwargs)
+    return _strip_complete_cta(message), status
 
 
 def _vertex_client():

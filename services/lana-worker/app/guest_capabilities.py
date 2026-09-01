@@ -51,7 +51,20 @@ def fetch_peer_matches(user_jwt: str, *, limit: int = 5) -> list[dict[str, Any]]
     return []
 
 
-def format_peer_matches(peers: list[dict[str, Any]]) -> str:
+def format_peer_matches(
+    peers: list[dict[str, Any]], session_ctx: dict[str, Any] | None = None
+) -> str:
+    """The reply over a neighbours list.
+
+    `session_ctx` only carries the community filter's state: which community the
+    list is scoped to, or — when that community had nobody — which one came up
+    empty before this wider list was fetched. Both are FACTS for the composer, so
+    a scoped search never reads as if it swept the whole neighbourhood.
+    """
+    scoped = str((peers[0] if peers else {}).get("community_name") or "").strip()
+    widened = str((session_ctx or {}).get("community_widened_from") or "").strip()
+    if session_ctx is not None and widened:
+        session_ctx["community_widened_from"] = None  # one turn only
     if not peers:
         return compose_reply(
             goal=(
@@ -69,6 +82,14 @@ def format_peer_matches(peers: list[dict[str, Any]]) -> str:
     # The match cards below the message carry names + shared traits — don't
     # narrate the same list twice; keep the text to the count and the next step.
     n = len(peers)
+    facts = [f"Neighbors found nearby (cards shown below the message): {n}"]
+    if scoped:
+        facts.append(f"Every one of them is at {scoped}, the community they are filtered to")
+    if widened:
+        facts.append(
+            f"Nobody at {widened} — the community they are filtered to — matched yet, "
+            "so this list is the wider area instead. Say that before the count."
+        )
     return compose_reply(
         goal=(
             "You just found nearby neighbors similar to the user; cards below "
@@ -76,7 +97,7 @@ def format_peer_matches(peers: list[dict[str, Any]]) -> str:
             "count, point to what they have in common below, and offer to "
             "introduce them to any of these neighbors. Do not invent names."
         ),
-        facts=[f"Neighbors found nearby (cards shown below the message): {n}"],
+        facts=facts,
         fallback=(
             f"I found {n} neighbor{'s' if n != 1 else ''} nearby — "
             "here's what you have in common. Want me to introduce you to any of them?"

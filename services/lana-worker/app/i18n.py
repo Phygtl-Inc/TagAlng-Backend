@@ -591,6 +591,25 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Não tem atividades assim perto de você agora. Quer que eu fique de olho "
               "e te avise assim que aparecer uma — ou amplio a busca?",
     },
+    # The same two, with the community filter named. A fallback that says "near you"
+    # while a community filter is on is a lie the pill under it can't keep.
+    "browse.empty_community_interest": {
+        "en": "No **{interest}** activities at {community} right now. Want me to keep an "
+              "ear out and text you the moment one pops up — or look beyond {community}?",
+        "es": "No hay actividades de **{interest}** en {community} ahora mismo. ¿Quieres que "
+              "me quede atenta y te escriba en cuanto aparezca una — o busco más allá de "
+              "{community}?",
+        "pt": "Não tem atividades de **{interest}** em {community} agora. Quer que eu fique "
+              "de olho e te avise assim que aparecer uma — ou procuro além de {community}?",
+    },
+    "browse.empty_community_generic": {
+        "en": "Nothing coming up at {community} right now. Want me to keep an ear out and "
+              "text you the moment something does — or look beyond {community}?",
+        "es": "No hay nada próximo en {community} ahora mismo. ¿Quieres que me quede atenta "
+              "y te escriba en cuanto aparezca algo — o busco más allá de {community}?",
+        "pt": "Não tem nada chegando em {community} agora. Quer que eu fique de olho e te "
+              "avise assim que aparecer algo — ou procuro além de {community}?",
+    },
     "browse.events_header": {
         "en": "Here's what's coming up near you.",
         "es": "Esto es lo que viene cerca de ti.",

@@ -660,6 +660,30 @@ class ItemDraft(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+class RecoStep(BaseModel):
+    """One step of the recommendation's question set — a card in the C-4-EVENT-P2B swipe
+    carousel, or one turn of the side-Lana chat fork. Same list drives both.
+
+    The set is written per recommendation (Lana generates it; app.reco_question_sets owns the
+    floor, the guards and the two closing steps), so `field`/`label`/`question` are data on
+    the wire, never an enum the client can switch on. `kind` is the only thing the FE
+    branches on:
+      text   → free-type input, `placeholder` is the example hint under it
+      choice → `options` as tappable chips, still free-typeable
+      toggle → the consent step (mock 9/10)
+      agree  → "others also said", `options` are "<attr> ×<n>", multi-select
+    """
+
+    field: str
+    label: str
+    question: str
+    kind: str = "text"
+    placeholder: str | None = None
+    options: list[str] = Field(default_factory=list)
+    required: bool = False
+    answer: str | None = None
+
+
 class TipDraft(BaseModel):
     """In-chat "share a tip / recommendation" draft (the tip_share flow)."""
 
@@ -667,6 +691,9 @@ class TipDraft(BaseModel):
     category: str | None = None
     trait: str | None = None
     locality: str | None = None
+    reco_type: str | None = None
+    steps: list[RecoStep] = Field(default_factory=list)
+    answers: dict[str, str] = Field(default_factory=dict)
     chips: list[ItemChip] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     ready: bool = False
@@ -761,6 +788,18 @@ class EventSetupRequest(BaseModel):
     circle_place_id: str | None = None
 
 
+class TipSetupRequest(BaseModel):
+    """The carousel fork of the recommendation capture (C-4-EVENT-P1B-FORK, "flip through
+    cards"): every answer at once instead of one per turn.
+
+    Keys are the `field`s of the steps Lana generated for THIS recommendation, so this
+    request cannot be validated against a fixed enum — the endpoint intersects it with the
+    session's own step set instead, which is also what stops a client writing arbitrary
+    keys into the draft."""
+
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
 class NudgeHookRequest(BaseModel):
     """FE calls this right after send_nudge / accept_nudge / accept_intro. Only the id
     travels — the worker reads the row to decide who to tell, so a client cannot aim a
@@ -825,6 +864,10 @@ class PlaceSearchResponse(BaseModel):
 class CreateSessionRequest(BaseModel):
     purpose: Literal["lana", "profile_intake", "event_draft"] = "lana"
     force_new: bool = False
+    # The community picked in the top filter (a places.id). Everything this session
+    # searches, shows and creates is scoped to it; "" or absent = the ZIP default.
+    # See app/community_scope.py — membership is re-checked server-side.
+    community_id: str | None = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -892,6 +935,10 @@ class SendMessageRequest(BaseModel):
     # other surface answered "I don't see Rust in your neighbor matches" and sent nothing
     # (2026-08-18). The id is authoritative; the text still carries the conversation.
     peer_user_id: str | None = None
+    # The community picked in the top filter (a places.id) — see CreateSessionRequest.
+    # None means "the client said nothing", which keeps whatever the session already
+    # has; "" is the explicit "no community" pick and restores the ZIP default.
+    community_id: str | None = None
     # WHICH place a grounding card's pick is, when the user chose it from the card's
     # own Google search. Those places are in no cached candidate list, so matching the
     # posted text ("It's Fitness CF St. Cloud") would only re-search for them.
@@ -1021,6 +1068,11 @@ class ExtractedClaim(BaseModel):
     subject_name: str | None = None
     # Stored as a birth year, not an age: an age written today is wrong in a year.
     subject_birth_year: int | None = None
+    # True when they said they do this AT the community they are looking at ("I like
+    # the pool HERE"). Not stored on the claim — a claim holds one place_ref and the
+    # same activity happens at two communities — it writes the place↔activity edge
+    # (place_activities, 20261010120000). Only ever set on a turn that HAS a here-place.
+    at_here: bool = False
 
 
 class CompleteSessionResponse(BaseModel):

@@ -1,0 +1,37 @@
+<!-- Sign-in / signup 6-digit code. Same card as app/notifications.py email_html() —
+     keep the two in sync if the brand colors move. {{ .Token }} is the OTP. -->
+<div style="background:#f6f4f1;padding:28px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all">Your Lana sign-in code — expires in 10 minutes.</div>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" width="100%" style="max-width:520px;margin:0 auto">
+    <tr>
+      <td style="background:#ffffff;border:1px solid #e7e2dc;border-radius:16px;padding:28px 26px 30px">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+          <tr>
+            <td width="40" style="width:40px;padding-right:12px">
+              <div style="width:40px;height:40px;line-height:40px;border-radius:20px;background:#fdf1ea;text-align:center;font-size:20px">&#128273;</div>
+            </td>
+            <td style="vertical-align:middle">
+              <span style="font-size:17px;font-weight:700;color:#1f2937;letter-spacing:-.01em">Lana</span><span style="font-size:13px;color:#6b7280"> &middot; your block concierge</span>
+            </td>
+          </tr>
+        </table>
+        <div style="height:1px;background:#e7e2dc;margin:18px 0 20px"></div>
+        <p style="margin:0 0 6px;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:#c2410c;font-weight:700">Secure sign-in</p>
+        <h1 style="margin:0 0 10px;font-size:21px;line-height:1.3;color:#1f2937;font-weight:700;letter-spacing:-.01em">Your sign-in code</h1>
+        <p style="margin:0;font-size:15px;line-height:1.6;color:#4b5563">Enter this code in Lana to finish signing in. It expires in 10 minutes and can only be used once.</p>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:20px 0 0">
+          <tr>
+            <td align="center" style="background:#fdf1ea;border:1px solid #f3d9c8;border-radius:12px;padding:18px 12px;font-size:32px;font-weight:700;letter-spacing:.28em;color:#c2410c;font-family:'SFMono-Regular',Menlo,Consolas,monospace">{{ .Token }}</td>
+          </tr>
+        </table>
+        <p style="margin:16px 0 0;font-size:13px;line-height:1.5;color:#6b7280">Didn't request this? You can safely ignore this email — nobody can sign in without the code.</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:18px 26px 0;font-size:12px;line-height:1.5;color:#6b7280;text-align:center">
+        You're getting this because this address was used to sign in to Lana.<br>
+        <a href="{{ .SiteURL }}" style="color:#6b7280;text-decoration:underline">Open Lana</a>
+      </td>
+    </tr>
+  </table>
+</div>

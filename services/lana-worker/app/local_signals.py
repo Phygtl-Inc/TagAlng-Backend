@@ -51,6 +51,45 @@ def normalize_signal_intent(raw: str | None) -> str | None:
     return intent if intent in _VALID_SIGNAL_INTENTS else None
 
 
+def reco_subject_key(name: Any) -> str | None:
+    """The grouping key for "others also said": what two neighbours recommending the SAME
+    dentist have in common. Case and whitespace only — no stemming, no fuzzy match, so
+    "Dr Sarah" and "Dr. Sarah" stay separate subjects. ponytail: exact key. The pgvector
+    path claim_search already uses is the upgrade if that turns out to be too strict."""
+    key = " ".join(str(name or "").split()).lower()
+    return key[:120] or None
+
+
+def fetch_reco_tallies(
+    user_jwt: str, *, block_id: str, subject: Any, limit: int = 6
+) -> list[dict[str, Any]]:
+    """Short attributes other neighbours logged on the same subject, with counts —
+    [{"attr": "easy parking", "n": 2}]. Aggregate only: the RPC is security definer because
+    the RLS on local_signals is own-rows-only, so it returns counts and never a row, an
+    author or a free-text answer longer than a couple of words.
+
+    Best-effort by design — the agree step is a bonus on the card, never a blocker."""
+    key = reco_subject_key(subject)
+    if not block_id or not key:
+        return []
+    try:
+        raw = call_rpc(
+            user_jwt,
+            "reco_attr_tallies",
+            {"p_block_id": block_id, "p_subject": key, "p_limit": int(limit)},
+        )
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).info("reco_attr_tallies_unavailable")
+        return []
+    return [
+        {"attr": str(r["attr"]).strip(), "n": int(r.get("n") or 1)}
+        for r in (raw or [])
+        if isinstance(r, dict) and str(r.get("attr") or "").strip()
+    ]
+
+
 def save_local_signal(
     user_jwt: str,
     *,
@@ -61,6 +100,9 @@ def save_local_signal(
     zip_code: str | None = None,
     stage: str | None = None,
     photo_url: str | None = None,
+    reco_type: str | None = None,
+    reco_fields: list[dict[str, Any]] | None = None,
+    reco_subject: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "p_intent": intent,
@@ -93,6 +135,30 @@ def save_local_signal(
         else:
             raise
     result = raw if isinstance(raw, dict) else {}
+
+    signal_id = result.get("signal_id")
+    if signal_id and (reco_type or reco_fields or reco_subject):
+        try:
+            call_rpc(
+                user_jwt,
+                "set_signal_reco",
+                {
+                    "p_signal_id": signal_id,
+                    "p_reco_type": reco_type,
+                    "p_reco_fields": reco_fields,
+                    "p_reco_subject": reco_subject_key(reco_subject),
+                },
+            )
+            result["reco_type"] = reco_type
+            result["reco_fields"] = reco_fields or []
+        except Exception:  # noqa: BLE001
+            # The tip itself is posted and matching already ran — losing the typed
+            # answers must not read back to the user as a failed post.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "set_signal_reco_failed signal_id=%s", signal_id
+            )
 
     # The matcher ran inside that insert and found the other side of somebody's open ask —
     # tell them NOW, in this turn. Before this the match rows piled up in

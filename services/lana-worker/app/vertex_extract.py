@@ -367,6 +367,7 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
         transient = bool(item.get("transient", False))
         vague = bool(item.get("vague", False))
         subject_kind, subject_name, birth_year = _parse_subject(item)
+        at_here = bool(item.get("at_here", False))
         out.append(
             ExtractedClaim(
                 concept=concept,
@@ -383,6 +384,7 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
                 subject_kind=subject_kind,
                 subject_name=subject_name,
                 subject_birth_year=birth_year,
+                at_here=at_here,
             )
         )
     return out[:8]
@@ -525,6 +527,45 @@ def _name_context_block(current_nickname: str | None, asked_question: str | None
     return "\n".join(lines) + "\n\n"
 
 
+def _here_block(here_place: dict[str, Any] | None) -> str:
+    """What "here" means this turn — the community selected in the top-of-app filter.
+
+    Without it a sentence about the place the user is literally standing in ("the
+    swimming pool here is too good") is about an unnamed place: the extractor has
+    nothing to attach a feature to, so it emits none and the fact is lost (QA
+    2026-09-01, Fitness CF). The circle_key is the caller's own affiliation key, so a
+    feature emitted against it routes straight to that place's profile.
+    """
+    name = str((here_place or {}).get("name") or "").strip()
+    key = str((here_place or {}).get("circle_key") or "").strip()
+    if not name or not key:
+        return ""
+    return (
+        f'THEY ARE LOOKING AT: {name} — a community they belong to. A bare "here", '
+        f'"this place", "this spot" or "this gym/church/school" in this message means '
+        f"{name} and nothing else. If they volunteer an OBJECTIVE attribute of it, emit "
+        f'a place_feature_candidate with circle_key "{key}". This tells you WHICH place '
+        "they mean; it is not itself something they said, so never invent a claim, a "
+        "circle or a feature out of it.\n"
+        "BOTH SIDES — a sentence like this usually carries TWO facts, and dropping either "
+        "loses half of it: what the PLACE has (a feature) and what THEY do or like (a "
+        'claim). "I like the swimming pool here very much" → place_feature has_pool AND a '
+        'claim that they swim / like swimming; "the childcare here is great while I train" '
+        "→ has_childcare AND a claim that they train. Emit both whenever both are really "
+        "there — one of them alone is not the whole sentence.\n"
+        "LIKING IT DOES NOT MAKE IT AN OPINION. A thing they NAME at the place is a fact "
+        "about the place even when the sentence is about enjoying it: the judgement "
+        '("it\'s good", "I like it") is the opinion, the thing being there is not. '
+        '"I like the juice corner here, it\'s good" → has_juice_bar AND a claim they like '
+        'juice bars; "the sauna here is great" → has_sauna. Only a judgement with no thing '
+        'in it ("I love this place") is opinion alone — that one is not a feature.\n'
+        f"AT_HERE — on a claim for something they do, use or enjoy AT {name}, add the "
+        'field "at_here": true INSIDE that claim object, next to its "concept" and '
+        '"label". Only that: an interest they happen to hold ("I am Pakistani", '
+        f'"I play guitar") is not done at {name} unless they said so.\n\n'
+    )
+
+
 def _recent_questions_block(recent_questions: list[str] | None) -> str:
     """Tell the extractor what it has recently asked, so its follow-up isn't a near-duplicate."""
     qs = [str(q).strip() for q in (recent_questions or []) if str(q).strip()]
@@ -571,6 +612,7 @@ def incremental_claims_from_utterance(
     *,
     current_nickname: str | None = None,
     asked_question: str | None = None,
+    here_place: dict[str, Any] | None = None,
 ) -> Any:
     """Extract claims via orchestrator LLM when configured; else Vertex."""
     import logging
@@ -582,6 +624,7 @@ def incremental_claims_from_utterance(
         + _existing_claims_block(existing_labels)
         + _recent_questions_block(recent_questions)
         + _name_context_block(current_nickname, asked_question)
+        + _here_block(here_place)
     )
     try:
         from app.orchestrator.llm import extractor_model, llm_configured, llm_json

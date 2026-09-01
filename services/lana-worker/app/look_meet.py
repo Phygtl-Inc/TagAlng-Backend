@@ -403,7 +403,13 @@ def _jwt_sub(jwt: str | None) -> str | None:
 
 
 def _find_block_events(
-    *, user_jwt: str, kind: str | None, zip_code: str | None, block_id: str | None, limit: int = 3
+    *,
+    user_jwt: str,
+    kind: str | None,
+    zip_code: str | None,
+    block_id: str | None,
+    limit: int = 3,
+    session_ctx: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Existing open meets near the seeker (next 14 days), kind-matched first.
 
@@ -420,28 +426,68 @@ def _find_block_events(
     # hiding them starves the meets that make an area come alive. The 2026-07-30
     # block was aimed at off-topic matches, which the relevance floor below handles
     # precisely. See zip_unlock.discovery_zip_gate for the full reasoning.
-    args: dict[str, Any] = {"p_limit": 20}
-    if zip_code:
-        args["p_zip"] = zip_code
-    else:
-        try:
-            from app.places import _centroid
+    from app.community_scope import active_community, community_events
+    from app.discovery_route import activity_radius_meters
+    from app.supabase_rpc import call_rpc
 
-            loc = _centroid(zip_code, block_id)
-        except Exception:  # noqa: BLE001
-            loc = None
-        if not loc:
+    # With a community selected in the top filter, the meets that count are that
+    # community's — wherever the place sits. Same relevance floor below either way.
+    _comm = active_community(session_ctx)
+    if _comm:
+        rows = community_events(str(_comm["place_id"]))
+        return _rank_activities(rows, kind, limit)
+
+    def _legacy() -> Any:
+        """Pre-PR7 read: no radius cap (a seeker away from home gets cross-country
+        events labelled "50000 min walk"), but it accepts a bare ZIP. Only used when
+        the radius read can't run — never return "nothing nearby" for a lookup miss."""
+        args: dict[str, Any] = {"p_limit": 20}
+        if zip_code:
+            args["p_zip"] = zip_code
+        elif loc:
+            args["p_lat"], args["p_lng"] = loc[0], loc[1]
+        else:
             return []
-        args["p_lat"], args["p_lng"] = loc[0], loc[1]
-    try:
-        from app.supabase_rpc import call_rpc
+        return call_rpc(user_jwt, "get_nearby_activities", args)
 
-        rows = call_rpc(user_jwt, "get_nearby_activities", args)
+    try:
+        from app.places import _centroid
+
+        # An explicit ZIP wins over the block: _centroid checks its dev-block fallback
+        # table first, which would otherwise override the ZIP the user just named.
+        loc = (_centroid(zip_code, None) if zip_code else None) or _centroid(None, block_id)
     except Exception:  # noqa: BLE001
-        return []
+        loc = None
+
+    try:
+        if not loc:
+            raise ValueError("no_centroid")
+        rows = call_rpc(
+            user_jwt,
+            "get_activities_near_point",
+            {
+                "p_lat": loc[0],
+                "p_lng": loc[1],
+                "p_radius_meters": activity_radius_meters(),
+                "p_limit": 20,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        # No centroid for this ZIP, or 20260920120000 isn't on this DB.
+        try:
+            rows = _legacy()
+        except Exception:  # noqa: BLE001
+            return []
+    return _rank_activities(rows, kind, limit)
+
+
+def _rank_activities(
+    rows: Any, kind: str | None, limit: int
+) -> list[dict[str, Any]]:
+    """Kind-matched, top-N, in the card shape the look flow renders. Shared by the
+    radius read and the community-scoped read so both apply the same floor."""
     if not isinstance(rows, list):
         return []
-
     keywords = [w for w in re.findall(r"[a-z]+", str(kind or "").lower()) if len(w) > 2]
 
     def relevance(ev: dict[str, Any]) -> int:
@@ -635,7 +681,11 @@ def run_look_meet_turn(
 
     # ── P4: ready → assembled card + dual CTA (saved only when they confirm) ──
     events = _find_block_events(
-        user_jwt=user_jwt, kind=draft.get("kind"), zip_code=zip_code, block_id=home_block_id
+        user_jwt=user_jwt,
+        kind=draft.get("kind"),
+        zip_code=zip_code,
+        block_id=home_block_id,
+        session_ctx=session_ctx,
     )
     draft["chips"] = chips
     draft["suggestions"] = []

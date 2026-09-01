@@ -406,11 +406,22 @@ def activity_browse_actions(ctx: dict[str, Any] | None = None) -> list[dict[str,
     if not isinstance(draft, dict):
         return []
     if draft.get("_seek_offer"):
+        # The lane's own labels win when it set them. This used to hardcode both
+        # pills unconditionally, so the "Look in <area> (<zip>)" offer the empty-state
+        # copy promised never rendered — the user read about Foster City and was shown
+        # "Widen the search" (QA 2026-08-31). A pill that contradicts the message is
+        # worse than no pill.
+        offered = [str(s).strip() for s in (draft.get("suggestions") or []) if str(s).strip()]
+        if not offered:
+            offered = ["Yes, listen for me", "Widen the search"]
         return [
-            _action(action_id="browse_seek_yes", label="Yes, listen for me",
-                    message="Yes, listen for me", style="primary"),
-            _action(action_id="browse_seek_widen", label="Widen the search",
-                    message="Widen the search", style="secondary"),
+            _action(
+                action_id="browse_seek_yes" if i == 0 else f"browse_seek_{i}",
+                label=label,
+                message=label,
+                style="primary" if i == 0 else "secondary",
+            )
+            for i, label in enumerate(offered[:4])
         ]
     labels = [str(s).strip() for s in (draft.get("suggestions") or []) if str(s).strip()]
     return [

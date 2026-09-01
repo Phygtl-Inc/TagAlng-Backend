@@ -33,7 +33,7 @@ _PASS_RE = re.compile(
     r"go ahead|done|send it)\b",
     re.IGNORECASE,
 )
-_TIP_TURN_CAP = 12
+_TIP_TURN_CAP = 24  # 8 carousel steps + name/type + corrections
 
 # Deterministic entry backstop (the "A tip to share" CTA), so it engages even without
 # the FE intent_hint. Matches SHARING a recommendation — not seeking one.
@@ -49,19 +49,22 @@ def looks_like_tip_share_entry(message: str) -> bool:
     return bool(_ENTRY_RE.search(str(message or "").strip()))
 
 
-_TIP_VALUE_FIELDS = ("name", "category", "trait", "locality")
+_TIP_VALUE_FIELDS = ("name", "category", "trait", "locality", "reco_type")
 
 _EXTRACT_SYSTEM = """You extract structured fields about a local recommendation (a "tip") \
 a neighbor wants to share, and propose ONE smart follow-up question.
 
 Return ONE compact JSON object with exactly these keys:
-{"name","category","trait","locality","place_based","ask"}
+{"name","category","trait","locality","reco_type","place_based","answers",<<STEPS_KEY>>"ask"}
 
 - name: the specific who/where being recommended, e.g. "Dr. Sarah", "Canvas Restaurant", "Lake Nona Park". null if not stated.
 - category: what kind of recommendation, e.g. "pediatric dentist","restaurant","playground","plumber","pediatrician". null if unclear.
 - trait: why it's good / the standout detail, e.g. "twin-friendly","amazing tacos","gentle with toddlers". null if not stated.
 - locality: neighborhood/area if mentioned, e.g. "Lake Nona". null otherwise.
-- place_based: true if this is a PLACE or business you could find on a map (restaurant, park, clinic, salon);
+- reco_type: EXACTLY one of <<TYPES>>, or null if genuinely unclear. <<TYPE_RULES>>
+- answers: object mapping any of the CURRENT TYPE FIELDS listed below to what the user ALREADY said,
+  verbatim-ish and short. Omit a field rather than guess it. {{}} when nothing was said.
+<<STEPS_SPEC>>- place_based: true if this is a PLACE or business you could find on a map (restaurant, park, clinic, salon);
   false if it's a person/word-of-mouth service with no fixed public listing (a nanny, a handyman by referral).
 - ask: the single MOST useful follow-up to make this a strong tip, TAILORED to what's still unknown,
   with tappable answers that fit (e.g. cuisine for a restaurant, age-fit for a doctor). Shape:
@@ -71,8 +74,45 @@ Return ONE compact JSON object with exactly these keys:
 Use null for any string the text does not support, false for place_based when unsure. Never invent a value."""
 
 
+_STEPS_SPEC = """- steps: the question set for THIS recommendation — 4-8 questions, in the order to ask them,
+  that a neighbor reading it would want answered. Each: {"field": short snake_case key,
+  "label": 1-2 word eyebrow, "question": ONE short question ending in "?",
+  "placeholder": a short example answer for THIS subject, "options": [2-4 short taps] ONLY
+  when the answer is genuinely a small closed set}.
+  Lead with the type's own basics: <<FLOOR>>.
+  Then tailor to the SUBJECT, not the type: a recipe wants taste, difficulty, time and what
+  they make it for; a pediatric dentist wants what she treats, what stood out, who to send;
+  a night light wants what it fixed and what to know before buying. Ask what a neighbor
+  would actually need to decide — never a generic "tell me more".
+  Never ask for a home address, a full name, or anything private.
+  Do NOT include "can neighbours ask you more" or "what did others say" — both are added
+  for you. Return [] when CURRENT TYPE FIELDS below already lists a set.
+"""
+
+
+def _extract_system(*, want_steps: bool) -> str:
+    """The extraction prompt with the type list + the current type's fields injected.
+
+    `want_steps` drops the whole question-set spec once the set exists: the set is written
+    ONCE per recommendation, so re-requesting it every turn would both burn tokens and let
+    the wording drift under a user who is halfway through answering it.
+    """
+    from app.reco_question_sets import FLOOR_RULES, RECO_TYPES, TYPE_RULES
+
+    return (
+        _EXTRACT_SYSTEM.replace("<<TYPES>>", "|".join(RECO_TYPES))
+        .replace("<<TYPE_RULES>>", TYPE_RULES)
+        .replace("<<STEPS_KEY>>", '"steps",' if want_steps else "")
+        .replace("<<STEPS_SPEC>>", _STEPS_SPEC.replace("<<FLOOR>>", FLOOR_RULES) if want_steps else "")
+    )
+
+
 def _extract_tip_fields(
-    *, history: list[dict[str, Any]], user_message: str, prev: dict[str, Any]
+    *,
+    history: list[dict[str, Any]],
+    user_message: str,
+    prev: dict[str, Any],
+    lang: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """LLM structured extraction. Returns (fields_found, ask). ({}, None) on failure."""
     try:
@@ -87,19 +127,36 @@ def _extract_tip_fields(
         )
         known = {k: prev.get(k) for k in _TIP_VALUE_FIELDS}
         known["details"] = prev.get("details") or []
+        known["answers"] = prev.get("answers") or {}
+        step_set = step_set_of(prev)
+        want_steps = not prev.get("step_set")
+        fields = [f"{s['field']}: {s['question']}" for s in step_set]
+        lang_line = (
+            f"WRITE EVERY label, question AND placeholder IN {lang}. The `field` keys stay "
+            "snake_case English — they are storage keys, not copy."
+            if want_steps and lang
+            else ""
+        )
         payload = "\n\n".join(
             [
+                p
+                for p in [lang_line]
+                if p
+            ]
+            + [
                 "CURRENT TIP DRAFT (merge updates into this):\n"
                 + json.dumps(known, ensure_ascii=False),
                 "CONVERSATION SO FAR:\n" + (convo or "(none)"),
+                "CURRENT TYPE FIELDS (targets for `answers`):\n"
+                + ("\n".join(fields) or "(type not known yet — return {} for answers)"),
                 f"USER'S NEW MESSAGE:\n{user_message.strip()}",
             ]
         )
         data = llm_json(
             model=synthesizer_model(),
-            system=_EXTRACT_SYSTEM,
+            system=_extract_system(want_steps=want_steps),
             user_payload=payload,
-            max_tokens=320,
+            max_tokens=1100 if want_steps else 320,
             temperature=0.2,
         )
         if not isinstance(data, dict):
@@ -111,6 +168,14 @@ def _extract_tip_fields(
                 out[k] = v.strip()
         if isinstance(data.get("place_based"), bool):
             out["place_based"] = data["place_based"]
+        if want_steps and isinstance(data.get("steps"), list):
+            out["steps_raw"] = data["steps"]
+        if isinstance(data.get("answers"), dict):
+            out["answers"] = {
+                str(k): v.strip()
+                for k, v in data["answers"].items()
+                if isinstance(v, str) and v.strip() and v.strip().lower() != "null"
+            }
         ask = data.get("ask")
         if isinstance(ask, dict):
             q = str(ask.get("question") or "").strip()
@@ -128,6 +193,30 @@ def _extract_tip_fields(
 
         logging.getLogger(__name__).exception("tip_share_extract_failed")
         return {}, None
+
+
+def step_set_of(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    """The recommendation's question set: the one Lana wrote for it, or the type's static
+    set until she has (and if generation fails, forever — the flow never blocks on it)."""
+    generated = draft.get("step_set")
+    if isinstance(generated, list) and generated:
+        return generated
+    from app.reco_question_sets import steps_for
+
+    return steps_for(draft.get("reco_type"))
+
+
+def _reco_tallies(*, user_jwt: str, block_id: str | None, name: Any) -> list[dict[str, Any]]:
+    """What OTHER neighbours already logged about this same subject, for the closing
+    "others also said · tap to agree" step. Best-effort: no tallies, no step."""
+    if not block_id or not str(name or "").strip():
+        return []
+    try:
+        from app.local_signals import fetch_reco_tallies
+
+        return fetch_reco_tallies(user_jwt, block_id=block_id, subject=str(name))
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _has(draft: dict[str, Any], key: str) -> bool:
@@ -172,11 +261,18 @@ def _summary(draft: dict[str, Any]) -> str:
 
 
 def _detail_text(draft: dict[str, Any]) -> str:
+    from app.reco_question_sets import carousel
+
     parts = [str(draft.get("name") or "").strip()]
     if _has(draft, "category"):
         parts.append(str(draft["category"]).strip())
     if _has(draft, "trait"):
         parts.append(str(draft["trait"]).strip())
+    parts += [
+        f"{s['label']}: {s['answer']}"
+        for s in carousel(step_set_of(draft), draft.get("answers"))
+        if s.get("answer")
+    ]
     parts += [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()]
     if _has(draft, "locality"):
         parts.append(str(draft["locality"]).strip())
@@ -198,6 +294,27 @@ def _name_suggestions(draft: dict[str, Any], *, zip_code: str | None, block_id: 
         return []
 
 
+def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The answered steps, self-describing. An array and not {field: answer} because the
+    questions are generated per recommendation: store the answer alone and nothing can ever
+    say again that "helped_with" was asked as "What did she help with?" — the reader card
+    would have answers with no labels."""
+    from app.reco_question_sets import carousel
+
+    out = [
+        {
+            "field": s["field"],
+            "label": s["label"],
+            "question": s["question"],
+            "kind": s.get("kind") or "text",
+            "answer": s["answer"],
+        }
+        for s in carousel(step_set_of(draft), draft.get("answers"))
+        if s.get("answer")
+    ]
+    return out or None
+
+
 def _save_tip(
     *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
 ) -> dict[str, Any] | None:
@@ -211,6 +328,11 @@ def _save_tip(
             category=str(draft.get("category") or "").strip() or None,
             block_id=block_id,
             zip_code=zip_code,
+            reco_type=draft.get("reco_type"),
+            reco_fields=_reco_fields(draft),
+            # What the agree-row tallies group on — the subject, normalized once at write
+            # time so a lookup is an index hit and not a scan over every recommendation.
+            reco_subject=str(draft.get("name") or "").strip() or None,
         )
     except Exception:  # noqa: BLE001
         import logging
@@ -370,8 +492,29 @@ def run_tip_share_turn(
             session_ctx["tip_enrich_count"] = 0
         elif field in _TIP_VALUE_FIELDS:
             draft.pop(field, None)
+        step = None
+        if field not in _TIP_VALUE_FIELDS and field != "details":
+            step = next((s for s in step_set_of(draft) if s["field"] == field), None)
+            if step:
+                draft["answers"] = {
+                    k: v for k, v in (draft.get("answers") or {}).items() if k != field
+                }
+                session_ctx["tip_asked_fields"] = [
+                    f for f in (session_ctx.get("tip_asked_fields") or []) if f != field
+                ]
+                # The re-answer has to land back on THIS step. Without the pending ask it
+                # went to the extractor's mercy: the reply to a re-opened "What did she help
+                # with?" was a bare fragment with nothing marking which step it belonged to.
+                session_ctx["tip_pending_ask"] = field
         session_ctx["tip_ready"] = None
-        q, opts = _question_for_field(field)
+        # A step is re-asked with its OWN question. `_question_for_field` only knows the four
+        # draft-level fields, so every step tap used to come back as "What should I change?" —
+        # which reads like Lana forgot what the user just tapped.
+        q, opts = (
+            (str(step["question"]), list(step.get("options") or []))
+            if step
+            else _question_for_field(field)
+        )
         draft["chips"] = _build_chips(draft)
         draft["suggestions"] = opts
         session_ctx["tip_draft"] = draft
@@ -383,18 +526,33 @@ def run_tip_share_turn(
     # ── Capture a pending enrichment / name answer into the right place ──
     pending = session_ctx.get("tip_pending_ask")
     if pending and msg and not _PASS_RE.search(msg):
-        details = list(draft.get("details") or [])
-        if msg not in details:
-            details.append(msg)
-        draft["details"] = details
+        step_fields = {s["field"] for s in step_set_of(draft)}
+        if pending in step_fields:
+            draft["answers"] = {**(draft.get("answers") or {}), str(pending): msg}
+        else:
+            details = list(draft.get("details") or [])
+            if msg not in details:
+                details.append(msg)
+            draft["details"] = details
         session_ctx["tip_pending_ask"] = None
 
     # ── Extract fields + tailored follow-up ──
     ask: dict[str, Any] | None = None
     if msg:
-        found, ask = _extract_tip_fields(history=history, user_message=msg, prev=draft)
+        from app.i18n import lang_display_name, session_lang
+
+        code = session_lang(session_ctx)
+        found, ask = _extract_tip_fields(
+            history=history,
+            user_message=msg,
+            prev=draft,
+            lang=lang_display_name(code) if code else None,
+        )
+        merged_answers = {**(draft.get("answers") or {}), **(found.pop("answers", None) or {})}
         for k, v in found.items():
             draft[k] = v
+        if merged_answers:
+            draft["answers"] = merged_answers
 
     # ── P1: nothing yet → "What do you want to recommend?" ──
     if not _has(draft, "name") and not _has(draft, "category"):
@@ -433,9 +591,62 @@ def run_tip_share_turn(
     # field already asked: a non-matching answer ("great for toddlers" to "Which
     # community center?") makes the model re-propose the same question — an identical
     # re-ask loop. ──
+    from app.reco_question_sets import (
+        carousel,
+        missing_required,
+        next_question,
+        validate_steps,
+    )
+
+    reco_type = draft.get("reco_type")
+    # ── The question set is written ONCE, here. Deliberately after the name/category gates
+    # rather than the turn the type lands: the questions and their example placeholders are
+    # about Dr. Sarah, not about dentists in general, and the tallies for the closing
+    # "others also said" step need the subject to group on. `steps_raw` is whatever the
+    # extractor proposed (possibly several turns ago); validate_steps is what makes it
+    # askable, and falls back to the type's static set when there is nothing usable. ──
+    if reco_type and not draft.get("step_set"):
+        draft["step_set"] = validate_steps(
+            draft.pop("steps_raw", None),
+            reco_type,
+            tallies=_reco_tallies(
+                user_jwt=user_jwt, block_id=home_block_id, name=draft.get("name")
+            ),
+        )
+    step_set = step_set_of(draft) if reco_type else []
+    if step_set:
+        steps = carousel(step_set, draft.get("answers"))
+        draft["steps"] = steps
+        draft["missing"] = missing_required(step_set, draft.get("answers"))
+        asked = set(session_ctx.get("tip_asked_fields") or [])
+        # "that's it / done" mid-carousel goes STRAIGHT to the ready card once the
+        # required steps are in. A typed set is 7-8 steps deep, so without this the only
+        # way out of a set the user considers finished is to answer every optional or
+        # abandon the tip.
+        done_early = bool(_PASS_RE.search(msg)) and not draft["missing"]
+        # `asked` goes IN so the walk advances past optionals already offered.
+        step = None if done_early else next_question(
+            step_set, draft.get("answers"), asked=asked
+        )
+        if step:
+            asked.add(step["field"])
+            session_ctx["tip_asked_fields"] = list(asked)
+            session_ctx["tip_pending_ask"] = step["field"]
+            draft["chips"] = chips
+            draft["suggestions"] = list(step.get("options") or [])
+            session_ctx["tip_draft"] = draft
+            session_ctx["tip_share_active"] = True
+            session_ctx["tip_pending_question"] = step["question"]
+            session_ctx["routing_phase"] = "listening"
+            answered = sum(1 for s in steps if s.get("answer"))
+            return (
+                f"Heard you — **{_summary(draft)}**. {step['question']} "
+                f"({answered + 1}/{len(steps)})"
+            )
+
     enrich_count = int(session_ctx.get("tip_enrich_count") or 0)
     asked_fields = set(session_ctx.get("tip_asked_fields") or [])
-    if ask and ask["field"] not in asked_fields and enrich_count < _MAX_ENRICH:
+    if not step_set and ask and ask["field"] not in asked_fields and enrich_count < _MAX_ENRICH:
         asked_fields.add(ask["field"])
         session_ctx["tip_asked_fields"] = list(asked_fields)
         session_ctx["tip_pending_ask"] = ask["field"]
