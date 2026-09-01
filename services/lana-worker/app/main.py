@@ -3499,13 +3499,22 @@ def post_fellows(
             from app.community_scope import peers_in_community
 
             peers = peers_in_community(auth.user_id, place_id, limit=limit)
+    # Pre-filtered and pre-sliced so the shaped rows line up index-for-index with the raw
+    # matches they came from — the authored line needs both halves: the raw row carries the
+    # shared claims and the real peer id (the cache key), the shaped row the enriched tags.
+    matched = [p for p in peers if isinstance(p, dict)][:limit]
+    rows = peers_to_match_rows(
+        matched, phone_verified=auth.phone_verified, max_rows=limit
+    )
+    # The line the card renders in place of the trait chips. Authored ON the fetch, not in
+    # the background: a row that appears with chips and swaps to a sentence a second later
+    # reads as a glitch. Cached per shared-claim basis, so only a genuinely new overlap
+    # pays an LLM call, and a failed compose just leaves the tags in place.
+    from app.peer_rec_line import attach_rec_lines
+
+    attach_rec_lines(auth.user_id, rows, matched)
     return FellowsResponse(
-        fellows=[
-            PeerMatchRow(**row)
-            for row in peers_to_match_rows(
-                peers, phone_verified=auth.phone_verified, max_rows=limit
-            )
-        ],
+        fellows=[PeerMatchRow(**row) for row in rows],
         requires_phone_verification=not auth.phone_verified,
     )
 
@@ -4509,8 +4518,9 @@ def post_rapport_mute_fact(
 
 
 # ── Feedback (👍/👎 on Lana output) ────────────────────────────────────────────
-# One endpoint for both rateable surfaces: an assistant chat reply (message_id) or a
-# rapport tile question (gap_row_id). Same thumb again → the FE sends rating='clear'.
+# One endpoint for every rateable surface: an assistant chat reply (message_id), a
+# rapport tile question (gap_row_id), or the authored reason on a fellows row (rec_id —
+# "Was this rec useful?"). Same thumb again → the FE sends rating='clear'.
 # Rows land in lana_feedback (service-role only) for the team to review.
 
 
@@ -4518,6 +4528,8 @@ class LanaFeedbackBody(_BaseModel):
     rating: str  # 'up' | 'down' | 'clear'
     message_id: str | None = None
     gap_row_id: str | None = None
+    # A peer_rec_lines id, as shipped in PeerMatchRow.rec_id by /lana/fellows.
+    rec_id: str | None = None
     # Where the thumb lives in the UI ('chat', 'rapport_tile', …) — stored for triage.
     surface: str | None = None
     # Optional free-text follow-up (the FE offers it on 👎). Tracks the latest rating
@@ -4536,6 +4548,7 @@ def post_lana_feedback(
         rating=body.rating,
         message_id=(body.message_id or "").strip() or None,
         gap_row_id=(body.gap_row_id or "").strip() or None,
+        rec_id=(body.rec_id or "").strip() or None,
         comment=body.comment,
         context={"surface": (body.surface or "").strip() or None},
     )
@@ -4547,6 +4560,7 @@ def post_lana_feedback(
             "target_kind": result["target_kind"],
             "message_id": body.message_id,
             "gap_row_id": body.gap_row_id,
+            "rec_id": body.rec_id,
             "surface": body.surface,
             # Comment text stays in the DB — analytics only needs to know one exists.
             "has_comment": bool((body.comment or "").strip()),

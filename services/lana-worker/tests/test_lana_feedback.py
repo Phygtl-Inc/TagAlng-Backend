@@ -71,12 +71,13 @@ class _Supabase:
         return _Query(name, self.store)
 
 
-def _store(messages=None, sessions=None, gaps=None, existing=None):
+def _store(messages=None, sessions=None, gaps=None, existing=None, recs=None):
     return {
         "selects": {
             "lana_messages": messages or [],
             "lana_sessions": sessions or [],
             "rapport_gaps": gaps or [],
+            "peer_rec_lines": recs or [],
             "lana_feedback": existing or [],
         },
         "inserts": [],
@@ -88,6 +89,12 @@ def _store(messages=None, sessions=None, gaps=None, existing=None):
 _MSG = {"id": "m1", "session_id": "s1", "role": "assistant", "content": "Try the park!"}
 _SES = {"id": "s1", "user_id": "u1"}
 _GAP = {"gap_row_id": "g1", "user_id": "u1", "gap_id": "family.pets", "question": "Any pets?"}
+_REC = {
+    "id": "r1",
+    "user_id": "u1",
+    "peer_user_id": "p1",
+    "line": "You're both early risers who'd rather run the lake trail.",
+}
 
 
 class TestRecordFeedback(unittest.TestCase):
@@ -131,6 +138,34 @@ class TestRecordFeedback(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             self._run(store, rating="up", gap_row_id="g1")
         self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_thumb_on_fellows_rec_line_snapshots_the_authored_line(self):
+        # The third rateable surface ("Was this rec useful?"). The rated text is the
+        # STORED line, not anything the client sent, and the pairing rides in context so
+        # the team can read the 👎 without joining a row that may be re-authored later.
+        store = _store(recs=[_REC])
+        out = self._run(store, rating="down", rec_id="r1", context={"surface": "fellows"})
+        self.assertEqual(out, {"rating": "down", "target_kind": "peer_rec"})
+        (_, row), = store["inserts"]
+        self.assertEqual(row["rec_id"], "r1")
+        self.assertEqual(row["content_snapshot"], _REC["line"])
+        self.assertEqual(row["context"]["peer_user_id"], "p1")
+        self.assertEqual(row["context"]["surface"], "fellows")
+
+    def test_rec_line_authored_for_someone_else_is_404(self):
+        # peer_rec_lines rows are per-viewer, so ownership IS the disclosure check —
+        # a guessed rec_id must not echo another user's line back in the snapshot.
+        store = _store(recs=[{**_REC, "user_id": "other"}])
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(store, rating="up", rec_id="r1")
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(store["inserts"], [])
+
+    def test_two_targets_at_once_is_400(self):
+        store = _store(recs=[_REC], gaps=[_GAP])
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(store, rating="up", rec_id="r1", gap_row_id="g1")
+        self.assertEqual(ctx.exception.status_code, 400)
 
     def test_down_with_comment_stores_trimmed_comment(self):
         store = _store(gaps=[_GAP])

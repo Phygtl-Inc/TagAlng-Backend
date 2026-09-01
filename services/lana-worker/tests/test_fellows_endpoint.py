@@ -37,6 +37,35 @@ def _peer(n: int, *, shared: list[str] | None = None) -> dict:
     }
 
 
+class TestFellowsCarriesTheAuthoredLine(unittest.TestCase):
+    """The card renders one authored sentence in place of the trait chips."""
+
+    def test_rec_line_and_rec_id_ride_out_on_the_wire(self):
+        def _fake(user_id, rows, peers):
+            # The shaped rows and the raw matches MUST stay index-aligned — the line is
+            # written from the raw row's shared claims and keyed on its real peer id.
+            self.assertEqual(user_id, "u-caller")
+            self.assertEqual(len(rows), len(peers))
+            self.assertEqual([p["peer_user_id"] for p in peers], ["p-1", "p-2"])
+            for i, row in enumerate(rows):
+                row["rec_line"] = f"line-{i}"
+                row["rec_id"] = f"rec-{i}"
+
+        with (
+            patch("app.main.verify_auth", return_value=_auth()),
+            patch(
+                "app.discovery_route._fetch_verified_peer_matches",
+                return_value=[_peer(1, shared=["Runs"]), _peer(2, shared=["Reads"])],
+            ),
+            patch("app.peer_rec_line.attach_rec_lines", side_effect=_fake),
+        ):
+            res = post_fellows(FellowsBody(), authorization=AUTH)
+        self.assertEqual([f.rec_line for f in res.fellows], ["line-0", "line-1"])
+        self.assertEqual([f.rec_id for f in res.fellows], ["rec-0", "rec-1"])
+        # The tags stay on the wire: the chat card still renders them.
+        self.assertEqual(res.fellows[0].trait_tags, ["Runs"])
+
+
 class TestFellowsUsesTheChatLane(unittest.TestCase):
     def _call(self, peers: list[dict], *, auth: AuthSession, limit: int = 12):
         with (

@@ -34,6 +34,15 @@ class PeerMatchRow(BaseModel):
     match_band: str | None = None
     match_badge: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
+    # ── The authored reason (app/peer_rec_line.py) ───────────────────────────────────
+    # One AI-written line in Lana's voice saying what these two actually share, from the
+    # same proven overlap `trait_tags` lists. The fellows card renders this instead of the
+    # chips; the tags stay on the wire because the chat card still renders them. `rec_id`
+    # is the stored line's id — the target a 👍/👎 posts to /lana/feedback. Absent on every
+    # row we could not author (no overlap, no LLM, a failed compose), which is why the tags
+    # remain the fallback rather than a canned sentence.
+    rec_line: str | None = None
+    rec_id: str | None = None
     # "intro_sent" (an intro is on its way) or "connected" (they already know each other,
     # per user_relationships.tier). Either way the card shows a status, not a Nudge button:
     # Lana saying "I just sent your intro" must not sit above a control inviting the same

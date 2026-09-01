@@ -1,7 +1,8 @@
-"""Thumbs up/down on Lana output (chat replies and rapport tile questions).
+"""Thumbs up/down on Lana output (chat replies, rapport questions, fellows rec lines).
 
-The PWA posts a rating against either a lana_messages id (an assistant reply) or a
-rapport_gaps gap_row_id (a "By the way…" question). One row per (user, target):
+The PWA posts a rating against a lana_messages id (an assistant reply), a rapport_gaps
+gap_row_id (a "By the way…" question), or a peer_rec_lines id (the authored "why this
+neighbour" line on a fellows row). One row per (user, target):
 rating again with the other thumb flips it, `clear` deletes it. The rated text is
 snapshotted from the DB at rating time — never trusted from the client — so the team
 reviews exactly what Lana said, even if the source row is later deleted.
@@ -81,12 +82,39 @@ def _resolve_rapport_target(user_id: str, gap_row_id: str) -> dict[str, Any]:
     }
 
 
+def _resolve_rec_target(user_id: str, rec_id: str) -> dict[str, Any]:
+    """Load the rated fellows line and prove it was authored FOR the caller.
+
+    peer_rec_lines rows are per-viewer (app/peer_rec_line.py), so the ownership check is
+    also the disclosure check: a rec_id belonging to someone else must not echo its line
+    back in content_snapshot.
+    """
+    res = (
+        service_client()
+        .table("peer_rec_lines")
+        .select("id, user_id, peer_user_id, line")
+        .eq("id", rec_id)
+        .limit(1)
+        .execute()
+    )
+    row = (res.data or [None])[0]
+    if not row or str(row.get("user_id")) != str(user_id):
+        raise HTTPException(status_code=404, detail="rec_not_found")
+    return {
+        "target_kind": "peer_rec",
+        "rec_id": rec_id,
+        "snapshot": str(row.get("line") or "")[:2000],
+        "peer_user_id": str(row.get("peer_user_id") or "") or None,
+    }
+
+
 def record_feedback(
     user_id: str,
     *,
     rating: str,
     message_id: str | None = None,
     gap_row_id: str | None = None,
+    rec_id: str | None = None,
     comment: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -99,7 +127,7 @@ def record_feedback(
     Returns {"rating": <current rating or None>, "target_kind": ...} so the FE can
     render the thumb state straight from the response.
     """
-    if bool(message_id) == bool(gap_row_id):
+    if sum(1 for t in (message_id, gap_row_id, rec_id) if t) != 1:
         raise HTTPException(status_code=400, detail="exactly_one_target_required")
     if rating not in (*RATINGS, "clear"):
         raise HTTPException(status_code=400, detail="invalid_rating")
@@ -107,6 +135,9 @@ def record_feedback(
     if message_id:
         target = _resolve_message_target(user_id, message_id)
         match_col, match_val = "message_id", message_id
+    elif rec_id:
+        target = _resolve_rec_target(user_id, str(rec_id))
+        match_col, match_val = "rec_id", str(rec_id)
     else:
         target = _resolve_rapport_target(user_id, str(gap_row_id))
         match_col, match_val = "gap_row_id", str(gap_row_id)
@@ -133,6 +164,10 @@ def record_feedback(
         ctx.setdefault("session_id", target["session_id"])
     if target.get("gap_id"):
         ctx.setdefault("gap_id", target["gap_id"])
+    if target.get("peer_user_id"):
+        # Who the rated line was about — the team reads "this pairing got a 👎" without a
+        # join back into a table whose row may have been re-authored since.
+        ctx.setdefault("peer_user_id", target["peer_user_id"])
     comment = (comment or "").strip()[:2000] or None
 
     if existing_row:
@@ -146,6 +181,7 @@ def record_feedback(
                 "target_kind": target["target_kind"],
                 "message_id": message_id,
                 "gap_row_id": gap_row_id,
+                "rec_id": rec_id,
                 "rating": rating,
                 "comment": comment,
                 "content_snapshot": target["snapshot"],
