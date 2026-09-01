@@ -1561,6 +1561,7 @@ def try_upsert_claims_from_message(
     message_id: str | None = None,
     allow_rapport_gap: bool = True,
     asked_question: str | None = None,
+    here_place: dict[str, Any] | None = None,
 ) -> ClaimExtractResult:
     """Flash extract from one user line → upsert claims; confirm heritage conflicts.
 
@@ -1595,6 +1596,7 @@ def try_upsert_claims_from_message(
             recent_questions,
             current_nickname=saved_nick,
             asked_question=asked_question,
+            here_place=here_place,
         )
         nickname, claims, kids_count, followup = parse_incremental_claims_data(data)
         # AI-written teaser for the tile ("about your reading…") — read straight off the raw
@@ -1693,6 +1695,17 @@ def try_upsert_claims_from_message(
             )
 
     saved = upsert_claims(user_id, claims)
+    # "I like the pool HERE" is two facts and one edge: the interest is the claim above,
+    # and THIS is the place↔activity edge (20261010120000 — a claim holds one place_ref,
+    # but the same activity happens at two communities, so the edge cannot live on it).
+    # It is what the community roster reads to show what each member does there.
+    here_id = str((here_place or {}).get("place_id") or "")
+    if here_id:
+        from app.place_activities import link_activity_from_claim
+
+        for claim in claims:
+            if claim.at_here and claim.subject_kind == "self":
+                link_activity_from_claim(user_id, here_id, claim.label)
     primary = max(claims, key=lambda c: c.confidence, default=None)
     # A turn that captured a circle gives its tile slot to the GROUNDING question
     # ("which spot is it?") instead of the extractor's follow-up — the two are about
@@ -1727,6 +1740,7 @@ def extract_and_upsert_claims_from_message(
     skip_heritage: bool = False,
     message_id: str | None = None,
     allow_rapport_gap: bool = True,
+    here_place: dict[str, Any] | None = None,
 ) -> int:
     """Background job: Flash extract from one user line → upsert claims + nickname, and open
     ONE contextual rapport follow-up gap from the extractor's own warm question (semantic,
@@ -1738,6 +1752,7 @@ def extract_and_upsert_claims_from_message(
         skip_heritage=skip_heritage,
         message_id=message_id,
         allow_rapport_gap=allow_rapport_gap,
+        here_place=here_place,
     ).saved
 
 

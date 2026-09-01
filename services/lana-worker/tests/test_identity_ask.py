@@ -85,8 +85,10 @@ class TestComposeIdentityAsk(unittest.TestCase):
 
 
 class TestFindPeersToolSeedsIdentity(unittest.TestCase):
+    # The tool now goes through the shared blended fetch (radius + onion + the
+    # community filter), not the bare vector RPC — same list the chat lane gets.
     @patch("app.identity_ask.identity_from_saved_claims", return_value="Mother · Runner")
-    @patch("app.guest_capabilities.fetch_peer_matches", return_value=[])
+    @patch("app.discovery_route._fetch_verified_peer_matches", return_value=[])
     def test_signed_in_user_with_claims_is_not_blocked(self, _fetch, _seed) -> None:
         from app.orchestrator.tools import execute_tool
 

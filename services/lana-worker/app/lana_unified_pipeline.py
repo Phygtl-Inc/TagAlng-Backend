@@ -875,7 +875,10 @@ def _event_draft_complete(draft: Any) -> bool:
 
 
 def _auto_publish_event(
-    user_id: str, user_jwt: str, draft: dict[str, Any]
+    user_id: str,
+    user_jwt: str,
+    draft: dict[str, Any],
+    session_ctx: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None]:
     """Create the event via create_event. Returns (event_id, None) on success or
     (None, error_detail) on failure (never raises — a publish problem must not break
@@ -889,6 +892,12 @@ def _auto_publish_event(
         from app.models import EventDraft
 
         clean = {k: v for k, v in draft.items() if k in _EVENT_DRAFT_FIELDS}
+        # A meet created while a community is selected in the top filter belongs to that
+        # community — the host said so by being in it. An explicit pick still wins.
+        if not clean.get("circle_place_id"):
+            from app.community_scope import active_community_id
+
+            clean["circle_place_id"] = active_community_id(session_ctx)
         event_id = publish_event(user_id, user_jwt, EventDraft(**clean)) or None
         return event_id, None
     except HTTPException as exc:
@@ -3091,7 +3100,9 @@ def run_lana_unified_pipeline(
                             ),
                         )
                 elif drop_asked:
-                    event_id, publish_error = _auto_publish_event(user_id, user_jwt, ed)
+                    event_id, publish_error = _auto_publish_event(
+                        user_id, user_jwt, ed, session_ctx
+                    )
                     if event_id:
                         turn_ctx["event_id"] = event_id
                         turn_ctx["event_published_now"] = True

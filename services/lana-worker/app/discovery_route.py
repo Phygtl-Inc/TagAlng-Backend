@@ -57,6 +57,7 @@ from app.guest_capabilities import (
     wants_host_activity,
     wants_peer_find,
 )
+from app.community_scope import active_community, community_name
 from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
 from app.tip_rec_cascade import WIDE_FETCH as WIDE_TIP_FETCH
 from app.tip_rec_cascade import stamp_tip_peer_surface
@@ -528,10 +529,26 @@ def _fetch_verified_peer_matches(
     user_id: str | None,
     block_id: str | None,
     limit: int = 5,
+    session_ctx: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Vector matches + self-heal: claims saved without embeddings (best-effort
     write-time embed) get re-embedded in the background so fuzzy matching is
-    whole by the next turn; exact-concept matches already work without vectors."""
+    whole by the next turn; exact-concept matches already work without vectors.
+
+    With a community selected in the top filter, the roster IS the search: "fellow
+    minded people" means fellow minded people HERE, and a block-scoped vector list
+    would answer with strangers from three ZIPs over. An empty community widens
+    back to the neighbourhood, but never silently — it stamps `community_widened_from`
+    so the reply names the community it found nobody in."""
+    from app.community_scope import active_community, peers_in_community
+
+    comm = active_community(session_ctx)
+    if comm and user_id:
+        scoped = peers_in_community(user_id, str(comm["place_id"]), limit=limit)
+        if scoped:
+            return scoped
+        if session_ctx is not None:
+            session_ctx["community_widened_from"] = comm.get("name")
     try:
         kick_claim_embedding_backfill(user_id=user_id, block_id=block_id)
     except Exception:
@@ -717,7 +734,8 @@ def _preview_peers_with_ids(
         )
         try:
             peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=None, block_id=block_id, limit=5
+                user_jwt, user_id=None, block_id=block_id, limit=5,
+                session_ctx=session_ctx,
             )
             if peers:
                 return peers
@@ -2978,12 +2996,13 @@ def _try_peer_seek_offer_reply_turn(
     if block_id:
         try:
             peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
+                user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                session_ctx=session_ctx,
             )
         except Exception:  # noqa: BLE001
             peers = []
     if peers:
-        reply = format_peer_matches(peers)
+        reply = format_peer_matches(peers, session_ctx)
     else:
         if block_id:
             peers = fetch_preview_peers_on_block(
@@ -3594,6 +3613,19 @@ def _compose_neighbor_tip_reply(
     composer gets is one the row itself carries (who, what they recommended, how far), so
     the prose can never claim more than the cards do."""
     facts = [f"What they asked for: {_ask_excerpt(detail)}"]
+    # The community filter, either way round: these recommendations are all from people
+    # at the selected community, or nobody there had one and this list is the wider
+    # neighbourhood — which the user has to be told, not shown silently.
+    _scope = community_name(session_ctx)
+    _widened = str(session_ctx.get("community_widened_from") or "").strip()
+    if _widened:
+        session_ctx["community_widened_from"] = None  # one turn only
+        facts.append(
+            f"Nobody at {_widened} — the community they are filtered to — has recommended "
+            "anything matching yet, so these are from the wider neighbourhood. Say that first."
+        )
+    elif _scope:
+        facts.append(f"Every recommender below is at {_scope}, the community they are filtered to")
     lines: list[str] = []
     for row in tips[:3]:
         text = str(row.get("detail_text") or "").strip()
@@ -3783,6 +3815,21 @@ def _tip_seek_answer_turn(
         locale=str(session_ctx.get("preferred_lang") or "en"),
         radius_meters=radius_meters() if widen else None,
     )
+    # The community filter: a recommendation is only "from CF Fitness" when the person
+    # who made it is at CF Fitness. Nothing is tagged at write time — membership is the
+    # tag, and it stays true as people join. Empty falls through to the Google/offer
+    # cascade below, exactly as an empty neighbourhood read already does.
+    _comm = active_community(session_ctx)
+    if _comm and neighbor_tips:
+        from app.community_scope import rows_by_members
+
+        scoped_tips = rows_by_members(neighbor_tips, str(_comm["place_id"]))
+        if scoped_tips:
+            neighbor_tips = scoped_tips
+        else:
+            # Read (and cleared) by _compose_neighbor_tip_reply below, off the same
+            # incoming ctx it composes from.
+            session_ctx["community_widened_from"] = _comm.get("name")
     logging.getLogger(__name__).info(
         "tip_seek_answer.enter block=%s detail=%r category=%r neighbor_tips=%d wide=%s",
         block_id, detail, category, len(neighbor_tips), wide,
@@ -7574,7 +7621,9 @@ def handle_discovery_turn(
                     user_jwt, session_ctx=session_ctx, home_block_id=home_block_id
                 )
             _title = str(_ed.get("title") or "").strip()
-            event_id, publish_error = _pipe._auto_publish_event(user_id, user_jwt, _ed)
+            event_id, publish_error = _pipe._auto_publish_event(
+                user_id, user_jwt, _ed, session_ctx
+            )
             if event_id:
                 _release_host_mode(session_ctx)
                 ctx = _routing_ctx(session_ctx, phase="listening", active_intent="none")
@@ -9315,7 +9364,8 @@ def handle_discovery_turn(
             return gated
         try:
             peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
+                user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                session_ctx=ctx_base,
             )
         except Exception:
             peers = []
@@ -9337,7 +9387,7 @@ def handle_discovery_turn(
                 peers, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
             )
         else:
-            reply = format_peer_matches(peers)
+            reply = format_peer_matches(peers, ctx_base)
         ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
         ctx.pop("pending_post_verify", None)
         ctx.pop("activity_previews", None)
@@ -9378,12 +9428,13 @@ def handle_discovery_turn(
             _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
             try:
                 peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
-            )
+                    user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                    session_ctx=ctx_base,
+                )
             except Exception:
                 peers = []
             if peers:
-                reply = format_peer_matches(peers)
+                reply = format_peer_matches(peers, ctx_base)
                 ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
                 ctx.pop("activity_previews", None)
                 identity = str(
@@ -9443,12 +9494,13 @@ def handle_discovery_turn(
         if phone_verified and effective_home:
             try:
                 peers = _fetch_verified_peer_matches(
-                user_jwt, user_id=user_id, block_id=block_id, limit=5
-            )
+                    user_jwt, user_id=user_id, block_id=block_id, limit=5,
+                    session_ctx=ctx_base,
+                )
             except Exception:
                 peers = []
             if peers:
-                reply = format_peer_matches(peers)
+                reply = format_peer_matches(peers, ctx_base)
                 ctx = _routing_ctx(ctx_base, phase=PHASE_PREVIEW, preview_block_id=block_id)
                 ctx.pop("activity_previews", None)
                 identity = str(

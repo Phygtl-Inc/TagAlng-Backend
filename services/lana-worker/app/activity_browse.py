@@ -415,12 +415,14 @@ def _far_supply_facts(far: dict[str, Any] | None) -> list[str]:
     where = _far_where(far)
     what = far.get("title") or "a meet"
     return [
-        f'Real activities DO exist further out — the nearest is "{what}" in {where}, '
-        f"about {far['miles']:,} miles away. Say this plainly: things are happening, "
-        "just not near them. Do NOT imply they can attend it.",
+        f'ONE area was checked and has something: "{what}" in {where}, about '
+        f"{far['miles']:,} miles away. Name {where} exactly — never \"places like "
+        f"{where}\", \"areas such as\", or any plural. No other area was looked at, "
+        "so any wider claim is invented.",
         f"Option B is to look in {where} instead (the pill says 'Look in {where}') — "
         "this REPLACES any offer to 'widen the search', which cannot cross that "
         "distance and would be a false promise.",
+        "Keep it to TWO sentences: nothing near them, then the two options.",
     ]
 
 
@@ -431,6 +433,7 @@ def _compose_empty_seek_offer(
     lang: str | None = None,
     area_facts: list[str] | None = None,
     far_facts: list[str] | None = None,
+    community: str | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -439,23 +442,33 @@ def _compose_empty_seek_offer(
     real options (keep listening + text them / widen the search) must both survive in the
     copy because the pills under it say exactly that. Localized static fallback."""
     interest = str(interest or "").strip()
-    fallback = (
-        t("browse.empty_interest_offer", lang, interest=interest)
-        if interest
-        else t("browse.empty_generic_offer", lang)
-    )
+    community = str(community or "").strip()
+    if community:
+        fallback = (
+            t("browse.empty_community_interest", lang, interest=interest, community=community)
+            if interest
+            else t("browse.empty_community_generic", lang, community=community)
+        )
+    else:
+        fallback = (
+            t("browse.empty_interest_offer", lang, interest=interest)
+            if interest
+            else t("browse.empty_generic_offer", lang)
+        )
     try:
         from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
 
         if not llm_configured():
             return fallback
+        where = f"{community} (the community filter they have selected)" if community else "their block"
         facts = [
             (
-                f"You searched their block for: {interest}"
+                f"You searched {where} for: {interest}"
                 if interest
-                else "You searched their block for upcoming activities"
+                else f"You searched {where} for upcoming activities"
             ),
-            "Zero matching activities exist on their block right now — that is the honest state",
+            f"Zero matching activities exist at {where} right now — that is the honest state. "
+            "Nothing outside it was looked at, so any wider claim would be invented",
             "Option A: you can keep an ear out and TEXT them the moment a matching one pops up "
             "(the pill under your message says 'Yes, listen for me')",
             "Never invent or promise events, and never claim something is happening nearby",
@@ -463,6 +476,13 @@ def _compose_empty_seek_offer(
         # "Widen the search" only clears the TOPIC filter — it never changes the
         # geography, so promising other areas with it is a lie the chip can't keep.
         # When the probe found real far supply, name that instead.
+        if community:
+            # The filter, not the topic, is what is narrowing this. The pill under the
+            # message drops the community and re-runs the same search neighbourhood-wide.
+            far_facts = [
+                f"Option B: they can look past {community} at their whole neighbourhood "
+                f"(the pill says 'Look beyond {community}')",
+            ]
         facts.extend(
             far_facts
             or [
@@ -686,6 +706,22 @@ def _far_offer(
     return facts, f"Look in {_far_where(far)}"
 
 
+def _community_name(comm: dict[str, Any] | None) -> str | None:
+    name = str((comm or {}).get("name") or "").strip()
+    return name or None
+
+
+def _arm_community_widen(draft: dict[str, Any], comm: dict[str, Any] | None) -> str:
+    """Pill label for "look past the filter", remembered on the draft so the tap is
+    recognised by the exact label we offered — no new matcher, and no risk of a
+    community whose name happens to read like an interest being re-searched."""
+    from app.community_scope import widen_chip
+
+    chip = widen_chip(_community_name(comm))
+    draft["_community_chip"] = chip
+    return chip
+
+
 def _format_browse_message(
     events: list[dict[str, Any]],
     label: str | None,
@@ -757,7 +793,16 @@ def run_activity_browse_turn(
     #    through the AI classifier. Accept → save a minimal seek; widen → drop the filter and
     #    show everything; a new kind → fall through and re-search. ──
     if draft.get("_seek_offer"):
-        if _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg):
+        chip = str(draft.get("_community_chip") or "")
+        if chip and msg.strip().lower() == chip.lower():
+            from app.community_scope import clear_active_community
+
+            clear_active_community(session_ctx)
+            draft["_seek_offer"] = None
+            draft["_community_chip"] = None
+            draft["_asked"] = True
+            msg = ""  # same interest, no filter — re-runs the search below
+        elif _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg):
             from app.discovery_route import resolve_block_id
             from app.look_meet import start_meet_seek_from_interest
 
@@ -937,6 +982,13 @@ def run_activity_browse_turn(
         draft["interest"] = msg[:80]
     interest = str(draft.get("interest") or "")
 
+    # The community filter at the top of the screen. It answers the "where" outright:
+    # a community IS a place, so nothing below needs her ZIP to run this search — and
+    # asking for one here would gate a question she already scoped herself.
+    from app.community_scope import active_community
+
+    comm = active_community(session_ctx)
+
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
     # (session preview_block_id, or a pending out-of-coverage ZIP) counts, not just the
     # persisted profile block. Ask in-flow rather than dead-ending when none is known.
@@ -959,13 +1011,26 @@ def run_activity_browse_turn(
                 return _ask_zip(t("discovery.zip_unplaceable", lang, zip=zip5))
             else:
                 return _offer_expansion(str(zip5))
-        if not block_id:
+        if not block_id and not comm:
             return _ask_zip(_compose_zip_ask(interest, lang=lang))
 
     # "weekend" is handled by the LLM date matcher too, but keep the SQL-side weekend
     # filter as a cheap pre-narrow when the word appears verbatim.
     weekend_only = bool(re.search(r"\bweekend\b", interest, re.I) or re.search(r"\bweekend\b", msg, re.I))
-    events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
+    # The community read wins over the block one: what is on at CF Fitness is a question
+    # about CF Fitness, and the place can sit outside her radius. No SQL weekend
+    # pre-narrow there — the LLM date matcher below still applies it, and a community's
+    # calendar is small enough to read whole.
+    if comm:
+        from app.auth import jwt_user_id
+        from app.community_scope import community_events
+
+        events = community_events(
+            str(comm["place_id"]), exclude_host_id=jwt_user_id(user_jwt)
+        )
+        _attach_host_names(events)
+    else:
+        events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
 
     # No pre-open block here (reverted 2026-08-05, see zip_unlock.discovery_zip_gate):
     # §D.2 is supply-aware — a host's event stays visible to the neighbours it was
@@ -987,7 +1052,11 @@ def run_activity_browse_turn(
         short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
         draft["interest"] = short or interest
         draft["_seek_offer"] = True
-        far_facts, far_chip = _far_offer(user_jwt, block_id, draft, interest=interest)
+        far_facts, far_chip = (
+            ([], _arm_community_widen(draft, comm))
+            if comm
+            else _far_offer(user_jwt, block_id, draft, interest=interest)
+        )
         draft["suggestions"] = ["Yes, listen for me", far_chip or "Widen the search"]
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
@@ -1000,7 +1069,12 @@ def run_activity_browse_turn(
 
             area_facts = gate_framing_facts(frame)
         return _compose_empty_seek_offer(
-            short, user_msg=msg, lang=lang, area_facts=area_facts, far_facts=far_facts
+            short,
+            user_msg=msg,
+            lang=lang,
+            area_facts=area_facts,
+            far_facts=far_facts,
+            community=_community_name(comm),
         )
 
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
@@ -1021,6 +1095,18 @@ def run_activity_browse_turn(
         # Generic browse with an empty calendar. Same honesty as the named-interest
         # branch: if real supply exists further out, name it and where, rather than
         # closing with "nothing near you" and an offer that can't reach it.
+        if comm:
+            # An empty community is not an empty neighbourhood — offer the way out
+            # instead of the "nothing near you" close.
+            draft["_seek_offer"] = True
+            draft["suggestions"] = ["Yes, listen for me", _arm_community_widen(draft, comm)]
+            session_ctx["browse_draft"] = draft
+            session_ctx["activity_browse_active"] = True
+            session_ctx["activity_previews"] = []
+            session_ctx["routing_phase"] = "listening"
+            return _compose_empty_seek_offer(
+                "", user_msg=msg, lang=lang, community=_community_name(comm)
+            )
         far_facts, far_chip = _far_offer(user_jwt, block_id, draft, interest=interest)
         if far_facts:
             draft["_seek_offer"] = True

@@ -1606,6 +1606,11 @@ def create_lana_session(
                 if effective_lang:
                     opening = localize_text(opening, effective_lang)
 
+        # The community filter the app opened with (top-of-screen switcher), so the
+        # very first turn already reads inside it — app/community_scope.py.
+        from app.community_scope import apply_community_selection
+
+        apply_community_selection(session_ctx, body.community_id, user_id=auth.user_id)
         opening_msg_id = insert_message(
             session_id,
             "assistant",
@@ -1732,6 +1737,13 @@ def _run_lana_message(
     session_ctx_in["user_role"] = auth.role
     session_ctx_in["user_grammatical_gender"] = auth.grammatical_gender
     set_address_context(auth.role, auth.grammatical_gender)
+    # The community filter at the top of the screen. Stamped before anything routes,
+    # because every read this turn (neighbours, meets, recommendations) and anything
+    # created is scoped to it — app/community_scope.py.
+    from app.community_scope import apply_community_selection
+    from app.community_scope import here_place as community_here
+
+    apply_community_selection(session_ctx_in, body.community_id, user_id=auth.user_id)
     # A rename announcement is worth exactly one turn. Cleared with None, never
     # popped — a popped key gets resurrected by the stored-context merge and Lana
     # would re-announce the same name change on every later turn.
@@ -2060,6 +2072,9 @@ def _run_lana_message(
             message_id=user_msg_id,
             # Defer to the classifier: no rapport gap on safety/OOS/medical/crisis turns.
             allow_rapport_gap=_rapport_gap_allowed(merged),
+            # What "here" means: the community in the top filter. Without it "the pool
+            # here is too good" is about an unnamed place and the fact is dropped.
+            here_place=community_here(merged, auth.user_id),
         )
         # Close any gaps whose concept the user has since stated.
         background_tasks.add_task(rapport_reconcile_gaps, auth.user_id, user_msg_id)
@@ -2459,7 +2474,14 @@ def set_event_setup(
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
     # Community card: the carousel is a full submission, so an absent value is the "None"
     # option (just the host's own meet), not "leave what was there".
-    draft["circle_place_id"] = (body.circle_place_id or "").strip() or None
+    # An absent value means the "None" option (just the host's own meet) — UNLESS the
+    # top filter has a community selected, which is the user saying "I'm at CF Fitness"
+    # before they ever opened this card. app/community_scope.py.
+    from app.community_scope import active_community_id
+
+    draft["circle_place_id"] = (
+        (body.circle_place_id or "").strip() or active_community_id(ctx)
+    )
     from app.lana_ui import is_none_bring_item
 
     # A typed none-answer ("nothing", "no need") on the bring card is an empty list,
@@ -3116,6 +3138,10 @@ class TipFeedBody(_BaseModel):
     # a tab a client shipped before we did is not a reason to show them nothing.
     tab: str = "recent"
     limit: int = 20
+    # The community filter at the top of the app: only recommendations from people at
+    # this place (a places.id). Membership IS the tag — nothing is stamped at write
+    # time, so a rec becomes "from CF Fitness" the moment its author joins.
+    place_id: str | None = None
 
 
 class TipFeedbackBody(_BaseModel):
@@ -3143,12 +3169,25 @@ def post_tips_recent(
     from app.tip_feed import recent_tips
 
     tab = (body.tab if body else "recent") or "recent"
-    return {
-        "tab": tab,
-        "tips": recent_tips(
-            _bearer_token(authorization), tab=tab, limit=(body.limit if body else 20)
-        ),
-    }
+    place_id = str((body.place_id if body else None) or "").strip() or None
+    limit = (body.limit if body else 20) or 20
+    tips = recent_tips(
+        _bearer_token(authorization),
+        tab=tab,
+        # The filter runs after the feed read, so ask for a deeper page — a top-20 that
+        # is mostly non-members would otherwise return two rows.
+        limit=min(limit * 3, 50) if place_id else limit,
+    )
+    if place_id:
+        from app.community_scope import rows_by_members
+        from app.community_surface import caller_affiliation_at
+
+        # Same authorization the roster uses: who is at a place stays members-only (§F),
+        # so the filter can never become a membership oracle for an arbitrary place id.
+        if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
+            raise HTTPException(status_code=403, detail="not_a_member")
+        tips = rows_by_members(tips, place_id)[:limit]
+    return {"tab": tab, "tips": tips}
 
 
 @app.post("/lana/tips/vouch")
@@ -3453,6 +3492,13 @@ def post_fellows(
         peers = [
             p for p in peers if str((p or {}).get("peer_user_id") or "") in member_ids
         ]
+        # The matcher ranks the neighbourhood, so a member who isn't in its top slice
+        # is invisible to the filter above — at a place the caller belongs to, the
+        # roster itself is the honest answer. Same rows the community screen shows.
+        if not peers and place_id:
+            from app.community_scope import peers_in_community
+
+            peers = peers_in_community(auth.user_id, place_id, limit=limit)
     return FellowsResponse(
         fellows=[
             PeerMatchRow(**row)

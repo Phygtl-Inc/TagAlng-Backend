@@ -162,6 +162,7 @@ def handle_hosting_send_mom_turn(
     phone_verified: bool,
     phase: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    from app.auth import jwt_user_id
     from app.guest_capabilities import fetch_peer_matches
     from app.layer1_handlers import peers_to_match_rows
 
@@ -171,7 +172,18 @@ def handle_hosting_send_mom_turn(
 
     peers: list[dict[str, Any]] = []
     try:
-        peers = fetch_peer_matches(user_jwt, limit=5)
+        # Who to invite obeys the top-of-app filter too: with a community selected,
+        # the people worth inviting to this meet are the ones at that community.
+        from app.community_scope import active_community, peers_in_community
+
+        comm = active_community(session_ctx)
+        user_id = jwt_user_id(user_jwt)
+        peers = (
+            peers_in_community(user_id, str(comm["place_id"]), limit=5)
+            if comm and user_id
+            else []
+        )
+        peers = peers or fetch_peer_matches(user_jwt, limit=5)
     except Exception:
         peers = []
 

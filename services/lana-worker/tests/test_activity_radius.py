@@ -148,6 +148,11 @@ class FarSupplyHonestyTests(unittest.TestCase):
         self.assertIn("Morning Run Club", blob)
         self.assertIn("2,209 miles", blob)
         self.assertIn("Lake Nona (32827)", blob)
+        # Exactly one area was probed, so the copy may not generalise to a plural
+        # ("events in places like Foster City (94404)" — QA 2026-08-31).
+        self.assertIn("never", blob)
+        self.assertIn("places like", blob)  # named as forbidden, in the facts
+        self.assertIn("No other area was looked at", blob)
         # The pill's text IS the next user message, and its ZIP is what re-anchors.
         self.assertIn("32827", _far_where(far))
 
