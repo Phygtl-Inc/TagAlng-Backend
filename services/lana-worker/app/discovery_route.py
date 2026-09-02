@@ -6495,6 +6495,30 @@ def activity_radius_meters() -> float:
         return _DEFAULT_ACTIVITY_RADIUS_M
 
 
+# How far AHEAD an activity read looks. The radius knob shipped without its twin, so
+# the horizon lived in a SQL default for two callers and a string literal for the
+# third: browse read 90 days locally while the far probe took get_nearby_activities'
+# 14-day default, and a real meet six weeks out 40 miles away was invisible to the
+# probe that exists to find exactly that. Every activity read now passes this
+# explicitly — a caller that relies on the SQL default is the bug, not the value.
+_DEFAULT_ACTIVITY_WINDOW_DAYS = 90
+
+
+def activity_window() -> str:
+    """Postgres interval literal for the browse/far-probe horizon.
+
+    look_meet deliberately does NOT use this — it is a 14-day surface and says so in
+    its own named constant (look_meet.LOOK_MEET_WINDOW). Divergence is fine; invisible
+    divergence is what this replaces.
+    """
+    raw = os.environ.get("LANA_ACTIVITY_WINDOW_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else _DEFAULT_ACTIVITY_WINDOW_DAYS
+    except ValueError:
+        days = _DEFAULT_ACTIVITY_WINDOW_DAYS
+    return f"{max(1, days)} days"
+
+
 def block_centroid(block_id: str) -> tuple[float, float] | None:
     """Lat/lng for an area id. Auto-created blocks are `zip-<zip5>`, which is what
     lets places._centroid resolve them off zip_centroids."""
@@ -6508,22 +6532,28 @@ def block_centroid(block_id: str) -> tuple[float, float] | None:
         return None
 
 
-def _event_area_label(event_id: str) -> tuple[str | None, str | None]:
-    """(area label, zip5) for one event — the RPC returns neither, and honest
-    far-supply copy needs a place name the user can recognise and act on."""
+def _event_area_label(event_id: str) -> tuple[str | None, str | None, str | None]:
+    """(area label, zip5, block id) for one event — the RPC returns none of the three,
+    and honest far-supply copy needs a place name the user can recognise and act on.
+
+    The block id is returned so callers never have to re-derive one from the label or
+    the ZIP. zip5 stays best-effort: it exists only for `zip-<zip5>` areas, and the
+    seeded pilot areas are H3 cells (`8a2a1072b59ffff`), so an offer that REQUIRED a
+    ZIP was silently impossible for exactly the areas the pilot runs in.
+    """
     try:
         sb = service_client()
         ev = sb.table("events").select("block_id").eq("id", event_id).limit(1).execute()
         bid = str(((ev.data or [{}])[0] or {}).get("block_id") or "")
         if not bid:
-            return None, None
+            return None, None, None
         blk = sb.table("blocks").select("display_name").eq("id", bid).limit(1).execute()
         label = clean_block_label(((blk.data or [{}])[0] or {}).get("display_name"))
         zip5 = bid[len("zip-"):] if bid.startswith("zip-") else None
-        return label, zip5
+        return label, zip5, bid
     except Exception:
         logging.getLogger(__name__).exception("event_area_label_failed event=%s", event_id)
-        return None, None
+        return None, None, None
 
 
 def activities_beyond_radius(
@@ -6551,7 +6581,15 @@ def activities_beyond_radius(
         rows = call_rpc(
             user_jwt,
             "get_nearby_activities",
-            {"p_lat": loc[0], "p_lng": loc[1], "p_limit": 20},
+            {
+                "p_lat": loc[0],
+                "p_lng": loc[1],
+                # Same horizon as the local read above it. On the RPC's own 14-day
+                # default this probe could not see the six-week-out meet that browse
+                # would happily have listed had it been nearby.
+                "p_window": activity_window(),
+                "p_limit": 20,
+            },
         )
     except Exception:
         logging.getLogger(__name__).exception("far_activity_probe_failed block=%s", block_id)
@@ -6571,11 +6609,11 @@ def activities_beyond_radius(
 
 
 def far_activity_details(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    """{title, venue, miles, area_label, zip5} for one probe row — the place lookup the
-    RPC can't give us. None when the row can't be placed."""
+    """{title, venue, miles, area_label, zip5, block_id} for one probe row — the place
+    lookup the RPC can't give us. None when the row can't be placed."""
     if not isinstance(row, dict) or not row.get("id"):
         return None
-    label, zip5 = _event_area_label(str(row["id"]))
+    label, zip5, block_id = _event_area_label(str(row["id"]))
     return {
         "title": str(row.get("title") or "").strip() or None,
         "venue": str(row.get("venue_name") or "").strip() or None,
@@ -6584,6 +6622,8 @@ def far_activity_details(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "miles": int(round(float(row["distance_meters"]) / 1609.34)),
         "area_label": label,
         "zip5": zip5,
+        # What the offer actually re-anchors on. The ZIP above is for the copy only.
+        "block_id": block_id,
     }
 
 
@@ -6615,7 +6655,7 @@ def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
                 "p_radius_meters": activity_radius_meters(),
                 # The block read has no horizon; keep one generous enough that a
                 # radius switch never silently shortens what browse can see.
-                "p_window": "90 days",
+                "p_window": activity_window(),
                 "p_limit": max(1, min(50, limit)),
             },
         ).execute()

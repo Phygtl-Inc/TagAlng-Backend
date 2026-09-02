@@ -591,6 +591,25 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Não tem atividades assim perto de você agora. Quer que eu fique de olho "
               "e te avise assim que aparecer uma — ou amplio a busca?",
     },
+    # The same two, with the far area named. The generic pair above offers to "widen the
+    # search", which only drops the topic — when the pill says "Look in <area>" that is a
+    # different promise, and with no LLM configured this string is the only thing shipped.
+    "browse.empty_interest_far": {
+        "en": "No **{interest}** activities near you right now — though there are some in "
+              "{area}. Want me to keep an ear out here, or look in {area}?",
+        "es": "No hay actividades de **{interest}** cerca de ti ahora mismo, aunque sí hay "
+              "en {area}. ¿Quieres que me quede atenta aquí o busco en {area}?",
+        "pt": "Não tem atividades de **{interest}** perto de você agora, mas tem em {area}. "
+              "Quer que eu fique de olho aqui ou procuro em {area}?",
+    },
+    "browse.empty_generic_far": {
+        "en": "Nothing coming up near you right now — though there is something in {area}. "
+              "Want me to keep an ear out here, or look in {area}?",
+        "es": "No hay nada próximo cerca de ti ahora mismo, aunque sí hay algo en {area}. "
+              "¿Quieres que me quede atenta aquí o busco en {area}?",
+        "pt": "Não tem nada chegando perto de você agora, mas tem algo em {area}. Quer que "
+              "eu fique de olho aqui ou procuro em {area}?",
+    },
     # The same two, with the community filter named. A fallback that says "near you"
     # while a community filter is on is a lie the pill under it can't keep.
     "browse.empty_community_interest": {

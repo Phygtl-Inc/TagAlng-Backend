@@ -391,8 +391,10 @@ def _compose_area_warming_empty(
 
 
 def _far_where(far: dict[str, Any] | None) -> str:
-    """Display name for the far area, ZIP included — the pill's text IS the next user
-    message, and the ZIP in it is what re-anchors the search (_need_zip consumes it)."""
+    """Display name for the far area. The ZIP is included when the area has one purely
+    because it helps a user place it ("Foster City (94404)") — it is NOT the transport
+    any more: the offer re-anchors on the remembered block id, so an area without a ZIP
+    is named by its label alone and works exactly the same."""
     if not far:
         return ""
     label = str(far.get("area_label") or "").strip()
@@ -409,8 +411,11 @@ def _far_supply_facts(far: dict[str, Any] | None) -> list[str]:
     Only ever describes ONE real row we actually read. Says nothing when the probe
     found nothing — an unmeasured claim about elsewhere is the same bug as an
     unmeasured claim about here."""
-    # No ZIP → no pill that can re-anchor the search, so make no offer we can't keep.
-    if not far or not far.get("miles") or not far.get("zip5"):
+    # Needs a distance, a name to put on the pill, and a block to send them to. It used
+    # to demand a ZIP as well, which no seeded pilot area has (they are H3 cells), so
+    # the offer was silently impossible in exactly the areas the pilot runs in — and
+    # nothing logged, so it looked identical to "no far supply exists".
+    if not far or not far.get("miles") or not far.get("block_id") or not _far_where(far):
         return []
     where = _far_where(far)
     what = far.get("title") or "a meet"
@@ -434,20 +439,37 @@ def _compose_empty_seek_offer(
     area_facts: list[str] | None = None,
     far_facts: list[str] | None = None,
     community: str | None = None,
+    area: str | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
     Grounded ONLY in what's true: the user's own words, the kind searched, and that zero
-    matching activities exist on THEIR block right now — never invented events. The two
-    real options (keep listening + text them / widen the search) must both survive in the
-    copy because the pills under it say exactly that. Localized static fallback."""
+    matching activities exist in the area searched — never invented events.
+
+    ONE rule holds the whole thing together: the options this copy offers are exactly the
+    pills rendered under it, and nothing else. There are three shapes — plain, a far area
+    ("Look in <area>"), and a community filter ("Look beyond <community>") — and each has
+    its own facts AND its own localized fallback. The system prompt below therefore names
+    no options of its own; it used to hardcode "or widen the search", which contradicted
+    the pill whenever one of the other two shapes was armed."""
     interest = str(interest or "").strip()
     community = str(community or "").strip()
+    area = str(area or "").strip()
     if community:
         fallback = (
             t("browse.empty_community_interest", lang, interest=interest, community=community)
             if interest
             else t("browse.empty_community_generic", lang, community=community)
+        )
+    elif area:
+        # A far area was found and the pill says "Look in <area>". The generic strings
+        # below end with "or widen the search?", which is not what the pill does and not
+        # something widening can deliver — with no LLM configured that mismatch was the
+        # ONLY output the user ever saw.
+        fallback = (
+            t("browse.empty_interest_far", lang, interest=interest, area=area)
+            if interest
+            else t("browse.empty_generic_far", lang, area=area)
         )
     else:
         fallback = (
@@ -460,15 +482,30 @@ def _compose_empty_seek_offer(
 
         if not llm_configured():
             return fallback
-        where = f"{community} (the community filter they have selected)" if community else "their block"
+        # "their area", not "their block": the read is a radius now, and "block" is
+        # lingo-banned in copy (clean_block_label exists to strip it, and the final-mile
+        # guard garbles sentences that carry it).
+        where = (
+            f"{community} (the community filter they have selected)"
+            if community
+            else "their area"
+        )
+        # Did we actually look past `where`? Only the far probe does. Claiming "nothing
+        # outside was looked at" while ALSO naming a far area is a self-contradiction —
+        # and the model was being handed both at once.
+        looked_wider = bool(far_facts)
         facts = [
             (
                 f"You searched {where} for: {interest}"
                 if interest
                 else f"You searched {where} for upcoming activities"
             ),
-            f"Zero matching activities exist at {where} right now — that is the honest state. "
-            "Nothing outside it was looked at, so any wider claim would be invented",
+            f"{where} has zero matching activities right now — that is the honest state"
+            + (
+                ""
+                if looked_wider
+                else ". Nothing outside it was looked at, so any wider claim would be invented"
+            ),
             "Option A: you can keep an ear out and TEXT them the moment a matching one pops up "
             "(the pill under your message says 'Yes, listen for me')",
             "Never invent or promise events, and never claim something is happening nearby",
@@ -509,9 +546,11 @@ def _compose_empty_seek_offer(
             model=synthesizer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
-                "(max 2 sentences) telling the user nothing matched on their block right now "
-                "and offering both options: you keep listening and text them when one pops up, "
-                "or widen the search. Ground it ONLY in the facts given. "
+                f"(max 2 sentences) telling the user nothing matched in {where} right now, "
+                "then offer EXACTLY the options named in the facts below — every one of "
+                "them, and no others. The facts describe the buttons shown under your "
+                "message, so an option you invent or omit contradicts what they can tap. "
+                "Ground it ONLY in the facts given. "
                 + (f"{lang_line} " if lang_line else "")
                 + 'Return JSON {"message": "..."}.'
             ),
@@ -674,8 +713,8 @@ def _far_offer(
     user_jwt: str, block_id: str | None, draft: dict[str, Any], *, interest: str = ""
 ) -> tuple[list[str], str]:
     """(facts, pill text) for real supply outside the radius — ([], "") when there is
-    none. The pill's ZIP re-anchors the search next turn through the path browse
-    already uses for a typed ZIP; the interest carries over untouched.
+    none. The offered area is remembered ON THE DRAFT, and the tap is matched against
+    the exact label we offered; the interest carries over untouched.
 
     The candidate area is only offered when its events survive the SAME filter this
     search just ran (and the caller's own meets are dropped, exactly as browse drops
@@ -684,6 +723,12 @@ def _far_offer(
     """
     from app.auth import jwt_user_id
     from app.discovery_route import activities_beyond_radius, far_activity_details
+
+    # Whatever area we offered last turn is not this turn's answer. Left standing, a
+    # stale label would still re-anchor the search if the user typed it later.
+    draft["_area_offer_chip"] = None
+    draft["_area_offer_block_id"] = None
+    draft["_area_offer_name"] = None
 
     rows = activities_beyond_radius(
         user_jwt, block_id, exclude_host_id=jwt_user_id(user_jwt)
@@ -698,12 +743,28 @@ def _far_offer(
     far = far_activity_details(nearest)
     facts = _far_supply_facts(far)
     if not facts:
+        # Real supply was found and then dropped for want of a name or a block to send
+        # them to. Silent before, which made it indistinguishable from "nothing exists".
+        logging.getLogger(__name__).info(
+            "far_offer_unnameable block=%s event=%s area_label=%r block_id=%r",
+            block_id, nearest.get("id"), (far or {}).get("area_label"),
+            (far or {}).get("block_id"),
+        )
         return [], ""
+    where = _far_where(far)
+    chip = f"Look in {where}"
+    # Remembered so the tap is recognised by the exact label we offered, and re-anchored
+    # on the block id rather than a ZIP parsed back out of the pill text — the pilot's
+    # areas are H3 cells and have no ZIP to parse. Mirrors _arm_community_widen.
+    draft["_area_offer_chip"] = chip
+    draft["_area_offer_block_id"] = str(far["block_id"])
+    # The bare name, for the copy. The static fallback has to be able to name the same
+    # area the pill names, and it never sees the facts the model gets.
+    draft["_area_offer_name"] = where
     # Deliberately does NOT set _need_zip. Arming it here made every non-ZIP reply
     # ("Widen the search", a fresh interest, a question) get eaten as a malformed ZIP
-    # and answered with "share your 5-digit ZIP code" (QA 2026-08-31). The ZIP is
-    # consumed only when one actually arrives — see the seek-offer branch below.
-    return facts, f"Look in {_far_where(far)}"
+    # and answered with "share your 5-digit ZIP code" (QA 2026-08-31).
+    return facts, chip
 
 
 def _community_name(comm: dict[str, Any] | None) -> str | None:
@@ -719,6 +780,11 @@ def _arm_community_widen(draft: dict[str, Any], comm: dict[str, Any] | None) -> 
 
     chip = widen_chip(_community_name(comm))
     draft["_community_chip"] = chip
+    # Same reason as in _far_offer: an area offered earlier in this browse must not stay
+    # tappable behind a community-scoped empty state.
+    draft["_area_offer_chip"] = None
+    draft["_area_offer_block_id"] = None
+    draft["_area_offer_name"] = None
     return chip
 
 
@@ -793,8 +859,21 @@ def run_activity_browse_turn(
     #    through the AI classifier. Accept → save a minimal seek; widen → drop the filter and
     #    show everything; a new kind → fall through and re-search. ──
     if draft.get("_seek_offer"):
+        area_chip = str(draft.get("_area_offer_chip") or "")
         chip = str(draft.get("_community_chip") or "")
-        if chip and msg.strip().lower() == chip.lower():
+        if area_chip and msg.strip().lower() == area_chip.lower():
+            # "Look in Lake Nona — Area A" — the far-supply pill. Re-anchor on the block
+            # id we remembered when we made the offer, rather than parsing a ZIP back out
+            # of the label: the seeded pilot areas are H3 cells with no ZIP in them, and
+            # requiring one is what made this offer impossible there.
+            draft["_area_block_id"] = str(draft.get("_area_offer_block_id") or "")
+            draft["_seek_offer"] = None
+            draft["_area_offer_chip"] = None
+            draft["_area_offer_block_id"] = None
+            draft["_area_offer_name"] = None
+            draft["_asked"] = True
+            msg = ""  # same interest, new area — re-runs the search below
+        elif chip and msg.strip().lower() == chip.lower():
             from app.community_scope import clear_active_community
 
             clear_active_community(session_ctx)
@@ -819,10 +898,10 @@ def run_activity_browse_turn(
             # Either way the browse flow is done (clears activity_browse_active for next turn).
             reset_activity_browse_state(session_ctx)
             return reply
-        # "Look in Foster City (94404)" — the far-supply pill. A ZIP in the reply is
-        # unambiguous here (the alternatives are "Yes, listen for me" and "Widen the
-        # search"), and re-anchoring is exactly the typed-ZIP path below, so hand it
-        # over rather than re-implementing the resolve. The interest carries over.
+        # A ZIP the user TYPED at the offer ("what about 94404?"). The pill no longer
+        # travels this way — it is matched by label above — but a typed ZIP is still
+        # unambiguous here, and re-anchoring is exactly the typed-ZIP path below, so
+        # hand it over rather than re-implementing the resolve. Interest carries over.
         from app.discovery_route import extract_zip as _extract_zip
 
         if _extract_zip(msg):
@@ -1075,6 +1154,7 @@ def run_activity_browse_turn(
             area_facts=area_facts,
             far_facts=far_facts,
             community=_community_name(comm),
+            area=draft.get("_area_offer_name"),
         )
 
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
@@ -1116,7 +1196,11 @@ def run_activity_browse_turn(
             session_ctx["activity_previews"] = []
             session_ctx["routing_phase"] = "listening"
             return _compose_empty_seek_offer(
-                "", user_msg=msg, lang=lang, far_facts=far_facts
+                "",
+                user_msg=msg,
+                lang=lang,
+                far_facts=far_facts,
+                area=draft.get("_area_offer_name"),
             )
 
     draft["_seek_offer"] = None
