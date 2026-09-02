@@ -192,6 +192,40 @@ class TestPendingQuestionIsRecorded(unittest.TestCase):
         self.assertIsNone(ctx["tip_share_active"])
 
 
+class TestPlaceStepGetsRealPlaces(unittest.TestCase):
+    """A map step asked in the CHAT fork has no Places picker to fall back on, so the
+    nearby places have to arrive as the step's suggestions or the answer is typed prose."""
+
+    def test_place_step_suggests_nearby_places(self) -> None:
+        from app.tip_share import run_tip_share_turn
+
+        ctx: dict = {"zip_code": "32827"}
+        draft = {
+            "name": "Lake Nona Park",
+            "category": "park",
+            "trait": "shady",
+            "reco_type": "location",
+            "place_based": True,
+            # Answered so `where` (kind=place) is the next step the walk reaches.
+            "answers": {"known_for": "the big shaded playground"},
+        }
+        with mock.patch("app.tip_share._extract_tip_fields", return_value=(draft, None)), mock.patch(
+            "app.places.nearby_place_suggestions",
+            return_value=["Lake Nona Park", "Nona Adventure Park"],
+        ), mock.patch("app.tip_share._reco_tallies", return_value=[]):
+            run_tip_share_turn(
+                user_message="lake nona park is great, big shaded playground",
+                session_ctx=ctx,
+                history=[],
+                user_jwt="jwt",
+                home_block_id="block-1",
+            )
+        self.assertEqual(ctx["tip_pending_ask"], "where")
+        self.assertEqual(
+            ctx["tip_draft"]["suggestions"], ["Lake Nona Park", "Nona Adventure Park"]
+        )
+
+
 class TestBareServiceNounIsNotASeek(unittest.TestCase):
     """The regex fallback fires on a REQUEST, not on a service noun standing alone."""
 

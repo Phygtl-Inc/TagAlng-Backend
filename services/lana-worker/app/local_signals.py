@@ -103,6 +103,9 @@ def save_local_signal(
     reco_type: str | None = None,
     reco_fields: list[dict[str, Any]] | None = None,
     reco_subject: str | None = None,
+    reco_name: str | None = None,
+    reco_place: str | None = None,
+    reco_description: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "p_intent": intent,
@@ -137,7 +140,9 @@ def save_local_signal(
     result = raw if isinstance(raw, dict) else {}
 
     signal_id = result.get("signal_id")
-    if signal_id and (reco_type or reco_fields or reco_subject):
+    if signal_id and (
+        reco_type or reco_fields or reco_subject or reco_name or reco_place or reco_description
+    ):
         try:
             call_rpc(
                 user_jwt,
@@ -147,10 +152,19 @@ def save_local_signal(
                     "p_reco_type": reco_type,
                     "p_reco_fields": reco_fields,
                     "p_reco_subject": reco_subject_key(reco_subject),
+                    # The card head, stored as fields rather than left to be split back
+                    # out of detail_text (20261120120000). reco_name keeps the author's
+                    # casing; reco_subject stays the lowercased grouping key.
+                    "p_reco_name": reco_name,
+                    "p_reco_place": reco_place,
+                    "p_reco_description": reco_description,
                 },
             )
             result["reco_type"] = reco_type
             result["reco_fields"] = reco_fields or []
+            result["reco_name"] = reco_name
+            result["reco_place"] = reco_place
+            result["reco_description"] = reco_description
         except Exception:  # noqa: BLE001
             # The tip itself is posted and matching already ran — losing the typed
             # answers must not read back to the user as a failed post.

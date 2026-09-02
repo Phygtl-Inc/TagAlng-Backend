@@ -3149,6 +3149,9 @@ class TipFeedbackBody(_BaseModel):
     # Desired state, not a toggle — a double tap on a flaky connection must not invert
     # what the user chose (see 20261106120000).
     on: bool = True
+    # Which way the vote points: 👍 true / 👎 false. Ignored when `on` is false, which
+    # clears the vote whichever way it pointed.
+    helpful: bool = True
 
 
 @app.post("/lana/tips/recent")
@@ -3195,19 +3198,10 @@ def post_tips_vouch(
     body: TipFeedbackBody,
     authorization: str | None = Header(default=None),
 ):
-    """✓ I vouch — add the caller's own voice to someone else's recommendation.
-
-    Refused on your own tip (409): the tip already IS your voice, and counting it twice
-    would inflate the one number a stranger reads as social proof.
-    """
-    verify_auth(authorization)
-    from app.tip_feed import set_vouch
-
-    try:
-        count = set_vouch(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
-    except HTTPException as exc:
-        raise _tip_feedback_error(exc) from None
-    return {"signal_id": body.signal_id, "vouched": body.on, "vouch_count": count}
+    """Gone: 410. Two counters on one card never read as two different questions, so
+    helpful/unhelpful is the verb that survived — see /lana/tips/helpful. The
+    tip_vouches rows are untouched in the database."""
+    raise HTTPException(status_code=410, detail="vouch_removed")
 
 
 @app.post("/lana/tips/helpful")
@@ -3215,16 +3209,25 @@ def post_tips_helpful(
     body: TipFeedbackBody,
     authorization: str | None = Header(default=None),
 ):
-    """👍 Helpful — this answer helped the reader. Says nothing about the place, so it is
-    deliberately a separate counter from the vouch."""
+    """👍 / 👎 on a recommendation — a verdict on the ANSWER, not on the place.
+
+    One vote per reader per tip: sending the other direction flips it, `on: false` clears
+    it. Both counts and the caller's own state come back so the tapped row re-renders
+    without a feed re-read.
+    """
     verify_auth(authorization)
     from app.tip_feed import set_helpful
 
     try:
-        count = set_helpful(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
+        counts = set_helpful(
+            _bearer_token(authorization),
+            signal_id=body.signal_id,
+            on=body.on,
+            helpful=body.helpful,
+        )
     except HTTPException as exc:
         raise _tip_feedback_error(exc) from None
-    return {"signal_id": body.signal_id, "helpful": body.on, "helpful_count": count}
+    return {"signal_id": body.signal_id, **counts}
 
 
 def _tip_feedback_error(exc: HTTPException) -> HTTPException:

@@ -142,6 +142,8 @@ def test_typed_answers_reach_the_saved_signal(monkeypatch: Any) -> None:
     ctx: dict[str, Any] = {
         "tip_draft": {
             "name": "Feijoada", "category": "family recipe", "reco_type": "recipe",
+            "trait": "worth the wait", "locality": "Lake Nona",
+            "details": ["freezes well"],
             "answers": {"recipe": "Brazilian black bean stew", "ingredients": "beans, pork",
                         "time": "~3 hours"},
         },
@@ -151,6 +153,11 @@ def test_typed_answers_reach_the_saved_signal(monkeypatch: Any) -> None:
     _run(monkeypatch, "pass the tip along", ctx, {})
     assert seen["reco_type"] == "recipe"
     assert seen["reco_subject"] == "Feijoada"
+    # The card head lands in its own columns — the reader renders these instead of
+    # splitting detail_text back apart (20261120120000).
+    assert seen["reco_name"] == "Feijoada"
+    assert seen["reco_place"] == "Lake Nona"
+    assert seen["reco_description"] == "worth the wait · freezes well"
     # Self-describing: the answer travels with the question it answered, because the
     # question was written for this recommendation and cannot be looked up from the key.
     time_row = next(r for r in seen["reco_fields"] if r["field"] == "time")

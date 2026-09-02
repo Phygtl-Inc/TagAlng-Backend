@@ -4,14 +4,13 @@ Reading a neighbour's tip used to require asking for one — find_neighbor_tips 
 against a specific request inside a chat turn. This is the same rows, browsed: newest
 first, or only from people the reader shares a circle with, or nearest.
 
-Two feedback verbs, kept apart on purpose:
+Every row is FIELDS, not a sentence: name / category / reco_type / place / description /
+the answered steps. detail_text is still carried for tips captured before those columns
+existed (20261120120000 backfilled only the name out of it) — new readers should render
+the fields and treat detail_text as the legacy fallback it is.
 
-    ✓ I vouch   adds YOUR voice to the recommendation ("I know this place too")
-    👍 Helpful  rates the ANSWER, and says nothing about the place
-
-The vouch count is the number a stranger reads as social proof, so a reader who has never
-been there must not be able to raise it. Enforced in SQL (set_tip_vouch refuses the
-author's own tip); mirrored here only in the error the caller sees.
+One feedback verb with a direction: 👍 / 👎 both rate the ANSWER. A reader has ONE vote
+per tip and it flips, so a card never shows the same person on both sides.
 """
 
 from __future__ import annotations
@@ -49,20 +48,67 @@ def _clean_circles(raw: Any) -> list[dict[str, Any]]:
     return out[:3]
 
 
+def _clean_fields(raw: Any) -> list[dict[str, Any]]:
+    """The answered steps, self-describing (field/label/question/answer). Kept as an array
+    because the questions are generated per recommendation: an answer without the label it
+    was asked under is unreadable on a card."""
+    out: list[dict[str, Any]] = []
+    for f in raw if isinstance(raw, list) else []:
+        if not isinstance(f, dict):
+            continue
+        answer = str(f.get("answer") or "").strip()
+        label = str(f.get("label") or "").strip()
+        if not answer or not label:
+            continue
+        out.append(
+            {
+                "field": str(f.get("field") or "").strip() or None,
+                "label": label,
+                "question": str(f.get("question") or "").strip() or None,
+                "kind": str(f.get("kind") or "").strip() or "text",
+                "answer": answer,
+            }
+        )
+    return out
+
+
+# The steps that answer "where is it" for the types that ask one. Read only as a fallback
+# for rows with no reco_place: the author naming a neighbourhood always wins.
+_PLACE_FIELDS = ("where", "where_to_buy", "location")
+
+
+def _place(raw: dict[str, Any], fields: list[dict[str, Any]]) -> str | None:
+    named = str(raw.get("reco_place") or "").strip()
+    if named:
+        return named
+    for f in fields:
+        if f["field"] in _PLACE_FIELDS:
+            return f["answer"]
+    return None
+
+
 def _row(raw: dict[str, Any]) -> dict[str, Any] | None:
     sid = str(raw.get("signal_id") or "").strip()
-    text = str(raw.get("detail_text") or "").strip()
-    if not sid or not text:
+    legacy = str(raw.get("detail_text") or "").strip()
+    name = str(raw.get("reco_name") or "").strip()
+    # A card needs something to title itself with. Pre-20261120 rows have the name
+    # backfilled out of detail_text, so "neither" means a row nothing can render.
+    if not sid or not (name or legacy):
         return None
-    circles = _clean_circles(raw.get("shared_circles"))
-    tags = raw.get("affinity_tags")
+    fields = _clean_fields(raw.get("reco_fields"))
     return {
         "signal_id": sid,
-        "detail_text": text,
+        "name": name or None,
+        # The specific kind the card labels the tip with ("pediatric dentist"); reco_type
+        # is the coarse taxonomy bucket the browse indexes on ("professional").
         "category": str(raw.get("category") or "").strip() or None,
-        "trait_tags": [str(t).strip() for t in tags if str(t or "").strip()][:6]
-        if isinstance(tags, list)
-        else [],
+        "reco_type": str(raw.get("reco_type") or "").strip() or None,
+        "place": _place(raw, fields),
+        "description": str(raw.get("reco_description") or "").strip() or None,
+        "fields": fields,
+        # Legacy only: the " · "-joined sentence tips were captured as before the fields
+        # existed. Render the fields above when they are there.
+        "detail_text": legacy or None,
         "created_at": str(raw.get("created_at") or "") or None,
         "peer_user_id": str(raw.get("peer_user_id") or "").strip() or None,
         "nickname": str(raw.get("neighbor_label") or "").strip() or None,
@@ -70,12 +116,12 @@ def _row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "distance_text": str(raw.get("distance_text") or "").strip() or None,
         # The shared circle labels the card in the "My circles" tab — the reason this tip
         # is worth more than a stranger's. Empty on the Recent tab's unconnected rows.
-        "shared_circles": circles,
+        "shared_circles": _clean_circles(raw.get("shared_circles")),
         "same_block": bool(raw.get("same_block")),
-        "vouch_count": int(raw.get("vouch_count") or 0),
         "helpful_count": int(raw.get("helpful_count") or 0),
-        "i_vouched": bool(raw.get("i_vouched")),
+        "unhelpful_count": int(raw.get("unhelpful_count") or 0),
         "i_marked_helpful": bool(raw.get("i_marked_helpful")),
+        "i_marked_unhelpful": bool(raw.get("i_marked_unhelpful")),
     }
 
 
@@ -104,13 +150,21 @@ def recent_tips(
     return out
 
 
-def set_vouch(user_jwt: str, *, signal_id: str, on: bool = True) -> int:
-    """Add or remove the caller's vouch. Returns the new count."""
-    raw = call_rpc(user_jwt, "set_tip_vouch", {"p_signal_id": signal_id, "p_on": bool(on)})
-    return int(raw or 0) if isinstance(raw, (int, float)) else 0
-
-
-def set_helpful(user_jwt: str, *, signal_id: str, on: bool = True) -> int:
-    """Add or remove the caller's "helpful" mark. Returns the new count."""
-    raw = call_rpc(user_jwt, "set_tip_helpful", {"p_signal_id": signal_id, "p_on": bool(on)})
-    return int(raw or 0) if isinstance(raw, (int, float)) else 0
+def set_helpful(
+    user_jwt: str, *, signal_id: str, on: bool = True, helpful: bool = True
+) -> dict[str, Any]:
+    """Set the caller's 👍/👎 on a tip. `on=False` clears it whichever way it pointed.
+    Returns both counts and the caller's own state, so the tapped row re-renders without
+    re-reading the feed."""
+    raw = call_rpc(
+        user_jwt,
+        "set_tip_helpful",
+        {"p_signal_id": signal_id, "p_on": bool(on), "p_helpful": bool(helpful)},
+    )
+    out = raw if isinstance(raw, dict) else {}
+    return {
+        "helpful_count": int(out.get("helpful_count") or 0),
+        "unhelpful_count": int(out.get("unhelpful_count") or 0),
+        "i_marked_helpful": bool(out.get("i_marked_helpful")),
+        "i_marked_unhelpful": bool(out.get("i_marked_unhelpful")),
+    }

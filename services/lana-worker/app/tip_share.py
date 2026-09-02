@@ -315,6 +315,15 @@ def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
     return out or None
 
 
+def _description(draft: dict[str, Any]) -> str | None:
+    """Why it is worth recommending, in the author's OWN words — the italic line on the
+    card. The trait plus any corrections they added, and nothing generated: a description
+    Lana wrote would be Lana vouching for a place she has never been to."""
+    parts = [str(draft.get("trait") or "").strip()]
+    parts += [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()]
+    return " · ".join([p for p in parts if p]) or None
+
+
 def _save_tip(
     *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
 ) -> dict[str, Any] | None:
@@ -333,6 +342,11 @@ def _save_tip(
             # What the agree-row tallies group on — the subject, normalized once at write
             # time so a lookup is an index hit and not a scan over every recommendation.
             reco_subject=str(draft.get("name") or "").strip() or None,
+            # The card head as fields. Same values detail_text joins into a sentence —
+            # stored separately so a reader renders them instead of splitting on " · ".
+            reco_name=str(draft.get("name") or "").strip() or None,
+            reco_place=str(draft.get("locality") or "").strip() or None,
+            reco_description=_description(draft),
         )
     except Exception:  # noqa: BLE001
         import logging
@@ -633,7 +647,15 @@ def run_tip_share_turn(
             session_ctx["tip_asked_fields"] = list(asked)
             session_ctx["tip_pending_ask"] = step["field"]
             draft["chips"] = chips
-            draft["suggestions"] = list(step.get("options") or [])
+            # A generated set writes no options for a map step, and the chat fork has no
+            # Places picker to fall back on the way the carousel does — so a "where is it?"
+            # asked in chat comes back as typed prose nobody can navigate to. Real nearby
+            # places, same call the name step makes.
+            draft["suggestions"] = list(step.get("options") or []) or (
+                _name_suggestions(draft, zip_code=zip_code, block_id=home_block_id)
+                if step.get("kind") == "place"
+                else []
+            )
             session_ctx["tip_draft"] = draft
             session_ctx["tip_share_active"] = True
             session_ctx["tip_pending_question"] = step["question"]
