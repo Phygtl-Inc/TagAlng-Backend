@@ -25,6 +25,7 @@ reversible). MatcherStub remains the parity reference the live output is diffed 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import httpx
@@ -45,6 +46,11 @@ from ports import (
 
 # repo-root .env.local (circles_zip → simulations → lana-worker → services → root)
 load_dotenv(Path(__file__).resolve().parents[4] / ".env.local", override=True)
+
+_SIMS_DIR = Path(__file__).resolve().parents[1]  # simulations/ — where local_guard lives
+if str(_SIMS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SIMS_DIR))
+from local_guard import require_local  # noqa: E402
 
 _URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 _KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -111,7 +117,7 @@ class MatcherLive:
       * UNGATED (raw scoring): score_onion_candidates_for_user(p_user_id, p_limit=20,
         p_min_score=1), service-role. Returns per-peer: peer_user_id, nickname, avatar_url,
         score, same_place_bonus, same_type_bonus, shared_concept_count, shared_concept_labels,
-        shared_place_ref. This is exactly what MatcherStub mirrors.
+        shared_concept_subjects, shared_place_ref. This is exactly what MatcherStub mirrors.
       * GATED (product path): app.onion.score_onion_candidates() enforces the §D.2 peers ZIP gate
         then calls the RPC, failing OPEN on gate errors. Swap `_rpc(...)` for that import if you
         want gated behavior (needs the app package importable).
@@ -123,6 +129,30 @@ class MatcherLive:
     IDENTITY_CONCEPT_LINK_ENABLED + the 20260905 backfill (PR #96). Until then live scores are
     circle-arm only — a 0-concept score is flag-off, not a bug (mirror with
     ScoringConfig.concept_arm_enabled=False on the stub side).
+
+    SUBJECT-AWARE (migrations 20261021120000 / 20261022120000): concepts pair only within the
+    same subject_kind, and the RPC was DROPPED+RECREATED to add `shared_concept_subjects`
+    (a return TABLE cannot gain a column via create-or-replace). Four things this adapter
+    CANNOT observe, none of which may be allowed to vacuously pass a parity diff:
+
+      * FLAGGED — `shared_concept_subjects=()` is AMBIGUOUS. It means EITHER "the peer shares
+        no concepts" OR "this server predates 20261022 and returns the 9-column shape". The
+        two are distinguishable only by cross-checking shared_concept_count > 0 with an empty
+        subjects array; a diff runner should treat that combination as UNSCORED, never as a
+        stub bug. There is no version column on the RPC to key off.
+      * FLAGGED — the SUBJECT-PAIRING RULE ITSELF is not directly observable from the output.
+        A cross-subject pair that wrongly scored and a same-subject pair that correctly scored
+        are the same row shape; proving the rule live needs SEEDED claims of known
+        subject_kind on both sides (live_seed writes no subject columns today, so this arm is
+        stub-only for now).
+      * FLAGGED — subject_name / subject_birth_year are OWNER-ONLY by design (20261021's
+        privacy contract; no peer-facing RPC selects them, and 20261023 lets them out only
+        through get_my_identity_claims / get_my_profile_dashboard where auth.uid() IS the
+        owner). Their absence here is CORRECT, not lossiness — do not add them.
+      * FLAGGED — the labels/subjects arrays are ordered by `ic2.label` ALONE, so when one
+        label appears under two subject_kinds the tie order is undefined server-side (same
+        class of problem as the nickname tiebreak below). Compare these as a SET of
+        (label, subject) pairs, never as two sequences.
 
     FLAGGED (ordering, when diffing this against MatcherStub): the RPC's secondary sort key is
     `u.nickname asc nulls last`, which the stub cannot reproduce (no nicknames here) and which
@@ -157,6 +187,11 @@ class MatcherLive:
                 same_type_bonus=float(r.get("same_type_bonus") or 0),
                 shared_concept_count=int(r.get("shared_concept_count") or 0),
                 shared_concept_labels=tuple(r.get("shared_concept_labels") or ()),
+                # NEW column (20261022120000). `.get(...) or ()` deliberately: a server that
+                # has NOT yet run the migration returns the OLD 9-column shape with no key at
+                # all, and this must degrade to empty rather than KeyError — but see the
+                # FLAGGED note in the class docstring: empty here is AMBIGUOUS.
+                shared_concept_subjects=tuple(r.get("shared_concept_subjects") or ()),
                 shared_place_ref=r.get("shared_place_ref"),
                 ring=None,  # the built RPC emits no ring — reporting artifact only (stub derives it)
             )
@@ -201,6 +236,11 @@ class AreaStateLive:
                 "and only against a seeded dev ZIP — never a real one."
             )
         zip5 = zip_state.zip_code
+        # Layered on top of SIM_ALLOW_WRITES (which says "I meant to write", not WHERE): a
+        # recount on a SHARED project mutates a real ZIP's unlock row and can permanently stamp
+        # founding on real members. Local stacks only — SIM_ALLOW_NONLOCAL_WRITES=1 to override.
+        require_local(f"recount_zip_unlock({zip5}) — rewrites zip_unlock, may stamp founding",
+                      url=_URL)
         _rpc("recount_zip_unlock", {"p_zip5": zip5})  # write: recompute + persist state
         rows = _select("zip_unlock", {"zip5": f"eq.{zip5}", "select": "*", "limit": "1"})
         if not rows:

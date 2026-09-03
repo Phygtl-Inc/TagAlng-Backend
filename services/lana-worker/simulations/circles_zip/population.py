@@ -14,7 +14,10 @@ exercises all THREE onion scoring arms so stub↔built parity is measurable:
   * type overlap (+1) — circle_types are global, so any two moms can share a circle_type;
   * concept overlap (+1 each) — the `affinity_*` knobs model each mom's PUBLIC identity
     CONCEPT ids (the built concept arm counts DISTINCT shared ones). `affinity_vocab_size`
-    is the OVERLAP knob (smaller vocab ⇒ more shared concepts per pair).
+    is the OVERLAP knob (smaller vocab ⇒ more shared concepts per pair). Since 20261021 a
+    concept also carries a SUBJECT and pairs only within one — `child_subject_rate` mints
+    'child'-subject claims from the same vocab, so the population contains same-slug /
+    different-subject pairs that must score ZERO.
 Also retains rev-1's DURABLE accepted intros (the `intros` table): a mom with ≥1 accepted
 intro counts toward her home_zip's verified-active total even with zero confirmed circles;
 without them the unlock count UNDERCOUNTS vs prod (guess #4). Field names track the as-built
@@ -103,6 +106,26 @@ class PopulationConfig:
     affinity_vocab_size: int = 12
     affinities_per_mom_max: int = 5
     affinities_per_mom_weights: tuple[float, ...] = (0.10, 0.25, 0.30, 0.20, 0.10, 0.05)  # P(0..5)
+
+    # SUBJECT dimension (migrations 20261021120000 / 20261022120000). Claims now carry
+    # subject_kind, and the matcher pairs a concept only WITHIN one kind — a child's karate
+    # never matches an adult's. Without child-subject claims in the population the harness
+    # cannot distinguish a correct subject-aware matcher from the old subject-blind one, so
+    # a share of moms get claims about a 'child' drawn from the SAME vocab as their own.
+    # That overlap-in-slug/disjoint-in-subject shape is exactly the case the rule exists for.
+    child_subject_rate: float = 0.35
+    # GUESSED: no measured rate exists — 20261021 ships the column but no distribution, and
+    # the extractor only started writing subjects with that migration, so there is no
+    # production base rate to copy yet. 0.35 is a "material but not dominant" placeholder
+    # chosen to keep both arms of the pairing rule well-populated in a default sweep. It is
+    # a SENSITIVITY knob, not a claim about reality — sweep it, don't trust it.
+    child_affinities_per_mom_max: int = 3
+    child_affinities_per_mom_weights: tuple[float, ...] = (0.0, 0.45, 0.35, 0.20)  # P(0..3)
+    # Conditioned on being a child-subject holder at all, so index 0 is 0.0 — the
+    # child_subject_rate coin already decides "has any".
+    # GUESSED: only 'self' and 'child' are generated. The enum has eight labels but
+    # 20261021's own note says only those two are WRITTEN today; minting 'grandparent' rows
+    # would test a path the extractor cannot currently produce.
 
     invite_rate: float = 0.3  # fraction of (non-spam) moms with invited_by set
     # Invite-spam agents (§I anti-gaming check): a small number of "inviters" who
@@ -427,6 +450,25 @@ def generate_population(config: PopulationConfig) -> GeneratedPopulation:
     # Blocks last, so adding this axis leaves every earlier rng draw (and therefore every
     # earlier fixture) byte-identical for a given seed.
     blocked = _blocked_pairs(rng, population, config.blocked_pair_rate)
+
+    # Child-subject claims — appended AFTER blocks for the same reason blocks came last:
+    # every rng draw above is untouched, so this axis cannot silently move any pre-existing
+    # seeded fixture or sweep number. `affinities` (bare slugs) stay the subject_kind='self'
+    # set — the column's NOT NULL DEFAULT, so that reading needs no migration of the
+    # generator — and the pairs below are the non-self ones. Drawn from the SAME vocab on
+    # purpose: the interesting adversarial case is two moms sharing slug `aff_3` where one
+    # holds it about herself and the other about her kid, which must score ZERO.
+    for mom in population:
+        if rng.random() >= config.child_subject_rate:
+            continue
+        n_child = min(
+            _weighted_count(rng, config.child_affinities_per_mom_weights),
+            config.child_affinities_per_mom_max,
+        )
+        if not n_child:
+            continue
+        picks = rng.sample(affinity_vocab, n_child)
+        mom.subject_affinities = frozenset(("child", c) for c in picks)
 
     validate_population(population)  # fail closed — never hand back an impossible world
     return GeneratedPopulation(moms=population, zip_adjacency=adjacency, blocked_pairs=blocked)

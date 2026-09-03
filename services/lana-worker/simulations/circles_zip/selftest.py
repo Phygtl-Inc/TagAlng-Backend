@@ -12,6 +12,8 @@ detection fires).
 
 The planted violations are the real divergences this harness exists to catch:
   * place+type scored as a SUM instead of MAX(3,1)      -> onion_scoring_parity
+  * concepts paired ACROSS subjects (pre-20261021)       -> onion_scoring_parity
+  * shared_concept_subjects dropped from the response    -> onion_scoring_parity
   * zero-score strangers emitted (the RPC has no such row) -> onion_scoring_parity
   * suggested/dismissed/ungrounded rows scored           -> onion_scoring_parity
   * p_limit honoured raw instead of clamped to [1,50]    -> onion_scoring_parity
@@ -131,6 +133,40 @@ class _NoClampMatcher(MatcherStub):
         return (rows * 3)[:raw] if raw > 50 else rows[:raw]
 
 
+class _SubjectBlindMatcher(MatcherStub):
+    """The pre-20261021 matcher: pairs concepts on the SLUG ALONE, ignoring subject_kind, so
+    a parent's karate matches a child's. This is the exact regression the subject columns
+    were added to prevent (`and cc.subject_kind = pp.subject_kind`, migrations
+    20261021120000 / 20261022120000) and the failure mode is silent — it produces a match
+    reason that is simply untrue ("you both do karate") rather than an error.
+
+    Implemented by flattening every subject onto 'self' before delegating, which is precisely
+    what the old schema did (there was no other subject to be)."""
+
+    def score_matches(self, mom, population, config):
+        def _flatten(m):
+            flat = copy.deepcopy(m)
+            flat.affinities = frozenset(c for _s, c in m.subject_concepts())
+            flat.subject_affinities = frozenset()
+            return flat
+
+        return super().score_matches(_flatten(mom), [_flatten(p) for p in population], config)
+
+
+class _DropSubjectsColumnMatcher(MatcherStub):
+    """An adapter that scores correctly but never surfaces `shared_concept_subjects` — what a
+    live impl looks like when it is pointed at a server that predates 20261022, or when the
+    new column is simply forgotten in the row mapping. Scores are right, so only the
+    parallel-array check can catch it; without that check the drop is invisible and the copy
+    layer silently falls back to "you both", the untrue sentence."""
+
+    def score_matches(self, mom, population, config):
+        rows = super().score_matches(mom, population, config)
+        for r in rows:
+            r.shared_concept_subjects = ()
+        return rows
+
+
 class _NoTypeFloorMatcher(MatcherStub):
     """Drops the type-only floor row, so a lone pioneer whose only overlap is a shared
     circle_type gets nothing — the §C.4 day-zero failure mode."""
@@ -219,6 +255,43 @@ def main() -> int:
            "onion parity FAILS when p_limit=0 is not clamped up to 1")
     expect(not broken["checks"]["clamp_upper_bound_50"],
            "onion parity FAILS when an over-50 p_limit is not clamped down to 50")
+
+    # --- SUBJECT-AWARE concept pairing (20261021120000 / 20261022120000) ------------------
+    # (a) a cross-subject pair must NOT score, (b) a same-subject pair MUST, (c) the subjects
+    # array must stay parallel to the labels array. The honest stub is asserted first so an
+    # over-eager check shows up as a failure, not as reassuring red.
+    expect(honest["checks"]["cross_subject_does_not_pair"],
+           "same-slug/different-subject peer does NOT pair (child's karate != adult's karate)")
+    expect(honest["checks"]["same_subject_pairs"],
+           "same-slug/same-subject peer DOES pair (+1, reported as subject 'child')")
+    expect(honest["checks"]["subjects_parallel_to_labels"],
+           "shared_concept_subjects[i] describes shared_concept_labels[i] (self+child on one peer)")
+    expect(honest["checks"]["subjects_always_accompany_labels"],
+           "every concept-bearing row carries one subject per label (no silently empty column)")
+
+    blind = sweep.measure_onion_scoring_parity(scoring, backend=_backend(_SubjectBlindMatcher()))
+    expect(not blind["passed"] and not blind["checks"]["cross_subject_does_not_pair"],
+           "onion parity FAILS when the matcher pairs concepts across DIFFERENT subjects")
+    # Targeted, not a wipe: the subject-blind matcher still RETURNS the same-subject peer at
+    # +1 (it just also returns the cross-subject one). Asserted on the reported rows rather
+    # than on same_subject_pairs, because that check also pins subject=='child' — which a
+    # subject-blind matcher necessarily reports as 'self', so it fails for a second reason
+    # and would make this control vacuous.
+    expect(dict(blind["top_scores_concept_on"]).get("same_subject") == 1.0,
+           "...and that planting is targeted: the subject-blind matcher still returns the "
+           "same-subject peer at +1, so the failure above is the cross-subject row, not a wipe")
+
+    dropped = sweep.measure_onion_scoring_parity(scoring, backend=_backend(_DropSubjectsColumnMatcher()))
+    expect(not dropped["passed"] and not dropped["checks"]["subjects_parallel_to_labels"],
+           "onion parity FAILS when shared_concept_subjects is dropped from the response")
+    expect(not dropped["checks"]["subjects_always_accompany_labels"],
+           "...and the non-vacuity arm fires too (labels present with no subjects)")
+
+    # (c) the pre-existing scoring properties must be UNCHANGED by the subject rule.
+    expect(honest["checks"]["max_not_sum"],
+           "MAX-not-sum circle bonus still holds under subject-aware concepts (place+type = 3)")
+    expect(honest["checks"]["components_are_max_split"],
+           "...and the component split is still (3, 0) for a place+type peer, not (3, 1)")
 
     # --- the candidate SET (not merely the score filter) ---------------------------------
     # The RPC never emits a peer with no overlap on either arm, even at p_min_score=0.

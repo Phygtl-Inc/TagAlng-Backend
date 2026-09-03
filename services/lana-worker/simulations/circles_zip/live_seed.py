@@ -5,8 +5,11 @@ namespaced, and reversible.
 
 SAFETY (read before running):
   * Writes ONLY happen with SIM_ALLOW_WRITES=1. Every call refuses otherwise.
-  * DEV ONLY. Never point this at prod (SUPABASE_URL must be the dev project). Asjid's rule:
-    never seed prod with synthetic data.
+  * LOCAL STACK ONLY (added 2026-08-20). Every write also goes through local_guard.require_local,
+    which refuses unless SUPABASE_URL is a local Supabase stack — see simulations/LOCAL_STACK.md.
+    SIM_ALLOW_WRITES says "I meant to write"; it never said WHERE. To seed the shared dev project
+    on purpose (the original use case) set SIM_ALLOW_NONLOCAL_WRITES=1 as well; it prints a banner.
+  * NEVER prod. Asjid's rule: never seed prod with synthetic data.
   * Reversible: every seeded row is tagged `detail = SEED_MARKER`; `teardown()` deletes exactly
     those. Run `--teardown` when done.
   * UNTESTED end-to-end until ONION_RPC_BUG.md is fixed (the RPC throws today), so run
@@ -42,6 +45,11 @@ import httpx
 
 from live_impl import _ALLOW_WRITES, _URL, _headers, _require_creds, _select
 
+_SIMS_DIR = Path(__file__).resolve().parents[1]  # simulations/ — where local_guard lives
+if str(_SIMS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SIMS_DIR))
+from local_guard import require_local  # noqa: E402
+
 SEED_MARKER = "circles-sim-seed"  # stamped on circle_affiliations.detail for safe teardown
 _SIMS = Path(__file__).resolve().parents[1]  # services/lana-worker/simulations
 _TIMEOUT = 30
@@ -72,14 +80,27 @@ def _circle_key_for(label: str) -> str:
     return key
 
 
-def _guard_writes() -> None:
+def _guard_writes(operation: str = "insert/delete circle_affiliations") -> None:
+    """Three gates, in order. The first two are the originals and are UNCHANGED; the third is
+    the local-target check layered on top.
+
+      1. creds present            (_require_creds)
+      2. SIM_ALLOW_WRITES=1       (the suite's pre-existing write gate)
+      3. target is a LOCAL stack  (local_guard.require_local)
+
+    (3) exists because (2) says "I meant to write" but says nothing about WHERE. This tool
+    deletes by `detail = SEED_MARKER`, so a misdirected teardown removes rows another person
+    seeded on the shared dev project — with the same marker, so it looks like a clean run.
+    Escape hatch, for the original dev-seeding use case: SIM_ALLOW_NONLOCAL_WRITES=1.
+    """
     _require_creds()
     if not _ALLOW_WRITES:
         raise RuntimeError("Refusing to write: set SIM_ALLOW_WRITES=1 (dev DB only).")
+    require_local(operation, url=_URL)
 
 
 def _insert(table: str, rows: list[dict]) -> list[dict]:
-    _guard_writes()
+    _guard_writes(f"INSERT {len(rows)} row(s) into {table}")
     with httpx.Client(timeout=_TIMEOUT) as c:
         r = c.post(f"{_URL}/rest/v1/{table}",
                    headers=_headers({"Prefer": "return=representation"}), json=rows)
@@ -88,7 +109,7 @@ def _insert(table: str, rows: list[dict]) -> list[dict]:
 
 
 def _delete(table: str, filters: dict) -> int:
-    _guard_writes()
+    _guard_writes(f"DELETE from {table} where {filters}")
     with httpx.Client(timeout=_TIMEOUT) as c:
         r = c.delete(f"{_URL}/rest/v1/{table}",
                      headers=_headers({"Prefer": "return=representation"}), params=filters)

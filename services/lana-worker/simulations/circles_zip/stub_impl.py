@@ -12,6 +12,10 @@ Reconciled 2026-07-28 with Asjid's reply, then REV-2 for the onion matcher. Up f
     target for LIVE:
         score        = circle_bonus + shared_concept_count
         circle_bonus = MAX(same place_ref → +3, same circle_type → +1)   # MAX, not SUM
+        concepts pair ONLY WITHIN THE SAME SUBJECT (20261021120000/20261022120000): a
+        child's karate never matches an adult's, shared_concept_count is
+        COUNT(DISTINCT (subject_kind, concept_id)), and the RPC also returns
+        `shared_concept_subjects` parallel to `shared_concept_labels`.
         candidate set = confirmed AND non-dismissed AND place_ref IS NOT NULL (grounded)
         order = score desc, nickname asc ; p_limit clamp [1,50] ; p_min_score default 1
         NO proximity term (users store no coordinates); blocked pairs excluded.
@@ -149,11 +153,53 @@ class MatcherStub:
             # Concept arm — gated by the DORMANCY toggle. When off (current-prod: the
             # 20260905 backfill / IDENTITY_CONCEPT_LINK_ENABLED not yet live), EVERY score is
             # circle-arm only, which is flag-off, not a scoring bug.
+            # SUBJECT-AWARE since 20261021120000/20261022120000: both concept sets carry
+            # subject_kind and the join requires it on BOTH sides
+            #   (`join caller_concepts cc on cc.concept_id = pp.concept_id
+            #                            and cc.subject_kind = pp.subject_kind`),
+            # so "my kid does karate" and "I do karate" are different facts and contribute
+            # nothing to each other. Mom.subject_concepts() is the normalized
+            # (subject_kind, concept_id) set — bare `affinities` normalize to 'self'.
+            # SHOWN arm — `both_public` (20261116120000:125). A pair is showable only when BOTH
+            # sides published it, which is exactly the intersection of the two PUBLIC sets. This
+            # drives shared_concept_count and the label/subject arrays, i.e. everything that
+            # reaches user-facing copy.
             shared_concepts = (
-                mom.affinities & candidate.affinities
+                mom.subject_concepts() & candidate.subject_concepts()
                 if config.concept_arm_enabled else frozenset()
             )
+            # count(distinct (s.subject_kind, s.concept_id)) filter (where both_public) — a
+            # concept held about TWO different subjects by both sides counts TWICE, which is why
+            # the count is over the pair set and not over the bare concept ids.
             concept_count = len(shared_concepts)
+
+            # RANKED arm — `disclosure in ('public','mutual')` on both sides (:102, :113), counted
+            # WITHOUT the both_public filter (:136). This is what `score` adds (:179).
+            #
+            # A mutual overlap therefore lifts a peer up the ranking while never being named:
+            # shared_concept_labels feeds copy like "you both run", and this surface only ever
+            # describes people you are NOT connected to — precisely whom a mutual claim is
+            # withheld from. Ranking on it is safe; showing it would leak.
+            #
+            # CONSEQUENCE FOR ANY LIVE DIFF: `score == circle_bonus + shared_concept_count` was
+            # true only while every claim was public. It is now false whenever a mutual pair
+            # exists, and `ranked_concept_count` is NOT in the RPC's RETURNS list — so the count
+            # is unobservable live except as `score - circle_bonus`. Do not assert the old
+            # identity, and do not read the gap as a scoring bug.
+            ranked_concepts = (
+                mom.ranked_concepts() & candidate.ranked_concepts()
+                if config.concept_arm_enabled else frozenset()
+            )
+            ranked_concept_count = len(ranked_concepts)
+            # The two returned arrays are aggregated over ONE ordered subquery so index i of
+            # each describes the same shared concept. The SQL's ORDER BY is `ic2.label` alone;
+            # GUESSED: when one label appears under two subject_kinds that key is ambiguous
+            # and Postgres does not define the tie order, so the stub breaks the tie on
+            # subject_kind for determinism. A live diff must compare these as a SET of
+            # (label, subject) pairs, never as two sequences. (FLAGGED in live_impl.)
+            shared_ordered = sorted(shared_concepts, key=lambda sc: (sc[1], sc[0]))
+            shared_labels = tuple(concept for _subject, concept in shared_ordered)
+            shared_subjects = tuple(subject for subject, _concept in shared_ordered)
 
             # circle_bonus = MAX(place, type) — place and type DO NOT STACK (the SQL is
             # MAX-over-pairs of place ELSE type, never a sum).
@@ -172,7 +218,8 @@ class MatcherStub:
             place_won = same_place and place_component >= type_component
             same_place_bonus = circle_bonus if place_won else 0.0
             same_type_bonus = circle_bonus if (same_type and not place_won) else 0.0
-            score = circle_bonus + config.affinity_weight * concept_count
+            # 20261116120000:179 — `circle_bonus + ranked_concept_count`, NOT shared_concept_count.
+            score = circle_bonus + config.affinity_weight * ranked_concept_count
             # NO proximity term (guess #1 RESOLVED) — the call contributes a hard 0.0.
             score += _default_proximity_bonus(mom, candidate)
 
@@ -187,7 +234,12 @@ class MatcherStub:
             # the RPC only clamps p_limit, not p_min_score). At the default p_min_score=1
             # this changes nothing — those peers score 0 and were already filtered — so the
             # guard cannot alter any current measurement, only a p_min_score<=0 sweep.
-            if not (same_place or same_type or concept_count > 0):
+            # RANKED count, not the shown one: `concept_scored` is built from `shared`, which is
+            # the public+mutual join (20261116120000:118-130). A peer whose ONLY overlap is a
+            # mutual claim is still a row — it just carries empty label arrays. Testing the shown
+            # count here would drop those peers entirely, which is the opposite of what
+            # 20261116120000 shipped.
+            if not (same_place or same_type or ranked_concept_count > 0):
                 continue
 
             if score < config.p_min_score:
@@ -199,11 +251,12 @@ class MatcherStub:
                     score=score,
                     same_place=same_place,
                     same_type=same_type,
-                    shared_affinities=tuple(sorted(shared_concepts)),
+                    shared_affinities=shared_labels,
                     same_place_bonus=same_place_bonus,
                     same_type_bonus=same_type_bonus,
                     shared_concept_count=concept_count,
-                    shared_concept_labels=tuple(sorted(shared_concepts)),
+                    shared_concept_labels=shared_labels,
+                    shared_concept_subjects=shared_subjects,
                     shared_place_ref=shared_place_ref,
                     ring=_reporting_ring(same_place, same_type, concept_count),
                 )

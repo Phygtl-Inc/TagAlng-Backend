@@ -39,7 +39,10 @@ are now RESOLVED below. The scoring is:
     score        = circle_bonus + shared_concept_count
     circle_bonus = MAX over circle pairs of (same place_ref → +3) ELSE (same circle_type → +1)
                    *** place and type do NOT stack — it is MAX, not SUM ***
-    shared_concept_count = COUNT(DISTINCT shared concept_ids) over PUBLIC, non-dismissed claims
+    shared_concept_count = COUNT(DISTINCT (subject_kind, concept_id)) over PUBLIC,
+                   non-dismissed claims — SUBJECT-AWARE since 20261021 (see SubjectKind):
+                   a concept pairs only when both sides hold it about the SAME KIND of
+                   person, and the RPC now also returns `shared_concept_subjects`.
     candidate set = status='confirmed' AND dismissed_at IS NULL AND place_ref IS NOT NULL
                     (suggested/dismissed/ungrounded rows NEVER score; blocked pairs excluded
                     on BOTH arms via lana_is_blocked, which is symmetric). A peer with no
@@ -74,6 +77,27 @@ AffiliationSource = Literal["chat_extraction", "invite_confirmed", "profile_add"
 # only modeled the first two.
 
 ZipUnlockState = Literal["closed", "warming", "open"]  # zip_unlock.unlock_state
+
+SubjectKind = Literal[
+    "self", "child", "parent", "spouse", "sibling", "grandparent", "household", "other"
+]
+# SUBJECT-AWARE CLAIMS (migrations 20261021120000_child_subject_claims.sql /
+# 20261022120000_subject_aware_peer_surfaces.sql / 20261023120000_owner_claims_subject.sql).
+# `user_identity_claims` gained three additive columns — subject_kind (this enum, NOT NULL
+# DEFAULT 'self'), subject_name (OWNER-ONLY) and subject_birth_year. The enum carries all
+# eight labels even though only 'self' and 'child' are written today (20261021's own note:
+# a second enum migration later costs more than the extra labels cost now).
+#
+# What this changes for the matcher: BOTH concept sets now carry subject_kind and the join
+# requires it on both sides —
+#     join caller_concepts cc on cc.concept_id = pp.concept_id
+#                            and cc.subject_kind = pp.subject_kind
+# so a child's karate and an adult's karate are DIFFERENT facts and score nothing against
+# each other. shared_concept_count is COUNT(DISTINCT (subject_kind, concept_id)).
+#
+# subject_name / subject_birth_year are NOT part of matching by design and are never
+# selected by any peer-facing RPC — the pairing key is the KIND alone, so two DIFFERENT
+# children (Sara and Mia) both count as 'child' and DO pair. Modeled that way below.
 
 IntroStatus = Literal["accepted"]
 # RESOLVED (Asjid 2026-07-28): intros are DURABLE rows in the `intros` table. Only
@@ -207,6 +231,36 @@ class Mom:
     # (Supersedes the rev-1 "embedding cosine stand-in / blocked on the matcher" note: the
     # deployed scoring counts shared concepts, not embedding similarity.) Subject to the
     # DORMANCY caveat — see ScoringConfig.concept_arm_enabled.
+    #
+    # SUBJECT-AWARE (20261021/22): every claim now carries subject_kind, and this bare set
+    # models the subject_kind='self' claims — which is exactly what every pre-existing row
+    # is (the column is NOT NULL DEFAULT 'self'), so every existing call site keeps its
+    # meaning unchanged. Non-self subjects go in `subject_affinities` below.
+    subject_affinities: frozenset[tuple[SubjectKind, str]] = frozenset()
+    # Claims held about someone OTHER than the caller, as (subject_kind, concept_id) pairs —
+    # e.g. ("child", "aff_3") is "my kid does karate". Kept as a SEPARATE field rather than
+    # widening `affinities` to tuples so the ~10 existing `affinities=frozenset({...})` call
+    # sites (sweep.py fixtures, population.py, selftest.py) stay valid and keep meaning
+    # 'self'. `subject_concepts()` is the single normalized view both arms of the matcher use.
+    #
+    # GUESSED: the subject NAME is deliberately not modeled here. The matcher's join key is
+    # subject_kind ONLY (20261022:… `and cc.subject_kind = pp.subject_kind`) and subject_name
+    # is never selected by any peer-facing RPC, so two different children both key as 'child'
+    # and DO pair. A stub carrying names would model a distinction the RPC does not make.
+    # --- MUTUAL-disclosure claims (20261116120000_onion_rank_mutual_claims.sql) --------------
+    # Same two shapes as above, for claims published at disclosure='mutual' instead of 'public'.
+    # Kept separate rather than widening the tuples to (kind, concept, disclosure) for the same
+    # reason `subject_affinities` was kept separate: every existing `affinities=frozenset({...})`
+    # call site keeps meaning "self, public" and needs no edit.
+    #
+    # These do NOT behave like public claims. Per 20261116120000:122-136 the RPC now pairs BOTH
+    # arms on `disclosure in ('public','mutual')` for RANKING, while the shown arrays are filtered
+    # to `both_public` — so a mutual overlap lifts a peer up the ranking SILENTLY and is never
+    # named in copy. That asymmetry is the whole point: shared_concept_labels feeds user-facing
+    # text ("you both run"), and this surface only ever describes people you are NOT connected to,
+    # which is exactly whom a mutual claim is withheld from.
+    mutual_affinities: frozenset[str] = frozenset()
+    mutual_subject_affinities: frozenset[tuple[SubjectKind, str]] = frozenset()
     invited_by: str | None = None
     # RESOLVED (Asjid 2026-07-28): `users.invited_by` is growth attribution, set ONCE at
     # invite redemption — deliberately NOT membership (an invite never creates a circle).
@@ -215,6 +269,38 @@ class Mom:
 
     def confirmed_circles(self) -> list[CircleAffiliation]:
         return [c for c in self.circles if c.status == "confirmed" and c.dismissed_at is None]
+
+    def subject_concepts(self) -> frozenset[tuple[SubjectKind, str]]:
+        """The concept set the matcher actually joins on, post-20261021: one entry per
+        DISTINCT (subject_kind, concept_id) — `select distinct ccl.concept_id, c.subject_kind`
+        in both `caller_concepts` and `peer_concepts`. Bare `affinities` normalize to 'self'
+        (the column's NOT NULL DEFAULT); `subject_affinities` carry their own kind.
+
+        Intersecting two of these is the faithful stub for the RPC's subject-aware join.
+
+        SCOPE, post-20261116120000: this is the PUBLIC view. Intersecting two of them reproduces
+        the `both_public` flag exactly — a pair is showable only when BOTH sides published it —
+        so len(intersection) is `shared_concept_count` and it drives the label/subject arrays.
+        It is NOT what `score` counts any more; see `ranked_concepts()`."""
+        selfs: frozenset[tuple[SubjectKind, str]] = frozenset(
+            ("self", c) for c in self.affinities
+        )
+        return selfs | self.subject_affinities
+
+    def ranked_concepts(self) -> frozenset[tuple[SubjectKind, str]]:
+        """The concept set the RPC RANKS on: `disclosure in ('public','mutual')`, both arms
+        (20261116120000:102 and :113).
+
+        len(this ∩ theirs) is `ranked_concept_count`, which is what `score` adds to the circle
+        bonus (:179) — NOT `shared_concept_count`. The two diverge whenever either side holds a
+        mutual claim the other also holds, and the divergence is invisible in the RPC's output:
+        `ranked_concept_count` is computed but never returned (the RETURNS list at :41-46 carries
+        only score / bonuses / shared_concept_*). So in a live diff, `score - circle_bonus` is the
+        ONLY way to observe it, and asserting `score == circle_bonus + shared_concept_count` is
+        now WRONG — that identity held only while every claim was public."""
+        return self.subject_concepts() | frozenset(
+            ("self", c) for c in self.mutual_affinities
+        ) | self.mutual_subject_affinities
 
     @property
     def phone_verified(self) -> bool:
@@ -445,8 +531,16 @@ class RankedCandidate:
     # --- real RPC output columns (rev-2) ---------------------------------------------
     same_place_bonus: float = 0.0   # RPC column: 0 or +3 (shares a confirmed place_ref)
     same_type_bonus: float = 0.0    # RPC column: 0 or +1 (shares a circle_type)
-    shared_concept_count: int = 0   # RPC column: COUNT(DISTINCT shared concept_ids)
+    shared_concept_count: int = 0   # RPC column: COUNT(DISTINCT (subject_kind, concept_id))
     shared_concept_labels: tuple[str, ...] = ()  # RPC column: <=50 labels (serving trims to 3)
+    shared_concept_subjects: tuple[str, ...] = ()
+    # NEW RPC column (20261022120000_subject_aware_peer_surfaces.sql): the subject_kind of
+    # each shared concept, PARALLEL to shared_concept_labels — index i of one describes
+    # index i of the other. Both arrays are aggregated over the SAME ordered subquery
+    # (`select distinct ic2.label, s2.subject_kind … order by ic2.label limit 50`) precisely
+    # so copy can say "your kids both do karate" instead of the false "you both do karate".
+    # A label can appear TWICE with different subjects (an adult and a child both doing it),
+    # which is why this is a parallel array and not a dict.
     shared_place_ref: str | None = None          # RPC column: bare uuid of the shared place
     ring: RingId | None = None      # spec-§C.1 artifact — reporting-only, see class docstring
 
@@ -484,7 +578,11 @@ class MatcherPort(Protocol):
         `app.onion.score_onion_candidates()` which enforces the §D.2 peers ZIP gate BEFORE
         the RPC and fails OPEN on gate errors. INVARIANT: any caller hitting the RPC directly
         bypasses the gate — the wrapper is the gate. STUB mirrors the algorithm faithfully
-        (circle_bonus is MAX not sum; only confirmed+grounded+non-dismissed rows score)."""
+        (circle_bonus is MAX not sum; only confirmed+grounded+non-dismissed rows score).
+        SUBJECT-AWARE (20261021/20261022): the RPC was DROPPED and RECREATED (its return
+        TABLE gained `shared_concept_subjects`, which create-or-replace cannot do), and the
+        concept join now requires `cc.subject_kind = pp.subject_kind` — a child's karate
+        never pairs with an adult's."""
         ...
 
 

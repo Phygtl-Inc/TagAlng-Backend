@@ -29,9 +29,22 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from backend import Backend, get_backend
-from population import PopulationConfig, generate_population
-from ports import (
+from dotenv import load_dotenv
+
+# Env comes from the repo-root .env.local — the convention every other entry point in this
+# suite follows (rapport/run_eval.py, judge_probe.py, policy_eval/run_eval.py). sweep.py is
+# an entry point and was missing it, so `SIM_BACKEND=live python sweep.py` saw no
+# SUPABASE_* / SIM_* keys unless the shell happened to export them. Loaded BEFORE
+# `from backend import …` because backend.get_backend imports live_impl, which reads its
+# credentials at import time. live_impl also calls load_dotenv itself; that stays, because
+# live_seed.py imports it directly without ever going through this module.
+# override=True matches the other entry points: a stale shell export must not silently beat
+# the file the team shares.
+load_dotenv(Path(__file__).resolve().parents[4] / ".env.local", override=True)
+
+from backend import Backend, get_backend  # noqa: E402
+from population import PopulationConfig, generate_population  # noqa: E402
+from ports import (  # noqa: E402
     ActivationConfig,
     AreaStateConfig,
     CircleAffiliation,
@@ -177,10 +190,20 @@ def _parity_circle(
     )
 
 
-def _parity_mom(uid: str, zip_code: str, circles: list[CircleAffiliation], concepts: frozenset[str]) -> Mom:
+def _parity_mom(
+    uid: str, zip_code: str, circles: list[CircleAffiliation], concepts: frozenset[str],
+    child_concepts: frozenset[str] = frozenset(),
+    mutual_concepts: frozenset[str] = frozenset(),
+) -> Mom:
+    """`concepts` are subject_kind='self' claims (the column's NOT NULL DEFAULT, and what
+    every pre-20261021 row is); `child_concepts` are the same slugs held about a 'child'.
+    Passing the SAME slug in both to two different moms is the adversarial case the
+    subject-aware join exists to reject."""
     now = PopulationConfig().now
     return Mom(user_id=uid, home_zip=zip_code, circles=circles,
-               phone_verified_at=now, last_session_at=now, affinities=concepts)
+               phone_verified_at=now, last_session_at=now, affinities=concepts,
+               subject_affinities=frozenset(("child", c) for c in child_concepts),
+               mutual_affinities=mutual_concepts)
 
 
 def measure_onion_scoring_parity(
@@ -192,7 +215,10 @@ def measure_onion_scoring_parity(
     cfg_on = replace(scoring_config, concept_arm_enabled=True, n_results=20, p_min_score=1)
     cfg_off = replace(scoring_config, concept_arm_enabled=False, n_results=20, p_min_score=1)
 
-    focus = _parity_mom("focus", "Z000", [_parity_circle("focus", 0, "fitness", "P_shared")], frozenset({"c1"}))
+    # focus holds concept c1 about HERSELF and concept k9 about her CHILD.
+    focus = _parity_mom("focus", "Z000", [_parity_circle("focus", 0, "fitness", "P_shared")],
+                        frozenset({"c1"}), child_concepts=frozenset({"k9"}),
+                        mutual_concepts=frozenset({"m1"}))
     peers = [
         # shares BOTH a place and a type — circle_bonus must be MAX(3,1)=3, NOT 4 (sum):
         _parity_mom("both", "Z000",
@@ -206,6 +232,27 @@ def measure_onion_scoring_parity(
         _parity_mom("dismissed_sharer", "Z000", [_parity_circle("dismissed_sharer", 0, "fitness", "P_shared", dismissed=True)], frozenset()),
         _parity_mom("ungrounded_sharer", "Z000", [_parity_circle("ungrounded_sharer", 0, "fitness", None)], frozenset()),
         _parity_mom("nothing", "Z003", [_parity_circle("nothing", 0, "other", "P_none")], frozenset()),
+        # --- SUBJECT-AWARE pairing (20261021120000 / 20261022120000) ----------------------
+        # Holds the SAME slug c1 as focus, but about her CHILD while focus holds it about
+        # herself. The join requires `cc.subject_kind = pp.subject_kind`, so this pair shares
+        # NOTHING — and with no circle overlap either it must not be a ROW AT ALL, not a
+        # zero-score row. This is the false "you both do karate" the migration exists to kill.
+        _parity_mom("cross_subject", "Z004", [_parity_circle("cross_subject", 0, "heritage", "P_x1")],
+                    frozenset(), child_concepts=frozenset({"c1"})),
+        # Holds k9 about her CHILD, exactly as focus does → pairs, +1. Note the pairing key is
+        # the KIND, not the name: these are two DIFFERENT children and they still match.
+        _parity_mom("same_subject", "Z004", [_parity_circle("same_subject", 0, "heritage", "P_x2")],
+                    frozenset(), child_concepts=frozenset({"k9"})),
+        # Both arms at once: c1 as self AND k9 as child → count 2, and the two returned
+        # arrays must line up index-for-index (labels sort c1 < k9, so subjects come back
+        # ("self","child") — NOT in subject order, which is what makes this non-vacuous).
+        _parity_mom("both_subjects", "Z004", [_parity_circle("both_subjects", 0, "heritage", "P_x3")],
+                    frozenset({"c1"}), child_concepts=frozenset({"k9"})),
+        # 20261116120000. Her ONLY overlap with focus is the MUTUAL claim m1, and she shares no
+        # place and no type. Under the pre-20261116 definition she was not a row at all; now she
+        # ranks +1 while the shown arrays stay EMPTY — the whole point of the split.
+        _parity_mom("mutual_only", "Z004", [_parity_circle("mutual_only", 0, "heritage", "P_x4")],
+                    frozenset(), mutual_concepts=frozenset({"m1"})),
     ]
     pop = [focus, *peers]
 
@@ -229,6 +276,50 @@ def measure_onion_scoring_parity(
     checks["place_only_is_3"] = "place_only" in on and on["place_only"].score == 3.0 and not on["place_only"].same_type
     checks["type_only_is_1"] = "type_only" in on and on["type_only"].score == 1.0 and not on["type_only"].same_place
     checks["concept_arm_adds_1"] = "concept_only" in on and on["concept_only"].score == 1.0 and on["concept_only"].shared_concept_count == 1
+    # --- subject-aware concept pairing (20261021120000 / 20261022120000) -----------------
+    # A concept pairs ONLY within one subject_kind. cross_subject shares slug c1 with focus
+    # but holds it about her child, so the pair shares nothing and (having no circle overlap)
+    # is not a row at all.
+    checks["cross_subject_does_not_pair"] = "cross_subject" not in on
+    # 20261116120000: score ranks on public+mutual, the shown arrays stay both_public.
+    _mo = on.get("mutual_only")
+    checks["mutual_claim_lifts_score"] = _mo is not None and _mo.score == 1.0
+    checks["mutual_claim_is_never_shown"] = (
+        _mo is not None
+        and _mo.shared_concept_count == 0
+        and _mo.shared_concept_labels == ()
+        and _mo.shared_concept_subjects == ()
+    )
+    # The identity that held while every claim was public — score == circle_bonus +
+    # shared_concept_count — must now be FALSE for this peer. Asserting it still holds is the
+    # mistake 20261116120000 invites, so pin the break explicitly.
+    checks["score_no_longer_equals_shown_count"] = (
+        _mo is not None
+        and _mo.score != _mo.same_place_bonus + _mo.same_type_bonus + _mo.shared_concept_count
+    )
+    checks["same_subject_pairs"] = (
+        "same_subject" in on
+        and on["same_subject"].score == 1.0
+        and on["same_subject"].shared_concept_count == 1
+        and on["same_subject"].shared_concept_labels == ("k9",)
+        and on["same_subject"].shared_concept_subjects == ("child",)
+    )
+    # count(distinct (subject_kind, concept_id)) — two subjects, two counted concepts — and
+    # shared_concept_subjects[i] describes shared_concept_labels[i] (arrays are aggregated
+    # over ONE subquery ordered by label, 20261022120000).
+    checks["subjects_parallel_to_labels"] = (
+        "both_subjects" in on
+        and on["both_subjects"].shared_concept_count == 2
+        and on["both_subjects"].score == 2.0
+        and on["both_subjects"].shared_concept_labels == ("c1", "k9")
+        and on["both_subjects"].shared_concept_subjects == ("self", "child")
+    )
+    # Non-vacuity: the subject arrays must be populated on EVERY concept-bearing row, so an
+    # adapter that silently drops the new column cannot pass by returning ().
+    checks["subjects_always_accompany_labels"] = all(
+        len(c.shared_concept_subjects) == len(c.shared_concept_labels) == c.shared_concept_count
+        for c in res_on
+    )
     checks["shared_place_ref_reported"] = "both" in on and on["both"].shared_place_ref == "P_shared" and on["type_only"].shared_place_ref is None
     # only confirmed+grounded rows score; suggested/dismissed/ungrounded/nothing excluded:
     checks["ineligible_rows_never_score"] = excluded.isdisjoint(on.keys())
@@ -265,7 +356,9 @@ def measure_onion_scoring_parity(
                       "circle bonus (not sum), component columns as a split of that MAX, "
                       "confirmed+grounded-only candidates, score desc ordering (the server's "
                       "nickname tiebreak is not reproducible here — FLAGGED), p_limit clamp "
-                      "[1,50], concept-arm dormancy toggle",
+                      "[1,50], concept-arm dormancy toggle, and SUBJECT-AWARE concept "
+                      "pairing (20261021/20261022: same subject_kind only, plus the parallel "
+                      "shared_concept_subjects array)",
     }
 
 
