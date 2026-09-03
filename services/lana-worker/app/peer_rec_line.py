@@ -5,7 +5,12 @@ is the raw claim vocabulary rather than a reason. This module authors one senten
 Lana's voice from the SAME proven overlap the chips came from:
 
     shared: ["Family oriented", "Author talks and interactive programs"]
-    → "You're both family-oriented, and you both turn up for author talks."
+    → chips ["Family-first", "Author talks"] + "You're both family-oriented, and you both
+      turn up for author talks."
+
+The new card leads with the chips ("WHY LANA SEES A FIT") and keeps the sentence under
+them, so both come out of the SAME call and the same proven overlap — a chip can never
+say more than the line, and neither can say more than the claim.
 
 Rules of the house it inherits:
 - Grounded only. The prompt gets the shared claim labels and nothing else — no nicknames,
@@ -35,6 +40,10 @@ logger = logging.getLogger("lana.peer_rec_line")
 # The card renders this as one small line under the name — same ceiling as the rapport
 # why-line, for the same reason.
 _MAX_LEN = 140
+# Chips per row, and the ceiling on one chip: the card renders them on one or two rows,
+# so a facet that doesn't fit in a couple of words isn't a chip.
+_MAX_CHIPS = 3
+_MAX_CHIP_LEN = 22
 # Lines authored per fetch. A 40-row "see all" is one prompt of a dozen, not forty; the
 # rest keep their tags until a later fetch (which will hit the cache for these twelve).
 _MAX_COMPOSE = 12
@@ -47,9 +56,20 @@ actually have in common.
 You are given, per neighbour, ONLY the things both people have said about themselves that \
 overlap. That is your entire evidence. Write from it and nothing else.
 
-Output ONLY JSON: {"lines": ["...", "..."]} with EXACTLY one entry per input, same order.
+Output ONLY JSON: {"lines": [{"chips": ["...", "..."], "line": "..."}, ...]} with EXACTLY \
+one entry per input, in the same order.
 
-Rules:
+CHIPS (2-3 per neighbour) are the reader's at-a-glance reasons, shown as small pills above \
+the line:
+- 1-3 words, under 22 characters, no punctuation, no sentence ("Runs at dawn", "Author \
+talks", "Twin toddlers").
+- Each names a DIFFERENT thread from the evidence. Never a restatement of another chip, \
+never a grade ("Great fit", "Strong match", "Perfect"), never a bare category ("Sports").
+- Only what the evidence says. Two overlaps means two chips, not three.
+- A kids' claim reads as the kids' ("Kids same age"), never as the adults'.
+- [] when you cannot name one honestly.
+
+LINE rules:
 - ONE sentence, under 120 characters. No question mark, no greeting, no name.
 - Speak TO the reader about the two of them: "You're both…", "You both…".
 - Name the actual thing. Weak: "You have a lot in common." Strong: "You're both early \
@@ -59,7 +79,7 @@ is thin, say the thin truth in a warm way rather than padding it.
 - A claim held about a CHILD ("kids_shared") belongs to the kids, not the reader: phrase it \
 as "your kids both…", never as something the adults do.
 - Never the words "match", "circle", "block", "mom", or "profile".
-- Return "" for a neighbour you cannot write honestly from the evidence."""
+- Return "" for a neighbour you cannot write honestly from the evidence (chips [] too)."""
 
 
 def _clean(text: Any) -> str:
@@ -68,6 +88,24 @@ def _clean(text: Any) -> str:
     if out and find_violations(out):
         out = enforce(out).text
     return out[:_MAX_LEN]
+
+
+def _clean_chips(value: Any) -> list[str]:
+    """Trim, cap and de-duplicate the authored facets. Anything sentence-shaped is dropped."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value if isinstance(value, list) else []:
+        chip = " ".join(str(item or "").split()).strip().strip('".,;:!?').strip()
+        if chip and find_violations(chip):
+            chip = enforce(chip).text.strip()
+        key = chip.lower()
+        if len(chip) < 2 or len(chip) > _MAX_CHIP_LEN or key in seen:
+            continue
+        seen.add(key)
+        out.append(chip)
+        if len(out) >= _MAX_CHIPS:
+            break
+    return out
 
 
 def _basis(peer: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
@@ -118,7 +156,7 @@ def _cached(user_id: str, lang: str, peer_ids: list[str]) -> dict[tuple[str, str
         res = (
             service_client()
             .table("peer_rec_lines")
-            .select("id, peer_user_id, basis_sig, line")
+            .select("id, peer_user_id, basis_sig, line, chips")
             .eq("user_id", user_id)
             .eq("lang", lang)
             .in_("peer_user_id", peer_ids)
@@ -135,7 +173,7 @@ def _cached(user_id: str, lang: str, peer_ids: list[str]) -> dict[tuple[str, str
     return out
 
 
-def _compose(basis_list: list[dict[str, Any]], lang: str) -> list[str]:
+def _compose(basis_list: list[dict[str, Any]], lang: str) -> list[tuple[str, list[str]]]:
     """One batched call for every line this fetch is missing. [] on any failure."""
     try:
         from app.i18n import lang_display_name
@@ -153,7 +191,7 @@ def _compose(basis_list: list[dict[str, Any]], lang: str) -> list[str]:
             model=composer_model(),
             system=system,
             user_payload=json.dumps(basis_list, ensure_ascii=False),
-            max_tokens=90 * len(basis_list) + 80,
+            max_tokens=130 * len(basis_list) + 80,
             temperature=0.5,
         )
     except Exception:  # noqa: BLE001 — no line is a fine outcome; a 500 is not
@@ -163,10 +201,19 @@ def _compose(basis_list: list[dict[str, Any]], lang: str) -> list[str]:
     if not isinstance(lines, list) or len(lines) != len(basis_list):
         logger.warning("peer-rec-line: compose returned %s lines", len(lines or []))
         return []
-    return [_clean(line) for line in lines]
+    # An item is either the {chips, line} object the prompt asks for or a bare string
+    # (older/looser model output) — the sentence is what the card cannot do without.
+    return [
+        (_clean(item.get("line")), _clean_chips(item.get("chips")))
+        if isinstance(item, dict)
+        else (_clean(item), [])
+        for item in lines
+    ]
 
 
-def _store(user_id: str, lang: str, pending: list[tuple[str, str, str]]) -> dict[str, str]:
+def _store(
+    user_id: str, lang: str, pending: list[tuple[str, str, str, list[str]]]
+) -> dict[str, str]:
     """Insert the authored lines, returning {peer_id: rec_id} for the ones that landed."""
     payload = [
         {
@@ -175,8 +222,9 @@ def _store(user_id: str, lang: str, pending: list[tuple[str, str, str]]) -> dict
             "lang": lang,
             "basis_sig": sig,
             "line": line,
+            "chips": chips,
         }
-        for peer_id, sig, line in pending
+        for peer_id, sig, line, chips in pending
     ]
     if not payload:
         return {}
@@ -203,7 +251,7 @@ def attach_rec_lines(
     rows: list[dict[str, Any]],
     peers: list[dict[str, Any]],
 ) -> None:
-    """Set `rec_line` (+ `rec_id`, when stored) on each shaped row, in place.
+    """Set `rec_line`, `rec_chips` (+ `rec_id`, when stored) on each shaped row, in place.
 
     `rows` and `peers` are the shaped rows and the raw matcher rows they came from, in
     the same order. Best-effort throughout: a row we cannot author for keeps the
@@ -234,8 +282,11 @@ def attach_rec_lines(
     missing: list[tuple[int, str, dict[str, Any], str]] = []
     for idx, peer_id, basis, sig in todo:
         hit = cached.get((peer_id, sig))
-        if hit:
+        # `chips is None` = a line authored before the card had chips. Re-author it once
+        # rather than serving a row the new card renders with an empty facet strip.
+        if hit and hit.get("chips") is not None:
             rows[idx]["rec_line"] = str(hit.get("line"))
+            rows[idx]["rec_chips"] = _clean_chips(hit.get("chips"))
             rows[idx]["rec_id"] = str(hit.get("id"))
         else:
             missing.append((idx, peer_id, basis, sig))
@@ -249,15 +300,16 @@ def attach_rec_lines(
         )
         missing = missing[:_MAX_COMPOSE]
 
-    lines = _compose([basis for _, _, basis, _ in missing], lang)
-    if not lines:
+    composed = _compose([basis for _, _, basis, _ in missing], lang)
+    if not composed:
         return
-    pending: list[tuple[str, str, str]] = []
-    for (idx, peer_id, _basis_unused, sig), line in zip(missing, lines):
+    pending: list[tuple[str, str, str, list[str]]] = []
+    for (idx, peer_id, _basis_unused, sig), (line, chips) in zip(missing, composed):
         if not line:
             continue
         rows[idx]["rec_line"] = line
-        pending.append((peer_id, sig, line))
+        rows[idx]["rec_chips"] = chips
+        pending.append((peer_id, sig, line, chips))
     ids = _store(user_id, lang, pending)
     for idx, peer_id, _basis_unused, _sig in missing:
         rec_id = ids.get(peer_id)

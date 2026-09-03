@@ -42,6 +42,12 @@ class PeerMatchRow(BaseModel):
     # row we could not author (no overlap, no LLM, a failed compose), which is why the tags
     # remain the fallback rather than a canned sentence.
     rec_line: str | None = None
+    # The same reason as 2-3 short facets ("Runs at dawn", "Author talks"), authored in the
+    # same call from the same overlap. The card leads with these as chips under "WHY LANA
+    # SEES A FIT" and keeps `rec_line` beneath them. Empty whenever no facet could be named
+    # honestly (and on every row with no authored line at all) — the chips are a view of
+    # the proven overlap, never a grade and never a claim the line doesn't already make.
+    rec_chips: list[str] = Field(default_factory=list)
     rec_id: str | None = None
     # "intro_sent" (an intro is on its way) or "connected" (they already know each other,
     # per user_relationships.tier). Either way the card shows a status, not a Nudge button:

@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from app import peer_rec_line
-from app.peer_rec_line import _basis, _basis_sig, attach_rec_lines
+from app.peer_rec_line import _basis, _basis_sig, _clean_chips, attach_rec_lines
 
 
 class _Result:
@@ -115,10 +115,12 @@ class TestAttachRecLines(unittest.TestCase):
                     "peer_user_id": "p-1",
                     "basis_sig": sig,
                     "line": "You're both up before the sun.",
+                    "chips": ["Runs at dawn"],
                 }
             ],
         )
         self.assertEqual(call.call_count, 0)
+        self.assertEqual(rows[0]["rec_chips"], ["Runs at dawn"])
         self.assertEqual(store["upserts"], [])
         self.assertEqual(rows[0]["rec_id"], "rec-old")
 
@@ -198,6 +200,69 @@ class TestAttachRecLines(unittest.TestCase):
         peers = [{"peer_user_id": "p-1", "shared_child_labels": ["Same grade at Laureate"]}]
         _store_, call = self._run(rows, peers, llm=["Your kids are in the same grade."])
         self.assertIn("kids_shared", call.call_args.kwargs["user_payload"])
+
+
+class TestChips(unittest.TestCase):
+    """The new card leads with 2-3 facets and keeps the sentence under them."""
+
+    def test_chips_ride_out_with_the_line_and_are_cached(self):
+        rows = [_row(["Runs at dawn", "Reads sci-fi"])]
+        store, _call = TestAttachRecLines._run(
+            TestAttachRecLines(),
+            rows,
+            [_peer(1, ["Runs at dawn", "Reads sci-fi"])],
+            llm=[
+                {
+                    "chips": ["Runs at dawn", "Sci-fi shelf"],
+                    "line": "You're both dawn runners with a sci-fi shelf.",
+                }
+            ],
+        )
+        self.assertEqual(rows[0]["rec_chips"], ["Runs at dawn", "Sci-fi shelf"])
+        self.assertEqual(rows[0]["rec_line"], "You're both dawn runners with a sci-fi shelf.")
+        self.assertEqual(store["upserts"][0][0]["chips"], ["Runs at dawn", "Sci-fi shelf"])
+
+    def test_a_line_authored_before_chips_existed_is_reauthored_once(self):
+        # chips IS NULL on every row written before the column: serving it would render
+        # the new card with an empty facet strip.
+        shared = ["Runs at dawn"]
+        sig = _basis_sig(_basis(_peer(1, shared), _row(shared)))
+        rows = [_row(shared)]
+        store, call = TestAttachRecLines._run(
+            TestAttachRecLines(),
+            rows,
+            [_peer(1, shared)],
+            cached=[
+                {
+                    "id": "rec-old",
+                    "peer_user_id": "p-1",
+                    "basis_sig": sig,
+                    "line": "You're both up before the sun.",
+                    "chips": None,
+                }
+            ],
+            llm=[{"chips": ["Runs at dawn"], "line": "You're both up before the sun."}],
+        )
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(rows[0]["rec_chips"], ["Runs at dawn"])
+        self.assertEqual(store["upserts"][0][0]["chips"], ["Runs at dawn"])
+
+    def test_only_chip_shaped_facets_survive(self):
+        # A sentence, a duplicate and a fourth facet are not chips — the strip is small.
+        self.assertEqual(
+            _clean_chips(
+                [
+                    "Runs at dawn.",
+                    "runs at dawn",
+                    "You are both people who get up very early",
+                    "Author talks",
+                    "Twin toddlers",
+                    "Book club",
+                ]
+            ),
+            ["Runs at dawn", "Author talks", "Twin toddlers"],
+        )
+        self.assertEqual(_clean_chips(None), [])
 
 
 if __name__ == "__main__":
