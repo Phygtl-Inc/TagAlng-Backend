@@ -1,0 +1,31 @@
+{
+  "run": "rerun-2026-07-10",
+  "scores": [
+    {"id":"host_0","draft":4,"flow":1,"warmth":3,"note":"correct title+time drafted; 'yes that works' just repeats 'does this look right?' forever"},
+    {"id":"host_1","draft":4,"flow":1,"warmth":3,"note":"correct draft; same confirm-loop"},
+    {"id":"host_2","draft":1,"flow":1,"warmth":3,"note":"title/time never populate even after 'yes that works', on a genuinely vague ask"},
+    {"id":"host_3","draft":4,"flow":1,"warmth":3,"note":"correct draft; same confirm-loop"},
+    {"id":"host_4","draft":3,"flow":1,"warmth":3,"note":"title/time correct, dropped 'somewhere with wine' constraint, stuck asking for venue after 'yes'"},
+    {"id":"host_5","draft":2,"flow":1,"warmth":3,"note":"title stays null across all 3 turns, dropped 'spanish-english' framing entirely"},
+    {"id":"host_6","draft":2,"flow":1,"warmth":3,"note":"title correct but starts_at is 2024-07-20 — TWO YEARS in the past for a 'july 20' said on 2026-07-10"},
+    {"id":"host_7","draft":1,"flow":1,"warmth":3,"note":"title/time never populate on a vague-timing ask"},
+    {"id":"host_8","draft":4,"flow":1,"warmth":4,"note":"correct draft; same confirm-loop"},
+    {"id":"host_9","draft":1,"flow":1,"warmth":3,"note":"title/time never populate; AND literally treats the ZIP as the venue: 'we'll use 32801 as the meeting spot!'"},
+    {"id":"host_10","draft":1,"flow":1,"warmth":4,"note":"title/time never populate on 'book club... end of july'"},
+    {"id":"host_11","draft":4,"flow":1,"warmth":3,"note":"correct draft; same confirm-loop"},
+    {"id":"host_12","draft":4,"flow":1,"warmth":3,"note":"correct draft; same confirm-loop"},
+    {"id":"host_13","draft":4,"flow":1,"warmth":3,"note":"correct draft; same confirm-loop"},
+    {"id":"host_14","draft":3,"flow":1,"warmth":3,"note":"title+time correct, stuck asking for location after 'yes'"},
+    {"id":"host_15","draft":2,"flow":1,"warmth":4,"note":"title present, time never populates, stuck asking for both after 'yes'"}
+  ],
+  "systemic_issues": [
+    {"title":"'yes that works' never advances the draft state machine","severity":"critical","evidence":"ALL 16 conversations — either repeats 'Updated X — does this look right?' verbatim, or keeps asking for the same missing fields, never treating the affirmation as consent to post","frequency":"16/16"},
+    {"title":"ZIP accepted as the event venue","severity":"critical","evidence":"host_9 — 'Great, we'll use 32801 as the meeting spot!' — exact reproduction of run #1's finding ('I'll use 34786 as the meeting spot'), different ZIP, same bug","frequency":"reproduced, unfixed"},
+    {"title":"Date year miscalculation — worse than run #1's finding","severity":"critical","evidence":"host_6 — 'bday party... july 20' on a session run 2026-07-10 drafted starts_at '2024-07-20T14:00:00', two full years in the past, not just the wrong day","frequency":"1/16 observed, but qualitatively worse than the original 'tomorrow drafted 2 days out' finding"},
+    {"title":"Draft never populates title/time on open-ended or recurring asks","severity":"major","evidence":"host_2 ('no idea what'), host_7 ('sometime next week whenever'), host_9 (MWF recurring), host_10 (book club, vague date) — all stay {title:null, starts_at:null} through all 3 turns","frequency":"4/16"}
+  ],
+  "best_moments": [
+    "host_0/1/3/6/8/11/12/13 correctly extract title + exact date/time from a single rich sentence — the one-shot drafter capability the original report called a 'hero moment' is real and reproducible"
+  ],
+  "verdict": "The host path's draft-authoring quality on rich single-sentence asks remains genuinely good and is the standout capability in the product. But the confirm-loop bug is completely unfixed at 16/16 (100%) — nobody in this rerun successfully posted a meet — and this run surfaced two concrete findings sharper than the original report: a literal ZIP-as-venue bug reproduced verbatim, and a date bug that lands two years in the past rather than a few days off."
+}

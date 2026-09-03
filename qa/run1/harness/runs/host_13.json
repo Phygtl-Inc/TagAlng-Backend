@@ -1,0 +1,109 @@
+{
+  "id": "host_13",
+  "tags": [
+    "host"
+  ],
+  "zip": "34786",
+  "turns": [
+    {
+      "sent": "I want to host a meet. swim morning at the YMCA pool friday 10",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 11546,
+      "assistant_message": "Here's your meet — **YMCA Swim Morning Meetup**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "YMCA Swim Morning Meetup",
+        "starts_at": "2026-07-10T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "34786",
+      "hint": null,
+      "status": 200,
+      "ms": 8180,
+      "assistant_message": "Updated **YMCA Swim Morning Meetup** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "YMCA Swim Morning Meetup",
+        "starts_at": "2026-07-10T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 8054,
+      "assistant_message": "Updated **YMCA Swim Morning Meetup** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "YMCA Swim Morning Meetup",
+        "starts_at": "2026-07-10T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:48:22.454Z",
+  "session": "239f1207-a251-401c-ab25-19269597f829",
+  "finishedAt": "2026-07-10T10:48:51.165Z"
+}

@@ -1,0 +1,109 @@
+{
+  "id": "host_6",
+  "tags": [
+    "host"
+  ],
+  "zip": "32832",
+  "turns": [
+    {
+      "sent": "I want to host a meet. bday party for my daughter turning 5, july 20 at 2pm at our community pool",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 14370,
+      "assistant_message": "Here's your meet — **5th Birthday Pool Party**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "5th Birthday Pool Party",
+        "starts_at": "2024-07-20T14:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Publishing your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32832",
+      "hint": null,
+      "status": 200,
+      "ms": 9107,
+      "assistant_message": "Updated **5th Birthday Pool Party** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "5th Birthday Pool Party",
+        "starts_at": "2024-07-20T14:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 9659,
+      "assistant_message": "Updated **5th Birthday Pool Party** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "5th Birthday Pool Party",
+        "starts_at": "2024-07-20T14:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Publishing your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:46:36.170Z",
+  "session": "0edfe8d8-662b-4a62-b752-bd0c290eb260",
+  "finishedAt": "2026-07-10T10:47:10.659Z"
+}
