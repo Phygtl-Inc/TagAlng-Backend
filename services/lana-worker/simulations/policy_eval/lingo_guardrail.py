@@ -40,7 +40,19 @@ _BANNED_SPECS: list[tuple[str, str, bool]] = [
     (r"\bgeofence\b",                 "say 'your area', not 'geofence' (§7.2)", False),
     (r"\bleaderboards?\b",            "no gamification (§2.8 / §7.6)", False),
     (r"\bstreaks?\b",                 "no streaks (§7.6)", False),
-    (r"\bpoints?\b",                  "no points (§7.6)", True),  # allow-list scoped to this only
+    # SCOPED TO THE SCORE FRAME, not the bare word — mirrors app/lingo_guard.py:52-55 verbatim
+    # (shipped 2026-08-25). "points" and "rank" are ordinary English outside a scoring context
+    # ("that points to the same spot", "the highest-ranked taco place"), so a bare-word ban is a
+    # false-positive generator on legitimate copy. The frame is what rule 6 actually forbids, the
+    # same way rule 4 scopes "match". The old bare `\bpoints?\b` + allow-window is replaced by
+    # this; `is_points=True` is kept so the existing allow-window remains available, but with the
+    # pattern scoped it should no longer need to fire.
+    (r"\b(?:no|any|my|your|their|how\s+many|earn(?:ed|ing)?|\d+)\s+points?\b"
+     r"|\bpoints?\s+(?:system|total|balance)\b",
+     "no points in the score frame (§7.6)", True),
+    (r"\b(?:my|your|their|the)\s+rank\b"
+     r"|\brank(?:ed|ing)?\s+(?:you\s+)?(?:up|higher|against)\b",
+     "no rank in the score frame (§7.6)", False),
     (r"\blevel up\b",                 "no 'level up' (§7.6)", False),
     (r"\bsubmit\b",                   "say 'Send'/'Next', not 'Submit' (§7.7)", False),
     (r"\bclick here\b",               "no 'click here' (§7.7)", False),

@@ -173,6 +173,11 @@ def _render_action(action: NextAction, *, inferred: bool = False) -> str:
     # so mark them as such — the judge must not treat a fabricated field as authoritative.
     tag = " (inferred by adapter — not authoritative)" if inferred else ""
     chips = ", ".join(f"[{c.label}]({c.action})" for c in action.chips) or "(none)"
+    if action.distress_turn:
+        # The policy judged this a distress turn and _apply_distress_gate (decide.py:300)
+        # then stripped the chips and downgraded the kind. Without saying so, a judge reads a
+        # bare, chipless, question-free turn as a dead end and marks it down for being right.
+        chips += "  [distress turn: chips deliberately cleared by _apply_distress_gate]"
     if inferred:
         chips = ", ".join(f"[{c.label}]" for c in action.chips) or "(none)"  # chip actions untyped in live
     return (
@@ -186,8 +191,14 @@ def _render_action(action: NextAction, *, inferred: bool = False) -> str:
 
 def _render_context(scenario: Scenario) -> str:
     w = scenario.world
-    lines = [f"user_locale={w.locale}", f"role={w.role}", f"grammatical_gender={w.grammatical_gender}",
-             f"area_state={w.zip_unlock_state}", f"phone_verified={w.phone_verified}"]
+    # Gender is shown as the DB shows it: NULL, not "unknown". The distinction matters to the
+    # judge, because the rule attached to NULL is "rephrase neutrally, never default feminine"
+    # (users.grammatical_gender column comment) — an instruction, not a missing value.
+    lines = [f"user_locale={w.locale}",
+             f"role={w.role if w.role else 'NULL (not inferred)'}",
+             f"grammatical_gender={w.grammatical_gender if w.grammatical_gender else 'NULL (rephrase neutrally)'}",
+             f"area_state={w.zip_unlock_state}",
+             f"state_tokens={sorted(w.current_state_tokens())}"]
     if w.extra.get("known_neighbor"):
         n = w.extra["known_neighbor"]
         lines.append(f"known_neighbor: type={n['circle_type']} tier={n['tier']} "

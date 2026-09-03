@@ -5,7 +5,9 @@ run_eval.py — entry point for the Conversational-Policy eval harness.
     python run_eval.py --dry-run              # no API key, no server — smoke-test the pipeline
     python run_eval.py --backend stub --judge # reference policy + LLM judge (needs OPENAI_API_KEY)
     python run_eval.py --backend stub --judge --multi-judge   # 3-stance judge + disagreement flag
-    python run_eval.py --backend live --judge # score REAL Lana (needs a running worker + account)
+    python run_eval.py --backend inproc --judge   # the REAL app.policy.decide.decide_turn, in-process
+    SIM_INPROC_INJECT_WORLD=1 python run_eval.py --backend inproc   # ...with the pinned world forced in
+    python run_eval.py --backend live --judge # score REAL Lana over HTTP (running worker + account)
     python run_eval.py --id sf_crisis_distress --judge        # one scenario
     python run_eval.py --bucket lingo_tone                     # one bucket
 
@@ -19,6 +21,9 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 # This harness scores SPANISH and PORTUGUESE scenarios by design, so its own output contains
 # characters (¡ ¿ ã) that the default Windows console codepage cannot encode. Without this, the
@@ -29,10 +34,20 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # allow bare intra-package imports
 
+# Env comes from the repo-root .env.local (LANA_BASE_URL, OPENAI_API_KEY, SUPABASE_*,
+# SIM_PASSWORD) — the convention every other entry point in this suite follows
+# (rapport/run_eval.py, judge_probe.py). This is the ONLY place policy_eval loads it:
+# backend.py imports live_policy LAZILY inside get_backend(), and live_policy reads its
+# config into module-level constants at import time, so the load must happen before the
+# `from backend import …` below and nowhere else. Adding it to those modules too would be
+# redundant work on every import and would put credential loading inside the adapters.
+# override=True: a stale shell export must not silently beat the file the team shares.
+load_dotenv(Path(__file__).resolve().parents[4] / ".env.local", override=True)
+
 import checks  # noqa: E402
 import judge as judge_mod  # noqa: E402
 from backend import get_backend  # noqa: E402
-from ports import NextAction  # noqa: E402
+from ports import NextAction, TurnNote  # noqa: E402
 from scenarios import ALL_SCENARIOS, BUCKETS, Scenario, by_id  # noqa: E402
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
@@ -45,12 +60,20 @@ class RunRecord:
     mechanical: list[checks.CheckResult]
     judged: judge_mod.JudgeResult | None = None
     error: str | None = None
+    # What the backend could and could not honour on this turn (ports.TurnNote). None for
+    # backends that honour everything by construction (stub, dry).
+    note: TurnNote | None = None
 
     @property
     def mech_verdict(self) -> str:
         if self.error is not None:
             return "HARD_FAIL"  # a backend crash is a failure, never a silent PASS on an empty check list
-        return checks.overall_verdict(self.mechanical) if self.mechanical else "PASS"
+        if not self.mechanical:
+            # An empty check list means nothing was verified. That is UNSCORED, not PASS — the
+            # difference between "we looked and it was fine" and "we never looked" is the whole
+            # point of the fail-closed rule.
+            return "UNSCORED"
+        return checks.overall_verdict(self.mechanical)
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +100,13 @@ def run(scenarios: list[Scenario], *, backend_kind: str, do_judge: bool,
             records.append(RunRecord(scenario=sc, action=NextAction(kind="reply", utterance=""),
                                      mechanical=[], error=str(e)))
             continue
+        # The backend's own account of what it could honour. Read AFTER decide_turn, because
+        # inproc rewrites it per turn (it records the world actually in force).
+        note = getattr(backend, "last_note", None)
         print(f"  kind={action.kind} tool={action.tool} | {action.utterance[:80]!r}")
-        mech = checks.run_mechanical_checks(action, sc, backend_kind=backend_kind)
+        for f in (note.flags if note else []):
+            print(f"  [flag] {f}")
+        mech = checks.run_mechanical_checks(action, sc, backend_kind=backend_kind, note=note)
         for r in mech:
             flag = "" if r.verdict == "PASS" else f"  <-- {r.verdict}"
             print(f"  [mech] {r.name}: {r.verdict}{flag}")
@@ -94,7 +122,8 @@ def run(scenarios: list[Scenario], *, backend_kind: str, do_judge: bool,
             for a in judged.axes:
                 dis = " (DISAGREE)" if a.disagreement else ""
                 print(f"  [judge] {a.axis}: {a.majority_verdict} ({a.mean_score}){dis}")
-        records.append(RunRecord(scenario=sc, action=action, mechanical=mech, judged=judged))
+        records.append(RunRecord(scenario=sc, action=action, mechanical=mech, judged=judged,
+                                 note=note))
     return records
 
 
@@ -119,15 +148,37 @@ def render_report(records: list[RunRecord], *, backend_kind: str, judged: bool) 
                      f"(esp. right_action / expected_kind) measures parroting, not independent "
                      f"quality. Flagged per-scenario below; fully valid against `live`.")
     if backend_kind == "live":
-        L.append("- **live** — REAL runtime output. `why`/typed-chip-actions/`kind` are flagged as "
-                 "not-emitted (see live_policy.py); capability-grounding is indicative only.")
+        L.append("- **live (HTTP)** — REAL runtime output, whole shipped pipeline. `why` / `kind` / "
+                 "typed chip actions are not returned by the messages endpoint (see live_policy.py); "
+                 "capability-grounding is indicative only; the scenario's world is NOT applied to the "
+                 "account, so `world_fidelity` is UNSCORED throughout.")
+    if backend_kind == "inproc":
+        L.append("- **inproc** — the REAL `app.policy.decide.decide_turn`, called in-process. "
+                 "`kind` / `why` / `defer_goal_id` / `distress_turn` / chip labels are REAL. Typed "
+                 "chip actions do not exist in app/ at all.")
+        notes = [r.note for r in records if r.note]
+        injected = any(n.world_source == "injected" for n in notes)
+        declined = sum(1 for n in notes if n.decision_declined)
+        if injected:
+            L.append("- ⚠️ **HARNESS-SUPPLIED WORLD** (`SIM_INPROC_INJECT_WORLD=1`): the area / "
+                     "verification / circle state each decision was made in was FABRICATED by the "
+                     "scenario and injected at `app.policy.world.world_state`. The decision is real; "
+                     "the situation it was made in is not. Do not read these as production behaviour.")
+        else:
+            L.append("- ⚠️ **World NOT honoured**: `decide_turn` read the sim account's own world, "
+                     "not the scenario's, so every world-dependent expectation is UNSCORED "
+                     "(`world_fidelity`). Set `SIM_INPROC_INJECT_WORLD=1` to pin the world.")
+        if declined:
+            L.append(f"- {declined} scenario(s) UNSCORED because `decide_turn` returned None "
+                     f"(no decision → legacy fall-through, which this backend does not run). "
+                     f"Use `--backend live` to score what the user actually receives on those turns.")
     L.append("")
 
     # --- mechanical summary by bucket ---
     L.append("## Mechanical axes (known-by-construction ground truth)")
     L.append("")
-    L.append("| bucket | scenarios | PASS | SOFT_FAIL | HARD_FAIL |")
-    L.append("|---|---|---|---|---|")
+    L.append("| bucket | scenarios | PASS | SOFT_FAIL | HARD_FAIL | UNSCORED |")
+    L.append("|---|---|---|---|---|---|")
     for b in BUCKETS:
         rs = [r for r in records if r.scenario.bucket == b]
         if not rs:
@@ -135,7 +186,8 @@ def render_report(records: list[RunRecord], *, backend_kind: str, judged: bool) 
         p = sum(r.mech_verdict == "PASS" for r in rs)
         s = sum(r.mech_verdict == "SOFT_FAIL" for r in rs)
         h = sum(r.mech_verdict == "HARD_FAIL" for r in rs)
-        L.append(f"| {b} | {len(rs)} | {p} | {s} | {h} |")
+        u = sum(r.mech_verdict == "UNSCORED" for r in rs)
+        L.append(f"| {b} | {len(rs)} | {p} | {s} | {h} | {u} |")
     L.append("")
 
     # --- per-axis mechanical failure tallies ---
@@ -187,6 +239,8 @@ def render_report(records: list[RunRecord], *, backend_kind: str, judged: bool) 
         tag = " — ⚠️ stub-exemplar (parroting risk)" if (backend_kind == "stub" and r.scenario.exemplar_of_stub) else ""
         L.append(f"### `{r.scenario.id}` ({r.scenario.bucket}){tag}")
         L.append(f"- utterance: {r.action.utterance[:200]!r}")
+        for f in (r.note.flags if r.note else []):
+            L.append(f"- _backend flag_: {f}")
         if r.error:
             L.append(f"- **backend error**: {r.error}")
         for c in problems:
@@ -208,7 +262,7 @@ def render_report(records: list[RunRecord], *, backend_kind: str, judged: bool) 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Conversational-Policy eval harness")
-    ap.add_argument("--backend", choices=["stub", "live", "dry"], default=None)
+    ap.add_argument("--backend", choices=["stub", "inproc", "live", "dry"], default=None)
     ap.add_argument("--dry-run", action="store_true", help="alias for --backend dry, judge off")
     ap.add_argument("--judge", action="store_true", help="run the LLM-judged axes (needs OPENAI_API_KEY)")
     ap.add_argument("--multi-judge", action="store_true", help="3-stance judge + disagreement flag")
@@ -249,20 +303,25 @@ def main() -> int:
     errors = sum(1 for r in records if r.error is not None)
     hard = sum(r.mech_verdict == "HARD_FAIL" for r in records)
     soft = sum(r.mech_verdict == "SOFT_FAIL" for r in records)
+    unscored = sum(r.mech_verdict == "UNSCORED" for r in records)
     jhard = sum(1 for r in records if r.judged and r.judged.any_hard_fail)
     junscored = sum(1 for r in records if r.judged and r.judged.any_unscored)
     jdis = sum(1 for r in records if r.judged and r.judged.any_disagreement)
     print("\n" + "=" * 60)
     print(f"[policy-eval] {len(records)} scenarios · backend={backend_kind}")
-    print(f"  mechanical: {hard} HARD_FAIL ({errors} backend error), {soft} SOFT_FAIL")
+    print(f"  mechanical: {hard} HARD_FAIL ({errors} backend error), {soft} SOFT_FAIL, "
+          f"{unscored} UNSCORED (axis not measurable on this backend)")
     if do_judge:
         print(f"  judged: {jhard} HARD_FAIL, {junscored} UNSCORED (judge dropped an axis), "
               f"{jdis} disagreement/REVIEW")
     print(f"  report -> {args.out}")
 
-    # Gate fails on any mechanical HARD_FAIL (incl. backend errors), any judged HARD_FAIL, and any
-    # UNSCORED safety/privacy axis (fail-closed — never let a dropped safety axis pass silently).
-    if args.gate and (hard > 0 or jhard > 0 or junscored > 0):
+    # Gate fails on any mechanical HARD_FAIL (incl. backend errors), any judged HARD_FAIL, any
+    # UNSCORED judged axis, and any UNSCORED MECHANICAL axis. All four are the same rule:
+    # fail closed. An axis nobody could measure must not be able to carry a green gate — which
+    # is exactly what would happen on `--backend inproc` without world injection, where the
+    # scenario worlds are silently not in force.
+    if args.gate and (hard > 0 or unscored > 0 or jhard > 0 or junscored > 0):
         print("[policy-eval] GATE FAIL")
         return 1
     return 0

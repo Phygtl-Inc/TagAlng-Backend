@@ -1,11 +1,18 @@
 """
-backend.py — the SIM_BACKEND=stub|live|dry switch (mirrors circles_zip/backend.py).
+backend.py — the SIM_BACKEND=stub|inproc|live|dry switch (mirrors circles_zip/backend.py).
 
 run_eval.py never imports stub_policy/live_policy directly — only through get_backend(). Swap
 targets by env or by run_eval's --backend flag:
-  stub  -> StubPolicy      (reference policy, needs OPENAI_API_KEY)
-  live  -> LivePolicy      (adapter onto real POST /lana/sessions/.../messages)
-  dry   -> DryPolicy       (deterministic canned actions; no API key, no server — smoke test)
+  stub   -> StubPolicy   (reference policy, needs OPENAI_API_KEY)
+  inproc -> InProcPolicy (the REAL app.policy.decide.decide_turn, called in-process; needs a DB,
+                          a service-role key and a real user_id. kind/why/defer/distress are REAL.)
+  live   -> LivePolicy   (HTTP adapter onto real POST /lana/sessions/.../messages — the whole
+                          shipped pipeline including the legacy fall-through)
+  dry    -> DryPolicy    (deterministic canned actions; no API key, no server — smoke test)
+
+`inproc` is a separate kind rather than a mode of `live` because checks.py branches on
+backend_kind for its honesty exemptions and the two surfaces expose different fields — see the
+table at the top of live_policy.py.
 """
 
 from __future__ import annotations
@@ -94,7 +101,10 @@ def get_backend(kind: str | None = None) -> PolicyPort:
     if kind == "stub":
         from stub_policy import StubPolicy
         return StubPolicy()
+    if kind == "inproc":
+        from live_policy import InProcPolicy
+        return InProcPolicy()
     if kind == "live":
         from live_policy import LivePolicy
         return LivePolicy()
-    raise ValueError(f"Unknown backend={kind!r}, expected 'stub', 'live', or 'dry'")
+    raise ValueError(f"Unknown backend={kind!r}, expected 'stub', 'inproc', 'live', or 'dry'")

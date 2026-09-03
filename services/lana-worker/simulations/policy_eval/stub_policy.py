@@ -22,7 +22,7 @@ import os
 from openai import OpenAI
 
 from ports import NextAction, TurnContext
-from world_state import REGISTERED_CAPABILITIES
+from world_state import INACTIVE_CAPABILITIES, REGISTERED_CAPABILITIES
 
 POLICY_MODEL = os.environ.get("SIM_POLICY_MODEL", "gpt-4o")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -102,9 +102,13 @@ class StubPolicy:
         # it DERIVE availability itself (offer a tool only if its required_state ⊆ current state).
         # We deliberately do NOT hand it the pre-filtered available list — otherwise the capability-
         # grounding check (which recomputes availability from the same function) would be tautological.
+        # Inactive rows are omitted entirely rather than listed as unavailable: that is exactly
+        # what app/policy/world.py:186 does before the real policy ever sees the catalogue, and
+        # naming an unshipped capability in the prompt is how it gets pitched (20261006120000).
         registry = "\n".join(
             f"    {cid} — requires {sorted(req) if req else 'nothing (always-on)'}"
             for cid, req in sorted(REGISTERED_CAPABILITIES.items())
+            if cid not in INACTIVE_CAPABILITIES
         )
         state = sorted(w.current_state_tokens())
         goals = [{"id": g.id, "kind": g.kind, "summary": g.summary, "value_hint": g.value_hint}
@@ -117,8 +121,11 @@ class StubPolicy:
                 "\n".join(f"    {c.circle_type} at {c.place_name or '(place ungrounded)'} — tier {c.tier}"
                           for c in w.communities) + "\n"
         return (
-            f"WORLD-STATE: locale={w.locale}, role={w.role}, grammatical_gender={w.grammatical_gender}, "
-            f"area_state={w.zip_unlock_state}, phone_verified={w.phone_verified}\n"
+            f"WORLD-STATE: locale={w.locale}, "
+            f"role={w.role if w.role else 'NULL (not inferred)'}, "
+            f"grammatical_gender="
+            f"{w.grammatical_gender if w.grammatical_gender else 'NULL (rephrase neutrally)'}, "
+            f"area_state={w.zip_unlock_state}, verified={w.verified}\n"
             f"USER CURRENT STATE TOKENS: {state}\n"
             f"CAPABILITY REGISTRY (offer a tool ONLY if its `requires` is satisfied by the state "
             f"tokens above; otherwise use tool=null):\n{registry}\n"
