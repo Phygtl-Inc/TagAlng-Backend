@@ -51,8 +51,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print the run matrix without calling any API.")
     parser.add_argument(
         "--pr", action="store_true",
-        help="PR-gate mode: run ONLY the must-have buckets (pr_gate=true in scenarios.json — "
-             "refusals/safety, PII/privacy, core function, routing). The rest run in the nightly. "
+        help="PR-gate mode: only the must-have SEEDS (per-seed `pr_gate` in scenarios.json) "
+             "across the PR persona subset — safety/refusals, PII/privacy, core function, "
+             "plus the one hallucination-catching seed. Everything else runs in the nightly. "
              "sim-gate.yml uses this; sim-nightly.yml runs the full matrix.",
     )
     parser.add_argument(
@@ -68,6 +69,60 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Matrix builder
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# PR-gate slimming
+# ---------------------------------------------------------------------------
+# The full matrix is 6 personas x 32 seeds = 192 runs (~472 turns measured). Every turn is an
+# LLM call for the mock user AND for Lana, and every run is 1-2 judge calls on top, so the PR
+# gate was the most expensive thing in CI by a wide margin.
+#
+# WHAT WAS CUT, AND ON WHAT BASIS. Seeds were ranked by defect yield (HARD_FAILs found per run)
+# against turn cost, measured over run_2026-08-14T14-45-21Z. But yield alone is the WRONG
+# criterion on its own: the privacy/PII/safety seeds found zero defects precisely because they
+# are the ones that must never regress. Cutting a smoke detector because there is no fire is how
+# a launch-blocking bug ships. So the rule is:
+#
+#   KEEP on PR  — anything whose failure is severe and hard to reverse (privacy, PII leak,
+#                 safety refusals), regardless of current yield; plus the highest-yield
+#                 defect-catchers.
+#   NIGHTLY     — quality/nuance seeds with low yield and high turn cost.
+#
+# One seed is kept purely for coverage: ambiguous_clarity/"host a meeting ambiguous" is the ONLY
+# seed in the suite where no_hallucination has ever fired (invented venues, reproduced on 2
+# personas). Dropping the bucket wholesale would have removed the PR gate's only hallucination
+# signal, which is why the cut is per-SEED, not per-bucket.
+#
+# Cutting seeds rather than buckets also keeps gate_check.py's baseline bucket matching intact —
+# a bucket-level cut would have made every PR incomparable to its baseline.
+#
+# Measured effect: 192 -> 33 runs, ~472 -> ~150 turns (roughly a 68% cut).
+
+# Three personas for the PR gate, chosen for CONTRAST rather than for past failure counts
+# (picking the personas that failed most would overfit the gate to defects we already know):
+#   P1 — established/dense-area happy path
+#   P5 — the only bilingual persona; language handling is where the judge's one confirmed
+#        false positive appeared (unprompted ES switch), so it earns a PR slot
+#   P6 — new-to-app skeptic: the cold-start / empty-area path, and the most defect-dense persona
+# The nightly still runs all six.
+PR_PERSONAS = {"P1", "P5", "P6"}
+
+
+def _pr_seed_allowlist() -> dict[str, set[str]]:
+    """{bucket: {seed_label, ...}} for seeds flagged `"pr_gate": true` in scenarios.json.
+
+    Read straight from the JSON rather than off the parsed Seed model: the pydantic model
+    ignores unknown keys, so the flag would be silently dropped. A bucket absent from this map
+    has no per-seed flags and keeps all of its seeds.
+    """
+    raw = json.loads(simulation.SCENARIOS_PATH.read_text(encoding="utf-8"))
+    allow: dict[str, set[str]] = {}
+    for b in raw.get("buckets", []):
+        labels = {s["label"] for s in b.get("seeds", []) if s.get("pr_gate")}
+        if labels:
+            allow[b["bucket"]] = labels
+    return allow
+
 
 def _build_matrix(
     personas: list[simulation.Persona],
@@ -106,10 +161,19 @@ def main() -> None:
     )
 
     if args.pr:
-        pr_buckets = sorted({b.bucket for b in buckets if b.pr_gate})
-        matrix = [(p, b, s) for (p, b, s) in matrix if b.pr_gate]
-        print(f"[runner] --pr: must-have buckets only → {pr_buckets} "
-              f"({len(matrix)} cases; the rest run in the nightly)")
+        before = len(matrix)
+        allow = _pr_seed_allowlist()
+        matrix = [
+            (p, b, s) for (p, b, s) in matrix
+            if b.pr_gate
+            # A pr_gate bucket with NO per-seed flags keeps all its seeds — so a newly added
+            # bucket is gated by default rather than silently skipped.
+            and (b.bucket not in allow or s.label in allow[b.bucket])
+            and (args.persona or p.id in PR_PERSONAS)
+        ]
+        print(f"[runner] --pr: {len(matrix)} cases (from {before}) — "
+              f"{len(PR_PERSONAS)} personas × the must-have seeds. "
+              f"Everything else runs in the nightly.")
 
     if not matrix:
         print("No runs matched the filters. Check --persona / --bucket / --seed values.")
@@ -155,6 +219,21 @@ def main() -> None:
         for persona, bucket, seed in cases:
             try:
                 transcript = simulation.run(persona, bucket, seed)
+                # HARNESS-INVALID runs are never scored. The mock user went out of character and
+                # stayed there after a retry, so the conversation is partly the simulator talking to
+                # itself. Scoring it would fold harness noise into Lana's failure rate and could make
+                # a corrupted transcript SFT-eligible. Reported as a failure so it stays visible —
+                # a silently dropped run is indistinguishable from one that passed.
+                if not transcript.get("harness_valid", True):
+                    g_failures.append({
+                        "persona_id": persona.id, "bucket": bucket.bucket, "seed_label": seed.label,
+                        "error": f"HARNESS_INVALID: {transcript.get('invalid_reason')}",
+                        "traceback": "",
+                    })
+                    with _print_lock:
+                        print(f"  [runner] INVALID (not scored): {persona.id} × "
+                              f"{bucket.bucket}/{seed.label} — {transcript.get('invalid_reason')}")
+                    continue
                 # score_qa() only handles the find/host/edge-style QA buckets and returns None
                 # otherwise, so this falls back to the original judge for every other bucket.
                 result = evaluation.score_qa(transcript) or evaluation.score(transcript)

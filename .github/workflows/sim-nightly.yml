@@ -5,6 +5,16 @@ on:
     - cron: '0 6 * * *'   # 06:00 UTC = 02:00 EDT
   workflow_dispatch:        # manual trigger from GitHub UI
 
+# The six p*-sim accounts are SHARED. app/db.py create_session(force_new=True) calls
+# abandon_other_active_sessions, so two sim runs against the same project kill each other's
+# sessions and the loser dies mid-transcript with `400 session_not_active`. Nothing in the app
+# prevents that, so the runs must be serialised here. cancel-in-progress is FALSE on purpose:
+# cancelling the earlier run would abandon a half-written transcript and lose the result, which
+# is the outcome this group exists to prevent.
+concurrency:
+  group: lana-sim-accounts
+  cancel-in-progress: false
+
 jobs:
   run-sims:
     runs-on: ubuntu-latest
@@ -31,5 +41,11 @@ jobs:
           SUPABASE_ANON_KEY:          ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SIM_PASSWORD:               ${{ secrets.SIM_PASSWORD }}
+          # CI legitimately targets the SHARED dev project — that is what the gate measures
+          # against. local_guard.require_local() refuses non-local writes by default (it
+          # exists to stop a developer wiping a teammate's seed data by accident), so CI
+          # must opt in explicitly. Safe here only because the concurrency group above
+          # serialises sim runs; without that, this flag would license the collision.
+          SIM_ALLOW_NONLOCAL_WRITES:  "1"
           GIT_SHA:                    ${{ github.sha }}
         run: python runner.py
