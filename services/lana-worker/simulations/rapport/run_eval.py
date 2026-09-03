@@ -94,6 +94,14 @@ def _load_fixtures() -> list[dict[str, Any]]:
 # Fixture validation (real work behind --dry-run)
 # ---------------------------------------------------------------------------
 
+# public.claim_subject_kind, verbatim from 20261021120000_child_subject_claims.sql. Only
+# 'self' and 'child' are written by the extractor today; the rest exist so a later relation
+# does not need a second enum migration.
+_SUBJECT_KINDS = frozenset(
+    {"self", "child", "parent", "spouse", "sibling", "grandparent", "household", "other"}
+)
+
+
 def validate_fixtures(fixtures: list[dict[str, Any]]) -> list[str]:
     """Load-time shape validation. Returns a list of human-readable errors (empty = valid).
 
@@ -146,6 +154,12 @@ def validate_fixtures(fixtures: list[dict[str, Any]]) -> list[str]:
             # An expectation with an empty label_has and no alternatives degenerates to
             # "any claim in this bucket" — an inert matcher that scores a vacuous pass.
             # rapport_012 used to be exactly this; the guard stops it recurring silently.
+            subj = exp.get("subject_kind")
+            if subj is not None and subj not in _SUBJECT_KINDS:
+                errors.append(
+                    f"{ewhere}: subject_kind {subj!r} is not in the claim_subject_kind enum "
+                    f"({', '.join(sorted(_SUBJECT_KINDS))}) — a typo here silently never matches"
+                )
             if not label_has and not alts:
                 errors.append(
                     f"{ewhere}: label_has is empty and no label_has_any given — inert matcher "
@@ -182,6 +196,13 @@ def _claim_matches(claim: ExtractedClaim, exp: dict[str, Any]) -> bool:
     if "transient" in exp and claim.transient != bool(exp["transient"]):
         return False
     if "vague" in exp and claim.vague != bool(exp["vague"]):
+        return False
+    # subject_kind — WHO the claim is about (migrations 20261021120000 / 20261022120000).
+    # Opt-in like disclosure/transient/vague: absent from an expectation means "don't care",
+    # so the 26 pre-subject fixtures are unaffected. Asserting it matters because the matcher
+    # now pairs concepts only WITHIN a subject — a child's karate claim mis-stored as 'self'
+    # would match adults on karate and produce the false "you both do karate".
+    if "subject_kind" in exp and getattr(claim, "subject_kind", "self") != exp["subject_kind"]:
         return False
     return True
 
@@ -260,7 +281,13 @@ def _needle_in_field(field_text: str, needle: str) -> bool:
 
 def _claim_fields(c: ExtractedClaim) -> list[str]:
     """Every text field of one claim, kept SEPARATE (see _check_anonymization)."""
-    out = [c.label or "", c.source_quote or ""]
+    # `concept` is the SLUG, and it is built from the user's own words — so real PII rides
+    # out in it (`lincoln_elementary_kindergarten`, `sunshine_preschool`, confirmed by
+    # backend). It was omitted from this scan, which meant a leak living ONLY in the slug
+    # was invisible to the PII axis. No normalisation needed here: _needle_in_field's
+    # normalised arm already flattens `_` to a space, so needle "Lincoln Elementary"
+    # matches slug "lincoln_elementary_kindergarten" (verified in selftest.py).
+    out = [c.label or "", c.source_quote or "", getattr(c, "concept", "") or ""]
     out.extend(str(s) for s in (c.synonyms or []))
     # `details` is redacted downstream by clean_claims_for_persist but was once omitted from
     # this scan, so a leak living only in `details` was invisible to this axis.
@@ -282,6 +309,8 @@ def _check_anonymization(
 
     Scans EVERY field a leak could ride out on, each one SEPARATELY:
       * label / source_quote / each synonym / details — redacted by clean_claims_for_persist.
+      * concept — the slug, built from the user's own words and NOT covered by the label
+        redaction, so it leaks school/preschool names verbatim.
       * the extracted nickname — free text taken from the user's own words.
       * followup_question — NEVER redacted anywhere in the real pipeline, so it is the most
         exposed vector of all.

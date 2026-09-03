@@ -45,12 +45,22 @@
 #                          is rejected at load time. (`expect_no_claims: false` alongside
 #                          expect_claims is fine and deliberate — see rapport_006.)
 #   expect_kids_count   — int or null; kids_count is NEVER a claim, checked separately.
+#                          Since 20261021 it is a COUNT ONLY — a child's name and age ride
+#                          on the claim's subject_* fields, never here.
+#   subject_kind        — (per-expectation, OPTIONAL) who the claim is about:
+#                          claim_subject_kind enum, 20261021120000. Absent = don't care, so
+#                          pre-subject fixtures are unaffected. Only 'self' and 'child' are
+#                          written by the extractor today. The child's NAME is never
+#                          asserted here — subject_name is owner-only.
 #   expect_followup     — true/false; whether followup_question should be non-null. The
 #                          question text itself is AI-authored per turn and NOT asserted
 #                          verbatim — only its presence/absence and (for the gap-quality axis)
 #                          a judge rating of too-vague / just-right / too-narrow.
 #   must_not_contain    — raw strings that must NEVER appear in any claim's label /
-#                          source_quote / synonyms AFTER app.pii.redact_pii has run (the
+#                          source_quote / synonyms / details / concept AFTER app.pii.redact_pii
+#                          has run (`concept` is the SLUG and is built from the user's own
+#                          words, so PII rides out in it — backend confirmed
+#                          `lincoln_elementary_kindergarten`, `sunshine_preschool`) (the
 #                          harness must call clean_claims_for_persist, or replicate
 #                          redact_pii, before checking this — the raw extractor output is
 #                          NOT pre-redacted, redaction is a downstream backstop), NOR in the
@@ -122,16 +132,42 @@ fixtures:
     input: "my daughter Sara at Lincoln Elementary"
     expect_no_claims: false
     expect_claims:
-      - {bucket: general, concept: kid_in_school, label_has: "school", confidence_min: 0.5}
+      - {bucket: general, concept: kid_in_school, label_has: "school", confidence_min: 0.5,
+         subject_kind: child}
     expect_kids_count: null
     expect_followup: true
     must_not_contain: ["Sara", "Lincoln"]
     notes: >
-      Direct PII case: "Sara" must never survive into label/source_quote/synonyms (must be
-      redacted to [kid] via the _KIN_NAME pattern — "daughter Sara"), "Lincoln" must be
-      redacted to [school]. HARD_FAIL on either leaking. Extractor is also instructed to
-      never capture a child's name/age/gender/school as a claim in the first place — this
-      fixture exercises both the prompt-level guard AND the redact_pii backstop.
+      Direct PII case: "Sara" must never survive into label/source_quote/synonyms/concept
+      (redacted to [kid] via the _KIN_NAME pattern — "daughter Sara"), "Lincoln" must be
+      redacted to [school]. HARD_FAIL on either leaking.
+
+      UPDATED for SUBJECT-AWARE claims (migrations 20261021120000_child_subject_claims.sql,
+      20261022120000_subject_aware_peer_surfaces.sql, 20261023120000_owner_claims_subject.sql).
+      What changed, and what deliberately did not:
+
+      * `subject_kind: child` is NEW and is the point of this fixture now. The old contract
+        ("never capture a child's name, age, or school") threw the whole thread away; a
+        child's facts are now claims ABOUT THE CHILD, and the matcher pairs concepts only
+        within one subject_kind. A kid-in-school claim mis-stored as 'self' would match
+        adults and render as "you both are in school" — untrue, and exactly the failure
+        20261021 was written to prevent. Storing it as 'child' is now the passing state.
+      * "Sara" is STILL a must_not_contain needle, and that is not in tension with the new
+        contract: the name is allowed to live in `subject_name` ONLY, which is owner-only
+        (no peer-facing RPC selects it; the matcher never reads it) and is NOT one of the
+        fields this axis scans. A name reaching label/source_quote/synonyms/concept is
+        still a leak — 20261021's privacy contract and the extractor's HARD RULE (a).
+      * "Lincoln" likewise: HARD RULE (c) still stands — a child's SCHOOL never becomes a
+        claim label, schools go to circle_candidates. Note this needle now also covers the
+        `concept` slug, where backend confirmed real leaks (`lincoln_elementary_kindergarten`).
+      * expect_kids_count stays NULL, and that is a POSITIVE assertion under the new
+        contract, not an oversight. kids_count is a COUNT only, set solely when the user
+        states HOW MANY children they have; "my daughter" is not a count. 20261021's whole
+        premise is that a child's facts stop being "discarded into users.kids_count" — so a
+        run that returns kids_count=1 here is over-inference and SHOULD fail this fixture.
+      * subject_name / subject_birth_year are NOT asserted: they are owner-only, and this
+        harness evaluates the extractor pass, not the owner-facing read surfaces
+        (get_my_identity_claims / get_my_profile_dashboard, 20261023).
 
   - id: rapport_007
     input: "I'm NOT looking for a moms night out, just want playdates"

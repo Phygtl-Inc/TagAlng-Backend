@@ -72,6 +72,23 @@ check("label_has_any matches an alternative",
 check("label_has_any rejects an unrelated label",
       not run_eval._claim_matches(claim(bucket="vicinity", label="Feeling tired"), lha))
 
+# f) subject_kind (20261021120000) — WHO the claim is about. Opt-in: absent from an
+# expectation it must not constrain anything (or the 26 pre-subject fixtures would break);
+# present, it must actually reject the wrong subject. A child's claim mis-stored as 'self'
+# is the silent failure the subject columns exist to prevent — it would match adults on the
+# concept and render the false "you both are in school".
+kid = claim(label="In school", bucket="general", subject_kind="child")
+adult = claim(label="In school", bucket="general")  # defaults to subject_kind='self'
+exp_child = [{"bucket": "general", "label_has": "school", "subject_kind": "child"}]
+check("subject_kind:child expectation MATCHES a child-subject claim",
+      run_eval._match_claims([kid], exp_child) == (1, []))
+check("subject_kind:child expectation REJECTS the same claim stored as 'self'",
+      run_eval._match_claims([adult], exp_child) == (0, [0]),
+      "planted: rapport_006's kid-in-school claim mis-stored as a fact about the parent")
+check("  (control) an expectation with NO subject_kind still matches either subject",
+      run_eval._match_claims([adult], [{"bucket": "general", "label_has": "school"}]) == (1, [])
+      and run_eval._match_claims([kid], [{"bucket": "general", "label_has": "school"}]) == (1, []))
+
 # ---------------------------------------------------------------------------
 print("\n== 2. _check_anonymization: per-field + normalised, fails CLOSED ==")
 
@@ -89,6 +106,32 @@ check("leak in synonyms is caught",
       run_eval._check_anonymization([claim(synonyms=["Lincoln Elementary"])], None, ["Lincoln"]) == ["Lincoln"])
 check("leak in source_quote is caught",
       run_eval._check_anonymization([claim(source_quote="at Lincoln")], None, ["Lincoln"]) == ["Lincoln"])
+
+# CONCEPT SLUG — PII rides out in the slug because it is built from the user's own words
+# (backend confirmed `lincoln_elementary_kindergarten`, `sunshine_preschool` in the wild).
+# The leak here exists ONLY in `concept`: label/source_quote/synonyms/details are all clean,
+# so this fails unless _claim_fields actually scans the slug.
+slug_only = claim(concept="lincoln_elementary_kindergarten", label="Kid in school",
+                  source_quote="my kid is in kindergarten", synonyms=["school"])
+check("leak living ONLY in the concept slug is caught",
+      run_eval._check_anonymization([slug_only], None, ["Lincoln Elementary"])
+      == ["Lincoln Elementary"],
+      "slug is lowercase_underscored — the normalised arm must flatten `_` to a space")
+check("  ...and a single-token needle in the slug too",
+      run_eval._check_anonymization([claim(concept="sunshine_preschool", label="Preschool")],
+                                    None, ["Sunshine"]) == ["Sunshine"])
+# Non-vacuity: the same claim with a harmless slug must NOT be flagged, so the check above
+# is detecting the slug and not just always firing.
+check("  (control) a harmless slug is NOT flagged (no false positive on the new field)",
+      run_eval._check_anonymization(
+          [claim(concept="kid_in_kindergarten", label="Kid in school",
+                 source_quote="my kid is in kindergarten", synonyms=["school"])],
+          None, ["Lincoln Elementary"]) == [])
+# The slug is still ONE field: a needle straddling slug+label is not a leak of that string.
+check("  (control) needle spanning concept+label is NOT reported (still per-field)",
+      run_eval._check_anonymization(
+          [claim(concept="lincoln_elementary", label="Sara's school")],
+          None, ["Elementary Sara"]) == [])
 
 # normalisation makes it MORE sensitive than the old plain substring test
 check("punctuation/spacing cannot hide a leak (jane@example.com -> 'Jane @ Example . COM')",
@@ -141,10 +184,23 @@ cases = [
      "inert"),
     ("inert matcher (no label keys at all)",
      [{"id": "a", "input": "i", "expect_claims": [{"bucket": "vicinity"}]}], "inert"),
+    # A subject_kind typo silently never matches ANY claim, so recall would read 0 with no
+    # explanation. Caught at load time instead.
+    ("subject_kind not in the claim_subject_kind enum",
+     [{"id": "a", "input": "i",
+       "expect_claims": [{"bucket": "general", "label_has": "school", "subject_kind": "kid"}]}],
+     "subject_kind"),
 ]
 for name, fx, needle in cases:
     errs = run_eval.validate_fixtures(fx)
     check(f"rejects: {name}", any(needle in e for e in errs), str(errs))
+
+# a LEGAL subject_kind must validate clean (the enum check is not a blanket reject)
+check("accepts a legal subject_kind on an expectation",
+      run_eval.validate_fixtures(
+          [{"id": "a", "input": "i",
+            "expect_claims": [{"bucket": "general", "label_has": "school",
+                               "subject_kind": "child"}]}]) == [])
 
 # the rapport_006 shape (expect_no_claims FALSE + expect_claims) must NOT trip
 check("accepts expect_no_claims:false alongside expect_claims (rapport_006 shape)",
