@@ -11,6 +11,7 @@ For each (persona, seed) pair:
 
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -35,13 +36,20 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Shared password for all 6 sim accounts — store in .env.local / GitHub secret, never commit
+# Shared password for all 6 sim accounts — store in .env.local / GitHub secret, never commit.
+# Read here only for reporting/back-compat; the actual login lives in sim_auth (which re-reads
+# it at call time and falls back to the service-role magic link when it is empty).
 SIM_PASSWORD = os.environ.get("SIM_PASSWORD", "")
 
 MOCK_USER_MODEL = "gpt-4o"
 MAX_TURNS = 8  # safety ceiling — most scenarios resolve in 3–5 turns
 
 SIMULATIONS_DIR = Path(__file__).parent
+if str(SIMULATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(SIMULATIONS_DIR))
+from local_guard import require_local  # noqa: E402
+from sim_auth import jwt_for, sign_in  # noqa: E402
+
 PERSONAS_PATH = SIMULATIONS_DIR / "personas.json"
 SCENARIOS_PATH = SIMULATIONS_DIR / "scenarios.json"
 
@@ -150,23 +158,55 @@ def load_buckets() -> list[Bucket]:
 
 def _jwt_for_persona(persona: Persona) -> str:
     """
-    Does a password-grant login for the sim account and returns a fresh JWT.
-    Tokens are valid for 1 hour — well within a single run's lifetime.
-    Credentials: email from persona.profile, shared SIM_PASSWORD from env.
+    Logs in as the sim account and returns a fresh JWT. Tokens last ~1h — well within a run.
+
+    Delegated to sim_auth.jwt_for so that a failure NAMES its cause. The raw call this used to
+    make ended in `raise_for_status()`, and a Supabase password grant answers `400` identically
+    for "wrong project", "SIM_PASSWORD empty/wrong" and "account was never seeded" — three
+    mistakes with three different fixes, all of which are live at once on a fresh local stack.
+    sim_auth also carries the service-role magic-link fallback for when SIM_PASSWORD is absent,
+    which is the normal shape of a local stack (LOCAL_STACK.md).
     """
-    resp = httpx.post(
-        f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
-        headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
-        json={"email": persona.profile.email, "password": SIM_PASSWORD},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    return jwt_for(persona.profile.email)
 
 
 # ---------------------------------------------------------------------------
 # Claims seeding
 # ---------------------------------------------------------------------------
+
+def _effective_user_id(persona: Persona) -> str:
+    """The user_id of the account we ACTUALLY authenticate as — not the one personas.json asserts.
+
+    WHY THIS EXISTS. Every entry point logs in BY EMAIL (`_jwt_for_persona` -> sim_auth), while
+    claims were seeded to `persona.profile.user_id` from personas.json. On the shared dev project
+    those happen to be the same row, so the discrepancy was invisible. On a LOCAL stack they are
+    not: `supabase/seed_sim_accounts.sql` creates the personas with its own fixed UUIDs
+    (51000001-0001-4000-8000-000000000001 …) while personas.json carries the dev project's ids
+    (3ad1c73f-… etc.). Seeding by the json id and conversing as the email id means the claims land
+    on one user and the conversation runs as another — every claim-dependent scenario then measures
+    an empty profile, and it does so SILENTLY, scoring the run as if it were real.
+
+    Resolving from the authenticated session removes the class entirely: whoever we can log in as
+    is definitionally the user whose claims matter. personas.json's id becomes a fallback for the
+    offline/no-credential path, and a mismatch is reported rather than swallowed.
+    """
+    declared = persona.profile.user_id
+    try:
+        session = sign_in(persona.profile.email)
+    except Exception as exc:  # offline / no creds — keep the old behaviour, don't fail the run here
+        print(f"  [auth] could not resolve {persona.id}'s user_id from the session "
+              f"({type(exc).__name__}); falling back to personas.json {declared}")
+        return declared
+    actual = str(((session or {}).get("user") or {}).get("id") or "").strip()
+    if not actual:
+        return declared
+    if actual != declared:
+        # Loud on purpose: on a local stack this is EXPECTED (different seed UUIDs) and correct to
+        # follow; on dev it would mean personas.json has drifted from the real accounts.
+        print(f"  [auth] {persona.id}: authenticated as {actual}, personas.json says {declared} — "
+              f"using the authenticated id (see _effective_user_id)")
+    return actual
+
 
 def _seed_claims(persona: Persona) -> None:
     """
@@ -175,7 +215,13 @@ def _seed_claims(persona: Persona) -> None:
     Ensures each run starts from a known clean state with no drift from prior runs.
     P6 (Diane) has zero claims by design — the DELETE still runs to clear any accumulation.
     """
-    user_id = persona.profile.user_id
+    user_id = _effective_user_id(persona)
+    # LOCAL-ONLY GATE. The DELETE below removes EVERY user_identity_claims row for this user,
+    # and the sim personas live in the SHARED dev project — a run pointed at dev silently wipes
+    # whatever a teammate seeded, and succeeds while doing it. require_local refuses unless
+    # SUPABASE_URL is a local stack (escape hatch: SIM_ALLOW_NONLOCAL_WRITES=1, which prints a
+    # banner). See simulations/LOCAL_STACK.md.
+    require_local(f"DELETE + reseed user_identity_claims for {persona.id} ({user_id})")
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -395,15 +441,127 @@ def _generate_user_turn(
     openai_client: OpenAI,
     system_prompt: str,
     history: list[dict[str, str]],
-) -> UserTurn:
+    correction: str | None = None,
+) -> UserTurn | None:
+    """The next persona turn, or None when the model produced nothing usable.
+
+    `.parsed` is None on a refusal or a failed structured parse, and the model occasionally returns
+    a blank message. Both were previously fatal: `.parsed.message` raised
+    "'NoneType' object has no attribute 'message'", and a blank message was POSTed to Lana, which
+    rejects it (min_length=1). Returning None instead lets the caller end the conversation cleanly
+    and mark it — an aborted run must be visible, never a silently short transcript.
+    """
     messages = [{"role": "system", "content": system_prompt}] + history
+    if correction:
+        messages.append({"role": "system", "content": correction})
     completion = openai_client.beta.chat.completions.parse(
         model=MOCK_USER_MODEL,
         messages=messages,
         response_format=UserTurn,
         temperature=0.9,
     )
-    return completion.choices[0].message.parsed
+    parsed = completion.choices[0].message.parsed
+    if parsed is None or not (parsed.message or "").strip():
+        return None
+    return parsed
+
+
+# ---------------------------------------------------------------------------
+# Out-of-character (OOC) guard for the mock user
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS: measured across the 102 transcripts of run_2026-08-14T14-45-21Z, 14 runs (13.7%)
+# contained at least one USER turn written in Lana's voice — in the worst case the persona's message
+# was one of Lana's own canned replies, verbatim. A human reviewer had already labelled this class
+# "mock user got confused and start roleplaying both sides", and the judge then scored the resulting
+# conversation as if it were real. That is worse than a wasted run: it silently corrupts the failure
+# rate, and such a transcript can become SFT-eligible.
+#
+# The `ABSOLUTE RULES` block already forbids this in six numbered prohibitions and the drift still
+# happens, so prompting alone cannot close it — instruction adherence decays as context grows. This
+# guard runs BEFORE the message is sent to Lana, so an OOC turn never enters the conversation.
+#
+# TWO TIERS, deliberately. A blunt detector would invalidate good runs: "let me know if you have any
+# links for that" is ordinary user speech. Only signals that are *impossible* for a persona to utter
+# are treated as hard.
+#   HARD  -> regenerate the turn once; if it recurs, the run is INVALID and is not scored.
+#   SOFT  -> recorded on the turn for triage; never blocks, never invalidates.
+
+# Actions only Lana can perform in this product. A persona cannot offer to poll the neighborhood.
+_OOC_HARD_PATTERNS: list[tuple[str, str]] = [
+    (r"\b(?:would you like me to|want me to|shall i|should i)\s+(?:ask|poll|check with|reach out to|"
+     r"put out|see if|find|notify|text|introduce|set (?:it |this )?up)\b", "offers-lana-action"),
+    # TUNED against the 102-run corpus: an earlier version accepted a bare "find someone", which
+    # fired on "Thanks anyway! I'll see if I can find someone on my own" — a persona declining help
+    # and doing it themselves, i.e. exactly right. The offer must be made ON THE OTHER PARTY'S
+    # BEHALF to be Lana's voice.
+    (r"\bi (?:can|could|will|'ll) (?:help you|assist you|keep an ear out|keep my ear out|"
+     r"put out a request|ask (?:your |the )?neighbou?rs|find you (?:someone|neighbou?rs))\b",
+     "speaks-as-lana"),
+    (r"\bi(?:'ve| have) noted your request\b", "speaks-as-lana"),
+    (r"\bthat'?s not something i can (?:help|assist)\b", "refuses-as-lana"),
+    (r"^\s*(?:lana|assistant|user)\s*:", "speaker-label"),
+]
+
+# Stage directions are matched case-SENSITIVELY and separately: `[Your City]` is a placeholder in a
+# quoted group name, not narration, and a case-insensitive bracket rule flagged it. Real stage
+# directions are lowercase verbs.
+_OOC_STAGE_DIRECTION_RE = re.compile(
+    r"\*(?:sigh|sighs|pause|pauses|laugh|laughs|nods|shrugs|smiles|thinking)[a-z ]*\*"
+    r"|\[(?:sigh|sighs|pause|pauses|laugh|laughs|nods|shrugs|smiles|thinking)[a-z ]*\]"
+)
+
+# Service register a real person *might* use — informative, never blocking.
+_OOC_SOFT_PATTERNS: list[tuple[str, str]] = [
+    (r"\blet me know if\b", "service-register"),
+    (r"\bfeel free to (?:reach|ask|let)\b", "service-register"),
+    (r"\bhappy to help\b", "service-register"),
+    (r"\bis there something specific\b", "service-register"),
+]
+
+_OOC_ECHO_MIN_WORDS = 8  # shortest run of words worth calling an echo rather than a coincidence
+
+
+def _word_ngrams(text: str, n: int) -> set[str]:
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    return {" ".join(words[i:i + n]) for i in range(len(words) - n + 1)}
+
+
+def ooc_violations(message: str, prior_lana_replies: list[str]) -> tuple[list[str], list[str]]:
+    """Return (hard, soft) OOC reasons for a candidate mock-user message.
+
+    Deterministic and cheap — no LLM. Reusable by selftest.py and by any retroactive scan of
+    stored transcripts.
+    """
+    hard: list[str] = []
+    soft: list[str] = []
+
+    for pattern, label in _OOC_HARD_PATTERNS:
+        if re.search(pattern, message, re.IGNORECASE | re.MULTILINE):
+            hard.append(label)
+    if _OOC_STAGE_DIRECTION_RE.search(message):
+        hard.append("stage-direction")
+    for pattern, label in _OOC_SOFT_PATTERNS:
+        if re.search(pattern, message, re.IGNORECASE):
+            soft.append(label)
+
+    # Verbatim echo of something Lana already said. This is the unambiguous signal: a persona
+    # reproducing Lana's own sentence is not paraphrase, it is role bleed.
+    msg_grams = _word_ngrams(message, _OOC_ECHO_MIN_WORDS)
+    if msg_grams:
+        for reply in prior_lana_replies:
+            if msg_grams & _word_ngrams(reply, _OOC_ECHO_MIN_WORDS):
+                hard.append("echoes-lana-verbatim")
+                break
+
+    return sorted(set(hard)), sorted(set(soft))
+
+
+_OOC_CORRECTION = (
+    "STOP. Your previous draft was written in Lana's voice — you offered to do something only Lana "
+    "can do, or repeated her words. You are the PERSON messaging Lana, not Lana. Rewrite it as one "
+    "short chat message from your own point of view: react to what Lana just said, and ask for or "
+    "say what YOU want. Never offer to contact neighbors, run a search, or make an introduction."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +597,8 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
 
         last_user_message: str | None = None
         repeat_count = 0
+        invalid_reason: str | None = None
+        ooc_retries = 0
 
         for turn_num in range(1, MAX_TURNS + 1):
             if turn_num == 1:
@@ -457,8 +617,42 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
                     reasoning="seed opening line, emitted verbatim (not model-generated)",
                     disengage=False,
                 )
+                turn_hard, turn_soft = [], []
             else:
+                # OOC GUARD — validate BEFORE the message reaches Lana, so a corrupted turn never
+                # enters the conversation. One regeneration, then the run is abandoned as invalid.
+                prior_replies = [t["lana_reply"] for t in turns if t.get("lana_reply")]
                 user_turn = _generate_user_turn(openai_client, system_prompt, history)
+                if user_turn is None:
+                    print(f"  [sim] no usable user turn at {turn_num} (refusal or blank) — ending run")
+                    invalid_reason = f"mock user produced no usable message at turn {turn_num}"
+                    break
+                turn_hard, turn_soft = ooc_violations(user_turn.message, prior_replies)
+                if turn_hard:
+                    print(f"  [ooc] turn {turn_num} rejected ({', '.join(turn_hard)}) — regenerating")
+                    user_turn = _generate_user_turn(
+                        openai_client, system_prompt, history, correction=_OOC_CORRECTION
+                    )
+                    if user_turn is None:
+                        print(f"  [ooc] retry at turn {turn_num} produced nothing usable — INVALID")
+                        invalid_reason = (
+                            f"mock user produced no usable message on the OOC retry at turn {turn_num}"
+                        )
+                        ooc_retries += 1
+                        break
+                    turn_hard, turn_soft = ooc_violations(user_turn.message, prior_replies)
+                    if turn_hard:
+                        # Do NOT send it. An OOC turn produces a conversation that looks real,
+                        # scores like a real one, and measures nothing.
+                        print(f"  [ooc] turn {turn_num} STILL out of character "
+                              f"({', '.join(turn_hard)}) — marking run INVALID")
+                        invalid_reason = (
+                            f"mock user out of character at turn {turn_num} after 1 retry: "
+                            f"{', '.join(turn_hard)}"
+                        )
+                        ooc_retries += 1
+                        break
+                    ooc_retries += 1
             print(f"  [user {turn_num}] {user_turn.message[:100]}")
 
             # Break out if the mock user is stuck repeating itself
@@ -488,12 +682,38 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
                 "intent_confidence": routing.get("confidence"),
                 "tool_called": routing.get("tool_called"),
                 "outcome": routing.get("outcome"),
+                # POLICY DECISION FIELDS — real as of app/policy/decide.py:59 (routing_dict).
+                # These cost nothing (already in the response) and were being discarded. Until
+                # decide_turn shipped there was no `kind` and no rationale to capture, so the
+                # suite inferred both; now they are authoritative. `outcome == "decide_turn"`
+                # marks a turn the policy engine decided, as opposed to the legacy path — which
+                # matters because a decision-quality finding is only meaningful on the former.
+                # `distress_turn` is load-bearing for false-positive control: _apply_distress_gate
+                # clears chips and suppresses task-pushing DELIBERATELY, so a check that does not
+                # know about it will flag correct behaviour.
+                "decision_kind": routing.get("kind"),
+                "decision_why": routing.get("why"),
+                "goal_id": routing.get("goal_id"),
+                "defer_goal_id": routing.get("defer_goal_id"),
+                "pending_action": routing.get("pending_action"),
+                "distress_turn": bool(routing.get("distress_turn")),
                 "ui_intent": lana_resp.get("ui_intent"),
                 "ready_to_complete": lana_resp.get("ready_to_complete", False),
                 # Fuller raw-turn fields (mirrors qa/run1/harness/sim.mjs's extraction) — lets
                 # the same mechanical checks (verify-wall, ZIP-loop, NY-bleed, leaks) that run
                 # against qa/run1 transcripts also run against these Python-generated ones.
-                "ui_actions": [a.get("label") for a in (lana_resp.get("ui_actions") or [])],
+                # FULL rows, not just labels (widened 2026-09-02). UiActionRow is
+                # {id, label, message, style, intro_id, peer_user_id} and its docstring is
+                # explicit: "Tap → POST `message` to Lana (same contract as typing in chat)."
+                # So a pill tap is drivable from this harness — send `message` as the next user
+                # turn — but only if we keep it. Labels alone made taps unreachable, which is
+                # what a re-anchor pill check needs ("tapping it must land on results, not a
+                # second empty"). `label` stays first for the existing lingo scan over chip text.
+                "ui_actions": [
+                    {"id": a.get("id"), "label": a.get("label"), "message": a.get("message")}
+                    for a in (lana_resp.get("ui_actions") or [])
+                    if isinstance(a, dict)
+                ],
                 "activity_previews": [
                     {
                         "title": p.get("title"),
@@ -501,6 +721,21 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
                         "where": p.get("venue_name"),
                     }
                     for p in (lana_resp.get("activity_previews") or [])
+                ],
+                # GOOGLE PLACES surfaced as tappable cards (app/main.py:1223 ->
+                # _place_suggestions_from_ctx, fed by ctx["google_place_suggestions"]). Captured
+                # 2026-08-25; it had been on the wire and discarded.
+                #
+                # Why it matters beyond completeness: qa_analyze._turn_is_sourced decides whether a
+                # turn had ANY data behind it, and a named venue on a turn with no source is the
+                # fabrication signal. Google-sourced places are a real source, so dropping this
+                # field made the runtime look emptier than it was. `community` marks rows that came
+                # from the user's own circles rather than Google — the surface groups on it
+                # ("From your circles" vs "From Google · not a neighbor vouch"), so it is kept.
+                "place_suggestions": [
+                    {"name": p.get("name"), "community": bool(p.get("community"))}
+                    for p in (lana_resp.get("place_suggestions") or [])
+                    if isinstance(p, dict)
                 ],
                 "event_draft": (
                     {
@@ -514,10 +749,20 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
                 "peer_matches": len(lana_resp.get("peer_matches") or []),
                 "signal_saved": lana_resp.get("signal_saved"),
                 "requires_phone_verification": lana_resp.get("requires_phone_verification", False),
+                # Soft OOC signals: recorded for triage, never blocking (see ooc_violations).
+                "ooc_soft_flags": turn_soft,
             })
 
-            history.append({"role": "user", "content": user_turn.message})
-            history.append({"role": "assistant", "content": lana_reply})
+            # ROLE MAPPING: the mock user is the ASSISTANT of this sub-conversation — it is the
+            # party this model is generating. Lana is its "user". Labelling them the other way round
+            # (persona=user, Lana=assistant) asks the model to emit an assistant turn directly after
+            # Lana's assistant turn, which invites it to continue in LANA's voice — a mechanical
+            # contributor to the OOC drift the guard above catches.
+            # Chronological: the persona speaks, then Lana answers. So the persona's message is
+            # appended first, and the history always ends on Lana — leaving the model to produce
+            # the next `assistant` turn, which is the persona's reply to what Lana just said.
+            history.append({"role": "assistant", "content": user_turn.message})
+            history.append({"role": "user", "content": lana_reply})
 
             if user_turn.disengage:
                 print(f"  [sim] character disengaged at turn {turn_num}")
@@ -538,7 +783,16 @@ def run(persona: Persona, bucket: Bucket, seed: Seed) -> dict[str, Any]:
         "must_not": seed.must_not,
         "turns": turns,
         "turn_count": len(turns),
+        # Harness integrity, NOT a verdict on Lana. False means the conversation itself is not a
+        # valid stimulus, so scoring it would measure the harness, not the product.
+        "harness_valid": invalid_reason is None,
+        "invalid_reason": invalid_reason,
+        "ooc_retries": ooc_retries,
     }
 
-    print(f"  [sim] done — {len(turns)} turns")
+    if invalid_reason:
+        print(f"  [sim] INVALID — {invalid_reason} ({len(turns)} usable turns, not scored)")
+    else:
+        print(f"  [sim] done — {len(turns)} turns"
+              + (f" ({ooc_retries} OOC retry/retries)" if ooc_retries else ""))
     return transcript

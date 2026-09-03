@@ -89,11 +89,24 @@ _ATTRIBUTION_RE = re.compile(
 
 
 def _turn_is_sourced(turn: dict[str, Any]) -> bool:
-    """True when the runtime actually returned data on this turn, so specifics have a basis."""
+    """True when the runtime actually returned data on this turn, so specifics have a basis.
+
+    `place_suggestions` was added 2026-08-25. It is the Google Places card list
+    (app/main.py:1223), and it had been on the /messages wire since before this detector was
+    written while the harness discarded it — so a turn where Lana named a venue BECAUSE the
+    runtime handed her one looked identical to a turn where she invented it. That is a
+    false-positive source on the one axis where a false positive is most expensive, and it
+    understated how often Lana is actually grounded.
+
+    Note the scope: this makes the turn SOURCED, which is a claim about fabrication only. Whether
+    Lana correctly ATTRIBUTED the source ("from Google — not a neighbor vouch", LINGO) is a
+    separate question and belongs to a lingo/disclosure check, not to this one.
+    """
     return bool(
         turn.get("tool_called")
         or (turn.get("peer_matches") or 0) > 0
         or (turn.get("activity_previews") or [])
+        or (turn.get("place_suggestions") or [])
         or turn.get("event_draft")
     )
 
@@ -168,6 +181,14 @@ def analyze_transcripts(transcripts: list[dict[str, Any]]) -> dict[str, Any]:
         "drafted_hosts": 0,
         "host_draft_details": [],
         "unsourced_specifics": [],  # mechanical hallucination signal — see unsourced_specifics()
+        # Policy-decision coverage, real since app/policy/decide.py shipped. These are
+        # DIAGNOSTICS, not pass/fail: `decide_turn_turns` says how much of a run the policy
+        # engine actually decided (vs. falling through to the legacy path), which is the
+        # denominator any decision-quality claim needs. `distress_turns` is counted so a run
+        # where Lana correctly withheld chips and task-pushing is not read as under-performance.
+        "decide_turn_turns": 0,
+        "legacy_path_turns": 0,
+        "distress_turns": 0,
         "flags": [],
     }
     latencies: list[float] = []
@@ -202,6 +223,16 @@ def analyze_transcripts(transcripts: list[dict[str, Any]]) -> dict[str, Any]:
 
             outcome = turn.get("outcome") or "none"
             stats["outcomes"][outcome] = stats["outcomes"].get(outcome, 0) + 1
+
+            # outcome == "decide_turn" is stamped by NextAction.routing_dict(); anything else
+            # means the policy returned None and the legacy path answered. Counted, never gated:
+            # falling through is a legitimate runtime behaviour, not a defect.
+            if outcome == "decide_turn":
+                stats["decide_turn_turns"] += 1
+            else:
+                stats["legacy_path_turns"] += 1
+            if turn.get("distress_turn"):
+                stats["distress_turns"] += 1
 
             tool = turn.get("tool_called")
             if tool:

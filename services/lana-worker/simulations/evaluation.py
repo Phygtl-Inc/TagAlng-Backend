@@ -615,12 +615,29 @@ def _normalize_1_5(score_1_5: int) -> tuple[str, float]:
     return "HARD_FAIL", 0.2
 
 
+
+def _ui_labels(rows: Any) -> list[str]:
+    """Labels from ui_actions, accepting BOTH shapes: the current row dicts
+    ({id,label,message}, widened 2026-09-02 so a pill tap is drivable) and the
+    pre-2026-09-02 list-of-strings still sitting in older scratch logs. The judge only
+    needs the label — the tap payload is harness plumbing, not something to reason about.
+    """
+    out: list[str] = []
+    for r in rows or []:
+        if isinstance(r, dict):
+            lbl = str(r.get('label') or '').strip()
+            if lbl:
+                out.append(lbl)
+        elif isinstance(r, str) and r.strip():
+            out.append(r.strip())
+    return out
+
 def _build_qa_judge_prompt(transcript: dict[str, Any], rubric: dict[str, Any]) -> str:
     turns_text = "\n".join(
         f"MOM: {t.get('user_message', '')}\nLANA: {t.get('lana_reply') or '(EMPTY)'}"
         + (f"\n  [showed events: {t['activity_previews']}]" if t.get("activity_previews") else "")
         + (f"\n  [drafted event: {t['event_draft']}]" if t.get("event_draft") else "")
-        + (f"\n  [buttons: {', '.join(t['ui_actions'])}]" if t.get("ui_actions") else "")
+        + (f"\n  [buttons: {', '.join(_ui_labels(t['ui_actions']))}]" if t.get("ui_actions") else "")
         for t in transcript.get("turns", [])
     )
     axis_list = ", ".join(rubric["axes"])
