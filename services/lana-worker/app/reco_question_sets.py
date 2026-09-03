@@ -223,6 +223,10 @@ TAIL_FIELDS = ("ask_ok", "others_also_said")
 # dependency on place_based: a dentist's clinic and a park are both findable, and `service`
 # (a plumber with no fixed address) has no `where` step in its floor to begin with.
 _PLACE_FIELDS = frozenset({"where", "location", "address", "where_to_find", "venue"})
+# The set is model-written, so the same step arrives as `office_location` or `clinic_address`
+# as often as bare `where` — and a name the list misses renders as a text box (dev QA
+# 2026-09-03). `where_to_buy` ends in none of these, so the Amazon case stays a text box.
+_PLACE_SUFFIXES = ("_location", "_address", "_venue")
 
 # 8 generated + up to 3 floor + 2 tail lands on the mock's 8-10 steps.
 _MAX_GENERATED = 8
@@ -247,7 +251,7 @@ def _slug(raw: Any) -> str:
 
 def _kind_for(field: str, options: Any = ()) -> str:
     """Which control answers this step: a map search, a chip row, or a text box."""
-    if field in _PLACE_FIELDS:
+    if field in _PLACE_FIELDS or field.endswith(_PLACE_SUFFIXES):
         return "place"
     return "choice" if len(options or []) >= 2 else "text"
 

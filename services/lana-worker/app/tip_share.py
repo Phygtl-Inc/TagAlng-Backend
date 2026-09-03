@@ -74,16 +74,21 @@ Return ONE compact JSON object with exactly these keys:
 Use null for any string the text does not support, false for place_based when unsure. Never invent a value."""
 
 
-_STEPS_SPEC = """- steps: the question set for THIS recommendation — 4-8 questions, in the order to ask them,
-  that a neighbor reading it would want answered. Each: {"field": short snake_case key,
-  "label": 1-2 word eyebrow, "question": ONE short question ending in "?",
-  "placeholder": a short example answer for THIS subject, "options": [2-4 short taps] ONLY
-  when the answer is genuinely a small closed set}.
-  Lead with the type's own basics: <<FLOOR>>.
-  Then tailor to the SUBJECT, not the type: a recipe wants taste, difficulty, time and what
-  they make it for; a pediatric dentist wants what she treats, what stood out, who to send;
-  a night light wants what it fixed and what to know before buying. Ask what a neighbor
-  would actually need to decide — never a generic "tell me more".
+_STEPS_SPEC = """- steps: the question set for THIS recommendation — 6-8 questions, in the order to ask them.
+  Each: {"field": short snake_case key, "label": 1-2 word eyebrow, "question": ONE short
+  question ending in "?", "placeholder": a short example answer for THIS subject,
+  "options": [2-4 short taps] when the answer really is a small closed set}.
+  Open with the type's own basics: <<FLOOR>>.
+  Then at least THREE questions that are specific to this subject and that a neighbour
+  would FILTER or SEARCH on later — the facts that decide whether this recommendation is
+  for them. A pediatrician: which ages, does she take walk-ins, which insurance, weekend
+  hours. A biryani place: how spicy, halal, delivery, wait at peak. A stroller: which car
+  seat it clicks into, weight, fits a subway turnstile. Answerable in a few words, and
+  prefer `options` — a closed set becomes a filter, a paragraph never does.
+  BANNED (they read well and filter nothing): "what stood out", "what did you like", "why
+  is it good", "anything else", "tell me more", anything already in CURRENT TIP DRAFT (the
+  user's own trait is captured — do not ask for it again), and any two questions that would
+  take the same answer.
   Never ask for a home address, a full name, or anything private.
   Do NOT include "can neighbours ask you more" or "what did others say" — both are added
   for you. Return [] when CURRENT TYPE FIELDS below already lists a set.
@@ -157,7 +162,10 @@ def _extract_tip_fields(
             system=_extract_system(want_steps=want_steps),
             user_payload=payload,
             max_tokens=1100 if want_steps else 320,
-            temperature=0.2,
+            # Warmer only on the turn that WRITES the set: at 0.2 every doctor got the same
+            # five questions (dev QA 2026-09-03). Extraction on that turn is the easy part —
+            # one sentence, nothing to disambiguate yet.
+            temperature=0.5 if want_steps else 0.2,
         )
         if not isinstance(data, dict):
             return {}, None
@@ -261,17 +269,20 @@ def _summary(draft: dict[str, Any]) -> str:
 
 
 def _detail_text(draft: dict[str, Any]) -> str:
-    from app.reco_question_sets import carousel
+    from app.reco_question_sets import TAIL_FIELDS, carousel
 
     parts = [str(draft.get("name") or "").strip()]
     if _has(draft, "category"):
         parts.append(str(draft["category"]).strip())
     if _has(draft, "trait"):
         parts.append(str(draft["trait"]).strip())
+    # TAIL_FIELDS out: the consent toggle and the agree row are how the AUTHOR answered
+    # Lana, not part of the recommendation — "Neighbours: Keep it to the card" read as a
+    # tip detail on the neighbour's card, and detail_text is also the dedupe key.
     parts += [
         f"{s['label']}: {s['answer']}"
         for s in carousel(step_set_of(draft), draft.get("answers"))
-        if s.get("answer")
+        if s.get("answer") and s["field"] not in TAIL_FIELDS
     ]
     parts += [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()]
     if _has(draft, "locality"):
@@ -326,7 +337,9 @@ def _description(draft: dict[str, Any]) -> str | None:
 
 def _save_tip(
     *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str]:
+    """(saved_row, error_detail). The reason comes back so the caller can recover from the
+    one failure that is fixable in-turn (block_required) instead of just apologising."""
     try:
         from app.local_signals import save_local_signal
 
@@ -347,12 +360,12 @@ def _save_tip(
             reco_name=str(draft.get("name") or "").strip() or None,
             reco_place=str(draft.get("locality") or "").strip() or None,
             reco_description=_description(draft),
-        )
-    except Exception:  # noqa: BLE001
+        ), ""
+    except Exception as exc:  # noqa: BLE001
         import logging
 
         logging.getLogger(__name__).exception("tip_share_save_failed")
-        return None
+        return None, str(getattr(exc, "detail", "") or exc).lower()
 
 
 # What this capture OWNS: the user sharing a local tip/recommendation (tip_share). Anything
@@ -404,6 +417,15 @@ def _is_tip_share_answer(
     )
 
 
+def _pending_step(session_ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """The step whose question the previous turn asked, or None."""
+    field = str(session_ctx.get("tip_pending_ask") or "")
+    draft = session_ctx.get("tip_draft")
+    if not field or not isinstance(draft, dict):
+        return None
+    return next((s for s in step_set_of(draft) if s.get("field") == field), None)
+
+
 def tip_share_should_release(
     message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
 ) -> bool:
@@ -411,6 +433,14 @@ def tip_share_should_release(
     another intent (AI's read, not keywords), so the user is never trapped."""
     from app.lane_decision import lane_should_continue
 
+    # A no to Lana's OWN closing yes/no ("Can neighbours ask you more?" → "naah, I don't
+    # want them to") is the ANSWER to that step, but it reads as an abandon to the
+    # classifier — which released the lane on the very last question and dropped a finished
+    # tip into the old signal cascade (dev QA 2026-09-02). Scoped to the toggle: every other
+    # step takes free text, where a real abandon still has to release.
+    step = _pending_step(session_ctx)
+    if step and step.get("kind") == "toggle":
+        return False
     return not lane_should_continue(
         message, session_ctx, slots, is_valid_answer=_is_tip_share_answer
     )
@@ -426,6 +456,7 @@ def reset_tip_share_state(session_ctx: dict[str, Any]) -> None:
         "tip_pending_ask",
         "tip_pending_question",
         "tip_asked_fields",
+        "tip_need_zip",
     ):
         session_ctx[k] = None
     session_ctx["tip_enrich_count"] = 0
@@ -442,32 +473,124 @@ def run_tip_share_turn(
 ) -> str:
     """Drive one tip-share capture turn. Mutates session_ctx (tip_draft,
     tip_share_active, tip_listed_now, routing_phase). Returns Lana's reply."""
+    from app.discovery_route import resolve_block_id
+
     msg = str(user_message or "").strip()
     draft: dict[str, Any] = dict(session_ctx.get("tip_draft") or {})
-    zip_code = str(session_ctx.get("zip_code") or "").strip() or None
+    # Re-stamped below by whichever branch asks something. The chat fork sends one question
+    # as prose, so without this the FE cannot tell WHICH step is open and renders a text box
+    # for a `place` step instead of the Places picker.
+    draft.pop("pending_field", None)
+    zip_code = str(session_ctx.get("zip_code") or session_ctx.get("zip") or "").strip() or None
+    # The block the tip is posted to — resolved the way every other save path resolves it,
+    # not the raw home block. A session whose block lives in the session (browsed an area,
+    # or signed up and the home block landed after this turn started) passes home_block_id
+    # None, and save_local_signal raises block_required: the tip died at the finish line
+    # with the ready card already on screen (dev QA 2026-09-03).
+    block_id = resolve_block_id(session_ctx, home_block_id)
     session_ctx["tip_listed_now"] = False
 
     # ── Loop safety ──
     turns = int(session_ctx.get("tip_turns") or 0) + 1
     session_ctx["tip_turns"] = turns
     if _CANCEL_RE.search(msg) or turns > _TIP_TURN_CAP:
-        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_enrich_count", "tip_asked_fields"):
+        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_enrich_count", "tip_asked_fields", "tip_need_zip"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["routing_phase"] = "listening"
         return "No problem — we can do that another time. What else can I help with?"
 
+    # ── The ZIP asked for after a block_required post failure ──
+    # A tip is posted TO a block and this account has none: the ZIP the user typed was read
+    # as a card answer by the extractor, so every retry failed the same way (dev QA
+    # 2026-09-03, "block_required" twice in a row). Answering the ask posts the tip on the
+    # spot — they already tapped the CTA once.
+    posting = bool(_PASS_RE.search(msg))
+    if session_ctx.get("tip_need_zip") and msg:
+        from app.discovery_route import (
+            ensure_home_block_for_verified_user,
+            extract_zip,
+        )
+
+        zip5 = extract_zip(msg)
+        if zip5:
+            session_ctx["zip_code"] = zip5
+            session_ctx["tip_need_zip"] = None
+            zip_code = zip5
+            try:
+                block_id = (
+                    ensure_home_block_for_verified_user(user_jwt, session_ctx=session_ctx)
+                    or block_id
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            posting = True
+
     # ── The "Pass the tip along" CTA on the ready card → save it ──
-    if session_ctx.get("tip_ready") and _PASS_RE.search(msg):
-        saved = _save_tip(draft=draft, user_jwt=user_jwt, block_id=home_block_id, zip_code=zip_code)
+    if session_ctx.get("tip_ready") and posting:
+        saved, err = _save_tip(
+            draft=draft, user_jwt=user_jwt, block_id=block_id, zip_code=zip_code
+        )
+        if not saved and "block_required" in err:
+            # The one fixable failure: no home block yet. Same helper the pipeline runs for
+            # a freshly verified user, then one retry — re-asking for a ZIP they already
+            # gave at signup, on top of a finished card, is not a recovery.
+            from app.discovery_route import ensure_home_block_for_verified_user
+
+            try:
+                block_id = ensure_home_block_for_verified_user(
+                    user_jwt, session_ctx=session_ctx
+                )
+            except Exception:  # noqa: BLE001
+                block_id = None
+            if block_id:
+                saved, err = _save_tip(
+                    draft=draft, user_jwt=user_jwt, block_id=block_id, zip_code=zip_code
+                )
+        if not saved:
+            # The card and the draft STAY. The copy has always said "let's try again" while
+            # dropping the draft in the same breath, so there was nothing left to try: the
+            # next message fell through to the old signal cascade and the whole answered
+            # question set was gone (dev QA 2026-09-03).
+            session_ctx["tip_draft"] = draft
+            session_ctx["tip_share_active"] = True
+            session_ctx["tip_ready"] = True
+            session_ctx["routing_phase"] = "listening"
+            no_area = "block_required" in err
+            session_ctx["tip_need_zip"] = True if no_area else None
+            return compose_reply(
+                goal=(
+                    "Ask which 5-digit ZIP they are in — you cannot post a tip without "
+                    "knowing which area it belongs to. Say the card is still here and "
+                    "that you will post it the moment they tell you: they do NOT have to "
+                    "tap anything again."
+                    if no_area
+                    else "The tip could not be posted. Say so plainly, tell them the card "
+                    "is still here, and ask them to tap **Pass the tip along** to try "
+                    "again (keep that button name verbatim, bolded)."
+                ),
+                facts=[
+                    f"The tip is still a draft: {_summary(draft)}",
+                    "Nothing was lost — the card is still on screen",
+                ]
+                + (
+                    ["Lana does not know which area to post it to yet"]
+                    if no_area
+                    else []
+                ),
+                fallback=(
+                    "Almost — which ZIP are you in? Tell me and I'll post this straight "
+                    "away."
+                    if no_area
+                    else "I couldn't post that just now — the card is still here, tap "
+                    "**Pass the tip along** to try again."
+                ),
+            )
         for k in ("tip_share_active", "tip_ready", "tip_pending_ask", "tip_pending_question"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["tip_enrich_count"] = 0
         session_ctx["routing_phase"] = "listening"
-        if not saved:
-            session_ctx["tip_draft"] = None
-            return "I couldn't post that just now — let's try again in a moment."
         matches = int(saved.get("matches_created") or 0)
         draft["signal_id"] = saved.get("signal_id")
         draft["listed"] = True
@@ -580,7 +703,7 @@ def run_tip_share_turn(
 
     # ── P3: need the who/where (name) — Places options when place-based ──
     if not _has(draft, "name"):
-        sugg = _name_suggestions(draft, zip_code=zip_code, block_id=home_block_id)
+        sugg = _name_suggestions(draft, zip_code=zip_code, block_id=block_id)
         draft["chips"] = chips
         draft["suggestions"] = sugg
         session_ctx["tip_draft"] = draft
@@ -624,7 +747,7 @@ def run_tip_share_turn(
             draft.pop("steps_raw", None),
             reco_type,
             tallies=_reco_tallies(
-                user_jwt=user_jwt, block_id=home_block_id, name=draft.get("name")
+                user_jwt=user_jwt, block_id=block_id, name=draft.get("name")
             ),
         )
     step_set = step_set_of(draft) if reco_type else []
@@ -646,13 +769,14 @@ def run_tip_share_turn(
             asked.add(step["field"])
             session_ctx["tip_asked_fields"] = list(asked)
             session_ctx["tip_pending_ask"] = step["field"]
+            draft["pending_field"] = step["field"]
             draft["chips"] = chips
             # A generated set writes no options for a map step, and the chat fork has no
             # Places picker to fall back on the way the carousel does — so a "where is it?"
             # asked in chat comes back as typed prose nobody can navigate to. Real nearby
             # places, same call the name step makes.
             draft["suggestions"] = list(step.get("options") or []) or (
-                _name_suggestions(draft, zip_code=zip_code, block_id=home_block_id)
+                _name_suggestions(draft, zip_code=zip_code, block_id=block_id)
                 if step.get("kind") == "place"
                 else []
             )

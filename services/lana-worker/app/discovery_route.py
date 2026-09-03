@@ -1606,6 +1606,15 @@ def _try_layer1_intent_turn(
     history: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Layer 1 explicit intents — identity, block summary, settings, help."""
+    # The display-name gate is armed and this reply IS the name — it belongs to the gate
+    # downstream, never to a classifier verdict. A bare "Tex" answering "what should
+    # neighbors call you?" came back as identity.complete_profile and was answered "Tex,
+    # your profile is all set up already" — the name echoed from the message text and
+    # never written, so the next session asked for it again (prod 2026-09-02).
+    if phase == PHASE_NEED_DISPLAY_NAME and (
+        extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+    ):
+        return None
     linear = slots_linear_intent(slots)
     if not linear or not intent_confidence_met(slots, linear):
         return None

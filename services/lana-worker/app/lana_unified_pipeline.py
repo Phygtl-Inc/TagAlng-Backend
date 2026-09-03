@@ -507,6 +507,12 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
 # reliably comply, and a one-off helper per intent is how the last one was missed.
 POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     "discovery.communities",
+    # An explicit search is the engine's turn. "can u find activites aroung me" came back
+    # as "Yep — I can look for activities near you. Want me to find a few good ones?" with
+    # a Find activities chip (prod 2026-09-02): a confirmation of a request the user had
+    # already made, costing them a turn while the browse sat right there.
+    "discovery.find_activities",
+    # NOT discovery.find_peers — test_tip_ask_consent pins it to the policy on purpose.
 })
 
 

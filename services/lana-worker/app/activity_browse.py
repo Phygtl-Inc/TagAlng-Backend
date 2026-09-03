@@ -493,7 +493,11 @@ def _compose_empty_seek_offer(
         # Did we actually look past `where`? Only the far probe does. Claiming "nothing
         # outside was looked at" while ALSO naming a far area is a self-contradiction —
         # and the model was being handed both at once.
-        looked_wider = bool(far_facts)
+        # Only the far probe looks past `where` — and it always names the area it found
+        # (see _far_offer). The community and host-your-own shapes reuse far_facts for
+        # their own Option B without having looked anywhere wider, so they keep the
+        # "nothing outside was looked at" caveat.
+        looked_wider = bool(area)
         facts = [
             (
                 f"You searched {where} for: {interest}"
@@ -1202,6 +1206,33 @@ def run_activity_browse_turn(
                 far_facts=far_facts,
                 area=draft.get("_area_offer_name"),
             )
+
+    if not matched:
+        # Nothing here and nothing further out either (the far/community branches above
+        # already returned). The empty copy offers to listen, widen, or host — so arm the
+        # seek and hand over the tappables. It used to fall through to _refine_suggestions,
+        # which has no events to mine and returns nothing: a three-way question with zero
+        # chips on a voice-first surface (prod 2026-09-02, after tapping "Widen the search").
+        draft["_seek_offer"] = True
+        draft["suggestions"] = ["Yes, listen for me", "Host a meet"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["activity_previews"] = []
+        session_ctx["routing_phase"] = "listening"
+        return _compose_empty_seek_offer(
+            "",
+            user_msg=msg,
+            lang=lang,
+            # Widening is not on the menu here: there is no topic left to drop, and the
+            # geography was already searched. Hosting is the one real move left.
+            far_facts=[
+                "Option B: they can set up their own meet for neighbours to join "
+                "(the pill says 'Host a meet')",
+            ],
+            # ponytail: with no LLM configured the static fallback still says "or widen
+            # the search" while the pill says "Host a meet". Add a browse.empty_*_host
+            # string (en/es/pt) if that path ever ships to users.
+        )
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)

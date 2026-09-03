@@ -38,6 +38,7 @@ _TITLE_KEY = {
 
 def _deliver(rows: list[dict[str, Any]]) -> int:
     """push + email one drained batch. Returns how many recipients were rung."""
+    from app.analytics import track
     from app.i18n import localize_text, t
     from app.notifications import email_html, notify_user, recipient_langs
 
@@ -78,6 +79,15 @@ def _deliver(rows: list[dict[str, Any]]) -> int:
                 ),
             )
             sent += 1
+            track(
+                "match_notified",
+                user_id=uid,
+                event_properties={
+                    "recipient_intent": their_intent or None,
+                    "strength": row.get("match_strength"),
+                    "match_intent": str(row.get("match_intent") or "") or None,
+                },
+            )
         except Exception:  # noqa: BLE001 — one bad recipient must not stop the batch
             _LOG.debug("signal_match_notify_one_failed", exc_info=True)
     return sent

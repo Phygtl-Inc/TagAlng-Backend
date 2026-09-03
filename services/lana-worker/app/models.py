@@ -679,6 +679,8 @@ class RecoStep(BaseModel):
     branches on:
       text   → free-type input, `placeholder` is the example hint under it
       choice → `options` as tappable chips, still free-typeable
+      place  → the Google Places picker (POST /lana/places/search), NOT a text box: a
+               park's "where is it?" typed by hand is a string nobody can navigate to
       toggle → the consent step (mock 9/10)
       agree  → "others also said", `options` are "<attr> ×<n>", multi-select
     """
@@ -709,6 +711,9 @@ class TipDraft(BaseModel):
     listed: bool = False
     signal_id: str | None = None
     missing: list[str] = Field(default_factory=list)
+    # Which step of `steps` the chat fork is asking right now — the FE renders that step's
+    # `kind` (a `place` step gets the picker). None on the ready card: nothing is open.
+    pending_field: str | None = None
 
 
 class LookEvent(BaseModel):

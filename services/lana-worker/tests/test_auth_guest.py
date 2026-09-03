@@ -108,6 +108,48 @@ class VerifyAuthTests(unittest.TestCase):
         update_chain.execute.assert_called_once()
 
 
+class SignupCompleteTrackingTests(unittest.TestCase):
+    """"Onboarded" in the funnel. The verify stamp is what makes a guest a real
+    account, and the stamp happens once — so the event must too."""
+
+    def test_fires_once_when_the_account_becomes_verified(self) -> None:
+        from app.auth import _resolve_verified
+
+        with patch("app.analytics.track") as track:
+            self.assertTrue(
+                _resolve_verified("u1", {"email_confirmed_at": "2026-09-01T00:00:00Z"}, {})
+            )
+        track.assert_called_once()
+        self.assertEqual(track.call_args.args[0], "signup_complete")
+        self.assertEqual(track.call_args.kwargs["event_properties"]["method"], "email")
+
+    def test_already_stamped_accounts_do_not_re_fire(self) -> None:
+        from app.auth import _resolve_verified
+
+        with patch("app.analytics.track") as track:
+            self.assertTrue(
+                _resolve_verified(
+                    "u1",
+                    {"email_confirmed_at": "2026-09-01T00:00:00Z"},
+                    {"email_verified_at": "2026-09-01T00:00:00Z"},
+                )
+            )
+        track.assert_not_called()
+
+    def test_anonymous_guests_are_not_onboarded(self) -> None:
+        from app.auth import _resolve_verified
+
+        with patch("app.analytics.track") as track:
+            self.assertFalse(
+                _resolve_verified(
+                    "u1",
+                    {"email_confirmed_at": "2026-09-01T00:00:00Z", "is_anonymous": True},
+                    {},
+                )
+            )
+        track.assert_not_called()
+
+
 class GuestOpeningTests(unittest.TestCase):
     def test_guest_opening_is_instant_and_on_script(self) -> None:
         opening, status, ctx, _ui = lana_profile_guest_opening()
