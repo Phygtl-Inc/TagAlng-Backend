@@ -25,7 +25,12 @@ class TestFinalizeReplyLanguage(unittest.TestCase):
     def test_renders_even_when_legacy_flag_stamped(self) -> None:
         # A composer vouching "already localized" must not skip the render.
         mixed = "Aquí tienes opciones cerca. I'll text you when a neighbor shares a tip that fits."
-        i18n._AI_RENDER_CACHE[(mixed, "es")] = "Aquí tienes opciones cerca. Te aviso cuando llegue un dato."
+        # _render_key, not a bare (text, lang) tuple: the cache is keyed on the
+        # addressee's grammatical gender too, so a hand-built 2-tuple silently misses
+        # (that key shape is exactly the cross-user leak — see test_i18n_gender.py).
+        i18n._AI_RENDER_CACHE[i18n._render_key(mixed, "es")] = (
+            "Aquí tienes opciones cerca. Te aviso cuando llegue un dato."
+        )
         ctx = {"lang": "es", "_reply_localized": True}
         out = finalize_reply_language(mixed, ctx)
         self.assertEqual(out, "Aquí tienes opciones cerca. Te aviso cuando llegue un dato.")

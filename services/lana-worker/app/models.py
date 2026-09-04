@@ -704,6 +704,11 @@ class RecoStep(BaseModel):
 class TipDraft(BaseModel):
     """In-chat "share a tip / recommendation" draft (the tip_share flow)."""
 
+    # Stable identity for ONE recommendation, for the whole draft's life. The FE keys its
+    # cards-or-chat mode on "is this still the same recommendation?", and it used `name` —
+    # which is null until the subject step is answered, so two nameless recs in a row were
+    # indistinguishable and the mode leaked from the previous one (dev QA 2026-09-04).
+    draft_id: str | None = None
     name: str | None = None
     category: str | None = None
     trait: str | None = None

@@ -406,7 +406,7 @@ def utterance_indicates_tip_share(msg: str) -> bool:
     text = str(msg or "").strip()
     if not text or _FIND_NEIGHBORS_RE.search(text):
         return False
-    return bool(_TIP_SHARE_RE.search(text))
+    return bool(_TIP_SHARE_RE.search(text) or _is_first_person_tip_offer(text))
 
 
 _TIP_SEEK_UTTERANCE_RE = re.compile(
@@ -421,6 +421,30 @@ _TIP_SEEK_SERVICE_RE = re.compile(
     r"daycare|electrician|mechanic|barber|hairdresser|salon)s?\b",
     re.I,
 )
+# "I know a good plumber" OFFERS one; "do you know a good plumber" ASKS for one. Same words,
+# opposite direction — and this is the one the AI classifier gets wrong every time whatever
+# the prompt says (4/4 on dev, 2026-09-04), because the prompt's own canonical tip_seek
+# examples ARE the phrase "know a good <service>", repeated at six points across a 49k-char
+# system prompt. Structural and first-person, so it decides only the case the words settle:
+# `_TIP_SEEK_CUE_RE` matches the bare "know a", which is what made the seek fallback claim a
+# nameless share and answer the user's own recommendation with Google listings.
+_FIRST_PERSON_TIP_OFFER_RE = re.compile(
+    r"\b(?:i|we)\s+(?:know|found|use|go\s+to)\s+(?:of\s+)?(?:a|an|this|that)\b",
+    re.I,
+)
+# "I don't know a plumber" is the opposite of an offer.
+_TIP_OFFER_NEGATION_RE = re.compile(r"\b(?:do\s?n[o']?t|does\s?n[o']?t|never|no longer)\b", re.I)
+
+
+def _is_first_person_tip_offer(text: str) -> bool:
+    """"I know a <service>" — a provider they HAVE, not one they want."""
+    return bool(
+        _FIRST_PERSON_TIP_OFFER_RE.search(text)
+        and _TIP_SEEK_SERVICE_RE.search(text)
+        and not _TIP_OFFER_NEGATION_RE.search(text)
+    )
+
+
 _SWAP_SEEK_ITEM_RE = re.compile(
     r"\b(?:computer|laptop|bike|bicycle|boots|toy|stroller|phone|ipad|tablet|"
     r"rain\s+coat|jacket|car\s+seat|crib|high\s+chair)\b",

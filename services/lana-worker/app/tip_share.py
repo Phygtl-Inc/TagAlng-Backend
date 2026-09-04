@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any
 
 from app.reply_compose import compose_reply
@@ -78,7 +79,11 @@ _STEPS_SPEC = """- steps: the question set for THIS recommendation — 6-8 quest
   Each: {"field": short snake_case key, "label": 1-2 word eyebrow, "question": ONE short
   question ending in "?", "placeholder": a short example answer for THIS subject,
   "options": [2-4 short taps] when the answer really is a small closed set}.
-  Open with the type's own basics: <<FLOOR>>.
+  The FIRST step is ALWAYS {"field": "subject"} — what/who is being recommended, phrased
+  for THIS subject: "Which trampoline park?", "What's the kettle called?", "What's the
+  doctor's name?". Never "who or where". Write it even when the name is already known; it
+  is shown answered rather than asked.
+  Then the type's own basics: <<FLOOR>>.
   Then at least THREE questions that are specific to this subject and that a neighbour
   would FILTER or SEARCH on later — the facts that decide whether this recommendation is
   for them. A pediatrician: which ages, does she take walk-ins, which insurance, weekend
@@ -248,8 +253,7 @@ def _build_chips(draft: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _question_for_field(field: str) -> tuple[str, list[str]]:
-    if field == "name":
-        return "Who or where? A name helps me find them.", []
+    # No `name` case: the name is the subject STEP, and `fix:name` is remapped to it.
     if field == "category":
         return "What kind of recommendation is it?", _CATEGORY_SUGGESTIONS
     if field == "trait":
@@ -269,7 +273,7 @@ def _summary(draft: dict[str, Any]) -> str:
 
 
 def _detail_text(draft: dict[str, Any]) -> str:
-    from app.reco_question_sets import TAIL_FIELDS, carousel
+    from app.reco_question_sets import SUBJECT_FIELD, TAIL_FIELDS, carousel
 
     parts = [str(draft.get("name") or "").strip()]
     if _has(draft, "category"):
@@ -282,7 +286,8 @@ def _detail_text(draft: dict[str, Any]) -> str:
     parts += [
         f"{s['label']}: {s['answer']}"
         for s in carousel(step_set_of(draft), draft.get("answers"))
-        if s.get("answer") and s["field"] not in TAIL_FIELDS
+        # SUBJECT out as well as the tail: it is `name`, already the first part above.
+        if s.get("answer") and s["field"] not in (*TAIL_FIELDS, SUBJECT_FIELD)
     ]
     parts += [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()]
     if _has(draft, "locality"):
@@ -293,7 +298,13 @@ def _detail_text(draft: dict[str, Any]) -> str:
 def _name_suggestions(draft: dict[str, Any], *, zip_code: str | None, block_id: str | None) -> list[str]:
     """Real nearby places (Google Places) matching the category — only for place-based
     tips. [] otherwise, so the flow falls back to free-type."""
-    if not draft.get("place_based") or not _has(draft, "category"):
+    from app.reco_question_sets import subject_is_place
+
+    if not _has(draft, "category"):
+        return []
+    # `place_based` is the extractor's guess and it says false for a restaurant often
+    # enough; the TYPE is the reliable signal for the subject step.
+    if not draft.get("place_based") and not subject_is_place(draft.get("reco_type")):
         return []
     try:
         from app.places import nearby_place_suggestions
@@ -310,7 +321,7 @@ def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
     questions are generated per recommendation: store the answer alone and nothing can ever
     say again that "helped_with" was asked as "What did she help with?" — the reader card
     would have answers with no labels."""
-    from app.reco_question_sets import carousel
+    from app.reco_question_sets import SUBJECT_FIELD, carousel
 
     out = [
         {
@@ -321,7 +332,7 @@ def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
             "answer": s["answer"],
         }
         for s in carousel(step_set_of(draft), draft.get("answers"))
-        if s.get("answer")
+        if s.get("answer") and s["field"] != SUBJECT_FIELD
     ]
     return out or None
 
@@ -474,6 +485,7 @@ def run_tip_share_turn(
     """Drive one tip-share capture turn. Mutates session_ctx (tip_draft,
     tip_share_active, tip_listed_now, routing_phase). Returns Lana's reply."""
     from app.discovery_route import resolve_block_id
+    from app.reco_question_sets import SUBJECT_FIELD
 
     msg = str(user_message or "").strip()
     draft: dict[str, Any] = dict(session_ctx.get("tip_draft") or {})
@@ -481,6 +493,11 @@ def run_tip_share_turn(
     # as prose, so without this the FE cannot tell WHICH step is open and renders a text box
     # for a `place` step instead of the Places picker.
     draft.pop("pending_field", None)
+    # One id per recommendation, for the whole draft's life — see TipDraft.draft_id. Cleared
+    # with the draft itself, so the next recommendation gets a new one and the FE knows the
+    # cards-or-chat pick does not carry over.
+    if not draft.get("draft_id"):
+        draft["draft_id"] = uuid.uuid4().hex[:12]
     zip_code = str(session_ctx.get("zip_code") or session_ctx.get("zip") or "").strip() or None
     # The block the tip is posted to — resolved the way every other save path resolves it,
     # not the raw home block. A session whose block lives in the session (browsed an area,
@@ -623,6 +640,11 @@ def run_tip_share_turn(
     fix = re.match(r"\s*fix:(\w+)\s*$", msg)
     if fix:
         field = fix.group(1)
+        if field == "name":
+            # The name IS the subject step now, so a name chip re-opens that step with its
+            # own generated question instead of the old type-blind "Who or where?".
+            field = SUBJECT_FIELD
+            draft.pop("name", None)
         if field == "details":
             draft["details"] = []
             session_ctx["tip_pending_ask"] = "details"
@@ -691,6 +713,21 @@ def run_tip_share_turn(
         if merged_answers:
             draft["answers"] = merged_answers
 
+    # ── subject ⇄ name ──
+    # The subject step IS the name ask (see `head_step`), so its answer is the name — and a
+    # name already in the opening sentence pre-answers the step, which is what stops the
+    # carousel asking for what the user just said. The subject wins on conflict: the
+    # extractor's read of "the new trampoline park" is a placeholder, the answer to the
+    # step is the real thing.
+    subject = str((draft.get("answers") or {}).get(SUBJECT_FIELD) or "").strip()
+    if subject:
+        draft["name"] = subject
+    elif _has(draft, "name"):
+        draft["answers"] = {
+            SUBJECT_FIELD: str(draft["name"]).strip(),
+            **(draft.get("answers") or {}),
+        }
+
     # ── P1: nothing yet → "What do you want to recommend?" ──
     if not _has(draft, "name") and not _has(draft, "category"):
         session_ctx["tip_draft"] = draft
@@ -700,19 +737,6 @@ def run_tip_share_turn(
         return "Love that — what do you want to recommend?"
 
     chips = _build_chips(draft)
-
-    # ── P3: need the who/where (name) — Places options when place-based ──
-    if not _has(draft, "name"):
-        sugg = _name_suggestions(draft, zip_code=zip_code, block_id=block_id)
-        draft["chips"] = chips
-        draft["suggestions"] = sugg
-        session_ctx["tip_draft"] = draft
-        session_ctx["tip_share_active"] = True
-        session_ctx["tip_pending_question"] = "Who or where? A name helps me find them."
-        session_ctx["routing_phase"] = "listening"
-        if sugg:
-            return f"Heard you — **{_summary(draft)}**. Who or where? A few near you, or tell me:"
-        return f"Heard you — **{_summary(draft)}**. Who or where? A name helps me find them."
 
     # ── need the category ──
     if not _has(draft, "category"):

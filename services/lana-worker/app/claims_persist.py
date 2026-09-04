@@ -974,14 +974,51 @@ def persist_profile_patch(
 _ALLOWED_ROLES = frozenset(
     {"parent", "expecting", "grandparent", "caregiver", "guardian", "relative"}
 )
-_ALLOWED_GRAM_GENDERS = frozenset({"feminine", "masculine"})
+_ALLOWED_GRAM_GENDERS = frozenset({"feminine", "masculine", "neutral"})
+
+
+def _stated_gender_locked(user_id: str) -> bool:
+    """True when this user's gender was set by an explicit statement.
+
+    An INFERENCE must never overwrite what the user said outright. Someone who
+    tells Lana "call me she" cannot be re-gendered a month later by a stray
+    "estou animado" the extractor reads as masculine self-reference — that is the
+    single most personal thing the profile stores, and silently flipping it is
+    worse than never having captured it.
+
+    Fails CLOSED (treats it as locked) on a read error: skipping one inference
+    costs nothing, overwriting a stated pronoun costs trust.
+    """
+    try:
+        row = (
+            service_client()
+            .table("users")
+            .select("gender_source")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        ).data
+        return str(((row or [{}])[0] or {}).get("gender_source") or "") == "stated"
+    except Exception:
+        # Pre-20261122 environments have no gender_source. Nothing is locked there,
+        # so let the write through rather than freezing the feature.
+        logger.debug("gender_source read failed for %s — treating as unlocked", user_id)
+        return False
 
 
 def persist_role_gender(user_id: str, data: Any) -> None:
     """users.role / users.grammatical_gender from the extractor's own verdict
     (lingo constitution's role-aware address + gendered-language agreement).
+
     Allow-listed values only; null never overwrites — a stated role can be
-    refined later ("my grandkids" after "my kids") but never silently erased."""
+    refined later ("my grandkids" after "my kids") but never silently erased.
+
+    Gender additionally carries PROVENANCE. The extractor reports whether the
+    value came from an explicit instruction ("call me she", "use masculine with
+    me") or from the user's own gendered self-reference ("estoy cansada"):
+      * stated   → always written, and locks the field against future inferences.
+      * inferred → written only while nothing stated is on file.
+    """
     if not user_id or not isinstance(data, dict):
         return
     patch: dict[str, str] = {}
@@ -990,13 +1027,27 @@ def persist_role_gender(user_id: str, data: Any) -> None:
         patch["role"] = role
     gender = str(data.get("grammatical_gender") or "").strip().lower()
     if gender in _ALLOWED_GRAM_GENDERS:
-        patch["grammatical_gender"] = gender
+        # The extractor flags an explicit instruction; anything else is inference.
+        stated = bool(data.get("gender_stated"))
+        if stated or not _stated_gender_locked(user_id):
+            patch["grammatical_gender"] = gender
+            patch["gender_source"] = "stated" if stated else "inferred"
+        else:
+            logger.info("gender_inference_skipped user=%s (stated value on file)", user_id)
     if not patch:
         return
     try:
         service_client().table("users").update(patch).eq("id", user_id).execute()
     except Exception:
-        # Column may predate the 20260909 migration in an env — never break extraction.
+        # Columns may predate the 20260909 / 20261122 migrations in an env — retry
+        # without gender_source rather than losing the gender itself.
+        if "gender_source" in patch:
+            patch.pop("gender_source")
+            try:
+                service_client().table("users").update(patch).eq("id", user_id).execute()
+                return
+            except Exception:
+                pass
         logger.exception("persist_role_gender_failed for %s", user_id)
 
 

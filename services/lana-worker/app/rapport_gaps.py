@@ -17,6 +17,7 @@ from typing import Any
 
 from app.auth import service_client
 from app.rapport_gap_tree import get_gap, render_why_frame
+from app.rapport_priority import P_NEW_BUCKET
 from app.vec_util import to_pgvector
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,8 @@ def open_semantic_gap(
     place_ref: str | None = None,
     affiliation_ref: str | None = None,
     gap_id: str | None = None,
-    unlock_score: float = 0.8,
+    unlock_score: float | None = None,
+    from_local_supply: bool = False,
     answer_options: list[str] | None = None,
 ) -> bool:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
@@ -155,6 +157,29 @@ def open_semantic_gap(
     # for an affiliation that was already asked, answered, or skipped out.
     gap_id = gap_id or f"deepen:{_slug(topic)}"
     bucket = bucket or "general"
+    # Priority. Every semantic gap used to open at a flat 0.8, so the tile's
+    # "highest-scoring open gap" was really oldest-open-first — a new user's most
+    # valuable question queued behind whatever landed first. app/rapport_priority.py
+    # derives the score from what the MATCHER pays for (a place is +3, an interest
+    # +1, and only if a neighbor nearby shares it), so what unlocks introductions
+    # soonest ranks first. An explicit unlock_score from the caller still wins.
+    if unlock_score is None:
+        from app.rapport_priority import describe, score_for
+
+        unlock_score = score_for(
+            user_id,
+            bucket=bucket,
+            deepens_concept=deepens_concept,
+            affiliation_ref=affiliation_ref,
+            from_local_supply=from_local_supply,
+        )
+        logger.info(
+            "rapport_gap_priority user=%s tier=%s score=%.2f q=%r",
+            user_id,
+            describe(unlock_score),
+            unlock_score,
+            str(question)[:60],
+        )
     # Teaser is AI-generated (grammatical, contextual) — e.g. "about your reading…". We no
     # longer glue the raw claim label, which broke on predicate labels ("about your interested
     # in books…"). Fall back to a neutral eyebrow only if the model gave none.
@@ -477,3 +502,62 @@ def mute_gap(user_id: str, gap_id: str) -> None:
         ).execute()
     except Exception:
         logger.exception("rapport: mute failed for %s / %s", user_id, gap_id)
+
+
+# The catalogue gaps that need NO prior knowledge of the user to make sense, and
+# which land in four DIFFERENT buckets — so answering them walks a zero-claim user
+# straight to a matchable profile rather than deep into one topic.
+#
+# GAP_TREE was retired as an OPENER (open_semantic_gap owns that; see the module
+# docstring) and this does not revive it: these three fire only for a user with no
+# claims and no gaps at all, when even rapport_local_supply came back empty — the
+# genuinely-first user in an area. Everyone else is served AI-written questions.
+#
+# language_home is deliberately NOT here: rapport_synth already injects a standing
+# `languages_spoken` thread first for every user, it is AI-phrased, and it is wired
+# to the language-switch offer. Two questions about the same thing is one too many.
+COLD_SEED_GAP_IDS = ("relocation_recency", "daily_rhythm", "free_windows")
+
+
+def open_cold_seed_gaps(user_id: str) -> int:
+    """Open the no-prior-knowledge catalogue seeds. Returns how many were created.
+
+    Uses the tree's REAL covers_concept (unlike semantic gaps, whose synthetic one
+    never matches), so reconcile_gaps() retires a seed the moment the user states
+    the fact in chat instead — the seed never becomes a stale question about
+    something Lana already knows.
+    """
+    if not user_id:
+        return 0
+    existing = _existing_gap_rows(user_id)
+    sb = service_client()
+    opened = 0
+    for gap_id in COLD_SEED_GAP_IDS:
+        if gap_id in existing:
+            continue
+        gap = get_gap(gap_id)
+        if not gap:
+            continue
+        try:
+            sb.table("rapport_gaps").insert(
+                {
+                    "user_id": user_id,
+                    "gap_id": gap_id,
+                    "parent_bucket": gap["parent_bucket"],
+                    "covers_concept": gap["covers_concept"],
+                    "why_frame": render_why_frame(gap, None),
+                    "question": gap["question"],
+                    # A seed opens a bucket the user has nothing in, which is the
+                    # highest-value question shape there is for a new user.
+                    "unlock_score": P_NEW_BUCKET,
+                    "status": "open",
+                }
+            ).execute()
+            opened += 1
+        except Exception:
+            # unique(user_id, gap_id) race, or a pre-question-column env — either
+            # way the seed already exists or cannot exist. Never fail the render.
+            logger.debug("rapport: cold seed %s exists/race for %s", gap_id, user_id)
+    if opened:
+        logger.info("rapport: opened %d cold seed gap(s) for %s", opened, user_id)
+    return opened

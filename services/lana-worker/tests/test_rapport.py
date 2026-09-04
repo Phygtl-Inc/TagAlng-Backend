@@ -50,6 +50,13 @@ class _Query:
     def is_(self, *a, **k):
         return self
 
+    @property
+    def not_(self):
+        # PostgREST negation reads `.not_.is_("col", "null")` — a property, not a
+        # call. The ranker has used it in _circle_asked_recently all along; the
+        # stub only grew it when _skip_brake made a second caller.
+        return self
+
     def or_(self, *a, **k):
         return self
 

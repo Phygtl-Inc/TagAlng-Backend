@@ -249,7 +249,7 @@ def localize_text(text: str, lang: str | None) -> str:
     code = normalize_lang_code(lang)
     if not text or not code or code == "en":
         return text
-    cache_key = (text, code)
+    cache_key = _render_key(text, code)
     cached = _AI_RENDER_CACHE.get(cache_key)
     if cached:
         return cached
@@ -290,10 +290,10 @@ def localize_labels(labels: list[str], lang: str | None) -> list[str]:
     out = list(labels)
     misses = [
         (i, lbl) for i, lbl in enumerate(out)
-        if lbl and (lbl, code) not in _AI_RENDER_CACHE
+        if lbl and _render_key(lbl, code) not in _AI_RENDER_CACHE
     ]
     for i, lbl in enumerate(out):
-        cached = _AI_RENDER_CACHE.get((lbl, code))
+        cached = _AI_RENDER_CACHE.get(_render_key(lbl, code))
         if cached:
             out[i] = cached
     if not misses:
@@ -311,9 +311,12 @@ def localize_labels(labels: list[str], lang: str | None) -> list[str]:
                 f"button label ENTIRELY in {label_name}. Keep each label SHORT (a "
                 "button, not a sentence — aim under 28 characters), same meaning, "
                 "keep proper nouns and anything quoted as-is. Never mom/mamá/mamãe, "
-                "never cuadra/quadra or círculo; gender-neutral when the English is "
-                "neutral. Return JSON "
-                '{"labels": ["..."]} with EXACTLY one entry per input, same order.'
+                "never cuadra/quadra or círculo. A label is written in the USER's own "
+                "voice, so obey the USER CONTEXT gender line below for any "
+                "adjective that must agree (\"Estoy listo\" vs \"Estoy lista\"). "
+                "Return JSON "
+                '{"labels": ["..."]} with EXACTLY one entry per input, same order.\n\n'
+                + _address_guidance()
             ),
             user_payload="\n".join(f"- {lbl}" for _, lbl in misses),
             max_tokens=40 * len(misses) + 60,
@@ -324,7 +327,7 @@ def localize_labels(labels: list[str], lang: str | None) -> list[str]:
             for (i, lbl), new in zip(misses, rendered):
                 new_s = str(new or "").strip()
                 if new_s:
-                    _AI_RENDER_CACHE[(lbl, code)] = new_s
+                    _AI_RENDER_CACHE[_render_key(lbl, code)] = new_s
                     out[i] = new_s
     except Exception:  # noqa: BLE001 — English chips beat a failed turn
         import logging
@@ -1117,10 +1120,39 @@ def _fmt(text: str, fmt: dict[str, Any]) -> str:
         return text
 
 
-# One AI render per (English line, lang) per process — a canned line costs one
-# LLM call per language, not one per turn. Failures cache the fallback so a
-# broken LLM never adds per-turn latency to deterministic paths.
-_AI_RENDER_CACHE: dict[tuple[str, str], str] = {}
+# One AI render per (English line, lang, grammatical gender) per process — a canned
+# line costs one LLM call per language, not one per turn. Failures cache the fallback
+# so a broken LLM never adds per-turn latency to deterministic paths.
+#
+# GENDER IS PART OF THE KEY, and must stay part of it. Keyed on (text, lang) alone,
+# this cache is a cross-user leak: the FIRST user to render a phrase fixed its
+# gender agreement for every later user in the process, so a user whose gender was
+# known masculine was served a feminine user's cached "¡Bienvenida a la zona!"
+# (eval 2026-09-01). Order-dependent, so it presents as flakiness and gets worse as
+# the cache fills — the two-run eval saw one language fail, then two.
+_AI_RENDER_CACHE: dict[tuple[str, str, str], str] = {}
+
+
+def _render_key(text: str, lang: str) -> tuple[str, str, str]:
+    """Cache key for one AI render. Deferred import: app.context imports app.auth,
+    which must not be pulled in at i18n import time."""
+    try:
+        from app.context import user_gram_gender
+
+        return (text, lang, user_gram_gender())
+    except Exception:  # noqa: BLE001 — a key without gender is still correct-per-user
+        return (text, lang, "")
+
+
+def _address_guidance() -> str:
+    """This turn's role/gender guidance, or the unknown-gender rule. Deferred import
+    for the same reason as _render_key."""
+    try:
+        from app.context import address_guidance
+
+        return address_guidance()
+    except Exception:  # noqa: BLE001 — never fail a render over prompt trimming
+        return ""
 
 
 def _ai_render(en_text: str, lang: str) -> str | None:
@@ -1145,9 +1177,15 @@ def _ai_render(en_text: str, lang: str) -> str | None:
                 "codes, and anything a user typed exactly as-is. "
                 "Lexicon: never address anyone as mom/mamá/mamãe; never cuadra/quadra "
                 "for the area (say the equivalent of 'near you'/'your neighborhood'); "
-                "never círculo for a community. When the English is gender-neutral, "
-                "stay gender-neutral — rephrase rather than pick a gendered form. "
-                'Return JSON {"message": "..."}.'
+                "never círculo for a community. "
+                # The addressee's gender is decided HERE, not by the composer: on the
+                # decide_turn path the English is authored gender-free and this call is
+                # the first place that must agree. Without the guidance below it had no
+                # gender at all and only an unsatisfiable "stay gender-neutral" rule.
+                "AGREEMENT: obey the USER CONTEXT gender line below for every adjective, "
+                "participle and greeting about the person you are addressing. "
+                'Return JSON {"message": "..."}.\n\n'
+                + _address_guidance()
             ),
             user_payload=en_text,
             # Long deterministic replies (event lists, block summaries) must not

@@ -110,6 +110,61 @@ _SETS: dict[str, list[dict[str, Any]]] = {
 
 RECO_TYPES = tuple(_SETS)
 
+# ── The subject step ─────────────────────────────────────────────────────────────────────
+#
+# The FIRST question of every set, and the one field the card cannot be written without:
+# "Split Oak Forest", "Dr Sarah", "Cosori gooseneck". It lives here rather than in _SETS
+# because this file owns both ENDS of a generated set (see TAIL below) — the model writes
+# the wording, the floor guarantees the step exists whatever it wrote.
+#
+# It used to be collected by a hand-written gate OUTSIDE the set ("Who or where? A name
+# helps me find them."), which was type-blind — an electric kettle was asked *who or
+# where* and got no step set at all — and duplicated the set's own `where` step for
+# places (dev QA 2026-09-04).
+SUBJECT_FIELD = "subject"
+
+# (eyebrow, fallback question) per type, for when generation fails or the LLM is off.
+_SUBJECT_STEP: dict[str, tuple[str, str]] = {
+    "professional": ("Who", "Who is it?"),
+    "service": ("Who", "Who is it?"),
+    "restaurant": ("Place", "Which place is it?"),
+    "recipe": ("Recipe", "What's the recipe called?"),
+    "product": ("Product", "What's it called?"),
+    "location": ("Place", "Which place is it?"),
+    "diy": ("Trick", "What would you call this trick?"),
+}
+
+# Types whose SUBJECT is itself a point on the map: the subject step is answered with the
+# Places picker, and the set's own place steps ("Where is it?") would then ask for the same
+# thing twice. professional/service keep theirs — Dr Sarah is not her clinic, and a plumber
+# has no address at all.
+_PLACE_SUBJECT_TYPES = frozenset({"location", "restaurant"})
+
+
+def subject_is_place(reco_type: Any) -> bool:
+    """Is this type's subject a map point (answered with the Places picker)?"""
+    return normalize_type(reco_type) in _PLACE_SUBJECT_TYPES
+
+
+def head_step(
+    reco_type: Any, *, question: Any = None, label: Any = None
+) -> dict[str, Any] | None:
+    """The subject step for a type (None for an unknown type). `question`/`label` are the
+    model's wording when it wrote them — it knows this is a trampoline park and not "the
+    place" — falling back to the type's own phrasing."""
+    rtype = normalize_type(reco_type)
+    if not rtype:
+        return None
+    dflt_label, dflt_question = _SUBJECT_STEP[rtype]
+    written = " ".join(str(question or "").split())
+    return {
+        "field": SUBJECT_FIELD,
+        "label": " ".join(str(label or "").split())[:24] or dflt_label,
+        "question": written[:140] if written.endswith("?") else dflt_question,
+        "kind": "place" if rtype in _PLACE_SUBJECT_TYPES else "text",
+        "required": True,
+    }
+
 # What the extractor is told each type MEANS. Kept next to the sets so a new type is one
 # edit, not two files.
 TYPE_RULES = (
@@ -135,8 +190,14 @@ def normalize_type(raw: Any) -> str | None:
 
 def steps_for(reco_type: Any) -> list[dict[str, Any]]:
     """The ordered carousel steps for a type ([] for an unknown type). Copies, so a caller
-    stamping `answer` onto a step can't mutate the shared table."""
-    return [dict(s) for s in _SETS.get(normalize_type(reco_type) or "", [])]
+    stamping `answer` onto a step can't mutate the shared table.
+
+    Head-first, same as a generated set: when generation fails this static set IS the set,
+    and without the subject step it would never learn what is being recommended."""
+    head = head_step(reco_type)
+    if not head:
+        return []
+    return [head] + [dict(s) for s in _SETS.get(normalize_type(reco_type) or "", [])]
 
 
 def _resolve(spec: Any) -> list[dict[str, Any]]:
@@ -306,9 +367,29 @@ def validate_steps(
     rtype = normalize_type(reco_type)
     if not rtype:
         return []
+    # The head is ours, its WORDING is the model's: it wrote "Which trampoline park?" from
+    # the same sentence the type came out of, which no static table can do.
+    written = next(
+        (
+            item
+            for item in (raw or [])
+            if isinstance(item, dict) and _slug(item.get("field")) == SUBJECT_FIELD
+        ),
+        None,
+    )
+    head = head_step(
+        rtype,
+        question=(written or {}).get("question"),
+        label=(written or {}).get("label"),
+    )
+    # A restaurant/location subject is picked on the map, so a second place step is the same
+    # question twice. Dropped here and not answered-by-proxy: "Zaiqa" is not an answer to
+    # "which area is it in?", and a wrong answer is worse than one fewer step.
+    drop_place = rtype in _PLACE_SUBJECT_TYPES
     fallback = {s["field"]: s for s in steps_for(rtype)}
     middle: list[dict[str, Any]] = []
-    seen: set[str] = set(TAIL_FIELDS)  # the tail is ours; a generated copy is dropped
+    # The tail and the head are ours; a generated copy of either is dropped.
+    seen: set[str] = set(TAIL_FIELDS) | {SUBJECT_FIELD}
     for item in raw or []:
         if not isinstance(item, dict):
             continue
@@ -317,6 +398,8 @@ def validate_steps(
         if not field or field in seen or not question.endswith("?"):
             continue
         if _BLOCKED_ASK.search(question):
+            continue
+        if drop_place and _kind_for(field) == "place":
             continue
         opts = [
             " ".join(str(o).split())
@@ -345,6 +428,9 @@ def validate_steps(
         middle = [
             {**s, "kind": _kind_for(s["field"], s.get("options"))}
             for s in fallback.values()
+            # `fallback` is head-first too, and the head is added back on return.
+            if s["field"] != SUBJECT_FIELD
+            and not (drop_place and _kind_for(s["field"], s.get("options")) == "place")
         ]
 
     # The model's ORDER stands — it put "What does she do?" first and location before the
@@ -356,6 +442,8 @@ def validate_steps(
     have = {s["field"] for s in middle}
     for field in floor:
         if field in have or field not in fallback:
+            continue
+        if drop_place and _kind_for(field, fallback[field].get("options")) == "place":
             continue
         step = dict(fallback[field])
         step["kind"] = _kind_for(field, step.get("options"))
@@ -373,4 +461,4 @@ def validate_steps(
     for step in middle:
         step["required"] = step["field"] in required
 
-    return middle[:_MAX_MIDDLE] + tail_steps(tallies)
+    return ([head] if head else []) + middle[:_MAX_MIDDLE] + tail_steps(tallies)

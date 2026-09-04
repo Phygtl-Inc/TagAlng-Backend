@@ -41,9 +41,14 @@ def test_normalize_type_tolerates_llm_shapes() -> None:
 def test_required_steps_come_first_and_gate_the_card() -> None:
     # Required = the type's first two FLOOR fields: what a neighbor reading a recipe cannot
     # act on it without. "why is it worth sharing" is colour, and is asked either way.
-    assert next_question("recipe", {"time": "3 hours"})["field"] == "recipe"
-    assert missing_required("recipe", {"recipe": "Feijoada"}) == ["ingredients"]
-    assert missing_required("recipe", {"recipe": "F", "ingredients": "beans"}) == []
+    # The subject comes first and is required: a recommendation with no subject is a card
+    # with no title, and every set is now head-first (see `head_step`).
+    assert next_question("recipe", {"time": "3 hours"})["field"] == "subject"
+    assert next_question("recipe", {"subject": "Feijoada", "time": "3 h"})["field"] == "recipe"
+    assert missing_required("recipe", {"recipe": "Feijoada"}) == ["subject", "ingredients"]
+    assert missing_required(
+        "recipe", {"subject": "Feijoada", "recipe": "F", "ingredients": "beans"}
+    ) == []
     filled = {s["field"]: "x" for s in steps_for("product")}
     assert next_question("product", filled) is None
 
@@ -81,14 +86,17 @@ def test_typed_capture_asks_the_types_own_questions(monkeypatch: Any) -> None:
             "answers": {"known_for": "Open-air food stalls and live music"},
         },
     )
-    # The opener already answered step 1, so the flow asks step 2 — not step 1 again.
-    assert ctx["tip_pending_question"] == "Where is it?"
-    assert ctx["tip_pending_ask"] == "where"
-    # 8 fallback steps + the consent step. No agree step: no neighbour has logged anything
-    # on Boxi Park, and an empty "others also said" row is a dead card.
-    assert "(2/9)" in reply
-    assert draft["steps"][0]["answer"] == "Open-air food stalls and live music"
-    assert draft["missing"] == ["where"]
+    # Two steps are already answered — the subject by the name in the opener, `known_for` by
+    # what they said about it — so the flow asks the THIRD, not either of those again.
+    assert ctx["tip_pending_question"] == "Why is it worth going?"
+    assert ctx["tip_pending_ask"] == "why"
+    # subject + 7 fallback steps + the consent step. `where` is not among them: a location's
+    # subject IS the map point, so asking "where is it?" after it is the same question twice.
+    assert "(3/9)" in reply
+    assert "where" not in [s["field"] for s in draft["steps"]]
+    assert draft["steps"][0]["answer"] == "Boxi Park"
+    assert draft["steps"][1]["answer"] == "Open-air food stalls and live music"
+    assert draft["missing"] == []
 
 
 def test_step_answer_lands_on_its_field_not_the_details_bag(monkeypatch: Any) -> None:
@@ -112,6 +120,9 @@ def test_answers_merge_across_turns(monkeypatch: Any) -> None:
     _, draft = _run(monkeypatch, "she took our insurance too", ctx,
                     {"answers": {"helped_with": "toddler cleanings"}})
     assert draft["answers"] == {
+        # Pre-answered from the name already in the draft, so the carousel shows it done
+        # instead of asking who this is.
+        "subject": "Dr. Sarah",
         "profession": "Pediatric dentist",
         "helped_with": "toddler cleanings",
     }
@@ -173,7 +184,7 @@ def test_optional_steps_advance_instead_of_repeating() -> None:
     """The walk must move PAST an optional already offered. Without `asked` it returned the
     same first unanswered optional every turn, the caller declined to re-ask it, and every
     step behind it was never reached — the last two questions of each set were dead."""
-    answers = {"profession": "dentist", "helped_with": "cleanings"}
+    answers = {"subject": "Dr. Sarah", "profession": "dentist", "helped_with": "cleanings"}
     asked: list[str] = []
     for _ in range(10):
         step = next_question("professional", answers, asked=asked)
@@ -184,7 +195,9 @@ def test_optional_steps_advance_instead_of_repeating() -> None:
 
 
 def test_required_step_is_re_asked_until_answered() -> None:
-    step = next_question("recipe", {"recipe": "Feijoada"}, asked=["ingredients"])
+    step = next_question(
+        "recipe", {"subject": "Feijoada", "recipe": "Feijoada"}, asked=["ingredients"]
+    )
     assert step["field"] == "ingredients", "a required step must not be dropped by `asked`"
 
 
@@ -228,11 +241,13 @@ def test_generated_set_keeps_the_models_questions() -> None:
     fields = [s["field"] for s in steps]
     # Floor first (a recipe nobody can shop for is not a recommendation), then the model's
     # own subject-specific questions, then the tail.
-    assert fields == ["recipe", "ingredients", "taste", "difficulty", "ask_ok"]
-    assert [s["field"] for s in steps if s["required"]] == ["recipe", "ingredients"]
-    assert steps[2]["placeholder"] == "Rich, smoky, deeply savoury"
-    assert steps[2]["kind"] == "text"
-    assert steps[3]["kind"] == "choice", "options ⇒ a chip row, not a text box"
+    assert fields == ["subject", "recipe", "ingredients", "taste", "difficulty", "ask_ok"]
+    assert [s["field"] for s in steps if s["required"]] == [
+        "subject", "recipe", "ingredients"
+    ]
+    assert steps[3]["placeholder"] == "Rich, smoky, deeply savoury"
+    assert steps[3]["kind"] == "text"
+    assert steps[4]["kind"] == "choice", "options ⇒ a chip row, not a text box"
 
 
 def test_generated_set_drops_what_it_must_not_ask() -> None:
@@ -258,7 +273,7 @@ def test_generated_set_drops_what_it_must_not_ask() -> None:
 def test_generated_set_falls_back_when_generation_gives_nothing() -> None:
     for raw in (None, [], "nope", [{"question": "no field?"}]):
         steps = validate_steps(raw, "product")
-        assert [s["field"] for s in steps][:2] == ["used_for", "where_to_buy"]
+        assert [s["field"] for s in steps][:3] == ["subject", "used_for", "where_to_buy"]
         assert steps[-1]["field"] == "ask_ok"
 
 
@@ -303,11 +318,11 @@ def test_flow_uses_the_generated_set_and_writes_it_once(monkeypatch: Any) -> Non
     )
     # Floor order, with the model's own "What does she do?" kept as step 1.
     assert [s["field"] for s in draft["step_set"]] == [
-        "profession", "helped_with", "contact", "treats", "ask_ok"
+        "subject", "profession", "helped_with", "contact", "treats", "ask_ok"
     ]
     assert "steps_raw" not in draft, "consumed, not carried"
     assert ctx["tip_pending_question"] == "What did they help you with?"
-    assert "(2/5)" in reply
+    assert "(3/6)" in reply
 
     # A later turn proposing a different set must not replace the one in flight.
     first = draft["step_set"]
@@ -402,12 +417,92 @@ def test_a_spoken_share_reaches_the_capture_not_the_policy() -> None:
     assert not escapes({"goal": "chat", "confidence": 0.9}, "my toddler slept through")
 
 
+def test_an_unnamed_recommendation_still_gets_its_own_questions(monkeypatch: Any) -> None:
+    """dev QA 2026-09-04: "i found a great electric kettle" and "found a new hiking place it
+    was great" both came back with the same hand-written "Who or where? A name helps me find
+    them." and step_set=[] — a kettle asked WHO, and neither reached the carousel at all,
+    because the name was collected by a gate OUTSIDE the set. The name is the set's first
+    STEP now, so every type has its questions from the first turn."""
+    monkeypatch.setattr(tip_share, "_reco_tallies", lambda **_: [])
+    for reco_type, category, kind in (
+        ("product", "electric kettle", "text"),
+        ("location", "hiking spot", "place"),
+    ):
+        ctx: dict[str, Any] = {}
+        reply, draft = _run(
+            monkeypatch, "i found a great one", ctx,
+            {"category": category, "reco_type": reco_type, "trait": "great"},
+        )
+        steps = draft["steps"]
+        assert len(steps) > 1, f"{reco_type} got no question set"
+        assert steps[0]["field"] == "subject", f"{reco_type} does not lead with the subject"
+        assert steps[0]["kind"] == kind, f"{reco_type} subject control"
+        assert ctx["tip_pending_ask"] == "subject"
+        assert "Who or where" not in reply
+
+
+def test_each_recommendation_gets_its_own_id(monkeypatch: Any) -> None:
+    """dev QA 2026-09-04: "my kids loved the new trampoline park" opened the CHAT fork with
+    0/7 answered — the cards-or-chat pick leaked from the previous recommendation. The FE
+    keyed "same recommendation?" on `name`, which is null until the subject step is
+    answered, so two nameless recommendations in a row looked like one. The id is stable
+    for a draft's life and new for the next one."""
+    monkeypatch.setattr(tip_share, "_reco_tallies", lambda **_: [])
+    ctx: dict[str, Any] = {}
+    extracted = {"category": "trampoline park", "reco_type": "location", "trait": "loved it"}
+    _, first = _run(monkeypatch, "my kids loved the new trampoline park", ctx, extracted)
+    one = first["draft_id"]
+    assert one, "a draft with no name still has an identity"
+
+    # Same recommendation, now named — the id must NOT change, or the FE reads it as a new
+    # one and throws the user back to the fork over a half-answered set.
+    _, named = _run(monkeypatch, "Altitude Trampoline Park", ctx, {"name": "Altitude Trampoline Park"})
+    assert named["draft_id"] == one
+    assert named["name"] == "Altitude Trampoline Park"
+
+    # A different recommendation gets a different id, so the lane pick does not carry over.
+    tip_share.reset_tip_share_state(ctx)
+    ctx["tip_draft"] = None
+    _, second = _run(monkeypatch, "i found a great electric kettle", ctx,
+                     {"category": "electric kettle", "reco_type": "product"})
+    assert second["draft_id"] and second["draft_id"] != one
+
+
+def test_fix_name_reopens_the_subject_step(monkeypatch: Any) -> None:
+    """The name chip has no gate to go back to any more, so it re-opens the subject step —
+    with the step's OWN question, not the old type-blind one."""
+    monkeypatch.setattr(tip_share, "_reco_tallies", lambda **_: [])
+    ctx: dict[str, Any] = {
+        "tip_draft": {"name": "Dr. Sarah", "category": "dentist", "reco_type": "professional",
+                      "answers": {"subject": "Dr. Sarah", "profession": "Dentist"}},
+        "tip_share_active": True,
+        "tip_ready": True,
+        "tip_asked_fields": ["subject", "profession"],
+    }
+    reply, draft = _run(monkeypatch, "fix:name", ctx, {})
+    assert ctx["tip_pending_ask"] == "subject"
+    assert "subject" not in draft["answers"]
+    assert not draft.get("name"), "cleared, so the mirror cannot put it straight back"
+    assert "Who or where" not in reply
+
+    _, draft = _run(monkeypatch, "Dr. Sara Ahmed", ctx, {})
+    assert draft["answers"]["subject"] == "Dr. Sara Ahmed"
+    assert draft["name"] == "Dr. Sara Ahmed", "the subject answer IS the name"
+
+
 def test_a_where_step_is_answered_on_the_map_not_in_a_text_box() -> None:
     """A hand-typed "where is it?" is a string nobody can navigate to, so the location steps
     come back as kind=place and the FE renders the Places picker."""
     kinds = {s["field"]: s["kind"] for s in validate_steps([], "location")}
-    assert kinds["where"] == "place"
+    # A location's SUBJECT is the map point, so it is the place step — and the set's own
+    # "where is it?" is dropped rather than asked right after it (dev QA 2026-09-04).
+    assert kinds["subject"] == "place"
+    assert "where" not in kinds
     assert kinds["known_for"] == "text"
+    # A person is not a place: professional keeps its own map step, and its subject is typed.
+    prof = {s["field"]: s["kind"] for s in validate_steps([], "professional")}
+    assert prof["subject"] == "text"
+    assert prof["where"] == "place"
 
     # A model-written location step gets it too — the promotion is by field, so it applies
     # whatever the model called the question.
