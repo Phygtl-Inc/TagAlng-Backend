@@ -35,6 +35,12 @@ LOGIN_CARRY_KEYS: tuple[str, ...] = (
     "ask_draft_pending",
     # They chose a community to join and then had to verify.
     "community_join_pending",
+    # A community they were CREATING when the login interrupted. Real work — the place is
+    # pinned and Lana's questions are half-answered — and the draft itself
+    # (community_draft) rides in the session context, so dropping only the pending ask
+    # would strand it mid-set with nothing marking which step was open.
+    "community_pending_ask",
+    "community_pending_question",
 )
 
 # Deliberately dropped, with the reason. These describe the STATE OF A TURN, not

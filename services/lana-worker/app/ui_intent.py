@@ -35,6 +35,9 @@ UI_INTENT_COLLECT_ITEM_DETAIL = "collect_item_detail"
 UI_INTENT_ITEM_LISTED = "item_listed"
 UI_INTENT_COLLECT_TIP_DETAIL = "collect_tip_detail"
 UI_INTENT_TIP_LISTED = "tip_listed"
+# Create-a-community capture: the draft card while capturing, the live one once created.
+UI_INTENT_COLLECT_COMMUNITY_DETAIL = "collect_community_detail"
+UI_INTENT_COMMUNITY_CREATED = "community_created"
 UI_INTENT_COLLECT_LOOK_MEET_DETAIL = "collect_look_meet_detail"
 UI_INTENT_LOOK_MEET_SAVED = "look_meet_saved"
 
@@ -145,6 +148,14 @@ def derive_ui_intent(
         return UI_INTENT_TIP_LISTED
     if ctx.get("tip_share_active"):
         return UI_INTENT_COLLECT_TIP_DETAIL
+
+    # In-chat "create a community" — the draft card while capturing, the created card on
+    # publish. Above the look-meet pair for the same reason the tip pair is: a capture in
+    # flight owns the input chrome.
+    if ctx.get("community_published_now"):
+        return UI_INTENT_COMMUNITY_CREATED
+    if ctx.get("community_create_active"):
+        return UI_INTENT_COLLECT_COMMUNITY_DETAIL
 
     # In-chat "looking for a meet" — the look card while capturing, saved card once listening.
     if ctx.get("look_meet_saved_now"):

@@ -19,6 +19,10 @@ LINEAR_INTENTS: frozenset[str] = frozenset({
     # "what communities am I in" and "what's around me to join" — one lane, because
     # the honest answer to either is usually both halves.
     "discovery.communities",
+    # Starting one (community_capture) — the sharing-side twin of discovery.communities,
+    # and a separate intent because the two are opposite directions: one BROWSES places
+    # people belong to, this one CREATES a place for people to find.
+    "sharing.community",
     # Identity
     "identity.add_claim",
     "identity.edit_claim",
@@ -381,6 +385,12 @@ def _apply_discovery_linear_slots(out: dict[str, Any], linear: str, *, msg: str)
         # it must NOT carry goal=peers (that is what turned "show me communities
         # around me" into a keyword search for neighbors "interested in community").
         out["goal"] = "chat"
+        out["in_discovery"] = False
+        out.pop("attr_filter", None)
+    elif linear == "sharing.community":
+        # Its own goal, so the capture's lane guard has something to be native to and a
+        # confident pivot away still releases it (see community_capture_should_release).
+        out["goal"] = "create_community"
         out["in_discovery"] = False
         out.pop("attr_filter", None)
     elif linear == "identity.add_claim":

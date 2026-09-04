@@ -354,42 +354,34 @@ def tail_steps(tallies: Any = ()) -> list[dict[str, Any]]:
     return out
 
 
-def validate_steps(
-    raw: Any, reco_type: Any, *, tallies: Any = ()
+def build_step_set(
+    raw: Any,
+    *,
+    fallback: dict[str, dict[str, Any]],
+    floor: tuple[str, ...],
+    head: dict[str, Any] | None,
+    tail: list[dict[str, Any]],
+    drop_place: bool = False,
+    required_extra: int = 0,
 ) -> list[dict[str, Any]]:
-    """A model-written question set, made safe to ask: [] for an unknown type.
+    """A model-written question set, made safe to ask — head + middle + tail.
 
-    Everything here is a guard against a specific way a generated set goes wrong — junk
+    Every line here is a guard against a specific way a generated set goes wrong: junk
     fields, a duplicate question, a statement instead of a question, a private ask, a
     35-step interrogation, a set that forgot the phone number, a model that helpfully
     re-invented the consent toggle in its own words.
+
+    Shared by the recommendation capture and the community capture (see
+    `community_question_sets`): the two differ ONLY in their tables — the guards, the
+    ordering rule and the required rule are the same problem in both, and were the same
+    ninety lines twice before this was pulled out.
     """
-    rtype = normalize_type(reco_type)
-    if not rtype:
-        return []
-    # The head is ours, its WORDING is the model's: it wrote "Which trampoline park?" from
-    # the same sentence the type came out of, which no static table can do.
-    written = next(
-        (
-            item
-            for item in (raw or [])
-            if isinstance(item, dict) and _slug(item.get("field")) == SUBJECT_FIELD
-        ),
-        None,
-    )
-    head = head_step(
-        rtype,
-        question=(written or {}).get("question"),
-        label=(written or {}).get("label"),
-    )
-    # A restaurant/location subject is picked on the map, so a second place step is the same
-    # question twice. Dropped here and not answered-by-proxy: "Zaiqa" is not an answer to
-    # "which area is it in?", and a wrong answer is worse than one fewer step.
-    drop_place = rtype in _PLACE_SUBJECT_TYPES
-    fallback = {s["field"]: s for s in steps_for(rtype)}
+    reserved = {s["field"] for s in tail}
+    if head:
+        reserved.add(head["field"])
     middle: list[dict[str, Any]] = []
     # The tail and the head are ours; a generated copy of either is dropped.
-    seen: set[str] = set(TAIL_FIELDS) | {SUBJECT_FIELD}
+    seen: set[str] = set(reserved)
     for item in raw or []:
         if not isinstance(item, dict):
             continue
@@ -429,7 +421,7 @@ def validate_steps(
             {**s, "kind": _kind_for(s["field"], s.get("options"))}
             for s in fallback.values()
             # `fallback` is head-first too, and the head is added back on return.
-            if s["field"] != SUBJECT_FIELD
+            if s["field"] not in reserved
             and not (drop_place and _kind_for(s["field"], s.get("options")) == "place")
         ]
 
@@ -438,7 +430,6 @@ def validate_steps(
     # for a phone number before it has said who she is. Only the floor fields it FORGOT are
     # inserted, and they go next to the other basics rather than at the end: they are asked
     # early or, on an early "that's it", never.
-    floor = _FLOOR.get(rtype, ())
     have = {s["field"] for s in middle}
     for field in floor:
         if field in have or field not in fallback:
@@ -456,9 +447,43 @@ def validate_steps(
     # Required = the type's first two floor fields. Not "the first two steps": a model that
     # leads with colour would make colour required and leave `contact` optional, which is
     # the exact failure the floor exists for.
-    floor_present = [f for f in floor if f in have][:2]
+    floor_present = [f for f in floor if f in have][: 2 + required_extra]
     required = set(floor_present) or {s["field"] for s in middle[:2]}
     for step in middle:
         step["required"] = step["field"] in required
 
-    return ([head] if head else []) + middle[:_MAX_MIDDLE] + tail_steps(tallies)
+    return ([head] if head else []) + middle[:_MAX_MIDDLE] + tail
+
+
+def validate_steps(
+    raw: Any, reco_type: Any, *, tallies: Any = ()
+) -> list[dict[str, Any]]:
+    """The recommendation capture's tables, poured into `build_step_set`."""
+    rtype = normalize_type(reco_type)
+    if not rtype:
+        return []
+    # The head is ours, its WORDING is the model's: it wrote "Which trampoline park?" from
+    # the same sentence the type came out of, which no static table can do.
+    written = next(
+        (
+            item
+            for item in (raw or [])
+            if isinstance(item, dict) and _slug(item.get("field")) == SUBJECT_FIELD
+        ),
+        None,
+    )
+    return build_step_set(
+        raw,
+        fallback={s["field"]: s for s in steps_for(rtype)},
+        floor=_FLOOR.get(rtype, ()),
+        head=head_step(
+            rtype,
+            question=(written or {}).get("question"),
+            label=(written or {}).get("label"),
+        ),
+        tail=tail_steps(tallies),
+        # A restaurant/location subject is picked on the map, so a second place step is the
+        # same question twice. Dropped and not answered-by-proxy: "Zaiqa" is not an answer
+        # to "which area is it in?", and a wrong answer is worse than one fewer step.
+        drop_place=rtype in _PLACE_SUBJECT_TYPES,
+    )

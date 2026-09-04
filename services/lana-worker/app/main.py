@@ -140,6 +140,8 @@ from app.models import (
     SignalSavedPayload,
     TipDraft,
     TipDraftPayload,
+    CommunityDraft,
+    CommunitySetupRequest,
     TipSetupRequest,
     TurnDebug,
     TurnRouting,
@@ -525,6 +527,13 @@ def _tip_draft_from_dict(raw: dict[str, Any] | None) -> TipDraft | None:
         return None
     fields = set(TipDraft.model_fields)
     return TipDraft(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _community_draft_from_dict(raw: dict[str, Any] | None) -> CommunityDraft | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    fields = set(CommunityDraft.model_fields)
+    return CommunityDraft(**{k: v for k, v in raw.items() if k in fields})
 
 
 def _look_draft_from_dict(raw: dict[str, Any] | None) -> LookDraft | None:
@@ -2043,6 +2052,7 @@ def _run_lana_message(
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"), auth.user_id)
         item_draft = _item_draft_from_dict(merged.get("item_draft"))
         tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
+        community_draft = _community_draft_from_dict(merged.get("community_draft"))
         look_draft = _look_draft_from_dict(merged.get("look_draft"))
     except Exception as exc:
         # Log the full traceback to the console — otherwise the caller only sees a
@@ -2218,6 +2228,7 @@ def _run_lana_message(
         event_draft=event_draft,
         item_draft=item_draft,
         tip_draft=tip_draft,
+        community_draft=community_draft,
         look_draft=look_draft,
         ask_draft=_ask_draft_from_ctx(merged),
         grounding=_grounding_card_from_ctx(merged),
@@ -2504,6 +2515,67 @@ def set_event_setup(
     ctx["event_settings"] = settings
     update_session_context(session_id, ctx)
     return {"ok": True}
+
+
+@app.post("/lana/sessions/{session_id}/community-setup")
+def set_community_setup(
+    session_id: str,
+    body: CommunitySetupRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Stamp the community carousel onto the session draft in one shot — and/or pin its
+    place. Serves BOTH forks of the capture, which is why the two live on one endpoint:
+
+      cards fork — the whole carousel at once: {answers: {...}, google_place_id: "..."}
+      chat  fork — just the map step Lana is asking right now: {google_place_id: "..."}
+
+    The client then sends one message and the flow lands on whatever comes next with
+    everything applied, instead of re-asking what the carousel already collected.
+
+    Two things a client cannot do here: write a field outside the session's OWN generated
+    step set (the keys are intersected with it), or name a place (`google_place_id` is
+    resolved against Google server-side — see community_capture.set_community_place).
+    """
+    auth = verify_auth(authorization)
+    session = get_session_for_user(session_id, auth.user_id)
+    ctx = dict(session.get("context") or {})
+    draft = dict(ctx.get("community_draft") or {})
+    if not draft:
+        raise HTTPException(status_code=409, detail="no_community_draft")
+
+    from app.community_capture import set_community_place, step_set_of
+    from app.reco_question_sets import missing_required
+
+    if (body.google_place_id or "").strip():
+        # Writes into ctx["community_draft"], so re-read it before stamping answers.
+        if not set_community_place(ctx, google_place_id=str(body.google_place_id)):
+            raise HTTPException(status_code=422, detail="place_not_found")
+        draft = dict(ctx.get("community_draft") or {})
+        ctx["community_pending_ask"] = None
+
+    steps = step_set_of(draft)
+    allowed = {s["field"] for s in steps}
+    answers = dict(draft.get("answers") or {})
+    from app.community_question_sets import COMMUNITY_SUBJECT_FIELD
+
+    for field, value in (body.answers or {}).items():
+        key = str(field)
+        text = " ".join(str(value or "").split())[:280]
+        # The subject is the pinned place and nothing else: a client-sent name would be
+        # an ungroundable string, and an ungrounded community is invisible everywhere.
+        if key in allowed and key != COMMUNITY_SUBJECT_FIELD and text:
+            answers[key] = text
+    draft["answers"] = answers
+    ctx["community_draft"] = draft
+    # Every step the carousel showed counts as offered, so the turn after this does not
+    # re-ask the optionals the user chose to leave blank — it goes to the ready card.
+    ctx["community_asked_fields"] = sorted(allowed)
+    ctx["community_create_active"] = True
+    missing = missing_required(steps, answers)
+    if not missing:
+        ctx["community_ready"] = True
+    update_session_context(session_id, ctx)
+    return {"ok": True, "missing": missing}
 
 
 @app.post("/lana/sessions/{session_id}/tip-setup")

@@ -21,6 +21,9 @@ TURN_SCOPED_SURFACES = frozenset({
     "event_published_now",
     "item_listed_now",
     "tip_listed_now",
+    # The one-turn "it just went live" flag. Without it the celebration card re-renders on
+    # the next unrelated turn, exactly as the tip/event flags would.
+    "community_published_now",
     "look_meet_saved_now",
     # Tip-seek Google fallback cards + their refine chips. Ephemeral per-turn UI: without
     # this a tip turn's "From Google" restaurant cards (google_place_suggestions) and refine

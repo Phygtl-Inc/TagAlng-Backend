@@ -727,6 +727,55 @@ class TipDraft(BaseModel):
     pending_field: str | None = None
 
 
+class CommunityDraft(BaseModel):
+    """In-chat "create a community" draft (the community_capture flow).
+
+    Deliberately shaped like TipDraft: the FE renders both with the same fork, carousel,
+    live card and ready card — see docs/CREATE_COMMUNITY_FLOW.md. Differences are the
+    place (mandatory, always pinned on the map) and `published`/`community_id` in place
+    of `listed`/`signal_id`.
+    """
+
+    # Stable identity for ONE community draft, for its whole life — the FE keys its
+    # cards-or-chat pick on this and never on the name, which arrives on the subject step.
+    draft_id: str | None = None
+    # The pinned place. `name` is Google's, never the client's (see set_community_place).
+    name: str | None = None
+    google_place_id: str | None = None
+    place_address: str | None = None
+    # circle_affiliations.circle_type — the taxonomy circles_capture already indexes on.
+    circle_type: str | None = None
+    # Why people gather there, in the creator's own words.
+    blurb: str | None = None
+    steps: list[RecoStep] = Field(default_factory=list)
+    answers: dict[str, str] = Field(default_factory=dict)
+    chips: list[ItemChip] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    ready: bool = False
+    published: bool = False
+    community_id: str | None = None
+    missing: list[str] = Field(default_factory=list)
+    # Which step the chat fork is asking right now — the FE renders that step's `kind`
+    # (a `place` step gets the picker). None on the ready card: nothing is open.
+    pending_field: str | None = None
+
+
+class CommunitySetupRequest(BaseModel):
+    """The carousel fork of the community capture: every answer at once instead of one
+    per turn, plus the pinned place.
+
+    `answers` keys are the `field`s of the steps Lana generated for THIS community, so
+    this cannot be validated against a fixed enum — the endpoint intersects it with the
+    session's own step set, which is also what stops a client writing arbitrary keys.
+
+    `google_place_id` is the ONLY way the place is ever set: name/address/geo are fetched
+    from Google server-side, so a caller can never mint or rename a community's place.
+    """
+
+    answers: dict[str, str] = Field(default_factory=dict)
+    google_place_id: str | None = None
+
+
 class LookEvent(BaseModel):
     """An existing block meet the seeker could join, surfaced on the ready card."""
 
@@ -1015,6 +1064,9 @@ class SendMessageResponse(BaseModel):
     event_id: str | None = None
     item_draft: ItemDraft | None = None
     tip_draft: TipDraft | None = None
+    # The create-a-community capture's draft — same shape and same FE components as
+    # tip_draft (docs/CREATE_COMMUNITY_FLOW.md). Absent on every other turn.
+    community_draft: CommunityDraft | None = None
     look_draft: LookDraft | None = None
     # Seek-side ask card on a looking.tip turn (§12d). Absent on every other turn, so the
     # FE renders nothing until it arrives.
