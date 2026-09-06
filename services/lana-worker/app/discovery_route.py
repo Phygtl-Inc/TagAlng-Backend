@@ -6706,7 +6706,7 @@ def fetch_preview_events_on_block(
             sb.table("events")
             .select(
                 "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, "
-                "recurrence, circle_place_ref"
+                "recurrence, circle_place_ref, description"
             )
             .eq("status", "open")
             .gte("starts_at", now_iso)

@@ -105,7 +105,7 @@ def community_events(
             .table("events")
             .select(
                 "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, "
-                "recurrence, circle_place_ref, place_ref"
+                "recurrence, circle_place_ref, place_ref, description"
             )
             .eq("status", "open")
             .gte("starts_at", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))

@@ -625,9 +625,10 @@ def _filter_events_by_query(
                     ev.get("starts_at"), has_time=ev.get("has_time") is not False
                 )
                 host = str(ev.get("host_name") or "").strip()
+                desc = str(ev.get("description") or "").strip()[:200]
                 lines.append(
                     f"{i}: {ev.get('title', '')} | date: {when} | "
-                    f"host: {host or '?'} | tags: {tagstr}"
+                    f"host: {host or '?'} | tags: {tagstr} | about: {desc}"
                 )
             data = llm_json(
                 model=router_model(),
