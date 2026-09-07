@@ -61,6 +61,16 @@ class PopulationConfig:
 
     n_zips: int = 5
     moms_per_zip: int = 30
+    # Synthetic ZIP ids are NUMERIC because the real column enforces the format:
+    # `zip_unlock.zip5 text primary key check (zip5 ~ '^\d{5}$')`
+    # (20260906120000:202). The old `Z000` labels were fine for the stub but made the LIVE
+    # ZIP arm structurally unrunnable — `recount_zip_unlock('Z000')` 400s on every call, which
+    # is why the live sweep had never actually executed its area half.
+    #
+    # 99xxx is chosen as the least-collision-prone valid range for a synthetic set, but it is
+    # NOT reserved (real Alaska ZIPs live there), so anything writing these to a shared project
+    # must collision-check first — see sweep.py's preflight.
+    zip_base: int = 99000
     # Adjacency topology: zips arranged in a ring, each adjacent to its `adjacency_ring`
     # nearest neighbors on either side.
     # RESOLVED (Asjid 2026-07-28, reaffirmed rev-2): there is NO adjacency concept as-built —
@@ -150,12 +160,12 @@ def _weighted_count(rng: random.Random, weights: tuple[float, ...]) -> int:
     return rng.choices(range(len(weights)), weights=list(weights), k=1)[0]
 
 
-def _zip_adjacency(n_zips: int, ring: int) -> dict[str, set[str]]:
+def _zip_adjacency(n_zips: int, ring: int, zip_base: int = 99000) -> dict[str, set[str]]:
     """A simple ring topology: zip_i is adjacent to zip_(i±1..ring), wrapping around.
     RESOLVED (Asjid 2026-07-28, reaffirmed rev-2): no real counterpart — the deployed onion
     matcher has no proximity/adjacency scoping, so the stub now IGNORES this. Retained only
     so generate_population's return signature and the day-zero fixture don't ripple. (guess #2)"""
-    zips = [f"Z{i:03d}" for i in range(n_zips)]
+    zips = [f"{zip_base + i:05d}" for i in range(n_zips)]
     adjacency: dict[str, set[str]] = {z: set() for z in zips}
     for i, z in enumerate(zips):
         for d in range(1, ring + 1):
@@ -342,8 +352,8 @@ def _blocked_pairs(
 def generate_population(config: PopulationConfig) -> GeneratedPopulation:
     """Returns moms + zip_adjacency + blocked_pairs. Deterministic for a given config.seed."""
     rng = random.Random(config.seed)
-    zips = [f"Z{i:03d}" for i in range(config.n_zips)]
-    adjacency = _zip_adjacency(config.n_zips, config.adjacency_ring)
+    zips = [f"{config.zip_base + i:05d}" for i in range(config.n_zips)]
+    adjacency = _zip_adjacency(config.n_zips, config.adjacency_ring, config.zip_base)
     place_pool = _place_pool(zips, config.circle_types, config.places_per_type_per_zip)
     affinity_vocab = [f"aff_{i}" for i in range(config.affinity_vocab_size)]
 

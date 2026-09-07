@@ -222,9 +222,17 @@ class AreaStateLive:
     verified_active_count from scratch and maps count→state (read-repaired from 3 call sites).
 
     ⚠ recount_zip_unlock WRITES: it updates the zip_unlock row and, on a closed/warming→open
-    crossing, stamps opened_at + founding on qualifying members and fires a push. So this method
-    is gated behind SIM_ALLOW_WRITES=1 — it refuses to run otherwise. Prefer a dedicated dev ZIP
-    seeded via live_seed, never a real one, since the founding stamps persist."""
+    crossing, stamps opened_at + founding on qualifying members. So this method is gated behind
+    SIM_ALLOW_WRITES=1 — it refuses to run otherwise. Prefer a dedicated dev ZIP seeded via
+    live_seed, never a real one, since the founding stamps persist.
+
+    IT DOES NOT SEND A PUSH (corrected 2026-09-04). The open notification lives in PYTHON, not in
+    the function: app/zip_unlock.py:66 calls _notify_zip_opened_async only when its own wrapper
+    sees state["opened"], and that wrapper is what POST /lana/area/progress runs. This adapter
+    calls the RPC DIRECTLY over REST, so that branch never executes. An earlier version of this
+    docstring said otherwise and the claim propagated into the README and two handoff reports,
+    where it made the live sweep look far more dangerous than it is. The DB write is real; the
+    notification is not."""
 
     def transition_zip(
         self, zip_state: ZipState, event: ZipEvent, config: AreaStateConfig

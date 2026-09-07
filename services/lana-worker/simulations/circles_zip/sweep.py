@@ -1030,11 +1030,21 @@ def render_report(sweep_results: dict[str, Any]) -> str:
     lines.append("coordinates; locality lives in the serving layer) and #7 (RPC p_limit 20, clamp [1,50],")
     lines.append("p_min_score 1; blend serve cap 5 / <=3 labels) are the two that flipped in rev-2.")
     lines.append("")
-    lines.append("Caveats: the concept arm is DORMANT in current prod (needs IDENTITY_CONCEPT_LINK_ENABLED")
-    lines.append("+ the 20260905 backfill, PR #96 pending) — a 0-concept score is flag-off, not a bug. And")
-    lines.append("prod DB still lacks migrations 20260913/14, so the blend FAILS OPEN there (peers list")
-    lines.append("byte-identical to pre-onion) until that push — dev has everything. Live scoring (RPC/")
-    lines.append("wrapper) is not exercised here: no dev DB/service credential is reachable from this branch.")
+    # Corrected 2026-09-03. Every clause of the previous caveat had become false and was being
+    # reprinted into each report: the concept arm is LIVE on both dev (139/139 peer rows) and prod
+    # (31/38) with IDENTITY_CONCEPT_LINK_ENABLED=1 in both env files, prod has 20260913/14, and
+    # live scoring HAS been exercised (read-only parity against the deployed RPC, 2026-08-17 and
+    # 2026-09-01, both green).
+    lines.append("Status: the concept arm is LIVE on dev AND prod (IDENTITY_CONCEPT_LINK_ENABLED=1 in")
+    lines.append("both env files; 139/139 dev peer rows and 31/38 prod carry shared concepts), and prod")
+    lines.append("has migrations 20260913/14 — the blend no longer fails open there. Live scoring HAS")
+    lines.append("been exercised read-only against the deployed RPC and matches this stub.")
+    lines.append("")
+    lines.append("One asymmetry to carry into any live diff (20261116120000): `score` ranks on")
+    lines.append("public+mutual claims while shared_concept_count/_labels/_subjects stay both_public, so")
+    lines.append("`score == circle_bonus + shared_concept_count` is NO LONGER an identity. The ranked")
+    lines.append("count is not in the RPC's RETURNS list, so `score - circle_bonus` is the only way to")
+    lines.append("observe it — do not read the gap as a scoring bug.")
     lines.append("")
 
     return "\n".join(lines)
