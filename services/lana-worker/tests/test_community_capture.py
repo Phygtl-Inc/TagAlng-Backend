@@ -421,3 +421,57 @@ def test_the_draft_survives_the_wire() -> None:
         assert getattr(model, key) or value in (False, [], {}), f"{key} lost on the wire"
     assert model.pending_field == "draws"
     assert model.steps[0].kind == "place"
+
+
+def test_the_lane_survives_its_own_seed_turn() -> None:
+    """dev 2026-09-07: the "Create a community" CTA came back as a decide_turn pitch
+    ("want to set one up for your kids, your gym…?") with policy chips and no capture.
+    The matcher armed the lane, then the release guard re-read the SAME utterance with the
+    classifier — which calls a bare create sharing.host — and released it on the spot, so
+    the turn fell through to the policy. A seed turn has nothing to pivot away from."""
+    host_misread = {
+        "linear_intent": "sharing.host",
+        "signal_intent": "host_meet",
+        "goal": "save_signal",
+        "confidence": 0.9,
+    }
+    seed = {"community_create_active": True, "community_turns": 0}
+    assert not cc.community_capture_should_release(
+        "I want to create a community", seed, host_misread
+    )
+    # Mid-flow the same misread IS a pivot — the user is never trapped.
+    mid = {"community_create_active": True, "community_turns": 2}
+    assert cc.community_capture_should_release("host a coffee morning", mid, host_misread)
+
+
+def test_the_lanes_own_intent_keeps_the_turn() -> None:
+    """`community.create` is not a registered intent, so the lane's native list could
+    never match its own classified turn and every mid-flow turn released."""
+    from app.layer1_intents import LINEAR_INTENTS
+
+    assert cc._NATIVE_LINEARS <= LINEAR_INTENTS
+    mine = {
+        "linear_intent": "sharing.community",
+        "goal": "create_community",
+        "confidence": 0.9,
+    }
+    mid = {"community_create_active": True, "community_turns": 3}
+    assert not cc.community_capture_should_release("make my gym a community", mid, mine)
+
+
+def test_the_router_is_told_the_capture_is_in_flight() -> None:
+    """With active_capture=none the router read the "which place?" answer ("Rosetta's
+    Bakery — best sourdough on the block") as sharing.tip, which is a confident pivot, so
+    the lane released one turn after it opened and Lana answered the user's own community
+    with Google listings — the tip capture's 2026-08-05 bug, same cause."""
+    from app.discovery_slots import _active_capture_context
+
+    line = _active_capture_context(
+        {
+            "community_create_active": True,
+            "community_pending_question": "Which place should I add as a community?",
+        }
+    )
+    assert line.startswith("community_create")
+    assert "sharing.community" in line
+    assert _active_capture_context({}) == "none"

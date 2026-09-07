@@ -1026,6 +1026,34 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "neighbors use?') is a PIVOT — classify that fresh so it leaves the share; and a "
             "reply that backs out ('never mind', 'I don't want to share it') is abandon=true"
         )
+    # The create-a-community capture is the share capture's twin and has the same
+    # exposure: it asks "which place?" and gets a place DESCRIPTION back ("Rosetta's
+    # Bakery — best sourdough on the block"), which with active_capture=none reads as
+    # sharing.tip and releases the lane one turn after it opened.
+    if session_ctx.get("community_create_active"):
+        pending_q = str(session_ctx.get("community_pending_question") or "").strip()
+        draft = (
+            session_ctx.get("community_draft")
+            if isinstance(session_ctx.get("community_draft"), dict)
+            else {}
+        )
+        named = str((draft or {}).get("name") or "").strip()
+        return (
+            "community_create — the user is CREATING a community around a real place so "
+            "neighbours can find and join it, and Lana is filling in the missing pieces."
+            + (f' The place is already captured: "{named[:80]}".' if named else "")
+            + (f' Lana\'s pending question was: "{pending_q[:300]}".' if pending_q else "")
+            + " A reply that ANSWERS that question is linear_intent=sharing.community "
+            "(goal=create_community) — even when it names a place and why people like it "
+            "(\"Rosetta's Bakery, best sourdough on the block\"), or is a bare fragment "
+            "answering the question ('Saturday mornings', 'yes', 'beginners welcome', 'a "
+            "gym or studio'). *** Such a reply is NEVER sharing.tip / tip_seek, and NEVER "
+            "host_meet: *** they are describing the community they are setting up, not "
+            "recommending a provider and not hosting one gathering. Only an explicit "
+            "request for something else ('find me a dentist', 'host a coffee morning "
+            "there') is a PIVOT — classify that fresh; a back-out ('never mind') is "
+            "abandon=true"
+        )
     if session_ctx.get("look_meet_active"):
         return (
             "look_meet — helping the user describe a meet/playgroup they are LOOKING FOR; "

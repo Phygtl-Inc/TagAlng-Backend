@@ -1623,6 +1623,7 @@ def run_lana_unified_pipeline(
         for k in (
             "pass_along_active",
             "tip_share_active",
+            "community_create_active",
             "look_meet_active",
             "activity_browse_active",
             "rapport_active",

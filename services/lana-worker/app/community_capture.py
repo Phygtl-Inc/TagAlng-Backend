@@ -449,6 +449,16 @@ def community_capture_should_release(
     every other lane already uses."""
     from app.lane_decision import lane_should_continue
 
+    # Never on the SEED turn (nothing asked yet, so nothing to pivot away from). That turn
+    # was already read as a create — usually by `looks_like_community_create`, which exists
+    # precisely because the classifier reads the bare "I want to create a community" as
+    # sharing.host 4/4. Re-asking the same classifier here undid the arming on the spot and
+    # the turn fell through to decide_turn: dev 2026-09-07, the "Create a community" CTA
+    # answered "want to set one up for your kids, your gym…?" with policy chips and no
+    # capture ever started.
+    if not int(session_ctx.get("community_turns") or 0):
+        return False
+
     return not lane_should_continue(
         message, session_ctx, slots, is_valid_answer=_is_community_answer
     )
@@ -458,7 +468,10 @@ def community_capture_should_release(
 # and releases. Self-maintaining via is_confident_off_lane (no foreign-list to maintain).
 _NATIVE_GOALS = frozenset({"create_community"})
 _NATIVE_SIGNALS: frozenset[str] = frozenset()
-_NATIVE_LINEARS = frozenset({"community.create"})
+# `sharing.community` is the registered intent id (layer1_intents.LINEAR_INTENTS) — a name
+# that is not in that registry can never match a classified turn, so the lane read its
+# OWN correct read as a foreign intent and released every turn (dev 2026-09-07).
+_NATIVE_LINEARS = frozenset({"sharing.community"})
 
 
 def _is_community_answer(
