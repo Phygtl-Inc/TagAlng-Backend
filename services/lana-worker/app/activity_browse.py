@@ -166,6 +166,18 @@ def activity_browse_should_release(
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
 
+# Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
+# retuned without reading around prose. These are what make a 0.7 mean the same thing on
+# Tuesday as on Friday: the model is told to score each event against the REQUEST, never
+# against the other events in the list, so the numbers stay comparable across calls and
+# across pools of different quality.
+_TOPIC_SCORE_SCALE = (
+    "0.9-1.0 same thing (basketball / basketball); "
+    "0.6-0.8 closely related (basketball / volleyball); "
+    "0.3-0.5 loosely related (basketball / hiking group); "
+    "0.0-0.2 unrelated (basketball / book club)"
+)
+
 
 def _attach_host_names(events: list[dict[str, Any]]) -> None:
     """Stamp each event with `host_name` (the host's nickname) so the filter can match
@@ -596,6 +608,35 @@ def _event_when_parts(raw: Any, *, has_time: bool = True) -> str:
         return s[:10]
 
 
+def _coerce_topic_score(value: Any) -> float:
+    """Model-reported closeness → a number this code can rely on. Anything non-numeric
+    (missing, null, a string, NaN) reads as 0.0 — an UNJUDGED event, never a good one."""
+    try:
+        score = round(min(1.0, max(0.0, float(value))), 1)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if score != score else score  # NaN survives float(); it must not survive.
+
+
+def _coerce_topic_mismatch(value: Any) -> str:
+    """Model-reported gap phrase → a string safe to render. `or ""` rather than a .get
+    default: a JSON null arrives as the KEY present holding None, so a default never
+    fires and an f-string would print the literal word "None"."""
+    return str(value or "").strip()[:120]
+
+
+def _stamp_unjudged(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark rows no model judged. Every path out of _filter_events_by_query goes through
+    here or through the scored branch, so the invariant holds with no exceptions:
+    anything this module returns carries a topic_score. An unscored row reaching a
+    caller that ranks or gates by score would otherwise sort as well as a perfect
+    match — the one failure this is here to make impossible."""
+    for ev in events:
+        ev["topic_score"] = 0.0
+        ev["topic_mismatch"] = ""
+    return events
+
+
 def _filter_events_by_query(
     events: list[dict[str, Any]], query: str
 ) -> tuple[list[dict[str, Any]], str]:
@@ -607,12 +648,19 @@ def _filter_events_by_query(
     weekday, local start time and host, plus today's date, and returns the events
     matching ALL constraints the request expresses, with a short label for the header.
     Open/vague requests return everything. Returns (matched, label).
+
+    Every returned event also carries `topic_score` (0.0-1.0, how closely it fits the
+    request — see _TOPIC_SCORE_SCALE) and `topic_mismatch` (a short phrase naming how it
+    differs, "" on an exact match). Rows no model judged carry 0.0 and "". Nothing reads
+    these yet; they are groundwork for ranking and gating wider search results.
     """
     if not events:
         return [], ""
     query = str(query or "").strip()
     if not query or _OPEN_RE.match(query):
-        return events, ""
+        # Open/vague request: everything "matches", but nothing was judged against a
+        # topic — there wasn't one. Unjudged, not perfect.
+        return _stamp_unjudged(events), ""
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
@@ -643,7 +691,8 @@ def _filter_events_by_query(
                     "start time: morning is before 12 PM, afternoon 12–5 PM, evening/night "
                     "5 PM onward), and/or a HOST name ('hosted by Asjid' → match the host "
                     "field, case-insensitive). Return "
-                    'JSON {"match_indices":[ints], "label":"short phrase"}: indices of '
+                    'JSON {"match_indices":[ints], "scores":[floats], '
+                    '"mismatches":[strings], "label":"short phrase"}: indices of '
                     "events satisfying EVERY constraint the request expresses (a date query "
                     "must match the event's date; a time-of-day query the start time; a "
                     "host query the host). When the request names an activity, interest or "
@@ -651,7 +700,17 @@ def _filter_events_by_query(
                     "is a hard constraint too: only events that are genuinely that kind of "
                     "activity match — a matching date or time of day alone NEVER qualifies "
                     "an unrelated event (a coffee catch-up is not a match for 'runners', "
-                    "even at the right hour). label "
+                    "even at the right hour). "
+                    "scores and mismatches are POSITIONALLY PARALLEL to match_indices — "
+                    "same length, same order, one entry per matched event (scores[0] "
+                    "describes match_indices[0]). Each score is how closely that event "
+                    "fits the request, one decimal place, on this scale: "
+                    f"{_TOPIC_SCORE_SCALE}. Judge every event on its own merits against "
+                    "the REQUEST — never rank them against each other, and never spread "
+                    "them out to separate them; two equally good matches get the same "
+                    "number. Each mismatch is a short phrase naming how that event "
+                    "differs from the request (\"asked for violin, this is guitar\"), or "
+                    '"" when it is exactly what was asked for. label '
                     "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
                     "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
                     "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "
@@ -661,24 +720,49 @@ def _filter_events_by_query(
                 ),
                 user_payload=(
                     f"Request: {query}\nEvents:\n" + "\n".join(lines)
-                    + '\nReturn {"match_indices":[...], "label":"..."}.'
+                    + '\nReturn {"match_indices":[...], "scores":[...], '
+                    '"mismatches":[...], "label":"..."}.'
                 ),
-                max_tokens=200,
+                # 200 was sized for a bare index list. Scores and mismatch phrases for a
+                # full _BROWSE_POOL of 40 run 700-900 output tokens, and an overflowing
+                # response is unparseable JSON: it lands in the except below and falls
+                # SILENTLY into the keyword fallback, which matches far worse and says
+                # nothing about it. Raise this with any growth in the response shape.
+                max_tokens=1200,
                 temperature=0.0,
             )
             if isinstance(data, dict):
                 idxs = data.get("match_indices")
                 label = str(data.get("label") or "").strip()
                 if isinstance(idxs, list):
-                    picked = [
-                        events[i]
-                        for i in idxs
-                        if isinstance(i, int) and 0 <= i < len(events)
-                    ]
+                    raw_scores = data.get("scores")
+                    raw_mismatches = data.get("mismatches")
+                    scores = raw_scores if isinstance(raw_scores, list) else []
+                    mismatches = (
+                        raw_mismatches if isinstance(raw_mismatches, list) else []
+                    )
+                    picked: list[dict[str, Any]] = []
+                    # Enumerate the RAW indices, so alignment is by position in the
+                    # model's own arrays. Filtering first and zipping after would let a
+                    # single out-of-range index shift every score after it onto the
+                    # wrong event — silently, and only on malformed responses.
+                    for pos, i in enumerate(idxs):
+                        if not isinstance(i, int) or not 0 <= i < len(events):
+                            continue
+                        ev = events[i]
+                        ev["topic_score"] = _coerce_topic_score(
+                            scores[pos] if pos < len(scores) else None
+                        )
+                        ev["topic_mismatch"] = _coerce_topic_mismatch(
+                            mismatches[pos] if pos < len(mismatches) else None
+                        )
+                        picked.append(ev)
                     return picked, label
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_filter_failed")
-    # Fallback (no LLM): keyword match on title + tags + host; nothing matched → show all.
+    # Fallback (no LLM, or the call failed): keyword match on title + tags + host;
+    # nothing matched → show all. A substring hit is not a judgement of topic fit, so
+    # every row out of here is unjudged — 0.0, never 1.0.
     kw = query.lower()
     matched = [
         e
@@ -692,7 +776,7 @@ def _filter_events_by_query(
             + str(e.get("host_name", ""))
         ).lower()
     ]
-    return (matched or events), ""
+    return _stamp_unjudged(matched or events), ""
 
 
 def _refine_suggestions(events: list[dict[str, Any]]) -> list[str]:
