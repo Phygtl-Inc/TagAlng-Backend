@@ -14,11 +14,12 @@ Flow (matches the C-4-reco mock):
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from typing import Any
 
-from app.reply_compose import compose_reply
+from app.reply_compose import compose_reply, readback
 
 _TRAIT_PROMPT = "What makes them great?"
 _CATEGORY_SUGGESTIONS = ["Doctor / clinic", "Restaurant", "Park / playground", "Home service"]
@@ -31,7 +32,7 @@ _CANCEL_RE = re.compile(
 # The "Pass the tip along" CTA / any go-ahead to post it.
 _PASS_RE = re.compile(
     r"\b(pass (?:the )?tip|pass it along|post it|share it|list it|that'?s it|"
-    r"go ahead|done|send it)\b",
+    r"go ahead|done|send it|share with (?:the |my )?communit(?:y|ies))\b",
     re.IGNORECASE,
 )
 _TIP_TURN_CAP = 24  # 8 carousel steps + name/type + corrections
@@ -287,7 +288,7 @@ def _detail_text(draft: dict[str, Any]) -> str:
         f"{s['label']}: {s['answer']}"
         for s in carousel(step_set_of(draft), draft.get("answers"))
         # SUBJECT out as well as the tail: it is `name`, already the first part above.
-        if s.get("answer") and s["field"] not in (*TAIL_FIELDS, SUBJECT_FIELD)
+        if s.get("answer") and s["field"] not in (*TAIL_FIELDS, SUBJECT_FIELD, COMMUNITY_FIELD)
     ]
     parts += [str(d).strip() for d in (draft.get("details") or []) if str(d).strip()]
     if _has(draft, "locality"):
@@ -332,7 +333,9 @@ def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
             "answer": s["answer"],
         }
         for s in carousel(step_set_of(draft), draft.get("answers"))
-        if s.get("answer") and s["field"] != SUBJECT_FIELD
+        # COMMUNITY out with the subject: where the tip was SENT is not something the card
+        # says about the place, and it lives in circle_place_ref already.
+        if s.get("answer") and s["field"] not in (SUBJECT_FIELD, COMMUNITY_FIELD)
     ]
     return out or None
 
@@ -346,15 +349,103 @@ def _description(draft: dict[str, Any]) -> str | None:
     return " · ".join([p for p in parts if p]) or None
 
 
+# The community step. Deterministic, appended after the generated set the way the hosting
+# flow puts "For one of your communities?" on its setup card — a destination is not one of
+# the facets Lana writes about the place, and it must never be invented.
+COMMUNITY_FIELD = "community"
+
+
+def my_communities(user_jwt: str) -> list[dict[str, str]]:
+    """[{place_id, name}] for the communities the caller belongs to. [] on any failure —
+    the step is then simply absent, which is also the right answer for a user with none."""
+    from app.auth import jwt_user_id
+
+    user_id = jwt_user_id(user_jwt)
+    if not user_id:
+        return []
+    try:
+        from app.circles_flow import list_my_circles
+
+        rows = list_my_circles(user_id)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("tip_my_communities_failed")
+        return []
+    out: list[dict[str, str]] = []
+    for c in rows or []:
+        pid = str(c.get("place_id") or c.get("place_ref") or "").strip()
+        name = str(c.get("place_name") or c.get("name") or "").strip()
+        if pid and name and not any(o["place_id"] == pid for o in out):
+            out.append({"place_id": pid, "name": name})
+    return out[:8]
+
+
+def _community_step(communities: list[dict[str, str]]) -> dict[str, Any]:
+    """Optional and last-but-one: sharing with the whole area is the default, and picking a
+    community NARROWS who sees it — never a required gate on posting."""
+    return {
+        "field": COMMUNITY_FIELD,
+        "label": "Community",
+        "question": "Is this for one of your communities?",
+        "kind": "community",
+        "options": [c["name"] for c in communities] + ["Everyone nearby"],
+        # Ids beside the labels, same order, "" for the opt-out. Two communities can share
+        # a name — a user belongs to two gyms both called "Life Time" — and a name-matched
+        # answer would always resolve to the first, making the second unpickable. The
+        # carousel posts the id; only the chat fork is left matching on names.
+        "option_ids": [c["place_id"] for c in communities] + [""],
+        "required": False,
+    }
+
+
+def resolve_community(
+    draft: dict[str, Any], *, user_jwt: str, session_ctx: dict[str, Any]
+) -> None:
+    """Settle `circle_place_id` from whatever the user gave us, in priority order: the id
+    the carousel posted, the name they answered the step with, else the community selected
+    at the top of the app. "Everyone nearby" is a real answer — it clears the pick."""
+    from app.community_scope import active_community, active_community_id
+
+    # Order matters and it is not "first value wins": the header pre-fill lands turns
+    # before the step is asked, so short-circuiting on a set value made the pre-fill
+    # unoverridable — a user who answered "Everyone nearby" still shared into the
+    # community that happened to be selected (caught by scripts/try_reco_carousel.py).
+    # The user's own answer is authoritative; the pre-fill only fills a silence.
+    answer = str((draft.get("answers") or {}).get(COMMUNITY_FIELD) or "").strip()
+    # A fresh answer naming something OTHER than the pick on the draft is a correction and
+    # outranks it — otherwise a carousel submit would freeze the choice against every later
+    # "actually, make it Fitness CF".
+    if answer and answer.casefold() != str(draft.get("circle_name") or "").casefold():
+        draft["circle_picked"] = False
+    # An id posted straight to /tip-setup is exact where a name is not, so it wins: it is
+    # the only way to tell two same-named communities apart.
+    if draft.get("circle_picked"):
+        return
+    if answer:
+        if answer.lower() in ("everyone nearby", "everyone", "no", "none", "skip"):
+            draft["circle_place_id"] = None
+            draft["circle_name"] = None
+            return
+        for c in (session_ctx.get("tip_communities") or my_communities(user_jwt)):
+            if str(c.get("name") or "").strip().lower() == answer.lower():
+                draft["circle_place_id"] = c["place_id"]
+                draft["circle_name"] = c["name"]
+                return
+    # Nothing said → whatever the app header is scoped to, same pre-fill the hosting
+    # setup card uses.
+    if active_community_id(session_ctx):
+        draft["circle_place_id"] = active_community_id(session_ctx)
+        draft["circle_name"] = (active_community(session_ctx) or {}).get("name")
+
+
 def _save_tip(
     *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
 ) -> tuple[dict[str, Any] | None, str]:
     """(saved_row, error_detail). The reason comes back so the caller can recover from the
     one failure that is fixable in-turn (block_required) instead of just apologising."""
     try:
-        from app.local_signals import save_local_signal
+        from app.local_signals import save_local_signal, tag_local_signal
 
-        return save_local_signal(
+        saved = save_local_signal(
             user_jwt,
             intent="tip_share",
             detail_text=_detail_text(draft),
@@ -371,7 +462,14 @@ def _save_tip(
             reco_name=str(draft.get("name") or "").strip() or None,
             reco_place=str(draft.get("locality") or "").strip() or None,
             reco_description=_description(draft),
-        ), ""
+        )
+        # Tagged AFTER the insert rather than through save_local_signal, which is 150 lines
+        # of dedupe/match/notify: threading one column through it is how a behaviour goes
+        # missing in a copy-paste. Best-effort — an untagged tip is still a posted tip.
+        place_id = str(draft.get("circle_place_id") or "").strip()
+        if place_id and (saved or {}).get("id"):
+            tag_local_signal(user_jwt, signal_id=str(saved["id"]), place_id=place_id)
+        return saved, ""
     except Exception as exc:  # noqa: BLE001
         import logging
 
@@ -746,7 +844,8 @@ def run_tip_share_turn(
         session_ctx["tip_share_active"] = True
         session_ctx["tip_pending_question"] = "What kind of recommendation is it?"
         session_ctx["routing_phase"] = "listening"
-        return f"Heard you — **{_summary(draft)}**. What kind of recommendation is it?"
+        lead = readback(session_ctx, "tip_readback", draft.get("draft_id"), _summary(draft))
+        return f"{lead}What kind of recommendation is it?"
 
     # ── AI-tailored enrichment (cuisine / age-fit / why-great), capped. Never re-ask a
     # field already asked: a non-matching answer ("great for toddlers" to "Which
@@ -767,14 +866,23 @@ def run_tip_share_turn(
     # extractor proposed (possibly several turns ago); validate_steps is what makes it
     # askable, and falls back to the type's static set when there is nothing usable. ──
     if reco_type and not draft.get("step_set"):
-        draft["step_set"] = validate_steps(
+        built = validate_steps(
             draft.pop("steps_raw", None),
             reco_type,
             tallies=_reco_tallies(
                 user_jwt=user_jwt, block_id=block_id, name=draft.get("name")
             ),
         )
+        # Where it goes is a step like any other, so both forks get it for free — the
+        # carousel renders one more card, the chat fork asks one more question. Absent for
+        # a user with no communities: there is nothing to choose between.
+        communities = my_communities(user_jwt)
+        if communities:
+            session_ctx["tip_communities"] = communities
+            built = list(built) + [_community_step(communities)]
+        draft["step_set"] = built
     step_set = step_set_of(draft) if reco_type else []
+    resolve_community(draft, user_jwt=user_jwt, session_ctx=session_ctx)
     if step_set:
         steps = carousel(step_set, draft.get("answers"))
         draft["steps"] = steps
@@ -809,8 +917,9 @@ def run_tip_share_turn(
             session_ctx["tip_pending_question"] = step["question"]
             session_ctx["routing_phase"] = "listening"
             answered = sum(1 for s in steps if s.get("answer"))
+            lead = readback(session_ctx, "tip_readback", draft.get("draft_id"), _summary(draft))
             return (
-                f"Heard you — **{_summary(draft)}**. {step['question']} "
+                f"{lead}{step['question']} "
                 f"({answered + 1}/{len(steps)})"
             )
 
@@ -829,7 +938,8 @@ def run_tip_share_turn(
         # ("family doctor") is its ANSWER and not a fresh recommendation ask.
         session_ctx["tip_pending_question"] = str(ask["question"])
         session_ctx["routing_phase"] = "listening"
-        return f"Heard you — **{_summary(draft)}**. {ask['question']}"
+        lead = readback(session_ctx, "tip_readback", draft.get("draft_id"), _summary(draft))
+        return f"{lead}{ask['question']}"
 
     # ── P4: ready → assembled card + dual CTA (saved only when they confirm) ──
     draft["chips"] = chips
@@ -841,15 +951,31 @@ def run_tip_share_turn(
     session_ctx["tip_pending_question"] = None  # nothing outstanding on the ready card
     session_ctx["routing_phase"] = "listening"
     summary = _summary(draft)
+    # Naming the destination is not decoration: a tagged tip is invisible to the area, so
+    # "shared with CF Fitness" is the difference between the neighbourhood seeing it and
+    # not. Untagged keeps the old wording.
+    circle = str(draft.get("circle_name") or "").strip()
     return compose_reply(
         goal=(
             "The tip draft is complete and shown as a card. Tell the user you'll pass it on when "
-            "a neighbor asks, and prompt them to tap **Pass the tip along** (keep that button "
+            + (
+                f"someone at {circle} asks — and that it goes to {circle} only, not to the "
+                "wider neighborhood. "
+                if circle
+                else "a neighbor asks, "
+            )
+            + "and prompt them to tap **Pass the tip along** (keep that button "
             "name verbatim, bolded) to post it, or send it to a neighbor they know."
         ),
-        facts=[f"Tip ready: {summary}"],
+        facts=[f"Tip ready: {summary}"]
+        + ([f"Shared with the community: {circle} (and only there)"] if circle else []),
         fallback=(
             f"Got it — **{summary}**. I'll pass it on when a neighbor asks. "
-            "**Pass the tip along** to post it for your neighbors, or send it to a neighbor you know."
+            + (
+                f"**Pass the tip along** to post it for {circle} — it stays inside {circle}."
+                if circle
+                else "**Pass the tip along** to post it for your neighbors, or send it to "
+                "a neighbor you know."
+            )
         ),
     )

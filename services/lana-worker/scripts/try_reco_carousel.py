@@ -75,6 +75,13 @@ TALLIES = {"dr. sarah": [{"attr": "easy parking", "n": 2}, {"attr": "books onlin
 
 POSTED: dict = {}
 
+# The caller's own communities — what the `community` step offers. Stubbed because the real
+# list_my_circles needs a database; everything downstream of it is the real code.
+MY_COMMUNITIES = [
+    {"place_id": "place-cf", "name": "CF Fitness"},
+    {"place_id": "place-lag", "name": "Lagoinha Orlando"},
+]
+
 
 def _install_stubs(opening: dict) -> None:
     """One-shot extractor: the opening message returns everything, later turns nothing."""
@@ -84,11 +91,18 @@ def _install_stubs(opening: dict) -> None:
         str(name or "").strip().lower(), []
     )
     ts.compose_reply = lambda **kw: kw["fallback"]
+    ts.my_communities = lambda user_jwt: list(MY_COMMUNITIES)
     ts._save_tip = lambda **kw: (
         POSTED.update(
-            {"reco_fields": ts._reco_fields(kw["draft"]), "detail_text": ts._detail_text(kw["draft"])}
+            {
+                "reco_fields": ts._reco_fields(kw["draft"]),
+                "detail_text": ts._detail_text(kw["draft"]),
+                # What tag_local_signal would stamp on the row.
+                "circle": kw["draft"].get("circle_name"),
+                "circle_place_id": kw["draft"].get("circle_place_id"),
+            }
         ),
-        {"signal_id": "sig-local", "matches_created": 2},
+        ({"signal_id": "sig-local", "id": "sig-local", "matches_created": 2}, ""),
     )[1]
 
 
@@ -105,6 +119,13 @@ def _show_posted() -> None:
     for row in POSTED.get("reco_fields") or []:
         print(f"    {row['label']:<18} {row['answer']}   \033[90m({row['question']})\033[0m")
     print(f"\n  detail_text a neighbour reads:\n    {POSTED.get('detail_text')}")
+    circle = POSTED.get("circle")
+    print(
+        f"  goes to:  \033[1m{circle}\033[0m ONLY — invisible to the area feed "
+        f"(circle_place_ref={POSTED.get('circle_place_id')})"
+        if circle
+        else "  goes to:  \033[1meveryone nearby\033[0m (circle_place_ref=NULL)"
+    )
     POSTED.clear()
 
 
@@ -122,6 +143,8 @@ def chat_fork() -> None:
         "Takes insurance · open Saturdays",
         "Let them ask",
         "easy parking ×2",
+        # The community step: answered by NAME, resolved to a place id on the worker.
+        "CF Fitness",
     ]:
         _turn(ctx, answer)
     _turn(ctx, "pass the tip along")
@@ -132,7 +155,8 @@ def cards_fork() -> None:
     """The carousel fork: the set is generated, then answered in ONE submission."""
     print("\n\033[1m── CARDS FORK · Feijoada ─────────────────────────────────────────\033[0m")
     _install_stubs(RECIPE)
-    ctx: dict = {"zip_code": "32827"}
+    # A community IS selected at the top of the app — the pre-fill the step can override.
+    ctx: dict = {"zip_code": "32827", "active_community": {"place_id": "place-cf", "name": "CF Fitness"}}
     _turn(ctx, "Feijoada — my Sunday-lunch staple, the whole block asks for the recipe")
 
     steps = (ctx.get("tip_draft") or {}).get("step_set") or []
@@ -152,6 +176,10 @@ def cards_fork() -> None:
         "time": "About 3 hours",
         "tips": "Soak the beans overnight",
         "ask_ok": "Let them ask",
+        # The community step, answered on a card. "Everyone nearby" is a real answer: it
+        # means the area feed, and it OVERRIDES whatever community is selected on top of
+        # the app — which this session has, to prove the step wins.
+        "community": "Everyone nearby",
         "evil": "should not land",
     }
     auth = AuthSession(user_id="u1", is_anonymous=False, phone_verified=True, home_block_id="b1")

@@ -29,7 +29,7 @@ import re
 import uuid
 from typing import Any
 
-from app.reply_compose import compose_reply
+from app.reply_compose import compose_reply, readback
 
 logger = logging.getLogger(__name__)
 
@@ -703,7 +703,8 @@ def run_community_capture_turn(
         session_ctx["community_pending_ask"] = "circle_type"
         session_ctx["community_pending_question"] = "What kind of place is it?"
         session_ctx["routing_phase"] = "listening"
-        return f"Heard you — **{_summary(draft)}**. What kind of place is it?"
+        lead = readback(session_ctx, "community_readback", draft.get("draft_id"), _summary(draft))
+        return f"{lead}What kind of place is it?"
 
     # ── The question set is written ONCE, here — after the type, because the type picks
     # the set and the questions are about THIS place ("which morning is busiest at
@@ -744,8 +745,9 @@ def run_community_capture_turn(
             session_ctx["community_pending_question"] = step["question"]
             session_ctx["routing_phase"] = "listening"
             answered = sum(1 for s in steps if s.get("answer"))
+            lead = readback(session_ctx, "community_readback", draft.get("draft_id"), _summary(draft))
             return (
-                f"Heard you — **{_summary(draft)}**. {step['question']} "
+                f"{lead}{step['question']} "
                 f"({answered + 1}/{len(steps)})"
             )
 

@@ -147,3 +147,84 @@ class TestFeedback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_SIGNAL = {
+    "id": "11111111-1111-1111-1111-111111111111",
+    "intent": "tip_share",
+    "status": "listening",
+    "user_id": "22222222-2222-2222-2222-222222222222",
+    "reco_name": "Dr. Sarah",
+    "category": "pediatric dentist",
+    "reco_type": "professional",
+    "reco_place": "Lake Nona",
+    "reco_description": "So gentle — quick appointments",
+    "reco_fields": [
+        {"field": "profession", "label": "Profession", "answer": "Pediatric dentist"},
+    ],
+    "detail_text": "Dr. Sarah · pediatric dentist",
+    "created_at": "2026-08-25T10:00:00+00:00",
+}
+_VIEWER = "33333333-3333-3333-3333-333333333333"
+
+
+class _Table:
+    """Minimal supabase-py stub: .table(x).select().eq()… .execute().data"""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a, **_k):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self._rows})()
+
+
+class TestTipByIdSharedLink(unittest.TestCase):
+    """§39: a link handed to a friend two blocks over has to resolve — the feed's
+    own-block scoping is exactly what a shared recommendation must not inherit."""
+
+    def _client(self, signal=_SIGNAL, votes=()):
+        tables = {
+            "local_signals": [signal] if signal else [],
+            "users": [{"nickname": "coral88", "profile_photo_url": "https://…/a.png"}],
+            "tip_helpful": list(votes),
+        }
+        return type("C", (), {"table": lambda _s, name: _Table(tables[name])})()
+
+    def _get(self, signal=_SIGNAL, votes=(), blocked=()):
+        with patch("app.auth.service_client", return_value=self._client(signal, votes)), \
+             patch("app.community_surface._blocked_ids", return_value=set(blocked)):
+            return mod.tip_by_id(_SIGNAL["id"], viewer_user_id=_VIEWER)
+
+    def test_a_stranger_gets_the_subject_quote_and_fields(self):
+        row = self._get()
+        self.assertEqual(row["name"], "Dr. Sarah")
+        self.assertEqual(row["description"], "So gentle — quick appointments")
+        self.assertEqual(row["fields"][0]["answer"], "Pediatric dentist")
+        self.assertEqual(row["nickname"], "coral88")
+        # Caller-relative fields are empty, not guessed.
+        self.assertIsNone(row["distance_text"])
+        self.assertEqual(row["shared_circles"], [])
+
+    def test_votes_are_counted_and_the_viewers_own_vote_comes_back(self):
+        row = self._get(votes=[
+            {"user_id": _VIEWER, "is_helpful": True},
+            {"user_id": "other", "is_helpful": False},
+        ])
+        self.assertEqual((row["helpful_count"], row["unhelpful_count"]), (1, 1))
+        self.assertTrue(row["i_marked_helpful"])
+        self.assertFalse(row["i_marked_unhelpful"])
+
+    def test_withdrawn_blocked_and_wrong_intent_all_miss(self):
+        self.assertIsNone(self._get(signal={**_SIGNAL, "status": "closed"}))
+        self.assertIsNone(self._get(signal={**_SIGNAL, "intent": "tip_seek"}))
+        self.assertIsNone(self._get(blocked=[_SIGNAL["user_id"]]))
+        self.assertIsNone(self._get(signal=None))

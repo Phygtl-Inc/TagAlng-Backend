@@ -3815,6 +3815,12 @@ def _tip_seek_answer_turn(
     # reach someone who wasn't on it (§12c) — that reach is the whole point of doing this
     # server-side. A plain ask keeps the original narrow read.
     wide = bool(weights) or widen
+    # The community scope. A recommendation belongs to CF Fitness because it was SHARED
+    # there (local_signals.circle_place_ref), not because its author happens to be a
+    # member — those are different questions, and only the first is what the share button
+    # asked. The RPC takes it as scope, not as a filter: inside a community distance does
+    # not apply, and outside one a community's tips do not show at all.
+    _comm = active_community(session_ctx)
     neighbor_tips = find_neighbor_tips(
         user_jwt,
         block_id=block_id,
@@ -3823,22 +3829,12 @@ def _tip_seek_answer_turn(
         limit=WIDE_TIP_FETCH if wide else 3,
         locale=str(session_ctx.get("preferred_lang") or "en"),
         radius_meters=radius_meters() if widen else None,
+        circle_place_id=str(_comm["place_id"]) if _comm else None,
     )
-    # The community filter: a recommendation is only "from CF Fitness" when the person
-    # who made it is at CF Fitness. Nothing is tagged at write time — membership is the
-    # tag, and it stays true as people join. Empty falls through to the Google/offer
-    # cascade below, exactly as an empty neighbourhood read already does.
-    _comm = active_community(session_ctx)
-    if _comm and neighbor_tips:
-        from app.community_scope import rows_by_members
-
-        scoped_tips = rows_by_members(neighbor_tips, str(_comm["place_id"]))
-        if scoped_tips:
-            neighbor_tips = scoped_tips
-        else:
-            # Read (and cleared) by _compose_neighbor_tip_reply below, off the same
-            # incoming ctx it composes from.
-            session_ctx["community_widened_from"] = _comm.get("name")
+    if _comm and not neighbor_tips:
+        # Read (and cleared) by _compose_neighbor_tip_reply below, off the same incoming
+        # ctx it composes from: name the community that was empty before widening.
+        session_ctx["community_widened_from"] = _comm.get("name")
     logging.getLogger(__name__).info(
         "tip_seek_answer.enter block=%s detail=%r category=%r neighbor_tips=%d wide=%s",
         block_id, detail, category, len(neighbor_tips), wide,

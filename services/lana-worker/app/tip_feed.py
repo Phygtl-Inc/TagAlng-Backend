@@ -130,17 +130,25 @@ def recent_tips(
     *,
     tab: str = "recent",
     limit: int = PAGE_SIZE,
+    circle_place_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """One page of the feed. [] on any failure — a browse surface must not error out."""
+    """One page of the feed. [] on any failure — a browse surface must not error out.
+
+    With `circle_place_id` this is ONE community's recommendations: no distance bound and
+    no tabs (the tabs belong to the area screen). Without it, tips shared into a community
+    are excluded — they were meant for that community, not for the neighbourhood.
+    """
     wanted = str(tab or "recent").strip().lower()
     if wanted not in FILTERS:
         wanted = "recent"
+    payload: dict[str, Any] = {
+        "p_filter": wanted,
+        "p_limit": max(1, min(int(limit or PAGE_SIZE), 50)),
+    }
+    if circle_place_id:
+        payload["p_circle_place_id"] = str(circle_place_id)
     try:
-        raw = call_rpc(
-            user_jwt,
-            "recent_neighbor_tips",
-            {"p_filter": wanted, "p_limit": max(1, min(int(limit or PAGE_SIZE), 50))},
-        )
+        raw = call_rpc(user_jwt, "recent_neighbor_tips", payload)
     except Exception:
         logger.exception("recent_tips_failed tab=%s", wanted)
         return []
@@ -168,3 +176,80 @@ def set_helpful(
         "i_marked_helpful": bool(out.get("i_marked_helpful")),
         "i_marked_unhelpful": bool(out.get("i_marked_unhelpful")),
     }
+
+
+def tip_by_id(signal_id: str, *, viewer_user_id: str | None = None) -> dict[str, Any] | None:
+    """ONE recommendation, by id — what a shared link opens (§39).
+
+    The feed is scoped to the reader's own block/radius, so a signal_id a client already
+    holds could not be turned into anything a second person could read. This is the same
+    row, read by id alone: a signal id is an unguessable uuid, so the link discloses
+    exactly that one recommendation and nothing about the block behind it — which is why
+    nothing is minted and nothing is stored.
+
+    Caller-relative fields come back empty on purpose: distance and shared circles are
+    meaningless when the viewer may share nothing at all with the author. Withdrawn
+    (status <> listening) is a miss; EXPIRED is not — expires_at is feed freshness, and a
+    recommendation a neighbour passed along should not die on day 15.
+    """
+    from app.auth import service_client
+    from app.community_surface import _blocked_ids
+
+    sid = str(signal_id or "").strip()
+    if not sid:
+        return None
+    sb = service_client()
+    try:
+        res = (
+            sb.table("local_signals")
+            .select(
+                "id, category, reco_name, reco_type, reco_place, reco_description, "
+                "reco_fields, detail_text, created_at, user_id, intent, status"
+            )
+            .eq("id", sid)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception("tip_by_id_failed signal=%s", sid)
+        return None
+    raw = (res.data or [None])[0]
+    if not raw or raw.get("intent") != "tip_share" or raw.get("status") != "listening":
+        return None
+    author = str(raw.get("user_id") or "")
+    if viewer_user_id and author and author in _blocked_ids(viewer_user_id, [author]):
+        return None
+
+    label, avatar = "A neighbor", None
+    votes: list[dict[str, Any]] = []
+    try:
+        prof = (
+            sb.table("users")
+            .select("nickname, profile_photo_url")
+            .eq("id", author)
+            .limit(1)
+            .execute()
+        )
+        row = (prof.data or [{}])[0] or {}
+        label = str(row.get("nickname") or "").strip() or "A neighbor"
+        avatar = row.get("profile_photo_url")
+        # One read, counted in Python — a shared link is a single row, not a page.
+        got = sb.table("tip_helpful").select("user_id, is_helpful").eq("signal_id", sid).execute()
+        votes = got.data if isinstance(got.data, list) else []
+    except Exception:
+        logger.exception("tip_by_id_side_read_failed signal=%s", sid)
+
+    mine = [v for v in votes if str(v.get("user_id")) == str(viewer_user_id or "")]
+    return _row(
+        {
+            **raw,
+            "signal_id": sid,
+            "peer_user_id": author,
+            "neighbor_label": label,
+            "avatar_url": avatar,
+            "helpful_count": sum(1 for v in votes if v.get("is_helpful")),
+            "unhelpful_count": sum(1 for v in votes if not v.get("is_helpful")),
+            "i_marked_helpful": any(v.get("is_helpful") for v in mine),
+            "i_marked_unhelpful": any(not v.get("is_helpful") for v in mine),
+        }
+    )

@@ -190,6 +190,20 @@ def save_local_signal(
     return result
 
 
+def tag_local_signal(user_jwt: str, *, signal_id: str, place_id: str) -> bool:
+    """Record which community a signal was shared INTO. Best-effort: a DB without the
+    20261124 migration leaves the tip untagged, which is the area behaviour it had before
+    the column existed — never a failed share."""
+    if not (signal_id and place_id):
+        return False
+    try:
+        call_rpc(user_jwt, "tag_local_signal", {"p_signal_id": signal_id, "p_place_id": place_id})
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("tag_local_signal_failed signal=%s place=%s", signal_id, place_id)
+        return False
+
+
 def find_neighbor_tips(
     user_jwt: str,
     *,
@@ -199,6 +213,7 @@ def find_neighbor_tips(
     limit: int = 3,
     locale: str = "en",
     radius_meters: float | None = None,
+    circle_place_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Neighbors' tip_share posts that match this ask — READ-ONLY (no signal written).
 
@@ -214,7 +229,8 @@ def find_neighbor_tips(
     """
     if not (str(query or "").strip()):
         return []
-    if not block_id and radius_meters is None:
+    # A community read needs neither: the roster is the audience, not the radius.
+    if not block_id and radius_meters is None and not circle_place_id:
         return []
     payload: dict[str, Any] = {
         "p_block_id": block_id,
@@ -225,10 +241,17 @@ def find_neighbor_tips(
     }
     if radius_meters is not None:
         payload["p_radius_meters"] = float(radius_meters)
+    if circle_place_id:
+        payload["p_circle_place_id"] = str(circle_place_id)
     try:
         raw = call_rpc(user_jwt, "find_neighbor_tips", payload)
     except HTTPException as exc:
         if "pgrst202" not in str(exc.detail or "").lower():
+            return []
+        # An older DB has no community scope, and retrying without it would answer
+        # "what's good at CF Fitness?" with the whole neighbourhood. Empty is the honest
+        # answer until the migration lands.
+        if circle_place_id:
             return []
         if not block_id:
             return []  # v1 has no radius mode and no block to fall back to
