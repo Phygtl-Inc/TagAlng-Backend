@@ -20,7 +20,8 @@ not an edit to Lana's logic. Fixing eval *rubrics/harnesses* here is in scope; f
 | `circles_zip/` | onion matcher + ZIP-unlock state machine | stub ↔ real (SIM_BACKEND) |
 | `policy_eval/` | conversational-policy decisions + lingo + safety | stub ↔ live adapter |
 
-Each has its own `README.md` (this dir uses `SIMULATION_PIPELINE.md`). `circles_zip/` and
+Each has its own `README.md` (this dir uses `SIMULATION_PIPELINE.md`; `LOCAL_STACK.md` covers
+running any of them against a local Supabase stack). `circles_zip/` and
 `policy_eval/` target features that don't fully exist in code yet, so they use a swappable seam.
 
 ## Conventions that recur across the suite
@@ -50,9 +51,28 @@ Each has its own `README.md` (this dir uses `SIMULATION_PIPELINE.md`). `circles_
 
 ## Running things
 
-- Env comes from the repo-root `.env.local` (each entry point loads it). Keys: `LANA_BASE_URL`,
-  `OPENAI_API_KEY`, `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`SUPABASE_SERVICE_ROLE_KEY`, `SIM_PASSWORD`.
+- **Prefer a LOCAL Supabase stack — see `LOCAL_STACK.md`.** The six sim accounts live in the
+  SHARED dev project, and `create_session(force_new=True)` calls `abandon_other_active_sessions`
+  (`app/db.py:340,363`), so two concurrent runs destroy each other (`400 session_not_active` on
+  turn 2). Local also gives full control of world state, which is what lets `policy_eval
+  --backend inproc` honour a scenario's pinned world instead of scoring it UNSCORED.
+- Env comes from the repo-root `.env.local` (each entry point loads it). Keys: `SUPABASE_URL`,
+  `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SIM_PASSWORD`, `OPENAI_API_KEY`, and
+  `LANA_BASE_URL` — **optional.** It defaults to `http://localhost:8000`, which is also the
+  default in backend's own `tests/test_L1_L2_intents.py:38`, so 8000 is the shared convention and
+  a worker started there needs no env var at all. Set it ONLY when the worker is somewhere else —
+  notably `scripts/run-lana-worker-local.sh`, which defaults to **8081** and is the one thing in
+  the repo that disagrees. Starting the worker with that script and not setting this points the
+  harness at a dead port, and every run fails on turn 1.
   Locally `LANA_LLM_PROVIDER=openai`, so harnesses exercise the OpenAI path, not prod's Vertex/Gemini.
+- The **worker** does not read `.env.local` — `scripts/run-lana-worker-local.sh` sources
+  `deploy/lana-worker.env` only. Pointing the suite at local means editing BOTH files, and if
+  they disagree about `SUPABASE_URL` the run is meaningless (the worker rejects the harness's JWT).
+- **Auth goes through `sim_auth.py`**, not a raw password grant: a Supabase `400` is the same
+  for "wrong project", "SIM_PASSWORD missing/wrong" and "account never seeded", so it diagnoses
+  which. With no `SIM_PASSWORD` but a service-role key it falls back to the admin
+  `generate_link` -> `/auth/v1/verify` magic-link flow described in `seed_sim_accounts.sql`'s
+  header (# GUESSED on the hashed-token field name; unverified end-to-end).
 - `circles_zip/` and `policy_eval/` use **bare intra-package imports** (`from ports import …`), so
   run their scripts from inside the subdir (or the entry point adds its own dir to `sys.path`).
 - No-cost smoke tests exist where possible: `policy_eval/run_eval.py --dry-run`, every `selftest.py`,
@@ -63,6 +83,14 @@ Each has its own `README.md` (this dir uses `SIMULATION_PIPELINE.md`). `circles_
 ## Gotchas
 
 - **Never seed prod with synthetic users.** Test accounts / claims / populations are for dev only.
+- **Destructive paths are LOCAL-ONLY, enforced in code.** `local_guard.require_local()` gates
+  `simulation._seed_claims` (it DELETEs a persona's claims), `circles_zip/live_seed.py`,
+  `circles_zip/live_impl.transition_zip` (recount can stamp founding), and all of
+  `local_world.py`. It classifies `SUPABASE_URL` as local/dev/unknown and **fails closed** —
+  an unrecognised host is refused, not assumed local. It LAYERS on `SIM_ALLOW_WRITES=1`
+  ("I meant to write") rather than replacing it ("...to *this* DB"); where both apply, both must
+  pass. Override with `SIM_ALLOW_NONLOCAL_WRITES=1`, which prints a banner. If you add a write,
+  gate it the same way and add a `selftest.py` case that proves it refuses.
 - `rapport/` was `git mv`'d from `tests/rapport/`; some in-code docstrings still show the old path —
   the READMEs are current.
 - `scratch/` (local run logs) and each harness's `out/` are gitignored — don't commit run artifacts.

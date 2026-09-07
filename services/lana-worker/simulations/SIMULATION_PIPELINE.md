@@ -51,6 +51,19 @@ apps/admin/app/sims/
 
 ## How to run locally
 
+> **Shared dev vs. your own stack.** By default `.env.local` points at the **shared dev
+> project**, where all six sim accounts live. `create_session(force_new=True)` calls
+> `abandon_other_active_sessions` (`app/db.py:340,363`), so two people running the suite at once
+> kill each other's sessions — you see `400 session_not_active` on turn 2, mid-run. If anyone
+> else might be running, use a **local Supabase stack**: see
+> [`LOCAL_STACK.md`](./LOCAL_STACK.md). It is also the only way to pin world state for
+> `policy_eval --backend inproc`.
+>
+> Everything destructive in this suite (claims wipe, circle seeding, ZIP recount, world
+> seeding) now **refuses to run** unless `SUPABASE_URL` is a local stack — see
+> `local_guard.py` and the LOCAL_STACK.md safety-preflight section. Override with
+> `SIM_ALLOW_NONLOCAL_WRITES=1` if you genuinely mean to touch dev.
+
 ### Prerequisites
 
 1. `.env.local` at repo root must contain these keys (all filled in as of 2026-06-30):
@@ -64,8 +77,23 @@ apps/admin/app/sims/
    LANA_LLM_PROVIDER=openai
    OPENAI_ROUTER_MODEL=gpt-4o-mini
    OPENAI_SYNTH_MODEL=gpt-4o
+   LANA_BASE_URL=http://127.0.0.1:8000        # see note below — NOT in the file today
    ```
    **Never commit `.env.local` — it is gitignored.**
+
+   > **`LANA_BASE_URL` correction (2026-08-20).** It is documented as an env key but is *not*
+   > actually present in the checked-in `.env.local`. `simulation.py` falls back to
+   > `http://localhost:8000`, which matches the uvicorn command below — but
+   > `scripts/run-lana-worker-local.sh` (the other documented way to start the worker) serves on
+   > **8081**. Set the variable explicitly and there is nothing to get wrong.
+
+   > **`SIM_PASSWORD` correction (2026-08-20).** Against the shared dev project this is a team
+   > secret, and it is not distributed with the repo. On a **local** stack you choose it
+   > yourself when applying `supabase/seed_sim_accounts.sql`. Auth now runs through
+   > `sim_auth.py`, which (a) diagnoses a failed login instead of surfacing a bare `400` — it
+   > names whether the URL, the password, or the missing account is the problem — and (b) falls
+   > back to the service-role `admin/generate_link` -> `/auth/v1/verify` magic-link flow when
+   > `SIM_PASSWORD` is empty but `SUPABASE_SERVICE_ROLE_KEY` is set.
 
 2. Python dependencies installed:
    ```powershell
@@ -136,6 +164,11 @@ Run logs are saved to `scratch/run_<timestamp>Z.json` (gitignored).
 | P6 | Skeptical Mom (Diane) | zero claims | cold-start / rapport building |
 
 All 6 accounts are provisioned in Supabase with `home_block_id = 8a2a1072b59ffff` (Lake Nona Block A), email-confirmed, and share `SIM_PASSWORD` from `.env.local`.
+
+They exist in the **shared dev project**, which is why concurrent runs collide. The same six
+identities — same fixed UUIDs, so `personas.json` keeps matching — are re-creatable on a local
+stack from `supabase/seed_sim_accounts.sql` with a password you pick; see
+[`LOCAL_STACK.md`](./LOCAL_STACK.md) step 3.
 
 ### Scenario buckets
 
@@ -288,7 +321,11 @@ The nightly cron and PR gate run in GitHub CI — they have no access to `.env.l
 |------|--------|
 | `personas.json` | ✅ All 6 personas, real user IDs, home_block_id confirmed |
 | `scenarios.json` | ✅ 7 buckets, 32 seeds (incl. 3 QA-rubric buckets) |
-| `simulation.py` | ✅ Claims seeding, password-grant auth, corpus feedback loop |
+| `simulation.py` | ✅ Claims seeding (local-only, `local_guard`-gated), auth via `sim_auth`, corpus feedback loop |
+| `local_guard.py` | ✅ local/dev/unknown target preflight; fails closed; selftested |
+| `sim_auth.py` | ✅ Diagnosed login + service-role magic-link fallback (fallback unverified end-to-end) |
+| `local_world.py` | ✅ World-state pinning for local stacks (zip_unlock / users / circles) |
+| `LOCAL_STACK.md` | ✅ Start, migrate, seed, point, tear down — dev/eval only |
 | `evaluation.py` | ✅ Judge scoring, HITL fields, SFT messages |
 | `runner.py` | ✅ CLI, error isolation, run log to scratch/ |
 | `gate_check.py` | ✅ PR regression gate |
