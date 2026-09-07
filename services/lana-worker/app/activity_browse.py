@@ -166,16 +166,37 @@ def activity_browse_should_release(
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
 
-# Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
-# retuned without reading around prose. These are what make a 0.7 mean the same thing on
-# Tuesday as on Friday: the model is told to score each event against the REQUEST, never
-# against the other events in the list, so the numbers stay comparable across calls and
-# across pools of different quality.
+# The closeness scale, kept OUT of the prompt string so it can be retuned without
+# reading around prose. This is what makes a 0.5 mean the same thing on Tuesday as on
+# Friday.
+#
+# It asks about SUBSTITUTABILITY, not resemblance. An earlier version graded mechanical
+# similarity and the model collapsed it: a live eval (gpt-4o-mini, 2026-09-06) produced
+# only 0.0/0.6/0.9/1.0 across four cases, scored beach volleyball 0.0 against basketball
+# while this very constant named that pair as closely related, and gave a pottery
+# workshop and a startup pitch night the same 0.0 against a violin request — which
+# cannot both be right. Resemblance is also the wrong question on its own terms: water
+# polo resembles basketball and substitutes badly for it; indoor soccer resembles it far
+# less and substitutes well.
+#
+# Two ladders on purpose. The first is the calibration; the second exists only to stop a
+# sports-only example teaching the model to read every request through a sports frame.
+# The endpoints are the only anchors that survived the rewrite — volleyball moved from
+# "closely related" (0.6-0.8) to 0.4, and a hiking group from 0.3-0.5 to about 0.1 — so
+# anything gating on these bands must be written against THESE numbers, not the old ones.
 _TOPIC_SCORE_SCALE = (
-    "0.9-1.0 same thing (basketball / basketball); "
-    "0.6-0.8 closely related (basketball / volleyball); "
-    "0.3-0.5 loosely related (basketball / hiking group); "
-    "0.0-0.2 unrelated (basketball / book club)"
+    "the question is SUBSTITUTABILITY, not resemblance — someone asked for the "
+    "request and there is none nearby: would they plausibly go to this instead? "
+    "0.8-1.0 the same activity in another form; 0.5-0.7 a different activity that "
+    "scratches the same itch; 0.2-0.4 same broad domain but it would not scratch it; "
+    "0.0-0.1 no connection. Never 0.0 for two things that are both sport, both music "
+    "or both hands-on making. For 'basketball': 1.0 rec-league game, 0.8 outdoor "
+    "3-on-3, 0.6 flag football, 0.4 volleyball open gym, 0.2 water polo, 0.0 book "
+    "club. For 'violin recital': 1.0 another recital, 0.7 string quartet, 0.5 "
+    "acoustic singer-songwriter night, 0.3 rock show, 0.1 pottery workshop, 0.0 "
+    "startup pitch night. Resemblance is not the question: water polo looks like "
+    "basketball and substitutes badly; indoor soccer looks nothing like it and "
+    "substitutes well."
 )
 
 # There is deliberately NO score threshold here. Membership is the model's own
@@ -632,6 +653,32 @@ def _coerce_topic_mismatch(value: Any) -> str:
     return str(value or "").strip()[:120]
 
 
+def _ratings_by_index(raw: Any, n: int) -> dict[int, dict[str, Any]]:
+    """Model `ratings` objects keyed by the index each one CLAIMS, not by its position.
+
+    Parallel arrays were the previous shape and they misaligned in production: asked for
+    one mismatch per event, the model silently skipped the empty string for an exact
+    match and returned four phrases for five events, so every phrase landed on the event
+    before it — Lana would have told someone their violin recital was actually guitar
+    (eval 2026-09-06). An object that names its own event cannot do that: a skipped entry
+    now leaves a gap, which reads as unjudged, instead of shifting its neighbours.
+
+    Anything unusable is dropped rather than guessed at: a non-dict, a missing or
+    non-integer index, an index outside the event list, or a duplicate. Duplicates keep
+    the FIRST — deterministic, and it keeps a real rating rather than discarding both.
+    """
+    out: dict[int, dict[str, Any]] = {}
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        i = entry.get("index")
+        # bool is a subclass of int: True would otherwise silently claim event 1.
+        if isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < n:
+            continue
+        out.setdefault(i, entry)
+    return out
+
+
 def _stamp_unjudged(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Mark rows no model judged. Every path out of _filter_events_by_query goes through
     here or through the scored branch, so the invariant holds with no exceptions:
@@ -666,6 +713,10 @@ def _filter_events_by_query(
     `topic_mismatch` (a short phrase naming how it differs, "" on an exact match). Rows
     no model judged carry 0.0 and "". The score describes closeness only; it decides
     nothing, and a matched event may legitimately carry a low one.
+
+    Each rating names the event it describes (see _ratings_by_index) rather than relying
+    on its position, so an entry the model skips leaves a gap instead of shifting every
+    rating after it onto the wrong event.
 
     Note the scores land on the caller's OWN list: rows are stamped in place, so after
     this returns, `events` holds every candidate scored — matched or not. A caller that
@@ -715,8 +766,8 @@ def _filter_events_by_query(
                     #    threshold over the score could not do it, because match and
                     #    closeness are different axes — the model matched a 0.6 event.
                     #    Only the JSON key list below is new. Do not paraphrase this.
-                    'JSON {"match_indices":[ints], "scores":[floats], '
-                    '"mismatches":[strings], "label":"short phrase"}: indices of '
+                    'JSON {"match_indices":[ints], "ratings":[objects], '
+                    '"label":"short phrase"}: indices of '
                     "events satisfying EVERY constraint the request expresses (a date query "
                     "must match the event's date; a time-of-day query the start time; a "
                     "host query the host). When the request names an activity, interest or "
@@ -725,21 +776,30 @@ def _filter_events_by_query(
                     "activity match — a matching date or time of day alone NEVER qualifies "
                     "an unrelated event (a coffee catch-up is not a match for 'runners', "
                     "even at the right hour). "
-                    # ── Scoring. Strictly additive: it must not touch the decision above.
-                    "SEPARATELY, rate EVERY event you were shown — the ones that match and "
-                    "the ones that don't. scores and mismatches are POSITIONALLY PARALLEL "
-                    "TO THE EVENT LIST, not to match_indices: one entry per event shown, "
-                    "in the order shown, so scores[0] and mismatches[0] describe event 0 "
-                    "whether or not 0 is in match_indices. Shown 12 events, return 12 of "
-                    "each. Each score is how closely that event's TOPIC fits the request, "
-                    f"one decimal place, on this scale: {_TOPIC_SCORE_SCALE}. Judge every "
-                    "event on its own merits against the REQUEST — never rank them "
-                    "against each other, and never spread them out to separate them; two "
-                    "equally good matches get the same number. The score does not decide "
-                    "anything: match_indices alone says what matched, and a matching "
-                    "event may score low. Each mismatch is a short phrase naming how that "
-                    'event differs from the request ("asked for violin, this is guitar"), '
-                    'or "" when it is exactly what was asked for. label '
+                    # ── Rating. A SEPARATE job from the decision above, and the prompt
+                    #    has to keep saying so: the model emits match_indices first, so
+                    #    every rating is generated downstream of a binary verdict and
+                    #    will restate it unless told not to. Each rating names its own
+                    #    event, and puts the comparison before the number — reasoning
+                    #    first, and no cross-list bookkeeping to lose track of.
+                    "SEPARATELY — a different question, answered independently of what "
+                    "you just matched — judge EVERY event you were shown, the ones that "
+                    "match and the ones that don't. ratings is ONE OBJECT PER EVENT, each "
+                    "naming the event it describes: "
+                    '{"index":<the event number>, "mismatch":"<short phrase>", '
+                    '"score":<0.0-1.0>}. Shown 12 events, return 12 objects with indexes '
+                    "0 to 11 — never skip one, not even for a perfect match. Within each "
+                    "object write the mismatch BEFORE the score: name how that event "
+                    'differs from the request ("asked for violin, this is guitar"), or '
+                    '"" when it is exactly what was asked for — then score it, one '
+                    f"decimal place: {_TOPIC_SCORE_SCALE} "
+                    "The match and the score answer different questions and must NOT be "
+                    "made to agree: an event you matched may score low, and an event you "
+                    "did NOT match may score 0.5 or higher. Never round a score toward "
+                    "0.0 or 1.0 to line it up with match_indices, and never use only the "
+                    "ends of the scale — the middle is where most events belong. Judge "
+                    "each event against the REQUEST, never against the other events. "
+                    "label "
                     "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
                     "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
                     "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "
@@ -749,48 +809,48 @@ def _filter_events_by_query(
                 ),
                 user_payload=(
                     f"Request: {query}\nEvents:\n" + "\n".join(lines)
-                    + f"\nReturn match_indices, plus {len(lines)} scores and "
-                    f"{len(lines)} mismatches in event order: "
-                    '{"match_indices":[...], "scores":[...], '
-                    '"mismatches":[...], "label":"..."}.'
+                    + f"\nReturn match_indices, then exactly {len(lines)} ratings "
+                    f"objects — one per event, indexes 0 to {len(lines) - 1}, none "
+                    'skipped: {"match_indices":[...], "ratings":[{"index":0,'
+                    '"mismatch":"...","score":0.0}, ...], "label":"..."}.'
                 ),
-                # 200 was sized for a bare index list. Scores and mismatch phrases for a
-                # full _BROWSE_POOL of 40 run 700-900 output tokens, and an overflowing
-                # response is unparseable JSON: it lands in the except below and falls
-                # SILENTLY into the keyword fallback, which matches far worse and says
-                # nothing about it. Raise this with any growth in the response shape.
-                #
-                # Every event is rated now, not just the matches, so the arrays are always
-                # full-length rather than as short as the match list.
-                max_tokens=1200,
+                # 200 was sized for a bare index list; 1200 for two parallel arrays. A
+                # ratings OBJECT runs ~25 tokens, so a full _BROWSE_POOL of 40 is ~1000
+                # for ratings alone, before match_indices and label — 1200 was already
+                # marginal and is the likeliest reason a 7-event call came back unusable
+                # in the 2026-09-06 eval. An overflowing response is unparseable JSON: it
+                # lands in the except below and falls SILENTLY into the keyword fallback,
+                # which matches far worse and says nothing about it.
+                max_tokens=2000,
                 temperature=0.0,
             )
             if isinstance(data, dict):
                 idxs = data.get("match_indices")
                 label = str(data.get("label") or "").strip()
                 # The gate is match_indices, exactly as before scoring existed: it is the
-                # membership answer, and a malformed scores array must never cost us a
-                # valid one. Junk scores mean everything reads 0.0; the right events are
-                # still returned.
+                # membership answer, and unusable ratings must never cost us a valid one.
+                # Junk ratings mean everything reads 0.0; the right events still return.
                 if isinstance(idxs, list):
-                    raw_scores = data.get("scores")
-                    raw_mismatches = data.get("mismatches")
-                    scores = raw_scores if isinstance(raw_scores, list) else []
-                    mismatches = (
-                        raw_mismatches if isinstance(raw_mismatches, list) else []
-                    )
-                    # Score EVERY event, by INPUT position — scores are parallel to the
-                    # event list, not to match_indices, so nothing the model chose to
-                    # return can shift a score onto the wrong row, and a short array just
-                    # leaves the tail at 0.0. This runs before membership is read: the
-                    # near-misses are the whole point, and under the old contract they
-                    # were dropped before anything could rate them.
+                    ratings = _ratings_by_index(data.get("ratings"), len(events))
+                    # Rate EVERY event, keyed by the index each rating CLAIMS. An event
+                    # with no usable rating stays unjudged at 0.0 rather than inheriting
+                    # its neighbour's — a skipped entry can no longer shift the rest.
+                    # This runs before membership is read: the near-misses are the whole
+                    # point, and the old contract dropped them before anything could rate
+                    # them.
                     for i, ev in enumerate(events):
-                        ev["topic_score"] = _coerce_topic_score(
-                            scores[i] if i < len(scores) else None
-                        )
+                        rating = ratings.get(i) or {}
+                        ev["topic_score"] = _coerce_topic_score(rating.get("score"))
                         ev["topic_mismatch"] = _coerce_topic_mismatch(
-                            mismatches[i] if i < len(mismatches) else None
+                            rating.get("mismatch")
+                        )
+                    if len(ratings) != len(events):
+                        # Not fatal — the gaps are unjudged, not misaligned. Logged
+                        # because a model that keeps skipping events is a prompt problem
+                        # we would otherwise only discover from a puzzling eval.
+                        logging.getLogger(__name__).info(
+                            "activity_browse_ratings_incomplete events=%d rated=%d",
+                            len(events), len(ratings),
                         )
                     # Membership is the model's call and the score has no vote — a
                     # matched event may score low. A threshold here read the wrong axis
@@ -802,6 +862,13 @@ def _filter_events_by_query(
                         if isinstance(i, int) and 0 <= i < len(events)
                     ]
                     return picked, label
+                # A parseable response we cannot use. Previously indistinguishable from
+                # "the model rated everything 0.0": both silently produced an all-zero,
+                # empty-label result, which cost a full eval cycle to tell apart.
+                logging.getLogger(__name__).warning(
+                    "activity_browse_filter_unusable keys=%s match_indices_type=%s",
+                    sorted(data.keys())[:8], type(idxs).__name__,
+                )
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_filter_failed")
     # Fallback (no LLM, or the call failed): keyword match on title + tags + host;
