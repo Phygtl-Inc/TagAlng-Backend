@@ -2192,6 +2192,9 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
+                    # Already computed for the release check above — the capture needs the
+                    # same read to tell "why are you asking?" from an answer.
+                    slots=pivot_slots,
                 )
             )
             session_ctx["_orchestrator_turn"] = False

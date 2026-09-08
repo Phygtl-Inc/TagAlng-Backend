@@ -2600,7 +2600,7 @@ def set_tip_setup(
         raise HTTPException(status_code=409, detail="no_tip_draft")
 
     from app.reco_question_sets import missing_required
-    from app.tip_share import step_set_of
+    from app.tip_share import judge_answers, step_set_of
 
     def _community_name_for(place_id: str) -> str | None:
         from app.tip_share import my_communities
@@ -2640,10 +2640,27 @@ def set_tip_setup(
     ctx["tip_asked_fields"] = sorted(allowed)
     ctx["tip_pending_ask"] = None
     ctx["tip_share_active"] = True
-    if not missing_required(steps, answers):
+    # One junk answer, named, handed straight back to the card it came from. The chat fork
+    # gets this from the per-turn extractor, but a carousel submit has no turn to hang it
+    # on — and Lana's nudge would land in a bubble the carousel is covering, which is why
+    # a submit full of "bla bla bla" came back as the same form with no reason given (dev
+    # QA 2026-09-08). Same one-nudge-then-accept rule: a second submit always goes through.
+    reasked = list(ctx.get("tip_reasked_fields") or [])
+    weak = judge_answers(
+        steps, answers, fields=set(body.answers or {}), skip=reasked
+    )
+    if weak:
+        ctx["tip_reasked_fields"] = [*reasked, *(w["field"] for w in weak)]
+    elif not missing_required(steps, answers):
         ctx["tip_ready"] = True
     update_session_context(session_id, ctx)
-    return {"ok": True, "missing": missing_required(steps, answers)}
+    return {
+        "ok": True,
+        "missing": missing_required(steps, answers),
+        # Every answer that needs another go, so the whole set can be fixed in one pass.
+        # Empty when they all land, and the client then advances the flow.
+        "weak": weak,
+    }
 
 
 @app.post("/hooks/event-join")

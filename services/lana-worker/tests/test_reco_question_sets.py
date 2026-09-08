@@ -21,10 +21,22 @@ from app.reco_question_sets import (
 )
 
 
+# The basics: a phone number and an address have no answer set, and are not meant to.
+_FLOOR_ISH = {
+    "subject", "profession", "service", "helped_with", "contact", "dish", "where",
+    "recipe", "ingredients", "steps", "used_for", "where_to_buy", "known_for", "fixes",
+    "how", "needs", "cuisine", "good_to_know", "best_for",
+}
+
+
 def test_every_type_has_required_steps_and_unique_fields() -> None:
     for t in RECO_TYPES:
         steps = steps_for(t)
-        assert 7 <= len(steps) <= 10, f"{t} has {len(steps)} steps"
+        assert 6 <= len(steps) <= 10, f"{t} has {len(steps)} steps"
+        # Every step but the type's own basics carries taps, or the carousel is a
+        # column of text boxes and nothing on the card is filterable.
+        facets = [s for s in steps if s["field"] not in _FLOOR_ISH]
+        assert any(s.get("options") for s in facets), f"{t} has no tappable facet"
         fields = [s["field"] for s in steps]
         assert len(fields) == len(set(fields)), f"{t} repeats a field"
         assert [s for s in steps if s.get("required")], f"{t} has no required step"
@@ -88,11 +100,12 @@ def test_typed_capture_asks_the_types_own_questions(monkeypatch: Any) -> None:
     )
     # Two steps are already answered — the subject by the name in the opener, `known_for` by
     # what they said about it — so the flow asks the THIRD, not either of those again.
-    assert ctx["tip_pending_question"] == "Why is it worth going?"
-    assert ctx["tip_pending_ask"] == "why"
-    # subject + 7 fallback steps + the consent step. `where` is not among them: a location's
-    # subject IS the map point, so asking "where is it?" after it is the same question twice.
-    assert "(3/9)" in reply
+    assert ctx["tip_pending_question"] == "Does it cost anything?"
+    assert ctx["tip_pending_ask"] == "cost"
+    # subject + 5 fallback steps + the consent step. `where` is gone (a location's subject
+    # IS the map point, so it would be the same question twice) and so is every colour step
+    # the prompt bans.
+    assert "(3/7)" in reply
     assert "where" not in [s["field"] for s in draft["steps"]]
     assert draft["steps"][0]["answer"] == "Boxi Park"
     assert draft["steps"][1]["answer"] == "Open-air food stalls and live music"
@@ -104,10 +117,10 @@ def test_step_answer_lands_on_its_field_not_the_details_bag(monkeypatch: Any) ->
         "tip_draft": {"name": "Boxi Park", "category": "food hall", "reco_type": "location",
                       "answers": {"known_for": "food stalls"}},
         "tip_share_active": True,
-        "tip_pending_ask": "why",
+        "tip_pending_ask": "good_to_know",
     }
     _, draft = _run(monkeypatch, "Kids run wild while you actually sit and eat", ctx, {})
-    assert draft["answers"]["why"] == "Kids run wild while you actually sit and eat"
+    assert draft["answers"]["good_to_know"] == "Kids run wild while you actually sit and eat"
     assert not draft.get("details")
 
 
@@ -173,7 +186,7 @@ def test_typed_answers_reach_the_saved_signal(monkeypatch: Any) -> None:
     # question was written for this recommendation and cannot be looked up from the key.
     time_row = next(r for r in seen["reco_fields"] if r["field"] == "time")
     assert time_row == {"field": "time", "label": "Cooks in",
-                        "question": "How long does it take?", "kind": "text",
+                        "question": "How long does it take?", "kind": "choice",
                         "answer": "~3 hours"}
     assert [r["field"] for r in seen["reco_fields"]] == ["recipe", "ingredients", "time"]
     # The answers also survive in the human-readable text a neighbor reads.
@@ -191,7 +204,7 @@ def test_optional_steps_advance_instead_of_repeating() -> None:
         if not step:
             break
         asked.append(step["field"])
-    assert asked == ["where", "contact", "liked", "stood_out", "best_for", "good_to_know"]
+    assert asked == ["where", "contact", "ages", "wait", "best_for", "good_to_know"]
 
 
 def test_required_step_is_re_asked_until_answered() -> None:
@@ -232,9 +245,13 @@ def test_generated_set_keeps_the_models_questions() -> None:
     steps = validate_steps(
         [
             {"field": "Taste!", "label": "Taste", "question": "How does it taste?",
-             "placeholder": "Rich, smoky, deeply savoury"},
+             "placeholder": "Rich, smoky, deeply savoury",
+             "options": ["Rich and smoky", "Fresh and light", "Properly spicy"]},
             {"field": "difficulty", "label": "Difficulty", "question": "How hard is it?",
              "options": ["Easy", "Some patience", "Handy only"]},
+            # No answer set and not a floor field: this is the text box "hundred dollars"
+            # came out of, so it does not get written at all.
+            {"field": "vibe", "label": "Vibe", "question": "What is the vibe of it?"},
         ],
         "recipe",
     )
@@ -242,11 +259,12 @@ def test_generated_set_keeps_the_models_questions() -> None:
     # Floor first (a recipe nobody can shop for is not a recommendation), then the model's
     # own subject-specific questions, then the tail.
     assert fields == ["subject", "recipe", "ingredients", "taste", "difficulty", "ask_ok"]
+    assert "vibe" not in fields, "a facet with no answer set is a text box, not a facet"
     assert [s["field"] for s in steps if s["required"]] == [
         "subject", "recipe", "ingredients"
     ]
     assert steps[3]["placeholder"] == "Rich, smoky, deeply savoury"
-    assert steps[3]["kind"] == "text"
+    assert steps[3]["kind"] == "choice"
     assert steps[4]["kind"] == "choice", "options ⇒ a chip row, not a text box"
 
 
@@ -268,6 +286,106 @@ def test_generated_set_drops_what_it_must_not_ask() -> None:
     assert fields.count("helped_with") == 1, "one field, one step"
     assert fields.count("ask_ok") == 1, "the consent step is ours, worded the same for all"
     assert steps[-1]["question"] == "Can neighbours ask you more?"
+
+
+def test_a_place_is_never_asked_what_google_already_knows() -> None:
+    """The Barnes & Noble card asked "price range?" and got "hundred dollars" — a step
+    spent on a listing fact, answered uselessly (dev QA 2026-09-07)."""
+    steps = validate_steps(
+        [
+            {"field": "subject", "question": "Which shop?"},
+            {"field": "known_for", "question": "What is Barnes & Noble known for?"},
+            {"field": "price_range", "question": "What is the price range?"},
+            {"field": "hours", "question": "What are their opening hours?"},
+            {"field": "phone", "question": "What is their phone number?"},
+            {"field": "quiet_corners", "question": "Are there quiet corners to read in?",
+             "options": ["Plenty", "A couple", "None"]},
+        ],
+        "location",
+    )
+    fields = [s["field"] for s in steps]
+    assert "quiet_corners" in fields, "what only a visitor knows survives"
+    for lookup in ("price_range", "hours", "phone"):
+        assert lookup not in fields, f"{lookup} is on the listing, not word-of-mouth"
+    # A product's price is not a listing fact — it stays askable, as bands.
+    assert "price" in [
+        s["field"]
+        for s in validate_steps(
+            [
+                {"field": "used_for", "question": "What is it used for?"},
+                {"field": "price", "question": "Roughly what does it cost?",
+                 "options": ["Under $50", "$50-150", "$150+"]},
+            ],
+            "product",
+        )
+    ], "a product's price is the neighbour's to tell"
+
+
+def test_a_barber_shop_is_picked_on_the_map_and_a_plumber_is_typed(monkeypatch: Any) -> None:
+    """"a barber shop near me" was asked "Who is it?" in a plain text box: the type table
+    files barbers with the plumbers, and a plumber genuinely has no storefront (dev QA
+    2026-09-08). The extractor's place_based read is what tells them apart."""
+    shop = steps_for("service", place_based=True)
+    assert shop[0]["kind"] == "place", "a barber shop is a door you walk through"
+    plumber = steps_for("service", place_based=False)
+    assert plumber[0]["kind"] == "text", "a plumber by referral has no address"
+
+    # A clinic too — and its duplicate "where are they based?" goes, since the pin has it.
+    clinic = validate_steps(
+        [{"field": "treats", "question": "Which ages?", "options": ["Kids", "Adults"]}],
+        "professional", place_based=True,
+    )
+    assert clinic[0]["kind"] == "place"
+    assert "where" not in [s["field"] for s in clinic], "the pin already answers it"
+
+    # But never a recipe, however confident the model is that daal is on a map.
+    assert steps_for("recipe", place_based=True)[0]["kind"] == "text"
+    assert steps_for("product", place_based=True)[0]["kind"] == "text"
+
+
+def test_the_chat_fork_offers_places_for_a_place_subject(monkeypatch: Any) -> None:
+    """kind=place is also what triggers the nearby-places chips, so the barber-shop fix
+    has to reach the reply and not just the carousel."""
+    # Not via `_run`: that helper stubs the place lookup empty, which is the thing under
+    # test here.
+    monkeypatch.setattr(tip_share, "_reco_tallies", lambda **_: [])
+    monkeypatch.setattr(
+        tip_share, "_extract_tip_fields",
+        lambda **_: ({"category": "barber shop", "reco_type": "service",
+                      "place_based": True}, None),
+    )
+    monkeypatch.setattr(
+        tip_share, "_name_suggestions", lambda *a, **k: ["Fade Room", "Nona Barbers"]
+    )
+    ctx: dict[str, Any] = {}
+    tip_share.run_tip_share_turn(
+        user_message="a barber shop near me", session_ctx=ctx, history=[],
+        user_jwt="jwt", home_block_id="b1",
+    )
+    draft = dict(ctx.get("tip_draft") or {})
+    assert ctx["tip_pending_ask"] == "subject"
+    assert draft["suggestions"] == ["Fade Room", "Nona Barbers"], "real shops to tap"
+
+
+def test_the_subject_step_offers_real_places_to_tap(monkeypatch: Any) -> None:
+    """"Which stationery shop?" arrived with nothing to tap and no ZIP in the session, so
+    the user was left typing a name Lana could have found (dev QA 2026-09-08). A map search
+    needs a centre, and for a signed-in user the only one that resolves is their home —
+    which means the user id has to reach `nearby_place_suggestions`."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "app.places.nearby_place_suggestions",
+        lambda **kw: (seen.update(kw), ["Sam Flax Orlando", "Rifle Paper Co."])[1],
+    )
+    monkeypatch.setattr("app.auth.jwt_user_id", lambda _jwt: "u-1")
+    out = tip_share._name_suggestions(
+        {"category": "stationery shop", "reco_type": "location"},
+        zip_code=None,
+        block_id="b1",
+        user_jwt="jwt",
+    )
+    assert out == ["Sam Flax Orlando", "Rifle Paper Co."]
+    assert seen["user_id"] == "u-1", "no user id, no map centre, no places to tap"
 
 
 def test_generated_set_falls_back_when_generation_gives_nothing() -> None:
@@ -311,8 +429,8 @@ def test_flow_uses_the_generated_set_and_writes_it_once(monkeypatch: Any) -> Non
             "answers": {"profession": "Pediatric dentist"},
             "steps_raw": [
                 {"field": "profession", "label": "Profession", "question": "What does she do?"},
-                {"field": "treats", "label": "Treats", "question": "What does she treat?",
-                 "placeholder": "Kids' dental care"},
+                {"field": "treats", "label": "Treats", "question": "Which ages does she treat?",
+                 "placeholder": "Toddlers up", "options": ["Babies", "Toddlers", "Big kids"]},
             ],
         },
     )
@@ -329,6 +447,211 @@ def test_flow_uses_the_generated_set_and_writes_it_once(monkeypatch: Any) -> Non
     _run(monkeypatch, "she treats toddlers", ctx,
          {"steps_raw": [{"field": "other", "question": "Something else?"}]})
     assert (ctx["tip_draft"] or {})["step_set"] == first
+
+
+def _priced_ctx() -> dict[str, Any]:
+    return {
+        "tip_draft": {
+            "name": "Barnes & Noble", "category": "stationery shop",
+            "reco_type": "location", "draft_id": "d1",
+            "step_set": [
+                {"field": "subject", "label": "Which shop", "kind": "place",
+                 "question": "Which shop?", "required": True},
+                {"field": "known_for", "label": "Known for", "kind": "text",
+                 "question": "What is Barnes & Noble known for?", "required": True},
+                {"field": "price_range", "label": "Price range", "kind": "text",
+                 "question": "What is the price range?", "required": False},
+            ],
+            "answers": {"subject": "Barnes & Noble", "known_for": "paperback books"},
+        },
+        "tip_share_active": True,
+        "tip_asked_fields": ["subject", "known_for", "price_range"],
+        "tip_pending_ask": "price_range",
+    }
+
+
+def test_an_answer_that_does_not_answer_gets_one_nudge(monkeypatch: Any) -> None:
+    """"hundred dollars" to "what is the price range?" was stored and rendered as a fact
+    (dev QA 2026-09-07). Now the step re-opens — once."""
+    ctx = _priced_ctx()
+    reply, draft = _run(
+        monkeypatch, "hundred dollars", ctx,
+        {"weak_answer": {"field": "price_range", "why": "an amount, not a range"}},
+    )
+    assert "price_range" not in draft["answers"], "the junk answer is not kept"
+    assert ctx["tip_pending_ask"] == "price_range", "the same step is re-opened"
+    assert ctx["tip_pending_question"] == "What is the price range?"
+    assert "price_range" not in (ctx["tip_asked_fields"] or []), "or the walk would skip it"
+    assert "price range" in reply.lower()
+
+    # Second try, still weak → it stands. A neighbour doing us a favour is not a form.
+    reply2, draft2 = _run(
+        monkeypatch, "like a hundred bucks", ctx,
+        {"weak_answer": {"field": "price_range", "why": "still not a range"}},
+    )
+    assert draft2["answers"]["price_range"] == "like a hundred bucks", "one nudge, then it stands"
+    assert ctx["tip_pending_ask"] != "price_range"
+
+
+def test_the_nudge_answers_the_user_before_re_asking(monkeypatch: Any) -> None:
+    """"the petrol is expensive" got a bare re-ask that read straight past it (dev QA
+    2026-09-08). Lana has to react to what was said, and offer a way out of an optional
+    question she has now asked twice."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        tip_share, "compose_reply",
+        lambda **kw: (seen.update(kw), str(kw.get("fallback") or ""))[1],
+    )
+    ctx = _priced_ctx()
+    _run(
+        monkeypatch, "the petrol is expensive", ctx,
+        {"weak_answer": {"field": "price_range", "why": "not about the shop"}},
+    )
+    assert "the petrol is expensive" in " ".join(seen["facts"]), "she read it"
+    assert "REACT" in seen["goal"], "and reacts to it before re-asking"
+    assert tip_share._SKIP_CHIP in (dict(ctx["tip_draft"]).get("suggestions") or [])
+
+
+def test_the_nudge_never_touches_the_subject_or_the_tail(monkeypatch: Any) -> None:
+    """The subject is a map pick and the tail is consent — neither is a wrong-shaped answer
+    to argue with."""
+    for field in ("subject", "ask_ok", "others_also_said"):
+        ctx = _priced_ctx()
+        _run(monkeypatch, "whatever", ctx, {"weak_answer": {"field": field, "why": "no"}})
+        assert not (ctx.get("tip_reasked_fields") or []), f"{field} is never re-asked"
+
+
+def test_no_nudge_when_the_user_is_done(monkeypatch: Any) -> None:
+    """"pass the tip along" on a weak answer posts the tip — arguing on the way out is how
+    a finished card becomes a loop."""
+    ctx = _priced_ctx()
+    ctx["tip_draft"]["answers"]["price_range"] = "hundred dollars"
+    _run(
+        monkeypatch, "pass the tip along", ctx,
+        {"weak_answer": {"field": "price_range", "why": "an amount, not a range"}},
+    )
+    assert not (ctx.get("tip_reasked_fields") or [])
+
+
+def test_questions_wait_until_lana_knows_which_shop(monkeypatch: Any) -> None:
+    """A category alone got a set written about "a stationery shop" in general — every
+    question said "this stationery shop" and asked what fits any shop on earth (dev QA
+    2026-09-08). Now the subject step comes first and the set is written after it."""
+    monkeypatch.setattr(tip_share, "_reco_tallies", lambda **_: [])
+    ctx: dict[str, Any] = {}
+    _, draft = _run(
+        monkeypatch, "a stationery shop near me with cool stuff", ctx,
+        {
+            "category": "stationery shop", "reco_type": "location",
+            "steps_raw": [{"field": "parking", "question": "What is parking like?",
+                           "options": ["Easy lot", "Street only"]}],
+        },
+    )
+    assert not draft.get("step_set"), "no subject yet, so no questions written about it"
+    assert ctx["tip_pending_ask"] == "subject", "the subject is asked first"
+
+    # The subject lands → NOW the set is written, and it can name the real place.
+    _, draft = _run(
+        monkeypatch, "Gifts & More at The Paper Store", ctx,
+        {"name": "Gifts & More at The Paper Store",
+         "answers": {"subject": "Gifts & More at The Paper Store"},
+         "steps_raw": [{"field": "parking", "label": "Parking",
+                        "question": "Is parking easy at The Paper Store?",
+                        "options": ["Easy lot", "Street only", "Tough parking"]}]},
+    )
+    assert [s["field"] for s in draft["step_set"]][:2] == ["subject", "known_for"]
+    assert "parking" in [s["field"] for s in draft["step_set"]]
+
+
+def test_the_cards_fork_waits_for_questions_about_this_subject(monkeypatch: Any) -> None:
+    """The carousel opened on the type's generic table — eight text boxes asking "What do
+    they do?" while the chat fork was offering Men's haircuts / Kids' cuts / Shaves for
+    this barber shop (dev QA 2026-09-08). `tailored` is what the client holds the fork on."""
+    monkeypatch.setattr(tip_share, "_reco_tallies", lambda **_: [])
+    ctx: dict[str, Any] = {}
+    _, draft = _run(
+        monkeypatch, "a barber shop near me", ctx,
+        {"category": "barber shop", "reco_type": "service", "place_based": True},
+    )
+    assert draft["tailored"] is False, "no subject yet, so the questions are still generic"
+
+    _, draft = _run(
+        monkeypatch, "Genteel barbershop", ctx,
+        {"name": "Genteel barbershop", "answers": {"subject": "Genteel barbershop"},
+         "steps_raw": [{"field": "service", "label": "Service",
+                        "question": "What does Genteel do?",
+                        "options": ["Men's haircuts", "Kids' cuts", "Shaves"]}]},
+    )
+    assert draft["tailored"] is True, "written for this shop — the fork can open"
+    service = next(s for s in draft["step_set"] if s["field"] == "service")
+    assert service["options"] == ["Men's haircuts", "Kids' cuts", "Shaves"]
+    assert service["kind"] == "choice", "taps in the carousel, not a text box"
+
+
+def test_asking_why_does_not_destroy_the_recommendation(monkeypatch: Any) -> None:
+    """"why are u asking this? why should i tell?" reset the whole capture — the card
+    vanished and Lana offered to help with something else (dev QA 2026-09-08)."""
+    ctx = _priced_ctx()
+    ctx["tip_pending_ask"] = "price_range"
+    meta = {"goal": "chat"}
+
+    # The lane is KEPT: a capture with a question outstanding owns "why are you asking".
+    assert not tip_share.tip_share_should_release("why are u asking this?", ctx, meta)
+
+    reply = tip_share.run_tip_share_turn(
+        user_message="why are u asking this? why should i tell?",
+        session_ctx=ctx, history=[], user_jwt="jwt", home_block_id="b1", slots=meta,
+    )
+    draft = dict(ctx.get("tip_draft") or {})
+    assert draft.get("name") == "Barnes & Noble", "the recommendation survives"
+    assert "price_range" not in (draft.get("answers") or {}), "the question is not the answer"
+    assert ctx["tip_share_active"], "still in the capture"
+    assert tip_share._SKIP_CHIP in (draft.get("suggestions") or []), "an optional step can be skipped"
+    assert "price range" in reply.lower()
+
+    # Skipping it moves on instead of re-asking.
+    _run(monkeypatch, tip_share._SKIP_CHIP, ctx, {})
+    assert "price_range" in (ctx.get("tip_asked_fields") or [])
+    assert (dict(ctx.get("tip_draft") or {}).get("answers") or {}).get("price_range") is None
+
+
+def test_the_question_is_never_stored_as_the_answer(monkeypatch: Any) -> None:
+    """"why should i answer this" landed on the card as the LIKED value with a green tick
+    (dev QA 2026-09-08). The classifier had not called that turn `chat`, so the meta branch
+    never ran — the extractor, which is the only one holding the question that was on
+    screen, now says what the message IS."""
+    ctx = _priced_ctx()
+    ctx["tip_pending_ask"] = "price_range"
+    reply, draft = _run(
+        monkeypatch, "why should i answer this", ctx,
+        # No slots at all: the classifier is not consulted, exactly the case that broke.
+        {"reply_role": "asks_why"},
+    )
+    assert (draft.get("answers") or {}).get("price_range") is None, (
+        "their question is not their answer"
+    )
+    assert ctx["tip_pending_ask"] == "price_range", "the step is still open"
+    assert draft.get("name") == "Barnes & Noble", "and the card survives"
+    assert tip_share._SKIP_CHIP in (draft.get("suggestions") or [])
+
+    # An ANSWER is still an answer, however grudging.
+    _, draft2 = _run(monkeypatch, "cheap enough", ctx, {"reply_role": "answer"})
+    assert (draft2.get("answers") or {}).get("price_range") == "cheap enough"
+
+
+def test_a_required_step_is_explained_not_skipped(monkeypatch: Any) -> None:
+    """No skip chip on a step the card cannot be finished without — offering one would
+    dead-end the flow."""
+    ctx = _priced_ctx()
+    ctx["tip_pending_ask"] = "known_for"
+    ctx["tip_draft"]["answers"] = {"subject": "Barnes & Noble"}
+    tip_share.run_tip_share_turn(
+        user_message="why do you need that?", session_ctx=ctx, history=[],
+        user_jwt="jwt", home_block_id="b1", slots={"goal": "chat"},
+    )
+    assert tip_share._SKIP_CHIP not in (
+        (dict(ctx.get("tip_draft") or {})).get("suggestions") or []
+    )
 
 
 def test_generated_questions_reach_the_saved_signal(monkeypatch: Any) -> None:

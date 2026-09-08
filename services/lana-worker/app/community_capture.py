@@ -281,7 +281,13 @@ def _build_chips(draft: dict[str, Any]) -> list[dict[str, str]]:
     return chips
 
 
-def _place_suggestions(draft: dict[str, Any], *, zip_code: str | None, block_id: str | None) -> list[str]:
+def _place_suggestions(
+    draft: dict[str, Any],
+    *,
+    zip_code: str | None,
+    block_id: str | None,
+    user_jwt: str | None = None,
+) -> list[str]:
     """Real nearby places of this community's kind, for the chat fork's subject step.
 
     The carousel fork has the Places picker; the chat fork has only chips, so without
@@ -295,8 +301,15 @@ def _place_suggestions(draft: dict[str, Any], *, zip_code: str | None, block_id:
         from app.places import nearby_place_suggestions
 
         _, keyword = _TYPE_SEARCH.get(ctype, (None, ctype.replace("_", " ")))
+        from app.auth import jwt_user_id
+
+        # See `tip_share._name_suggestions`: no user id, no centre, no places for anyone
+        # whose session has no ZIP in it.
         return nearby_place_suggestions(
-            query=str(draft.get("name") or keyword), zip_code=zip_code, block_id=block_id
+            query=str(draft.get("name") or keyword),
+            zip_code=zip_code,
+            block_id=block_id,
+            user_id=jwt_user_id(user_jwt) if user_jwt else None,
         )
     except Exception:  # noqa: BLE001
         return []
@@ -554,7 +567,7 @@ def run_community_capture_turn(
                 session_ctx["community_pending_ask"] = COMMUNITY_SUBJECT_FIELD
                 draft["pending_field"] = COMMUNITY_SUBJECT_FIELD
                 draft["suggestions"] = _place_suggestions(
-                    draft, zip_code=zip_code, block_id=block_id
+                    draft, zip_code=zip_code, block_id=block_id, user_jwt=user_jwt
                 )
                 session_ctx["community_draft"] = draft
                 session_ctx["community_ready"] = None
@@ -619,7 +632,9 @@ def run_community_capture_turn(
             question = str(step["question"])
             options = list(step.get("options") or [])
             if step.get("kind") == "place":
-                options = _place_suggestions(draft, zip_code=zip_code, block_id=block_id)
+                options = _place_suggestions(
+                    draft, zip_code=zip_code, block_id=block_id, user_jwt=user_jwt
+                )
             draft["pending_field"] = field
         elif field == "circle_type":
             question, options = "What kind of place is it?", TYPE_SUGGESTIONS
@@ -735,7 +750,9 @@ def run_community_capture_turn(
             # A generated set writes no options for a map step, and the chat fork has no
             # Places picker to fall back on — so real nearby places arrive as suggestions.
             draft["suggestions"] = list(step.get("options") or []) or (
-                _place_suggestions(draft, zip_code=zip_code, block_id=block_id)
+                _place_suggestions(
+                    draft, zip_code=zip_code, block_id=block_id, user_jwt=user_jwt
+                )
                 if step.get("kind") == "place"
                 else []
             )
