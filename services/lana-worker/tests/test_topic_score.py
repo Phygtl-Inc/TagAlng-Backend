@@ -355,5 +355,82 @@ class PromptContractTests(unittest.TestCase):
         self.assertIn("match_indices alone says what matched", system)
 
 
+class NoMatchLoggingTests(_LLMCase):
+    """An empty search logs what it searched and how close it got. In production the
+    empty states are the ones nobody can reconstruct afterwards, and "nothing matched"
+    on its own does not say whether the neighbourhood had nothing or the matcher was
+    too strict about something that was nearly right."""
+
+    def _logs(self, fn):
+        with self.assertLogs("app.activity_browse", level="INFO") as captured:
+            fn()
+        return [line for line in captured.output if "activity_browse_no_match" in line]
+
+    def test_an_empty_result_logs_the_request_the_count_and_the_best_score(self):
+        lines = self._logs(
+            lambda: self._run(
+                {"match_indices": [], "scores": [0.2, 0.8, 0.1],
+                 "mismatches": ["", "", ""], "label": "cricket"},
+                query="cricket",
+            )
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertIn("query='cricket'", lines[0])
+        self.assertIn("candidates=3", lines[0])
+        # The near-miss is the point: 0.8 says the matcher was strict, not that the
+        # block was empty.
+        self.assertIn("best_score=0.8", lines[0])
+
+    def test_a_match_does_not_log(self):
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json",
+            return_value={"match_indices": [0], "scores": [1.0, 0.0, 0.0],
+                          "mismatches": ["", "", ""], "label": "cricket"},
+        ), patch("app.orchestrator.llm.router_model", return_value="m"), patch(
+            "app.activity_browse._log_no_match"
+        ) as spy:
+            _filter_events_by_query(_events(), "cricket")
+        spy.assert_not_called()
+
+    def test_indices_that_all_fall_out_of_range_log_too(self):
+        """Membership can end up empty without the model saying so."""
+        lines = self._logs(
+            lambda: self._run(
+                {"match_indices": [99, -1], "scores": [0.5, 0.5, 0.5],
+                 "mismatches": ["", "", ""], "label": "cricket"},
+                query="cricket",
+            )
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertIn("best_score=0.5", lines[0])
+
+    def test_no_candidates_at_all_logs_with_a_zero_count_and_no_score(self):
+        lines = self._logs(lambda: _filter_events_by_query([], "cricket"))
+        self.assertEqual(len(lines), 1)
+        self.assertIn("candidates=0", lines[0])
+        self.assertIn("best_score=None", lines[0])
+
+    def test_the_keyword_fallback_cannot_return_empty_so_it_never_logs(self):
+        """Documenting the reason there is no log call on that path rather than leaving
+        dead code there: the fallback returns `matched or events`, and events is known
+        non-empty by then, so it always hands back at least the full candidate list."""
+        with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
+            "app.activity_browse._log_no_match"
+        ) as spy:
+            matched, _ = _filter_events_by_query(_events(), "nothing will match this")
+        self.assertEqual(len(matched), 3)
+        spy.assert_not_called()
+
+    def test_a_long_request_is_truncated_in_the_log(self):
+        lines = self._logs(
+            lambda: self._run(
+                {"match_indices": [], "scores": [], "mismatches": [], "label": ""},
+                query="cricket " * 40,
+            )
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertLess(len(lines[0]), 400)
+
+
 if __name__ == "__main__":
     unittest.main()

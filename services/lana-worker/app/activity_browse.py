@@ -632,6 +632,26 @@ def _coerce_topic_mismatch(value: Any) -> str:
     return str(value or "").strip()[:120]
 
 
+def _log_no_match(query: str, events: list[dict[str, Any]]) -> None:
+    """One line when a search comes up empty, carrying the best near-miss it saw.
+
+    The score is what makes this worth logging. "cricket, 12 candidates, nothing matched"
+    and "cricket, 12 candidates, nothing matched, closest was 0.8" are different
+    problems: the first is a supply gap in the neighbourhood, the second a matcher being
+    too strict about something that was nearly right. Without the score the two are
+    indistinguishable in production, which is where the empty states actually happen.
+    """
+    scores = [
+        s for s in (e.get("topic_score") for e in events) if isinstance(s, (int, float))
+    ]
+    logging.getLogger(__name__).info(
+        "activity_browse_no_match query=%r candidates=%d best_score=%s",
+        query[:120],
+        len(events),
+        max(scores) if scores else None,
+    )
+
+
 def _stamp_unjudged(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Mark rows no model judged. Every path out of _filter_events_by_query goes through
     here or through the scored branch, so the invariant holds with no exceptions:
@@ -672,9 +692,10 @@ def _filter_events_by_query(
     wants the near-misses reads its input list; no second return value is needed.
     Nothing reads any of this yet.
     """
-    if not events:
-        return [], ""
     query = str(query or "").strip()
+    if not events:
+        _log_no_match(query, events)
+        return [], ""
     if not query or _OPEN_RE.match(query):
         # Open/vague request: everything "matches", but nothing was judged against a
         # topic — there wasn't one. Unjudged, not perfect.
@@ -801,6 +822,10 @@ def _filter_events_by_query(
                         for i in idxs
                         if isinstance(i, int) and 0 <= i < len(events)
                     ]
+                    if not picked:
+                        # Every candidate is scored by now, so the log can say how close
+                        # the closest one came.
+                        _log_no_match(query, events)
                     return picked, label
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_filter_failed")
