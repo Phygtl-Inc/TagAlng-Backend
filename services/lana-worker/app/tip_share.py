@@ -77,9 +77,9 @@ Return ONE compact JSON object with exactly these keys:
   You are the only one who can call this, because you are the only one holding the question
   they were asked. Get it wrong towards "answer" and their question gets stored as their
   answer, which is what used to happen.
-- weak: the ONE answer that does not actually answer the question it was asked — normally
-  the one they just gave, but a whole set can also arrive at once from the card carousel,
-  and those get judged too (pick the worst single one):
+- weak: the ONE answer the user JUST GAVE, in this message, that does not answer the
+  question it was asked. Only that one — a set submitted from the card carousel is judged
+  where it arrives, and judging it again here reopened a form the user had just fixed:
   {"field": <the key from CURRENT TYPE FIELDS>, "why": <max 8 words>}. Judge shape,
   not length — a two-word answer is fine, a wrong-shaped one is not: "hundred dollars" to
   "what's the price range?", "good" to "what's it known for?", "idk", "ask me" to "how do
@@ -268,7 +268,7 @@ _JUDGE_SYSTEM = """You check whether answers on a recommendation card actually a
 questions they were given.
 
 You get QUESTION → ANSWER pairs. Return ONE compact JSON object:
-{"weak": [{"field": <field key>, "why": <max 8 words, plain and kind>, "reply": <or null>}]}
+{"weak": [{"field": <field key>, "why": <max 8 words, see below>, "reply": <or null>}]}
 with an entry for EVERY answer that does not answer its question, and "weak": [] when they
 all fit. Do not invent problems to fill the list — most sets have none.
 
@@ -276,6 +276,11 @@ Judge SHAPE, not length or eloquence. "Fade" is a fine answer to "what did they 
 you?". These are not: "bla bla bla", "what?", "why?", "idk", "everything", "good", "ask me"
 to a question about contact, a dollar amount where a range was asked for, or an answer that
 belongs to a different question.
+
+`why` names what is MISSING, and never judges the person or their answer: "not a price
+range", "no place to buy it", "does not say which ages". NEVER "nonsense", "gibberish",
+"meaningless", "garbage", "not a real answer" — this is a neighbour doing us a favour, and
+the line is shown to them on their own card.
 
 `reply`: when the answer is itself a QUESTION BACK AT YOU — "why?", "what?", "why should I
 tell you?", "who sees this?" — they are not being difficult, they are asking what the
@@ -1130,11 +1135,7 @@ def run_tip_share_turn(
         # Never argue with our own chip. If the answer IS one of the options Lana offered,
         # it is valid by construction — your log had a nudge on a `choice` step (dev QA
         # 2026-09-08), which is Lana telling a user the answer she gave them is wrong.
-        offered = {
-            " ".join(str(o).split()).casefold()
-            for o in ((step or {}).get("options") or [])
-        }
-        if step and answer_now and answer_now.casefold() not in offered:
+        if step and answer_now and not _all_offered(answer_now, (step or {}).get("options")):
             draft["answers"] = {
                 k: v for k, v in (draft.get("answers") or {}).items() if k != weak_field
             }
@@ -1282,17 +1283,25 @@ def run_tip_share_turn(
             # Places picker to fall back on the way the carousel does — so a "where is it?"
             # asked in chat comes back as typed prose nobody can navigate to. Real nearby
             # places, same call the name step makes.
-            # The chips stay up, plus a way out: two off-target answers in a row means the
-            # question is not landing, and a third ask is worse than no answer.
-            draft["suggestions"] = list(step.get("options") or []) + (
-                [] if step.get("required") else [_SKIP_CHIP]
-            ) or (
-                _name_suggestions(
+            # One list, three cases, in order:
+            #   community — nothing. It has its own select in chat, and eight communities
+            #     as eight full-width chips is a wall, not a question (dev QA 2026-09-08).
+            #   options    — the taps Lana wrote for this question.
+            #   place      — real nearby places, since a generated set writes no options
+            #     for a map step and chat has no picker of its own to fall back on.
+            # Plus a way out on anything optional. Deliberately not `a + b or c`: once a
+            # skip chip is in the list the left side is never falsy, which silently ate the
+            # nearby places for every optional map step.
+            picks = list(step.get("options") or [])
+            if not picks and step.get("kind") == "place":
+                picks = _name_suggestions(
                     draft, zip_code=zip_code, block_id=block_id, user_jwt=user_jwt
                 )
-                if step.get("kind") == "place"
-                else []
-            )
+            if step.get("kind") == "community":
+                picks = []
+            elif not step.get("required"):
+                picks = [*picks, _SKIP_CHIP]
+            draft["suggestions"] = picks
             session_ctx["tip_draft"] = draft
             session_ctx["tip_share_active"] = True
             session_ctx["tip_pending_question"] = step["question"]

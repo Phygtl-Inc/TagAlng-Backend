@@ -164,6 +164,15 @@ class TestJunkAnswers(unittest.TestCase):
         self.assertEqual(sorted(ctx["tip_reasked_fields"]),
                          ["liked", "used_for", "where_to_buy"])
 
+    def test_a_cleared_submit_is_not_re_judged_by_the_turn(self) -> None:
+        """The turn after a submit runs its own per-answer judge. It was re-rejecting a set
+        this endpoint had just cleared — a different field each time — so the carousel
+        reopened for ever and the tip could never be posted (dev QA 2026-09-08). Every
+        submitted field is marked queried, which is what the turn's nudge skips on."""
+        _, ctx = _run({"where_to_buy": "Target", "liked": "the staff"}, judge=None)
+        self.assertEqual(sorted(ctx["tip_reasked_fields"]), ["liked", "where_to_buy"])
+        self.assertTrue(ctx["tip_ready"])
+
 
 class TestQuestionsBack(unittest.TestCase):
     def test_a_question_back_gets_an_answer_not_a_label(self) -> None:

@@ -367,6 +367,41 @@ def test_the_chat_fork_offers_places_for_a_place_subject(monkeypatch: Any) -> No
     assert draft["suggestions"] == ["Fade Room", "Nona Barbers"], "real shops to tap"
 
 
+def test_the_community_step_is_a_select_in_chat_not_a_wall_of_chips(monkeypatch: Any) -> None:
+    """Eight communities came down as quick replies and rendered as eight full-width
+    buttons stacked down the screen (dev QA 2026-09-08). The step has its own select in
+    chat, so its options must not ALSO arrive as chips."""
+    monkeypatch.setattr(tip_share, "_reco_tallies", lambda **_: [])
+    monkeypatch.setattr(
+        tip_share, "my_communities",
+        lambda _jwt: [{"place_id": f"p{i}", "name": n} for i, n in enumerate(
+            ["HILI FITNESS", "Mizu Sushi", "Fitness CF", "Life Time"])],
+    )
+    ctx: dict[str, Any] = {
+        "tip_draft": {
+            "name": "Rifle Paper Co.", "category": "stationery shop",
+            "reco_type": "location", "draft_id": "d1",
+            "step_set": [
+                {"field": "subject", "label": "Shop", "kind": "place",
+                 "question": "Which shop?", "required": True},
+                {"field": "community", "label": "Community", "kind": "community",
+                 "question": "Is this for one of your communities?", "required": False,
+                 "options": ["HILI FITNESS", "Mizu Sushi", "Everyone nearby"],
+                 "option_ids": ["p0", "p1", ""]},
+            ],
+            "answers": {"subject": "Rifle Paper Co."},
+        },
+        "tip_share_active": True,
+        "tip_asked_fields": ["subject"],
+    }
+    _, draft = _run(monkeypatch, "go on then", ctx, {})
+    assert ctx["tip_pending_ask"] == "community"
+    assert draft["suggestions"] == [], "the select is the control, chips are not"
+    # The options still travel ON the step — that is what the select renders from.
+    step = next(s for s in draft["steps"] if s["field"] == "community")
+    assert step["options"][-1] == "Everyone nearby"
+
+
 def test_the_subject_step_offers_real_places_to_tap(monkeypatch: Any) -> None:
     """"Which stationery shop?" arrived with nothing to tap and no ZIP in the session, so
     the user was left typing a name Lana could have found (dev QA 2026-09-08). A map search

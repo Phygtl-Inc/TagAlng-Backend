@@ -2649,9 +2649,12 @@ def set_tip_setup(
     weak = judge_answers(
         steps, answers, fields=set(body.answers or {}), skip=reasked
     )
-    if weak:
-        ctx["tip_reasked_fields"] = [*reasked, *(w["field"] for w in weak)]
-    elif not missing_required(steps, answers):
+    # EVERY submitted field counts as queried, not just the flagged ones. The turn that
+    # follows this submit runs its own per-answer judge, and it was re-rejecting a set this
+    # endpoint had just cleared — a different field each time, so the carousel reopened for
+    # ever and the tip could never be posted (dev QA 2026-09-08). One judge per answer.
+    ctx["tip_reasked_fields"] = [*reasked, *(set(body.answers or {}) - set(reasked))]
+    if not weak and not missing_required(steps, answers):
         ctx["tip_ready"] = True
     update_session_context(session_id, ctx)
     return {
