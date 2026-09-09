@@ -113,7 +113,10 @@ def _row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "peer_user_id": str(raw.get("peer_user_id") or "").strip() or None,
         "nickname": str(raw.get("neighbor_label") or "").strip() or None,
         "avatar_url": str(raw.get("avatar_url") or "").strip() or None,
-        "distance_text": str(raw.get("distance_text") or "").strip() or None,
+        # No distance. It measured the AUTHOR's home to the reader's, which is neither the
+        # subject's location nor a fact anyone reading a recommendation wants, and it was
+        # wrong often enough to be worse than absent (product call 2026-09-08). The `nearest`
+        # tab still orders on the RPC's own distance — only the displayed string is gone.
         # The shared circle labels the card in the "My circles" tab — the reason this tip
         # is worth more than a stranger's. Empty on the Recent tab's unconnected rows.
         "shared_circles": _clean_circles(raw.get("shared_circles")),

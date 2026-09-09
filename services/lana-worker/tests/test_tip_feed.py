@@ -22,6 +22,7 @@ _RPC_ROW = {
     "neighbor_label": "coral88",
     "avatar_url": "https://…/a.png",
     "distance_meters": 640.0,
+    # Still on the RPC row; deliberately not passed through (see _row).
     "distance_text": "0.4 mi away",
     "shared_circles": [
         {"place_id": "pl-mary", "name": "St Mary's Church", "circle_type": "faith"},
@@ -211,8 +212,10 @@ class TestTipByIdSharedLink(unittest.TestCase):
         self.assertEqual(row["fields"][0]["answer"], "Pediatric dentist")
         self.assertEqual(row["nickname"], "coral88")
         # Caller-relative fields are empty, not guessed.
-        self.assertIsNone(row["distance_text"])
         self.assertEqual(row["shared_circles"], [])
+        # No distance at all: it measured the author's home to the reader's, and it was
+        # wrong often enough to be worse than absent (product call 2026-09-08).
+        self.assertNotIn("distance_text", row)
 
     def test_votes_are_counted_and_the_viewers_own_vote_comes_back(self):
         row = self._get(votes=[
