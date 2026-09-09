@@ -642,6 +642,17 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Esto es lo que viene de {label} cerca de ti.",
         "pt": "Olha o que vem por aí de {label} perto de você.",
     },
+    # Widened search (pass 2). Never says "near you" — the distance is the point.
+    "browse.events_header_far": {
+        "en": "Nothing near you, but here's what I found about {miles} miles out.",
+        "es": "No hay nada cerca de ti, pero esto es lo que encontré a unas {miles} millas.",
+        "pt": "Nada perto de você, mas foi isso que achei a cerca de {miles} milhas.",
+    },
+    "browse.events_header_label_far": {
+        "en": "No {label} near you, but here's what I found about {miles} miles out.",
+        "es": "No hay {label} cerca de ti, pero esto es lo que encontré a unas {miles} millas.",
+        "pt": "Nada de {label} perto de você, mas achei isso a cerca de {miles} milhas.",
+    },
     "browse.events_empty": {
         "en": "Nothing near you in the next couple weeks. Want me to widen it, "
               "try another kind, or set up your own?",

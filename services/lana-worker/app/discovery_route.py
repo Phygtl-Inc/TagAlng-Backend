@@ -6641,12 +6641,30 @@ def nearest_activity_beyond_radius(
     return far_activity_details(rows[0]) if rows else None
 
 
-def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
-    """Open event ids within activity_radius_meters of the block centroid.
+def event_distances_near_block(
+    block_id: str, *, limit: int = 50, radius_meters: float | None = None
+) -> dict[str, float] | None:
+    """{event id: metres from the block centroid} for open events in range, nearest first.
 
-    [] means "nothing nearby" — a real answer. None means we could not place the
-    block (no centroid, or the RPC isn't deployed yet); callers fall back to the old
-    block-equality filter rather than showing an empty list they can't justify.
+    Same contract as event_ids_near_block, which wraps this: {} means "nothing nearby",
+    a real answer; None means we could not place the block (no centroid, or the RPC
+    isn't deployed yet) and callers must fall back rather than show an empty list they
+    can't justify.
+
+    The distance is the reason this exists. get_activities_near_point computes it, and
+    fetch_preview_events_on_block used to throw it away when it re-queried the events
+    table by id — so nothing downstream could say how far a meet was.
+
+    `radius_meters` overrides the LANA_ACTIVITY_RADIUS_METERS default for one call, which
+    is what lets a widened search reach past the usual ring. Postgres clamps it to 200 km
+    (20260920120000_geolocation_aware_search.sql:411), so that is the real ceiling.
+
+    ponytail: the RPC returns the N NEAREST STARTING FROM ZERO, capped at 50 in SQL
+    (same migration, :480). A widened pass therefore spends its 50 slots on the events
+    nearest the centre first, so once more than 50 open events sit inside the inner
+    radius the outer ring starves and a wider search silently finds nothing. Correct
+    while supply is thin; the fix is a p_min_radius_meters argument on the RPC so the
+    ring is cut in SQL rather than in the worker.
     """
     loc = block_centroid(block_id)
     if not loc:
@@ -6657,7 +6675,9 @@ def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
             {
                 "p_lat": loc[0],
                 "p_lng": loc[1],
-                "p_radius_meters": activity_radius_meters(),
+                "p_radius_meters": (
+                    activity_radius_meters() if radius_meters is None else float(radius_meters)
+                ),
                 # The block read has no horizon; keep one generous enough that a
                 # radius switch never silently shortens what browse can see.
                 "p_window": activity_window(),
@@ -6668,7 +6688,28 @@ def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
         logging.getLogger(__name__).exception("events_near_block_failed block=%s", block_id)
         return None
     rows = res.data if isinstance(res.data, list) else []
-    return [str(r["id"]) for r in rows if isinstance(r, dict) and r.get("id")]
+    out: dict[str, float] = {}
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        try:
+            out[str(r["id"])] = float(r.get("distance_meters") or 0.0)
+        except (TypeError, ValueError):
+            out[str(r["id"])] = 0.0
+    return out
+
+
+def event_ids_near_block(
+    block_id: str, *, limit: int = 50, radius_meters: float | None = None
+) -> list[str] | None:
+    """Open event ids within range of the block centroid, nearest first.
+
+    [] means "nothing nearby" — a real answer. None means we could not place the
+    block (no centroid, or the RPC isn't deployed yet); callers fall back to the old
+    block-equality filter rather than showing an empty list they can't justify.
+    """
+    near = event_distances_near_block(block_id, limit=limit, radius_meters=radius_meters)
+    return None if near is None else list(near)
 
 
 def fetch_preview_events_on_block(
@@ -6678,6 +6719,8 @@ def fetch_preview_events_on_block(
     weekend_only: bool = False,
     pool: int | None = None,
     exclude_host_id: str | None = None,
+    radius_meters: float | None = None,
+    min_distance_meters: float | None = None,
 ) -> list[dict[str, Any]]:
     """Upcoming open events on preview block (service role).
 
@@ -6688,6 +6731,16 @@ def fetch_preview_events_on_block(
 
     `exclude_host_id` drops the caller's own meets: browse offers every card as "tap to
     RSVP", so without it Lana asked a host to RSVP to the event he had just created.
+
+    `radius_meters` widens (or narrows) the search for one call. `min_distance_meters`
+    keeps only events STRICTLY BEYOND that distance, which is how a widened pass reads
+    the ring outside a search that already happened without re-scoring what that search
+    saw. The ring is cut on measured distance rather than on the ids the earlier pass
+    returned, because those ids had already been trimmed to `pool` by start date — an
+    event dropped by that trim would otherwise reappear out here and be announced as a
+    far find when it was three miles away. Distance cannot make that mistake.
+
+    Every returned row carries `distance_meters` when the block could be placed.
     """
     try:
         from app.event_publish import roll_recurring_events
@@ -6710,17 +6763,30 @@ def fetch_preview_events_on_block(
         # Radius, not ZIP equality. The id pre-filter keeps this select list intact
         # (get_activities_near_point returns neither recurrence nor circle_place_ref,
         # and the cards need both), and None falls back to the pre-PR7 behaviour.
-        near = event_ids_near_block(block_id, limit=max(fetch_n, 50))
+        near = event_distances_near_block(
+            block_id, limit=max(fetch_n, 50), radius_meters=radius_meters
+        )
         if near is None:
+            # Block couldn't be placed: pre-PR7 behaviour, and no distances to stamp. A
+            # ring read has nothing to stand on here, so it asks for nothing.
+            if min_distance_meters is not None:
+                return []
             q = q.eq("block_id", block_id)
-        elif not near:
-            return []
         else:
-            q = q.in_("id", near)
+            if min_distance_meters is not None:
+                near = {
+                    eid: d for eid, d in near.items() if d > float(min_distance_meters)
+                }
+            if not near:
+                return []
+            q = q.in_("id", list(near))
         if exclude_host_id:
             q = q.neq("host_id", exclude_host_id)
         res = q.order("starts_at").limit(fetch_n).execute()
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
+        for row in rows:
+            if near and str(row.get("id") or "") in near:
+                row["distance_meters"] = near[str(row["id"])]
         if weekend_only:
             from datetime import timezone
 

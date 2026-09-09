@@ -166,6 +166,20 @@ def activity_browse_should_release(
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
 
+# Pass 2 of the search. A FIXED second radius, not a loop: the widening terminates by
+# construction and costs at most one extra model call.
+#
+# 200 km is not a taste decision — it is the ceiling Postgres clamps to
+# (20260920120000_geolocation_aware_search.sql:411), so anything larger is the same
+# query. There is deliberately no middle rung: without distance tiers nothing downstream
+# would treat 40 miles differently from 120, so a third pass would buy a model call and
+# a round trip for no change in what the user is told.
+#
+# Supply past 200 km is NOT covered here and cannot be — that is what _far_offer's
+# uncapped probe is for (discovery_route.activities_beyond_radius; ZIP 90001 to Lake Nona
+# is 3,555 km). The two are complementary, not alternatives.
+_WIDE_RADIUS_M = 200_000.0
+
 # Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
 # retuned without reading around prose. These are what make a 0.7 mean the same thing on
 # Tuesday as on Friday: the model is told to score each event against the REQUEST, never
@@ -234,6 +248,79 @@ def _fetch_block_events(
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_fetch_failed")
         return []
+
+
+def _widen_search(
+    user_jwt: str,
+    block_id: str | None,
+    *,
+    interest: str,
+    weekend_only: bool = False,
+) -> tuple[list[dict[str, Any]], str]:
+    """Pass 2: the same topic, searched out to _WIDE_RADIUS_M, over the ring the nearby
+    pass could not see. Returns (matched, label) — ([], "") when there is nothing.
+
+    Only ever called from the "a topical search found nothing" branch, so a turn that
+    matches nearby never reaches it and is untouched by construction rather than by a
+    flag. Returns empty when the block can't be placed, when there is no interest to
+    hold constant, and on any failure: a widened search is an improvement on an empty
+    state, never a reason to break one.
+
+    The ring is cut on measured distance, not on the ids the nearby pass returned — see
+    fetch_preview_events_on_block. The pool stays at _BROWSE_POOL: the wider pass is the
+    rare path, and paying for a bigger prompt on every browse turn to serve it is the
+    wrong trade.
+    """
+    interest = str(interest or "").strip()
+    # An open request ("anything", "what's happening") has no topic to hold constant, and
+    # _filter_events_by_query would pass the whole ring through unjudged — so a generic
+    # browse of an empty block would answer with meets 100 miles away. Same guard the
+    # matcher itself uses, for the same reason.
+    if not block_id or not interest or _OPEN_RE.match(interest):
+        return [], ""
+    try:
+        from app.auth import jwt_user_id
+        from app.discovery_route import (
+            activity_radius_meters,
+            fetch_preview_events_on_block,
+        )
+
+        rows = fetch_preview_events_on_block(
+            block_id,
+            limit=_BROWSE_POOL,
+            pool=_BROWSE_POOL,
+            weekend_only=weekend_only,
+            exclude_host_id=jwt_user_id(user_jwt),
+            radius_meters=_WIDE_RADIUS_M,
+            # Strictly beyond whatever the nearby pass just covered, so nothing is
+            # re-scored and nothing near is announced as far.
+            min_distance_meters=activity_radius_meters(),
+        )
+        if not rows:
+            return [], ""
+        _attach_host_names(rows)
+        matched, label = _filter_events_by_query(rows, interest)
+        if matched:
+            logging.getLogger(__name__).info(
+                "activity_browse_widened block=%s query=%r ring=%d matched=%d",
+                block_id, interest[:120], len(rows), len(matched),
+            )
+        return matched, label
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("activity_browse_widen_failed")
+        return [], ""
+
+
+def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
+    """Whole miles to the closest of these events, or None when none carry a distance.
+    Whole miles because the pilot is US-only and "196 km" reads as a bug to someone told
+    everything else in miles — same rule as far_activity_details."""
+    dists = [
+        float(e["distance_meters"])
+        for e in events
+        if isinstance(e.get("distance_meters"), (int, float))
+    ]
+    return int(round(min(dists) / 1609.34)) if dists else None
 
 
 def _today_str() -> str:
@@ -956,6 +1043,7 @@ def _format_browse_message(
     *,
     phone_verified: bool,
     lang: str | None = None,
+    far_miles: int | None = None,
 ) -> str:
     label = (label or "").strip() or None
     if not events:
@@ -964,11 +1052,22 @@ def _format_browse_message(
         return t("browse.events_empty", lang)
     # The FE renders these same events as a card list (activity_previews) right under this
     # message — a short lead-in is enough; enumerating them in text too reads as a bug.
-    head = (
-        t("browse.events_header_label", lang, label=label)
-        if label
-        else t("browse.events_header", lang)
-    )
+    #
+    # far_miles is set only by a WIDENED search. Saying "near you" over a meet 90 miles
+    # out would be the same lie as claiming supply we never measured: the distance was
+    # the whole reason we looked further, so it has to reach the copy.
+    if far_miles is not None:
+        head = (
+            t("browse.events_header_label_far", lang, label=label, miles=f"{far_miles:,}")
+            if label
+            else t("browse.events_header_far", lang, miles=f"{far_miles:,}")
+        )
+    else:
+        head = (
+            t("browse.events_header_label", lang, label=label)
+            if label
+            else t("browse.events_header", lang)
+        )
     tail = (
         t("browse.events_tail_verified", lang)
         if phone_verified
@@ -1285,6 +1384,20 @@ def run_activity_browse_turn(
     # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
     # text them when a matching meet appears) rather than dead-ending. The accept/widen reply
     # is read next turn. No interest (a "show me anything" browse) keeps the generic message.
+    # Pass 2: nothing on topic nearby, so search the ring out to _WIDE_RADIUS_M holding
+    # the topic constant. Sits INSIDE the "found nothing" branch, so a turn that matched
+    # nearby cannot reach it — no flag, no second code path to keep in sync. Community
+    # scope is excluded: "what's on at CF Fitness" is a question about a place, and
+    # answering it with a meet 90 miles away is not a wider answer, it is a wrong one.
+    far_miles: int | None = None
+    if not matched and interest and not comm:
+        matched, wide_label = _widen_search(
+            user_jwt, block_id, interest=interest, weekend_only=weekend_only
+        )
+        if matched:
+            label = wide_label or label
+            far_miles = _nearest_miles(matched)
+
     if not matched and interest:
         # Echo (and store) the filter's short label, not the raw sentence — a full NL entry
         # ("are there any fifa activities for my 6 year old") would otherwise be parroted
@@ -1398,4 +1511,6 @@ def run_activity_browse_turn(
     session_ctx["activity_browse_active"] = True
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     session_ctx["routing_phase"] = "listening"
-    return _format_browse_message(matched, label, phone_verified=phone_verified, lang=lang)
+    return _format_browse_message(
+        matched, label, phone_verified=phone_verified, lang=lang, far_miles=far_miles
+    )
