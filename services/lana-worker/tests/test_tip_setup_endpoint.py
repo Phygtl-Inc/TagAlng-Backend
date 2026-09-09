@@ -33,7 +33,9 @@ STEPS = [
 ]
 
 
-def _run(answers: dict, *, draft: dict | None = None) -> tuple[dict, dict]:
+def _run(
+    answers: dict, *, draft: dict | None = None, judge: list | None = None
+) -> tuple[dict, dict]:
     """Returns (response, the session context as it was written back)."""
     ctx = {
         "tip_draft": draft
@@ -47,6 +49,7 @@ def _run(answers: dict, *, draft: dict | None = None) -> tuple[dict, dict]:
         patch("app.main.verify_auth", return_value=AUTH_SESSION),
         patch("app.main.get_session_for_user", return_value={"context": ctx}),
         patch("app.main.update_session_context", side_effect=lambda sid, c: written.update(c)),
+        patch("app.tip_share.judge_answers", return_value=list(judge or [])),
     ):
         res = set_tip_setup("s-1", TipSetupRequest(answers=answers), authorization=AUTH)
     return res, written
@@ -100,3 +103,90 @@ class TestTipSetup(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJunkAnswers(unittest.TestCase):
+    """A submit full of "bla bla bla" came back as the same form with no reason given: the
+    worker's nudge went to a chat bubble the carousel was covering (dev QA 2026-09-08)."""
+
+    def test_a_junk_answer_comes_back_named_and_blocks_the_ready_card(self) -> None:
+        res, ctx = _run(
+            {"where_to_buy": "bla bla bla"},
+            judge=[{"field": "where_to_buy", "why": "not a place to buy it"}],
+        )
+        self.assertEqual(res["weak"], [{"field": "where_to_buy", "why": "not a place to buy it"}])
+        self.assertNotEqual(ctx.get("tip_ready"), True, "not ready while one answer is junk")
+        # Kept, not discarded — it is in the box the user is about to edit.
+        self.assertEqual(ctx["tip_draft"]["answers"]["where_to_buy"], "bla bla bla")
+        self.assertEqual(ctx["tip_reasked_fields"], ["where_to_buy"])
+
+    def test_the_second_submit_always_goes_through(self) -> None:
+        """One nudge, then their words stand — a neighbour doing us a favour is not a form
+        validator. The endpoint tells the judge what it has already queried."""
+        draft = {"name": "Hatch Rest", "category": "baby gear", "reco_type": "product",
+                 "step_set": STEPS, "answers": {"used_for": "A night light"}}
+        ctx = {"tip_draft": draft, "tip_share_active": True,
+               "tip_reasked_fields": ["where_to_buy"]}
+        seen: dict = {}
+        with (
+            patch("app.main.verify_auth", return_value=AUTH_SESSION),
+            patch("app.main.get_session_for_user", return_value={"context": ctx}),
+            patch("app.main.update_session_context", side_effect=lambda sid, c: None),
+            patch("app.tip_share.judge_answers", side_effect=lambda *a, **kw: seen.update(kw)),
+        ):
+            set_tip_setup(
+                "s-1",
+                TipSetupRequest(answers={"where_to_buy": "bla bla bla"}),
+                authorization=AUTH,
+            )
+        self.assertEqual(seen["skip"], ["where_to_buy"], "already queried once — let it be")
+
+    def test_a_clean_submit_is_ready(self) -> None:
+        res, ctx = _run({"where_to_buy": "Target"}, judge=None)
+        self.assertEqual(res["weak"], [])
+        self.assertTrue(ctx["tip_ready"])
+
+    def test_every_bad_answer_comes_back_in_one_pass(self) -> None:
+        """One problem per submit made fixing three answers cost three round trips, each
+        one hiding the next (dev QA 2026-09-08)."""
+        res, ctx = _run(
+            {"where_to_buy": "idk", "liked": "bla bla", "used_for": "why?"},
+            judge=[
+                {"field": "where_to_buy", "why": "not a place"},
+                {"field": "liked", "why": "not a real answer"},
+                {"field": "used_for", "why": "answered with a question",
+                 "reply": "So a neighbour knows what it's for — what do you use it for?"},
+            ],
+        )
+        self.assertEqual([w["field"] for w in res["weak"]],
+                         ["where_to_buy", "liked", "used_for"])
+        # All three are queried once, so the next submit stands whatever they say.
+        self.assertEqual(sorted(ctx["tip_reasked_fields"]),
+                         ["liked", "used_for", "where_to_buy"])
+
+    def test_a_cleared_submit_is_not_re_judged_by_the_turn(self) -> None:
+        """The turn after a submit runs its own per-answer judge. It was re-rejecting a set
+        this endpoint had just cleared — a different field each time — so the carousel
+        reopened for ever and the tip could never be posted (dev QA 2026-09-08). Every
+        submitted field is marked queried, which is what the turn's nudge skips on."""
+        _, ctx = _run({"where_to_buy": "Target", "liked": "the staff"}, judge=None)
+        self.assertEqual(sorted(ctx["tip_reasked_fields"]), ["liked", "where_to_buy"])
+        self.assertTrue(ctx["tip_ready"])
+
+
+class TestQuestionsBack(unittest.TestCase):
+    def test_a_question_back_gets_an_answer_not_a_label(self) -> None:
+        """"why?" in a card was met with "Answered with a question, not info" — a label
+        that answers nothing (dev QA 2026-09-08). The judge writes the answer instead."""
+        res, _ = _run(
+            {"where_to_buy": "why?"},
+            judge=[{
+                "field": "where_to_buy",
+                "why": "answered with a question",
+                "reply": "So a neighbour knows where to actually get one — where did you?",
+            }],
+        )
+        self.assertEqual(
+            res["weak"][0]["reply"],
+            "So a neighbour knows where to actually get one — where did you?",
+        )

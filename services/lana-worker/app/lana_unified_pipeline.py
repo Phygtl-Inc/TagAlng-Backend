@@ -1623,6 +1623,7 @@ def run_lana_unified_pipeline(
         for k in (
             "pass_along_active",
             "tip_share_active",
+            "community_create_active",
             "look_meet_active",
             "activity_browse_active",
             "rapport_active",
@@ -2191,6 +2192,9 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
+                    # Already computed for the release check above — the capture needs the
+                    # same read to tell "why are you asking?" from an answer.
+                    slots=pivot_slots,
                 )
             )
             session_ctx["_orchestrator_turn"] = False

@@ -725,6 +725,16 @@ class TipDraft(BaseModel):
     # Which step of `steps` the chat fork is asking right now — the FE renders that step's
     # `kind` (a `place` step gets the picker). None on the ready card: nothing is open.
     pending_field: str | None = None
+    # True once `steps` are the questions Lana wrote for THIS subject, false while they are
+    # still the type's generic table. The cards fork waits for it: a carousel commits to a
+    # whole set in one go, and the generic table has no per-subject taps to offer.
+    tailored: bool = False
+    # The community this recommendation is being shared INTO (places.id). Picked on a step
+    # of the capture the way a meet picks one on its setup card, pre-filled from whatever
+    # is selected at the top of the app. Tagged means EXCLUSIVE: the area feed and plain
+    # neighbour asks do not show it (product decision 2026-09-07).
+    circle_place_id: str | None = None
+    circle_name: str | None = None
 
 
 class CommunityDraft(BaseModel):
@@ -872,6 +882,10 @@ class TipSetupRequest(BaseModel):
     keys into the draft."""
 
     answers: dict[str, str] = Field(default_factory=dict)
+    # The community step, by id — the client already holds the ids from the switcher, so it
+    # sends one instead of a name the server would have to match back. Membership is
+    # re-checked server-side; "" clears the pick.
+    circle_place_id: str | None = None
 
 
 class NudgeHookRequest(BaseModel):

@@ -47,6 +47,23 @@ def _enabled() -> bool:
     return os.getenv(_ENABLED_ENV, "1").strip().lower() not in ("0", "false", "off")
 
 
+def readback(session_ctx: dict[str, Any], key: str, draft_id: str | None, summary: str) -> str:
+    """The ``"Heard you — X. "`` lead, ONCE per draft, "" every turn after.
+
+    The item card carries the summary on every turn anyway; repeating it in prose buries
+    the one thing that is new — and read aloud (voice fork) the user sits through the same
+    sentence before hearing what was actually asked. Keyed on the draft id, so the next
+    draft leads again.
+    """
+    if not summary:
+        return ""
+    stamp = draft_id or summary
+    if session_ctx.get(key) == stamp:
+        return ""
+    session_ctx[key] = stamp
+    return f"Heard you — **{summary}**. "
+
+
 def compose_reply(
     *,
     goal: str,

@@ -2600,7 +2600,15 @@ def set_tip_setup(
         raise HTTPException(status_code=409, detail="no_tip_draft")
 
     from app.reco_question_sets import missing_required
-    from app.tip_share import step_set_of
+    from app.tip_share import judge_answers, step_set_of
+
+    def _community_name_for(place_id: str) -> str | None:
+        from app.tip_share import my_communities
+
+        for c in my_communities(_bearer_token(authorization)):
+            if c["place_id"] == place_id:
+                return c["name"]
+        return None
 
     steps = step_set_of(draft)
     allowed = {s["field"] for s in steps}
@@ -2611,16 +2619,51 @@ def set_tip_setup(
         if key in allowed and text:
             answers[key] = text
     draft["answers"] = answers
+    # The community step, by id. Membership is re-checked here because the id comes from
+    # the client; an id the caller does not belong to clears the pick rather than setting
+    # it, exactly like the top-of-app switcher does.
+    if body.circle_place_id is not None:
+        from app.community_surface import caller_affiliation_at
+
+        pid = str(body.circle_place_id).strip()
+        ok = bool(pid) and bool(
+            caller_affiliation_at(auth.user_id, pid, statuses=("confirmed", "curious"))
+        )
+        draft["circle_place_id"] = pid if ok else None
+        # Marked as the user's own pick either way: an explicit "" (everyone nearby) must
+        # not be re-filled from whatever is selected at the top of the app.
+        draft["circle_picked"] = True
+        draft["circle_name"] = _community_name_for(pid) if ok else None
     ctx["tip_draft"] = draft
     # Every step the carousel showed counts as offered, so the turn after this does not
     # re-ask the optionals the user chose to leave blank — it goes to the ready card.
     ctx["tip_asked_fields"] = sorted(allowed)
     ctx["tip_pending_ask"] = None
     ctx["tip_share_active"] = True
-    if not missing_required(steps, answers):
+    # One junk answer, named, handed straight back to the card it came from. The chat fork
+    # gets this from the per-turn extractor, but a carousel submit has no turn to hang it
+    # on — and Lana's nudge would land in a bubble the carousel is covering, which is why
+    # a submit full of "bla bla bla" came back as the same form with no reason given (dev
+    # QA 2026-09-08). Same one-nudge-then-accept rule: a second submit always goes through.
+    reasked = list(ctx.get("tip_reasked_fields") or [])
+    weak = judge_answers(
+        steps, answers, fields=set(body.answers or {}), skip=reasked
+    )
+    # EVERY submitted field counts as queried, not just the flagged ones. The turn that
+    # follows this submit runs its own per-answer judge, and it was re-rejecting a set this
+    # endpoint had just cleared — a different field each time, so the carousel reopened for
+    # ever and the tip could never be posted (dev QA 2026-09-08). One judge per answer.
+    ctx["tip_reasked_fields"] = [*reasked, *(set(body.answers or {}) - set(reasked))]
+    if not weak and not missing_required(steps, answers):
         ctx["tip_ready"] = True
     update_session_context(session_id, ctx)
-    return {"ok": True, "missing": missing_required(steps, answers)}
+    return {
+        "ok": True,
+        "missing": missing_required(steps, answers),
+        # Every answer that needs another go, so the whole set can be fixed in one pass.
+        # Empty when they all land, and the client then advances the flow.
+        "weak": weak,
+    }
 
 
 @app.post("/hooks/event-join")
@@ -3246,23 +3289,62 @@ def post_tips_recent(
     tab = (body.tab if body else "recent") or "recent"
     place_id = str((body.place_id if body else None) or "").strip() or None
     limit = (body.limit if body else 20) or 20
-    tips = recent_tips(
-        _bearer_token(authorization),
-        tab=tab,
-        # The filter runs after the feed read, so ask for a deeper page — a top-20 that
-        # is mostly non-members would otherwise return two rows.
-        limit=min(limit * 3, 50) if place_id else limit,
-    )
     if place_id:
-        from app.community_scope import rows_by_members
         from app.community_surface import caller_affiliation_at
 
         # Same authorization the roster uses: who is at a place stays members-only (§F),
-        # so the filter can never become a membership oracle for an arbitrary place id.
+        # so this can never become a membership oracle for an arbitrary place id. The RPC
+        # re-checks it too — this one is here to answer 403 rather than an empty list.
         if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
             raise HTTPException(status_code=403, detail="not_a_member")
-        tips = rows_by_members(tips, place_id)[:limit]
+    # Scope, not post-filter: with a community selected this is that community's own
+    # recommendations, whatever the distance, and the Recent / My community tabs do not
+    # apply (there is one list). Without one, community-scoped tips stay out of the area
+    # feed — they were shared with the community, not the neighbourhood.
+    tips = recent_tips(
+        _bearer_token(authorization),
+        tab=tab,
+        limit=limit,
+        circle_place_id=place_id,
+    )
     return {"tab": tab, "tips": tips}
+
+
+class TipGetBody(_BaseModel):
+    signal_id: str
+
+
+@app.post("/lana/tips/get")
+def post_tips_get(
+    body: TipGetBody,
+    authorization: str | None = Header(default=None),
+):
+    """ONE shared recommendation, by id — what `/r/<signal_id>` opens (§39).
+
+    Deliberately NOT scoped to the caller's block, unlike the feed: a recommendation
+    passed to a friend two neighbourhoods over has to resolve for her. The id IS the
+    capability, exactly as `/meet/<id>` is for a meet — so no token is minted and the
+    client needs no extra call to build a link. Guests count: a cold link open has only
+    an anonymous session, and refusing it would put a signup wall on every share.
+    """
+    auth = verify_auth(authorization)
+    from app.tip_feed import tip_by_id
+
+    tip = tip_by_id(body.signal_id, viewer_user_id=auth.user_id)
+    if not tip:
+        raise HTTPException(status_code=404, detail="tip_not_found")
+    amplitude_track(
+        "tip_link_opened",
+        user_id=auth.user_id,
+        event_properties={
+            "signal_id": body.signal_id,
+            # Who passed what along, without a token table: the author previewing her
+            # own link is not a referral.
+            "is_author": tip.get("peer_user_id") == auth.user_id,
+            "guest": auth.is_anonymous,
+        },
+    )
+    return {"tip": tip}
 
 
 @app.post("/lana/tips/vouch")

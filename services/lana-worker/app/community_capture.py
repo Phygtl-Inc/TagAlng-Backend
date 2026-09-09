@@ -29,7 +29,7 @@ import re
 import uuid
 from typing import Any
 
-from app.reply_compose import compose_reply
+from app.reply_compose import compose_reply, readback
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +281,13 @@ def _build_chips(draft: dict[str, Any]) -> list[dict[str, str]]:
     return chips
 
 
-def _place_suggestions(draft: dict[str, Any], *, zip_code: str | None, block_id: str | None) -> list[str]:
+def _place_suggestions(
+    draft: dict[str, Any],
+    *,
+    zip_code: str | None,
+    block_id: str | None,
+    user_jwt: str | None = None,
+) -> list[str]:
     """Real nearby places of this community's kind, for the chat fork's subject step.
 
     The carousel fork has the Places picker; the chat fork has only chips, so without
@@ -295,8 +301,15 @@ def _place_suggestions(draft: dict[str, Any], *, zip_code: str | None, block_id:
         from app.places import nearby_place_suggestions
 
         _, keyword = _TYPE_SEARCH.get(ctype, (None, ctype.replace("_", " ")))
+        from app.auth import jwt_user_id
+
+        # See `tip_share._name_suggestions`: no user id, no centre, no places for anyone
+        # whose session has no ZIP in it.
         return nearby_place_suggestions(
-            query=str(draft.get("name") or keyword), zip_code=zip_code, block_id=block_id
+            query=str(draft.get("name") or keyword),
+            zip_code=zip_code,
+            block_id=block_id,
+            user_id=jwt_user_id(user_jwt) if user_jwt else None,
         )
     except Exception:  # noqa: BLE001
         return []
@@ -449,6 +462,16 @@ def community_capture_should_release(
     every other lane already uses."""
     from app.lane_decision import lane_should_continue
 
+    # Never on the SEED turn (nothing asked yet, so nothing to pivot away from). That turn
+    # was already read as a create — usually by `looks_like_community_create`, which exists
+    # precisely because the classifier reads the bare "I want to create a community" as
+    # sharing.host 4/4. Re-asking the same classifier here undid the arming on the spot and
+    # the turn fell through to decide_turn: dev 2026-09-07, the "Create a community" CTA
+    # answered "want to set one up for your kids, your gym…?" with policy chips and no
+    # capture ever started.
+    if not int(session_ctx.get("community_turns") or 0):
+        return False
+
     return not lane_should_continue(
         message, session_ctx, slots, is_valid_answer=_is_community_answer
     )
@@ -458,7 +481,10 @@ def community_capture_should_release(
 # and releases. Self-maintaining via is_confident_off_lane (no foreign-list to maintain).
 _NATIVE_GOALS = frozenset({"create_community"})
 _NATIVE_SIGNALS: frozenset[str] = frozenset()
-_NATIVE_LINEARS = frozenset({"community.create"})
+# `sharing.community` is the registered intent id (layer1_intents.LINEAR_INTENTS) — a name
+# that is not in that registry can never match a classified turn, so the lane read its
+# OWN correct read as a foreign intent and released every turn (dev 2026-09-07).
+_NATIVE_LINEARS = frozenset({"sharing.community"})
 
 
 def _is_community_answer(
@@ -541,7 +567,7 @@ def run_community_capture_turn(
                 session_ctx["community_pending_ask"] = COMMUNITY_SUBJECT_FIELD
                 draft["pending_field"] = COMMUNITY_SUBJECT_FIELD
                 draft["suggestions"] = _place_suggestions(
-                    draft, zip_code=zip_code, block_id=block_id
+                    draft, zip_code=zip_code, block_id=block_id, user_jwt=user_jwt
                 )
                 session_ctx["community_draft"] = draft
                 session_ctx["community_ready"] = None
@@ -606,7 +632,9 @@ def run_community_capture_turn(
             question = str(step["question"])
             options = list(step.get("options") or [])
             if step.get("kind") == "place":
-                options = _place_suggestions(draft, zip_code=zip_code, block_id=block_id)
+                options = _place_suggestions(
+                    draft, zip_code=zip_code, block_id=block_id, user_jwt=user_jwt
+                )
             draft["pending_field"] = field
         elif field == "circle_type":
             question, options = "What kind of place is it?", TYPE_SUGGESTIONS
@@ -690,7 +718,8 @@ def run_community_capture_turn(
         session_ctx["community_pending_ask"] = "circle_type"
         session_ctx["community_pending_question"] = "What kind of place is it?"
         session_ctx["routing_phase"] = "listening"
-        return f"Heard you — **{_summary(draft)}**. What kind of place is it?"
+        lead = readback(session_ctx, "community_readback", draft.get("draft_id"), _summary(draft))
+        return f"{lead}What kind of place is it?"
 
     # ── The question set is written ONCE, here — after the type, because the type picks
     # the set and the questions are about THIS place ("which morning is busiest at
@@ -721,7 +750,9 @@ def run_community_capture_turn(
             # A generated set writes no options for a map step, and the chat fork has no
             # Places picker to fall back on — so real nearby places arrive as suggestions.
             draft["suggestions"] = list(step.get("options") or []) or (
-                _place_suggestions(draft, zip_code=zip_code, block_id=block_id)
+                _place_suggestions(
+                    draft, zip_code=zip_code, block_id=block_id, user_jwt=user_jwt
+                )
                 if step.get("kind") == "place"
                 else []
             )
@@ -731,8 +762,9 @@ def run_community_capture_turn(
             session_ctx["community_pending_question"] = step["question"]
             session_ctx["routing_phase"] = "listening"
             answered = sum(1 for s in steps if s.get("answer"))
+            lead = readback(session_ctx, "community_readback", draft.get("draft_id"), _summary(draft))
             return (
-                f"Heard you — **{_summary(draft)}**. {step['question']} "
+                f"{lead}{step['question']} "
                 f"({answered + 1}/{len(steps)})"
             )
 

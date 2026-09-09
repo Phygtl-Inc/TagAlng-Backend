@@ -7,6 +7,13 @@ taste and difficulty, a night light about what it fixed, and the placeholder und
 question is an example for THAT subject. The set drives the carousel steps the FE renders
 (C-4-EVENT-P2B) and the fields the ready card shows (C-4-RECO-P3).
 
+Every step here obeys the same two rules the generated ones do, because this table is not
+only the failure path — the flip-through carousel runs on it until the subject is answered,
+and a neighbour flipping nine text boxes that ask "what stood out?" is the mock we replaced.
+So: no colour questions (the `liked` / `stood_out` / `why` steps are gone — they are banned
+in the prompt, and a table that asks them anyway is the prompt's own counter-example), and
+`options` on everything but the basics, since a chip row is a filter and a paragraph is not.
+
 _SETS below is what survives of the static version and does three jobs: the per-type FLOOR
 (fields a reader of that type needs whatever the model felt like asking), the fallback set
 when generation fails or the LLM is unconfigured, and the worked examples the prompt is
@@ -24,8 +31,11 @@ time there = location. That keeps "great biryani at Zaiqa" / "here's my biryani 
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 # field: the snake_case key the answer lands under, stable across wording changes.
 # required: the flow will not reach the ready card without it. Kept in step with the first
@@ -37,10 +47,12 @@ _SETS: dict[str, list[dict[str, Any]]] = {
         {"field": "helped_with", "label": "Helped with", "question": "What did they help you with?", "required": True},
         {"field": "where", "label": "Location", "question": "Where are they based?"},
         {"field": "contact", "label": "Contact", "question": "How do neighbours reach them?"},
-        {"field": "liked", "label": "Liked", "question": "What did you like about them?"},
-        {"field": "stood_out", "label": "Stood out", "question": "What stood out for you?"},
+        {"field": "ages", "label": "Sees", "question": "Which ages do they see?",
+         "options": ["Babies & kids", "Teens", "Adults", "Any age"]},
+        {"field": "wait", "label": "Wait", "question": "How long was the wait for an appointment?",
+         "options": ["Same week", "A few weeks", "Over a month"]},
         {"field": "best_for", "label": "Best for", "question": "Who are they best for?",
-         "options": ["Kids", "Adults", "Seniors", "Anyone"]},
+         "options": ["Kids", "Adults", "Seniors", "Anyone"], "multi": True},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything a neighbour should know before going?"},
     ],
     "restaurant": [
@@ -49,61 +61,73 @@ _SETS: dict[str, list[dict[str, Any]]] = {
         {"field": "cuisine", "label": "Cuisine", "question": "What kind of food is it?"},
         {"field": "price", "label": "Price", "question": "Roughly what does a meal run?",
          "options": ["Cheap eats", "Mid-range", "A treat"]},
+        {"field": "wait", "label": "Wait", "question": "How long is the wait at its busiest?",
+         "options": ["Walk right in", "10-20 minutes", "Worth booking"]},
+        {"field": "kids", "label": "With kids", "question": "How is it with kids?",
+         "options": ["High chairs & kids' menu", "Fine for kids", "Better without"]},
         {"field": "best_for", "label": "Best for", "question": "Who is it best for?",
-         "options": ["Families", "Date night", "Groups", "Quick solo bite"]},
-        {"field": "liked", "label": "Liked", "question": "What did you like about it?"},
-        {"field": "stood_out", "label": "Stood out", "question": "What stood out for you?"},
-        {"field": "good_to_know", "label": "Good to know", "question": "Anything to know before going — waits, parking, hours?"},
+         "options": ["Families", "Date night", "Groups", "Quick solo bite"], "multi": True},
+        {"field": "good_to_know", "label": "Good to know", "question": "Anything to know before going?"},
     ],
     "recipe": [
         {"field": "recipe", "label": "Recipe", "question": "What is the recipe?", "required": True},
         {"field": "ingredients", "label": "Ingredients", "question": "What goes into it?", "required": True},
-        {"field": "why", "label": "Why this one", "question": "Why is this one worth sharing?"},
         {"field": "steps", "label": "How to make it", "question": "How do you make it?"},
-        {"field": "time", "label": "Cooks in", "question": "How long does it take?"},
-        {"field": "serves", "label": "Serves", "question": "How many does it feed?"},
+        {"field": "time", "label": "Cooks in", "question": "How long does it take?",
+         "options": ["Under 30 minutes", "About an hour", "A slow one"]},
+        {"field": "serves", "label": "Serves", "question": "How many does it feed?",
+         "options": ["1-2", "3-4", "5-6", "A crowd"]},
+        {"field": "difficulty", "label": "Difficulty", "question": "How hard is it?",
+         "options": ["Anyone can", "Some practice", "Confident cook"]},
         {"field": "best_for", "label": "Best for", "question": "When is it good for?",
-         "options": ["Weeknight", "Sunday lunch", "A crowd", "Freezer batch"]},
+         "options": ["Weeknight", "Sunday lunch", "A crowd", "Freezer batch"], "multi": True},
         {"field": "good_to_know", "label": "Good to know", "question": "Any tip that makes it work?"},
     ],
     "product": [
         {"field": "used_for", "label": "Used for", "question": "What is it used for?", "required": True},
         {"field": "where_to_buy", "label": "Where to buy", "question": "Where can neighbours get it?", "required": True},
-        {"field": "why", "label": "Why this one", "question": "Why this one over the others?"},
-        {"field": "price", "label": "Price", "question": "Roughly what does it cost?"},
-        {"field": "setup", "label": "Sets up in", "question": "How much effort is it to get going?"},
+        {"field": "price", "label": "Price", "question": "Roughly what does it cost?",
+         "options": ["Under $25", "$25-100", "$100-300", "$300+"]},
+        {"field": "setup", "label": "Sets up in", "question": "How much effort is it to get going?",
+         "options": ["Out of the box", "Ten minutes", "A bit of a project"]},
+        {"field": "lasted", "label": "Held up", "question": "How has it held up?",
+         "options": ["Still like new", "Fine so far", "Shows wear"]},
         {"field": "best_for", "label": "Best for", "question": "Who is it best for?"},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything to know before buying?"},
     ],
     "location": [
         {"field": "known_for", "label": "Known for", "question": "What is the place known for?", "required": True},
         {"field": "where", "label": "Location", "question": "Where is it?", "required": True},
-        {"field": "why", "label": "Why go", "question": "Why is it worth going?"},
-        {"field": "hours", "label": "Hours", "question": "When is it open — and the best time to go?"},
-        {"field": "cost", "label": "Cost", "question": "Does it cost anything?"},
+        {"field": "cost", "label": "Cost", "question": "Does it cost anything?",
+         "options": ["Free", "A few dollars", "Ticketed"]},
+        {"field": "crowds", "label": "Crowds", "question": "How busy does it get?",
+         "options": ["Quiet most times", "Busy at weekends", "Packed"]},
         {"field": "best_for", "label": "Best for", "question": "Who is it best for?",
-         "options": ["Families", "Kids", "Dogs", "Quiet time"]},
-        {"field": "liked", "label": "Liked", "question": "What did you like about it?"},
-        {"field": "good_to_know", "label": "Good to know", "question": "Anything to know before going — parking, crowds?"},
+         "options": ["Families", "Kids", "Dogs", "Quiet time"], "multi": True},
+        {"field": "good_to_know", "label": "Good to know", "question": "Anything to know before going?"},
     ],
     "service": [
         {"field": "service", "label": "Service", "question": "What do they do?", "required": True},
         {"field": "helped_with", "label": "Helped with", "question": "What did they do for you?", "required": True},
         {"field": "contact", "label": "Contact", "question": "How do neighbours reach them?"},
-        {"field": "price", "label": "Price", "question": "Roughly what did it cost?"},
-        {"field": "reliability", "label": "Reliability", "question": "Did they show up when they said they would?"},
-        {"field": "liked", "label": "Liked", "question": "What did you like about them?"},
-        {"field": "stood_out", "label": "Stood out", "question": "What stood out for you?"},
+        {"field": "price", "label": "Price", "question": "Roughly what did it cost?",
+         "options": ["Under $100", "$100-500", "$500+"]},
+        {"field": "reliability", "label": "Reliability", "question": "Did they show up when they said they would?",
+         "options": ["Right on time", "A bit late", "Had to chase them"]},
+        {"field": "callout", "label": "Call-outs", "question": "Do they take emergency or weekend jobs?",
+         "options": ["Yes", "Weekdays only", "Not sure"]},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything a neighbour should know before hiring them?"},
     ],
     "diy": [
         {"field": "fixes", "label": "Fixes", "question": "What problem does it solve?", "required": True},
         {"field": "how", "label": "How to do it", "question": "How do you do it?", "required": True},
         {"field": "needs", "label": "You'll need", "question": "What do they need on hand?"},
-        {"field": "time", "label": "Takes", "question": "How long does it take?"},
+        {"field": "time", "label": "Takes", "question": "How long does it take?",
+         "options": ["Under an hour", "An afternoon", "A weekend"]},
         {"field": "difficulty", "label": "Difficulty", "question": "How hard is it?",
          "options": ["Anyone can", "Some patience", "Handy only"]},
-        {"field": "cost", "label": "Cost", "question": "Roughly what does it cost to do?"},
+        {"field": "cost", "label": "Cost", "question": "Roughly what does it cost to do?",
+         "options": ["Under $20", "$20-100", "$100+"]},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything that goes wrong the first time?"},
     ],
 }
@@ -140,14 +164,36 @@ _SUBJECT_STEP: dict[str, tuple[str, str]] = {
 # has no address at all.
 _PLACE_SUBJECT_TYPES = frozenset({"location", "restaurant"})
 
+# Types whose subject MIGHT be a point on the map — a barber shop, a dental clinic and a
+# gym are all walked into, while a plumber, a nanny and a tutor-who-comes-to-you have no
+# storefront at all. The type alone cannot tell them apart, so the extractor's
+# `place_based` read decides, and only for these two: a recipe or a DIY trick is never a
+# place however confidently the model says so.
+#
+# Without this a "barber shop near me" was asked "Who is it?" in a plain text box, with no
+# picker and no nearby shops to tap — the type table had it filed with the plumbers (dev QA
+# 2026-09-08).
+_PLACE_CAPABLE_TYPES = frozenset({"professional", "service"})
 
-def subject_is_place(reco_type: Any) -> bool:
-    """Is this type's subject a map point (answered with the Places picker)?"""
-    return normalize_type(reco_type) in _PLACE_SUBJECT_TYPES
+
+def subject_is_place(reco_type: Any, *, place_based: bool = False) -> bool:
+    """Is this recommendation's subject a map point (answered with the Places picker)?
+
+    `place_based` is the extractor's read of "you could find this on a map", and it is what
+    separates a barber shop from a plumber inside the same `service` type."""
+    rtype = normalize_type(reco_type)
+    return rtype in _PLACE_SUBJECT_TYPES or bool(
+        place_based and rtype in _PLACE_CAPABLE_TYPES
+    )
 
 
 def head_step(
-    reco_type: Any, *, question: Any = None, label: Any = None
+    reco_type: Any,
+    *,
+    question: Any = None,
+    label: Any = None,
+    place_based: bool = False,
+    subject_hint: Any = None,
 ) -> dict[str, Any] | None:
     """The subject step for a type (None for an unknown type). `question`/`label` are the
     model's wording when it wrote them — it knows this is a trampoline park and not "the
@@ -156,12 +202,20 @@ def head_step(
     if not rtype:
         return None
     dflt_label, dflt_question = _SUBJECT_STEP[rtype]
+    # The type's own wording assumes a person, because `service` was written for plumbers:
+    # "a barber shop near me" was asked "Who is it?" over a list of barber shops to tap
+    # (dev QA 2026-09-08). When the subject turns out to be a storefront, the category the
+    # user just said is better wording than anything this table can hold — and it is what
+    # Lana would have written herself once the set is generated.
+    hint = " ".join(str(subject_hint or "").split()).lower()[:32]
+    if hint and subject_is_place(rtype, place_based=place_based):
+        dflt_label, dflt_question = hint, f"Which {hint} is it?"
     written = " ".join(str(question or "").split())
     return {
         "field": SUBJECT_FIELD,
         "label": " ".join(str(label or "").split())[:24] or dflt_label,
         "question": written[:140] if written.endswith("?") else dflt_question,
-        "kind": "place" if rtype in _PLACE_SUBJECT_TYPES else "text",
+        "kind": "place" if subject_is_place(rtype, place_based=place_based) else "text",
         "required": True,
     }
 
@@ -188,16 +242,33 @@ def normalize_type(raw: Any) -> str | None:
     return key if key in _SETS else None
 
 
-def steps_for(reco_type: Any) -> list[dict[str, Any]]:
+def steps_for(
+    reco_type: Any, *, place_based: bool = False, subject_hint: Any = None
+) -> list[dict[str, Any]]:
     """The ordered carousel steps for a type ([] for an unknown type). Copies, so a caller
     stamping `answer` onto a step can't mutate the shared table.
 
     Head-first, same as a generated set: when generation fails this static set IS the set,
-    and without the subject step it would never learn what is being recommended."""
-    head = head_step(reco_type)
+    and without the subject step it would never learn what is being recommended.
+
+    Put through the SAME two filters a generated set gets, because this is not only the
+    failure path — the flip-through carousel runs on it until the subject is answered, and
+    it showed the raw table: a place picker on step 1 and "Where is it?" again on step 3,
+    with every control a text box because nothing had set `kind` (dev QA 2026-09-08)."""
+    head = head_step(reco_type, place_based=place_based, subject_hint=subject_hint)
     if not head:
         return []
-    return [head] + [dict(s) for s in _SETS.get(normalize_type(reco_type) or "", [])]
+    drop_place = subject_is_place(reco_type, place_based=place_based)
+    out: list[dict[str, Any]] = []
+    for raw in _SETS.get(normalize_type(reco_type) or "", []):
+        step = dict(raw)
+        step["kind"] = _kind_for(step["field"], step.get("options"))
+        if drop_place and (
+            step["kind"] == "place" or _LOOKUP_ASK.search(step["question"])
+        ):
+            continue
+        out.append(step)
+    return [head] + out
 
 
 def _resolve(spec: Any) -> list[dict[str, Any]]:
@@ -302,6 +373,19 @@ _BLOCKED_ASK = re.compile(
     re.IGNORECASE,
 )
 
+# Questions Google already answers for a point on the map: hours, phone, website, the
+# $$-band. Asking them wastes a carousel step on a fact Lana can look up, and buys a
+# useless answer besides — "price range?" came back as "hundred dollars" (dev QA
+# 2026-09-07), which no reader can filter on. Only applied when the SUBJECT is a place
+# (see `drop_place`): a product's price and a plumber's number are word-of-mouth, not
+# listings, and stay askable.
+_LOOKUP_ASK = re.compile(
+    r"opening hours|what (?:time|hours)|when (?:do|does|is) (?:it|they|the)\s*\w* ?(?:open|close)|"
+    r"phone number|website|price range|how (?:much|expensive)|price (?:point|band|level)|"
+    r"what does (?:it|a meal) cost",
+    re.IGNORECASE,
+)
+
 
 def _slug(raw: Any) -> str:
     """A stable snake_case field key from whatever the model called it. The key is what the
@@ -363,6 +447,7 @@ def build_step_set(
     tail: list[dict[str, Any]],
     drop_place: bool = False,
     required_extra: int = 0,
+    require_options: bool = False,
 ) -> list[dict[str, Any]]:
     """A model-written question set, made safe to ask — head + middle + tail.
 
@@ -380,6 +465,9 @@ def build_step_set(
     if head:
         reserved.add(head["field"])
     middle: list[dict[str, Any]] = []
+    # Every question thrown away, with the reason, logged once at the end. A guard that
+    # drops silently is a guard nobody can tell has started dropping everything.
+    dropped: list[str] = []
     # The tail and the head are ours; a generated copy of either is dropped.
     seen: set[str] = set(reserved)
     for item in raw or []:
@@ -387,17 +475,39 @@ def build_step_set(
             continue
         field = _slug(item.get("field"))
         question = " ".join(str(item.get("question") or "").split())
-        if not field or field in seen or not question.endswith("?"):
+        if not field or not question.endswith("?"):
+            dropped.append(f"{field or '?'}:malformed")
+            continue
+        if field in reserved:
+            # Expected: the model was told the head and tail are ours and wrote one anyway.
+            dropped.append(f"{field}:ours")
+            continue
+        if field in seen:
+            dropped.append(f"{field}:duplicate")
             continue
         if _BLOCKED_ASK.search(question):
+            dropped.append(f"{field}:private")
             continue
         if drop_place and _kind_for(field) == "place":
+            dropped.append(f"{field}:place_dup")
+            continue
+        if drop_place and _LOOKUP_ASK.search(question):
+            dropped.append(f"{field}:on_the_listing")
             continue
         opts = [
             " ".join(str(o).split())
             for o in (item.get("options") or [])
             if isinstance(o, str) and str(o).strip()
         ][:4]
+        # A facet with no answer set is a text box, and a text box is where "hundred
+        # dollars" came from (dev QA 2026-09-07). Asked to write the four answers, the
+        # model has to know the subject: "what is the price range?" has no sane set for a
+        # bookstore, so it never gets written, while "which ages?" has an obvious one.
+        # Exempt: floor fields (a phone number has no options) and map steps (the picker
+        # IS the answer set).
+        if require_options and not opts and field not in floor and _kind_for(field) != "place":
+            dropped.append(f"{field}:no_options")
+            continue
         step: dict[str, Any] = {
             "field": field,
             "label": " ".join(str(item.get("label") or field.replace("_", " ")).split())[:24],
@@ -406,6 +516,11 @@ def build_step_set(
         }
         if opts:
             step["options"] = opts
+            # Several answers can be true at once ("known for: journals AND pens"), so the
+            # chips toggle instead of replacing. Only meaningful with options, and only
+            # when the model says so: a price band or a spice level is exactly one answer.
+            if item.get("multi") is True:
+                step["multi"] = True
         placeholder = " ".join(str(item.get("placeholder") or "").split())
         if placeholder:
             step["placeholder"] = placeholder[:80]
@@ -422,7 +537,13 @@ def build_step_set(
             for s in fallback.values()
             # `fallback` is head-first too, and the head is added back on return.
             if s["field"] not in reserved
-            and not (drop_place and _kind_for(s["field"], s.get("options")) == "place")
+            and not (
+                drop_place
+                and (
+                    _kind_for(s["field"], s.get("options")) == "place"
+                    or _LOOKUP_ASK.search(s["question"])
+                )
+            )
         ]
 
     # The model's ORDER stands — it put "What does she do?" first and location before the
@@ -447,6 +568,8 @@ def build_step_set(
     # Required = the type's first two floor fields. Not "the first two steps": a model that
     # leads with colour would make colour required and leave `contact` optional, which is
     # the exact failure the floor exists for.
+    if dropped:
+        _log.info("step_set.dropped kept=%d dropped=%s", len(middle), ",".join(dropped))
     floor_present = [f for f in floor if f in have][: 2 + required_extra]
     required = set(floor_present) or {s["field"] for s in middle[:2]}
     for step in middle:
@@ -456,7 +579,12 @@ def build_step_set(
 
 
 def validate_steps(
-    raw: Any, reco_type: Any, *, tallies: Any = ()
+    raw: Any,
+    reco_type: Any,
+    *,
+    tallies: Any = (),
+    place_based: bool = False,
+    subject_hint: Any = None,
 ) -> list[dict[str, Any]]:
     """The recommendation capture's tables, poured into `build_step_set`."""
     rtype = normalize_type(reco_type)
@@ -474,16 +602,26 @@ def validate_steps(
     )
     return build_step_set(
         raw,
-        fallback={s["field"]: s for s in steps_for(rtype)},
+        fallback={
+            s["field"]: s
+            for s in steps_for(
+                rtype, place_based=place_based, subject_hint=subject_hint
+            )
+        },
         floor=_FLOOR.get(rtype, ()),
         head=head_step(
             rtype,
             question=(written or {}).get("question"),
             label=(written or {}).get("label"),
+            place_based=place_based,
+            subject_hint=subject_hint,
         ),
         tail=tail_steps(tallies),
         # A restaurant/location subject is picked on the map, so a second place step is the
         # same question twice. Dropped and not answered-by-proxy: "Zaiqa" is not an answer
         # to "which area is it in?", and a wrong answer is worse than one fewer step.
-        drop_place=rtype in _PLACE_SUBJECT_TYPES,
+        drop_place=subject_is_place(rtype, place_based=place_based),
+        # Recommendations only. A community's questions are prose by nature ("what happens
+        # when you meet?") and the same rule there would gut the set.
+        require_options=True,
     )
