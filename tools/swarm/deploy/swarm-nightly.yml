@@ -1,0 +1,158 @@
+# Nightly zero-bug section run.
+#
+# WHY A GITHUB ACTION AND NOT A CLOUD RUN JOB
+#   The handover says to pick whichever has less setup friction and say which.
+#   This repo deploys Cloud Run by hand-run shell script (scripts/deploy-lana-worker-prod.sh)
+#   and has no Terraform, no CI, and no .github/workflows at all — so a Cloud Run
+#   job would mean a Dockerfile, an Artifact Registry push, a service account, an
+#   IAM binding and a Cloud Scheduler trigger, all provisioned by hand, before the
+#   first assertion runs. The runner is pure Python + httpx and needs two secrets.
+#   An Action gives cron, secrets, artifact retention and manual dispatch for free.
+#   If the swarm later needs VPC access or a >6h budget, revisit.
+#
+# SEQUENCING (LANA_ZERO_BUG_PROGRAM_FINAL.md §6)
+#   Night 1 is P1 Language alone, across all nine personas: language noise
+#   contaminates every downstream transcript. `section` therefore defaults to P1
+#   and is an input rather than a matrix — running two sections on night 1 is a
+#   process error, not a config choice.
+
+name: swarm-nightly
+
+on:
+  schedule:
+    # 02:00 UTC on weekdays. Late enough that the day's PRs have landed, early
+    # enough that lana-program-manager (08:00) reads a finished run.
+    - cron: "0 2 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      section:
+        description: "Section to run (P0..P8, X1..X3)"
+        required: true
+        default: "P1"
+      personas:
+        description: "Comma-separated persona ids, blank for all nine"
+        required: false
+        default: ""
+      arms:
+        description: "Comma-separated arms"
+        required: false
+        default: "E-VOICE"
+      dry_run:
+        description: "Preflight only, no writes"
+        type: boolean
+        default: false
+
+concurrency:
+  # Two concurrent runs would interleave anonymous session creation and trip the
+  # PR #124 bot heuristic that the swarm exists to survive, not to provoke.
+  group: swarm-nightly
+  cancel-in-progress: false
+
+jobs:
+  run-section:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out the backend
+        uses: actions/checkout@v4
+
+      - name: Check out the fixtures
+        # personas.json, KNOWN_DELTA_REGISTRY.md and the section specs live in the
+        # design repo, not here. The run cannot be scored without them.
+        uses: actions/checkout@v4
+        with:
+          repository: Phygtl-Inc/tagalng-rnd
+          path: .fixtures
+          token: ${{ secrets.FIXTURES_REPO_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r tools/swarm/requirements.txt
+
+      - name: Resolve run id
+        id: runid
+        # One run_id per night, and teardown is keyed on it. The attempt number is
+        # included so a re-run does not collide with the identities the first
+        # attempt already registered.
+        run: echo "run_id=$(date -u +%Y-%m-%d)-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Merged PRs for the registry staleness audit
+        id: merged
+        # KNOWN_DELTA_REGISTRY.md §4.6: a TEMPORARY entry whose PR has merged will
+        # convert a genuine regression into blocked-by-known-delta. Preflight
+        # aborts on that, so it needs to know what has merged.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state merged --limit 100 \
+                  --json number --jq '[.[].number] | join(",")')
+          echo "prs=$prs" >> "$GITHUB_OUTPUT"
+
+      - name: Run section
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
+          SIM_EMAIL_DOMAIN: ${{ secrets.SIM_EMAIL_DOMAIN }}
+          SWARM_MERGED_PRS: ${{ steps.merged.outputs.prs }}
+        run: |
+          python tools/swarm/run_swarm.py \
+            --section "${{ github.event.inputs.section || 'P1' }}" \
+            --run-id "${{ steps.runid.outputs.run_id }}" \
+            --personas "${{ github.event.inputs.personas || '' }}" \
+            --arms "${{ github.event.inputs.arms || 'E-VOICE' }}" \
+            --fixtures ".fixtures/tests" \
+            --out "artifacts/${{ steps.runid.outputs.run_id }}.json" \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+
+      - name: Teardown
+        # `always()`, because a failed or cancelled run leaves exactly the same
+        # test identities behind as a successful one. Skipping teardown on failure
+        # is how prod accumulates sim users.
+        #
+        # NOTE: this step is intentionally NOT `continue-on-error`. A teardown
+        # that raises must turn the job red — LANA_AUTONOMY_GAPS.md gap 4 calls the
+        # sweep "non-negotiable", and a silent teardown failure is worse than a
+        # failed section because nobody looks at a green run.
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python - <<'PY'
+          import json, os, sys, urllib.request
+          run_id = os.environ.get("RUN_ID") or "${{ steps.runid.outputs.run_id }}"
+          url = f"{os.environ['SUPABASE_URL']}/rest/v1/rpc/cleanup_swarm_run"
+          key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+          req = urllib.request.Request(
+              url,
+              data=json.dumps({"p_run_id": run_id}).encode(),
+              headers={"apikey": key, "authorization": f"Bearer {key}",
+                       "content-type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  print("teardown:", r.read().decode()[:2000])
+          except urllib.error.HTTPError as e:
+              body = e.read().decode()
+              # "no actors registered" means the run aborted in preflight before
+              # creating anything. That is the one benign case.
+              if "no actors registered" in body:
+                  print("teardown: nothing to sweep (run aborted before it wrote)")
+                  sys.exit(0)
+              print("TEARDOWN FAILED:", e.code, body[:2000], file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Upload run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-${{ steps.runid.outputs.run_id }}
+          path: artifacts/
+          retention-days: 30
