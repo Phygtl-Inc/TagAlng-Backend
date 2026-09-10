@@ -3249,8 +3249,9 @@ class CircleGroundBody(_BaseModel):
 
 
 class TipFeedBody(_BaseModel):
-    # recent | circles | nearest. Unknown values fall back to recent rather than erroring:
-    # a tab a client shipped before we did is not a reason to show them nothing.
+    # recent | circles | nearest | foryou. Unknown values fall back to recent rather than
+    # erroring: a tab a client shipped before we did is not a reason to show them nothing.
+    # foryou is the same rows, ordered by fit against the reader's own claims (§43).
     tab: str = "recent"
     limit: int = 20
     # The community filter at the top of the app: only recommendations from people at
@@ -3307,6 +3308,13 @@ def post_tips_recent(
         limit=limit,
         circle_place_id=place_id,
     )
+    # "Why Lana sees a fit" — the fellows line's mechanism with the recommendation's own
+    # fields as evidence (§43), plus the fit score the For-you tab orders on. Authored ON
+    # the fetch and cached per basis, so a reload costs no LLM call and a row she cannot
+    # justify simply ships without the block.
+    from app.tip_rec_line import attach_fit
+
+    attach_fit(auth.user_id, tips, tab=tab, limit=limit)
     return {"tab": tab, "tips": tips}
 
 

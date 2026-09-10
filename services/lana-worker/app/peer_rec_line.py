@@ -173,15 +173,22 @@ def _cached(user_id: str, lang: str, peer_ids: list[str]) -> dict[tuple[str, str
     return out
 
 
-def _compose(basis_list: list[dict[str, Any]], lang: str) -> list[tuple[str, list[str]]]:
-    """One batched call for every line this fetch is missing. [] on any failure."""
+def _compose(
+    basis_list: list[dict[str, Any]], lang: str, system: str | None = None
+) -> list[tuple[str, list[str]]]:
+    """One batched call for every line this fetch is missing. [] on any failure.
+
+    `system` swaps the evidence contract while keeping the cleaning, the language
+    rule and the failure behaviour — app/tip_rec_line.py authors the same shape from
+    a recommendation instead of a shared claim.
+    """
     try:
         from app.i18n import lang_display_name
         from app.orchestrator.llm import composer_model, llm_configured, llm_json
 
         if not llm_configured():
             return []
-        system = _SYSTEM
+        system = system or _SYSTEM
         if lang and lang != "en":
             system += (
                 f"\n- Write every line ENTIRELY in {lang_display_name(lang)}, "

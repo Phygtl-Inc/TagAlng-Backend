@@ -22,11 +22,18 @@ from app.supabase_rpc import call_rpc
 
 logger = logging.getLogger(__name__)
 
-# The three tabs on the feed. Anything else is read as "recent" rather than erroring —
-# an unknown tab is a client that shipped ahead of us, not a reason to show nothing.
-FILTERS = ("recent", "circles", "nearest")
+# The tabs on the feed. Anything else is read as "recent" rather than erroring — an
+# unknown tab is a client that shipped ahead of us, not a reason to show nothing.
+# "foryou" is a FIT ORDER, not a different set of rows: the RPC has no idea what the
+# reader has claimed, so it serves recent rows and app/tip_rec_line.py sorts them (§43).
+FILTERS = ("recent", "circles", "nearest", "foryou")
 
 PAGE_SIZE = 20
+
+# How much wider the For-you fetch reaches, so the ranking has somewhere to rank from —
+# re-ordering only the 20 newest is barely an ordering at all.
+# ponytail: window, not a corpus ranking. Score in SQL if the window starts to bite.
+FORYOU_FETCH = 3
 
 
 def _clean_circles(raw: Any) -> list[dict[str, Any]]:
@@ -144,9 +151,12 @@ def recent_tips(
     wanted = str(tab or "recent").strip().lower()
     if wanted not in FILTERS:
         wanted = "recent"
+    size = max(1, min(int(limit or PAGE_SIZE), 50))
     payload: dict[str, Any] = {
-        "p_filter": wanted,
-        "p_limit": max(1, min(int(limit or PAGE_SIZE), 50)),
+        # The RPC knows three orders; For-you is recent rows, ranked afterwards and
+        # sliced back to `limit` by the caller that holds the reader's claims.
+        "p_filter": "recent" if wanted == "foryou" else wanted,
+        "p_limit": min(size * FORYOU_FETCH, 50) if wanted == "foryou" else size,
     }
     if circle_place_id:
         payload["p_circle_place_id"] = str(circle_place_id)

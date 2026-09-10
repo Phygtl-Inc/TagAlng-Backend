@@ -28,7 +28,11 @@ class ReadScope(unittest.TestCase):
         from fastapi import HTTPException
 
         boom = HTTPException(status_code=502, detail="PGRST202 no function")
-        with patch.object(local_signals, "call_rpc", side_effect=boom) as rpc:
+        # Pinned lexical: with an embedding available there is one extra (still
+        # community-scoped) retry, and this test is about the SCOPE, not the count.
+        with patch("app.layer1_handlers._embed_attr_filter", return_value=None), patch.object(
+            local_signals, "call_rpc", side_effect=boom
+        ) as rpc:
             rows = local_signals.find_neighbor_tips(
                 "jwt", block_id="b1", query="dentist", circle_place_id="place-1"
             )
