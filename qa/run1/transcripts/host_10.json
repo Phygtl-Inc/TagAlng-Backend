@@ -1,0 +1,109 @@
+{
+  "id": "host_10",
+  "tags": [
+    "host"
+  ],
+  "zip": "32827",
+  "turns": [
+    {
+      "sent": "I want to host a meet. book club for moms, first meeting end of july",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 14378,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Book Club for Moms",
+        "starts_at": "2026-07-31T00:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32827",
+      "hint": null,
+      "status": 200,
+      "ms": 13684,
+      "assistant_message": "Thanks for sharing the zip codes! Could you let me know the exact spot you'd like to meet—like a specific park or address? Once we have the place, I can get your book club picnic posted.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "picnic meetup",
+        "starts_at": "2026-07-31T00:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 20488,
+      "assistant_message": "Great, glad it sounds good! We just need the exact location—like which park or a specific address—before I can post your book club picnic. Let me know where you'd like to meet!",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "picnic meetup",
+        "starts_at": "2026-07-31T00:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:08:43.587Z",
+  "session": "502e7110-eb33-4ae3-b3d2-2c95180485e7",
+  "finishedAt": "2026-07-09T01:09:32.635Z"
+}
