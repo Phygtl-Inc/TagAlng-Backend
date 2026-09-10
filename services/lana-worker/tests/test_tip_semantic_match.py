@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from app import local_signals
 from app.tip_embed import tip_embedding_text
+from app.tip_tags import _clean as clean_tags
 
 
 def _pgrst202() -> HTTPException:
@@ -151,5 +152,143 @@ class TipWriteEmbedding(unittest.TestCase):
         self.assertEqual(result["signal_id"], "sig-1")
 
 
+class EmbeddedTextIsTopical(unittest.TestCase):
+    """The trim that moved "art supplies" vs a stationery store from 0.506 to 0.588."""
+
+    RIFLE = ("Rifle Paper Co. \u00b7 stationery store \u00b7 Known for: Looks good \u00b7 "
+             "Cost: Free to browse \u00b7 Crowds: Quiet weekdays \u00b7 "
+             "Good to know: Parking is limited")
+
+    def _text(self, **kw):
+        return tip_embedding_text(detail_text=self.RIFLE, category="stationery store",
+                                  reco_name="Rifle Paper Co.", **kw)
+
+    def test_labels_are_stripped_but_their_answers_survive(self) -> None:
+        text = self._text()
+        self.assertNotIn("Known for:", text)
+        self.assertNotIn("Cost:", text)
+        self.assertIn("Looks good", text)
+
+    def test_the_head_is_not_embedded_twice(self) -> None:
+        """detail_text repeats the card, and the old containment check only ran one way —
+        so every modern tip embedded its own name and category a second time."""
+        text = self._text()
+        self.assertEqual(text.lower().count("rifle paper co"), 1)
+        self.assertEqual(text.lower().count("stationery store"), 1)
+
+    def test_tags_lead_the_prose(self) -> None:
+        text = self._text(affinity_tags=["stationery", "art supplies", "gift"])
+        self.assertLess(text.index("art supplies"), text.index("Looks good"))
+
+    def test_logistics_cannot_outweigh_a_short_ask(self) -> None:
+        """Four answers, not all of them: parking and opening hours are most of a tip's
+        characters and none of its topic."""
+        self.assertNotIn("Parking is limited", self._text())
+
+
+class TipTagCleaning(unittest.TestCase):
+    def test_shape_is_enforced_not_trusted(self) -> None:
+        self.assertEqual(
+            clean_tags(["  Beard Trim ", "BEARD TRIM", "x", "a" * 40, "shave."]),
+            ["beard trim", "shave"],
+        )
+
+    def test_a_model_returning_junk_yields_no_tags(self) -> None:
+        for junk in (None, "beard trim", {"tags": []}, 7):
+            self.assertEqual(clean_tags(junk), [])
+
+    def test_the_tail_is_capped(self) -> None:
+        self.assertEqual(len(clean_tags([f"tag {i}" for i in range(30)])), 8)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplyDoesNotRepeatTheCard(unittest.TestCase):
+    """The prose sat above a card rendering the same tip, and said it twice — badly:
+    "parking is limited just a minute away" merged "Good to know: Parking is limited"
+    with a "1 min walk" distance."""
+
+    RIFLE = ("Rifle Paper Co. · stationery store · Known for: Looks good · "
+             "Cost: Free to browse · Crowds: Quiet weekdays · "
+             "Good to know: Parking is limited")
+
+    def _facts(self):
+        from app import discovery_route as dr
+
+        captured = {}
+
+        def _compose(*, goal, facts, session_ctx, fallback, max_sentences):
+            captured.update(goal=goal, facts=facts, max_sentences=max_sentences)
+            return "ok"
+
+        with patch.object(dr, "compose_reply", _compose):
+            dr._compose_neighbor_tip_reply(
+                [{"detail_text": self.RIFLE, "neighbor_label": "Asjid",
+                  "distance_text": "1 min walk"}],
+                detail="art supplies", session_ctx={},
+            )
+        return captured
+
+    def test_the_composer_never_sees_the_card_only_fields(self) -> None:
+        blob = " ".join(self._facts()["facts"])
+        self.assertIn("Rifle Paper Co.", blob)
+        for card_only in ("Parking is limited", "Free to browse", "Quiet weekdays"):
+            self.assertNotIn(card_only, blob)
+
+    def test_the_distance_is_left_to_the_card(self) -> None:
+        self.assertNotIn("1 min walk", " ".join(self._facts()["facts"]))
+
+    def test_the_goal_forbids_restating_and_caps_the_length(self) -> None:
+        cap = self._facts()
+        self.assertIn("ALREADY ON A CARD", cap["goal"])
+        self.assertEqual(cap["max_sentences"], 2)
+
+
+class ApproximateMatchesAreNamed(unittest.TestCase):
+    """A cosine cannot explain itself. "art supplies" returning a stationery store is a
+    real match the reader cannot verify from the card, so Lana has to account for it."""
+
+    def _facts(self, *, detail, tags, text):
+        from app import discovery_route as dr
+
+        captured = {}
+
+        def _compose(*, goal, facts, session_ctx, fallback, max_sentences):
+            captured.update(goal=goal, facts=facts)
+            return "ok"
+
+        with patch.object(dr, "compose_reply", _compose):
+            dr._compose_neighbor_tip_reply(
+                [{"detail_text": text, "neighbor_label": "Asjid", "affinity_tags": tags}],
+                detail=detail, session_ctx={},
+            )
+        return " ".join(captured["facts"])
+
+    def test_a_meaning_only_match_is_flagged_for_explanation(self) -> None:
+        blob = self._facts(
+            detail="art supplies",
+            tags=["stationery", "gift shop", "greeting card"],
+            text="Rifle Paper Co. · stationery store · Cost: Free to browse",
+        )
+        self.assertIn("NOT AN EXACT MATCH", blob)
+        self.assertIn("stationery", blob)
+
+    def test_a_word_match_explains_itself_and_is_not_flagged(self) -> None:
+        blob = self._facts(
+            detail="barber",
+            tags=["barber", "mens haircut"],
+            text="Jacas Barber · barber · Wait time: Under 15 min",
+        )
+        self.assertNotIn("NOT AN EXACT MATCH", blob)
+
+    def test_a_synonym_carried_by_a_tag_counts_as_covered(self) -> None:
+        """"kids doctor" against a tip tagged "child doctor" is self-evident once the tag
+        is on the card — the reader can see the connection without being told."""
+        blob = self._facts(
+            detail="kids doctor",
+            tags=["pediatrician", "child doctor"],
+            text="Dr Zubair · pediatrician",
+        )
+        self.assertNotIn("NOT AN EXACT MATCH", blob)

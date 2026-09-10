@@ -22,6 +22,7 @@ import sys
 
 from app.auth import service_client
 from app.tip_embed import tip_embedding_text
+from app.tip_tags import tags_for_tip
 
 
 def _vertex_embed(text: str, dim: int = 768) -> list[float]:
@@ -46,7 +47,7 @@ def _vertex_embed(text: str, dim: int = 768) -> list[float]:
     return values
 
 
-def _backfill_tips(sb, user_id: str | None, do_all: bool) -> tuple[int, int]:
+def _backfill_tips(sb, user_id: str | None, do_all: bool, with_tags: bool) -> tuple[int, int]:
     query = (
         sb.table("local_signals")
         .select(
@@ -62,6 +63,21 @@ def _backfill_tips(sb, user_id: str | None, do_all: bool) -> tuple[int, int]:
     rows = query.execute().data or []
     done = 0
     for row in rows:
+        # Tags first: they are part of what gets embedded, so filling them after would
+        # leave every backfilled vector built from text the live path never produces.
+        tags = row.get("affinity_tags") or []
+        if with_tags and not tags:
+            tags = tags_for_tip(
+                name=row.get("reco_name"),
+                category=row.get("category"),
+                description=row.get("reco_description"),
+                details=str(row.get("detail_text") or "").split("\u00b7"),
+            )
+            if tags:
+                sb.table("local_signals").update({"affinity_tags": tags}).eq(
+                    "id", row["id"]
+                ).execute()
+                row["affinity_tags"] = tags
         text = tip_embedding_text(
             detail_text=row.get("detail_text"),
             category=row.get("category"),
@@ -128,7 +144,11 @@ def _probe(sb, ask: str) -> int:
         scored.append((dot / norm if norm else 0.0, row))
     scored.sort(key=lambda pair: pair[0], reverse=True)
 
-    floor = float(os.environ.get("LANA_TIP_MIN_SIM", "0.55"))
+    # The matcher's own floor, not a second copy of the default — a probe that marks
+    # rows against a number the matcher isn't using is worse than no probe at all.
+    from app.local_signals import _tip_min_similarity
+
+    floor = _tip_min_similarity()
     print(f'\nask: "{ask}"   (floor LANA_TIP_MIN_SIM={floor})\n')
     for sim, row in scored:
         mark = "✓" if sim >= floor else " "
@@ -142,6 +162,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--all", action="store_true", help="re-embed all rows, not just NULLs")
     parser.add_argument("--user", help="limit to one author user_id", default=None)
+    parser.add_argument("--tags", action="store_true",
+                        help="also generate missing affinity_tags (one LLM call per tip)")
     parser.add_argument("--probe", help="score this ask against every embedded tip", default=None)
     args = parser.parse_args()
 
@@ -150,7 +172,7 @@ def main() -> int:
         return _probe(sb, args.probe)
 
     print("Backfilling tip_share embeddings…")
-    done, total = _backfill_tips(sb, args.user, args.all)
+    done, total = _backfill_tips(sb, args.user, args.all, args.tags)
     print(f"  → {done}/{total} tips embedded.")
     return 0 if done == total else 1
 

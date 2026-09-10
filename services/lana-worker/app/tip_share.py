@@ -627,6 +627,7 @@ def _save_tip(
     one failure that is fixable in-turn (block_required) instead of just apologising."""
     try:
         from app.local_signals import save_local_signal, tag_local_signal
+        from app.tip_tags import tags_for_tip
 
         saved = save_local_signal(
             user_jwt,
@@ -645,6 +646,20 @@ def _save_tip(
             reco_name=str(draft.get("name") or "").strip() or None,
             reco_place=str(draft.get("locality") or "").strip() or None,
             reco_description=_description(draft),
+            # Ask-shaped tags, generated once here. The ask side has always been
+            # normalized by the classifier ("trim my beard" -> "barber"); this is the
+            # same normalization for the tip, so both sides finally speak one vocabulary.
+            # Best-effort: [] leaves the tip exactly as findable as it was before.
+            affinity_tags=tags_for_tip(
+                name=str(draft.get("name") or "").strip() or None,
+                category=str(draft.get("category") or "").strip() or None,
+                description=_description(draft),
+                details=[
+                    f"{f.get('label')}: {f.get('answer')}"
+                    for f in (_reco_fields(draft) or [])
+                    if isinstance(f, dict) and f.get("label") and f.get("answer")
+                ],
+            ),
         )
         # Tagged AFTER the insert rather than through save_local_signal, which is 150 lines
         # of dedupe/match/notify: threading one column through it is how a behaviour goes

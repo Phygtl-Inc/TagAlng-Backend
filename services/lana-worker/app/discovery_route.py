@@ -59,6 +59,7 @@ from app.guest_capabilities import (
 )
 from app.community_scope import active_community, community_name
 from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
+from app.tip_embed import tip_headline
 from app.tip_rec_cascade import WIDE_FETCH as WIDE_TIP_FETCH
 from app.tip_rec_cascade import stamp_tip_peer_surface
 from app.hosting_cta import (
@@ -3610,6 +3611,28 @@ def _compose_tip_ask_offer_line(detail: str, session_ctx: dict[str, Any]) -> str
     )
 
 
+# Appended to every neighbor-tip goal: the card under the reply carries the detail,
+# so the prose that repeats it is not a summary, it is the same text twice.
+def _ask_is_covered(detail: str, tags: list[str], text: str) -> bool:
+    """Does the recommendation answer the ask in the ASK'S OWN WORDS?
+
+    Cheap and deliberately not a second copy of _tip_match_strength: the SQL decides what
+    matches, this only decides whether the match is self-evident to the reader. A tip
+    tagged "barber" against an ask for "barber" explains itself; "stationery store"
+    against "art supplies" does not, and that is the one Lana has to account for.
+    """
+    from app.layer1_intents import attr_filter_tokens
+
+    words = [w for w in attr_filter_tokens(detail) if len(w) >= 4]
+    if not words:
+        return True  # nothing substantive to miss on; say nothing rather than guess
+    haystack = " ".join(tags).lower() + " " + str(text or "").lower()
+    return any(w in haystack for w in words)
+
+
+_CARD_IS_BELOW = (" The recommendation itself is ALREADY ON A CARD directly below your reply, with the neighbor's own words, their distance, their tags and a button to message them. Never restate what is on the card: no prices, hours, parking, crowds, wait times or quality notes. Say only what the card cannot — that a real neighbor vouched for this, and what they named. At most TWO short sentences.")
+
+
 def _compose_neighbor_tip_reply(
     tips: list[dict[str, Any]],
     *,
@@ -3636,26 +3659,45 @@ def _compose_neighbor_tip_reply(
     elif _scope:
         facts.append(f"Every recommender below is at {_scope}, the community they are filtered to")
     lines: list[str] = []
+    approximate = False
     for row in tips[:3]:
         text = str(row.get("detail_text") or "").strip()
         if not text:
             continue
         who = str(row.get("neighbor_label") or "A neighbor on your block").strip()
-        where = str(row.get("distance_text") or "").strip()
-        lines.append(
-            f"{who} recommended: {text}" + (f" ({where})" if where else "")
-        )
+        # The HEAD of the tip only. The card under this reply already renders the whole
+        # thing — every "Label: answer", the tags, the distance and the Nudge — so the
+        # full text here only ever bought a paraphrase of the card below it.
+        tags = [str(t).strip() for t in (row.get("affinity_tags") or []) if str(t or "").strip()]
+        line = f"{who} recommended {tip_headline(text)}"
+        if tags:
+            # The evidence the match was actually made on. Without it the composer has no
+            # way to say WHY a stationery store answers an art-supplies ask, and an
+            # unexplained near-match reads as Lana misunderstanding the question.
+            line += f" — they tag it: {', '.join(tags[:5])}"
+        lines.append(line)
+        if not _ask_is_covered(detail, tags, text):
+            approximate = True
     facts.extend(lines)
+    if approximate:
+        # Matched on MEANING, not on words — the ask and the recommendation share no
+        # vocabulary at all. That is exactly the case the reader cannot verify for
+        # themselves, so it is the one case Lana has to name out loud.
+        facts.append(
+            "NOT AN EXACT MATCH: nothing they recommended uses the words the user asked "
+            "in. This was matched on meaning being close. Name the gap in your own words "
+            "(what they asked for vs what this actually is) so the user can judge it. Do "
+            "NOT guess what else the place stocks or offers."
+        )
     if weights:
         facts.append("What they said matters most: " + ", ".join(weights[:4]))
     if widened:
         facts.append("You just widened the search past their own block.")
     fallback_body = "\n".join(f"• {line}" for line in lines)
     goal = (
-        "A neighbor on the user's block already posted a recommendation that matches "
-        "what they asked for. Lead with it — this is a real neighbor vouch, not a "
-        "Google listing, so say who recommended what in their words. Do not invent "
-        "any detail beyond the facts, and do not claim anything has been posted."
+        "A neighbor on the user's block already recommended something matching what they "
+        "asked for — a real neighbor vouch, not a Google listing. Do not invent any detail "
+        "beyond the facts, and do not claim anything has been posted." + _CARD_IS_BELOW
     )
     if weights:
         goal = (
@@ -3664,19 +3706,20 @@ def _compose_neighbor_tip_reply(
             "the ones matching what they care about first, then lead with the top rec in "
             "the neighbor's own words. Never claim a neighbor said something about a "
             "thread the facts do not show, and do not claim anything has been posted."
+            + _CARD_IS_BELOW
         )
     elif widened:
         goal = (
             "The user asked you to look further out, so you searched past their own block. "
             "Say that plainly, then lead with what the neighbors further out recommended, "
-            "in their own words. Do not claim anything has been posted."
+            "in their own words. Do not claim anything has been posted." + _CARD_IS_BELOW
         )
     return compose_reply(
         goal=goal,
         facts=facts,
         session_ctx=session_ctx,
         fallback=f"A neighbor near you already recommended one:\n{fallback_body}",
-        max_sentences=3,
+        max_sentences=2,
     )
 
 

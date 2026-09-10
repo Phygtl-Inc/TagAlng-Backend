@@ -50,17 +50,34 @@ _SEMANTIC_TIP_ARGS = ("p_query_embedding", "p_min_similarity")
 def _tip_min_similarity() -> float:
     """Cosine floor for "this tip answers that ask".
 
-    ponytail: 0.55 is BORROWED, not measured — it is the claim-to-claim floor the peer
-    matcher uses, picked because a tip is a sentence like a claim is, where the place
-    matcher's 0.50 was calibrated against bare activity labels
-    ([[place_local_signal._min_similarity]]). Tune it against real asks before trusting it:
-    too low and every tip on the block answers every question, which is worse than today's
-    silence because Lana then writes a confident line defending the match.
+    0.50, MEASURED on prod's own rows (2026-09-10) after tip_tags + the tip_embed trim:
+
+        beard trim    -> barber      0.648   want
+        art supplies  -> stationery  0.588   want
+        shave         -> barber      0.576   want
+        greeting card -> stationery  0.569   want   <- worst wanted
+        --------------------------------------------------- 0.50
+        dentist       -> barber      0.435   reject <- best rejected
+        pizza         -> barber      0.388   reject
+        art supplies  -> barber      0.348   reject
+
+    Two earlier floors were wrong in opposite directions and both are worth remembering.
+    0.55 was BORROWED from the claim-to-claim peer matcher and rejected every real answer.
+    0.42 was then fitted to the untagged corpus, where "art supplies" only reached 0.506 —
+    but on that same corpus `dentist` scored 0.461 against the BARBER, so 0.42 bought recall
+    by admitting a confident wrong answer. Neither number was the real problem: the tip was
+    embedding its own parking notes. Fix the text, and the floor lands mid-gap with ~0.07
+    of margin on both sides.
+
+    ponytail: eight asks, ten rows, one embedding model. Re-run
+    `python -m scripts.backfill_tip_embeddings --probe "<ask>"` on a bigger corpus before
+    trusting it — especially the near-miss pairs (dentist/pediatrician, barber/salon), which
+    are where a floor gets paid for.
     """
     try:
-        return float(os.environ.get("LANA_TIP_MIN_SIM", "0.55"))
+        return float(os.environ.get("LANA_TIP_MIN_SIM", "0.50"))
     except ValueError:
-        return 0.55
+        return 0.50
 
 
 def _ask_embedding_args(query: str) -> dict[str, Any]:
@@ -148,6 +165,7 @@ def save_local_signal(
     reco_name: str | None = None,
     reco_place: str | None = None,
     reco_description: str | None = None,
+    affinity_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "p_intent": intent,
@@ -155,6 +173,11 @@ def save_local_signal(
     }
     if category:
         payload["p_category"] = category
+    # save_local_signal has taken p_affinity_tags since 20260630120000 and no caller
+    # ever passed it, so every tip carried the '{}' default and the tag branch in
+    # _tip_match_strength scored nothing. This is what turns it on.
+    if affinity_tags:
+        payload["p_affinity_tags"] = [str(t) for t in affinity_tags if str(t).strip()]
     if block_id:
         payload["p_block_id"] = block_id
     if zip_code:
@@ -235,6 +258,7 @@ def save_local_signal(
                         reco_name=reco_name,
                         reco_place=reco_place,
                         reco_description=reco_description,
+                        affinity_tags=affinity_tags,
                     )
                 )
             )
