@@ -30,14 +30,38 @@ _LOG = logging.getLogger(__name__)
 _ENABLED_ENV = "LANA_AI_REPLIES"
 
 # Per-process cache for context-free lines (cache=True call sites only):
-# (goal, lang) -> composed text. Facts-dependent sites must not opt in.
-_STATIC_CACHE: dict[tuple[str, str], str] = {}
+# (goal, lang, grammatical gender) -> composed text. Facts-dependent sites must
+# not opt in.
+#
+# GENDER IS PART OF THE KEY. A composed line is gendered in es/pt ("¡Bienvenida!"),
+# so keyed on (goal, lang) alone this cache serves the first user's agreement to
+# every later user in the process — the same cross-user leak i18n._AI_RENDER_CACHE
+# had (eval 2026-09-01). Cache size multiplies by at most 3 (masculine/feminine/
+# neutral) plus the unknown case; the correctness is worth it.
+_STATIC_CACHE: dict[tuple[str, str, str], str] = {}
 
 _MAX_FACTS = 12
 
 
 def _enabled() -> bool:
     return os.getenv(_ENABLED_ENV, "1").strip().lower() not in ("0", "false", "off")
+
+
+def readback(session_ctx: dict[str, Any], key: str, draft_id: str | None, summary: str) -> str:
+    """The ``"Heard you — X. "`` lead, ONCE per draft, "" every turn after.
+
+    The item card carries the summary on every turn anyway; repeating it in prose buries
+    the one thing that is new — and read aloud (voice fork) the user sits through the same
+    sentence before hearing what was actually asked. Keyed on the draft id, so the next
+    draft leads again.
+    """
+    if not summary:
+        return ""
+    stamp = draft_id or summary
+    if session_ctx.get(key) == stamp:
+        return ""
+    session_ctx[key] = stamp
+    return f"Heard you — **{summary}**. "
 
 
 def compose_reply(
@@ -76,7 +100,9 @@ def compose_reply(
         lang = session_lang(session_ctx) if isinstance(session_ctx, dict) else None
         lang_norm = (lang or "en").strip().lower()
 
-        cache_key = (goal, lang_norm)
+        from app.context import user_gram_gender
+
+        cache_key = (goal, lang_norm, user_gram_gender())
         if cache:
             hit = _STATIC_CACHE.get(cache_key)
             if hit:

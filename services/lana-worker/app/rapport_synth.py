@@ -239,6 +239,15 @@ def _parse_questions(data: Any) -> list[dict[str, str]]:
         # deepens_concept despite "copy it EXACTLY" — keep only the concept token, or the
         # exact-match coverage gates (e.g. languages_spoken once-per-user) silently break.
         concept = str(item.get("deepens_concept") or "").split("|")[0].strip()[:64]
+        # answer_options: cold-start questions attach one-tap answers (tapping beats
+        # typing for a first question). The deepening prompt never emits them, so an
+        # absent key is normal — open_semantic_gap treats [] as "free text only".
+        raw_opts = item.get("answer_options")
+        options = (
+            [" ".join(str(o).split())[:48] for o in raw_opts if str(o or "").strip()][:3]
+            if isinstance(raw_opts, list)
+            else []
+        )
         out.append(
             {
                 "question": question,
@@ -246,6 +255,7 @@ def _parse_questions(data: Any) -> list[dict[str, str]]:
                 "label": str(item.get("label") or "").strip()[:80],
                 "bucket": str(item.get("bucket") or "general").strip()[:32] or "general",
                 "deepens_concept": concept,
+                "answer_options": options,
             }
         )
         if len(out) >= _MAX_NEW:
@@ -374,4 +384,215 @@ def ensure_gap_buffer(user_id: str, target: int = _BUFFER_TARGET) -> int:
     need = target - _open_gap_count(user_id)
     if need <= 0:
         return 0
-    return synthesize_gaps_from_claims(user_id, max_new=min(need, _MAX_NEW))
+    made = synthesize_gaps_from_claims(user_id, max_new=min(need, _MAX_NEW))
+    if made:
+        return made
+    # No threads to deepen. A user with no claims has a queue that never started
+    # rather than one that ran dry — seed it (no-op once they hold any claim).
+    return seed_cold_start(user_id, max_new=min(need, 3))
+
+
+# ── Cold start ───────────────────────────────────────────────────────────────
+#
+# Everything above deepens threads the user already has. A zero-claim user has
+# none, so synthesize_gaps_from_claims correctly returns 0 and the tile stays
+# empty — the emptiest state in the product, and the one most internal testing
+# goes through.
+#
+# Seeding it with invented questions would be the obvious fix and the wrong one.
+# score_onion_candidates_for_user awards +1 per shared PUBLIC concept and drops
+# any pair scoring 0, so a shared interest only counts IF A NEIGHBOR NEARBY HOLDS
+# IT TOO: "I collect vinyl" is a true, warm answer worth nothing to the matcher if
+# nobody within reach shares it. So the seeds are drawn from real local claim
+# supply (rapport_local_supply, 20261123120000) — every answer then has a
+# guaranteed counterpart, because the concept was read off the very people we
+# would be matching them with.
+
+SEED_PROMPT = """You are Lana, a warm neighborhood concierge in a block-based neighborhood app where \
+neighbors connect with nearby neighbors. You are meeting someone who JUST joined — you know \
+NOTHING about them yet, so every question here is their first.
+
+Below are things NEIGHBORS NEAR THEM already have on their own profiles, with how many \
+neighbors each. Write up to {max_new} opening questions that find out whether any of these are \
+theirs too. Because these come from real nearby neighbors, an answer of "yes, that's me" is an \
+immediate introduction — that is the whole point, so stay close to the list and do NOT wander \
+off it into topics nobody nearby mentioned.
+
+Every question must clear these bars:
+1. ANSWERABLE COLD — they have told you nothing, so never reference a fact about them. No "you \
+mentioned…", no "your running…". Ask openly.
+2. ONE TOPIC EACH — spread across DIFFERENT threads from the list, never two on the same one. \
+Prefer threads from different buckets over several from the strongest bucket: a first question in \
+an untouched area of their life is worth more than a second in the same area.
+3. CONCRETE ANSWER — a place, a time, an activity, a level, a cadence. Never a feeling, an \
+opinion, or an origin story ("what got you into…", "what do you love most about…").
+4. NEVER YES/NO. Not "Do you run?" — ask "Where do you like to run around here?" so the answer \
+names something. If a thread only supports a yes/no, widen it or drop it.
+5. NOT A SURVEY. Warm, curious, like a neighbor asking, under 120 characters. Never stack two \
+questions into one sentence.
+
+Attach 2-3 one-tap ANSWER OPTIONS to each question when the list makes obvious ones (in THEIR \
+voice, first person, under 40 characters) — tapping is much easier than typing for a first \
+question. Options must be real possibilities, never "yes"/"no".
+
+NEVER touch a sensitive topic — health/medical, grief, divorce/relationship trouble, money/debt, \
+legal/immigration, mental health, faith. Never ask about their gender, their name, or their age. \
+Never mention that other neighbors claimed this ("3 neighbors nearby also…") — it is context for \
+YOU, not for them, and repeating it back reads as surveillance.
+
+Write question, teaser and label in ENGLISH regardless of the language of any quotes — questions \
+are stored English-canonical and rendered into the user's language at display time. Quality over \
+quantity: return only the questions that clear every bar, or an empty list.
+
+Each thread below is `concept | Label [bucket] — N neighbors`. Echo back the `concept` your \
+question came from, copied EXACTLY.
+
+Output ONLY valid JSON (no markdown):
+{{
+  "questions": [
+    {{
+      "question": "the question itself, <120 chars",
+      "teaser": "2-5 word grammatical lead-in ending with …, e.g. 'about your weekends…'",
+      "label": "short thread name, e.g. 'running'",
+      "bucket": "heritage | stage | vicinity | faith | activity | interest | general",
+      "deepens_concept": "the exact concept from the list this question is about",
+      "answer_options": ["first-person option", "another"]
+    }}
+  ]
+}}"""
+
+
+def _local_supply(user_id: str) -> list[dict[str, Any]]:
+    """Public concepts held by >= 2 neighbors near this user. [] on any failure."""
+    try:
+        res = service_client().rpc(
+            "rapport_local_supply",
+            {"p_user_id": user_id, "p_limit": 8, "p_min_holders": 2},
+        ).execute()
+        return res.data or []
+    except Exception:
+        # Pre-20261123 environments have no such RPC — fall through to the tree seeds.
+        logger.info("rapport-seed: local-supply RPC unavailable for %s", user_id)
+        return []
+
+
+def _supply_block(rows: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for r in rows:
+        concept = str(r.get("concept") or "").strip()
+        label = str(r.get("label") or "").strip()
+        if not concept or not label:
+            continue
+        bucket = str(r.get("bucket") or "general").strip()
+        holders = int(r.get("holders") or 0)
+        lines.append(f"- {concept} | {label} [{bucket}] — {holders} neighbors")
+    return "\n".join(lines)
+
+
+def _has_any_claim(user_id: str) -> bool:
+    """True when the user holds at least one active claim. Fails CLOSED (True): a
+    read error must not seed a user who already has a profile."""
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("id")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        logger.exception("rapport-seed: claim check failed for %s", user_id)
+        return True
+
+
+def seed_cold_start(user_id: str, max_new: int = 3) -> int:
+    """Open opening questions for a user we know NOTHING about. Returns how many.
+
+    Only ever runs for a user with no claims — anyone with a profile is served by
+    the deepening synth above. Three tiers, cheapest last:
+      1. Local supply → AI-written questions about what neighbors nearby claim.
+      2. Nothing nearby (first user in an area, or no location yet) → the
+         no-prior-knowledge catalogue seeds, which need no supply at all.
+    Never raises.
+    """
+    if not user_id or _cooling_down(user_id):
+        return 0
+    if _has_any_claim(user_id):
+        return 0
+
+    supply = _local_supply(user_id)
+    logger.info(
+        "rapport-seed[%s]: local supply = %s",
+        user_id,
+        [(r.get("concept"), r.get("holders")) for r in supply] or "(none)",
+    )
+    if supply:
+        asked = recent_gap_questions(user_id, limit=60)
+        data = _generate_seeds(_supply_block(supply), _asked_block(asked), max_new)
+        questions = _parse_questions(data)
+        opened = 0
+        for q in questions:
+            try:
+                if open_semantic_gap(
+                    user_id,
+                    None,
+                    q["question"],
+                    label=q["label"] or None,
+                    bucket=q["bucket"],
+                    teaser=q["teaser"] or None,
+                    deepens_concept=q["deepens_concept"] or None,
+                    answer_options=q.get("answer_options") or None,
+                    # Priority: this topic has a proven local counterpart, so an
+                    # answer scores in the matcher instead of merely maybe scoring.
+                    from_local_supply=True,
+                ):
+                    opened += 1
+            except Exception:
+                logger.exception("rapport-seed: open failed for %s", user_id)
+        if opened:
+            logger.info("rapport-seed: opened %d local-supply seed(s) for %s", opened, user_id)
+            return opened
+        # The model returned nothing usable — fall through rather than leave it empty.
+
+    try:
+        from app.rapport_gaps import open_cold_seed_gaps
+
+        return open_cold_seed_gaps(user_id)
+    except Exception:
+        logger.exception("rapport-seed: tree seeds failed for %s", user_id)
+        return 0
+
+
+def _generate_seeds(supply: str, asked: str, max_new: int) -> Any:
+    """One Flash-class call for cold-start questions. Mirrors _generate's failover."""
+    system = SEED_PROMPT.format(max_new=max_new)
+    user_payload = f"WHAT NEIGHBORS NEAR THEM CLAIM:\n{supply}\n\nALREADY ASKED:\n{asked}"
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if llm_configured():
+            return llm_json(
+                model=router_model(),
+                system=system,
+                user_payload=user_payload,
+                max_tokens=640,
+                temperature=0.4,
+            )
+    except Exception:
+        logger.exception("rapport-seed: orchestrator llm failed")
+    try:
+        from app.orchestrator.llm import vertex_generate_json
+
+        return vertex_generate_json(
+            model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+            system=system,
+            user_payload=user_payload,
+            max_tokens=640,
+            temperature=0.4,
+        )
+    except Exception:
+        logger.exception("rapport-seed: vertex fallback failed")
+        return None

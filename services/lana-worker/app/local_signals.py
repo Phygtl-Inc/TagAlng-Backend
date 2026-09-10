@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from fastapi import HTTPException
@@ -10,6 +12,10 @@ from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 
 from app.signal_capture import clear_signal_draft
+
+# tag_local_signal's except block already called `logger`, which was never defined here —
+# a failed tag raised NameError from inside the handler instead of logging.
+logger = logging.getLogger(__name__)
 
 INTENT_SAVE_SIGNAL = "signal.capture"
 INTENT_SHOW_BLOCK_LOG = "discovery.block_log"
@@ -35,6 +41,59 @@ _INTENT_LABELS: dict[str, str] = {
 # find_neighbor_tips v1 (20261001120000) took only these. Used to retry against a DB that
 # has not yet applied the v2 migration.
 _V1_TIP_ARGS = frozenset({"p_block_id", "p_query", "p_category", "p_limit"})
+
+# find_neighbor_tips v6 (20261126120000) scores meaning as well as words. A DB still on v5
+# rejects these two, and the retry below drops them to match — words only, same as before.
+_SEMANTIC_TIP_ARGS = ("p_query_embedding", "p_min_similarity")
+
+
+def _tip_min_similarity() -> float:
+    """Cosine floor for "this tip answers that ask".
+
+    0.50, MEASURED on prod's own rows (2026-09-10) after tip_tags + the tip_embed trim:
+
+        beard trim    -> barber      0.648   want
+        art supplies  -> stationery  0.588   want
+        shave         -> barber      0.576   want
+        greeting card -> stationery  0.569   want   <- worst wanted
+        --------------------------------------------------- 0.50
+        dentist       -> barber      0.435   reject <- best rejected
+        pizza         -> barber      0.388   reject
+        art supplies  -> barber      0.348   reject
+
+    Two earlier floors were wrong in opposite directions and both are worth remembering.
+    0.55 was BORROWED from the claim-to-claim peer matcher and rejected every real answer.
+    0.42 was then fitted to the untagged corpus, where "art supplies" only reached 0.506 —
+    but on that same corpus `dentist` scored 0.461 against the BARBER, so 0.42 bought recall
+    by admitting a confident wrong answer. Neither number was the real problem: the tip was
+    embedding its own parking notes. Fix the text, and the floor lands mid-gap with ~0.07
+    of margin on both sides.
+
+    ponytail: eight asks, ten rows, one embedding model. Re-run
+    `python -m scripts.backfill_tip_embeddings --probe "<ask>"` on a bigger corpus before
+    trusting it — especially the near-miss pairs (dentist/pediatrician, barber/salon), which
+    are where a floor gets paid for.
+    """
+    try:
+        return float(os.environ.get("LANA_TIP_MIN_SIM", "0.50"))
+    except ValueError:
+        return 0.50
+
+
+def _ask_embedding_args(query: str) -> dict[str, Any]:
+    """The semantic half of a find_neighbor_tips payload, or {} when embedding is not
+    available (no Vertex creds, model down). {} degrades the call to the lexical v5
+    behaviour rather than failing the ask."""
+    from app.layer1_handlers import _embed_attr_filter
+    from app.vec_util import to_pgvector
+
+    literal = to_pgvector(_embed_attr_filter(query))
+    if not literal:
+        # Loud on purpose: without this line a dead embedding model looks exactly like a
+        # working one that found nothing, and every ask silently drops to word matching.
+        logger.warning("tip_ask_embedding_unavailable query=%r — lexical only", query[:60])
+        return {}
+    return {"p_query_embedding": literal, "p_min_similarity": _tip_min_similarity()}
 
 _MATCH_TYPES_BY_SIGNAL_INTENT: dict[str, frozenset[str]] = {
     "swap_seek": frozenset({"inbound_for_my_seek"}),
@@ -103,6 +162,10 @@ def save_local_signal(
     reco_type: str | None = None,
     reco_fields: list[dict[str, Any]] | None = None,
     reco_subject: str | None = None,
+    reco_name: str | None = None,
+    reco_place: str | None = None,
+    reco_description: str | None = None,
+    affinity_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "p_intent": intent,
@@ -110,6 +173,11 @@ def save_local_signal(
     }
     if category:
         payload["p_category"] = category
+    # save_local_signal has taken p_affinity_tags since 20260630120000 and no caller
+    # ever passed it, so every tip carried the '{}' default and the tag branch in
+    # _tip_match_strength scored nothing. This is what turns it on.
+    if affinity_tags:
+        payload["p_affinity_tags"] = [str(t) for t in affinity_tags if str(t).strip()]
     if block_id:
         payload["p_block_id"] = block_id
     if zip_code:
@@ -137,7 +205,9 @@ def save_local_signal(
     result = raw if isinstance(raw, dict) else {}
 
     signal_id = result.get("signal_id")
-    if signal_id and (reco_type or reco_fields or reco_subject):
+    if signal_id and (
+        reco_type or reco_fields or reco_subject or reco_name or reco_place or reco_description
+    ):
         try:
             call_rpc(
                 user_jwt,
@@ -147,10 +217,19 @@ def save_local_signal(
                     "p_reco_type": reco_type,
                     "p_reco_fields": reco_fields,
                     "p_reco_subject": reco_subject_key(reco_subject),
+                    # The card head, stored as fields rather than left to be split back
+                    # out of detail_text (20261120120000). reco_name keeps the author's
+                    # casing; reco_subject stays the lowercased grouping key.
+                    "p_reco_name": reco_name,
+                    "p_reco_place": reco_place,
+                    "p_reco_description": reco_description,
                 },
             )
             result["reco_type"] = reco_type
             result["reco_fields"] = reco_fields or []
+            result["reco_name"] = reco_name
+            result["reco_place"] = reco_place
+            result["reco_description"] = reco_description
         except Exception:  # noqa: BLE001
             # The tip itself is posted and matching already ran — losing the typed
             # answers must not read back to the user as a failed post.
@@ -159,6 +238,38 @@ def save_local_signal(
             logging.getLogger(__name__).warning(
                 "set_signal_reco_failed signal_id=%s", signal_id
             )
+
+    # Embed the tip so a neighbour asking in different words still finds it (20261126120000).
+    # AFTER set_signal_reco on purpose: the card fields carry half the meaning of a modern
+    # tip, and a vector over detail_text alone would miss the name, the place and the
+    # description. Best-effort — a tip that posted must never fail on its vector; it stays
+    # findable lexically and the backfill script can pick it up later.
+    if signal_id and intent == "tip_share":
+        try:
+            from app.layer1_handlers import _embed_attr_filter
+            from app.tip_embed import tip_embedding_text
+            from app.vec_util import to_pgvector
+
+            literal = to_pgvector(
+                _embed_attr_filter(
+                    tip_embedding_text(
+                        detail_text=detail_text,
+                        category=category,
+                        reco_name=reco_name,
+                        reco_place=reco_place,
+                        reco_description=reco_description,
+                        affinity_tags=affinity_tags,
+                    )
+                )
+            )
+            if literal:
+                call_rpc(
+                    user_jwt,
+                    "set_signal_embedding",
+                    {"p_signal_id": signal_id, "p_embedding": literal},
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("set_signal_embedding_failed signal_id=%s", signal_id)
 
     # The matcher ran inside that insert and found the other side of somebody's open ask —
     # tell them NOW, in this turn. Before this the match rows piled up in
@@ -176,6 +287,20 @@ def save_local_signal(
     return result
 
 
+def tag_local_signal(user_jwt: str, *, signal_id: str, place_id: str) -> bool:
+    """Record which community a signal was shared INTO. Best-effort: a DB without the
+    20261124 migration leaves the tip untagged, which is the area behaviour it had before
+    the column existed — never a failed share."""
+    if not (signal_id and place_id):
+        return False
+    try:
+        call_rpc(user_jwt, "tag_local_signal", {"p_signal_id": signal_id, "p_place_id": place_id})
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("tag_local_signal_failed signal=%s place=%s", signal_id, place_id)
+        return False
+
+
 def find_neighbor_tips(
     user_jwt: str,
     *,
@@ -185,6 +310,7 @@ def find_neighbor_tips(
     limit: int = 3,
     locale: str = "en",
     radius_meters: float | None = None,
+    circle_place_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Neighbors' tip_share posts that match this ask — READ-ONLY (no signal written).
 
@@ -200,7 +326,8 @@ def find_neighbor_tips(
     """
     if not (str(query or "").strip()):
         return []
-    if not block_id and radius_meters is None:
+    # A community read needs neither: the roster is the audience, not the radius.
+    if not block_id and radius_meters is None and not circle_place_id:
         return []
     payload: dict[str, Any] = {
         "p_block_id": block_id,
@@ -211,18 +338,41 @@ def find_neighbor_tips(
     }
     if radius_meters is not None:
         payload["p_radius_meters"] = float(radius_meters)
-    try:
-        raw = call_rpc(user_jwt, "find_neighbor_tips", payload)
-    except HTTPException as exc:
-        if "pgrst202" not in str(exc.detail or "").lower():
-            return []
-        if not block_id:
-            return []  # v1 has no radius mode and no block to fall back to
-        legacy = {k: v for k, v in payload.items() if k in _V1_TIP_ARGS}
+    if circle_place_id:
+        payload["p_circle_place_id"] = str(circle_place_id)
+    payload.update(_ask_embedding_args(payload["p_query"]))
+
+    # Widest call first, then progressively older signatures. Dropping the embedding costs
+    # recall; dropping the community scope would answer "what's good at CF Fitness?" with
+    # the whole neighbourhood, so that variant is only ever offered for a plain block read.
+    attempts: list[dict[str, Any]] = [payload]
+    if any(k in payload for k in _SEMANTIC_TIP_ARGS):
+        attempts.append({k: v for k, v in payload.items() if k not in _SEMANTIC_TIP_ARGS})
+    if block_id and not circle_place_id:
+        attempts.append({k: v for k, v in payload.items() if k in _V1_TIP_ARGS})
+
+    raw: Any = None
+    for attempt, args in enumerate(attempts):
         try:
-            raw = call_rpc(user_jwt, "find_neighbor_tips", legacy)
-        except HTTPException:
-            return []
+            raw = call_rpc(user_jwt, "find_neighbor_tips", args)
+            logger.info(
+                # community= is not decoration: a community read ignores the block and
+                # matches only tips shared INTO that place, so an empty result there says
+                # nothing about what the neighbourhood holds. Debugging a zero without it
+                # sends you hunting through the matcher for a scope decision.
+                "find_neighbor_tips query=%r semantic=%s community=%s block=%s attempt=%d rows=%d",
+                str(query)[:60],
+                "p_query_embedding" in args,
+                args.get("p_circle_place_id") or None,
+                args.get("p_block_id") or None,
+                attempt,
+                len(raw) if isinstance(raw, list) else 0,
+            )
+            break
+        except HTTPException as exc:
+            last = attempt == len(attempts) - 1
+            if last or "pgrst202" not in str(exc.detail or "").lower():
+                return []
     if isinstance(raw, list):
         return [r for r in raw if isinstance(r, dict)]
     if isinstance(raw, dict):

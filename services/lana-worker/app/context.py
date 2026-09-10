@@ -67,9 +67,95 @@ def set_address_context(
     _USER_GRAM_GENDER.set(str(grammatical_gender or "").strip().lower() or None)
 
 
+def user_gram_gender() -> str:
+    """This turn's grammatical gender ("" when unknown).
+
+    Public because it is part of the CACHE KEY of every AI language render — see
+    i18n._AI_RENDER_CACHE. Keyed on (text, lang) alone, the first user to warm a
+    phrase decided its agreement for every later user in the process: a feminine
+    user's "¡Bienvenida a la zona!" was served verbatim to a user whose gender was
+    known masculine (eval 2026-09-01, lt_gender_es_known_masculine). That read as
+    flaky because it is order-dependent, not random — and it worsens as the cache
+    fills, so a cold-process run can never reproduce it.
+    """
+    return _USER_GRAM_GENDER.get() or ""
+
+
+# English pronouns for each stored value. grammatical_gender is a CONJUGATION axis
+# (es/pt agreement) and is documented never-shown — but "what are my pronouns?" is
+# the user asking about their own profile, and Lana answered "I don't know your
+# pronouns yet" to a user who had just set them (2026-09-04). Never-shown protects
+# the value from OTHER users; it was never meant to hide someone's own preference
+# from them.
+_PRONOUNS = {"feminine": "she/her", "masculine": "he/him", "neutral": "they/them"}
+
+# Appended whenever a value IS on file: the model has the fact but no permission to
+# state it, so it hedged instead of answering.
+_PRONOUN_READBACK = (
+    "If they ASK how you address them (\"what are my pronouns?\", \"do you know if "
+    "I'm he or she?\"), answer plainly with the value above — it is their own "
+    "profile fact and they are entitled to it. Do NOT volunteer it unprompted, do "
+    "NOT attach it to them as a label, and never state it to any OTHER user."
+)
+
+# Appended when nothing is on file. The old behaviour was to hedge and improvise
+# pronoun chips that posted text nothing was listening for; this makes the ask
+# concrete and tells the model the exact words that DO persist (see
+# app/vertex_extract.py's stated-gender rule).
+_PRONOUN_UNKNOWN_READBACK = (
+    "If they ASK how you address them, say plainly that you don't have it yet and "
+    "invite them to tell you — and phrase the invitation so their reply is one you "
+    "can store: \"she/her\", \"he/him\" or \"they/them\" on its own is enough, as is "
+    "\"call me she\". Offer those three as options. Never guess, and never claim to "
+    "know."
+)
+
+# What each grammatical gender means for agreement. 'neutral' is a real stored
+# value, not an absence: a user who states they/them must not fall back to the
+# unknown-gender guess, which is allowed to pick masculine as a last resort.
+_GENDER_GUIDANCE = {
+    "feminine": (
+        "USER CONTEXT — grammatical gender: feminine; in gendered languages "
+        "(es/pt/…) conjugate every greeting and adjective to agree (femenino)."
+    ),
+    "masculine": (
+        "USER CONTEXT — grammatical gender: masculine; in gendered languages "
+        "(es/pt/…) conjugate every greeting and adjective to agree (masculino)."
+    ),
+    "neutral": (
+        "USER CONTEXT — grammatical gender: neutral (they/them, stated by the "
+        "user). NEVER use a gendered form for them in ANY language. In gendered "
+        "languages rephrase so agreement never arises — address them with verbs "
+        "and neutral nouns (\"qué bueno tenerte por aquí\") instead of an "
+        "adjective that must agree (\"bienvenido/bienvenida\"). Never invent a "
+        "neologism (-e/-x) unless the user used it first."
+    ),
+}
+
+# No stored gender. The composer must NOT coin-flip: "bienvenida" for an unknown
+# user is the exact failure the eval caught (lt_gender_es_unknown_neutral). The old
+# rule said only "stay gender-neutral — rephrase rather than pick a gendered form",
+# which is unsatisfiable for a word like bienvenido/a, so the model sampled — and
+# Spanish/Portuguese training data leans feminine in a warm welcoming register.
+_GENDER_UNKNOWN_GUIDANCE = (
+    "USER CONTEXT — grammatical gender: UNKNOWN. Do not guess it, and do not "
+    "guess from their name. FIRST rephrase so agreement never arises (\"qué bueno "
+    "tenerte por aquí\" / \"que bom ter você por aqui\" rather than "
+    "\"bienvenido/bienvenida\"). ONLY if the language leaves no ungendered "
+    "construction, use the MASCULINE form — it is the grammatical default in "
+    "es/pt. NEVER default to the feminine form."
+)
+
+
 def address_guidance() -> str:
-    """Per-user address lines appended to the constitution ("" when nothing is
-    known — the constitution's neutral rules already cover that case)."""
+    """Per-user address lines appended to the constitution.
+
+    Unlike role, gender ALWAYS emits a line — including when it is unknown. An
+    empty string used to mean "the constitution's neutral rules cover it", but the
+    constitution has no rule for a word that cannot be written ungendered, so the
+    composer picked one (and picked feminine). Naming the unknown case explicitly,
+    with a stated fallback, is what closes that.
+    """
     role = _USER_ROLE.get() or ""
     gender = _USER_GRAM_GENDER.get() or ""
     lines: list[str] = []
@@ -79,11 +165,13 @@ def address_guidance() -> str:
             "Role sharpens warmth only — never announce it or attach it to them as a label. "
             + _ROLE_OVERRIDE_GUARD
         )
-    if gender in ("feminine", "masculine"):
-        lines.append(
-            f"USER CONTEXT — grammatical gender: {gender}; in gendered languages "
-            "(es/pt/…) conjugate greetings and adjectives to agree."
-        )
+    known = _GENDER_GUIDANCE.get(gender)
+    if known:
+        lines.append(f"{known} Their pronouns are {_PRONOUNS[gender]}.")
+        lines.append(_PRONOUN_READBACK)
+    else:
+        lines.append(_GENDER_UNKNOWN_GUIDANCE)
+        lines.append(_PRONOUN_UNKNOWN_READBACK)
     return "\n".join(lines)
 
 

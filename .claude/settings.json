@@ -93,7 +93,10 @@
       "Bash(ln -s /Users/dev/Downloads/tagalng-pwa-main/node_modules node_modules)",
       "Bash(grep \"^SUPABASE_URL\" .env.local | sed 's|https://||'; cd /Users/dev/Downloads/TagAlng-backend && cat supabase/.temp/project-ref 2>/dev/null; echo)",
       "Bash(psql -lqt postgres)",
-      "Bash(pg_ctl status *)"
+      "Bash(pg_ctl status *)",
+      "Bash(cd /Users/dev/Downloads/TagAlng-backend/services/lana-worker && ls .venv/bin/python && echo \"venv is HERE, not at repo root\")",
+      "Read(//usr/local/Cellar/python@3.13/3.13.7/Frameworks/Python.framework/Versions/3.13/bin/**)",
+      "Bash(psql \"postgresql://postgres:postgres@127.0.0.1:54322/postgres\" -c \"select public._tip_match_strength\\('barber', 'Jacas Barber · barber · Service: Men''s haircut', '{}'::text[], null, null, 0.55\\) as barber_vs_barber;\")"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",

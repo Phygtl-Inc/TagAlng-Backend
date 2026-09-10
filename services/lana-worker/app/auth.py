@@ -230,6 +230,17 @@ def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
                 ).execute()
             except Exception:
                 pass
+        # Account-creation completion for the funnel. This branch runs on the FIRST
+        # authenticated turn after the OTP lands (the stamp above makes later calls
+        # take the early return), so it is the one place a guest becomes a real
+        # account regardless of which client verified.
+        from app.analytics import track
+
+        track(
+            "signup_complete",
+            user_id=user_id,
+            event_properties={"method": "phone" if column.startswith("phone") else "email"},
+        )
         return True
     return False
 

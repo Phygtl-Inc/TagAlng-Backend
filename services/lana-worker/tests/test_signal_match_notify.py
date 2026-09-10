@@ -75,6 +75,18 @@ class TestDelivery(unittest.TestCase):
         self.assertEqual(sent, 1)
         self.assertEqual(self.notify.call_count, 2)
 
+    def test_delivered_matches_are_tracked_for_the_funnel(self) -> None:
+        """"Connected" in the funnel is one Amplitude event per neighbor actually rung —
+        keyed to the recipient, so it stitches to their browser timeline by user_id."""
+        with mock.patch("app.analytics.track") as track:
+            smn._deliver([_row(), _row(notification_id="n2", recipient_user_id="seeker-2")])
+
+        self.assertEqual([c.args[0] for c in track.call_args_list], ["match_notified"] * 2)
+        self.assertEqual(track.call_args_list[0].kwargs["user_id"], "seeker-1")
+        self.assertEqual(
+            track.call_args_list[0].kwargs["event_properties"]["recipient_intent"], "tip_seek"
+        )
+
     def test_rows_without_a_recipient_are_dropped(self) -> None:
         self.assertEqual(smn._deliver([{"match_detail": "x"}]), 0)
         self.notify.assert_not_called()

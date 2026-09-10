@@ -44,6 +44,23 @@ on conflict (id) do update set
   raw_user_meta_data = excluded.raw_user_meta_data,
   updated_at         = now();
 
+-- GoTrue scans these token columns into non-nullable Go strings, and a direct
+-- insert into auth.users leaves them NULL (the columns have no default), so every
+-- password grant returns 500 {"error_code":"unexpected_failure","msg":"Database
+-- error querying schema"}. Normalise them to '' -- non-null values are untouched.
+update auth.users set
+  confirmation_token         = coalesce(confirmation_token, ''),
+  email_change               = coalesce(email_change, ''),
+  email_change_token_new     = coalesce(email_change_token_new, ''),
+  email_change_token_current = coalesce(email_change_token_current, ''),
+  recovery_token             = coalesce(recovery_token, ''),
+  phone_change               = coalesce(phone_change, ''),
+  phone_change_token         = coalesce(phone_change_token, ''),
+  reauthentication_token     = coalesce(reauthentication_token, '')
+where num_nulls(confirmation_token, email_change, email_change_token_new,
+                email_change_token_current, recovery_token, phone_change,
+                phone_change_token, reauthentication_token) > 0;
+
 -- 2. auth.identities — email provider rows -----------------------------------
 --    For the email provider GoTrue uses provider_id = user id (the sub).
 insert into auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)

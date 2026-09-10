@@ -1,10 +1,20 @@
 """Rapport ranker — pick the single best follow-up gap for the home "By the way…" tile.
 
 Deterministic on purpose (no AI in the home-render hot path):
-  * frequency cap — env-tunable min-gap + rolling-7-day ceiling (keyed on asked_at).
-  * tier gate      — HIGH-sensitivity gaps require the mom to have warmed into the
+  * skip brake     — 3 consecutive skips with no answer between → quiet for 24h.
+                     Replaced the frequency cap, which is now off by default: a
+                     clock rationed the tile for the users who were ENGAGING with
+                     it (answer a question, get an empty card for six hours) while
+                     saying nothing about the ones ignoring it.
+  * frequency cap  — env-tunable min-gap + rolling-7-day ceiling (keyed on
+                     asked_at), both defaulting to 0. Kept as the one-env-change
+                     way back if always-on proves wrong.
+  * tier gate      — HIGH-sensitivity gaps require the user to have warmed into the
                      community (reached >= acquaintance with anyone).
   * score          — unlock_score decayed by prior skips; oldest-open breaks ties.
+                     unlock_score is now derived from the matcher's own weights
+                     (app/rapport_priority.py) instead of a flat 0.8, so this is a
+                     real priority order rather than oldest-first.
 Muted/answered/expired gaps are simply not 'open', so they never appear as candidates.
 """
 
@@ -21,10 +31,20 @@ from app.rapport_gap_tree import get_gap
 
 logger = logging.getLogger(__name__)
 
-# Cadence caps (STRATEGY doc §4: "Frequency capped (1/session, 3/rolling-7-days)").
-# Tunable without code changes; set both to 0 to effectively "always show" when a gap is open.
-_DEFAULT_MIN_HOURS = 6.0   # min gap between NEW asks (approximates once-per-session)
-_DEFAULT_MAX_PER_7D = 3    # rolling 7-day ceiling (the doc's "3/rolling-7-days")
+# Cadence caps — DISABLED by default as of 2026-09-04. The STRATEGY doc's
+# "1/session, 3/rolling-7-days" was written for a surface that pushes; the tile is
+# one the user chooses to open, and rationing availability meant a user who answered
+# a question was shown an empty card for the next six hours. Pacing now lives where
+# Lana actually interrupts (chat: policy/goals.CHAT_ASK_COOLDOWN_HOURS) and
+# disinterest is read from behavior (_skip_brake). Set either knob above 0 to
+# restore the old clock without a deploy.
+_DEFAULT_MIN_HOURS = 0.0   # was 6.0
+_DEFAULT_MAX_PER_7D = 0    # was 3
+
+# Skip brake: this many CONSECUTIVE skipped asks with no answer between them means
+# not now — hold off for the cooldown. One answer anywhere in the window clears it.
+_DEFAULT_SKIP_BRAKE = 3
+_DEFAULT_SKIP_BRAKE_HOURS = 24.0
 
 # relationship_tier enum order (see 20260613120000_social_graph_lana_tools.sql).
 _TIER_RANK = {"stranger": 0, "nudge": 1, "acquaintance": 2, "direct": 3, "irl_peer": 4}
@@ -48,15 +68,27 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _recently_asked(user_id: str) -> bool:
-    """True if the cadence caps block a NEW ask.
+    """True if the cadence caps block a NEW ask. Off by default — see the brake below.
 
-    Two knobs (env-tunable): LANA_RAPPORT_MIN_HOURS (min gap between new asks) and
-    LANA_RAPPORT_MAX_PER_7D (rolling 7-day ceiling). Either at 0 disables that check;
-    both at 0 → a new ask surfaces whenever one is open ("always show"). A still-pending ask
-    is re-shown regardless (see next_ask) — these caps only gate brand-new asks.
+    Two knobs: LANA_RAPPORT_MIN_HOURS (min gap between new asks) and
+    LANA_RAPPORT_MAX_PER_7D (rolling 7-day ceiling), both now defaulting to 0
+    (disabled). A still-pending ask is re-shown regardless (see next_ask) — these
+    caps only ever gated brand-new asks, which is why they read as "the tile went
+    empty right after I answered one": answering clears the pending row, and the
+    6h timer then suppressed the next question on a queue that was full.
+
+    A clock is the wrong instrument for this surface. The tile is PASSIVE — a card
+    the user chooses to look at, not a push — so availability needs no rationing;
+    what needs rationing is Lana asking *into* a conversation, and that is capped
+    separately in policy/goals.py. Disinterest is now read from behavior instead
+    (_skip_brake): three skips in a row means not now, and that responds to the
+    actual person rather than to a guess. Both knobs are kept so the old cadence
+    can be restored in one env change if the always-on tile proves wrong.
     """
     min_hours = _env_float("LANA_RAPPORT_MIN_HOURS", _DEFAULT_MIN_HOURS)
     max_7d = int(_env_float("LANA_RAPPORT_MAX_PER_7D", _DEFAULT_MAX_PER_7D))
+    if min_hours <= 0 and max_7d <= 0:
+        return False  # always-on: no clock, no read
     try:
         sb = service_client()
         if min_hours > 0:
@@ -87,6 +119,57 @@ def _recently_asked(user_id: str) -> bool:
     except Exception:
         logger.exception("rapport: freq-cap check failed for %s", user_id)
         return True  # fail closed — don't risk over-asking on a transient error
+
+
+def _skip_brake(user_id: str) -> bool:
+    """True when the user's last few tile answers were all skips — go quiet a while.
+
+    This is what replaces the clock. A timer suppresses the tile for someone who is
+    engaged and answering (the worst case: they answer, and their reward is an empty
+    card); this suppresses it for someone who is visibly not interested, and says
+    nothing about anyone else. Counted on consecutive SKIPS with no answer between,
+    so one answer clears it immediately.
+
+    Fails CLOSED like the old cap: on a read error, brake. LANA_RAPPORT_SKIP_BRAKE=0
+    disables it entirely.
+    """
+    limit = int(_env_float("LANA_RAPPORT_SKIP_BRAKE", _DEFAULT_SKIP_BRAKE))
+    if limit <= 0:
+        return False
+    hours = _env_float("LANA_RAPPORT_SKIP_BRAKE_HOURS", _DEFAULT_SKIP_BRAKE_HOURS)
+    try:
+        rows = (
+            service_client()
+            .table("rapport_gaps")
+            .select("status, asked_at, answered_at, skipped_count")
+            .eq("user_id", user_id)
+            .not_.is_("asked_at", "null")
+            .order("asked_at", desc=True)
+            .limit(limit)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("rapport: skip-brake check failed for %s", user_id)
+        return True
+    if len(rows) < limit:
+        return False  # not enough history to call it disinterest
+    # Any answer in the window clears the brake, however old the skips around it.
+    if any(r.get("answered_at") for r in rows):
+        return False
+    if not all(int(r.get("skipped_count") or 0) > 0 for r in rows):
+        return False
+    # All skips. Hold off until the most recent one has cooled down.
+    raw = str(rows[0].get("asked_at") or "")
+    try:
+        last = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    braked = (_now() - last) < timedelta(hours=hours)
+    if braked:
+        logger.info("rapport: skip brake engaged for %s (%d consecutive skips)", user_id, limit)
+    return braked
 
 
 def _max_tier_rank(user_id: str) -> int:
@@ -297,6 +380,18 @@ def _backfill_from_claims(user_id: str) -> bool:
         made += synthesize_gaps_from_claims(user_id)
     except Exception:
         logger.exception("rapport: claim backfill failed for %s", user_id)
+    if made:
+        return True
+    # Nothing to deepen. For a user with no claims at all that is not a dry queue,
+    # it is a queue that never started — every opener above is claim-triggered. Seed
+    # it from what neighbors nearby actually claim, so the first answers are ones the
+    # matcher can score. No-ops for anyone who already has a profile.
+    try:
+        from app.rapport_synth import seed_cold_start
+
+        made += seed_cold_start(user_id)
+    except Exception:
+        logger.exception("rapport: cold-start seed failed for %s", user_id)
     return made > 0
 
 
@@ -473,8 +568,9 @@ def next_ask(
                     ).execute()
             except Exception:
                 logger.exception("rapport: stale-rotate failed for %s", user_id)
-        # 2) Daily cap — something was asked (and since answered/skipped) within the window.
-        elif _recently_asked(user_id):
+        # 2) Nothing pending. The cadence cap is off by default now, so the only
+        #    thing that keeps the tile quiet is visible disinterest.
+        elif _recently_asked(user_id) or _skip_brake(user_id):
             return None
 
     tier_rank = _max_tier_rank(user_id)

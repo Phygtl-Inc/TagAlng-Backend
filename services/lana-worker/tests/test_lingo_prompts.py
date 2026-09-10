@@ -122,11 +122,15 @@ class TestAddressGuidance(unittest.TestCase):
         from app.context import address_guidance, set_address_context
 
         set_address_context(None, None)
-        self.assertEqual(address_guidance(), "")
-        # The constitution md mentions "USER CONTEXT" in its rules; the appended
-        # per-user guidance lines must be absent when nothing is known.
+        # No ROLE line when the role is unknown — that part is unchanged.
         self.assertNotIn("USER CONTEXT — household role", lingo_constitution())
-        self.assertNotIn("USER CONTEXT — grammatical gender", lingo_constitution())
+        # But gender ALWAYS emits a line, including when unknown. Asserting "" here
+        # is what encoded the defect: with no rule at all the composer had to pick
+        # an agreement for words like bienvenido/bienvenida, and es/pt lean feminine
+        # in a warm register — so unknown-gender users were greeted "¡Bienvenida!"
+        # (eval 2026-09-01, lt_gender_es_unknown_neutral).
+        self.assertIn("UNKNOWN", address_guidance())
+        self.assertIn("NEVER default to the feminine form", address_guidance())
 
     def test_role_and_gender_reach_the_constitution(self) -> None:
         from app.context import address_guidance, set_address_context
@@ -142,7 +146,9 @@ class TestAddressGuidance(unittest.TestCase):
         from app.context import address_guidance, set_address_context
 
         set_address_context("astronaut", None)
-        self.assertEqual(address_guidance(), "")
+        # An unlisted role contributes nothing; the unknown-gender rule still rides.
+        self.assertNotIn("USER CONTEXT — household role", address_guidance())
+        self.assertNotIn("astronaut", address_guidance())
 
     def test_caregiver_framing_never_parent_label(self) -> None:
         from app.context import address_guidance, set_address_context

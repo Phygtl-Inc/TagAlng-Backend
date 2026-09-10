@@ -166,6 +166,39 @@ def activity_browse_should_release(
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
 
+# Pass 2 of the search. A FIXED second radius, not a loop: the widening terminates by
+# construction and costs at most one extra model call.
+#
+# 200 km is not a taste decision — it is the ceiling Postgres clamps to
+# (20260920120000_geolocation_aware_search.sql:411), so anything larger is the same
+# query. There is deliberately no middle rung: without distance tiers nothing downstream
+# would treat 40 miles differently from 120, so a third pass would buy a model call and
+# a round trip for no change in what the user is told.
+#
+# Supply past 200 km is NOT covered here and cannot be — that is what _far_offer's
+# uncapped probe is for (discovery_route.activities_beyond_radius; ZIP 90001 to Lake Nona
+# is 3,555 km). The two are complementary, not alternatives.
+_WIDE_RADIUS_M = 200_000.0
+
+# Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
+# retuned without reading around prose. These are what make a 0.7 mean the same thing on
+# Tuesday as on Friday: the model is told to score each event against the REQUEST, never
+# against the other events in the list, so the numbers stay comparable across calls and
+# across pools of different quality.
+_TOPIC_SCORE_SCALE = (
+    "0.9-1.0 same thing (basketball / basketball); "
+    "0.6-0.8 closely related (basketball / volleyball); "
+    "0.3-0.5 loosely related (basketball / hiking group); "
+    "0.0-0.2 unrelated (basketball / book club)"
+)
+
+# There is deliberately NO score threshold here. Membership is the model's own
+# match_indices, as it has always been. A cut over the score was tried and reverted: it
+# reads a different axis than the match decision, and the model happily matches an event
+# it rates 0.6 ("Sunday jam night" for "violin", eval 2026-09-06) while a 1.0 elsewhere
+# had previously been rejected. Any future gate is the widening work's call to make, with
+# a consumer in hand — not a reconstruction of a rule nobody ever wrote down.
+
 
 def _attach_host_names(events: list[dict[str, Any]]) -> None:
     """Stamp each event with `host_name` (the host's nickname) so the filter can match
@@ -215,6 +248,79 @@ def _fetch_block_events(
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_fetch_failed")
         return []
+
+
+def _widen_search(
+    user_jwt: str,
+    block_id: str | None,
+    *,
+    interest: str,
+    weekend_only: bool = False,
+) -> tuple[list[dict[str, Any]], str]:
+    """Pass 2: the same topic, searched out to _WIDE_RADIUS_M, over the ring the nearby
+    pass could not see. Returns (matched, label) — ([], "") when there is nothing.
+
+    Only ever called from the "a topical search found nothing" branch, so a turn that
+    matches nearby never reaches it and is untouched by construction rather than by a
+    flag. Returns empty when the block can't be placed, when there is no interest to
+    hold constant, and on any failure: a widened search is an improvement on an empty
+    state, never a reason to break one.
+
+    The ring is cut on measured distance, not on the ids the nearby pass returned — see
+    fetch_preview_events_on_block. The pool stays at _BROWSE_POOL: the wider pass is the
+    rare path, and paying for a bigger prompt on every browse turn to serve it is the
+    wrong trade.
+    """
+    interest = str(interest or "").strip()
+    # An open request ("anything", "what's happening") has no topic to hold constant, and
+    # _filter_events_by_query would pass the whole ring through unjudged — so a generic
+    # browse of an empty block would answer with meets 100 miles away. Same guard the
+    # matcher itself uses, for the same reason.
+    if not block_id or not interest or _OPEN_RE.match(interest):
+        return [], ""
+    try:
+        from app.auth import jwt_user_id
+        from app.discovery_route import (
+            activity_radius_meters,
+            fetch_preview_events_on_block,
+        )
+
+        rows = fetch_preview_events_on_block(
+            block_id,
+            limit=_BROWSE_POOL,
+            pool=_BROWSE_POOL,
+            weekend_only=weekend_only,
+            exclude_host_id=jwt_user_id(user_jwt),
+            radius_meters=_WIDE_RADIUS_M,
+            # Strictly beyond whatever the nearby pass just covered, so nothing is
+            # re-scored and nothing near is announced as far.
+            min_distance_meters=activity_radius_meters(),
+        )
+        if not rows:
+            return [], ""
+        _attach_host_names(rows)
+        matched, label = _filter_events_by_query(rows, interest)
+        if matched:
+            logging.getLogger(__name__).info(
+                "activity_browse_widened block=%s query=%r ring=%d matched=%d",
+                block_id, interest[:120], len(rows), len(matched),
+            )
+        return matched, label
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("activity_browse_widen_failed")
+        return [], ""
+
+
+def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
+    """Whole miles to the closest of these events, or None when none carry a distance.
+    Whole miles because the pilot is US-only and "196 km" reads as a bug to someone told
+    everything else in miles — same rule as far_activity_details."""
+    dists = [
+        float(e["distance_meters"])
+        for e in events
+        if isinstance(e.get("distance_meters"), (int, float))
+    ]
+    return int(round(min(dists) / 1609.34)) if dists else None
 
 
 def _today_str() -> str:
@@ -391,8 +497,10 @@ def _compose_area_warming_empty(
 
 
 def _far_where(far: dict[str, Any] | None) -> str:
-    """Display name for the far area, ZIP included — the pill's text IS the next user
-    message, and the ZIP in it is what re-anchors the search (_need_zip consumes it)."""
+    """Display name for the far area. The ZIP is included when the area has one purely
+    because it helps a user place it ("Foster City (94404)") — it is NOT the transport
+    any more: the offer re-anchors on the remembered block id, so an area without a ZIP
+    is named by its label alone and works exactly the same."""
     if not far:
         return ""
     label = str(far.get("area_label") or "").strip()
@@ -409,8 +517,11 @@ def _far_supply_facts(far: dict[str, Any] | None) -> list[str]:
     Only ever describes ONE real row we actually read. Says nothing when the probe
     found nothing — an unmeasured claim about elsewhere is the same bug as an
     unmeasured claim about here."""
-    # No ZIP → no pill that can re-anchor the search, so make no offer we can't keep.
-    if not far or not far.get("miles") or not far.get("zip5"):
+    # Needs a distance, a name to put on the pill, and a block to send them to. It used
+    # to demand a ZIP as well, which no seeded pilot area has (they are H3 cells), so
+    # the offer was silently impossible in exactly the areas the pilot runs in — and
+    # nothing logged, so it looked identical to "no far supply exists".
+    if not far or not far.get("miles") or not far.get("block_id") or not _far_where(far):
         return []
     where = _far_where(far)
     what = far.get("title") or "a meet"
@@ -434,20 +545,37 @@ def _compose_empty_seek_offer(
     area_facts: list[str] | None = None,
     far_facts: list[str] | None = None,
     community: str | None = None,
+    area: str | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
     Grounded ONLY in what's true: the user's own words, the kind searched, and that zero
-    matching activities exist on THEIR block right now — never invented events. The two
-    real options (keep listening + text them / widen the search) must both survive in the
-    copy because the pills under it say exactly that. Localized static fallback."""
+    matching activities exist in the area searched — never invented events.
+
+    ONE rule holds the whole thing together: the options this copy offers are exactly the
+    pills rendered under it, and nothing else. There are three shapes — plain, a far area
+    ("Look in <area>"), and a community filter ("Look beyond <community>") — and each has
+    its own facts AND its own localized fallback. The system prompt below therefore names
+    no options of its own; it used to hardcode "or widen the search", which contradicted
+    the pill whenever one of the other two shapes was armed."""
     interest = str(interest or "").strip()
     community = str(community or "").strip()
+    area = str(area or "").strip()
     if community:
         fallback = (
             t("browse.empty_community_interest", lang, interest=interest, community=community)
             if interest
             else t("browse.empty_community_generic", lang, community=community)
+        )
+    elif area:
+        # A far area was found and the pill says "Look in <area>". The generic strings
+        # below end with "or widen the search?", which is not what the pill does and not
+        # something widening can deliver — with no LLM configured that mismatch was the
+        # ONLY output the user ever saw.
+        fallback = (
+            t("browse.empty_interest_far", lang, interest=interest, area=area)
+            if interest
+            else t("browse.empty_generic_far", lang, area=area)
         )
     else:
         fallback = (
@@ -460,15 +588,34 @@ def _compose_empty_seek_offer(
 
         if not llm_configured():
             return fallback
-        where = f"{community} (the community filter they have selected)" if community else "their block"
+        # "their area", not "their block": the read is a radius now, and "block" is
+        # lingo-banned in copy (clean_block_label exists to strip it, and the final-mile
+        # guard garbles sentences that carry it).
+        where = (
+            f"{community} (the community filter they have selected)"
+            if community
+            else "their area"
+        )
+        # Did we actually look past `where`? Only the far probe does. Claiming "nothing
+        # outside was looked at" while ALSO naming a far area is a self-contradiction —
+        # and the model was being handed both at once.
+        # Only the far probe looks past `where` — and it always names the area it found
+        # (see _far_offer). The community and host-your-own shapes reuse far_facts for
+        # their own Option B without having looked anywhere wider, so they keep the
+        # "nothing outside was looked at" caveat.
+        looked_wider = bool(area)
         facts = [
             (
                 f"You searched {where} for: {interest}"
                 if interest
                 else f"You searched {where} for upcoming activities"
             ),
-            f"Zero matching activities exist at {where} right now — that is the honest state. "
-            "Nothing outside it was looked at, so any wider claim would be invented",
+            f"{where} has zero matching activities right now — that is the honest state"
+            + (
+                ""
+                if looked_wider
+                else ". Nothing outside it was looked at, so any wider claim would be invented"
+            ),
             "Option A: you can keep an ear out and TEXT them the moment a matching one pops up "
             "(the pill under your message says 'Yes, listen for me')",
             "Never invent or promise events, and never claim something is happening nearby",
@@ -509,9 +656,11 @@ def _compose_empty_seek_offer(
             model=synthesizer_model(),
             system=(
                 "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
-                "(max 2 sentences) telling the user nothing matched on their block right now "
-                "and offering both options: you keep listening and text them when one pops up, "
-                "or widen the search. Ground it ONLY in the facts given. "
+                f"(max 2 sentences) telling the user nothing matched in {where} right now, "
+                "then offer EXACTLY the options named in the facts below — every one of "
+                "them, and no others. The facts describe the buttons shown under your "
+                "message, so an option you invent or omit contradicts what they can tap. "
+                "Ground it ONLY in the facts given. "
                 + (f"{lang_line} " if lang_line else "")
                 + 'Return JSON {"message": "..."}.'
             ),
@@ -553,6 +702,55 @@ def _event_when_parts(raw: Any, *, has_time: bool = True) -> str:
         return s[:10]
 
 
+def _coerce_topic_score(value: Any) -> float:
+    """Model-reported closeness → a number this code can rely on. Anything non-numeric
+    (missing, null, a string, NaN) reads as 0.0 — an UNJUDGED event, never a good one."""
+    try:
+        score = round(min(1.0, max(0.0, float(value))), 1)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if score != score else score  # NaN survives float(); it must not survive.
+
+
+def _coerce_topic_mismatch(value: Any) -> str:
+    """Model-reported gap phrase → a string safe to render. `or ""` rather than a .get
+    default: a JSON null arrives as the KEY present holding None, so a default never
+    fires and an f-string would print the literal word "None"."""
+    return str(value or "").strip()[:120]
+
+
+def _log_no_match(query: str, events: list[dict[str, Any]]) -> None:
+    """One line when a search comes up empty, carrying the best near-miss it saw.
+
+    The score is what makes this worth logging. "cricket, 12 candidates, nothing matched"
+    and "cricket, 12 candidates, nothing matched, closest was 0.8" are different
+    problems: the first is a supply gap in the neighbourhood, the second a matcher being
+    too strict about something that was nearly right. Without the score the two are
+    indistinguishable in production, which is where the empty states actually happen.
+    """
+    scores = [
+        s for s in (e.get("topic_score") for e in events) if isinstance(s, (int, float))
+    ]
+    logging.getLogger(__name__).info(
+        "activity_browse_no_match query=%r candidates=%d best_score=%s",
+        query[:120],
+        len(events),
+        max(scores) if scores else None,
+    )
+
+
+def _stamp_unjudged(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark rows no model judged. Every path out of _filter_events_by_query goes through
+    here or through the scored branch, so the invariant holds with no exceptions:
+    anything this module returns carries a topic_score. An unscored row reaching a
+    caller that ranks or gates by score would otherwise sort as well as a perfect
+    match — the one failure this is here to make impossible."""
+    for ev in events:
+        ev["topic_score"] = 0.0
+        ev["topic_mismatch"] = ""
+    return events
+
+
 def _filter_events_by_query(
     events: list[dict[str, Any]], query: str
 ) -> tuple[list[dict[str, Any]], str]:
@@ -564,12 +762,31 @@ def _filter_events_by_query(
     weekday, local start time and host, plus today's date, and returns the events
     matching ALL constraints the request expresses, with a short label for the header.
     Open/vague requests return everything. Returns (matched, label).
+
+    Membership is the model's `match_indices`, unchanged — this function does not second-
+    guess it and applies no score threshold. What is new is that the model also RATES
+    every event it was shown, matched or not, so a near-miss survives long enough to be
+    read. Under the old contract non-matches were dropped before anything could rate
+    them, and "how close was the closest thing?" had no answer at all.
+
+    EVERY event carries `topic_score` (0.0-1.0 against _TOPIC_SCORE_SCALE) and
+    `topic_mismatch` (a short phrase naming how it differs, "" on an exact match). Rows
+    no model judged carry 0.0 and "". The score describes closeness only; it decides
+    nothing, and a matched event may legitimately carry a low one.
+
+    Note the scores land on the caller's OWN list: rows are stamped in place, so after
+    this returns, `events` holds every candidate scored — matched or not. A caller that
+    wants the near-misses reads its input list; no second return value is needed.
+    Nothing reads any of this yet.
     """
-    if not events:
-        return [], ""
     query = str(query or "").strip()
+    if not events:
+        _log_no_match(query, events)
+        return [], ""
     if not query or _OPEN_RE.match(query):
-        return events, ""
+        # Open/vague request: everything "matches", but nothing was judged against a
+        # topic — there wasn't one. Unjudged, not perfect.
+        return _stamp_unjudged(events), ""
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
@@ -582,9 +799,10 @@ def _filter_events_by_query(
                     ev.get("starts_at"), has_time=ev.get("has_time") is not False
                 )
                 host = str(ev.get("host_name") or "").strip()
+                desc = str(ev.get("description") or "").strip()[:200]
                 lines.append(
                     f"{i}: {ev.get('title', '')} | date: {when} | "
-                    f"host: {host or '?'} | tags: {tagstr}"
+                    f"host: {host or '?'} | tags: {tagstr} | about: {desc}"
                 )
             data = llm_json(
                 model=router_model(),
@@ -599,7 +817,14 @@ def _filter_events_by_query(
                     "start time: morning is before 12 PM, afternoon 12–5 PM, evening/night "
                     "5 PM onward), and/or a HOST name ('hosted by Asjid' → match the host "
                     "field, case-insensitive). Return "
-                    'JSON {"match_indices":[ints], "label":"short phrase"}: indices of '
+                    # ── Membership. Every sentence from here to "even at the right hour"
+                    #    is verbatim from before scoring existed (e76bcc9). Reproducing
+                    #    the model's old judgement means reproducing the old words: a
+                    #    threshold over the score could not do it, because match and
+                    #    closeness are different axes — the model matched a 0.6 event.
+                    #    Only the JSON key list below is new. Do not paraphrase this.
+                    'JSON {"match_indices":[ints], "scores":[floats], '
+                    '"mismatches":[strings], "label":"short phrase"}: indices of '
                     "events satisfying EVERY constraint the request expresses (a date query "
                     "must match the event's date; a time-of-day query the start time; a "
                     "host query the host). When the request names an activity, interest or "
@@ -607,7 +832,22 @@ def _filter_events_by_query(
                     "is a hard constraint too: only events that are genuinely that kind of "
                     "activity match — a matching date or time of day alone NEVER qualifies "
                     "an unrelated event (a coffee catch-up is not a match for 'runners', "
-                    "even at the right hour). label "
+                    "even at the right hour). "
+                    # ── Scoring. Strictly additive: it must not touch the decision above.
+                    "SEPARATELY, rate EVERY event you were shown — the ones that match and "
+                    "the ones that don't. scores and mismatches are POSITIONALLY PARALLEL "
+                    "TO THE EVENT LIST, not to match_indices: one entry per event shown, "
+                    "in the order shown, so scores[0] and mismatches[0] describe event 0 "
+                    "whether or not 0 is in match_indices. Shown 12 events, return 12 of "
+                    "each. Each score is how closely that event's TOPIC fits the request, "
+                    f"one decimal place, on this scale: {_TOPIC_SCORE_SCALE}. Judge every "
+                    "event on its own merits against the REQUEST — never rank them "
+                    "against each other, and never spread them out to separate them; two "
+                    "equally good matches get the same number. The score does not decide "
+                    "anything: match_indices alone says what matched, and a matching "
+                    "event may score low. Each mismatch is a short phrase naming how that "
+                    'event differs from the request ("asked for violin, this is guitar"), '
+                    'or "" when it is exactly what was asked for. label '
                     "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
                     "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
                     "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "
@@ -617,24 +857,68 @@ def _filter_events_by_query(
                 ),
                 user_payload=(
                     f"Request: {query}\nEvents:\n" + "\n".join(lines)
-                    + '\nReturn {"match_indices":[...], "label":"..."}.'
+                    + f"\nReturn match_indices, plus {len(lines)} scores and "
+                    f"{len(lines)} mismatches in event order: "
+                    '{"match_indices":[...], "scores":[...], '
+                    '"mismatches":[...], "label":"..."}.'
                 ),
-                max_tokens=200,
+                # 200 was sized for a bare index list. Scores and mismatch phrases for a
+                # full _BROWSE_POOL of 40 run 700-900 output tokens, and an overflowing
+                # response is unparseable JSON: it lands in the except below and falls
+                # SILENTLY into the keyword fallback, which matches far worse and says
+                # nothing about it. Raise this with any growth in the response shape.
+                #
+                # Every event is rated now, not just the matches, so the arrays are always
+                # full-length rather than as short as the match list.
+                max_tokens=1200,
                 temperature=0.0,
             )
             if isinstance(data, dict):
                 idxs = data.get("match_indices")
                 label = str(data.get("label") or "").strip()
+                # The gate is match_indices, exactly as before scoring existed: it is the
+                # membership answer, and a malformed scores array must never cost us a
+                # valid one. Junk scores mean everything reads 0.0; the right events are
+                # still returned.
                 if isinstance(idxs, list):
+                    raw_scores = data.get("scores")
+                    raw_mismatches = data.get("mismatches")
+                    scores = raw_scores if isinstance(raw_scores, list) else []
+                    mismatches = (
+                        raw_mismatches if isinstance(raw_mismatches, list) else []
+                    )
+                    # Score EVERY event, by INPUT position — scores are parallel to the
+                    # event list, not to match_indices, so nothing the model chose to
+                    # return can shift a score onto the wrong row, and a short array just
+                    # leaves the tail at 0.0. This runs before membership is read: the
+                    # near-misses are the whole point, and under the old contract they
+                    # were dropped before anything could rate them.
+                    for i, ev in enumerate(events):
+                        ev["topic_score"] = _coerce_topic_score(
+                            scores[i] if i < len(scores) else None
+                        )
+                        ev["topic_mismatch"] = _coerce_topic_mismatch(
+                            mismatches[i] if i < len(mismatches) else None
+                        )
+                    # Membership is the model's call and the score has no vote — a
+                    # matched event may score low. A threshold here read the wrong axis
+                    # and changed what Lana shows (eval 2026-09-06: "Sunday jam night"
+                    # matched at 0.6, FIFA/soccer at 1.0 where it had been rejected).
                     picked = [
                         events[i]
                         for i in idxs
                         if isinstance(i, int) and 0 <= i < len(events)
                     ]
+                    if not picked:
+                        # Every candidate is scored by now, so the log can say how close
+                        # the closest one came.
+                        _log_no_match(query, events)
                     return picked, label
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_filter_failed")
-    # Fallback (no LLM): keyword match on title + tags + host; nothing matched → show all.
+    # Fallback (no LLM, or the call failed): keyword match on title + tags + host;
+    # nothing matched → show all. A substring hit is not a judgement of topic fit, so
+    # every row out of here is unjudged — 0.0, never 1.0.
     kw = query.lower()
     matched = [
         e
@@ -648,6 +932,10 @@ def _filter_events_by_query(
             + str(e.get("host_name", ""))
         ).lower()
     ]
+    # Stamp EVERY candidate, not just the ones handed back: the scored branch leaves the
+    # caller's whole list rated, and a caller reading its near-misses must not hit a
+    # KeyError on the one path where the model was never reached.
+    _stamp_unjudged(events)
     return (matched or events), ""
 
 
@@ -674,8 +962,8 @@ def _far_offer(
     user_jwt: str, block_id: str | None, draft: dict[str, Any], *, interest: str = ""
 ) -> tuple[list[str], str]:
     """(facts, pill text) for real supply outside the radius — ([], "") when there is
-    none. The pill's ZIP re-anchors the search next turn through the path browse
-    already uses for a typed ZIP; the interest carries over untouched.
+    none. The offered area is remembered ON THE DRAFT, and the tap is matched against
+    the exact label we offered; the interest carries over untouched.
 
     The candidate area is only offered when its events survive the SAME filter this
     search just ran (and the caller's own meets are dropped, exactly as browse drops
@@ -684,6 +972,12 @@ def _far_offer(
     """
     from app.auth import jwt_user_id
     from app.discovery_route import activities_beyond_radius, far_activity_details
+
+    # Whatever area we offered last turn is not this turn's answer. Left standing, a
+    # stale label would still re-anchor the search if the user typed it later.
+    draft["_area_offer_chip"] = None
+    draft["_area_offer_block_id"] = None
+    draft["_area_offer_name"] = None
 
     rows = activities_beyond_radius(
         user_jwt, block_id, exclude_host_id=jwt_user_id(user_jwt)
@@ -698,12 +992,28 @@ def _far_offer(
     far = far_activity_details(nearest)
     facts = _far_supply_facts(far)
     if not facts:
+        # Real supply was found and then dropped for want of a name or a block to send
+        # them to. Silent before, which made it indistinguishable from "nothing exists".
+        logging.getLogger(__name__).info(
+            "far_offer_unnameable block=%s event=%s area_label=%r block_id=%r",
+            block_id, nearest.get("id"), (far or {}).get("area_label"),
+            (far or {}).get("block_id"),
+        )
         return [], ""
+    where = _far_where(far)
+    chip = f"Look in {where}"
+    # Remembered so the tap is recognised by the exact label we offered, and re-anchored
+    # on the block id rather than a ZIP parsed back out of the pill text — the pilot's
+    # areas are H3 cells and have no ZIP to parse. Mirrors _arm_community_widen.
+    draft["_area_offer_chip"] = chip
+    draft["_area_offer_block_id"] = str(far["block_id"])
+    # The bare name, for the copy. The static fallback has to be able to name the same
+    # area the pill names, and it never sees the facts the model gets.
+    draft["_area_offer_name"] = where
     # Deliberately does NOT set _need_zip. Arming it here made every non-ZIP reply
     # ("Widen the search", a fresh interest, a question) get eaten as a malformed ZIP
-    # and answered with "share your 5-digit ZIP code" (QA 2026-08-31). The ZIP is
-    # consumed only when one actually arrives — see the seek-offer branch below.
-    return facts, f"Look in {_far_where(far)}"
+    # and answered with "share your 5-digit ZIP code" (QA 2026-08-31).
+    return facts, chip
 
 
 def _community_name(comm: dict[str, Any] | None) -> str | None:
@@ -719,6 +1029,11 @@ def _arm_community_widen(draft: dict[str, Any], comm: dict[str, Any] | None) -> 
 
     chip = widen_chip(_community_name(comm))
     draft["_community_chip"] = chip
+    # Same reason as in _far_offer: an area offered earlier in this browse must not stay
+    # tappable behind a community-scoped empty state.
+    draft["_area_offer_chip"] = None
+    draft["_area_offer_block_id"] = None
+    draft["_area_offer_name"] = None
     return chip
 
 
@@ -728,6 +1043,7 @@ def _format_browse_message(
     *,
     phone_verified: bool,
     lang: str | None = None,
+    far_miles: int | None = None,
 ) -> str:
     label = (label or "").strip() or None
     if not events:
@@ -736,11 +1052,22 @@ def _format_browse_message(
         return t("browse.events_empty", lang)
     # The FE renders these same events as a card list (activity_previews) right under this
     # message — a short lead-in is enough; enumerating them in text too reads as a bug.
-    head = (
-        t("browse.events_header_label", lang, label=label)
-        if label
-        else t("browse.events_header", lang)
-    )
+    #
+    # far_miles is set only by a WIDENED search. Saying "near you" over a meet 90 miles
+    # out would be the same lie as claiming supply we never measured: the distance was
+    # the whole reason we looked further, so it has to reach the copy.
+    if far_miles is not None:
+        head = (
+            t("browse.events_header_label_far", lang, label=label, miles=f"{far_miles:,}")
+            if label
+            else t("browse.events_header_far", lang, miles=f"{far_miles:,}")
+        )
+    else:
+        head = (
+            t("browse.events_header_label", lang, label=label)
+            if label
+            else t("browse.events_header", lang)
+        )
     tail = (
         t("browse.events_tail_verified", lang)
         if phone_verified
@@ -793,8 +1120,21 @@ def run_activity_browse_turn(
     #    through the AI classifier. Accept → save a minimal seek; widen → drop the filter and
     #    show everything; a new kind → fall through and re-search. ──
     if draft.get("_seek_offer"):
+        area_chip = str(draft.get("_area_offer_chip") or "")
         chip = str(draft.get("_community_chip") or "")
-        if chip and msg.strip().lower() == chip.lower():
+        if area_chip and msg.strip().lower() == area_chip.lower():
+            # "Look in Lake Nona — Area A" — the far-supply pill. Re-anchor on the block
+            # id we remembered when we made the offer, rather than parsing a ZIP back out
+            # of the label: the seeded pilot areas are H3 cells with no ZIP in them, and
+            # requiring one is what made this offer impossible there.
+            draft["_area_block_id"] = str(draft.get("_area_offer_block_id") or "")
+            draft["_seek_offer"] = None
+            draft["_area_offer_chip"] = None
+            draft["_area_offer_block_id"] = None
+            draft["_area_offer_name"] = None
+            draft["_asked"] = True
+            msg = ""  # same interest, new area — re-runs the search below
+        elif chip and msg.strip().lower() == chip.lower():
             from app.community_scope import clear_active_community
 
             clear_active_community(session_ctx)
@@ -819,10 +1159,10 @@ def run_activity_browse_turn(
             # Either way the browse flow is done (clears activity_browse_active for next turn).
             reset_activity_browse_state(session_ctx)
             return reply
-        # "Look in Foster City (94404)" — the far-supply pill. A ZIP in the reply is
-        # unambiguous here (the alternatives are "Yes, listen for me" and "Widen the
-        # search"), and re-anchoring is exactly the typed-ZIP path below, so hand it
-        # over rather than re-implementing the resolve. The interest carries over.
+        # A ZIP the user TYPED at the offer ("what about 94404?"). The pill no longer
+        # travels this way — it is matched by label above — but a typed ZIP is still
+        # unambiguous here, and re-anchoring is exactly the typed-ZIP path below, so
+        # hand it over rather than re-implementing the resolve. Interest carries over.
         from app.discovery_route import extract_zip as _extract_zip
 
         if _extract_zip(msg):
@@ -1044,6 +1384,20 @@ def run_activity_browse_turn(
     # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
     # text them when a matching meet appears) rather than dead-ending. The accept/widen reply
     # is read next turn. No interest (a "show me anything" browse) keeps the generic message.
+    # Pass 2: nothing on topic nearby, so search the ring out to _WIDE_RADIUS_M holding
+    # the topic constant. Sits INSIDE the "found nothing" branch, so a turn that matched
+    # nearby cannot reach it — no flag, no second code path to keep in sync. Community
+    # scope is excluded: "what's on at CF Fitness" is a question about a place, and
+    # answering it with a meet 90 miles away is not a wider answer, it is a wrong one.
+    far_miles: int | None = None
+    if not matched and interest and not comm:
+        matched, wide_label = _widen_search(
+            user_jwt, block_id, interest=interest, weekend_only=weekend_only
+        )
+        if matched:
+            label = wide_label or label
+            far_miles = _nearest_miles(matched)
+
     if not matched and interest:
         # Echo (and store) the filter's short label, not the raw sentence — a full NL entry
         # ("are there any fifa activities for my 6 year old") would otherwise be parroted
@@ -1075,6 +1429,7 @@ def run_activity_browse_turn(
             area_facts=area_facts,
             far_facts=far_facts,
             community=_community_name(comm),
+            area=draft.get("_area_offer_name"),
         )
 
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
@@ -1116,8 +1471,39 @@ def run_activity_browse_turn(
             session_ctx["activity_previews"] = []
             session_ctx["routing_phase"] = "listening"
             return _compose_empty_seek_offer(
-                "", user_msg=msg, lang=lang, far_facts=far_facts
+                "",
+                user_msg=msg,
+                lang=lang,
+                far_facts=far_facts,
+                area=draft.get("_area_offer_name"),
             )
+
+    if not matched:
+        # Nothing here and nothing further out either (the far/community branches above
+        # already returned). The empty copy offers to listen, widen, or host — so arm the
+        # seek and hand over the tappables. It used to fall through to _refine_suggestions,
+        # which has no events to mine and returns nothing: a three-way question with zero
+        # chips on a voice-first surface (prod 2026-09-02, after tapping "Widen the search").
+        draft["_seek_offer"] = True
+        draft["suggestions"] = ["Yes, listen for me", "Host a meet"]
+        session_ctx["browse_draft"] = draft
+        session_ctx["activity_browse_active"] = True
+        session_ctx["activity_previews"] = []
+        session_ctx["routing_phase"] = "listening"
+        return _compose_empty_seek_offer(
+            "",
+            user_msg=msg,
+            lang=lang,
+            # Widening is not on the menu here: there is no topic left to drop, and the
+            # geography was already searched. Hosting is the one real move left.
+            far_facts=[
+                "Option B: they can set up their own meet for neighbours to join "
+                "(the pill says 'Host a meet')",
+            ],
+            # ponytail: with no LLM configured the static fallback still says "or widen
+            # the search" while the pill says "Host a meet". Add a browse.empty_*_host
+            # string (en/es/pt) if that path ever ships to users.
+        )
 
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)
@@ -1125,4 +1511,6 @@ def run_activity_browse_turn(
     session_ctx["activity_browse_active"] = True
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     session_ctx["routing_phase"] = "listening"
-    return _format_browse_message(matched, label, phone_verified=phone_verified, lang=lang)
+    return _format_browse_message(
+        matched, label, phone_verified=phone_verified, lang=lang, far_miles=far_miles
+    )

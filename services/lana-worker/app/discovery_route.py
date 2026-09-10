@@ -59,6 +59,7 @@ from app.guest_capabilities import (
 )
 from app.community_scope import active_community, community_name
 from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
+from app.tip_embed import tip_headline
 from app.tip_rec_cascade import WIDE_FETCH as WIDE_TIP_FETCH
 from app.tip_rec_cascade import stamp_tip_peer_surface
 from app.hosting_cta import (
@@ -1606,6 +1607,15 @@ def _try_layer1_intent_turn(
     history: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Layer 1 explicit intents — identity, block summary, settings, help."""
+    # The display-name gate is armed and this reply IS the name — it belongs to the gate
+    # downstream, never to a classifier verdict. A bare "Tex" answering "what should
+    # neighbors call you?" came back as identity.complete_profile and was answered "Tex,
+    # your profile is all set up already" — the name echoed from the message text and
+    # never written, so the next session asked for it again (prod 2026-09-02).
+    if phase == PHASE_NEED_DISPLAY_NAME and (
+        extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+    ):
+        return None
     linear = slots_linear_intent(slots)
     if not linear or not intent_confidence_met(slots, linear):
         return None
@@ -3601,6 +3611,28 @@ def _compose_tip_ask_offer_line(detail: str, session_ctx: dict[str, Any]) -> str
     )
 
 
+# Appended to every neighbor-tip goal: the card under the reply carries the detail,
+# so the prose that repeats it is not a summary, it is the same text twice.
+def _ask_is_covered(detail: str, tags: list[str], text: str) -> bool:
+    """Does the recommendation answer the ask in the ASK'S OWN WORDS?
+
+    Cheap and deliberately not a second copy of _tip_match_strength: the SQL decides what
+    matches, this only decides whether the match is self-evident to the reader. A tip
+    tagged "barber" against an ask for "barber" explains itself; "stationery store"
+    against "art supplies" does not, and that is the one Lana has to account for.
+    """
+    from app.layer1_intents import attr_filter_tokens
+
+    words = [w for w in attr_filter_tokens(detail) if len(w) >= 4]
+    if not words:
+        return True  # nothing substantive to miss on; say nothing rather than guess
+    haystack = " ".join(tags).lower() + " " + str(text or "").lower()
+    return any(w in haystack for w in words)
+
+
+_CARD_IS_BELOW = (" The recommendation itself is ALREADY ON A CARD directly below your reply, with the neighbor's own words, their distance, their tags and a button to message them. Never restate what is on the card: no prices, hours, parking, crowds, wait times or quality notes. Say only what the card cannot — that a real neighbor vouched for this, and what they named. At most TWO short sentences.")
+
+
 def _compose_neighbor_tip_reply(
     tips: list[dict[str, Any]],
     *,
@@ -3627,26 +3659,45 @@ def _compose_neighbor_tip_reply(
     elif _scope:
         facts.append(f"Every recommender below is at {_scope}, the community they are filtered to")
     lines: list[str] = []
+    approximate = False
     for row in tips[:3]:
         text = str(row.get("detail_text") or "").strip()
         if not text:
             continue
         who = str(row.get("neighbor_label") or "A neighbor on your block").strip()
-        where = str(row.get("distance_text") or "").strip()
-        lines.append(
-            f"{who} recommended: {text}" + (f" ({where})" if where else "")
-        )
+        # The HEAD of the tip only. The card under this reply already renders the whole
+        # thing — every "Label: answer", the tags, the distance and the Nudge — so the
+        # full text here only ever bought a paraphrase of the card below it.
+        tags = [str(t).strip() for t in (row.get("affinity_tags") or []) if str(t or "").strip()]
+        line = f"{who} recommended {tip_headline(text)}"
+        if tags:
+            # The evidence the match was actually made on. Without it the composer has no
+            # way to say WHY a stationery store answers an art-supplies ask, and an
+            # unexplained near-match reads as Lana misunderstanding the question.
+            line += f" — they tag it: {', '.join(tags[:5])}"
+        lines.append(line)
+        if not _ask_is_covered(detail, tags, text):
+            approximate = True
     facts.extend(lines)
+    if approximate:
+        # Matched on MEANING, not on words — the ask and the recommendation share no
+        # vocabulary at all. That is exactly the case the reader cannot verify for
+        # themselves, so it is the one case Lana has to name out loud.
+        facts.append(
+            "NOT AN EXACT MATCH: nothing they recommended uses the words the user asked "
+            "in. This was matched on meaning being close. Name the gap in your own words "
+            "(what they asked for vs what this actually is) so the user can judge it. Do "
+            "NOT guess what else the place stocks or offers."
+        )
     if weights:
         facts.append("What they said matters most: " + ", ".join(weights[:4]))
     if widened:
         facts.append("You just widened the search past their own block.")
     fallback_body = "\n".join(f"• {line}" for line in lines)
     goal = (
-        "A neighbor on the user's block already posted a recommendation that matches "
-        "what they asked for. Lead with it — this is a real neighbor vouch, not a "
-        "Google listing, so say who recommended what in their words. Do not invent "
-        "any detail beyond the facts, and do not claim anything has been posted."
+        "A neighbor on the user's block already recommended something matching what they "
+        "asked for — a real neighbor vouch, not a Google listing. Do not invent any detail "
+        "beyond the facts, and do not claim anything has been posted." + _CARD_IS_BELOW
     )
     if weights:
         goal = (
@@ -3655,19 +3706,20 @@ def _compose_neighbor_tip_reply(
             "the ones matching what they care about first, then lead with the top rec in "
             "the neighbor's own words. Never claim a neighbor said something about a "
             "thread the facts do not show, and do not claim anything has been posted."
+            + _CARD_IS_BELOW
         )
     elif widened:
         goal = (
             "The user asked you to look further out, so you searched past their own block. "
             "Say that plainly, then lead with what the neighbors further out recommended, "
-            "in their own words. Do not claim anything has been posted."
+            "in their own words. Do not claim anything has been posted." + _CARD_IS_BELOW
         )
     return compose_reply(
         goal=goal,
         facts=facts,
         session_ctx=session_ctx,
         fallback=f"A neighbor near you already recommended one:\n{fallback_body}",
-        max_sentences=3,
+        max_sentences=2,
     )
 
 
@@ -3806,6 +3858,12 @@ def _tip_seek_answer_turn(
     # reach someone who wasn't on it (§12c) — that reach is the whole point of doing this
     # server-side. A plain ask keeps the original narrow read.
     wide = bool(weights) or widen
+    # The community scope. A recommendation belongs to CF Fitness because it was SHARED
+    # there (local_signals.circle_place_ref), not because its author happens to be a
+    # member — those are different questions, and only the first is what the share button
+    # asked. The RPC takes it as scope, not as a filter: inside a community distance does
+    # not apply, and outside one a community's tips do not show at all.
+    _comm = active_community(session_ctx)
     neighbor_tips = find_neighbor_tips(
         user_jwt,
         block_id=block_id,
@@ -3814,22 +3872,12 @@ def _tip_seek_answer_turn(
         limit=WIDE_TIP_FETCH if wide else 3,
         locale=str(session_ctx.get("preferred_lang") or "en"),
         radius_meters=radius_meters() if widen else None,
+        circle_place_id=str(_comm["place_id"]) if _comm else None,
     )
-    # The community filter: a recommendation is only "from CF Fitness" when the person
-    # who made it is at CF Fitness. Nothing is tagged at write time — membership is the
-    # tag, and it stays true as people join. Empty falls through to the Google/offer
-    # cascade below, exactly as an empty neighbourhood read already does.
-    _comm = active_community(session_ctx)
-    if _comm and neighbor_tips:
-        from app.community_scope import rows_by_members
-
-        scoped_tips = rows_by_members(neighbor_tips, str(_comm["place_id"]))
-        if scoped_tips:
-            neighbor_tips = scoped_tips
-        else:
-            # Read (and cleared) by _compose_neighbor_tip_reply below, off the same
-            # incoming ctx it composes from.
-            session_ctx["community_widened_from"] = _comm.get("name")
+    if _comm and not neighbor_tips:
+        # Read (and cleared) by _compose_neighbor_tip_reply below, off the same incoming
+        # ctx it composes from: name the community that was empty before widening.
+        session_ctx["community_widened_from"] = _comm.get("name")
     logging.getLogger(__name__).info(
         "tip_seek_answer.enter block=%s detail=%r category=%r neighbor_tips=%d wide=%s",
         block_id, detail, category, len(neighbor_tips), wide,
@@ -6495,6 +6543,30 @@ def activity_radius_meters() -> float:
         return _DEFAULT_ACTIVITY_RADIUS_M
 
 
+# How far AHEAD an activity read looks. The radius knob shipped without its twin, so
+# the horizon lived in a SQL default for two callers and a string literal for the
+# third: browse read 90 days locally while the far probe took get_nearby_activities'
+# 14-day default, and a real meet six weeks out 40 miles away was invisible to the
+# probe that exists to find exactly that. Every activity read now passes this
+# explicitly — a caller that relies on the SQL default is the bug, not the value.
+_DEFAULT_ACTIVITY_WINDOW_DAYS = 90
+
+
+def activity_window() -> str:
+    """Postgres interval literal for the browse/far-probe horizon.
+
+    look_meet deliberately does NOT use this — it is a 14-day surface and says so in
+    its own named constant (look_meet.LOOK_MEET_WINDOW). Divergence is fine; invisible
+    divergence is what this replaces.
+    """
+    raw = os.environ.get("LANA_ACTIVITY_WINDOW_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else _DEFAULT_ACTIVITY_WINDOW_DAYS
+    except ValueError:
+        days = _DEFAULT_ACTIVITY_WINDOW_DAYS
+    return f"{max(1, days)} days"
+
+
 def block_centroid(block_id: str) -> tuple[float, float] | None:
     """Lat/lng for an area id. Auto-created blocks are `zip-<zip5>`, which is what
     lets places._centroid resolve them off zip_centroids."""
@@ -6508,22 +6580,28 @@ def block_centroid(block_id: str) -> tuple[float, float] | None:
         return None
 
 
-def _event_area_label(event_id: str) -> tuple[str | None, str | None]:
-    """(area label, zip5) for one event — the RPC returns neither, and honest
-    far-supply copy needs a place name the user can recognise and act on."""
+def _event_area_label(event_id: str) -> tuple[str | None, str | None, str | None]:
+    """(area label, zip5, block id) for one event — the RPC returns none of the three,
+    and honest far-supply copy needs a place name the user can recognise and act on.
+
+    The block id is returned so callers never have to re-derive one from the label or
+    the ZIP. zip5 stays best-effort: it exists only for `zip-<zip5>` areas, and the
+    seeded pilot areas are H3 cells (`8a2a1072b59ffff`), so an offer that REQUIRED a
+    ZIP was silently impossible for exactly the areas the pilot runs in.
+    """
     try:
         sb = service_client()
         ev = sb.table("events").select("block_id").eq("id", event_id).limit(1).execute()
         bid = str(((ev.data or [{}])[0] or {}).get("block_id") or "")
         if not bid:
-            return None, None
+            return None, None, None
         blk = sb.table("blocks").select("display_name").eq("id", bid).limit(1).execute()
         label = clean_block_label(((blk.data or [{}])[0] or {}).get("display_name"))
         zip5 = bid[len("zip-"):] if bid.startswith("zip-") else None
-        return label, zip5
+        return label, zip5, bid
     except Exception:
         logging.getLogger(__name__).exception("event_area_label_failed event=%s", event_id)
-        return None, None
+        return None, None, None
 
 
 def activities_beyond_radius(
@@ -6551,7 +6629,15 @@ def activities_beyond_radius(
         rows = call_rpc(
             user_jwt,
             "get_nearby_activities",
-            {"p_lat": loc[0], "p_lng": loc[1], "p_limit": 20},
+            {
+                "p_lat": loc[0],
+                "p_lng": loc[1],
+                # Same horizon as the local read above it. On the RPC's own 14-day
+                # default this probe could not see the six-week-out meet that browse
+                # would happily have listed had it been nearby.
+                "p_window": activity_window(),
+                "p_limit": 20,
+            },
         )
     except Exception:
         logging.getLogger(__name__).exception("far_activity_probe_failed block=%s", block_id)
@@ -6571,11 +6657,11 @@ def activities_beyond_radius(
 
 
 def far_activity_details(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    """{title, venue, miles, area_label, zip5} for one probe row — the place lookup the
-    RPC can't give us. None when the row can't be placed."""
+    """{title, venue, miles, area_label, zip5, block_id} for one probe row — the place
+    lookup the RPC can't give us. None when the row can't be placed."""
     if not isinstance(row, dict) or not row.get("id"):
         return None
-    label, zip5 = _event_area_label(str(row["id"]))
+    label, zip5, block_id = _event_area_label(str(row["id"]))
     return {
         "title": str(row.get("title") or "").strip() or None,
         "venue": str(row.get("venue_name") or "").strip() or None,
@@ -6584,6 +6670,8 @@ def far_activity_details(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "miles": int(round(float(row["distance_meters"]) / 1609.34)),
         "area_label": label,
         "zip5": zip5,
+        # What the offer actually re-anchors on. The ZIP above is for the copy only.
+        "block_id": block_id,
     }
 
 
@@ -6596,12 +6684,30 @@ def nearest_activity_beyond_radius(
     return far_activity_details(rows[0]) if rows else None
 
 
-def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
-    """Open event ids within activity_radius_meters of the block centroid.
+def event_distances_near_block(
+    block_id: str, *, limit: int = 50, radius_meters: float | None = None
+) -> dict[str, float] | None:
+    """{event id: metres from the block centroid} for open events in range, nearest first.
 
-    [] means "nothing nearby" — a real answer. None means we could not place the
-    block (no centroid, or the RPC isn't deployed yet); callers fall back to the old
-    block-equality filter rather than showing an empty list they can't justify.
+    Same contract as event_ids_near_block, which wraps this: {} means "nothing nearby",
+    a real answer; None means we could not place the block (no centroid, or the RPC
+    isn't deployed yet) and callers must fall back rather than show an empty list they
+    can't justify.
+
+    The distance is the reason this exists. get_activities_near_point computes it, and
+    fetch_preview_events_on_block used to throw it away when it re-queried the events
+    table by id — so nothing downstream could say how far a meet was.
+
+    `radius_meters` overrides the LANA_ACTIVITY_RADIUS_METERS default for one call, which
+    is what lets a widened search reach past the usual ring. Postgres clamps it to 200 km
+    (20260920120000_geolocation_aware_search.sql:411), so that is the real ceiling.
+
+    ponytail: the RPC returns the N NEAREST STARTING FROM ZERO, capped at 50 in SQL
+    (same migration, :480). A widened pass therefore spends its 50 slots on the events
+    nearest the centre first, so once more than 50 open events sit inside the inner
+    radius the outer ring starves and a wider search silently finds nothing. Correct
+    while supply is thin; the fix is a p_min_radius_meters argument on the RPC so the
+    ring is cut in SQL rather than in the worker.
     """
     loc = block_centroid(block_id)
     if not loc:
@@ -6612,10 +6718,12 @@ def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
             {
                 "p_lat": loc[0],
                 "p_lng": loc[1],
-                "p_radius_meters": activity_radius_meters(),
+                "p_radius_meters": (
+                    activity_radius_meters() if radius_meters is None else float(radius_meters)
+                ),
                 # The block read has no horizon; keep one generous enough that a
                 # radius switch never silently shortens what browse can see.
-                "p_window": "90 days",
+                "p_window": activity_window(),
                 "p_limit": max(1, min(50, limit)),
             },
         ).execute()
@@ -6623,7 +6731,28 @@ def event_ids_near_block(block_id: str, *, limit: int = 50) -> list[str] | None:
         logging.getLogger(__name__).exception("events_near_block_failed block=%s", block_id)
         return None
     rows = res.data if isinstance(res.data, list) else []
-    return [str(r["id"]) for r in rows if isinstance(r, dict) and r.get("id")]
+    out: dict[str, float] = {}
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        try:
+            out[str(r["id"])] = float(r.get("distance_meters") or 0.0)
+        except (TypeError, ValueError):
+            out[str(r["id"])] = 0.0
+    return out
+
+
+def event_ids_near_block(
+    block_id: str, *, limit: int = 50, radius_meters: float | None = None
+) -> list[str] | None:
+    """Open event ids within range of the block centroid, nearest first.
+
+    [] means "nothing nearby" — a real answer. None means we could not place the
+    block (no centroid, or the RPC isn't deployed yet); callers fall back to the old
+    block-equality filter rather than showing an empty list they can't justify.
+    """
+    near = event_distances_near_block(block_id, limit=limit, radius_meters=radius_meters)
+    return None if near is None else list(near)
 
 
 def fetch_preview_events_on_block(
@@ -6633,6 +6762,8 @@ def fetch_preview_events_on_block(
     weekend_only: bool = False,
     pool: int | None = None,
     exclude_host_id: str | None = None,
+    radius_meters: float | None = None,
+    min_distance_meters: float | None = None,
 ) -> list[dict[str, Any]]:
     """Upcoming open events on preview block (service role).
 
@@ -6643,6 +6774,16 @@ def fetch_preview_events_on_block(
 
     `exclude_host_id` drops the caller's own meets: browse offers every card as "tap to
     RSVP", so without it Lana asked a host to RSVP to the event he had just created.
+
+    `radius_meters` widens (or narrows) the search for one call. `min_distance_meters`
+    keeps only events STRICTLY BEYOND that distance, which is how a widened pass reads
+    the ring outside a search that already happened without re-scoring what that search
+    saw. The ring is cut on measured distance rather than on the ids the earlier pass
+    returned, because those ids had already been trimmed to `pool` by start date — an
+    event dropped by that trim would otherwise reappear out here and be announced as a
+    far find when it was three miles away. Distance cannot make that mistake.
+
+    Every returned row carries `distance_meters` when the block could be placed.
     """
     try:
         from app.event_publish import roll_recurring_events
@@ -6657,7 +6798,7 @@ def fetch_preview_events_on_block(
             sb.table("events")
             .select(
                 "id, title, starts_at, has_time, venue_name, cohort_tags, host_id, "
-                "recurrence, circle_place_ref"
+                "recurrence, circle_place_ref, description"
             )
             .eq("status", "open")
             .gte("starts_at", now_iso)
@@ -6665,17 +6806,30 @@ def fetch_preview_events_on_block(
         # Radius, not ZIP equality. The id pre-filter keeps this select list intact
         # (get_activities_near_point returns neither recurrence nor circle_place_ref,
         # and the cards need both), and None falls back to the pre-PR7 behaviour.
-        near = event_ids_near_block(block_id, limit=max(fetch_n, 50))
+        near = event_distances_near_block(
+            block_id, limit=max(fetch_n, 50), radius_meters=radius_meters
+        )
         if near is None:
+            # Block couldn't be placed: pre-PR7 behaviour, and no distances to stamp. A
+            # ring read has nothing to stand on here, so it asks for nothing.
+            if min_distance_meters is not None:
+                return []
             q = q.eq("block_id", block_id)
-        elif not near:
-            return []
         else:
-            q = q.in_("id", near)
+            if min_distance_meters is not None:
+                near = {
+                    eid: d for eid, d in near.items() if d > float(min_distance_meters)
+                }
+            if not near:
+                return []
+            q = q.in_("id", list(near))
         if exclude_host_id:
             q = q.neq("host_id", exclude_host_id)
         res = q.order("starts_at").limit(fetch_n).execute()
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
+        for row in rows:
+            if near and str(row.get("id") or "") in near:
+                row["distance_meters"] = near[str(row["id"])]
         if weekend_only:
             from datetime import timezone
 

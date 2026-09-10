@@ -192,6 +192,104 @@ class TestPendingQuestionIsRecorded(unittest.TestCase):
         self.assertIsNone(ctx["tip_share_active"])
 
 
+class TestPlaceStepGetsRealPlaces(unittest.TestCase):
+    """A map step asked in the CHAT fork has no Places picker to fall back on, so the
+    nearby places have to arrive as the step's suggestions or the answer is typed prose."""
+
+    def test_place_step_suggests_nearby_places(self) -> None:
+        from app.tip_share import run_tip_share_turn
+
+        ctx: dict = {"zip_code": "32827"}
+        draft = {
+            # No name: the SUBJECT step (kind=place for a location) is the map step the walk
+            # reaches, and it is the one that used to be a hand-written "who or where?" ask
+            # outside the set entirely (dev QA 2026-09-04).
+            "category": "park",
+            "trait": "shady",
+            "reco_type": "location",
+            "place_based": True,
+            "answers": {"known_for": "the big shaded playground"},
+        }
+        with mock.patch("app.tip_share._extract_tip_fields", return_value=(draft, None)), mock.patch(
+            "app.places.nearby_place_suggestions",
+            return_value=["Lake Nona Park", "Nona Adventure Park"],
+        ), mock.patch("app.tip_share._reco_tallies", return_value=[]):
+            run_tip_share_turn(
+                user_message="lake nona park is great, big shaded playground",
+                session_ctx=ctx,
+                history=[],
+                user_jwt="jwt",
+                home_block_id="block-1",
+            )
+        self.assertEqual(ctx["tip_pending_ask"], "subject")
+        self.assertEqual(
+            ctx["tip_draft"]["suggestions"], ["Lake Nona Park", "Nona Adventure Park"]
+        )
+
+
+class TestFirstPersonOfferIsAShare(unittest.TestCase):
+    """dev QA 2026-09-04: "I know a really reliable plumber" was answered with three Google
+    plumbers and an "ask your neighbors?" offer — the user's own recommendation read as a
+    request for one. Two causes: `_TIP_SEEK_CUE_RE` matches the bare "know a", so the seek
+    fallback claimed the turn; and the classifier itself returned looking.tip (the prompt's
+    canonical tip_seek examples ARE the phrase "know a good <service>"). The prompt was
+    fixed too, but its verdict on this sentence is not stable at temperature 0 — the
+    structural matcher is what makes the routing deterministic."""
+
+    def test_i_know_a_service_is_a_share_not_a_seek(self) -> None:
+        from app.layer1_intents import (
+            utterance_indicates_tip_seek,
+            utterance_indicates_tip_share,
+        )
+
+        for text in (
+            "I know a really reliable plumber",
+            "I know a great dentist",
+            "we go to a wonderful pediatrician",
+            "i found a good mechanic",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(utterance_indicates_tip_share(text))
+                self.assertFalse(utterance_indicates_tip_seek(text))
+
+    def test_asking_for_one_is_still_a_seek(self) -> None:
+        """The offer branch is first-person and negation-aware, so none of these flip."""
+        from app.layer1_intents import (
+            utterance_indicates_tip_seek,
+            utterance_indicates_tip_share,
+        )
+
+        for text in (
+            "do you know a good plumber",
+            "anyone know a reliable plumber?",
+            "I don't know a good plumber, anyone?",
+            "i need a plumber",
+            "I have a leak, need a plumber",
+            "recommend a plumber",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(utterance_indicates_tip_share(text))
+                self.assertTrue(utterance_indicates_tip_seek(text))
+
+    def test_the_seek_engine_declines_the_turn(self) -> None:
+        """The routing consequence: `_try_signal_seek_early_turn` bails on a share, so the
+        capture picks it up even when the classifier says looking.tip."""
+        from app.discovery_route import _try_signal_seek_early_turn
+        from app.lana_unified_pipeline import _turn_is_tip_share
+
+        msg = "I know a really reliable plumber"
+        misread = {"linear_intent": "looking.tip", "signal_intent": "tip_seek",
+                   "goal": "save_signal", "confidence": 0.9}
+        self.assertTrue(_turn_is_tip_share(misread, msg), "the capture has to claim it")
+        self.assertIsNone(
+            _try_signal_seek_early_turn(
+                msg=msg, slots=misread, session_ctx={}, user_jwt="", phone_verified=True,
+                home_block_id="b1", phase="listening",
+            ),
+            "the seek engine must not answer the user's own recommendation",
+        )
+
+
 class TestBareServiceNounIsNotASeek(unittest.TestCase):
     """The regex fallback fires on a REQUEST, not on a service noun standing alone."""
 

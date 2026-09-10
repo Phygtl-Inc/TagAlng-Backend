@@ -72,6 +72,23 @@ values
   ('00000000-0000-0000-0000-000000000000', 'a0000004-0004-4000-8000-000000000004', 'authenticated', 'authenticated', null, null, null, '{"provider":"phone","providers":["phone"]}'::jsonb, '{"seed_role":"joint_moment_demo"}'::jsonb, now(), now(), '+15550100004', now(), false)
 on conflict (id) do update set phone = excluded.phone, phone_confirmed_at = excluded.phone_confirmed_at, updated_at = now();
 
+-- GoTrue scans these token columns into non-nullable Go strings, and a direct
+-- insert into auth.users leaves them NULL (the columns have no default), so every
+-- password grant returns 500 {"error_code":"unexpected_failure","msg":"Database
+-- error querying schema"}. Normalise them to '' -- non-null values are untouched.
+update auth.users set
+  confirmation_token         = coalesce(confirmation_token, ''),
+  email_change               = coalesce(email_change, ''),
+  email_change_token_new     = coalesce(email_change_token_new, ''),
+  email_change_token_current = coalesce(email_change_token_current, ''),
+  recovery_token             = coalesce(recovery_token, ''),
+  phone_change               = coalesce(phone_change, ''),
+  phone_change_token         = coalesce(phone_change_token, ''),
+  reauthentication_token     = coalesce(reauthentication_token, '')
+where num_nulls(confirmation_token, email_change, email_change_token_new,
+                email_change_token_current, recovery_token, phone_change,
+                phone_change_token, reauthentication_token) > 0;
+
 insert into auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)
 values
   ('a0000001-0001-4000-8000-000000000001', 'a0000001-0001-4000-8000-000000000001', '+15550100001', jsonb_build_object('sub', 'a0000001-0001-4000-8000-000000000001', 'phone', '+15550100001'), 'phone', now(), now(), now()),

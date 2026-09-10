@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from fastapi import HTTPException
 
 from app.auth import service_client
@@ -443,14 +444,36 @@ def update_session_context(
     context: dict[str, Any],
     core_block: dict[str, Any] | None = None,
 ) -> None:
-    sb = service_client()
+    """Persist a turn's session state. Retried ONCE on a transport failure.
+
+    This write is the last thing a turn does, and losing it loses the whole turn: the reply
+    is never stored, the context never lands, and the client re-renders its last known
+    state — a finished recommendation carousel came back looking like an unsubmitted form
+    because one TLS handshake to Supabase failed (dev QA 2026-09-08). A single retry on a
+    CONNECTION error only; a 4xx/5xx from Postgrest is a real answer and re-sending it
+    would just double the damage.
+
+    # ponytail: one retry, no backoff. If flaky handshakes turn out to be common, the fix
+    # is a shared retrying transport on the client, not more retries sprinkled per call.
+    """
     patch: dict[str, Any] = {
         "context": context,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     if core_block is not None:
         patch["core_block"] = core_block
-    sb.table("lana_sessions").update(patch).eq("id", session_id).execute()
+    for attempt in (1, 2):
+        try:
+            service_client().table("lana_sessions").update(patch).eq(
+                "id", session_id
+            ).execute()
+            return
+        except httpx.TransportError:
+            logger.warning(
+                "session_write_transport_error session=%s attempt=%d", session_id, attempt
+            )
+            if attempt == 2:
+                raise
 
 
 def complete_session(session_id: str, context: dict[str, Any]) -> None:

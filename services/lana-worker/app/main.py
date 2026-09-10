@@ -140,6 +140,8 @@ from app.models import (
     SignalSavedPayload,
     TipDraft,
     TipDraftPayload,
+    CommunityDraft,
+    CommunitySetupRequest,
     TipSetupRequest,
     TurnDebug,
     TurnRouting,
@@ -525,6 +527,13 @@ def _tip_draft_from_dict(raw: dict[str, Any] | None) -> TipDraft | None:
         return None
     fields = set(TipDraft.model_fields)
     return TipDraft(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _community_draft_from_dict(raw: dict[str, Any] | None) -> CommunityDraft | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    fields = set(CommunityDraft.model_fields)
+    return CommunityDraft(**{k: v for k, v in raw.items() if k in fields})
 
 
 def _look_draft_from_dict(raw: dict[str, Any] | None) -> LookDraft | None:
@@ -2043,6 +2052,7 @@ def _run_lana_message(
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"), auth.user_id)
         item_draft = _item_draft_from_dict(merged.get("item_draft"))
         tip_draft = _tip_draft_from_dict(merged.get("tip_draft"))
+        community_draft = _community_draft_from_dict(merged.get("community_draft"))
         look_draft = _look_draft_from_dict(merged.get("look_draft"))
     except Exception as exc:
         # Log the full traceback to the console — otherwise the caller only sees a
@@ -2218,6 +2228,7 @@ def _run_lana_message(
         event_draft=event_draft,
         item_draft=item_draft,
         tip_draft=tip_draft,
+        community_draft=community_draft,
         look_draft=look_draft,
         ask_draft=_ask_draft_from_ctx(merged),
         grounding=_grounding_card_from_ctx(merged),
@@ -2506,6 +2517,67 @@ def set_event_setup(
     return {"ok": True}
 
 
+@app.post("/lana/sessions/{session_id}/community-setup")
+def set_community_setup(
+    session_id: str,
+    body: CommunitySetupRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Stamp the community carousel onto the session draft in one shot — and/or pin its
+    place. Serves BOTH forks of the capture, which is why the two live on one endpoint:
+
+      cards fork — the whole carousel at once: {answers: {...}, google_place_id: "..."}
+      chat  fork — just the map step Lana is asking right now: {google_place_id: "..."}
+
+    The client then sends one message and the flow lands on whatever comes next with
+    everything applied, instead of re-asking what the carousel already collected.
+
+    Two things a client cannot do here: write a field outside the session's OWN generated
+    step set (the keys are intersected with it), or name a place (`google_place_id` is
+    resolved against Google server-side — see community_capture.set_community_place).
+    """
+    auth = verify_auth(authorization)
+    session = get_session_for_user(session_id, auth.user_id)
+    ctx = dict(session.get("context") or {})
+    draft = dict(ctx.get("community_draft") or {})
+    if not draft:
+        raise HTTPException(status_code=409, detail="no_community_draft")
+
+    from app.community_capture import set_community_place, step_set_of
+    from app.reco_question_sets import missing_required
+
+    if (body.google_place_id or "").strip():
+        # Writes into ctx["community_draft"], so re-read it before stamping answers.
+        if not set_community_place(ctx, google_place_id=str(body.google_place_id)):
+            raise HTTPException(status_code=422, detail="place_not_found")
+        draft = dict(ctx.get("community_draft") or {})
+        ctx["community_pending_ask"] = None
+
+    steps = step_set_of(draft)
+    allowed = {s["field"] for s in steps}
+    answers = dict(draft.get("answers") or {})
+    from app.community_question_sets import COMMUNITY_SUBJECT_FIELD
+
+    for field, value in (body.answers or {}).items():
+        key = str(field)
+        text = " ".join(str(value or "").split())[:280]
+        # The subject is the pinned place and nothing else: a client-sent name would be
+        # an ungroundable string, and an ungrounded community is invisible everywhere.
+        if key in allowed and key != COMMUNITY_SUBJECT_FIELD and text:
+            answers[key] = text
+    draft["answers"] = answers
+    ctx["community_draft"] = draft
+    # Every step the carousel showed counts as offered, so the turn after this does not
+    # re-ask the optionals the user chose to leave blank — it goes to the ready card.
+    ctx["community_asked_fields"] = sorted(allowed)
+    ctx["community_create_active"] = True
+    missing = missing_required(steps, answers)
+    if not missing:
+        ctx["community_ready"] = True
+    update_session_context(session_id, ctx)
+    return {"ok": True, "missing": missing}
+
+
 @app.post("/lana/sessions/{session_id}/tip-setup")
 def set_tip_setup(
     session_id: str,
@@ -2528,7 +2600,15 @@ def set_tip_setup(
         raise HTTPException(status_code=409, detail="no_tip_draft")
 
     from app.reco_question_sets import missing_required
-    from app.tip_share import step_set_of
+    from app.tip_share import judge_answers, step_set_of
+
+    def _community_name_for(place_id: str) -> str | None:
+        from app.tip_share import my_communities
+
+        for c in my_communities(_bearer_token(authorization)):
+            if c["place_id"] == place_id:
+                return c["name"]
+        return None
 
     steps = step_set_of(draft)
     allowed = {s["field"] for s in steps}
@@ -2539,16 +2619,51 @@ def set_tip_setup(
         if key in allowed and text:
             answers[key] = text
     draft["answers"] = answers
+    # The community step, by id. Membership is re-checked here because the id comes from
+    # the client; an id the caller does not belong to clears the pick rather than setting
+    # it, exactly like the top-of-app switcher does.
+    if body.circle_place_id is not None:
+        from app.community_surface import caller_affiliation_at
+
+        pid = str(body.circle_place_id).strip()
+        ok = bool(pid) and bool(
+            caller_affiliation_at(auth.user_id, pid, statuses=("confirmed", "curious"))
+        )
+        draft["circle_place_id"] = pid if ok else None
+        # Marked as the user's own pick either way: an explicit "" (everyone nearby) must
+        # not be re-filled from whatever is selected at the top of the app.
+        draft["circle_picked"] = True
+        draft["circle_name"] = _community_name_for(pid) if ok else None
     ctx["tip_draft"] = draft
     # Every step the carousel showed counts as offered, so the turn after this does not
     # re-ask the optionals the user chose to leave blank — it goes to the ready card.
     ctx["tip_asked_fields"] = sorted(allowed)
     ctx["tip_pending_ask"] = None
     ctx["tip_share_active"] = True
-    if not missing_required(steps, answers):
+    # One junk answer, named, handed straight back to the card it came from. The chat fork
+    # gets this from the per-turn extractor, but a carousel submit has no turn to hang it
+    # on — and Lana's nudge would land in a bubble the carousel is covering, which is why
+    # a submit full of "bla bla bla" came back as the same form with no reason given (dev
+    # QA 2026-09-08). Same one-nudge-then-accept rule: a second submit always goes through.
+    reasked = list(ctx.get("tip_reasked_fields") or [])
+    weak = judge_answers(
+        steps, answers, fields=set(body.answers or {}), skip=reasked
+    )
+    # EVERY submitted field counts as queried, not just the flagged ones. The turn that
+    # follows this submit runs its own per-answer judge, and it was re-rejecting a set this
+    # endpoint had just cleared — a different field each time, so the carousel reopened for
+    # ever and the tip could never be posted (dev QA 2026-09-08). One judge per answer.
+    ctx["tip_reasked_fields"] = [*reasked, *(set(body.answers or {}) - set(reasked))]
+    if not weak and not missing_required(steps, answers):
         ctx["tip_ready"] = True
     update_session_context(session_id, ctx)
-    return {"ok": True, "missing": missing_required(steps, answers)}
+    return {
+        "ok": True,
+        "missing": missing_required(steps, answers),
+        # Every answer that needs another go, so the whole set can be fixed in one pass.
+        # Empty when they all land, and the client then advances the flow.
+        "weak": weak,
+    }
 
 
 @app.post("/hooks/event-join")
@@ -3134,8 +3249,9 @@ class CircleGroundBody(_BaseModel):
 
 
 class TipFeedBody(_BaseModel):
-    # recent | circles | nearest. Unknown values fall back to recent rather than erroring:
-    # a tab a client shipped before we did is not a reason to show them nothing.
+    # recent | circles | nearest | foryou. Unknown values fall back to recent rather than
+    # erroring: a tab a client shipped before we did is not a reason to show them nothing.
+    # foryou is the same rows, ordered by fit against the reader's own claims (§43).
     tab: str = "recent"
     limit: int = 20
     # The community filter at the top of the app: only recommendations from people at
@@ -3149,6 +3265,9 @@ class TipFeedbackBody(_BaseModel):
     # Desired state, not a toggle — a double tap on a flaky connection must not invert
     # what the user chose (see 20261106120000).
     on: bool = True
+    # Which way the vote points: 👍 true / 👎 false. Ignored when `on` is false, which
+    # clears the vote whichever way it pointed.
+    helpful: bool = True
 
 
 @app.post("/lana/tips/recent")
@@ -3171,23 +3290,69 @@ def post_tips_recent(
     tab = (body.tab if body else "recent") or "recent"
     place_id = str((body.place_id if body else None) or "").strip() or None
     limit = (body.limit if body else 20) or 20
-    tips = recent_tips(
-        _bearer_token(authorization),
-        tab=tab,
-        # The filter runs after the feed read, so ask for a deeper page — a top-20 that
-        # is mostly non-members would otherwise return two rows.
-        limit=min(limit * 3, 50) if place_id else limit,
-    )
     if place_id:
-        from app.community_scope import rows_by_members
         from app.community_surface import caller_affiliation_at
 
         # Same authorization the roster uses: who is at a place stays members-only (§F),
-        # so the filter can never become a membership oracle for an arbitrary place id.
+        # so this can never become a membership oracle for an arbitrary place id. The RPC
+        # re-checks it too — this one is here to answer 403 rather than an empty list.
         if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
             raise HTTPException(status_code=403, detail="not_a_member")
-        tips = rows_by_members(tips, place_id)[:limit]
+    # Scope, not post-filter: with a community selected this is that community's own
+    # recommendations, whatever the distance, and the Recent / My community tabs do not
+    # apply (there is one list). Without one, community-scoped tips stay out of the area
+    # feed — they were shared with the community, not the neighbourhood.
+    tips = recent_tips(
+        _bearer_token(authorization),
+        tab=tab,
+        limit=limit,
+        circle_place_id=place_id,
+    )
+    # "Why Lana sees a fit" — the fellows line's mechanism with the recommendation's own
+    # fields as evidence (§43), plus the fit score the For-you tab orders on. Authored ON
+    # the fetch and cached per basis, so a reload costs no LLM call and a row she cannot
+    # justify simply ships without the block.
+    from app.tip_rec_line import attach_fit
+
+    attach_fit(auth.user_id, tips, tab=tab, limit=limit)
     return {"tab": tab, "tips": tips}
+
+
+class TipGetBody(_BaseModel):
+    signal_id: str
+
+
+@app.post("/lana/tips/get")
+def post_tips_get(
+    body: TipGetBody,
+    authorization: str | None = Header(default=None),
+):
+    """ONE shared recommendation, by id — what `/r/<signal_id>` opens (§39).
+
+    Deliberately NOT scoped to the caller's block, unlike the feed: a recommendation
+    passed to a friend two neighbourhoods over has to resolve for her. The id IS the
+    capability, exactly as `/meet/<id>` is for a meet — so no token is minted and the
+    client needs no extra call to build a link. Guests count: a cold link open has only
+    an anonymous session, and refusing it would put a signup wall on every share.
+    """
+    auth = verify_auth(authorization)
+    from app.tip_feed import tip_by_id
+
+    tip = tip_by_id(body.signal_id, viewer_user_id=auth.user_id)
+    if not tip:
+        raise HTTPException(status_code=404, detail="tip_not_found")
+    amplitude_track(
+        "tip_link_opened",
+        user_id=auth.user_id,
+        event_properties={
+            "signal_id": body.signal_id,
+            # Who passed what along, without a token table: the author previewing her
+            # own link is not a referral.
+            "is_author": tip.get("peer_user_id") == auth.user_id,
+            "guest": auth.is_anonymous,
+        },
+    )
+    return {"tip": tip}
 
 
 @app.post("/lana/tips/vouch")
@@ -3195,19 +3360,10 @@ def post_tips_vouch(
     body: TipFeedbackBody,
     authorization: str | None = Header(default=None),
 ):
-    """✓ I vouch — add the caller's own voice to someone else's recommendation.
-
-    Refused on your own tip (409): the tip already IS your voice, and counting it twice
-    would inflate the one number a stranger reads as social proof.
-    """
-    verify_auth(authorization)
-    from app.tip_feed import set_vouch
-
-    try:
-        count = set_vouch(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
-    except HTTPException as exc:
-        raise _tip_feedback_error(exc) from None
-    return {"signal_id": body.signal_id, "vouched": body.on, "vouch_count": count}
+    """Gone: 410. Two counters on one card never read as two different questions, so
+    helpful/unhelpful is the verb that survived — see /lana/tips/helpful. The
+    tip_vouches rows are untouched in the database."""
+    raise HTTPException(status_code=410, detail="vouch_removed")
 
 
 @app.post("/lana/tips/helpful")
@@ -3215,16 +3371,25 @@ def post_tips_helpful(
     body: TipFeedbackBody,
     authorization: str | None = Header(default=None),
 ):
-    """👍 Helpful — this answer helped the reader. Says nothing about the place, so it is
-    deliberately a separate counter from the vouch."""
+    """👍 / 👎 on a recommendation — a verdict on the ANSWER, not on the place.
+
+    One vote per reader per tip: sending the other direction flips it, `on: false` clears
+    it. Both counts and the caller's own state come back so the tapped row re-renders
+    without a feed re-read.
+    """
     verify_auth(authorization)
     from app.tip_feed import set_helpful
 
     try:
-        count = set_helpful(_bearer_token(authorization), signal_id=body.signal_id, on=body.on)
+        counts = set_helpful(
+            _bearer_token(authorization),
+            signal_id=body.signal_id,
+            on=body.on,
+            helpful=body.helpful,
+        )
     except HTTPException as exc:
         raise _tip_feedback_error(exc) from None
-    return {"signal_id": body.signal_id, "helpful": body.on, "helpful_count": count}
+    return {"signal_id": body.signal_id, **counts}
 
 
 def _tip_feedback_error(exc: HTTPException) -> HTTPException:
@@ -3499,13 +3664,22 @@ def post_fellows(
             from app.community_scope import peers_in_community
 
             peers = peers_in_community(auth.user_id, place_id, limit=limit)
+    # Pre-filtered and pre-sliced so the shaped rows line up index-for-index with the raw
+    # matches they came from — the authored line needs both halves: the raw row carries the
+    # shared claims and the real peer id (the cache key), the shaped row the enriched tags.
+    matched = [p for p in peers if isinstance(p, dict)][:limit]
+    rows = peers_to_match_rows(
+        matched, phone_verified=auth.phone_verified, max_rows=limit
+    )
+    # The line the card renders in place of the trait chips. Authored ON the fetch, not in
+    # the background: a row that appears with chips and swaps to a sentence a second later
+    # reads as a glitch. Cached per shared-claim basis, so only a genuinely new overlap
+    # pays an LLM call, and a failed compose just leaves the tags in place.
+    from app.peer_rec_line import attach_rec_lines
+
+    attach_rec_lines(auth.user_id, rows, matched)
     return FellowsResponse(
-        fellows=[
-            PeerMatchRow(**row)
-            for row in peers_to_match_rows(
-                peers, phone_verified=auth.phone_verified, max_rows=limit
-            )
-        ],
+        fellows=[PeerMatchRow(**row) for row in rows],
         requires_phone_verification=not auth.phone_verified,
     )
 
@@ -4509,8 +4683,9 @@ def post_rapport_mute_fact(
 
 
 # ── Feedback (👍/👎 on Lana output) ────────────────────────────────────────────
-# One endpoint for both rateable surfaces: an assistant chat reply (message_id) or a
-# rapport tile question (gap_row_id). Same thumb again → the FE sends rating='clear'.
+# One endpoint for every rateable surface: an assistant chat reply (message_id), a
+# rapport tile question (gap_row_id), or the authored reason on a fellows row (rec_id —
+# "Was this rec useful?"). Same thumb again → the FE sends rating='clear'.
 # Rows land in lana_feedback (service-role only) for the team to review.
 
 
@@ -4518,6 +4693,8 @@ class LanaFeedbackBody(_BaseModel):
     rating: str  # 'up' | 'down' | 'clear'
     message_id: str | None = None
     gap_row_id: str | None = None
+    # A peer_rec_lines id, as shipped in PeerMatchRow.rec_id by /lana/fellows.
+    rec_id: str | None = None
     # Where the thumb lives in the UI ('chat', 'rapport_tile', …) — stored for triage.
     surface: str | None = None
     # Optional free-text follow-up (the FE offers it on 👎). Tracks the latest rating
@@ -4536,6 +4713,7 @@ def post_lana_feedback(
         rating=body.rating,
         message_id=(body.message_id or "").strip() or None,
         gap_row_id=(body.gap_row_id or "").strip() or None,
+        rec_id=(body.rec_id or "").strip() or None,
         comment=body.comment,
         context={"surface": (body.surface or "").strip() or None},
     )
@@ -4547,6 +4725,7 @@ def post_lana_feedback(
             "target_kind": result["target_kind"],
             "message_id": body.message_id,
             "gap_row_id": body.gap_row_id,
+            "rec_id": body.rec_id,
             "surface": body.surface,
             # Comment text stays in the DB — analytics only needs to know one exists.
             "has_comment": bool((body.comment or "").strip()),

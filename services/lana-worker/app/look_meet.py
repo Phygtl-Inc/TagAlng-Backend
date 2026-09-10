@@ -23,6 +23,12 @@ _KIND_SUGGESTIONS = ["Playground meet", "Stroller walk", "Coffee & kids", "Libra
 _AFFINITY_QUESTION = "Anyone with a similar kid-stage matter?"
 _AFFINITY_OPTIONS = ["Same kid-stage", "Any toddler parent", "Open to everyone"]
 _MAX_ENRICH = 2
+# This surface promises "meets in the next 14 days" and deliberately keeps that horizon
+# while browse looks 90 days out (discovery_route.activity_window): a look-for-a-meet
+# answer is about the next couple of weeks, not the next quarter. Named and passed
+# explicitly so the difference is a decision in the code rather than two RPC defaults
+# that happened to agree until one call site started overriding its own.
+LOOK_MEET_WINDOW = "14 days"
 
 _CANCEL_RE = re.compile(
     r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
@@ -430,6 +436,9 @@ def _find_block_events(
     from app.discovery_route import activity_radius_meters
     from app.supabase_rpc import call_rpc
 
+    # LOOK_MEET_WINDOW is passed on every read below, never left to the RPC's default —
+    # see the constant for why this surface stays at 14 days while browse looks 90.
+
     # With a community selected in the top filter, the meets that count are that
     # community's — wherever the place sits. Same relevance floor below either way.
     _comm = active_community(session_ctx)
@@ -441,7 +450,7 @@ def _find_block_events(
         """Pre-PR7 read: no radius cap (a seeker away from home gets cross-country
         events labelled "50000 min walk"), but it accepts a bare ZIP. Only used when
         the radius read can't run — never return "nothing nearby" for a lookup miss."""
-        args: dict[str, Any] = {"p_limit": 20}
+        args: dict[str, Any] = {"p_window": LOOK_MEET_WINDOW, "p_limit": 20}
         if zip_code:
             args["p_zip"] = zip_code
         elif loc:
@@ -469,6 +478,7 @@ def _find_block_events(
                 "p_lat": loc[0],
                 "p_lng": loc[1],
                 "p_radius_meters": activity_radius_meters(),
+                "p_window": LOOK_MEET_WINDOW,
                 "p_limit": 20,
             },
         )

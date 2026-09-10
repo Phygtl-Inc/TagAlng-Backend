@@ -507,7 +507,41 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
 # reliably comply, and a one-off helper per intent is how the last one was missed.
 POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     "discovery.communities",
+    # An explicit search is the engine's turn. "can u find activites aroung me" came back
+    # as "Yep — I can look for activities near you. Want me to find a few good ones?" with
+    # a Find activities chip (prod 2026-09-02): a confirmation of a request the user had
+    # already made, costing them a turn while the browse sat right there.
+    "discovery.find_activities",
+    # NOT discovery.find_peers — test_tip_ask_consent pins it to the policy on purpose.
 })
+
+
+def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
+    """Is this turn CREATING a community (the community_capture flow)?
+
+    Signal-or-utterance, the same shape `_turn_is_tip_share` uses and for the same
+    reason: the classifier reads every phrasing but one correctly, and the one it misses
+    ("I want to create a community" → sharing.host, 4/4 on dev) is the flow's own front
+    door. The utterance half is narrow enough that no browse can match it — see
+    `looks_like_community_create`.
+    """
+    from app.community_capture import looks_like_community_create
+
+    text = str(msg or "").strip()
+    if not text:
+        return False
+    if isinstance(slots, dict):
+        from app.layer1_intents import (
+            enrich_slots,
+            intent_confidence_met,
+            slots_linear_intent,
+        )
+
+        enriched = enrich_slots(dict(slots), msg=text)
+        linear = slots_linear_intent(enriched)
+        if linear == "sharing.community" and intent_confidence_met(enriched, linear):
+            return True
+    return looks_like_community_create(text)
 
 
 def _tip_share_slots(
@@ -1589,6 +1623,7 @@ def run_lana_unified_pipeline(
         for k in (
             "pass_along_active",
             "tip_share_active",
+            "community_create_active",
             "look_meet_active",
             "activity_browse_active",
             "rapport_active",
@@ -2157,6 +2192,9 @@ def run_lana_unified_pipeline(
                     history=history,
                     user_jwt=user_jwt,
                     home_block_id=home_block_id,
+                    # Already computed for the release check above — the capture needs the
+                    # same read to tell "why are you asking?" from an answer.
+                    slots=pivot_slots,
                 )
             )
             session_ctx["_orchestrator_turn"] = False
@@ -2165,6 +2203,62 @@ def run_lana_unified_pipeline(
                 "outcome": "tip_share",
                 "intent_class": "discovery",
                 "tool_called": "save_local_signal" if session_ctx.get("tip_listed_now") else None,
+            }
+            ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+            return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+    # Sticky "create a community" capture — the tip capture's twin, same pattern, and
+    # placed right after it so the two share the same arming shape (docs/CREATE_COMMUNITY_FLOW.md).
+    if session_ctx.get("community_create_active") or (
+        str(session_ctx.get("routing_phase") or "") in ("", "listening")
+        and not session_ctx.get("requires_phone_verification")
+        and not session_ctx.get("pending_signup_gate")
+        and _turn_is_community_create(_tip_share_slots(
+            session_ctx, user_message, history=history,
+            home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+        ), user_message)
+    ):
+        from app.community_capture import (
+            community_capture_should_release,
+            reset_community_state,
+            run_community_capture_turn,
+        )
+        from app.discovery_slots import discovery_slots_for_turn
+
+        if not session_ctx.get("community_create_active"):
+            session_ctx["community_create_active"] = True
+            session_ctx["community_turns"] = 0
+            session_ctx["community_ready"] = None
+
+        pivot_slots = discovery_slots_for_turn(
+            session_ctx,
+            user_message,
+            routing_phase=str(session_ctx.get("routing_phase") or "listening"),
+            history=history,
+            has_block=bool(home_block_id or session_ctx.get("preview_block_id")),
+            has_identity=bool(session_ctx.get("identity_snippet")),
+            phone_verified=phone_verified,
+            timer=timer,
+        )
+        if community_capture_should_release(user_message, session_ctx, pivot_slots):
+            reset_community_state(session_ctx)
+        else:
+            reply = sanitize_assistant_message(
+                run_community_capture_turn(
+                    user_message=user_message,
+                    session_ctx=session_ctx,
+                    history=history,
+                    user_jwt=user_jwt,
+                    user_id=user_id,
+                    home_block_id=home_block_id,
+                )
+            )
+            session_ctx["_orchestrator_turn"] = False
+            session_ctx["timing_ms"] = timer.to_dict()
+            session_ctx["last_routing"] = {
+                "outcome": "community_create",
+                "intent_class": "discovery",
+                "tool_called": "add_circle" if session_ctx.get("community_published_now") else None,
             }
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")

@@ -1440,10 +1440,6 @@ class TestGroundingStampsProvenance(unittest.TestCase):
         self.assertEqual(table.update.call_args[0][0]["confirmed_via"], "profile_add")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestPlaceNounResolution(unittest.TestCase):
     """A Join tap never asked for a noun, so "your spot" was every joiner's tag."""
 
@@ -1502,3 +1498,7 @@ class TestLlmPlaceNoun(unittest.TestCase):
         # §F/O7: the tag names the RELATION, never the place. A model that echoes the
         # venue back would turn "your spot" into "your mizu sushi" — worse, not better.
         self.assertEqual(self._ask({"noun": "mizu sushi"}), {})
+
+
+if __name__ == "__main__":
+    unittest.main()

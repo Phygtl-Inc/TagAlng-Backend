@@ -34,6 +34,21 @@ class PeerMatchRow(BaseModel):
     match_band: str | None = None
     match_badge: str | None = None
     trait_tags: list[str] = Field(default_factory=list)
+    # ── The authored reason (app/peer_rec_line.py) ───────────────────────────────────
+    # One AI-written line in Lana's voice saying what these two actually share, from the
+    # same proven overlap `trait_tags` lists. The fellows card renders this instead of the
+    # chips; the tags stay on the wire because the chat card still renders them. `rec_id`
+    # is the stored line's id — the target a 👍/👎 posts to /lana/feedback. Absent on every
+    # row we could not author (no overlap, no LLM, a failed compose), which is why the tags
+    # remain the fallback rather than a canned sentence.
+    rec_line: str | None = None
+    # The same reason as 2-3 short facets ("Runs at dawn", "Author talks"), authored in the
+    # same call from the same overlap. The card leads with these as chips under "WHY LANA
+    # SEES A FIT" and keeps `rec_line` beneath them. Empty whenever no facet could be named
+    # honestly (and on every row with no authored line at all) — the chips are a view of
+    # the proven overlap, never a grade and never a claim the line doesn't already make.
+    rec_chips: list[str] = Field(default_factory=list)
+    rec_id: str | None = None
     # "intro_sent" (an intro is on its way) or "connected" (they already know each other,
     # per user_relationships.tier). Either way the card shows a status, not a Nudge button:
     # Lana saying "I just sent your intro" must not sit above a control inviting the same
@@ -670,6 +685,8 @@ class RecoStep(BaseModel):
     branches on:
       text   → free-type input, `placeholder` is the example hint under it
       choice → `options` as tappable chips, still free-typeable
+      place  → the Google Places picker (POST /lana/places/search), NOT a text box: a
+               park's "where is it?" typed by hand is a string nobody can navigate to
       toggle → the consent step (mock 9/10)
       agree  → "others also said", `options` are "<attr> ×<n>", multi-select
     """
@@ -687,6 +704,11 @@ class RecoStep(BaseModel):
 class TipDraft(BaseModel):
     """In-chat "share a tip / recommendation" draft (the tip_share flow)."""
 
+    # Stable identity for ONE recommendation, for the whole draft's life. The FE keys its
+    # cards-or-chat mode on "is this still the same recommendation?", and it used `name` —
+    # which is null until the subject step is answered, so two nameless recs in a row were
+    # indistinguishable and the mode leaked from the previous one (dev QA 2026-09-04).
+    draft_id: str | None = None
     name: str | None = None
     category: str | None = None
     trait: str | None = None
@@ -700,6 +722,68 @@ class TipDraft(BaseModel):
     listed: bool = False
     signal_id: str | None = None
     missing: list[str] = Field(default_factory=list)
+    # Which step of `steps` the chat fork is asking right now — the FE renders that step's
+    # `kind` (a `place` step gets the picker). None on the ready card: nothing is open.
+    pending_field: str | None = None
+    # True once `steps` are the questions Lana wrote for THIS subject, false while they are
+    # still the type's generic table. The cards fork waits for it: a carousel commits to a
+    # whole set in one go, and the generic table has no per-subject taps to offer.
+    tailored: bool = False
+    # The community this recommendation is being shared INTO (places.id). Picked on a step
+    # of the capture the way a meet picks one on its setup card, pre-filled from whatever
+    # is selected at the top of the app. Tagged means EXCLUSIVE: the area feed and plain
+    # neighbour asks do not show it (product decision 2026-09-07).
+    circle_place_id: str | None = None
+    circle_name: str | None = None
+
+
+class CommunityDraft(BaseModel):
+    """In-chat "create a community" draft (the community_capture flow).
+
+    Deliberately shaped like TipDraft: the FE renders both with the same fork, carousel,
+    live card and ready card — see docs/CREATE_COMMUNITY_FLOW.md. Differences are the
+    place (mandatory, always pinned on the map) and `published`/`community_id` in place
+    of `listed`/`signal_id`.
+    """
+
+    # Stable identity for ONE community draft, for its whole life — the FE keys its
+    # cards-or-chat pick on this and never on the name, which arrives on the subject step.
+    draft_id: str | None = None
+    # The pinned place. `name` is Google's, never the client's (see set_community_place).
+    name: str | None = None
+    google_place_id: str | None = None
+    place_address: str | None = None
+    # circle_affiliations.circle_type — the taxonomy circles_capture already indexes on.
+    circle_type: str | None = None
+    # Why people gather there, in the creator's own words.
+    blurb: str | None = None
+    steps: list[RecoStep] = Field(default_factory=list)
+    answers: dict[str, str] = Field(default_factory=dict)
+    chips: list[ItemChip] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    ready: bool = False
+    published: bool = False
+    community_id: str | None = None
+    missing: list[str] = Field(default_factory=list)
+    # Which step the chat fork is asking right now — the FE renders that step's `kind`
+    # (a `place` step gets the picker). None on the ready card: nothing is open.
+    pending_field: str | None = None
+
+
+class CommunitySetupRequest(BaseModel):
+    """The carousel fork of the community capture: every answer at once instead of one
+    per turn, plus the pinned place.
+
+    `answers` keys are the `field`s of the steps Lana generated for THIS community, so
+    this cannot be validated against a fixed enum — the endpoint intersects it with the
+    session's own step set, which is also what stops a client writing arbitrary keys.
+
+    `google_place_id` is the ONLY way the place is ever set: name/address/geo are fetched
+    from Google server-side, so a caller can never mint or rename a community's place.
+    """
+
+    answers: dict[str, str] = Field(default_factory=dict)
+    google_place_id: str | None = None
 
 
 class LookEvent(BaseModel):
@@ -798,6 +882,10 @@ class TipSetupRequest(BaseModel):
     keys into the draft."""
 
     answers: dict[str, str] = Field(default_factory=dict)
+    # The community step, by id — the client already holds the ids from the switcher, so it
+    # sends one instead of a name the server would have to match back. Membership is
+    # re-checked server-side; "" clears the pick.
+    circle_place_id: str | None = None
 
 
 class NudgeHookRequest(BaseModel):
@@ -990,6 +1078,9 @@ class SendMessageResponse(BaseModel):
     event_id: str | None = None
     item_draft: ItemDraft | None = None
     tip_draft: TipDraft | None = None
+    # The create-a-community capture's draft — same shape and same FE components as
+    # tip_draft (docs/CREATE_COMMUNITY_FLOW.md). Absent on every other turn.
+    community_draft: CommunityDraft | None = None
     look_draft: LookDraft | None = None
     # Seek-side ask card on a looking.tip turn (§12d). Absent on every other turn, so the
     # FE renders nothing until it arrives.
