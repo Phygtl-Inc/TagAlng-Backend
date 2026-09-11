@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from app.peer_discovery_surface import match_badge, match_band, score_to_stars
 from app.reply_compose import compose_reply
 from app.supabase_rpc import call_rpc
 
@@ -311,6 +312,7 @@ def find_neighbor_tips(
     locale: str = "en",
     radius_meters: float | None = None,
     circle_place_id: str | None = None,
+    reco_types: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Neighbors' tip_share posts that match this ask — READ-ONLY (no signal written).
 
@@ -340,6 +342,13 @@ def find_neighbor_tips(
         payload["p_radius_meters"] = float(radius_meters)
     if circle_place_id:
         payload["p_circle_place_id"] = str(circle_place_id)
+    # The Find screen's category chips, as taxonomy buckets (v7). Equality on reco_type, so
+    # "Recipes" cannot come back with a plumber whose tip mentions chicken.
+    from app.reco_question_sets import normalize_types
+
+    picked = normalize_types(reco_types)
+    if picked:
+        payload["p_reco_types"] = picked
     payload.update(_ask_embedding_args(payload["p_query"]))
 
     # Widest call first, then progressively older signatures. Dropping the embedding costs
@@ -348,7 +357,10 @@ def find_neighbor_tips(
     attempts: list[dict[str, Any]] = [payload]
     if any(k in payload for k in _SEMANTIC_TIP_ARGS):
         attempts.append({k: v for k, v in payload.items() if k not in _SEMANTIC_TIP_ARGS})
-    if block_id and not circle_place_id:
+    # v1 knows neither the community scope nor the category filter, so it is only ever
+    # offered for a plain, unfiltered block read — an old DB answers a filtered ask empty
+    # rather than out of the wrong bucket.
+    if block_id and not circle_place_id and not picked:
         attempts.append({k: v for k, v in payload.items() if k in _V1_TIP_ARGS})
 
     raw: Any = None
@@ -360,9 +372,11 @@ def find_neighbor_tips(
                 # matches only tips shared INTO that place, so an empty result there says
                 # nothing about what the neighbourhood holds. Debugging a zero without it
                 # sends you hunting through the matcher for a scope decision.
-                "find_neighbor_tips query=%r semantic=%s community=%s block=%s attempt=%d rows=%d",
+                "find_neighbor_tips query=%r semantic=%s types=%s community=%s block=%s "
+                "attempt=%d rows=%d",
                 str(query)[:60],
                 "p_query_embedding" in args,
+                args.get("p_reco_types") or None,
                 args.get("p_circle_place_id") or None,
                 args.get("p_block_id") or None,
                 attempt,
@@ -557,6 +571,26 @@ def filter_block_log_for_signal(
     return filtered
 
 
+def block_log_badge(row: dict[str, Any]) -> str | None:
+    """Truthful badge for a block-log row, in the peer-card vocabulary.
+
+    A block-log row has no proven claim pair to count — the overlap is words, tags or
+    cosine — so shared_count stays 0 and match_badge caps the row at FIT, the same rule
+    the peer surface applies to a fuzzy-only match ([[truthful-peer-match-model]]).
+    Raw match_strength never leaves the worker: one shared word scores 0.76 for every
+    pair, and shipping that as "76%" is what put an invented number on three unrelated
+    rows (prod 2026-09-10).
+    """
+    raw = row.get("match_strength")
+    if raw is None:
+        return None
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return match_badge(match_band(score), score_to_stars(score))
+
+
 def normalize_block_log_row(row: dict[str, Any]) -> dict[str, Any]:
     reasons = row.get("match_reasons")
     if not isinstance(reasons, list):
@@ -568,7 +602,7 @@ def normalize_block_log_row(row: dict[str, Any]) -> dict[str, Any]:
         "match_type": row.get("match_type"),
         "peer_user_id": row.get("peer_user_id"),
         "peer_preview_label": row.get("peer_preview_label"),
-        "match_strength": row.get("match_strength"),
+        "match_badge": block_log_badge(row),
         "match_reasons": normalized_reasons,
         "match_summary": summary or None,
         "my_signal_detail": row.get("my_signal_detail"),
@@ -640,16 +674,11 @@ def format_block_log_reply(entries: list[dict[str, Any]]) -> str:
         if not reason:
             reasons = row.get("match_reasons") or []
             reason = str(reasons[0]).strip() if reasons else ""
-        strength = row.get("match_strength")
+        # No score in the prose: the card carries the badge, and a metric label in
+        # rendered copy is what the localizer turned into "(76% someone to meet)".
         bit = f"{idx}. {nick}"
         if reason:
             bit += f" — {reason}"
-        if strength is not None:
-            try:
-                pct = int(float(strength) * 100)
-                bit += f" ({pct}% match)"
-            except (TypeError, ValueError):
-                pass
         lines.append(bit)
     if len(entries) > 1:
         lines.append(f"…and {len(entries) - 1} more below.")

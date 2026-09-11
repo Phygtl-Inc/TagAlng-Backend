@@ -201,9 +201,22 @@ def stamp_tip_peer_surface(
     *,
     phone_verified: bool = True,
     weights: list[str] | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Put the ranked rec rows (and their counts strip) on ctx. Returns the rows shown."""
+    """Put the ranked rec rows (and their counts strip) on ctx. Returns the rows shown.
+
+    `user_id` stamps `connection` — the fact the Nudge button is built on. A recommender
+    is a neighbour like any other, and an intro to them may already be out or already
+    accepted, but these rows reached the card without passing a peer source, so they
+    arrived with no connection at all and the button offered a nudge that could only
+    bounce off the 7-day pair cooldown. Same helper every other peer surface uses, so the
+    row says "Sent" / "Connected" for the same reasons everywhere.
+    """
     rows = peer_rows_from_neighbor_tips(tips, phone_verified=phone_verified)
+    if user_id:
+        from app.peer_discovery_surface import stamp_connection_state
+
+        stamp_connection_state(rows, user_id=user_id)
     if weights:
         rows = rerank_by_weights(rows, weights)
     shown = rows[:PAGE_SIZE]

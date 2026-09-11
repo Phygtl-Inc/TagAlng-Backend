@@ -216,6 +216,7 @@ from app.rapport_gaps import (
 )
 from app.rapport_ranker import next_ask as rapport_next_ask
 from pydantic import BaseModel as _BaseModel
+from pydantic import Field as _Field
 
 _LOG = logging.getLogger(__name__)
 
@@ -1009,7 +1010,7 @@ def _block_log_from_ctx(ctx: dict[str, Any]) -> list[BlockLogEntryRow]:
                 match_type=str(row.get("match_type") or "") or None,
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
                 peer_preview_label=str(row.get("peer_preview_label") or "") or None,
-                match_strength=row.get("match_strength"),
+                match_badge=str(row.get("match_badge") or "") or None,
                 match_reasons=[str(r) for r in reasons[:6]],
                 match_summary=str(row.get("match_summary") or "") or None,
                 peer_signal_detail=str(row.get("peer_signal_detail") or "") or None,
@@ -1753,6 +1754,12 @@ def _run_lana_message(
     from app.community_scope import here_place as community_here
 
     apply_community_selection(session_ctx_in, body.community_id, user_id=auth.user_id)
+    # The category chips on "Find a peer recommendation", stamped the same way and for the
+    # same reason: a recommendation read this turn is scoped to the bucket the user tapped
+    # (app/reco_question_sets.py). None = the client said nothing, [] = they cleared it.
+    from app.reco_question_sets import apply_reco_type_filter
+
+    apply_reco_type_filter(session_ctx_in, body.reco_types)
     # A rename announcement is worth exactly one turn. Cleared with None, never
     # popped — a popped key gets resurrected by the stored-context merge and Lana
     # would re-announce the same name change on every later turn.
@@ -1884,6 +1891,23 @@ def _run_lana_message(
             "weights": [str(w).strip() for w in (body.weights or []) if str(w).strip()][:8],
             "widen": False,
         }
+    # A LIT CATEGORY CHIP IS THE SAME DETERMINISTIC ENTRY as the CTA hint above. The user
+    # picked a recommendation bucket, so this turn is a recommendation ask whatever words it
+    # arrives in — and the words a chip-driven ask arrives in are exactly the ones a
+    # classifier cannot read: "any recommendation" hit the out-of-scope rail and "show all"
+    # got a conversational reply about the user's communities, because neither names a
+    # subject and the chip carried the whole meaning (prod log 2026-09-10).
+    #
+    # Never while the SHARE flow is armed: that one is mid-capture, and its turns are
+    # answers to Lana's questions rather than asks of their own.
+    if (
+        purpose == "lana"
+        and body.reco_types
+        and not session_ctx_in.get("tip_share_active")
+        and not session_ctx_in.get("pass_along_active")
+    ):
+        session_ctx_in["tip_seek_hint"] = True
+        session_ctx_in["tip_draft"] = None
     # A "By the way…" tile answer — route it deterministically to the profile path (save the
     # claim + reply in-thread) rather than the classifier, which would misread a bare answer
     # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
@@ -3258,6 +3282,10 @@ class TipFeedBody(_BaseModel):
     # this place (a places.id). Membership IS the tag — nothing is stamped at write
     # time, so a rec becomes "from CF Fitness" the moment its author joins.
     place_id: str | None = None
+    # The Find screen's category chips, as taxonomy buckets ("Services" is
+    # ["professional", "service"], "Others" is ["location"]). Empty = every type.
+    # Unknown keys are dropped, never guessed at.
+    reco_types: list[str] = _Field(default_factory=list, max_length=8)
 
 
 class TipFeedbackBody(_BaseModel):
@@ -3307,6 +3335,7 @@ def post_tips_recent(
         tab=tab,
         limit=limit,
         circle_place_id=place_id,
+        reco_types=list(body.reco_types) if body else None,
     )
     # "Why Lana sees a fit" — the fellows line's mechanism with the recommendation's own
     # fields as evidence (§43), plus the fit score the For-you tab orders on. Authored ON
@@ -3315,7 +3344,65 @@ def post_tips_recent(
     from app.tip_rec_line import attach_fit
 
     attach_fit(auth.user_id, tips, tab=tab, limit=limit)
+    # Whether a nudge to each recommender is still sendable. One batched relationship
+    # lookup for the page: without it every row offered a Nudge button, including to people
+    # the reader already knows or already has an intro out to — a tap that can only fail
+    # the 7-day pair cooldown, and which the reader had no way to see coming.
+    from app.peer_discovery_surface import stamp_connection_state
+
+    stamp_connection_state(tips, user_id=auth.user_id)
     return {"tab": tab, "tips": tips}
+
+
+class TipTypesBody(_BaseModel):
+    # The community picked in the top filter (a places.id) — same scope the ask uses.
+    place_id: str | None = None
+
+
+@app.post("/lana/tips/types")
+def post_tips_types(
+    body: TipTypesBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """How many neighbour recommendations of each type the caller can SEE — the chip row.
+
+    The Find-a-rec categories were a fixed list, so "Recipes" invited a tap with no recipe
+    within reach, and "Restaurants" invited one when the only restaurant tip was the
+    reader's own (which the search must hide). These counts come from the search's own
+    predicate, so a chip is only offered when a tap will land on something.
+
+    Counts are a FLOOR, not a promise: they are scoped to the caller's block (or their area
+    when they have no block yet), and an ask that widens can find more.
+    """
+    auth = verify_auth(authorization)
+    if auth.is_anonymous:
+        # Neighbours' data, same bar as the feed and the tile.
+        return {"types": {}, "scope": "none"}
+    from app.tip_feed import neighbor_tip_type_counts
+
+    place_id = str((body.place_id if body else None) or "").strip() or None
+    if place_id:
+        from app.community_surface import caller_affiliation_at
+
+        if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
+            raise HTTPException(status_code=403, detail="not_a_member")
+    # Block first, because that is what a plain ask reads. No block yet (a preview session,
+    # a fresh signup) would otherwise count nothing at all, so those fall back to the area
+    # radius — the same one a widened ask uses, so the number stays honest either way.
+    block_id = None if place_id else (auth.home_block_id or None)
+    radius = None
+    if not place_id and not block_id:
+        from app.peer_radius import radius_meters
+
+        radius = radius_meters()
+    counts = neighbor_tip_type_counts(
+        _bearer_token(authorization),
+        block_id=block_id,
+        radius_meters=radius,
+        circle_place_id=place_id,
+    )
+    scope = "community" if place_id else ("block" if block_id else "area")
+    return {"types": counts, "scope": scope, "total": sum(counts.values())}
 
 
 class TipGetBody(_BaseModel):

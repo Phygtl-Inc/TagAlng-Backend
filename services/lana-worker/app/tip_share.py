@@ -63,7 +63,7 @@ Return ONE compact JSON object with exactly these keys:
 - category: what kind of recommendation, e.g. "pediatric dentist","restaurant","playground","plumber","pediatrician". null if unclear.
 - trait: why it's good / the standout detail, e.g. "twin-friendly","amazing tacos","gentle with toddlers". null if not stated.
 - locality: neighborhood/area if mentioned, e.g. "Lake Nona". null otherwise.
-- reco_type: EXACTLY one of <<TYPES>>, or null if genuinely unclear. <<TYPE_RULES>>
+- reco_type: EXACTLY one of <<TYPES>>. NEVER null — 'other' is the answer when none of the rest fits. <<TYPE_RULES>>
 - answers: object mapping any of the CURRENT TYPE FIELDS listed below to what the user ALREADY said,
   verbatim-ish and short. Omit a field rather than guess it. {{}} when nothing was said.
 <<STEPS_SPEC>>- reply_role: what the user's new message IS, relative to the question they were just
@@ -636,7 +636,13 @@ def _save_tip(
             category=str(draft.get("category") or "").strip() or None,
             block_id=block_id,
             zip_code=zip_code,
-            reco_type=draft.get("reco_type"),
+            # 'other' rather than NULL, always: a typeless row is invisible to every
+            # category read (the chips, the type census, "all the recipes near me"), which
+            # is a recommendation nobody can find. The column stays nullable — the same
+            # table holds meet/swap signals that have no type at all, and the type is
+            # written by set_signal_reco a step AFTER this insert — so the floor lives
+            # here, at the one place a tip_share is ever saved.
+            reco_type=draft.get("reco_type") or "other",
             reco_fields=_reco_fields(draft),
             # What the agree-row tallies group on — the subject, normalized once at write
             # time so a lookup is an index hit and not a scan over every recommendation.

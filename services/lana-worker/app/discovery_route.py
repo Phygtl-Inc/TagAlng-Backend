@@ -58,6 +58,7 @@ from app.guest_capabilities import (
     wants_peer_find,
 )
 from app.community_scope import active_community, community_name
+from app.reco_question_sets import active_reco_types, google_searchable
 from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
 from app.tip_embed import tip_headline
 from app.tip_rec_cascade import WIDE_FETCH as WIDE_TIP_FETCH
@@ -3357,6 +3358,15 @@ def _tip_seek_fallback_reply(
     already_asked = bool(session_ctx.get("rec_filter_asked"))
     ctx.pop("rec_filter_asked", None)
 
+    # A recipe and a repair trick are not points on the map. Under those chips a Places
+    # search answers with restaurants and hardware stores — confidently, and about the
+    # wrong thing — so there is no fallback to run: "" sends the caller down the honest
+    # nothing-found-yet path, which offers to ask the neighbours instead.
+    _types = active_reco_types(session_ctx)
+    if not google_searchable(_types):
+        logging.getLogger(__name__).info("tip_seek_fallback.no_places types=%s", _types)
+        return ""
+
     base_query = (detail or category or "").strip()
     noun = (category or detail or "options").strip() or "options"
     zip_for_bias = str(
@@ -3864,6 +3874,9 @@ def _tip_seek_answer_turn(
     # asked. The RPC takes it as scope, not as a filter: inside a community distance does
     # not apply, and outside one a community's tips do not show at all.
     _comm = active_community(session_ctx)
+    # The category chips ("Recipes", "Services") are a FILTER, not a flavouring of the
+    # prose: scoped on reco_type so the bucket the user tapped is the bucket they get.
+    _types = active_reco_types(session_ctx)
     neighbor_tips = find_neighbor_tips(
         user_jwt,
         block_id=block_id,
@@ -3873,21 +3886,27 @@ def _tip_seek_answer_turn(
         locale=str(session_ctx.get("preferred_lang") or "en"),
         radius_meters=radius_meters() if widen else None,
         circle_place_id=str(_comm["place_id"]) if _comm else None,
+        reco_types=_types,
     )
     if _comm and not neighbor_tips:
         # Read (and cleared) by _compose_neighbor_tip_reply below, off the same incoming
         # ctx it composes from: name the community that was empty before widening.
         session_ctx["community_widened_from"] = _comm.get("name")
     logging.getLogger(__name__).info(
-        "tip_seek_answer.enter block=%s detail=%r category=%r neighbor_tips=%d wide=%s",
-        block_id, detail, category, len(neighbor_tips), wide,
+        "tip_seek_answer.enter block=%s detail=%r category=%r types=%s neighbor_tips=%d "
+        "wide=%s",
+        block_id, detail, category, _types or None, len(neighbor_tips), wide,
     )
 
     if neighbor_tips:
         # The rec rides ON the neighbor's row, not only in the prose (§12a/b): the quote is
         # what makes the row a pre-qualified answer instead of one more person to message.
         shown = stamp_tip_peer_surface(
-            ctx, neighbor_tips, phone_verified=phone_verified, weights=weights
+            ctx,
+            neighbor_tips,
+            phone_verified=phone_verified,
+            weights=weights,
+            user_id=user_id,
         )
         reply = _compose_neighbor_tip_reply(
             neighbor_tips,

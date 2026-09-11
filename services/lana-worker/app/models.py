@@ -183,7 +183,8 @@ class BlockLogEntryRow(BaseModel):
     match_type: str | None = None
     peer_user_id: str | None = None
     peer_preview_label: str | None = None
-    match_strength: float | None = None
+    # Badge, not score: see local_signals.block_log_badge.
+    match_badge: str | None = None
     match_reasons: list[str] = Field(default_factory=list)
     match_summary: str | None = None
     peer_signal_detail: str | None = None
@@ -1031,6 +1032,13 @@ class SendMessageRequest(BaseModel):
     # own Google search. Those places are in no cached candidate list, so matching the
     # posted text ("It's Fitness CF St. Cloud") would only re-search for them.
     ground_place_id: str | None = None
+    # The category chips on "Find a peer recommendation", as reco_type buckets — one chip
+    # can stand for two ("Services" = professional + service, "Others" = location). The
+    # chip stays lit while the user narrows the ask, so this is STICKY on the session like
+    # the community filter: None means the client said nothing (keep the pick), [] is the
+    # explicit "no category" and clears it. Sent as well as the prose, not instead of it —
+    # a tap still posts a real message, and the filter is what the search is scoped by.
+    reco_types: list[str] | None = None
 
 
 class TurnRouting(BaseModel):

@@ -9,11 +9,13 @@ from app.discovery_route import (
     handle_discovery_turn,
 )
 from app.local_signals import (
+    block_log_badge,
     block_log_match_summary,
     fetch_my_block_log,
     filter_block_log_for_signal,
     format_block_log_reply,
     format_signal_saved_reply,
+    normalize_block_log_row,
     normalize_signal_intent,
     refresh_my_signal_matches,
     save_local_signal,
@@ -99,7 +101,27 @@ class TestLocalSignalsHelpers(unittest.TestCase):
         ])
         self.assertIn("playgroup for toddlers", reply)
         self.assertIn("backyard meetup Sunday", reply)
-        self.assertIn("84%", reply)
+        # Matcher B: no raw score in the copy — the card badges it instead.
+        self.assertNotIn("%", reply)
+
+    def test_block_log_badge_never_exceeds_fit(self) -> None:
+        # One shared word scores 0.76 for every pair, so it must not read as a strong
+        # match; nothing fuzzy may reach STRONG/PERFECT FIT.
+        self.assertEqual(block_log_badge({"match_strength": 0.76}), "PARTIAL")
+        self.assertEqual(block_log_badge({"match_strength": 0.95}), "FIT")
+        self.assertIsNone(block_log_badge({}))
+
+    def test_normalize_block_log_row_sends_badge_not_score(self) -> None:
+        row = normalize_block_log_row({
+            "id": "e1",
+            "match_type": "tip_match",
+            "peer_preview_label": "A neighbor on your block",
+            "match_strength": 0.76,
+            "peer_signal_intent": "tip_share",
+            "peer_signal_detail": "barber on Narcoossee",
+        })
+        self.assertEqual(row["match_badge"], "PARTIAL")
+        self.assertNotIn("match_strength", row)
 
     def test_filter_block_log_for_swap_offer(self) -> None:
         rows = [

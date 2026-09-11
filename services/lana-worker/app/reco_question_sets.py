@@ -130,6 +130,25 @@ _SETS: dict[str, list[dict[str, Any]]] = {
          "options": ["Under $20", "$20-100", "$100+"]},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything that goes wrong the first time?"},
     ],
+    # The escape hatch, and the only bucket defined by what it is NOT. A bus route, a
+    # Facebook group, an insurance broker, "don't use the west gate at 5pm" — real
+    # recommendations that are none of the six above, and which used to arrive with
+    # reco_type NULL: no question set was generated for them, so the capture limped along
+    # on ad-hoc questions and the row landed invisible to every category read.
+    #
+    # Its questions are deliberately generic, because the subject could be anything. The
+    # sharper questions still come from the model — this is only the floor under them.
+    "other": [
+        {"field": "helps_with", "label": "Good for", "question": "What is it good for?", "required": True},
+        # NOT `where_to_find`/`where`: those names carry the Places picker (see _PLACE_FIELDS),
+        # and an `other` subject is precisely the kind that is not a point on a map — a bus
+        # route, a Facebook group, a broker's phone number. Plain text.
+        {"field": "where_to_look", "label": "Where to find it", "question": "Where do neighbours find it?", "required": True},
+        {"field": "cost", "label": "Cost", "question": "Does it cost anything?",
+         "options": ["Free", "A few dollars", "More than that"]},
+        {"field": "best_for", "label": "Best for", "question": "Who is it best for?"},
+        {"field": "good_to_know", "label": "Good to know", "question": "Anything a neighbour should know?"},
+    ],
 }
 
 RECO_TYPES = tuple(_SETS)
@@ -156,6 +175,7 @@ _SUBJECT_STEP: dict[str, tuple[str, str]] = {
     "product": ("Product", "What's it called?"),
     "location": ("Place", "Which place is it?"),
     "diy": ("Trick", "What would you call this trick?"),
+    "other": ("What", "What is it called?"),
 }
 
 # Types whose SUBJECT is itself a point on the map: the subject step is answered with the
@@ -229,8 +249,13 @@ TYPE_RULES = (
     "product = a thing the neighbor would BUY. "
     "location = somewhere the neighbor would VISIT or spend time (park, market, trail). "
     "diy = a how-to / trick the neighbor would DO themselves. "
+    "other = a real recommendation that is none of the six above (a bus route, a local "
+    "Facebook group, an insurance broker, a warning about a bad hour to visit somewhere). "
     "Split by what the neighbor DOES with it, never by topic: food can be restaurant, "
-    "recipe, product or location depending on that."
+    "recipe, product or location depending on that. NEVER answer null: when nothing fits, "
+    "'other' IS the answer — a typeless recommendation cannot be found by anyone. But "
+    "'other' is a LAST resort, so try the six first; a book is a product and a church is a "
+    "location, however unusual the ask sounds."
 )
 
 
@@ -240,6 +265,67 @@ def normalize_type(raw: Any) -> str | None:
     if key.endswith("s") and key[:-1] in _SETS:
         key = key[:-1]
     return key if key in _SETS else None
+
+
+# ── The category toggle (Find a peer recommendation) ─────────────────────────────────────
+#
+# The Find screen's chip row — Services / Restaurants / DIY / Products / Recipes / Others —
+# is a FILTER over reco_type, not a hint for the prose: tapping Recipes and then asking must
+# not answer with a plumber. One chip is not always one bucket (Services covers a dentist
+# AND a plumber, Others covers a park), so the picked filter is a LIST of taxonomy keys and
+# both readers take it as `p_reco_types` (20261128120000).
+#
+# The client sends the keys; unknown ones are dropped rather than guessed at, because a
+# typo'd key that fell through as "no filter" would show every type under a chip that
+# promised one — the exact bug this exists to fix.
+RECO_TYPE_CTX_KEY = "reco_type_filter"
+
+# Types with no point on a map. The empty-handed tip_seek falls back to Google Places, and
+# a Places search for a recipe, a repair trick or a bus route returns restaurants and
+# hardware stores — confident nonsense under a chip that asked for none of them.
+#
+# The "Others" chip sends location AND other, and one searchable type in the pick is enough
+# to keep the fallback (see `google_searchable`) — so that chip still gets nearby places
+# while a pure `other` ask does not.
+GOOGLE_UNSEARCHABLE_TYPES = frozenset({"recipe", "diy", "other"})
+
+
+def normalize_types(raw: Any) -> list[str]:
+    """The known taxonomy keys in whatever the client sent (order kept, deduped)."""
+    if isinstance(raw, str):
+        raw = [raw]
+    out: list[str] = []
+    for item in raw if isinstance(raw, (list, tuple)) else []:
+        key = normalize_type(item)
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def apply_reco_type_filter(session_ctx: dict[str, Any], raw: Any) -> list[str]:
+    """Stamp the chip row's pick on the session, and return what is now in force.
+
+    Sticky like the community filter ([[community-filter-scope]]): the chip stays lit while
+    the user narrows the ask over several turns, so the pick has to outlive the turn it
+    arrived on. `None` means the client said nothing — keep what's there; `[]` is the
+    explicit "no category" and clears it.
+    """
+    if raw is None:
+        return active_reco_types(session_ctx)
+    types = normalize_types(raw)
+    session_ctx[RECO_TYPE_CTX_KEY] = types or None
+    return types
+
+
+def active_reco_types(session_ctx: dict[str, Any] | None) -> list[str]:
+    """The category filter in force this turn ([] = every type)."""
+    return normalize_types((session_ctx or {}).get(RECO_TYPE_CTX_KEY))
+
+
+def google_searchable(types: Any) -> bool:
+    """Can a Places search stand in for a missing neighbour rec under this filter?"""
+    picked = normalize_types(types)
+    return not picked or any(t not in GOOGLE_UNSEARCHABLE_TYPES for t in picked)
 
 
 def steps_for(
@@ -335,6 +421,7 @@ _FLOOR: dict[str, tuple[str, ...]] = {
     "product": ("used_for", "where_to_buy"),
     "location": ("known_for", "where"),
     "diy": ("fixes", "how"),
+    "other": ("helps_with", "where_to_look"),
 }
 
 # The floor, phrased for the prompt. Generated from _FLOOR so adding a type can't leave the

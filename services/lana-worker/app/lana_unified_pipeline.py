@@ -605,7 +605,17 @@ def _turn_is_engine_action(
     is cached per user message — the same parse handle_discovery_turn reuses, so this costs no extra model
     call. Fails CLOSED (False) so a classifier hiccup leaves the policy gate exactly as
     it was rather than diverting every turn to the engines.
+
+    A DETERMINISTIC ENTRY OUTRANKS THE CLASSIFIER: `tip_seek_hint` is stamped by the Find
+    fork's CTA and by a lit category chip (app/main.py), and those are exactly the turns a
+    classifier cannot read, because under a chip the words carry almost none of the meaning.
+    "show all", sent from a screen whose own UI said Professionals, was filed as
+    discovery.find_peers and answered with people to meet; "any recommendation" hit the
+    out-of-scope rail (prod 2026-09-10). The flag is per-turn — discovery_route clears it on
+    the turn it fires — so honouring it here cannot divert a later, unrelated message.
     """
+    if ctx.get("tip_seek_hint"):
+        return True
     try:
         from app.discovery_slots import discovery_slots_for_turn
         from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR, intent_confidence_met
