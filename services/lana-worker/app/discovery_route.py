@@ -6684,6 +6684,10 @@ def nearest_activity_beyond_radius(
     return far_activity_details(rows[0]) if rows else None
 
 
+# SQL clamps the location query's p_limit to this, so asking for more changes nothing.
+_NEARBY_CANDIDATE_CAP = 50
+
+
 def event_distances_near_block(
     block_id: str, *, limit: int = 50, radius_meters: float | None = None
 ) -> dict[str, float] | None:
@@ -6767,10 +6771,14 @@ def fetch_preview_events_on_block(
 ) -> list[dict[str, Any]]:
     """Upcoming open events on preview block (service role).
 
-    `pool` overrides how many rows to pull from the DB before slicing to `limit` —
-    callers that filter the result downstream (date/host/topic) pass a larger pool so
-    the candidate set isn't pre-truncated to just the soonest few. `with_host_name`
-    attaches each host's nickname for host-aware filtering.
+    `pool` marks a caller that filters the result downstream (date/host/topic). Such a
+    caller gets EVERY candidate the location query found — up to _NEARBY_CANDIDATE_CAP —
+    rather than a slice of them, because any slice taken here is taken before anyone
+    knows what the user asked for. `with_host_name` attaches each host's nickname for
+    host-aware filtering.
+
+    Callers that pass no `pool` are presenting rows directly and still get the `limit`
+    soonest, which for them is the product decision rather than a silent drop.
 
     `exclude_host_id` drops the caller's own meets: browse offers every card as "tap to
     RSVP", so without it Lana asked a host to RSVP to the event he had just created.
@@ -6793,7 +6801,17 @@ def fetch_preview_events_on_block(
         # an un-rolled weekly meet would be filtered out by the starts_at floor below.
         roll_recurring_events()
         now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-        fetch_n = pool if pool and pool > 0 else limit * 3
+        if pool and pool > 0:
+            # Filters downstream, so it needs every candidate: ordering in SQL would
+            # decide which rows survive the limit, not just their order.
+            fetch_n = keep_n = max(pool, _NEARBY_CANDIDATE_CAP)
+            order_in_sql = False
+        else:
+            # Renders rows as-is, so "the soonest few" IS the selection — the order
+            # belongs in SQL where it does that job.
+            fetch_n = limit * 3
+            keep_n = limit
+            order_in_sql = True
         q = (
             sb.table("events")
             .select(
@@ -6807,7 +6825,7 @@ def fetch_preview_events_on_block(
         # (get_activities_near_point returns neither recurrence nor circle_place_ref,
         # and the cards need both), and None falls back to the pre-PR7 behaviour.
         near = event_distances_near_block(
-            block_id, limit=max(fetch_n, 50), radius_meters=radius_meters
+            block_id, limit=max(fetch_n, _NEARBY_CANDIDATE_CAP), radius_meters=radius_meters
         )
         if near is None:
             # Block couldn't be placed: pre-PR7 behaviour, and no distances to stamp. A
@@ -6825,11 +6843,14 @@ def fetch_preview_events_on_block(
             q = q.in_("id", list(near))
         if exclude_host_id:
             q = q.neq("host_id", exclude_host_id)
-        res = q.order("starts_at").limit(fetch_n).execute()
+        if order_in_sql:
+            q = q.order("starts_at")
+        res = q.limit(fetch_n).execute()
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
         for row in rows:
             if near and str(row.get("id") or "") in near:
                 row["distance_meters"] = near[str(row["id"])]
+        rows.sort(key=lambda r: (str(r.get("starts_at") or "9999"), str(r.get("id") or "")))
         if weekend_only:
             from datetime import timezone
 
@@ -6849,7 +6870,7 @@ def fetch_preview_events_on_block(
                 except ValueError:
                     continue
             rows = filtered
-        return rows[:limit]
+        return rows[:keep_n]
     except Exception:
         return []
 
