@@ -3385,7 +3385,19 @@ def post_tips_types(
         from app.community_surface import caller_affiliation_at
 
         if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
-            raise HTTPException(status_code=403, detail="not_a_member")
+            # DROPPED, not refused — the same rule apply_community_selection applies to a
+            # chat turn: a place the caller doesn't belong to clears the filter rather than
+            # scoping to it. The top-filter pick lives in the client's localStorage, per
+            # DEVICE and not per account, so a community chosen by the previous signed-in
+            # user survives the switch; 403ing there left the chip row empty while the very
+            # next chat turn answered area-wide (prod 2026-09-11, FIT 407 Lake Nona).
+            # Answering for the area is also the honest number: that is the scope the ask
+            # itself will read once the worker clears the same pick.
+            _LOG.info(
+                "tips_types_scope_dropped user=%s place=%s (not a member)",
+                auth.user_id, place_id,
+            )
+            place_id = None
     # Block first, because that is what a plain ask reads. No block yet (a preview session,
     # a fresh signup) would otherwise count nothing at all, so those fall back to the area
     # radius — the same one a widened ask uses, so the number stays honest either way.
