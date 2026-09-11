@@ -1,0 +1,66 @@
+{
+  "id": "edge_offtopic_math",
+  "tags": [
+    "edge",
+    "offtopic"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "what is 234 * 91?",
+      "hint": null,
+      "status": 200,
+      "ms": 6543,
+      "assistant_message": "I can't help with math calculations, but feel free to ask if you need local tips or neighborhood info anytime!",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "out_of_scope",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "sorry lol. looking for a coffee buddy",
+      "hint": null,
+      "status": 200,
+      "ms": 3234,
+      "assistant_message": "Verify your email first — then I can post that to your block.",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "save_signal_need_verify",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:49:54.756Z",
+  "session": "b3eeaefe-e8ca-489c-ad55-7986adb63f10",
+  "finishedAt": "2026-07-10T10:50:07.208Z"
+}

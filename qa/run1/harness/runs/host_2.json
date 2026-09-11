@@ -1,0 +1,109 @@
+{
+  "id": "host_2",
+  "tags": [
+    "host"
+  ],
+  "zip": "32812",
+  "turns": [
+    {
+      "sent": "I want to host a meet. I want to host something but I have no idea what",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 19000,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32812",
+      "hint": null,
+      "status": 200,
+      "ms": 8818,
+      "assistant_message": "Thanks for sharing your ZIP code 32812! Now, what kind of meetup are you thinking about hosting on your block?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "identity",
+        "confidence": 0.85,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 9811,
+      "assistant_message": "Great! To get your meetup posted, we just need a name for the event, a date and time, and a specific place. Let me know what you’d like to call it and when and where you want to host!",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T11:12:45.325Z",
+  "session": "665b8f32-11b0-40ce-90d7-1db49a6190a3",
+  "finishedAt": "2026-07-10T11:13:33.846Z"
+}

@@ -1,0 +1,109 @@
+{
+  "id": "host_8",
+  "tags": [
+    "host"
+  ],
+  "zip": "34786",
+  "turns": [
+    {
+      "sent": "I want to host a meet. I wanna do a potluck brunch sunday around 11, our backyard, kids welcome",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 15126,
+      "assistant_message": "Here's your meet — **Backyard Potluck Brunch**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Backyard Potluck Brunch",
+        "starts_at": "2026-07-12T11:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "34786",
+      "hint": null,
+      "status": 200,
+      "ms": 16117,
+      "assistant_message": "Updated **Backyard Potluck Brunch** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Backyard Potluck Brunch",
+        "starts_at": "2026-07-12T11:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 24858,
+      "assistant_message": "Updated **Backyard Potluck Brunch** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Backyard Potluck Brunch",
+        "starts_at": "2026-07-12T11:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:07:47.267Z",
+  "session": "502e7110-eb33-4ae3-b3d2-2c95180485e7",
+  "finishedAt": "2026-07-09T01:08:44.114Z"
+}

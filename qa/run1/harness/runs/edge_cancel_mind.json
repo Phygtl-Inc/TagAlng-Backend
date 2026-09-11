@@ -1,0 +1,98 @@
+{
+  "id": "edge_cancel_mind",
+  "tags": [
+    "edge",
+    "flow"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "I want to host a coffee morning",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 11507,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Coffee Morning",
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "actually never mind, cancel that",
+      "hint": null,
+      "status": 200,
+      "ms": 2784,
+      "assistant_message": "No worries — we don't have to set up an event. Want to find neighbors, see what's happening on your block, or something else?",
+      "routing": {
+        "outcome": "A",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "can you find me one to join instead? 32827",
+      "hint": null,
+      "status": 200,
+      "ms": 3134,
+      "assistant_message": "Verify your email first — then I can post that to your block.",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "save_signal_need_verify",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:53:39.775Z",
+  "session": "2c61a9e2-4154-4a23-b544-96fd26c32fe4",
+  "finishedAt": "2026-07-10T10:54:36.998Z"
+}

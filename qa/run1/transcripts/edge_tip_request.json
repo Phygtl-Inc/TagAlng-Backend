@@ -1,0 +1,66 @@
+{
+  "id": "edge_tip_request",
+  "tags": [
+    "edge",
+    "comingsoon"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "can you recommend a good pediatric dentist nearby?",
+      "hint": null,
+      "status": 200,
+      "ms": 3647,
+      "assistant_message": "Verify your email first — then I can post that to your block.",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "save_signal_need_verify",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "32827",
+      "hint": null,
+      "status": 200,
+      "ms": 3377,
+      "assistant_message": "I can see neighbors nearby — to show names and connect you, verify your email first. What's your email?",
+      "routing": {
+        "outcome": "A",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": true,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:12:59.708Z",
+  "session": "502e7110-eb33-4ae3-b3d2-2c95180485e7",
+  "finishedAt": "2026-07-09T01:13:44.955Z"
+}

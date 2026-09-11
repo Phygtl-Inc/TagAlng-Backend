@@ -1,0 +1,109 @@
+{
+  "id": "host_11",
+  "tags": [
+    "host"
+  ],
+  "zip": "32832",
+  "turns": [
+    {
+      "sent": "I want to host a meet. picnic saturday noon at central park",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 11619,
+      "assistant_message": "Here's your meet — **Central Park Picnic Meetup**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Central Park Picnic Meetup",
+        "starts_at": "2026-07-11T12:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32832",
+      "hint": null,
+      "status": 200,
+      "ms": 11570,
+      "assistant_message": "Updated **Central Park Picnic Meetup** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Central Park Picnic Meetup",
+        "starts_at": "2026-07-11T12:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 8808,
+      "assistant_message": "Updated **Central Park Picnic Meetup** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Central Park Picnic Meetup",
+        "starts_at": "2026-07-11T12:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Publishing your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T11:13:32.776Z",
+  "session": "375b35d3-617c-417b-9101-c048f34ef9d0",
+  "finishedAt": "2026-07-10T11:14:05.876Z"
+}

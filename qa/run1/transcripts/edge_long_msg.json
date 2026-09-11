@@ -1,0 +1,97 @@
+{
+  "id": "edge_long_msg",
+  "tags": [
+    "edge",
+    "robust"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "So we just moved here from Ohio two weeks ago because my husband got a job at the medical city and I don't know a single soul, my son Jake is in pre-K at the local elementary and my daughter is 18 months, and honestly between unpacking and the kids I haven't had a moment, but I really really need some mom friends because back home I had this amazing group and we did everything together and I'm scared I'll never find that again. Can you help?",
+      "hint": "look_meet",
+      "status": 200,
+      "ms": 5482,
+      "assistant_message": "Love it — what kind of thing are you up for?",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": true,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "32827",
+      "hint": null,
+      "status": 200,
+      "ms": 4615,
+      "assistant_message": "Here's what's coming up:\n• Pre-K Playground Meetup at Laureate Park Zipline Playground (Fri Jul 10)\n• Brazilian Coffee Morning at Foxtail Coffee Co. (Sat Jul 11)\n• Brazilian Coffee Morning at Foxtail at Foxtail Coffee Co (Sat Jul 11)\n• Brazilian Coffee Morning at Foxtail Coffee Co (Sat Jul 11)\n• Morning meetup at My place (Sat Jul 11)\nVerify your email to RSVP, or tell me to narrow it (e.g. 'just cricket').",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [
+        {
+          "title": "Pre-K Playground Meetup",
+          "when": "2026-07-10T13:30:00+00:00"
+        },
+        {
+          "title": "Brazilian Coffee Morning",
+          "when": "2026-07-11T14:00:00+00:00"
+        },
+        {
+          "title": "Brazilian Coffee Morning at Foxtail",
+          "when": "2026-07-11T14:00:00+00:00"
+        },
+        {
+          "title": "Brazilian Coffee Morning",
+          "when": "2026-07-11T14:00:00+00:00"
+        },
+        {
+          "title": "Morning meetup",
+          "when": "2026-07-11T14:00:00+00:00"
+        }
+      ],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": true,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:18:31.410Z",
+  "session": "502e7110-eb33-4ae3-b3d2-2c95180485e7",
+  "finishedAt": "2026-07-09T01:19:16.097Z"
+}

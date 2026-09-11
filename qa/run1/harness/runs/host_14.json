@@ -1,0 +1,109 @@
+{
+  "id": "host_14",
+  "tags": [
+    "host"
+  ],
+  "zip": "32801",
+  "turns": [
+    {
+      "sent": "I want to host a meet. nothing fancy — just coffee and let the kids run around, thursday morning",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 12843,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Thursday Coffee & Playdate",
+        "starts_at": "2026-07-16T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32801",
+      "hint": null,
+      "status": 200,
+      "ms": 10613,
+      "assistant_message": "Thanks for sharing your zip code! Could you let me know the specific spot where you'd like to host—your home, a park, or maybe a local café? Once we have the location, we’ll be ready to post your event.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Thursday Coffee & Playdate",
+        "starts_at": "2026-07-16T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 10020,
+      "assistant_message": "Great! Could you let me know the specific location where you’d like to host the playdate? Once we have the place, we’ll be all set to share your event with neighbors.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Thursday Coffee & Playdate",
+        "starts_at": "2026-07-16T10:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:48:51.165Z",
+  "session": "28cc8d05-c836-4c54-b87b-eae6decc9014",
+  "finishedAt": "2026-07-10T10:49:25.544Z"
+}

@@ -1,0 +1,66 @@
+{
+  "id": "edge_rude",
+  "tags": [
+    "edge",
+    "tone"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "this app is stupid and you're a dumb sheep",
+      "hint": null,
+      "status": 200,
+      "ms": 3882,
+      "assistant_message": "I'm not able to help with that. I'm here to connect you with neighbors on your block — finding people, local activities, swaps, and tips. Want to do any of those?",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "unsafe_refusal",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "fine. playdates near 32827",
+      "hint": null,
+      "status": 200,
+      "ms": 3430,
+      "assistant_message": "Verify your email first — then I can post that to your block.",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "save_signal_need_verify",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:16:04.197Z",
+  "session": "f08bda10-780e-4ed6-85f3-0cdd984e586b",
+  "finishedAt": "2026-07-09T01:16:57.891Z"
+}

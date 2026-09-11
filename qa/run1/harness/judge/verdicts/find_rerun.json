@@ -1,0 +1,49 @@
+{
+  "run": "rerun-2026-07-10",
+  "scores": [
+    {"id":"find_fl_0","goal":2,"warmth":3,"trust":2,"note":"real events shown, refine narrows list but NY-bleed event persists"},
+    {"id":"find_fl_1","goal":1,"warmth":3,"trust":3,"note":"empty state handled gracefully, no echo"},
+    {"id":"find_fl_2","goal":1,"warmth":2,"trust":2,"note":"verbatim-echoes refine sentence back as the 'nothing found' subject"},
+    {"id":"find_fl_3","goal":1,"warmth":3,"trust":3,"note":"generic empty-state message, no echo"},
+    {"id":"find_fl_4","goal":1,"warmth":2,"trust":1,"note":"32801 fails to resolve, then refine hits verify-wall on a nonexistent block"},
+    {"id":"find_fl_5","goal":2,"warmth":3,"trust":3,"note":"empty on Sports, refine broadens to real generic list"},
+    {"id":"find_fl_6","goal":1,"warmth":2,"trust":2,"note":"verbatim-echo bug"},
+    {"id":"find_fl_7","goal":1,"warmth":3,"trust":3,"note":"generic empty-state, no echo"},
+    {"id":"find_fl_8","goal":1,"warmth":2,"trust":2,"note":"verbatim-echo bug"},
+    {"id":"find_fl_9","goal":1,"warmth":3,"trust":3,"note":"32801 fails, but recovers with a real clarifying question, not an echo"},
+    {"id":"find_fl_10","goal":1,"warmth":2,"trust":1,"note":"block resolves, real events shown, but refine still hits verify-wall"},
+    {"id":"find_fl_11","goal":1,"warmth":3,"trust":3,"note":"generic empty-state, no echo"},
+    {"id":"find_fl_12","goal":1,"warmth":2,"trust":2,"note":"verbatim-echo bug"},
+    {"id":"find_fl_13","goal":1,"warmth":3,"trust":3,"note":"generic empty-state, no echo"},
+    {"id":"find_fl_14","goal":1,"warmth":2,"trust":1,"note":"32801 fails, refine hits verify-wall"},
+    {"id":"find_fl_15","goal":2,"warmth":4,"trust":3,"note":"real events shown, refine produces a genuine clarifying question"},
+    {"id":"find_fl_16","goal":1,"warmth":2,"trust":2,"note":"verbatim-echo bug"},
+    {"id":"find_fl_17","goal":1,"warmth":3,"trust":3,"note":"generic empty-state, no echo"},
+    {"id":"find_fl_18","goal":1,"warmth":2,"trust":2,"note":"verbatim-echo bug"},
+    {"id":"find_fl_19","goal":1,"warmth":3,"trust":3,"note":"32801 fails, recovers with real clarifying question"},
+    {"id":"find_metro_0","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia: re-asks for ZIP she already gave and was rejected"},
+    {"id":"find_metro_1","goal":1,"warmth":3,"trust":3,"note":"asks a real browse-vs-match clarifying question instead of re-asking ZIP"},
+    {"id":"find_metro_2","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia re-ask"},
+    {"id":"find_metro_3","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia re-ask"},
+    {"id":"find_metro_4","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia re-ask"},
+    {"id":"find_metro_5","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia re-ask"},
+    {"id":"find_metro_6","goal":1,"warmth":3,"trust":3,"note":"real clarifying question, no re-ask"},
+    {"id":"find_metro_7","goal":1,"warmth":3,"trust":3,"note":"real clarifying question, no re-ask"},
+    {"id":"find_metro_8","goal":1,"warmth":3,"trust":3,"note":"real clarifying question, no re-ask"},
+    {"id":"find_metro_9","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia re-ask"},
+    {"id":"find_metro_10","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia re-ask"},
+    {"id":"find_metro_11","goal":1,"warmth":2,"trust":2,"note":"ZIP-amnesia re-ask"}
+  ],
+  "systemic_issues": [
+    {"title":"Verbatim-echo on unfulfilled refinement","severity":"critical","evidence":"find_fl_2/6/8/12/16/18 — 'Nothing like Something for my 4 year old, we're free weekday mornings on your block'","frequency":"6/20 find_fl"},
+    {"title":"Verify-wall fires on refinement even when a block resolved","severity":"critical","evidence":"find_fl_4/10/14 — 'Verify your email first — then I can post that to your block' after a real block was found or before any block existed","frequency":"3/20 find_fl"},
+    {"title":"Metro ZIP-amnesia: re-asks a ZIP already given and rejected","severity":"major","evidence":"find_metro_0/2/3/4/5/9/10/11 — 'What's your ZIP so I can see what's on your block?' immediately after rejecting that exact ZIP","frequency":"8/12 find_metro (worse than run #1's 7/12)"},
+    {"title":"Cross-city event bleed persists","severity":"major","evidence":"find_fl_0 — 'Playdate at the park at New York (Tue Jul 14)' served in a Lake Nona FL feed","frequency":"reproduced from run #1, unfixed"},
+    {"title":"Near-duplicate event listings","severity":"minor","evidence":"'Brazilian Coffee Morning at Foxtail Coffee Co.' listed 3x with near-identical venue strings, in nearly every 32827 listing","frequency":"pervasive across 32827 convos"}
+  ],
+  "best_moments": [
+    "ZIP coverage genuinely widened since run #1: 32812/32832/34786 now resolve to a real block (only 32801 and out-of-state metro ZIPs still fail) — this appears to be a real, unreported improvement",
+    "find_metro_1/6/7/8 ask a warm, real clarifying question instead of the ZIP-amnesia re-ask — the fix is partially and inconsistently applied"
+  ],
+  "verdict": "The find path is still fundamentally the same broken funnel the original report described — refinements are discarded via verbatim-echo or an incorrectly-firing verify-wall, and most metro/out-of-coverage moms still get looped on a ZIP they already gave. The one genuine improvement is that ZIP coverage silently widened beyond just 32827, though this isn't reflected in the metro empty-state messaging, which still only offers 32827 as an example."
+}

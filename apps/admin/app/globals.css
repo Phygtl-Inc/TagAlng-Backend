@@ -1506,6 +1506,29 @@ a {
   font-size: 0.75rem;
 }
 
+/* —— Sims review page —— */
+.sim-filter-select {
+  display: block;
+  width: 100%;
+  margin-bottom: 0.4rem;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.8rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.sim-verdict {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+}
+
+.sim-verdict--pass  { background: #e8f5e9; color: #2e7d32; }
+.sim-verdict--soft  { background: #fff3e0; color: #e65100; }
+.sim-verdict--hard  { background: #ffebee; color: #c62828; }
+
 @keyframes lana-pulse {
   0%,
   100% {
