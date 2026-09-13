@@ -320,5 +320,143 @@ class TestSkipBrake(_StubBase):
             os.environ.pop("LANA_RAPPORT_MIN_HOURS", None)
 
 
+class TestThinAreaSupply(_StubBase):
+    """A thin area is not an empty one.
+
+    rapport_local_supply defaults to p_min_holders=2, but the onion matcher scores +1
+    off a SINGLE shared public claim and only drops a pair at 0 — so two holders is a
+    quality heuristic, not a requirement. Before falling back to catalogue questions
+    with no counterpart at all, ask again for concepts exactly one neighbor holds.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store["selects"]["user_identity_claims"] = []
+        rapport_synth._last_attempt.clear()
+
+    def tearDown(self) -> None:
+        rapport_synth._last_attempt.clear()
+        super().tearDown()
+
+    def _holder_floors(self) -> list[int]:
+        return [
+            p.get("p_min_holders")
+            for n, p in self.store.get("rpcs", [])
+            if n == "rapport_local_supply"
+        ]
+
+    def test_empty_supply_retries_at_one_holder_before_the_catalogue(self) -> None:
+        self.store["rpc_results"]["rapport_local_supply"] = []
+        import app.rapport_gaps as gaps
+
+        self._patch(gaps, "open_cold_seed_gaps", lambda uid: 3)
+        rapport_synth.seed_cold_start("u1")
+        self.assertEqual(self._holder_floors(), [2, 1])
+
+    def test_supply_at_two_holders_does_not_retry(self) -> None:
+        self.store["rpc_results"]["rapport_local_supply"] = [
+            {"concept": "running", "label": "Running", "bucket": "activity", "holders": 4},
+        ]
+        self._patch(rapport_synth, "_generate_seeds", lambda *a: {"questions": []})
+        import app.rapport_gaps as gaps
+
+        self._patch(gaps, "open_cold_seed_gaps", lambda uid: 3)
+        rapport_synth.seed_cold_start("u1")
+        self.assertEqual(self._holder_floors(), [2])
+
+
+class _SeedClient:
+    """service_client for open_cold_seed_gaps: records inserts, and can refuse any row
+    carrying answer_options (a pre-20261029 environment, which has no such column)."""
+
+    def __init__(self, store, reject_chips=False):
+        self.store = store
+        self.reject_chips = reject_chips
+
+    def table(self, name):
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def insert(self, row):
+        self._row = dict(row)
+        return self
+
+    def execute(self):
+        row = getattr(self, "_row", None)
+        if row is None:
+            return _Result([])
+        if self.reject_chips and "answer_options" in row:
+            raise RuntimeError("column rapport_gaps.answer_options does not exist")
+        self.store.setdefault("seeded", []).append(row)
+        return _Result([dict(row, gap_row_id="new-row")])
+
+
+class TestColdSeedChips(unittest.TestCase):
+    """The user with the LEAST to say was the only one handed a bare free-text box.
+
+    A user with neighbors gets AI-authored questions WITH one-tap chips (see
+    TestColdStartSeeding); the first user in an area fell through to the catalogue,
+    whose rows shipped no answer_options at all.
+    """
+
+    def setUp(self) -> None:
+        import app.rapport_gaps as gaps
+
+        self.gaps = gaps
+        self.store: dict = {}
+        self._old = gaps.service_client
+        gaps.service_client = lambda: _SeedClient(self.store)
+
+    def tearDown(self) -> None:
+        self.gaps.service_client = self._old
+
+    def _seeded(self) -> dict[str, dict]:
+        return {r["gap_id"]: r for r in self.store.get("seeded", [])}
+
+    def test_chippable_seeds_ship_their_chips(self) -> None:
+        self.assertEqual(self.gaps.open_cold_seed_gaps("u1"), 3)
+        rows = self._seeded()
+        self.assertEqual(rows["relocation_recency"]["answer_options"][0], "Just moved in")
+        self.assertEqual(len(rows["free_windows"]["answer_options"]), 3)
+
+    def test_chips_never_exceed_the_cards_three(self) -> None:
+        self.gaps.open_cold_seed_gaps("u1")
+        for row in self.store["seeded"]:
+            self.assertLessEqual(len(row.get("answer_options") or []), 3, row["gap_id"])
+
+    def test_open_ended_seed_is_asked_last(self) -> None:
+        """Every seed ties at P_NEW_BUCKET, so the ranker's opened_at tie-break makes
+        insertion order the real ranking: a question with no tappable answer must not
+        outrank one that has them."""
+        chipless = [
+            i
+            for i, gid in enumerate(self.gaps.COLD_SEED_GAP_IDS)
+            if not (self.gaps.get_gap(gid) or {}).get("answer_options")
+        ]
+        chipped = [
+            i
+            for i, gid in enumerate(self.gaps.COLD_SEED_GAP_IDS)
+            if (self.gaps.get_gap(gid) or {}).get("answer_options")
+        ]
+        self.assertTrue(chipped, "at least one seed must be tappable")
+        self.assertGreater(min(chipless), max(chipped))
+
+    def test_old_schema_keeps_the_seed_and_drops_the_chips(self) -> None:
+        """A pre-20261029 environment must lose the chips, never the question."""
+        self.gaps.service_client = lambda: _SeedClient(self.store, reject_chips=True)
+        self.assertEqual(self.gaps.open_cold_seed_gaps("u1"), 3)
+        for row in self.store["seeded"]:
+            self.assertNotIn("answer_options", row)
+            self.assertTrue(row["question"])
+
+
 if __name__ == "__main__":
     unittest.main()

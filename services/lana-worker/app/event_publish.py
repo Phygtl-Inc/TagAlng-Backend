@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -360,4 +361,43 @@ def publish_event(
         import logging
 
         logging.getLogger(__name__).exception("event_community_stamp_kickoff_failed")
+    # The vector a topical meet search finds this by (20261202120000). Background for the
+    # same reason as the two stamps above: a Vertex round-trip never gates a publish, and a
+    # meet that failed to embed is still findable — search_events_semantic returns
+    # unembedded meets rather than hiding them, and --stale picks this one up later.
+    _embed_event_async(str(event_id), fields)
     return str(event_id)
+
+
+def _embed_event_async(event_id: str, fields: dict[str, Any]) -> None:
+    """Post-publish: embed what the meet is about and stamp events.embedding.
+    Fire-and-forget — publishing never waits on Vertex."""
+    eid = str(event_id or "").strip()
+    if not eid:
+        return
+
+    def _run() -> None:
+        try:
+            from app.event_embed import event_embedding_text
+            from app.layer1_handlers import _embed_attr_filter
+
+            vec = _embed_attr_filter(
+                event_embedding_text(
+                    title=fields.get("title"),
+                    description=fields.get("description"),
+                    venue_name=fields.get("venue_name"),
+                    cohort_tags=fields.get("cohort_tags"),
+                )
+            )
+            if not vec:
+                return
+            service_client().table("events").update(
+                {
+                    "embedding": vec,
+                    "embedding_updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ).eq("id", eid).execute()
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).warning("event_embed_failed event_id=%s", eid)
+
+    threading.Thread(target=_run, daemon=True, name=f"event-embed-{eid[:8]}").start()

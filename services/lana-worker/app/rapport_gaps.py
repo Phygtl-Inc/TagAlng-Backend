@@ -516,7 +516,14 @@ def mute_gap(user_id: str, gap_id: str) -> None:
 # language_home is deliberately NOT here: rapport_synth already injects a standing
 # `languages_spoken` thread first for every user, it is AI-phrased, and it is wired
 # to the language-switch offer. Two questions about the same thing is one too many.
-COLD_SEED_GAP_IDS = ("relocation_recency", "daily_rhythm", "free_windows")
+#
+# ORDER IS THE RANKING. Every seed is written at a flat P_NEW_BUCKET below, so all
+# three tie on score and the ranker falls through to its opened_at tie-break — which
+# is insertion order, i.e. this tuple. daily_rhythm goes last on purpose: it is the
+# one seed too open-ended to offer tappable answers for ("What do your days usually
+# look like?"), and it used to sit SECOND, making the broadest question the second
+# thing a first-in-area user ever saw.
+COLD_SEED_GAP_IDS = ("relocation_recency", "free_windows", "daily_rhythm")
 
 
 def open_cold_seed_gaps(user_id: str) -> int:
@@ -538,25 +545,46 @@ def open_cold_seed_gaps(user_id: str) -> int:
         gap = get_gap(gap_id)
         if not gap:
             continue
+        row: dict[str, Any] = {
+            "user_id": user_id,
+            "gap_id": gap_id,
+            "parent_bucket": gap["parent_bucket"],
+            "covers_concept": gap["covers_concept"],
+            "why_frame": render_why_frame(gap, None),
+            "question": gap["question"],
+            # A seed opens a bucket the user has nothing in, which is the
+            # highest-value question shape there is for a new user.
+            "unlock_score": P_NEW_BUCKET,
+            "status": "open",
+        }
+        # The synth's AI questions ship one-tap chips; these did not, so the user with
+        # the LEAST to say — first in their area, no local supply to draw on — was the
+        # only one handed a bare free-text box. Same shape, same 3-chip cap as
+        # open_semantic_gap, so the card and the answer path need no special case.
+        chips = [
+            " ".join(str(o).split())[:48]
+            for o in (gap.get("answer_options") or [])
+            if str(o or "").strip()
+        ][:3]
+        if chips:
+            row["answer_options"] = chips
         try:
-            sb.table("rapport_gaps").insert(
-                {
-                    "user_id": user_id,
-                    "gap_id": gap_id,
-                    "parent_bucket": gap["parent_bucket"],
-                    "covers_concept": gap["covers_concept"],
-                    "why_frame": render_why_frame(gap, None),
-                    "question": gap["question"],
-                    # A seed opens a bucket the user has nothing in, which is the
-                    # highest-value question shape there is for a new user.
-                    "unlock_score": P_NEW_BUCKET,
-                    "status": "open",
-                }
-            ).execute()
+            sb.table("rapport_gaps").insert(row).execute()
             opened += 1
+            continue
         except Exception:
             # unique(user_id, gap_id) race, or a pre-question-column env — either
             # way the seed already exists or cannot exist. Never fail the render.
+            if not chips:
+                logger.debug("rapport: cold seed %s exists/race for %s", gap_id, user_id)
+                continue
+        # A pre-20261029 environment has no answer_options column and lands here too:
+        # retry once bare rather than lose the seed over its chips.
+        row.pop("answer_options", None)
+        try:
+            sb.table("rapport_gaps").insert(row).execute()
+            opened += 1
+        except Exception:
             logger.debug("rapport: cold seed %s exists/race for %s", gap_id, user_id)
     if opened:
         logger.info("rapport: opened %d cold seed gap(s) for %s", opened, user_id)
