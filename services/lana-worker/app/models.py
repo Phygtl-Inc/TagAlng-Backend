@@ -21,6 +21,8 @@ class JointMomentCandidate(BaseModel):
 
 
 class PeerMatchRow(BaseModel):
+    # See ActivityPreviewRow.impression_id — same contract, same endpoint.
+    impression_id: str | None = None
     peer_user_id: str | None = None
     nickname: str | None = None
     avatar_url: str | None = None
@@ -124,6 +126,10 @@ class ActivityPreviewRow(BaseModel):
     # else, so the browse row names it beside the venue.
     community: dict[str, Any] | None = None
     preview: bool = True
+    # The recommendation_impressions row written when this card was sent (contract v2 §A7).
+    # The FE posts it back to /lana/impression on a tap so "shown" becomes "tapped"; a row
+    # we failed to log is simply absent, and the card still renders.
+    impression_id: str | None = None
 
 
 class AuthActionPayload(BaseModel):
@@ -1123,6 +1129,22 @@ class SendMessageResponse(BaseModel):
     routing_phase: str | None = None
     ui_intent: str | None = None
     ui_actions: list[UiActionRow] = Field(default_factory=list)
+
+
+class ImpressionStatusBody(BaseModel):
+    """What the user did with a card Lana showed (contract v2 §A7).
+
+    `viewed`/`dismissed` are how we learn Lana is showing the wrong things — an outcome
+    log that records only taps makes every ranking look good forever. `accepted` (opened
+    it) is kept separate from `converted` (RSVP'd, joined, accepted the intro) because a
+    card that looks good and a thing that IS good are different failures with different
+    fixes.
+    """
+
+    impression_id: str
+    status: Literal["viewed", "dismissed", "accepted", "converted"]
+    # The row the action created (an event_request, an intro), when there is one.
+    converted_action_id: str | None = None
 
 
 class BlockLogActionRequest(BaseModel):

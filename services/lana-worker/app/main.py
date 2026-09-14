@@ -118,6 +118,7 @@ from app.models import (
     HostingDraftPayload,
     IdentityClaimRow,
     IdentityProfilePayload,
+    ImpressionStatusBody,
     IntroProposalPayload,
     ItemDraft,
     JointMomentCandidate,
@@ -1151,6 +1152,9 @@ def _onboarding_fields(
     auth: AuthSession,
     *,
     ready_to_complete: bool = False,
+    session_id: str | None = None,
+    user_message: str | None = None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     from app.peer_discovery_surface import stamp_peer_discovery_ctx
 
@@ -1231,6 +1235,29 @@ def _onboarding_fields(
     for key in ctx.get("_wiped_turn_surfaces") or []:
         if not ctx.get(key):
             _warn_surface_dropped("wiped:" + str(key), 0, ui_intent=ui_intent, active=active)
+    # ── What we showed (contract v2 §A7) ──────────────────────────────────────────
+    # Here and not in the lanes, deliberately: every ui_intent drop-filter above has
+    # already run, so `peers` and `activities` are what the client receives rather than
+    # what a lane hoped to send — and their order is render order, which is the only
+    # thing that makes metadata.position mean anything to D4's nDCG. Stamps
+    # impression_id onto the rows; the insert itself is a background thread.
+    try:
+        from app.impressions import log_shown
+
+        log_shown(
+            user_id=auth.user_id,
+            session_id=session_id,
+            block_id=auth.home_block_id or str(ctx.get("preview_block_id") or "") or None,
+            query=user_message,
+            peers=peers,
+            activities=activities,
+            ctx=ctx,
+            turn_id=turn_id,
+        )
+    except Exception:  # noqa: BLE001
+        # A logging failure must never cost the user their answer.
+        logger.warning("impressions_log_skipped")
+
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
@@ -2150,7 +2177,13 @@ def _run_lana_message(
     timing_ms["total_ms"] = _timing_total_ms(timing_ms)
 
     ready = status == "ready_to_complete"
-    ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
+    ob = _onboarding_fields(
+        merged,
+        auth,
+        ready_to_complete=ready,
+        session_id=session_id,
+        user_message=body.message,
+    )
     # Chip-tap language pin, part 1: remember EXACTLY which chip payloads this response
     # offers, so the next turn can tell an app-authored tap from typed text (the pipeline
     # pins the session language on a match — a canonical-English chip payload must never
@@ -3499,6 +3532,31 @@ def _tip_feedback_error(exc: HTTPException) -> HTTPException:
     if "tip_not_found" in detail:
         return HTTPException(status_code=404, detail="tip_not_found")
     return exc
+
+
+@app.post("/lana/impression")
+def post_impression(
+    body: ImpressionStatusBody,
+    authorization: str | None = Header(default=None),
+):
+    """The other half of §A7: what the user did with a card Lana showed.
+
+    Without this every row sits at 'shown' forever, and "we showed 400 things" is all the
+    pilot can ever say. 404 rather than 403 on someone else's row — an id that is not
+    yours should not be confirmable as existing.
+    """
+    auth = verify_auth(authorization)
+    from app.impressions import set_impression_status
+
+    ok = set_impression_status(
+        user_id=auth.user_id,
+        impression_id=body.impression_id,
+        status=body.status,
+        converted_action_id=body.converted_action_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="impression_not_found")
+    return {"impression_id": body.impression_id, "status": body.status}
 
 
 @app.post("/lana/circles/list")
