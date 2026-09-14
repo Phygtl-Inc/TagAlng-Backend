@@ -75,3 +75,33 @@ def test_a_broken_insert_never_reaches_the_caller():
         log_shown(user_id="u1", session_id="s1", block_id=None, query=None,
                   peers=peers, activities=[])
     assert peers[0].impression_id  # still stamped, so a later tap still reports
+
+
+def test_a_peer_row_carrying_a_tip_logs_as_the_recommendation():
+    """The ask was "know a good plumber?" — the answer is the tip, not the neighbour.
+
+    Logging these as 'neighbor' would file every recommendation search under peer
+    discovery and leave signal_id null on every row, so "was this rec shown 40 times and
+    tapped twice" could never be asked.
+    """
+    rows = _captured(
+        peers=[PeerMatchRow(peer_user_id="u-882", tip_signal_id="sig-4417")],
+        ctx={"tip_scores": {"sig-4417": 0.81}},
+        query="know a good plumber?",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["recommendation_type"] == "local_signal"
+    assert rows[0]["signal_id"] == "sig-4417"
+    assert rows[0]["score"] == 0.81
+    assert rows[0]["suggested_action"] == "view_tip"
+    # Who vouched is kept too — both facts are true, and dropping the neighbour would
+    # lose the shared-community provenance the whole product rests on.
+    assert rows[0]["candidate_user_id"] == "u-882"
+
+
+def test_a_peer_row_without_a_tip_is_still_a_peer():
+    rows = _captured(peers=[PeerMatchRow(peer_user_id="u-882")])
+    assert rows[0]["recommendation_type"] == "neighbor"
+    assert rows[0]["candidate_user_id"] == "u-882"
+    assert rows[0].get("signal_id") is None

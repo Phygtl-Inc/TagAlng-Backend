@@ -223,6 +223,15 @@ def stamp_tip_peer_surface(
     if not shown:
         return []
     ctx["peer_matches"] = shown
+    # Match strength by signal id, for the impression log (§A7). Same pattern as
+    # browse_scores: an internal ranking number with nothing to render, so it rides on ctx
+    # rather than on PeerMatchRow. Keyed by signal because the impression this produces is
+    # about the RECOMMENDATION, not about the neighbour carrying it.
+    ctx["tip_scores"] = {
+        str(r.get("tip_signal_id") or ""): float(r.get("match_strength") or 0.0)
+        for r in shown
+        if r.get("tip_signal_id")
+    }
     surface = tip_discovery_surface(shown)
     if surface:
         ctx["discovery_surface"] = surface
