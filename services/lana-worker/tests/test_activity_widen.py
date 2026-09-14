@@ -1,20 +1,19 @@
-"""Widening: when a topical search finds nothing nearby, search the ring out to 200 km.
+"""Distance in the browse copy, and the distance plumbing under it.
 
-Two passes over a fixed list of radii, not a loop — it terminates by construction and
-costs at most one extra model call. Pass 2 lives INSIDE the "found nothing" branch, so a
-turn that matched nearby cannot reach it: that is the property most of these tests are
-really protecting, because it is what keeps every ordinary browse turn unchanged.
+A meet is admitted by the distance rule (app.distance_admission), not by a radius, so a
+match can legitimately be 90 miles out. The header must then say so: "nothing near you,
+but here's what I found about 90 miles out" is honest only when the CLOSEST admitted
+meet is far — one match close by makes the plain header the true one, however far the
+rest are. The conversion is whole miles, from the nearest meet, and never invented.
 
-The other load-bearing property is that the ring is cut on measured DISTANCE, not on the
-ids the nearby pass returned. Those ids had already been trimmed to the pool by start
-date, so an event the trim dropped would come back out here and be announced as a far
-find when it was three miles away.
+The rest of this file pins the contracts the distance rides in on: event distances keyed
+by id from the radius RPC, and the stamp onto every row of the block read.
 """
 
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.activity_browse import _nearest_miles, run_activity_browse_turn
+from app.activity_browse import _far_miles, _nearest_miles, run_activity_browse_turn
 
 
 def _ev(eid, title, **kw):
@@ -45,19 +44,22 @@ class NearestMilesTests(unittest.TestCase):
         self.assertIsNone(_nearest_miles([]))
 
 
-# Deliberately failing: _widen_search is gone and far_miles has no source yet. Rewritten
-# in the distance-copy step, once admitted rows carry the distance the header quotes.
 class FarResultsAreLabelledHonestlyTests(unittest.TestCase):
     """Rendering a meet 90 miles out under "near you" would be the same lie as claiming
-    supply we never measured. The distance was the reason we looked further, so it has
-    to reach the copy."""
+    supply we never measured. The distance is data on every admitted row, so the copy
+    reads it — and only claims "far" when the nearest match actually is."""
 
-    def _far_turn(self, far_rows):
+    def _turn(self, admitted_rows):
+        """One topical browse turn with the semantic fetch returning `admitted_rows` and
+        the matcher passing them all through."""
         ctx = {"activity_browse_active": True, "browse_draft": {"_asked": True},
                "phone_verified": True}
-        with patch("app.activity_browse._fetch_block_events", return_value=[]), patch(
-            "app.activity_browse._filter_events_by_query", side_effect=lambda ev, q: ([], "")
-        ), patch("app.activity_browse._widen_search", return_value=(far_rows, "cricket")):
+        with patch(
+            "app.activity_browse._fetch_admitted_events", return_value=(admitted_rows, False)
+        ), patch(
+            "app.activity_browse._filter_events_by_query",
+            side_effect=lambda ev, q: (list(ev), "cricket"),
+        ), patch("app.activity_browse._attach_host_names"):
             reply = run_activity_browse_turn(
                 user_message="any cricket?",
                 session_ctx=ctx,
@@ -68,7 +70,7 @@ class FarResultsAreLabelledHonestlyTests(unittest.TestCase):
         return reply, ctx
 
     def test_the_message_names_the_distance_and_does_not_say_near_you(self):
-        reply, ctx = self._far_turn(
+        reply, ctx = self._turn(
             [_ev("e1", "Cricket nets", distance_meters=144840.0)]  # 90 miles
         )
         self.assertIn("90 miles", reply)
@@ -81,7 +83,7 @@ class FarResultsAreLabelledHonestlyTests(unittest.TestCase):
         self.assertIsNone((ctx.get("browse_draft") or {}).get("_seek_offer"))
 
     def test_the_closest_of_several_is_the_one_quoted(self):
-        reply, _ctx = self._far_turn([
+        reply, _ctx = self._turn([
             _ev("e1", "Far nets", distance_meters=160934.0),   # 100 miles
             _ev("e2", "Closer nets", distance_meters=96560.4),  # 60 miles
         ])
@@ -90,9 +92,27 @@ class FarResultsAreLabelledHonestlyTests(unittest.TestCase):
 
     def test_a_far_match_without_a_distance_falls_back_to_the_plain_header(self):
         """Never invent a number. No distance measured means no distance claimed."""
-        reply, _ctx = self._far_turn([_ev("e1", "Cricket nets")])
+        reply, _ctx = self._turn([_ev("e1", "Cricket nets")])
         self.assertNotIn("miles", reply.lower())
         self.assertIn("coming up", reply.lower())
+
+    def test_nearest_beyond_the_threshold_renders_the_miles(self):
+        # Just past far_copy_m (40 km): the honest header is the far one.
+        reply, _ctx = self._turn([_ev("e1", "Cricket nets", distance_meters=48280.0)])  # 30 mi
+        self.assertIn("30 miles", reply)
+        self.assertNotIn("coming up", reply.lower())
+
+    def test_nearest_inside_the_threshold_renders_the_plain_header(self):
+        # A match five miles away means "nothing near you" would be false — however far
+        # the other admitted match is, the plain header is the true one.
+        reply, ctx = self._turn([
+            _ev("e1", "Far nets", distance_meters=144840.0),   # 90 miles
+            _ev("e2", "Local nets", distance_meters=8046.7),   # 5 miles
+        ])
+        self.assertNotIn("miles", reply.lower())
+        self.assertIn("coming up", reply.lower())
+        # Both still render; the threshold changes the copy, not the results.
+        self.assertEqual(len(ctx["activity_previews"]), 2)
 
     def test_the_far_strings_exist_in_all_three_languages(self):
         from app.i18n import _STRINGS
@@ -103,11 +123,37 @@ class FarResultsAreLabelledHonestlyTests(unittest.TestCase):
                 self.assertIn("{miles}", _STRINGS[key][lang])
 
 
+class FarMilesThresholdTests(unittest.TestCase):
+    """_far_miles on its own: the threshold is a keyword default and the value is the
+    nearest meet's, via _nearest_miles."""
+
+    def test_default_threshold_is_forty_km(self):
+        self.assertIsNone(_far_miles([_ev("a", "x", distance_meters=40000.0)]))   # at, not beyond
+        self.assertEqual(_far_miles([_ev("a", "x", distance_meters=40001.0)]), 25)
+
+    def test_threshold_is_overridable(self):
+        rows = [_ev("a", "x", distance_meters=20000.0)]
+        self.assertIsNone(_far_miles(rows))
+        self.assertEqual(_far_miles(rows, far_copy_m=10000.0), 12)
+
+    def test_nearest_decides_and_is_what_is_quoted(self):
+        rows = [
+            _ev("far", "x", distance_meters=160934.0),
+            _ev("near", "y", distance_meters=96560.4),
+        ]
+        self.assertEqual(_far_miles(rows), 60)
+        rows.append(_ev("local", "z", distance_meters=1000.0))
+        self.assertIsNone(_far_miles(rows))
+
+    def test_no_distances_is_none(self):
+        self.assertIsNone(_far_miles([_ev("a", "x")]))
+        self.assertIsNone(_far_miles([]))
+
+
 class RingIsCutOnDistanceNotOnSeenIdsTests(unittest.TestCase):
-    """The bug this shape exists to prevent: the nearby pass trims its pool by start
-    date, so an event it dropped is NOT in the rows that reached the matcher. Subtracting
-    those rows would let a three-mile event reappear in the ring and be announced as a
-    far find. Distance cannot make that mistake."""
+    """fetch_preview_events_on_block stamps the RPC's measured distance onto every row it
+    returns — the fallback read's rows must carry a distance too, or the header would
+    have nothing to quote when the semantic read could not run."""
 
     def _fetch(self, *, distances, min_distance_meters=None):
         from app.discovery_route import fetch_preview_events_on_block

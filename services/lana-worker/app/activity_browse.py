@@ -408,6 +408,24 @@ def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
     return int(round(min(dists) / 1609.34)) if dists else None
 
 
+def _far_miles(
+    events: list[dict[str, Any]], *, far_copy_m: float = 40_000.0
+) -> int | None:
+    """Miles to the nearest of these meets when the far header is the honest one, else
+    None. The far header says "nothing near you", which is only true when the CLOSEST
+    admitted meet is beyond `far_copy_m`; one match close by makes the plain header
+    correct however far the others are. None when no meet carries a distance — never
+    invent a number."""
+    dists = [
+        float(e["distance_meters"])
+        for e in events
+        if isinstance(e.get("distance_meters"), (int, float))
+    ]
+    if not dists or min(dists) <= far_copy_m:
+        return None
+    return _nearest_miles(events)
+
+
 def _today_str() -> str:
     from datetime import datetime
 
@@ -1138,9 +1156,9 @@ def _format_browse_message(
     # The FE renders these same events as a card list (activity_previews) right under this
     # message — a short lead-in is enough; enumerating them in text too reads as a bug.
     #
-    # far_miles is set only by a WIDENED search. Saying "near you" over a meet 90 miles
-    # out would be the same lie as claiming supply we never measured: the distance was
-    # the whole reason we looked further, so it has to reach the copy.
+    # far_miles is set only when the NEAREST match is far (see _far_miles). Saying "near
+    # you" over a meet 90 miles out would be the same lie as claiming supply we never
+    # measured, so the distance has to reach the copy.
     if far_miles is not None:
         head = (
             t("browse.events_header_label_far", lang, label=label, miles=f"{far_miles:,}")
@@ -1602,7 +1620,5 @@ def run_activity_browse_turn(
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     session_ctx["routing_phase"] = "listening"
     return _format_browse_message(
-        # far_miles has no source until the distance-copy step lands; the header is the
-        # plain one for now.
-        matched, label, phone_verified=phone_verified, lang=lang, far_miles=None
+        matched, label, phone_verified=phone_verified, lang=lang, far_miles=_far_miles(matched)
     )
