@@ -76,14 +76,17 @@ _VALUE_FIELDS = ("name", "circle_type", "blurb")
 _EXTRACT_SYSTEM = """You extract structured fields about a LOCAL COMMUNITY a neighbor \
 wants to create, and write the question set for it.
 
-A community is a real PLACE people gather at — a bakery, a gym, a church, a school, a \
-park. The neighbor is starting it so others can find and join it.
+A community is usually a real PLACE people gather at — a bakery, a gym, a church, a \
+school, a park. It can also have NO place at all: a community around a topic, a creator or \
+a following, which people join from a link rather than by going somewhere. The neighbor is \
+starting it so others can find and join it.
 
 Return ONE compact JSON object with exactly these keys:
 {"name","circle_type","blurb",<<STEPS_KEY>>"answers"}
 
-- name: the place being made into a community, verbatim as they said it, e.g. "Rosetta's \
-Bakery", "CF Fitness", "Lake Nona Park". null if not stated.
+- name: what is being made into a community, verbatim as they said it — usually a place \
+("Rosetta's Bakery", "CF Fitness", "Lake Nona Park"), or for a placeless one the community's \
+own name ("Iron Man Training"). null if not stated.
 - circle_type: EXACTLY one of <<TYPES>>, or null if genuinely unclear. <<TYPE_RULES>>
 - blurb: why people gather there, in THEIR words, e.g. "best sourdough on the block, \
 everyone ends up there Saturday mornings". null if not stated.
@@ -244,6 +247,7 @@ _TYPE_LABELS: dict[str, str] = {
     "support": "A support group",
     "heritage": "A cultural community",
     "other": "Something else",
+    "creator": "A creator community",
 }
 TYPE_SUGGESTIONS = list(_TYPE_LABELS.values())
 
@@ -380,11 +384,31 @@ def publish_community(
     failure that is fixable in-turn (place_required) instead of just apologising.
     """
     gpid = str(draft.get("google_place_id") or "").strip()
-    if not gpid:
-        return None, "place_required"
     ctype = str(draft.get("circle_type") or "").strip()
     if not ctype:
         return None, "type_required"
+    if not gpid:
+        # No place was picked — either a creator community (nothing to pick) or the
+        # neighbour skipped an optional place step. Identity comes from the NAME instead:
+        # the same key every time, so re-publishing finds the row rather than splitting the
+        # roster across two places. Everything downstream is unchanged — add_circle grounds
+        # it through the normal path (circles_flow.ground_affiliation), which reads the
+        # prefix and skips the Google lookup.
+        from app.circles_capture import _slugify
+        from app.circles_flow import CREATOR_PLACE_PREFIX
+        from app.community_question_sets import COMMUNITY_SUBJECT_FIELD
+
+        # draft["name"] is written by the place picker (_set_subject_from_place) and by
+        # nothing else, so on this lane — where the subject is typed, not pinned — it is
+        # empty and the answer is the only place the name exists.
+        name = str(draft.get("name") or "").strip() or str(
+            (draft.get("answers") or {}).get(COMMUNITY_SUBJECT_FIELD) or ""
+        ).strip()
+        slug = _slugify(name)
+        if not slug:
+            return None, "name_required"
+        draft = {**draft, "name": name}
+        gpid = CREATOR_PLACE_PREFIX + slug
     try:
         from app.circles_flow import add_circle
 
@@ -695,15 +719,23 @@ def run_community_capture_turn(
         draft["suggestions"] = []
         session_ctx["community_draft"] = draft
         session_ctx["community_create_active"] = True
-        session_ctx["community_pending_question"] = "Which place should I add as a community?"
+        session_ctx["community_pending_question"] = "What should I add as a community?"
         session_ctx["routing_phase"] = "listening"
         return compose_reply(
             goal=(
-                "Ask which place the user wants to turn into a community, and mention they "
-                "can say what draws people to it. Warm, one or two short lines."
+                "Ask what they want to add as a community, and mention they can say what "
+                "brings people to it. Warm, one or two short lines."
             ),
-            facts=["Nothing captured yet", "A community is always a real place"],
-            fallback="Love that — which place should I add as a community? Name the spot and what draws people to it.",
+            # This turn runs BEFORE the type is known, so it must not foreclose either
+            # answer. It used to assert "a community is always a real place" — true until
+            # 20261207120000, and now the one thing that would talk a creator out of the
+            # community they came to make.
+            facts=[
+                "Nothing captured yet",
+                "Usually a real place nearby, but it can also be a community built around "
+                "a shared interest with no location at all",
+            ],
+            fallback="Love that — what should I add as a community? A spot near you, or something people gather around.",
         )
 
     chips = _build_chips(draft)

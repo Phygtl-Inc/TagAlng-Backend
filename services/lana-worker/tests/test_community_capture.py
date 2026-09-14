@@ -61,9 +61,18 @@ def test_every_circle_type_has_an_askable_set() -> None:
         steps = validate_community_steps(None, t)
         assert steps, f"{t} generates no questions at all"
         head = steps[0]
-        assert head["field"] == COMMUNITY_SUBJECT_FIELD, f"{t} does not lead with the place"
-        assert head["kind"] == "place", f"{t} subject must be pinned, never typed"
-        assert head["required"], f"{t} could publish with no place"
+        assert head["field"] == COMMUNITY_SUBJECT_FIELD, f"{t} does not lead with the subject"
+        # A creator community has no building to pin, so its subject is the name the
+        # creator types (20261207120000). Every OTHER type still comes off the map: a gym
+        # answered as free text cannot be grounded, and an ungrounded community is
+        # invisible everywhere.
+        want = "text" if t == "creator" else "place"
+        assert head["kind"] == want, f"{t} subject must be {want}, not {head['kind']}"
+        # Offered first, never mandatory (20261207120000). A community that is not
+        # anywhere is a real community — a creator's following, a group with no venue —
+        # and making the place a gate is what left "long course triathlon and race prep"
+        # stuck on a place search it could never satisfy.
+        assert not head["required"], f"{t} still forces a place before it can publish"
         assert steps[-1]["field"] == "who_for", f"{t} lost the closing step"
         fields = [s["field"] for s in steps]
         assert len(fields) == len(set(fields)), f"{t} repeats a field"
@@ -72,10 +81,15 @@ def test_every_circle_type_has_an_askable_set() -> None:
 
 def test_a_community_set_has_no_second_place_step() -> None:
     """The subject already pinned the map, so a "where is it?" step would ask for the
-    thing the picker just returned — the same duplicate the reco capture dropped."""
+    thing the picker just returned — the same duplicate the reco capture dropped.
+
+    A creator community has no place step at all, and must not acquire one: it is not
+    anywhere, and a stray map answer would give it coordinates the schema forbids.
+    """
     for t in CIRCLE_TYPES:
         kinds = [s["kind"] for s in validate_community_steps(None, t)]
-        assert kinds.count("place") == 1, f"{t} asks for a place twice"
+        want = 0 if t == "creator" else 1
+        assert kinds.count("place") == want, f"{t} has {kinds.count('place')} place steps, wanted {want}"
 
     generated = validate_community_steps(
         [{"field": "location", "label": "Location", "question": "Where exactly is it?"}],
@@ -93,10 +107,21 @@ def test_unknown_type_generates_nothing() -> None:
 
 def test_required_steps_gate_the_card() -> None:
     steps = validate_community_steps(None, "fitness")
-    assert missing_required(steps, {}) == [COMMUNITY_SUBJECT_FIELD, "draws", "when"]
-    assert next_question(steps, {})["field"] == COMMUNITY_SUBJECT_FIELD
-    filled = {COMMUNITY_SUBJECT_FIELD: "CF", "draws": "lifting", "when": "6am"}
-    assert missing_required(steps, filled) == []
+    # The subject is asked first but does not gate: what a neighbour cannot do without is
+    # what happens here and when, not where.
+    assert missing_required(steps, {}) == ["draws", "when"]
+    assert missing_required(steps, {"draws": "lifting", "when": "6am"}) == []
+
+    # The subject still LEADS the set — the carousel renders steps in order, so the place
+    # is card 1 of 6 with an Optional affordance on it.
+    assert steps[0]["field"] == COMMUNITY_SUBJECT_FIELD
+
+    # In the chat walk it trades places with the floor, because `next_question` lets
+    # required steps jump the queue. Offered once, never a gate.
+    assert next_question(steps, {})["field"] == "draws"
+    assert next_question(steps, {"draws": "lifting", "when": "6am"})["field"] == (
+        COMMUNITY_SUBJECT_FIELD
+    )
 
 
 # ── The place is never text ───────────────────────────────────────────────────────────
@@ -107,11 +132,12 @@ def test_the_place_only_ever_comes_from_the_picker(monkeypatch: Any) -> None:
     everywhere — so text answers to the subject step are dropped and it is re-asked."""
     ctx: dict[str, Any] = {}
     _run(monkeypatch, "our bakery", ctx, {"circle_type": "friends", "name": "our bakery"})
-    assert ctx["community_pending_ask"] == COMMUNITY_SUBJECT_FIELD
 
     _, draft = _run(monkeypatch, "Rosetta's Bakery on Main Street", ctx, {})
+    # Still the invariant, and the one the optional place did NOT relax: on a kind="place"
+    # step only the picker can answer. Typed text is not a map point, so it is dropped
+    # rather than stored as if the community had been grounded.
     assert COMMUNITY_SUBJECT_FIELD not in (draft.get("answers") or {})
-    assert ctx["community_pending_ask"] == COMMUNITY_SUBJECT_FIELD, "still open"
     assert not draft.get("google_place_id")
 
 
@@ -253,15 +279,13 @@ def test_publishing_without_a_pin_reopens_the_place_step(monkeypatch: Any) -> No
         "community_create_active": True,
         "community_ready": True,
     }
-    _, draft = _run(monkeypatch, "share it with the community", ctx, {})
-    assert not draft.get("published")
-    assert ctx["community_pending_ask"] == COMMUNITY_SUBJECT_FIELD
-    assert not ctx.get("community_ready")
-
-    result, err = cc.publish_community(draft={"circle_type": "friends"}, user_id="u")
-    assert (result, err) == (None, "place_required")
+    # The type is still the one thing nothing can be asked without — it picks the set.
     result, err = cc.publish_community(draft={"google_place_id": "x"}, user_id="u")
     assert (result, err) == (None, "type_required")
+    # With no place AND no name there is nothing to key the community on, so it re-asks
+    # rather than minting an unnameable row.
+    result, err = cc.publish_community(draft={"circle_type": "friends"}, user_id="u")
+    assert (result, err) == (None, "name_required")
 
 
 # ── Flow shape ───────────────────────────────────────────────────────────────────────
