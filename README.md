@@ -85,6 +85,35 @@ Migrations are append-only — never rewrite a merged migration; always add a ne
 
 ---
 
+## Which database am I pushing to? (DEV vs PROD)
+
+There is **one** `supabase/migrations/` folder and **one** CLI link slot, but two hosted
+projects. `supabase db push` writes to whichever project is currently linked — so always
+confirm the target before pushing:
+
+```bash
+node scripts/which-db.mjs        # or: ./scripts/which-db.sh
+```
+
+| Project | Ref                    | Notes                                  |
+|---------|------------------------|----------------------------------------|
+| DEV     | `rjlcyvwogmfmngemhbmn` | What the app (`.env.local`) points at. |
+| PROD    | `kmetmatfxdkrialwrnzj` | Production. Push here deliberately.    |
+
+Switch the link before deploying:
+
+```bash
+supabase link --project-ref rjlcyvwogmfmngemhbmn   # -> DEV
+supabase link --project-ref kmetmatfxdkrialwrnzj   # -> PROD
+supabase db push --dry-run                          # review SQL first
+supabase db push                                    # apply
+```
+
+Rule of thumb: run `which-db` immediately before every `db push`. Take a backup
+(Dashboard → Database → Backups) before pushing to PROD.
+
+---
+
 ## Schema v0 (mirrors the website + app)
 
 ```sql
