@@ -2183,6 +2183,10 @@ def _run_lana_message(
         ready_to_complete=ready,
         session_id=session_id,
         user_message=body.message,
+        # lana_messages row id of THIS reply — the join that turns an impression back into
+        # "she was asked X, she answered Y, and these are the cards that went with it".
+        # None when the message write failed; the impression is still worth having.
+        turn_id=assistant_msg_id,
     )
     # Chip-tap language pin, part 1: remember EXACTLY which chip payloads this response
     # offers, so the next turn can tell an app-authored tap from typed text (the pipeline

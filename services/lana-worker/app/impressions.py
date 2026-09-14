@@ -122,22 +122,40 @@ def log_shown(
     # render, and the wire model is not the place to park telemetry.
     scores = ctx.get("browse_scores")
     scores = scores if isinstance(scores, dict) else {}
+    tip_scores = ctx.get("tip_scores")
+    tip_scores = tip_scores if isinstance(tip_scores, dict) else {}
 
     rows: list[dict[str, Any]] = []
     position = 0
 
-    def _row(kind: str, key: str, ident: str | None, score: Any, reasons: Any, action: str) -> None:
+    def _row(
+        kind: str,
+        key: str,
+        ident: str | None,
+        score: Any,
+        reasons: Any,
+        action: str,
+        also: dict[str, str] | None = None,
+        model: Any = None,
+    ) -> None:
         nonlocal position
         if not ident or kind not in _TYPES or position >= _MAX_PER_TURN:
             return
+        row_id = str(uuid.uuid4())
+        # Stamped here, on the row that produced it. An earlier version walked the models
+        # a second time and matched by order, which silently misattributes the moment any
+        # row is written on one pass and skipped on the other.
+        if model is not None:
+            model.impression_id = row_id
         rows.append(
             {
-                "id": str(uuid.uuid4()),
+                "id": row_id,
                 "user_id": user_id,
                 "session_id": session_id,
                 "block_id": block_id,
                 "recommendation_type": kind,
                 key: ident,
+                **(also or {}),
                 "score": float(score) if isinstance(score, (int, float)) else 0.0,
                 "reason_codes": [str(r) for r in reasons][:8] if isinstance(reasons, list) else [],
                 "suggested_action": action,
@@ -156,13 +174,35 @@ def log_shown(
         position += 1
 
     for p in peers:
+        # A peer row carrying a tip is a RECOMMENDATION, not a person suggestion — the ask
+        # was "know a good plumber?", and the neighbour is how the answer is delivered
+        # (tip_rec_cascade: "the rec rides ON the neighbor's row"). Logging it as
+        # 'neighbor' would file every tip search under peer discovery and leave signal_id
+        # — the column that exists for exactly this — null on every row, so "was Ramirez
+        # Plumbing shown 40 times and tapped twice" could never be asked.
+        # Both ids are kept: the recommendation AND who vouched for it are each true.
+        tip_id = str(getattr(p, "tip_signal_id", "") or "").strip()
+        peer_id = getattr(p, "peer_user_id", None)
+        if tip_id:
+            _row(
+                "local_signal",
+                "signal_id",
+                tip_id,
+                tip_scores.get(tip_id),
+                getattr(p, "trait_tags", None),
+                "view_tip",
+                also={"candidate_user_id": str(peer_id)} if peer_id else None,
+                model=p,
+            )
+            continue
         _row(
             "neighbor",
             "candidate_user_id",
-            getattr(p, "peer_user_id", None),
+            peer_id,
             getattr(p, "similarity_score", None),
             getattr(p, "trait_tags", None),
             "view_peer",
+            model=p,
         )
     for a in activities:
         _row(
@@ -172,25 +212,14 @@ def log_shown(
             scores.get(str(getattr(a, "activity_id", "") or "")),
             None,
             "view_event",
+            model=a,
         )
 
     if not rows:
         return
 
-    # Stamp before the insert is even attempted: the client's ability to report a tap must
-    # not depend on whether our logging thread succeeded.
-    minted = iter([r["id"] for r in rows])
-    for row_model in list(peers) + list(activities):
-        ident = getattr(row_model, "peer_user_id", None) or getattr(
-            row_model, "activity_id", None
-        )
-        if not ident:
-            continue
-        try:
-            row_model.impression_id = next(minted)
-        except StopIteration:
-            break
-
+    # Ids are already on the models (stamped in _row, before any I/O): the client's
+    # ability to report a tap must not depend on whether our logging thread succeeded.
     _insert_async(rows)
 
 
