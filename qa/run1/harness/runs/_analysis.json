@@ -1,0 +1,578 @@
+{
+  "conversations": 72,
+  "completed": 72,
+  "failed_conversations": 0,
+  "total_turns": 233,
+  "http_errors": 0,
+  "empty_replies": 0,
+  "outcomes": {
+    "activity_browse": 156,
+    "R": 51,
+    "A": 2,
+    "T": 23,
+    "pass_along": 1
+  },
+  "tools": {
+    "save_signal_need_verify": 7,
+    "clarify_browse_or_meet": 9,
+    "out_of_scope": 1,
+    "clarify_out_of_scope": 1,
+    "activity_browse": 2,
+    "unsafe_refusal": 1,
+    "help_capabilities": 1,
+    "preview_peers_on_block": 1
+  },
+  "leaks": {
+    "placeholder": 1
+  },
+  "verify_walls": 29,
+  "clarify_loops": 0,
+  "kid_name_echo": [
+    {
+      "id": "edge_kid_pii",
+      "msg": "I keep Emma's name and school private unless you choose to share them with neighbors after connecting—your privacy is always respected here."
+    }
+  ],
+  "lang_mismatch": [
+    {
+      "id": "edge_portuguese",
+      "sample": "Here's what's coming up:\n• Pre-K Playground Meetup at Laureate Park Zipline Playground (Fri Jul 10)\n• Morning meetup at My place (Sat Jul 11)\n• Brazilian Coffee"
+    },
+    {
+      "id": "edge_spanish",
+      "sample": "Here's what's coming up for family:\n• Pre-K Playground Meetup at Laureate Park Zipline Playground (Fri Jul 10)\n• Tea Party at Freiwilligendienste DRS gGmbH - Re"
+    }
+  ],
+  "ny_bleed": 3,
+  "zip_dead_ends": 25,
+  "phone_verification_asks": 0,
+  "drafted_hosts": 49,
+  "host_draft_details": [
+    {
+      "id": "edge_cancel_mind",
+      "sent": "I want to host a coffee morning",
+      "draft": {
+        "title": "Coffee Morning",
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_0",
+      "sent": "I want to host a meet. A playground meetup Friday morning around 9:30 at Laureat",
+      "draft": {
+        "title": "Pre-K Playground Meetup",
+        "starts_at": "2026-07-17T09:30:00"
+      }
+    },
+    {
+      "id": "host_0",
+      "sent": "I want to host a meet. A playground meetup Friday morning around 9:30 at Laureat",
+      "draft": {
+        "title": "Pre-K Playground Meetup",
+        "starts_at": "2026-07-17T09:30:00"
+      }
+    },
+    {
+      "id": "host_0",
+      "sent": "I want to host a meet. A playground meetup Friday morning around 9:30 at Laureat",
+      "draft": {
+        "title": "Pre-K Playground Meetup",
+        "starts_at": "2026-07-17T09:30:00"
+      }
+    },
+    {
+      "id": "host_1",
+      "sent": "I want to host a meet. coffee at my place saturday 10am for moms on my street",
+      "draft": {
+        "title": "Street Moms Coffee Morning",
+        "starts_at": "2026-07-11T10:00:00"
+      }
+    },
+    {
+      "id": "host_1",
+      "sent": "I want to host a meet. coffee at my place saturday 10am for moms on my street",
+      "draft": {
+        "title": "Street Moms Coffee Morning",
+        "starts_at": "2026-07-11T10:00:00"
+      }
+    },
+    {
+      "id": "host_1",
+      "sent": "I want to host a meet. coffee at my place saturday 10am for moms on my street",
+      "draft": {
+        "title": "Street Moms Coffee Morning",
+        "starts_at": "2026-07-11T10:00:00"
+      }
+    },
+    {
+      "id": "host_10",
+      "sent": "I want to host a meet. book club for moms, first meeting end of july",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_10",
+      "sent": "I want to host a meet. book club for moms, first meeting end of july",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_10",
+      "sent": "I want to host a meet. book club for moms, first meeting end of july",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_11",
+      "sent": "I want to host a meet. picnic saturday noon at central park",
+      "draft": {
+        "title": "Central Park Picnic Meetup",
+        "starts_at": "2026-07-11T12:00:00"
+      }
+    },
+    {
+      "id": "host_11",
+      "sent": "I want to host a meet. picnic saturday noon at central park",
+      "draft": {
+        "title": "Central Park Picnic Meetup",
+        "starts_at": "2026-07-11T12:00:00"
+      }
+    },
+    {
+      "id": "host_11",
+      "sent": "I want to host a meet. picnic saturday noon at central park",
+      "draft": {
+        "title": "Central Park Picnic Meetup",
+        "starts_at": "2026-07-11T12:00:00"
+      }
+    },
+    {
+      "id": "host_12",
+      "sent": "I want to host a meet. playdate at the McDonalds playplace tuesday 3pm",
+      "draft": {
+        "title": "McDonald's Playplace Playdate",
+        "starts_at": "2026-07-14T15:00:00"
+      }
+    },
+    {
+      "id": "host_12",
+      "sent": "I want to host a meet. playdate at the McDonalds playplace tuesday 3pm",
+      "draft": {
+        "title": "McDonald's Playplace Playdate",
+        "starts_at": "2026-07-14T15:00:00"
+      }
+    },
+    {
+      "id": "host_12",
+      "sent": "I want to host a meet. playdate at the McDonalds playplace tuesday 3pm",
+      "draft": {
+        "title": "McDonald's Playplace Playdate",
+        "starts_at": "2026-07-14T15:00:00"
+      }
+    },
+    {
+      "id": "host_13",
+      "sent": "I want to host a meet. swim morning at the YMCA pool friday 10",
+      "draft": {
+        "title": "YMCA Swim Morning Meetup",
+        "starts_at": "2026-07-10T10:00:00"
+      }
+    },
+    {
+      "id": "host_13",
+      "sent": "I want to host a meet. swim morning at the YMCA pool friday 10",
+      "draft": {
+        "title": "YMCA Swim Morning Meetup",
+        "starts_at": "2026-07-10T10:00:00"
+      }
+    },
+    {
+      "id": "host_13",
+      "sent": "I want to host a meet. swim morning at the YMCA pool friday 10",
+      "draft": {
+        "title": "YMCA Swim Morning Meetup",
+        "starts_at": "2026-07-10T10:00:00"
+      }
+    },
+    {
+      "id": "host_14",
+      "sent": "I want to host a meet. nothing fancy — just coffee and let the kids run around, ",
+      "draft": {
+        "title": "Thursday Coffee & Playdate",
+        "starts_at": "2026-07-16T10:00:00"
+      }
+    },
+    {
+      "id": "host_14",
+      "sent": "I want to host a meet. nothing fancy — just coffee and let the kids run around, ",
+      "draft": {
+        "title": "Thursday Coffee & Playdate",
+        "starts_at": "2026-07-16T10:00:00"
+      }
+    },
+    {
+      "id": "host_14",
+      "sent": "I want to host a meet. nothing fancy — just coffee and let the kids run around, ",
+      "draft": {
+        "title": "Thursday Coffee & Playdate",
+        "starts_at": "2026-07-16T10:00:00"
+      }
+    },
+    {
+      "id": "host_15",
+      "sent": "I want to host a meet. help me plan a meet & greet for new moms on the block",
+      "draft": {
+        "title": "Meet & Greet for New Moms",
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_15",
+      "sent": "I want to host a meet. help me plan a meet & greet for new moms on the block",
+      "draft": {
+        "title": "Meet & Greet for New Moms",
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_15",
+      "sent": "I want to host a meet. help me plan a meet & greet for new moms on the block",
+      "draft": {
+        "title": "Meet & Greet for New Moms",
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_2",
+      "sent": "I want to host a meet. I want to host something but I have no idea what",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_2",
+      "sent": "I want to host a meet. I want to host something but I have no idea what",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_2",
+      "sent": "I want to host a meet. I want to host something but I have no idea what",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_3",
+      "sent": "I want to host a meet. stroller walk tomorrow at sunrise, meet at the lake",
+      "draft": {
+        "title": "Sunrise Stroller Walk at Lake Nona",
+        "starts_at": "2026-07-11T05:00:00"
+      }
+    },
+    {
+      "id": "host_3",
+      "sent": "I want to host a meet. stroller walk tomorrow at sunrise, meet at the lake",
+      "draft": {
+        "title": "Sunrise Stroller Walk at Lake Nona",
+        "starts_at": "2026-07-11T05:00:00"
+      }
+    },
+    {
+      "id": "host_3",
+      "sent": "I want to host a meet. stroller walk tomorrow at sunrise, meet at the lake",
+      "draft": {
+        "title": "Sunrise Stroller Walk at Lake Nona",
+        "starts_at": "2026-07-11T05:00:00"
+      }
+    },
+    {
+      "id": "host_4",
+      "sent": "I want to host a meet. a moms night out next friday 8pm, somewhere with wine",
+      "draft": {
+        "title": "Moms Night Out",
+        "starts_at": "2026-07-17T20:00:00"
+      }
+    },
+    {
+      "id": "host_4",
+      "sent": "I want to host a meet. a moms night out next friday 8pm, somewhere with wine",
+      "draft": {
+        "title": "Moms Night Out",
+        "starts_at": "2026-07-17T20:00:00"
+      }
+    },
+    {
+      "id": "host_4",
+      "sent": "I want to host a meet. a moms night out next friday 8pm, somewhere with wine",
+      "draft": {
+        "title": "Moms Night Out",
+        "starts_at": "2026-07-17T20:00:00"
+      }
+    },
+    {
+      "id": "host_5",
+      "sent": "I want to host a meet. weekly spanish-english playdate for toddlers, wednesdays ",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_5",
+      "sent": "I want to host a meet. weekly spanish-english playdate for toddlers, wednesdays ",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_5",
+      "sent": "I want to host a meet. weekly spanish-english playdate for toddlers, wednesdays ",
+      "draft": {
+        "title": null,
+        "starts_at": "2026-07-15T16:00:00"
+      }
+    },
+    {
+      "id": "host_6",
+      "sent": "I want to host a meet. bday party for my daughter turning 5, july 20 at 2pm at o",
+      "draft": {
+        "title": "5th Birthday Pool Party",
+        "starts_at": "2024-07-20T14:00:00"
+      }
+    },
+    {
+      "id": "host_6",
+      "sent": "I want to host a meet. bday party for my daughter turning 5, july 20 at 2pm at o",
+      "draft": {
+        "title": "5th Birthday Pool Party",
+        "starts_at": "2024-07-20T14:00:00"
+      }
+    },
+    {
+      "id": "host_6",
+      "sent": "I want to host a meet. bday party for my daughter turning 5, july 20 at 2pm at o",
+      "draft": {
+        "title": "5th Birthday Pool Party",
+        "starts_at": "2024-07-20T14:00:00"
+      }
+    },
+    {
+      "id": "host_7",
+      "sent": "I want to host a meet. park hangout sometime next week whenever people can",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_7",
+      "sent": "I want to host a meet. park hangout sometime next week whenever people can",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_7",
+      "sent": "I want to host a meet. park hangout sometime next week whenever people can",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_8",
+      "sent": "I want to host a meet. I wanna do a potluck brunch sunday around 11, our backyar",
+      "draft": {
+        "title": "Backyard Potluck Brunch",
+        "starts_at": "2026-07-12T11:00:00"
+      }
+    },
+    {
+      "id": "host_8",
+      "sent": "I want to host a meet. I wanna do a potluck brunch sunday around 11, our backyar",
+      "draft": {
+        "title": "Backyard Potluck Brunch",
+        "starts_at": "2026-07-12T11:00:00"
+      }
+    },
+    {
+      "id": "host_8",
+      "sent": "I want to host a meet. I wanna do a potluck brunch sunday around 11, our backyar",
+      "draft": {
+        "title": "Backyard Potluck Brunch",
+        "starts_at": "2026-07-12T11:00:00"
+      }
+    },
+    {
+      "id": "host_9",
+      "sent": "I want to host a meet. host a walking group MWF 7am before preschool dropoff",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_9",
+      "sent": "I want to host a meet. host a walking group MWF 7am before preschool dropoff",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    },
+    {
+      "id": "host_9",
+      "sent": "I want to host a meet. host a walking group MWF 7am before preschool dropoff",
+      "draft": {
+        "title": null,
+        "starts_at": null
+      }
+    }
+  ],
+  "flags": [
+    {
+      "id": "edge_multi_need",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "edge_spanish",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "edge_specific_school",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "edge_vague",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "edge_wrong_zip",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_fl_0",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_fl_10",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_fl_14",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_fl_15",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_fl_19",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_fl_4",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_fl_5",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_fl_9",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_metro_0",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_metro_1",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_metro_10",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_metro_11",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_metro_2",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_metro_3",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_metro_4",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_metro_5",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    },
+    {
+      "id": "find_metro_6",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_metro_7",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_metro_8",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 2x"
+    },
+    {
+      "id": "find_metro_9",
+      "kind": "zip_loop",
+      "detail": "asked for ZIP 3x"
+    }
+  ],
+  "latency_summary": {
+    "n": 233,
+    "p50": 3864,
+    "p90": 10733,
+    "p99": 14370,
+    "max": 19000
+  }
+}

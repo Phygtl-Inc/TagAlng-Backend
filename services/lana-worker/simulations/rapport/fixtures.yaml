@@ -1,0 +1,373 @@
+# Rapport claim-extraction fixtures.
+#
+# Ground truth for services/lana-worker/app/vertex_extract.py::incremental_claims_from_utterance
+# (message, existing_labels=None) -> raw dict, parsed via parse_incremental_claims_data(data)
+# -> (nickname, claims: list[ExtractedClaim], kids_count, followup_question).
+#
+# This asserts against the REAL contract (see INCREMENTAL_EXTRACT_PROMPT in vertex_extract.py
+# and ExtractedClaim in models.py) — NOT the original doc's {facets, gaps_opened} shape, which
+# does not exist in the codebase. See LANA_RAPPORT field-guide artifact for the full mapping.
+#
+# Fixture fields:
+#   input               — the raw user message sent to the extractor
+#   existing_labels     — optional list[str], simulates _existing_claims_block dedup context
+#   recent_questions    — optional list[str], simulates _recent_questions_block (questions Lana
+#                          has already asked). The extractor is told its followup must not
+#                          repeat/near-duplicate these. "Near-duplicate" needs judgment, so the
+#                          harness asserts ONLY the by-construction part: the followup must not
+#                          be an exact repeat (modulo case/punctuation) of a listed question.
+#                          Fixtures using this deliberately omit expect_followup — the prompt
+#                          explicitly allows the extractor to return null rather than reuse an
+#                          angle, so asserting presence would be a false failure.
+#   expect_claims       — list of {bucket, concept, label_has|label_has_any, confidence_min,
+#                          disclosure?, transient?, vague?}. `label_has` is a case-insensitive
+#                          substring match against the returned claim's `label`;
+#                          `label_has_any` is a list of alternatives, matching if ANY is a
+#                          substring (for inputs whose English-canonical label has several
+#                          valid phrasings). Both may be given — then both must hold. An
+#                          expectation with an empty `label_has` and no `label_has_any` is
+#                          REJECTED at load time: it degenerates to "any claim in this bucket",
+#                          an inert matcher that scores a vacuous pass. `concept` is NOT
+#                          matched exactly by the harness — only its regex shape is fixed
+#                          by the extractor (^[a-z][a-z0-9_]{1,63}$), the exact slug is the
+#                          model's free choice ("karate_practice" vs "karate" are both valid
+#                          for the same thread); it's recorded here for readability only.
+#                          Matching is bucket + label_has/label_has_any + confidence_min
+#                          (+ any of disclosure/transient/vague present), resolved as a
+#                          ONE-TO-ONE maximum matching: a returned claim can satisfy at most
+#                          one expectation and vice versa. Precision = returned claims that
+#                          got assigned an expectation; recall = expectations that got
+#                          assigned a distinct claim. So a duplicated thread is a precision
+#                          miss, and two expectations can never both be paid by one claim.
+#   expect_no_claims    — true when the message should produce zero claims (greetings, vague,
+#                          profanity, negations, forbidden categories). Mutually exclusive with
+#                          a non-empty expect_claims: `expect_no_claims: true` + expect_claims
+#                          is rejected at load time. (`expect_no_claims: false` alongside
+#                          expect_claims is fine and deliberate — see rapport_006.)
+#   expect_kids_count   — int or null; kids_count is NEVER a claim, checked separately.
+#   expect_followup     — true/false; whether followup_question should be non-null. The
+#                          question text itself is AI-authored per turn and NOT asserted
+#                          verbatim — only its presence/absence and (for the gap-quality axis)
+#                          a judge rating of too-vague / just-right / too-narrow.
+#   must_not_contain    — raw strings that must NEVER appear in any claim's label /
+#                          source_quote / synonyms AFTER app.pii.redact_pii has run (the
+#                          harness must call clean_claims_for_persist, or replicate
+#                          redact_pii, before checking this — the raw extractor output is
+#                          NOT pre-redacted, redaction is a downstream backstop), NOR in the
+#                          raw followup_question text — redact_pii is NEVER applied to the
+#                          followup question anywhere in the real pipeline, so it is a
+#                          distinct, unprotected leak vector the harness checks separately.
+#                          Anonymization axis = 100% pass on these, HARD_FAIL on any leak.
+#   notes               — why this fixture exists / what edge case it locks in
+
+fixtures:
+  - id: rapport_001
+    input: "I'm Brazilian and my son does karate"
+    expect_claims:
+      - {bucket: heritage, concept: brazilian_heritage, label_has: "brazil", confidence_min: 0.8}
+      - {bucket: activity, concept: karate, label_has: "karate", confidence_min: 0.8}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Baseline multi-thread case from the field guide's worked example. "son" is a kinship
+      word with no following capitalized name here, so nothing should be redacted (no
+      must_not_contain here — this is a negative control: "son" is expected to legitimately
+      survive un-redacted, confirming redact_pii does NOT over-trigger on bare kinship words
+      without a name attached — contrast with rapport_006, which DOES have a name to redact).
+      expect_kids_count is null on the theory that "my son" is a bare mention, not an
+      explicit count statement ("2 sons") — if the real extractor infers kids_count=1 from
+      this, that's a genuine finding about over-inference, not a fixture bug.
+
+  - id: rapport_002
+    input: "we just moved here from Miami"
+    expect_claims:
+      - {bucket: vicinity, concept: recently_moved, label_has: "moved", confidence_min: 0.7}
+      - {bucket: vicinity, concept: prior_city_miami, label_has: "miami", confidence_min: 0.7}
+    expect_kids_count: null
+    expect_followup: true
+    notes: "Relocation is a vicinity-bucket claim, not its own pillar (doc had identity/relocation_*)."
+
+  - id: rapport_003
+    input: "we speak Portuguese and English at home"
+    expect_claims:
+      - {bucket: interest, concept: multilingual, label_has: "portuguese", confidence_min: 0.8}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Language is bucket "interest" per the prompt's explicit rule, not a separate
+      identity/language_* pillar. Two named languages is already specific, so NOT vague —
+      no follow-up needed to sharpen it (contrast with rapport_009).
+
+  - id: rapport_004
+    input: "my husband works nights, married 10 years"
+    expect_claims:
+      - {bucket: stage, concept: long_married, label_has: "married", confidence_min: 0.85}
+    expect_kids_count: null
+    expect_followup: true
+    notes: "Relationship status/duration is bucket stage per the explicit prompt rule."
+
+  - id: rapport_005
+    input: "kindergarten at Lincoln Elementary"
+    expect_claims:
+      - {bucket: general, concept: kid_in_school, label_has: "school", confidence_min: 0.5}
+    expect_kids_count: null
+    expect_followup: true
+    must_not_contain: ["Lincoln"]
+    notes: >
+      School name must be redacted to [school] downstream (app/pii.py _SCHOOL pattern).
+      Low confidence_min since school-stage-only claims are thin; the important assertion
+      here is must_not_contain, not the claim's exact shape.
+
+  - id: rapport_006
+    input: "my daughter Sara at Lincoln Elementary"
+    expect_no_claims: false
+    expect_claims:
+      - {bucket: general, concept: kid_in_school, label_has: "school", confidence_min: 0.5}
+    expect_kids_count: null
+    expect_followup: true
+    must_not_contain: ["Sara", "Lincoln"]
+    notes: >
+      Direct PII case: "Sara" must never survive into label/source_quote/synonyms (must be
+      redacted to [kid] via the _KIN_NAME pattern — "daughter Sara"), "Lincoln" must be
+      redacted to [school]. HARD_FAIL on either leaking. Extractor is also instructed to
+      never capture a child's name/age/gender/school as a claim in the first place — this
+      fixture exercises both the prompt-level guard AND the redact_pii backstop.
+
+  - id: rapport_007
+    input: "I'm NOT looking for a moms night out, just want playdates"
+    expect_claims:
+      - {bucket: general, concept: playdate_focused, label_has: "playdate", confidence_min: 0.6}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Negation case. The prompt says NEVER extract negative/exclusion claims ("not X") — so
+      "NOT looking for a moms night out" must NOT become a claim of any kind (no
+      "dislikes_moms_night_out" or similar). Only the affirmative "want playdates" half may
+      surface. Precision fails if a negative-framed claim appears at all.
+
+  - id: rapport_008
+    input: "this is bullshit, help me"
+    expect_no_claims: true
+    expect_kids_count: null
+    expect_followup: false
+    notes: >
+      Profanity/frustration with no identity content. Per the prompt: "if no identity
+      content ... return empty". The safety/tone handling itself belongs to the intent
+      classifier, not this extractor — this fixture only asserts the extractor stays quiet.
+
+  - id: rapport_009
+    input: "I work in tech"
+    expect_claims:
+      - {bucket: activity, concept: tech_worker, label_has: "tech", confidence_min: 0.7, vague: true}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Canonical vague/coarse occupation case from the prompt's own examples. vague=true is a
+      required field assertion (not just presence) — a HARD_FAIL if the extractor marks this
+      specific enough. Followup should sharpen it (e.g. "what kind of tech?").
+
+  - id: rapport_010
+    input: "I'm a product designer at a fintech startup, mostly work on onboarding flows"
+    expect_claims:
+      - {bucket: activity, concept: product_designer, label_has: "design", confidence_min: 0.8, vague: true}
+      - {bucket: activity, concept: fintech_onboarding, label_has: "onboarding", confidence_min: 0.8, vague: false}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Occupation contrast case to rapport_009. The real extractor splits this into TWO
+      threads: the job title itself ("product designer" — still coarse/vague=true, since
+      "product" spans many domains per the prompt's own vague-occupation example) and the
+      specific detail she volunteered ("onboarding flows" — vague=false). Both threads
+      landing separately, with only the specific one marked non-vague, is correct splitting
+      behavior per the "split distinct threads" rule — not a single combined claim.
+
+  - id: rapport_011
+    input: "meu kid does karate"
+    expect_claims:
+      - {bucket: activity, concept: karate, label_has: "karate", confidence_min: 0.8}
+    expect_kids_count: null
+    expect_followup: true
+    notes: "Code-switch PT/EN. Model must parse across the language boundary in one utterance."
+
+  - id: rapport_012
+    input: "estou cansada, cheguei aqui semana passada"
+    expect_claims:
+      # GUESSED: the label is English-canonical even for a PT-only input, but WHICH English
+      # phrasing the model picks for "cheguei aqui semana passada" is its free choice, so this
+      # lists the plausible stems instead of one. Previously `label_has: ""`, which made the
+      # expectation inert (it matched ANY vicinity claim, including a mis-filed "cansada" one).
+      - {bucket: vicinity, concept: recently_moved,
+         label_has_any: ["moved", "arrived", "relocat", "new to"], confidence_min: 0.6}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Pure-PT input ("I'm tired, I arrived here last week"). "cansada" (tired) is a passing
+      mood/emotional state, not durable identity — must NOT surface as a claim at all
+      (there is no emotional bucket in the real taxonomy; the closest failure mode would be
+      misfiling it under general). Only the relocation thread should produce a claim.
+      label_has_any (not label_has) because the arrival can be labeled several equally
+      correct ways in English; anything outside that set is a genuine finding, not a
+      fixture bug — widen the list only after observing the real label.
+
+  - id: rapport_013
+    input: "I sprained my ankle last week, can barely walk"
+    expect_claims:
+      - {bucket: general, concept: sprained_ankle, label_has: "ankle", confidence_min: 0.6, transient: true}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Transient injury per the prompt's explicit example. transient=true is a required field
+      assertion — a HARD_FAIL if this lands as durable identity (transient=false). Should
+      not be pushed to the identity wall downstream (checked in claims_persist, not here).
+
+  - id: rapport_014
+    input: "heading to Cancun next month for a family trip"
+    expect_claims:
+      - {bucket: general, concept: upcoming_trip, label_has: "cancun", confidence_min: 0.6, transient: true}
+    expect_kids_count: null
+    expect_followup: true
+    notes: "Upcoming trip is transient per the prompt's explicit example list."
+
+  - id: rapport_015
+    input: "I want pizza"
+    expect_no_claims: true
+    expect_kids_count: null
+    expect_followup: false
+    notes: "Vague/no identity content — must return the empty shape exactly."
+
+  - id: rapport_016
+    input: "yeah"
+    expect_no_claims: true
+    expect_kids_count: null
+    expect_followup: false
+    notes: "One-word confirmation, no identity content."
+
+  - id: rapport_017
+    input: "I have 2 sons, ages 4 and 7"
+    expect_no_claims: true
+    expect_kids_count: 2
+    expect_followup: false
+    must_not_contain: ["4", "7"]
+    notes: >
+      HARD constraint: kids_count captures the count (2) ONLY — exact ages must NEVER be
+      captured anywhere (not as a claim, not in kids_count, not leaked into any
+      label/source_quote/synonyms). This fixture's expect_no_claims=true is deliberate: a
+      kid-count statement alone should not ALSO spawn a claim.
+
+  - id: rapport_018
+    input: "we do church every Sunday, it's a big part of our life"
+    expect_claims:
+      - {bucket: faith, concept: practicing_christian, label_has: "church", confidence_min: 0.8, disclosure: mutual}
+    expect_kids_count: null
+    expect_followup: true
+    notes: "Faith claims MUST have disclosure=mutual per the explicit prompt rule — HARD_FAIL if public."
+
+  - id: rapport_019
+    input: "I'm 5 years sober and go to meetings twice a week"
+    expect_claims:
+      - {bucket: general, concept: in_recovery, label_has: "sober", confidence_min: 0.8, disclosure: mutual}
+    expect_kids_count: null
+    expect_followup: true
+    notes: "Sobriety/recovery MUST be disclosure=mutual per the explicit prompt rule."
+
+  - id: rapport_020
+    input: "my wife and I are raising our kids in an interfaith household"
+    expect_claims:
+      - {bucket: faith, concept: interfaith_family, label_has: "interfaith", confidence_min: 0.7, disclosure: mutual}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Also exercises the LGBTQ+/faith mutual-disclosure marker set indirectly via "wife" +
+      faith combination — disclosure must still be mutual since faith is present.
+
+  - id: rapport_021
+    input: "I'm 34, half Filipino half white, work in finance"
+    expect_claims:
+      - {bucket: activity, concept: finance_worker, label_has: "finance", confidence_min: 0.6, vague: true}
+    expect_kids_count: null
+    expect_followup: true
+    must_not_contain: ["34", "half Filipino half white"]
+    notes: >
+      HARD constraint: exact age (34) and race/ethnicity demographics must NEVER be
+      extracted as claims per the prompt's explicit rule, even though heritage claims are
+      normally allowed — "half Filipino half white" phrased as race/demographics (not a
+      cultural-identity statement like fixture 1's "I'm Brazilian") should be skipped
+      entirely. Only the vague occupation claim should land.
+
+  - id: rapport_022
+    input: "living at 123 Maple Street, email me at jane@example.com"
+    expect_no_claims: true
+    expect_kids_count: null
+    expect_followup: false
+    must_not_contain: ["123 Maple Street", "jane@example.com"]
+    notes: >
+      Street address and email must never appear in any claim field after redaction
+      (app/pii.py _ADDRESS / _EMAIL patterns). No identity content here either way, so
+      expect_no_claims=true — this is a belt-and-suspenders check on the redaction backstop.
+
+  - id: rapport_023
+    input: "I love running Saturday mornings, training for a half marathon"
+    expect_claims:
+      - {bucket: activity, concept: running, label_has: "run", confidence_min: 0.85, vague: false}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Specific hobby with clear detail (half marathon, Saturday mornings) — vague must be
+      false. bucket is "activity", not "interest" — "interest" is reserved for languages per
+      the prompt's explicit rule (contrast rapport_003); sports/hobbies land in "activity"
+      in observed real behavior.
+
+  - id: rapport_024
+    input: "I'm a stay-at-home mom, been doing it for 6 years"
+    expect_claims:
+      - {bucket: stage, concept: stay_at_home_mom, label_has: "stay-at-home", confidence_min: 0.85}
+    expect_kids_count: null
+    expect_followup: true
+    notes: "Work/mom-role status is bucket stage, not a separate life_stage/mom_role pillar."
+
+  - id: rapport_025
+    input: "I speak 5 languages"
+    expect_claims:
+      - {bucket: interest, concept: multilingual, label_has: "5 language", confidence_min: 0.6, vague: true}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Count-without-specifics is vague=true per the prompt's explicit example ("speaks 5
+      languages" until they name them). Contrast with rapport_003 where two languages are
+      already named and NOT vague. Followup should ask which five.
+
+  - id: rapport_026
+    input: "I already told you I'm Brazilian, my son also plays soccer now"
+    existing_labels: ["Brazilian, Rio"]
+    expect_claims:
+      - {bucket: activity, concept: soccer, label_has: "soccer", confidence_min: 0.8}
+    expect_kids_count: null
+    expect_followup: true
+    notes: >
+      Dedup-against-existing-profile case. With "Brazilian, Rio" already on the profile via
+      existing_labels, the heritage restatement must NOT re-emit as a new/duplicate claim —
+      only the genuinely new soccer thread should land. Precision fails if a duplicate
+      heritage claim appears.
+
+  - id: rapport_027
+    input: "I've gotten really into pottery this year"
+    recent_questions:
+      - "What got you into pottery?"
+      - "Do you have a favorite thing to make?"
+    expect_claims:
+      # GUESSED: bucket=activity by analogy with rapport_023 (running) — hobbies land in
+      # "activity", "interest" is reserved for languages per the prompt's explicit rule.
+      - {bucket: activity, concept: pottery, label_has: "pottery", confidence_min: 0.8}
+    expect_kids_count: null
+    notes: >
+      The ONLY fixture exercising the third extractor parameter, recent_questions
+      (_recent_questions_block in vertex_extract.py), which was previously never passed by
+      this harness and therefore wholly uncovered. Fresh single-thread input on purpose —
+      bolting recent_questions onto an existing fixture would perturb that fixture's
+      precision/recall. The two listed questions are the two most natural follow-ups to this
+      exact input, so the extractor is genuinely forced off its first choice.
+      expect_followup is deliberately ABSENT: the prompt permits "a DIFFERENT angle, OR
+      null", so asserting a followup exists would be a false failure. The only thing true by
+      construction is that the followup must not be an exact repeat of a listed question —
+      that, and nothing stronger, is what the harness asserts (near-duplicate detection needs
+      judgment and belongs to the gap-quality judge, not a mechanical gate).

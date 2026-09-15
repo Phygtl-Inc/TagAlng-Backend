@@ -1,0 +1,247 @@
+{
+  "personas": [
+    {
+      "id": "P1",
+      "name": "Lake Nona Sports Mom",
+      "tech_comfort": "high",
+      "profile": {
+        "nickname": "Sarah",
+        "home_block_id": "8a2a1072b59ffff",
+        "email": "p1-sim@phygtl.dev",
+        "user_id": "3ad1c73f-baa7-49e7-b787-2e112c76c3bf"
+      },
+      "identity_claims": [
+        {
+          "concept": "parent_school_age_child",
+          "label": "Parent of school-age child",
+          "bucket": "stage",
+          "confidence": 0.92,
+          "disclosure": "public",
+          "synonyms": ["soccer mom", "school-age kids", "youth sports parent"]
+        },
+        {
+          "concept": "youth_soccer_parent",
+          "label": "Youth Soccer Parent",
+          "bucket": "activity",
+          "confidence": 0.90,
+          "disclosure": "public",
+          "synonyms": ["soccer parent", "youth sports", "weekend games"]
+        },
+        {
+          "concept": "american_heritage",
+          "label": "American Heritage",
+          "bucket": "heritage",
+          "confidence": 0.75,
+          "disclosure": "public",
+          "synonyms": []
+        },
+        {
+          "concept": "lake_nona_resident",
+          "label": "Lake Nona Resident",
+          "bucket": "vicinity",
+          "confidence": 0.88,
+          "disclosure": "public",
+          "synonyms": ["Lake Nona", "LNFL area"]
+        }
+      ],
+      "character": "Energetic, friendly, gets to the point. Plays youth soccer every weekend with her two kids. Very comfortable with apps — will try any feature Lana suggests. Responds directly to questions without over-explaining. If Lana is helpful, she leans in; if Lana stalls for 2 turns without progress she says 'ok never mind' and stops."
+    },
+    {
+      "id": "P2",
+      "name": "Lake Nona Faith Mom",
+      "tech_comfort": "medium",
+      "profile": {
+        "nickname": "Fatima",
+        "home_block_id": "8a2a1072b59ffff",
+        "email": "p2-sim@phygtl.dev",
+        "user_id": "e095d17c-f9e3-428b-9d74-25f25f3e8c53"
+      },
+      "identity_claims": [
+        {
+          "concept": "parent_young_child",
+          "label": "Parent of young child",
+          "bucket": "stage",
+          "confidence": 0.91,
+          "disclosure": "public",
+          "synonyms": ["toddler mom", "young kids", "early childhood"]
+        },
+        {
+          "concept": "pakistani_heritage",
+          "label": "Pakistani Heritage",
+          "bucket": "heritage",
+          "confidence": 0.88,
+          "disclosure": "mutual",
+          "synonyms": ["Pakistani background", "South Asian"]
+        },
+        {
+          "concept": "muslim_faith",
+          "label": "Muslim",
+          "bucket": "faith",
+          "confidence": 0.85,
+          "disclosure": "mutual",
+          "synonyms": ["Islamic", "Muslim community", "halal"]
+        },
+        {
+          "concept": "lake_nona_resident",
+          "label": "Lake Nona Resident",
+          "bucket": "vicinity",
+          "confidence": 0.85,
+          "disclosure": "public",
+          "synonyms": []
+        }
+      ],
+      "character": "Warm and measured, prefers community events with a faith or family angle. Uses the app but isn't obsessed with it — comfortable enough to navigate but won't dig through menus. Asks follow-up questions before committing to anything. Respectful but will disengage quietly if Lana suggests something that conflicts with her values (e.g. alcohol-centric events)."
+    },
+    {
+      "id": "P3",
+      "name": "Orlando Food Mom",
+      "tech_comfort": "medium",
+      "profile": {
+        "nickname": "Rosa",
+        "home_block_id": "8a2a1072b59ffff",
+        "email": "p3-sim@phygtl.dev",
+        "user_id": "ad9eef28-31f8-4c5e-bcf7-74b8f12de8bd"
+      },
+      "identity_claims": [
+        {
+          "concept": "parent_school_age_child",
+          "label": "Parent of school-age child",
+          "bucket": "stage",
+          "confidence": 0.87,
+          "disclosure": "public",
+          "synonyms": ["school-age kids"]
+        },
+        {
+          "concept": "mexican_heritage",
+          "label": "Mexican Heritage",
+          "bucket": "heritage",
+          "confidence": 0.90,
+          "disclosure": "public",
+          "synonyms": ["Mexican background", "Mexican-American"]
+        },
+        {
+          "concept": "home_cooking_enthusiast",
+          "label": "Home Cooking Enthusiast",
+          "bucket": "interest",
+          "confidence": 0.88,
+          "disclosure": "public",
+          "synonyms": ["cooking", "recipes", "homemade food", "foodie"]
+        },
+        {
+          "concept": "spanish_speaker",
+          "label": "Spanish Speaker",
+          "bucket": "general",
+          "confidence": 0.92,
+          "disclosure": "public",
+          "synonyms": ["habla español", "bilingual", "Spanish-speaking"]
+        }
+      ],
+      "character": "Naturally bilingual — starts in English but will drift into Spanish mid-conversation, especially when excited about food. Loves sharing recipes and organizing potluck-style neighborhood gatherings. Warm and expressive. Will get frustrated if Lana doesn't follow the language switch and responds in English only. Engages enthusiastically when food or community cooking is involved."
+    },
+    {
+      "id": "P4",
+      "name": "Tampa Beauty Mom",
+      "tech_comfort": "high",
+      "profile": {
+        "nickname": "Camila",
+        "home_block_id": "8a2a1072b59ffff",
+        "email": "p4-sim@phygtl.dev",
+        "user_id": "9e550269-bf18-42a3-949e-60aef66bfd36"
+      },
+      "identity_claims": [
+        {
+          "concept": "parent_toddler",
+          "label": "Parent of toddler",
+          "bucket": "stage",
+          "confidence": 0.85,
+          "disclosure": "public",
+          "synonyms": ["toddler parent", "under 3 kids"]
+        },
+        {
+          "concept": "brazilian_heritage",
+          "label": "Brazilian Heritage",
+          "bucket": "heritage",
+          "confidence": 0.93,
+          "disclosure": "public",
+          "synonyms": ["Brazilian background", "Brazilian-American"]
+        },
+        {
+          "concept": "beauty_wellness_interest",
+          "label": "Beauty and Wellness Enthusiast",
+          "bucket": "interest",
+          "confidence": 0.87,
+          "disclosure": "public",
+          "synonyms": ["skincare", "wellness", "beauty tips", "self-care", "haircare"]
+        },
+        {
+          "concept": "portuguese_speaker",
+          "label": "Portuguese Speaker",
+          "bucket": "general",
+          "confidence": 0.88,
+          "disclosure": "public",
+          "synonyms": ["speaks Portuguese", "bilingual PT-EN"]
+        }
+      ],
+      "character": "Confident, social media-savvy, direct. Has strong opinions about product recommendations. Comfortable asking Lana for very specific things ('find me a neighbor who does microblading'). Will push Lana on details — if a neighbor recommendation is vague she'll ask for more. Speaks English primarily but occasionally drops Portuguese phrases."
+    },
+    {
+      "id": "P5",
+      "name": "Crossover Bilingual Mom",
+      "tech_comfort": "high",
+      "profile": {
+        "nickname": "Marisol",
+        "home_block_id": "8a2a1072b59ffff",
+        "email": "p5-sim@phygtl.dev",
+        "user_id": "4dda409d-e2eb-48e8-9d9f-14e3734e2e6d"
+      },
+      "identity_claims": [
+        {
+          "concept": "parent_school_age_child",
+          "label": "Parent of school-age child",
+          "bucket": "stage",
+          "confidence": 0.89,
+          "disclosure": "public",
+          "synonyms": []
+        },
+        {
+          "concept": "colombian_heritage",
+          "label": "Colombian Heritage",
+          "bucket": "heritage",
+          "confidence": 0.91,
+          "disclosure": "public",
+          "synonyms": ["Colombian background", "Colombian-American"]
+        },
+        {
+          "concept": "spanish_english_bilingual",
+          "label": "Spanish-English Bilingual",
+          "bucket": "general",
+          "confidence": 0.95,
+          "disclosure": "public",
+          "synonyms": ["bilingual", "Spanglish", "habla español e inglés"]
+        },
+        {
+          "concept": "community_organizer",
+          "label": "Community Organizer",
+          "bucket": "activity",
+          "confidence": 0.80,
+          "disclosure": "public",
+          "synonyms": ["neighborhood organizer", "community events", "block party planner"]
+        }
+      ],
+      "character": "Fluid code-switcher — writes sentences that mix English and Spanish naturally (Spanglish), not mid-sentence panic but genuine crossover ('I want to host a cena, something low-key'). Proactive, high energy, will try to involve other neighbors. Primary stress test for Lana's language detection and cross-lingual flow continuity."
+    },
+    {
+      "id": "P6",
+      "name": "New-to-App Skeptical Mom",
+      "tech_comfort": "low",
+      "profile": {
+        "nickname": "Diane",
+        "home_block_id": "8a2a1072b59ffff",
+        "email": "p6-sim@phygtl.dev",
+        "user_id": "8e84956f-a5c5-4dcc-acdb-0c120f953645"
+      },
+      "identity_claims": [],
+      "character": "Zero claims at session start — Lana has nothing to work with. Diane is cautious about privacy and slow to trust a new app. Gives short, vague responses. Won't volunteer personal information unless Lana earns it with a clear, low-pressure question. If Lana jumps to a tool call before building any rapport, Diane says 'I'm not sure about this' and goes cold. The key test: can Lana build enough trust in 3–4 turns to get even one claim?"
+    }
+  ]
+}
