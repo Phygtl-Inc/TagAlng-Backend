@@ -407,8 +407,16 @@ class TestPolicyGate(unittest.TestCase):
         self.assertFalse(
             self._is_tip_ask({"linear_intent": "discovery.find_peers", "goal": "peers", "confidence": 0.9})
         )
-        # A tip_share (naming a provider they vouch for) is a different lane.
-        self.assertFalse(
+        # A confident tip_share goes to the CAPTURE engine, not to the policy — which is
+        # what _turn_is_engine_action's own docstring has always said ("True ... for
+        # SHARING a recommendation"). This used to assert False because the tip_seek
+        # utterance regex demoted sharing.tip to looking.tip whenever the words carried a
+        # service noun, and the demoted slots then missed the share branch. That override
+        # is gone (see _reconcile_defer_to_llm): seek-vs-share is the model's call.
+        #
+        # The premise here is synthetic — asked for real, "recommend me a doctor nearby"
+        # classifies tip_seek at 0.98 — so nothing rests on the regex rescuing it.
+        self.assertTrue(
             self._is_tip_ask({"linear_intent": "sharing.tip", "signal_intent": "tip_share", "confidence": 0.9})
         )
         # Too unsure to divert.

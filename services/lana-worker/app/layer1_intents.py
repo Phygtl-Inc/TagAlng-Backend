@@ -599,6 +599,25 @@ def _reconcile_defer_to_llm(
     ):
         return True
 
+    # SEEK vs SHARE is the one call these regexes cannot make. They match nouns and verbs
+    # that sit on BOTH sides of it — "recommend" and "pizza" appear in "can you recommend a
+    # pizza place" and in "I want to recommend Bella Vita, the fig and gorgonzola pizza is
+    # incredible" alike — while the direction lives in the grammar and the context only the
+    # model holds. That second sentence matched the tip_seek pair and was rewritten into a
+    # SEARCH: the user's own recommendation came back as a Google list of restaurants, and
+    # no prompt wording could reach it, because the model had already answered sharing.tip
+    # and was overruled here (dev 2026-09-15).
+    #
+    # So a confident model pick of the OPPOSITE tip direction wins, utterance match or not.
+    # The regexes keep their real job — rescuing a tip wrongly classified as peer/activity
+    # discovery — which is what the docstring above always claimed they were for.
+    if (
+        conf >= 0.6
+        and linear != target_linear
+        and {linear, target_linear} == {"looking.tip", "sharing.tip"}
+    ):
+        return True
+
     # A high-precision structural utterance match ("Dr X is a great dentist",
     # "coffee this weekend") may correct the model only among signal lanes.
     if utterance_match:

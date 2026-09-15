@@ -1885,6 +1885,10 @@ def _run_lana_message(
         session_ctx_in["tip_ready"] = None
         session_ctx_in["tip_enrich_count"] = 0
         session_ctx_in["tip_draft"] = None
+        _LOG.info(
+            "tip_share_armed hint=%s phrase=%s", body.intent_hint,
+            looks_like_tip_share_entry(body.message),
+        )
         # Entering tip-share closes any in-flight pass-along flow + its card.
         session_ctx_in["pass_along_active"] = False
         session_ctx_in["item_draft"] = None

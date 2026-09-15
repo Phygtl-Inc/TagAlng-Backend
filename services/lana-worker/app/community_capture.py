@@ -398,11 +398,15 @@ def publish_community(
         from app.circles_flow import CREATOR_PLACE_PREFIX
         from app.community_question_sets import COMMUNITY_SUBJECT_FIELD
 
-        # draft["name"] is written by the place picker (_set_subject_from_place) and by
-        # nothing else, so on this lane — where the subject is typed, not pinned — it is
-        # empty and the answer is the only place the name exists.
-        name = str(draft.get("name") or "").strip() or str(
-            (draft.get("answers") or {}).get(COMMUNITY_SUBJECT_FIELD) or ""
+        # The SUBJECT ANSWER wins here, and draft["name"] is only the fallback — the
+        # opposite of the grounded lane. draft["name"] is whatever the extractor lifted
+        # verbatim from the opening message, so "I want a community for people who follow
+        # my Jack Russell account" names the community "people who follow my Jack Russell
+        # account". The subject step then asks what it is actually called, and that answer
+        # is the one the creator chose.
+        answers = draft.get("answers") or {}
+        name = str(answers.get(COMMUNITY_SUBJECT_FIELD) or "").strip() or str(
+            draft.get("name") or ""
         ).strip()
         slug = _slugify(name)
         if not slug:
@@ -606,6 +610,17 @@ def run_community_capture_turn(
                 fallback="I couldn't get that up just now — I've kept everything you told me. Want to try again?",
             )
         draft["published"] = True
+        # Creating a community is the strongest possible "I am here" — so the top-of-app
+        # filter follows it. Without this the scope stayed unset and the recommendation
+        # filed two minutes later knew nothing about the community just made (Tommaso,
+        # prod 2026-09-14). app/community_scope.py owns the key.
+        if result.get("place_id"):
+            from app.community_scope import CTX_KEY
+
+            session_ctx[CTX_KEY] = {
+                "place_id": str(result["place_id"]),
+                "name": str(draft.get("name") or "").strip(),
+            }
         draft["community_id"] = result.get("place_id") or result.get("affiliation_id")
         draft["ready"] = True
         session_ctx["community_draft"] = draft

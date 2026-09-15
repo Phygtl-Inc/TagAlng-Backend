@@ -160,8 +160,11 @@ COMMUNITY_TYPE_RULES = (
     "friends = a hangout spot a circle of friends is built around (cafe, bakery, bar). "
     "other = a real community that fits none of the above. "
     "creator = a community with NO location: people gathered around a topic, a creator or "
-    "an online following rather than somewhere they go. Pick this ONLY when there is no "
-    "place at all — a running club that meets at a park is hobby, not creator. "
+    "an online following rather than somewhere they go. Pick this whenever the user talks "
+    "about their OWN audience or channel — \"people who follow my account\", \"my "
+    "subscribers\", \"my channel\", \"my newsletter\", \"link in bio\" — or names a "
+    "community that plainly has no venue. A group that gathers somewhere real is that "
+    "place's type instead: a running club meeting at a park is hobby, not creator. "
     "Pick by what people DO there, never by the building's category."
 )
 

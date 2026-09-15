@@ -2192,7 +2192,16 @@ def run_lana_unified_pipeline(
             phone_verified=phone_verified,
             timer=timer,
         )
+        # A lane releasing was invisible in the log: the turn simply reappeared in
+        # discovery_route with no trace of the capture it had just been thrown out of.
         if tip_share_should_release(user_message, session_ctx, pivot_slots):
+            logging.getLogger(__name__).info(
+                "tip_share_released goal=%s signal=%s linear=%s had_draft=%s",
+                (pivot_slots or {}).get("goal"),
+                (pivot_slots or {}).get("signal_intent"),
+                (pivot_slots or {}).get("linear_intent"),
+                bool(session_ctx.get("tip_draft")),
+            )
             reset_tip_share_state(session_ctx)
         else:
             reply = sanitize_assistant_message(

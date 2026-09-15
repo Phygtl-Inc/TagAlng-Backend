@@ -252,8 +252,21 @@ def note_ask_streak(session_ctx: dict[str, Any], action: NextAction) -> None:
     (with None, never popped — the session merge resurrects popped keys)."""
     if turn_asks_personal_question(action):
         session_ctx["policy_ask_streak"] = ask_streak(session_ctx) + 1
+        # The question itself, for the NEXT turn's classifier. Every other capture in the
+        # app publishes its open question into _active_capture_context; a policy ask
+        # published nothing, so a typed answer arrived with active_capture=none and was
+        # judged on its own words. Prod 2026-09-14: a rapport answer about the Pausa
+        # recommendation ("the fig, gorgonzola with caramelized onions is the best") read
+        # as a BRAND NEW recommendation, and Lana asked which pizzeria he meant while he
+        # sat inside the Pausa community. A chip TAP survived (the pipeline recognises
+        # policy_chip_msgs); only typing was punished.
+        #
+        # Same text the annoyance counter already judges — no second read, no matching.
+        session_ctx["policy_pending_question"] = str(action.utterance or "").strip()[:300]
+        logger.info("policy_question_armed q=%r", session_ctx["policy_pending_question"][:80])
     else:
         session_ctx["policy_ask_streak"] = None
+        session_ctx["policy_pending_question"] = None
 
 
 def parse_next_action(data: Any) -> NextAction | None:
