@@ -61,6 +61,7 @@ LOGIN_CARRY_EXCLUDED: dict[str, str] = {
     "tip_tweak_pending": "a refinement of results the new session has not shown",
     "posting_manage_pending": "acts on the guest's postings, not this account's",
     "policy_pending_question": "the question Lana asked LAST turn; a login interstitial means it is no longer the last thing asked",
+    "policy_recent_asks": "the run of questions before the login; the interstitial ended that run",
     "pending_lane_switch": "turn-scoped routing state",
     "pending_signup_gate": "the login just satisfied it",
     "pending_zip": "re-derived from the account's own home_zip",
