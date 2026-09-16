@@ -689,7 +689,20 @@ def _save_tip(
         # missing in a copy-paste. Best-effort — an untagged tip is still a posted tip.
         place_id = str(draft.get("circle_place_id") or "").strip()
         if place_id and (saved or {}).get("id"):
-            tag_local_signal(user_jwt, signal_id=str(saved["id"]), place_id=place_id)
+            try:
+                tag_local_signal(user_jwt, signal_id=str(saved["id"]), place_id=place_id)
+            except Exception:  # noqa: BLE001
+                # "Best-effort" above was a comment, not code: tag_local_signal raises
+                # not_a_member when the author has left the community since the draft
+                # opened, the outer handler caught it, and the user was told their tip
+                # FAILED while the row sat saved in the table. The tag is a nice-to-have;
+                # the recommendation is the thing.
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "tip_community_tag_failed signal=%s place=%s",
+                    saved["id"], place_id, exc_info=True,
+                )
         return saved, ""
     except Exception as exc:  # noqa: BLE001
         import logging

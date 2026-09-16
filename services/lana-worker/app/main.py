@@ -1626,6 +1626,21 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
+        if purpose == "lana" and not auth.is_anonymous:
+            # Somebody agreed to be asked on a neighbor's behalf, and the outreach email's
+            # button dropped them into an ordinary chat that never mentioned it — so from
+            # their side the button did nothing and the ask died there. Raised once
+            # (surfaced_at), only while the asker is still listening, and it REPLACES the
+            # generic greeting rather than stacking on it: two openings is two asks.
+            try:
+                from app.tip_ask_route import opening_for_pending_ask
+
+                pending_opening = opening_for_pending_ask(auth.user_id, session_ctx)
+                if pending_opening:
+                    opening = pending_opening
+            except Exception:  # noqa: BLE001 — never block a session on this
+                logging.getLogger(__name__).debug("pending_ask_opening_failed", exc_info=True)
+
         if purpose == "lana":
             # The saved preference decides how the conversation STARTS — the
             # opening greets in it. users.locale is read for guests too: every
@@ -3240,6 +3255,41 @@ def hook_signal_matches(
         older_than_minutes=int(older_than_minutes), limit=int(limit)
     )
     return {"ok": True, "notified": notified}
+
+
+@app.get("/asks/mute")
+def mute_neighbor_asks(u: str = "", t: str = ""):
+    """One-tap opt-out from the neighbor-ask emails, straight from the mail.
+
+    A GET with a signed token and no session on purpose: the person we are asking to leave
+    us alone is exactly the person who should not have to log in to do it. The token is an
+    HMAC of their user id under a server-only secret, so the link cannot be guessed or
+    edited into someone else's unsubscribe — and when no secret is configured the link is
+    never put in the mail in the first place (see tip_ask_route.mute_link).
+
+    Returns a page rather than JSON because a human clicked it from an inbox.
+    """
+    from fastapi.responses import HTMLResponse
+
+    from app.tip_ask_route import mute_asks, verify_mute
+
+    if not (u and t and verify_mute(u, t)):
+        raise HTTPException(status_code=403, detail="forbidden")
+    ok = mute_asks(u)
+    message = (
+        "You're unsubscribed. I won't email you about neighbors' recommendation asks again."
+        if ok
+        else "Something went wrong on my side — please reply to the email and I'll sort it."
+    )
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Neighbor asks</title>"
+        "<body style='font:16px/1.5 system-ui;margin:0;display:grid;place-items:center;"
+        "min-height:100vh;background:#faf7f2;color:#2b2724'>"
+        f"<main style='max-width:28rem;padding:2rem;text-align:center'><p>{message}</p></main>",
+        status_code=200 if ok else 500,
+    )
 
 
 @app.post("/lana/places/search", response_model=PlaceSearchResponse)

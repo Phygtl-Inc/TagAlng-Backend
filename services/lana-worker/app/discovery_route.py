@@ -3424,8 +3424,12 @@ def _tip_seek_fallback_reply(
         from app.rec_personalize import personalize_tip_query
 
         claims = load_user_context(user_id).get("existing_claims") or []
+        from app.community_scope import community_name
+
         personalized = personalize_tip_query(
             request=base_query, category=category, claims=claims,
+            # "what should I eat there?" has no subject without this.
+            place=community_name(session_ctx),
         )
         if personalized:
             filters = personalized.get("filters") or []
@@ -3892,6 +3896,29 @@ def _tip_seek_answer_turn(
         # Read (and cleared) by _compose_neighbor_tip_reply below, off the same incoming
         # ctx it composes from: name the community that was empty before widening.
         session_ctx["community_widened_from"] = _comm.get("name")
+        # ...and then actually widen. The peers lane has done this since the top filter
+        # shipped (scoped read, fall through to the neighbourhood when it is empty); the
+        # tip lane took the STAMP and not the second query, so an empty community skipped
+        # the neighbourhood entirely and fell to Google — with a matching tip sitting
+        # unscoped in the area (prod 2026-09-16, asked inside Pausa Bar & Cookery).
+        neighbor_tips = find_neighbor_tips(
+            user_jwt,
+            block_id=block_id,
+            query=detail,
+            category=category,
+            limit=WIDE_TIP_FETCH if wide else 3,
+            locale=str(session_ctx.get("preferred_lang") or "en"),
+            radius_meters=radius_meters() if widen else None,
+            circle_place_id=None,
+            reco_types=_types,
+        )
+        if not neighbor_tips:
+            # Nothing wider either, so this turn goes to Google and its composer never
+            # reads the stamp. Left set, it survives into a LATER turn and tells the user
+            # "nobody at Pausa had one, so these are from the wider neighbourhood" over a
+            # list that has nothing to do with Pausa. The flag describes one turn; clear
+            # it on the turn it described.
+            session_ctx["community_widened_from"] = None
     logging.getLogger(__name__).info(
         "tip_seek_answer.enter block=%s detail=%r category=%r types=%s neighbor_tips=%d "
         "wide=%s",

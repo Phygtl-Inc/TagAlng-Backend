@@ -285,6 +285,19 @@ def save_local_signal(
             notify_new_signal_matches(user_jwt, signal_id=str(result.get("signal_id") or ""))
     except Exception:  # noqa: BLE001 — a notification must never break a save
         pass
+
+    # A shared tip retires whatever Lana asked this person for. Wired HERE, at the single
+    # save point, for the same reason the matcher drain is: a call site that has to
+    # remember will eventually forget, and the cost of forgetting is that a neighbor who
+    # answered gets counted as one who never does, and stops being asked.
+    try:
+        if str(intent or "") == "tip_share":
+            from app.auth import jwt_user_id
+            from app.tip_ask_route import mark_answered
+
+            mark_answered(user_jwt, responder_user_id=str(jwt_user_id(user_jwt) or ""))
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 
@@ -701,6 +714,7 @@ def stamp_signal_saved_ctx(
     when_hint: str | None = None,
     where_hint: str | None = None,
     block_name: str | None = None,
+    ask_outcome: dict[str, Any] | None = None,
 ) -> None:
     _clear_stale_intro_ctx(ctx)
     ctx.pop("block_log_intro_list", None)
@@ -725,6 +739,7 @@ def stamp_signal_saved_ctx(
     attach_tip_to_signal_saved(
         ctx["signal_saved"],
         where_hint=where_hint,
+        ask_outcome=ask_outcome,
     )
     ctx["active_intent"] = active_intent or INTENT_SAVE_SIGNAL
     clear_signal_draft(ctx)

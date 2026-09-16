@@ -215,7 +215,7 @@ class TestOfferReply(unittest.TestCase):
         self.save.assert_called_once()
         self.assertEqual(self.save.call_args.kwargs["intent"], "tip_seek")
         self.assertEqual(ctx["signal_saved"]["signal_id"], "sig-1")
-        self.assertEqual(routing.get("tool_to_call"), "tip_ask_posted")
+        self.assertEqual(routing.get("tool_to_call"), "tip_ask_listening")
         # Offer consumed, removal armed and pointed at the row it would close.
         self.assertIsNone(ctx.get("tip_ask_offer_pending"))
         self.assertEqual(ctx["posting_manage_pending"]["signal_id"], "sig-1")
@@ -265,7 +265,7 @@ class TestOfferReply(unittest.TestCase):
         self.save.assert_called_once()
         self.assertEqual(self.save.call_args.kwargs["intent"], "tip_seek")  # NOT tip_share
         self.assertEqual(self.save.call_args.kwargs["detail_text"], "good doctor")
-        self.assertEqual(routing.get("tool_to_call"), "tip_ask_posted")
+        self.assertEqual(routing.get("tool_to_call"), "tip_ask_listening")
         self.assertIsNone(ctx.get("signal_draft"))
 
     def test_refinement_falls_through_to_the_recommendation_lane(self) -> None:
