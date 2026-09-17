@@ -33,6 +33,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # allow bare intra-package imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # simulations/
 
 # Env comes from the repo-root .env.local (LANA_BASE_URL, OPENAI_API_KEY, SUPABASE_*,
 # SIM_PASSWORD) — the convention every other entry point in this suite follows
@@ -134,6 +135,9 @@ def run(scenarios: list[Scenario], *, backend_kind: str, do_judge: bool,
 def render_report(records: list[RunRecord], *, backend_kind: str, judged: bool) -> str:
     L: list[str] = []
     L.append("# Conversational-Policy eval — report")
+    L.append("")
+    from provenance import header_lines  # noqa: PLC0415
+    L.extend(header_lines(judge_model=judge_mod.JUDGE_MODEL))
     L.append("")
     L.append(f"- backend: `{backend_kind}`  ·  judged axes: `{judged}`  ·  scenarios: {len(records)}")
     if backend_kind == "dry":

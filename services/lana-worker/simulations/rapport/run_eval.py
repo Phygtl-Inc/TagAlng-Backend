@@ -57,6 +57,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 _ROOT = Path(__file__).resolve().parents[2]  # services/lana-worker
 sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # simulations/ -> provenance
 load_dotenv(_ROOT.parents[1] / ".env.local", override=True)
 
 from app.models import ExtractedClaim  # noqa: E402
@@ -414,6 +415,9 @@ def render_report(results: list[FixtureResult], *, judged: bool, vacuous: bool,
                   totals: dict[str, int], axis_failures: list[tuple[str, str]]) -> str:
     L: list[str] = []
     L.append("# Rapport claim-extraction eval — report")
+    L.append("")
+    from provenance import header_lines  # noqa: PLC0415
+    L.extend(header_lines(judge_model=_GAP_QUALITY_MODEL))
     L.append("")
     L.append("> ⚠️ Contains **pre-redaction** extractor output, i.e. the fixtures' planted PII. "
              "`simulations/*/out/` is gitignored — do not commit or paste this file.")

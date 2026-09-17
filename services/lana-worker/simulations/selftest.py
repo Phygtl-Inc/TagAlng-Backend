@@ -327,6 +327,61 @@ def main() -> int:
     check("an invented price still fires on an unsourced turn", len(_hits_bare) == 1)
     check("...and does NOT fire once the turn has a real source", len(_hits_src) == 0)
 
+    # ---- provenance: which credential produced the numbers -------------------------------
+    #
+    # Added after 2026-09-15/16, when a personal OPENAI_API_KEY exported in a shell shadowed the
+    # repo key from .env.local. The shell key was out of credits, every call 429'd, and
+    # `extract_entities_from_message` swallows BOTH its OpenAI and its Vertex failure and returns
+    # [] — so the symptom was "the extractor found nothing", not "your key is dead". It cost a day.
+    #
+    # `shadowed_key_warning` is the tripwire. Both directions matter as much as they do for the
+    # OOC guard above: a missed shadow means a report quietly describes the wrong account, and a
+    # false positive puts a scary warning on top of a perfectly good run.
+    import os
+    import tempfile
+
+    import provenance as _prov
+
+    _tmp = Path(tempfile.mkdtemp())
+    _envf = _tmp / ".env.local"
+    _envf.write_text("OPENAI_API_KEY=sk-proj-FILEKEY0000aaaa\n", encoding="utf-8")
+    _saved = os.environ.get("OPENAI_API_KEY")
+    try:
+        os.environ["OPENAI_API_KEY"] = "sk-proj-SHELLKEY111bbbb"
+        _w = _prov.shadowed_key_warning(str(_envf))
+        check("a shell key shadowing the repo key is detected",
+              bool(_w) and "bbbb" in _w and "aaaa" in _w)
+        check("...and the fingerprint names the key actually in use",
+              _prov.key_fingerprint() == "..bbbb")
+
+        os.environ["OPENAI_API_KEY"] = "sk-proj-FILEKEY0000aaaa"
+        check("no warning when the shell key IS the repo key",
+              _prov.shadowed_key_warning(str(_envf)) is None)
+
+        os.environ.pop("OPENAI_API_KEY", None)
+        check("no warning when nothing is exported (nothing to shadow)",
+              _prov.shadowed_key_warning(str(_envf)) is None)
+        check("an absent key reads as (unset), not as a fingerprint",
+              _prov.key_fingerprint() == "(unset)")
+
+        os.environ["OPENAI_API_KEY"] = "sk-proj-SHELLKEY111bbbb"
+        check("a missing env file is not an error — a diagnostic must never break a run",
+              _prov.shadowed_key_warning(str(_tmp / "absent.env")) is None)
+
+        # The console line carries the fingerprint, and Windows consoles here are cp950.
+        # A provenance line must not be the thing that kills the run it was added to explain.
+        try:
+            _prov.console_line().encode("cp950")
+            _enc = True
+        except UnicodeEncodeError:
+            _enc = False
+        check("console_line survives a cp950 console", _enc)
+    finally:
+        if _saved is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = _saved
+
     print()
     if _failures:
         print(f"[selftest] {len(_failures)} FAILED: {_failures}")
