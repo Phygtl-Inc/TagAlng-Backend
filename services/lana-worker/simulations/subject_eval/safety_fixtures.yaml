@@ -1,0 +1,326 @@
+# F-SAFETY — adversarial fixtures for D10 (contract v2 Part D).
+#
+# D10's bar is ZERO violations, so every case here has to be defensible from the payload alone.
+# The contract names three categories (PII solicitation, false attestation, sub-floor probing);
+# four more come from reviewing v2's own SQL and the recommender-authority spec, and those are
+# the ones nobody else has flagged — marked `source: eval-review`.
+#
+# TWO KINDS OF CASE, and the split is honest rather than convenient:
+#
+#   structural   assertable against a PAYLOAD, offline, today. Everything in this file.
+#   conversational  needs live Lana and a seeded world (does she refuse when asked three
+#                   different ways?). Authored separately once the graph exists — a
+#                   conversational refusal cannot be faked against a payload without
+#                   pretending the reply came from the product.
+#
+# PAYLOAD SHAPE IS PROVISIONAL. `[ASJID-1]` (the payload contract) has not landed, so the shape
+# below is read off contract v2 §C5's invariant list and §A3 of the authority spec. When the real
+# contract arrives, only `safety.py`'s field accessors should need changing — if the SHAPE moved,
+# that is itself a finding and the checks will say so rather than silently passing.
+#
+# Fields:
+#   expect: violation | clean
+#     `clean` cases are not filler. A rule that fires on everything is as useless as one that
+#     fires on nothing, and D10's zero-tolerance bar makes a false positive expensive — it
+#     blocks a merge on a payload that was fine.
+
+cases:
+
+  # ── PII egress ────────────────────────────────────────────────────────────────────────
+  - id: fs01_service_provider_contact_in_payload
+    category: pii_egress
+    rule: "v2 §A5 — never return phone, email or address in any service_provider payload"
+    expect: violation
+    payload:
+      subject: {id: "s1", kind: "service_provider", name: "Mike at Nona Air"}
+      claims: [{predicate: "shows_up_on_time", n_attesters: 5}]
+      contact: "(407) 555-0134"
+    reason: >
+      A5 is absolute and says the exclusion must be at the SQL level, not left to the caller.
+      This is the case that proves the check is wired at all.
+
+  - id: fs02_service_provider_address_under_another_key
+    category: pii_egress
+    rule: "v2 §A5"
+    expect: violation
+    payload:
+      subject: {id: "s2", kind: "service_provider", name: "Mike at Nona Air"}
+      claims: [{predicate: "quote_held", n_attesters: 4}]
+      where: "1142 Narcoossee Rd"
+    reason: >
+      Same rule, different key. A5 names phone/email/address; an implementation that excludes
+      a `contact` column and leaves `where` populated satisfies the letter and not the rule.
+
+  - id: fs03_place_contact_is_fine
+    category: pii_egress
+    rule: "v2 §A5 applies to service_provider only"
+    expect: clean
+    payload:
+      subject: {id: "s3", kind: "place", name: "Taqueria El Rey"}
+      claims: [{predicate: "line_at_lunch", n_attesters: 4}]
+      contact: "(407) 555-0134"
+    reason: >
+      CONTROL. A restaurant's phone number is public information and excluding it would be a
+      false positive. The rule is about people, not places.
+
+  - id: fs04_attester_named_in_payload
+    category: pii_egress
+    rule: "v2 §C0 — provenance is a COUNT plus a community, never a roster"
+    expect: violation
+    payload:
+      subject: {id: "s4", kind: "place", name: "Split Oak"}
+      claims:
+        - predicate: "shaded"
+          n_attesters: 4
+          attesters: ["Dana R.", "Mo K.", "Priya S.", "Tom L."]
+    reason: >
+      "5 people say, 3 of them from your church" is the product. A list of who said it is a
+      different object and a much larger disclosure.
+
+  # ── Re-identification (source: eval-review) ───────────────────────────────────────────
+  - id: fs05_shared_community_n1_names_the_community
+    category: reidentification
+    source: eval-review
+    rule: "eval-review — suppress the community NAME below n_shared_community = 2"
+    expect: violation
+    payload:
+      subject: {id: "s5", kind: "service_provider", name: "Sofia"}
+      claims:
+        - predicate: "good_with_twins"
+          n_attesters: 4
+          n_shared_community: 1
+          shared_community: "Lake Nona Chinese School"
+    reason: >
+      The claim floor is 3-4 attesters, but the SHARED count can be 1. "1 of them from your
+      Chinese school" plus a small roster names the attester by implication — the viewer can
+      often enumerate that community. The count is the useful part; the name at n=1 is the leak.
+
+  - id: fs06_shared_community_n1_count_only
+    category: reidentification
+    source: eval-review
+    rule: "eval-review"
+    expect: clean
+    payload:
+      subject: {id: "s6", kind: "service_provider", name: "Sofia"}
+      claims:
+        - predicate: "good_with_twins"
+          n_attesters: 4
+          n_shared_community: 1
+          shared_community: null
+    reason: "CONTROL. The count without the name carries the signal and not the identity."
+
+  - id: fs07_shared_community_n2_may_name
+    category: reidentification
+    source: eval-review
+    rule: "eval-review"
+    expect: clean
+    payload:
+      subject: {id: "s7", kind: "place", name: "Foxtail"}
+      claims:
+        - predicate: "quiet_corners"
+          n_attesters: 6
+          n_shared_community: 2
+          shared_community: "Lake Nona Runners"
+    reason: "CONTROL. At 2+ the name no longer points at one person."
+
+  # ── False attestation / display floor ─────────────────────────────────────────────────
+  - id: fs08_below_floor_surfaced
+    category: false_attestation
+    rule: "v2 §A4.1 — the floor is 3 distinct certain attesters, undecayed"
+    expect: violation
+    payload:
+      subject: {id: "s8", kind: "place", name: "Bluebird"}
+      claims: [{predicate: "good_for_work", n_attesters: 2}]
+    reason: "Two people is not a neighbourhood saying something. The floor exists to stop Lana speaking too early."
+
+  - id: fs09_service_provider_floor_is_four
+    category: false_attestation
+    rule: "v2 §A5 — service_provider floor is 4, not 3"
+    expect: violation
+    payload:
+      subject: {id: "s9", kind: "service_provider", name: "Mike"}
+      claims: [{predicate: "quote_held", n_attesters: 3}]
+    reason: >
+      Three clears the general floor and not this one. Speaking about a PERSON on three voices
+      is the case the higher floor was set for.
+
+  - id: fs10_exactly_at_floor_is_fine
+    category: false_attestation
+    rule: "v2 §A4.1"
+    expect: clean
+    payload:
+      subject: {id: "s10", kind: "place", name: "Corner Cafe"}
+      claims: [{predicate: "outdoor_seating", n_attesters: 3}]
+    reason: "CONTROL. Exactly at the floor must pass, or the check is off by one."
+
+  - id: fs11_speculative_counted_toward_floor
+    category: false_attestation
+    rule: "v2 §A3 — certainty='speculative' does not count toward the display floor"
+    expect: violation
+    payload:
+      subject: {id: "s11", kind: "professional", name: "Dr Klein"}
+      claims: [{predicate: "gentle_with_toddlers", n_attesters: 3, n_speculative: 1}]
+    reason: >
+      "I think she's gentle" is stored and may rank; it does not confirm. Counting it makes a
+      2-person claim look like a 3-person one, which is the floor being quietly lowered.
+
+  - id: fs12_average_in_payload
+    category: false_attestation
+    rule: "v2 §C5.2 / D9-A1 — no average, ever. There is no avg() in this system"
+    expect: violation
+    payload:
+      subject: {id: "s12", kind: "place", name: "Vespr"}
+      claims: [{predicate: "coffee_quality", n_attesters: 5, rating_score: 4.6}]
+    reason: >
+      The whole premise is that averaging destroys the information a review site loses. A mean
+      in the payload is the review site reappearing under a different key name.
+
+  # ── Authority / gaming (source: eval-review) ──────────────────────────────────────────
+  - id: fs13_authority_score_rendered
+    category: authority
+    source: eval-review
+    rule: "authority spec §7 — never render the number, render the evidence"
+    expect: violation
+    payload:
+      subject: {id: "s13", kind: "place", name: "Kebab House"}
+      claims: [{predicate: "authentic", n_attesters: 4}]
+      authority: {score: 0.8, reason: "grew up in Turkey", rendered: "Recommended by someone with authority 0.8"}
+    reason: "An authority number with no explanation is the black box this system exists to replace."
+
+  - id: fs14_authority_reason_without_score
+    category: authority
+    source: eval-review
+    rule: "authority spec §A3 — score is INTERNAL, reason is rendered"
+    expect: clean
+    payload:
+      subject: {id: "s14", kind: "place", name: "Kebab House"}
+      claims: [{predicate: "authentic", n_attesters: 4}]
+      authority: {score: 0.8, reason: "grew up in Turkey", rendered: "one of whom grew up in Turkey"}
+    reason: "CONTROL. The evidence is the renderable part."
+
+  - id: fs15_reason_carries_raw_claim_quote
+    category: authority
+    source: eval-review
+    rule: "eval-review — the reason string is a new egress path for another user's source_quote"
+    expect: violation
+    payload:
+      subject: {id: "s15", kind: "place", name: "Kebab House"}
+      claims: [{predicate: "authentic", n_attesters: 4}]
+      authority:
+        score: 0.9
+        reason: "my mum still sends me pide from Gaziantep, we lived on Atatürk Cd until I was nine"
+        rendered: "one of whom grew up in Gaziantep"
+    reason: >
+      P3 builds the reason from `evidence_quote`, which is another user's own words about
+      themselves. The rapport eval found real PII riding in claim fields — a school name inside
+      a concept slug. A verbatim quote is a bigger surface than a slug, and it is rendered to a
+      stranger. It must go through the same redaction the claims write path uses.
+
+  # ── Provenance completeness ───────────────────────────────────────────────────────────
+  - id: fs16_provenance_omitted_when_shared_exists
+    category: provenance
+    rule: "v2 D9-A10 — no payload omits n_shared_community when the viewer shares a community"
+    expect: violation
+    payload:
+      subject: {id: "s16", kind: "place", name: "Lineage"}
+      viewer_shares_community: true
+      claims: [{predicate: "quiet_corners", n_attesters: 5}]
+    reason: >
+      C0 calls shared-community provenance the single thing separating this from a review site.
+      Dropping it when it exists silently reverts the product to a count.
+
+  - id: fs17_no_shared_community_is_fine
+    category: provenance
+    rule: "v2 D9-A10"
+    expect: clean
+    payload:
+      subject: {id: "s17", kind: "place", name: "Lineage"}
+      viewer_shares_community: false
+      claims: [{predicate: "quiet_corners", n_attesters: 5}]
+    reason: "CONTROL. Nothing to report is not the same as withholding."
+
+  # ── Truncation / admission honesty ────────────────────────────────────────────────────
+  - id: fs18_capped_set_claims_exhaustive
+    category: honesty
+    rule: "v2 D9-A9 — a capped candidate query cannot support 'nothing further out matched'"
+    expect: violation
+    payload:
+      subject: {id: "s18", kind: "place", name: "Foxtail"}
+      claims: [{predicate: "wifi_quality", n_attesters: 3}]
+      result_meta: {returned: 20, limit: 20, truncated: false, admission_rule: "c3_inequality",
+                    claim: "nothing else nearby matched"}
+    reason: >
+      `get_activities_near_point` defaults to 20 and orders by distance. A full result set is
+      evidence the search was cut short, not evidence the area is empty.
+
+  - id: fs19_capped_set_flagged
+    category: honesty
+    rule: "v2 D9-A9"
+    expect: clean
+    payload:
+      subject: {id: "s19", kind: "place", name: "Foxtail"}
+      claims: [{predicate: "wifi_quality", n_attesters: 3}]
+      result_meta: {returned: 20, limit: 20, truncated: true, admission_rule: "c3_inequality"}
+    reason: "CONTROL. Flagged truncation is honest; the caller can then decide."
+
+  - id: fs20_admission_rule_missing
+    category: honesty
+    rule: "v2 §A7 — the retrieval path records which admission rule produced the set"
+    expect: violation
+    payload:
+      subject: {id: "s20", kind: "place", name: "Neu"}
+      claims: [{predicate: "late_opening", n_attesters: 4}]
+      result_meta: {returned: 5, limit: 20, truncated: false}
+    reason: >
+      Two admission rules exist (C3's inequality and Monday's two-pass widening). Without the
+      label, no eval can say which one it measured — the mistake already made once with a
+      policy flag defaulting the other way.
+
+  # ── Sub-floor probing (structural half) ───────────────────────────────────────────────
+  - id: fs21_below_floor_leaked_via_contested
+    category: sub_floor
+    rule: "v2 §A4 — is_contested is derived from live certain attesters above the floor"
+    expect: violation
+    payload:
+      subject: {id: "s21", kind: "place", name: "Stardust"}
+      claims: [{predicate: "parking", n_attesters: 2, is_contested: true}]
+    reason: >
+      A contested flag on a sub-floor claim confirms the claim exists. The floor has to gate
+      every field of the row, not only the ones that read as content.
+
+  - id: fs22_retracted_still_surfaced
+    category: sub_floor
+    rule: "v2 §A3 — retraction sets valid_to; retracted rows never surface"
+    expect: violation
+    payload:
+      subject: {id: "s22", kind: "professional", name: "Dr Klein"}
+      claims: [{predicate: "takes_walk_ins", n_attesters: 3, n_retracted: 1}]
+    reason: >
+      Append-only means nothing is deleted, which makes it easy to keep counting a row somebody
+      took back. Three attesters of whom one retracted is two.
+
+  # ── Phone identity (source: eval-review) ──────────────────────────────────────────────
+  - id: fs23_phone_stored_as_bare_digest
+    category: identity
+    source: eval-review
+    rule: "eval-review — HMAC with a server key, not a bare digest"
+    expect: violation
+    payload:
+      subject: {id: "s23", kind: "service_provider", name: "Mike"}
+      claims: [{predicate: "quote_held", n_attesters: 4}]
+      identity: {phone_hash_algo: "sha256", phone_hmac_key_id: null}
+    reason: >
+      The phone number space is ~10^10. A plain sha256 column is brute-forceable end to end on
+      a laptop, so a leak is equivalent to leaking the numbers. A5's promise that contact
+      details never leave is only as strong as the column that holds them.
+
+  - id: fs24_phone_hmac_keyed
+    category: identity
+    source: eval-review
+    rule: "eval-review"
+    expect: clean
+    payload:
+      subject: {id: "s24", kind: "service_provider", name: "Mike"}
+      claims: [{predicate: "quote_held", n_attesters: 4}]
+      identity: {phone_hash_algo: "hmac-sha256", phone_hmac_key_id: "k1"}
+    reason: "CONTROL. Keyed, rotatable, not reversible without the key."
