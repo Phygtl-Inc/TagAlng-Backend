@@ -11,7 +11,7 @@ Backend/product fixes belong to Asjid (backend), Yunchao/Aki (AI/prompts), Tomma
 The deliverable for a found product bug is a clear write-up (often a root-level `*_HANDOFF.md`),
 not an edit to Lana's logic. Fixing eval *rubrics/harnesses* here is in scope; fixing Lana is not.
 
-## The four pipelines here
+## The six pipelines here
 
 | Path | What it evals | Target |
 |---|---|---|
@@ -19,10 +19,27 @@ not an edit to Lana's logic. Fixing eval *rubrics/harnesses* here is in scope; f
 | `rapport/` | the claim-extraction pass (`vertex_extract`) + PII redaction | real extractor, no DB |
 | `circles_zip/` | onion matcher + ZIP-unlock state machine | stub ↔ real (SIM_BACKEND) |
 | `policy_eval/` | conversational-policy decisions + lingo + safety | stub ↔ live adapter |
+| `reco_eval/` | recommendation capture — the questions Lana writes, and the answers the flow accepts | real generator in-process, no DB |
+| `subject_eval/` | the subject-graph / recommender-authority spec (Part D + authority) — resolver, elicitation, F-SAFETY, extraction baselines, topic/authority invariants | mix: real dev-data reads, offline stubs where the product hasn't shipped, one real RPC (`attester_authority`) |
+
+`subject_eval/` is the least uniform of the six on purpose: contract v2's subject graph
+(`subject_context()`, `subject`/`attestation` tables) hasn't shipped, so its D7/D9/T2 checks run
+against a stub built from the accepted spec text, swapped for the real thing the day it lands.
+Everything that CAN run against real data already does — D3 (resolver), N1 (τ calibration), N2
+(extractor baseline) and the band-spread measurement all read real (non-test) rows from dev.
+T3 (anti-gaming) is the newest real-not-stub piece: `attester_authority()` shipped 2026-09-17, so
+it mirrors the deployed SQL formula and optionally calls the live RPC once, safely, against a
+guaranteed-empty user.
 
 Each has its own `README.md` (this dir uses `SIMULATION_PIPELINE.md`; `LOCAL_STACK.md` covers
 running any of them against a local Supabase stack). `circles_zip/` and
 `policy_eval/` target features that don't fully exist in code yet, so they use a swappable seam.
+
+`reco_eval/` is the only one whose subject is **nondeterministic enough that a single run means
+nothing**: identical calls to the question generator return six questions, or three, or none.
+Every number it reports is a rate over `--trials`, never a verdict. Its Arm B (what the flow
+accepts as an answer) needs no key and no server and runs in seconds, which makes it the
+cheapest real signal in the suite.
 
 ## Conventions that recur across the suite
 

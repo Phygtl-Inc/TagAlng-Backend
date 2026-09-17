@@ -45,6 +45,35 @@ jobs:
         working-directory: services/lana-worker
         run: pip install -r requirements.txt
 
+      # Offline: no secrets, no database, no API key, seconds to run. Deliberately BEFORE the
+      # live matrix so a broken check fails fast instead of after 25 minutes of live turns.
+      #
+      # PyYAML is installed HERE and not in the step above on purpose: it is absent from the
+      # worker's requirements.txt, and reco_eval reads fixtures.yaml — but the worker pins
+      # openai>=1.55,<2 while simulations/requirements.txt pins >=2.50,<3, so installing both
+      # files in one step resolves one of them away.
+      #
+      # What each command is protecting:
+      #   selftest.py  every mechanical axis fed a planted violation AND a clean input, plus
+      #                the drift tripwires (the consent question, the per-type floor, the
+      #                280-char storage transform — all copies of product values).
+      #   --dry-run --gate   the whole pipeline end to end on canned data. The --gate matters:
+      #                without it run_eval exits 0 even on a HARD_FAIL, so the step would only
+      #                have caught a crash. The dry set is built to pass every axis, so any
+      #                failure here is a regression in a check or in validate_steps itself.
+      #   --arm answers --gate   fails ONLY if a good answer starts being rejected. §12.4 rules
+      #                out telling a neighbour their recommendation was not good enough, so
+      #                that is the one regression here worth blocking a PR over. Accepted junk
+      #                is reported as a rate, not gated — it is the known state of the product
+      #                today, and a permanently red gate is an ignored gate.
+      - name: Recommendation-capture checks (offline)
+        working-directory: services/lana-worker/simulations/reco_eval
+        run: |
+          pip install "PyYAML>=6.0.2,<7"
+          python selftest.py
+          python run_eval.py --dry-run --gate
+          python run_eval.py --arm answers --validator shipped --gate
+
       - name: Run simulation matrix against PR branch
         working-directory: services/lana-worker/simulations
         env:

@@ -49,3 +49,42 @@ jobs:
           SIM_ALLOW_NONLOCAL_WRITES:  "1"
           GIT_SHA:                    ${{ github.sha }}
         run: python runner.py
+
+      # The recommendation capture, against the REAL question generator in-process. Nightly
+      # rather than on the gate because it costs model calls and because the generator is
+      # nondeterministic enough that a cheap run would report sampling noise.
+      #
+      # WHY 9 TRIALS AND NOT 5. The headline number is the static-fallback rate. Three
+      # measurements to date — 13/30, 11/30 and 3/7 — pool to 27/67 = 40% with a 95% Wilson
+      # interval of 29-52%. At 11 fixtures x 5 trials (n=55) the interval is still about
+      # +/-13pp, wide enough that an ordinary run-to-run swing reads as a regression. n=99
+      # (--trials 9) brings it to roughly +/-10pp for 198 calls, which is the point where the
+      # cost stops buying much: +/-5pp would need ~370 trials and 740 calls.
+      # run_eval prints the interval either way, so the number can never be quoted as a point.
+      #
+      # No --gate: this run reports RATES. Its findings are about the product's current state,
+      # not about the PR, and the offline half that IS a regression gate already ran on the PR.
+      # continue-on-error so a flaky model call cannot mask the matrix result above it.
+      - name: Recommendation capture (real generator, 9 trials)
+        working-directory: services/lana-worker/simulations/reco_eval
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
+          # Both providers are configured in some environments, and llm.py silently re-serves a
+          # retryable failure from Vertex Gemini. An eval that cannot name the model that
+          # produced the set is not measuring anything — fail loudly instead.
+          LANA_LLM_FALLBACK: "0"
+        run: |
+          pip install "PyYAML>=6.0.2,<7"
+          python run_eval.py --arm questions --backend inproc --trials 9 --judge \
+            --out out/report_questions.md
+          python run_eval.py --arm answers --validator reference \
+            --out out/report_answers_reference.md
+
+      - name: Upload recommendation-capture reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reco-eval-reports
+          path: services/lana-worker/simulations/reco_eval/out/*.md
+          if-no-files-found: warn
