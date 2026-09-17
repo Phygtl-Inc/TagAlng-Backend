@@ -33,6 +33,7 @@ _CONCEPT_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 # gap_id → definition. gap_id is free-form (slug); covers_concept must satisfy _CONCEPT_RE.
 #   why_frame_template → the tile teaser (may interpolate the triggering claim's {label}).
 #   question           → the actual question shown under the teaser (static, clear sentence).
+#   answer_options (optional) → up to 3 one-tap answers for the card; free text without.
 #   requires_any_keyword (optional) → the gap only opens if one of the user's active claim
 #     labels/concepts contains one of these tokens (so, e.g., we don't ask about kids unless
 #     she's actually mentioned kids). Absent = open on the parent_bucket alone.
@@ -60,6 +61,12 @@ GAP_TREE: dict[str, dict[str, Any]] = {
         "covers_concept": "relocation_recency",
         "why_frame_template": "about settling into the neighborhood…",
         "question": "How long have you been in the neighborhood?",
+        # Tappable answers, shipped with the cold seed (open_cold_seed_gaps). These are
+        # the USER's possible replies, not Lana's prose — the question itself is already
+        # fixed here, and a first-in-area user handed a bare free-text box answers
+        # nothing, while a user with neighbors gets AI-authored chips from the synth.
+        # Max 3: the card renders three, same cap open_semantic_gap applies.
+        "answer_options": ["Just moved in", "A year or two", "Years now"],
         "sensitivity_tier": "LOW",
         "unlock_score": 0.60,
     },
@@ -125,6 +132,7 @@ GAP_TREE: dict[str, dict[str, Any]] = {
         "covers_concept": "free_windows",
         "why_frame_template": "about when you get a free moment…",
         "question": "When do you usually get a free moment?",
+        "answer_options": ["Mornings", "Evenings", "Weekends"],
         "sensitivity_tier": "LOW",
         "unlock_score": 0.50,
     },

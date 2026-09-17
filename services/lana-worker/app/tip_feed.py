@@ -118,6 +118,10 @@ def _row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "detail_text": legacy or None,
         "created_at": str(raw.get("created_at") or "") or None,
         "peer_user_id": str(raw.get("peer_user_id") or "").strip() or None,
+        # "connected" / "intro_sent" when a nudge to this recommender would bounce —
+        # stamped by the endpoint, which knows who is reading. Absent means "nudgeable",
+        # and the card shows the button.
+        "connection": str(raw.get("connection") or "").strip() or None,
         "nickname": str(raw.get("neighbor_label") or "").strip() or None,
         "avatar_url": str(raw.get("avatar_url") or "").strip() or None,
         # No distance. It measured the AUTHOR's home to the reader's, which is neither the
@@ -141,6 +145,7 @@ def recent_tips(
     tab: str = "recent",
     limit: int = PAGE_SIZE,
     circle_place_id: str | None = None,
+    reco_types: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """One page of the feed. [] on any failure — a browse surface must not error out.
 
@@ -160,6 +165,13 @@ def recent_tips(
     }
     if circle_place_id:
         payload["p_circle_place_id"] = str(circle_place_id)
+    # The Find screen's category chips: "Recent recommendations" sits in that same chip
+    # row, so a pick there scopes the browse too (20261128120000).
+    from app.reco_question_sets import normalize_types
+
+    picked = normalize_types(reco_types)
+    if picked:
+        payload["p_reco_types"] = picked
     try:
         raw = call_rpc(user_jwt, "recent_neighbor_tips", payload)
     except Exception:
@@ -167,7 +179,49 @@ def recent_tips(
         return []
     rows = [_row(r) for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
     out = [r for r in rows if r]
-    logger.info("recent_tips tab=%s rows=%d", wanted, len(out))
+    logger.info("recent_tips tab=%s types=%s rows=%d", wanted, picked or None, len(out))
+    return out
+
+
+def neighbor_tip_type_counts(
+    user_jwt: str,
+    *,
+    block_id: str | None = None,
+    radius_meters: float | None = None,
+    circle_place_id: str | None = None,
+) -> dict[str, int]:
+    """How many recommendations of each type this caller can actually SEE (20261130120000).
+
+    What the Find-a-rec chip row is built from, so it never offers a category with nothing
+    behind it. Counted through the search's own visibility rules — own rows excluded, same
+    scope — because a census with a looser predicate is how "Restaurants" came to invite a
+    tap when the only restaurant tip was the reader's own.
+
+    {} on any failure: a chip row that falls back to showing every category is a worse
+    screen, not a broken one.
+    """
+    payload: dict[str, Any] = {}
+    if block_id:
+        payload["p_block_id"] = str(block_id)
+    if radius_meters is not None:
+        payload["p_radius_meters"] = float(radius_meters)
+    if circle_place_id:
+        payload["p_circle_place_id"] = str(circle_place_id)
+    if not payload:
+        return {}
+    try:
+        raw = call_rpc(user_jwt, "neighbor_tip_type_counts", payload)
+    except Exception:
+        logger.exception("tip_type_counts_failed")
+        return {}
+    out: dict[str, int] = {}
+    for row in raw if isinstance(raw, list) else []:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("reco_type") or "").strip()
+        if key:
+            out[key] = int(row.get("n") or 0)
+    logger.info("tip_type_counts scope=%s counts=%s", list(payload), out)
     return out
 
 

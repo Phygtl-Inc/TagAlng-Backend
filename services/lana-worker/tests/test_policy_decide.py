@@ -418,3 +418,52 @@ class TestRevisionNote(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQuestionsAlreadyAsked(unittest.TestCase):
+    """The model is handed its own recent questions, not just a count.
+
+    A count says "you asked three times". It cannot say "all three circled one
+    answer", which is what actually reads as an interrogation — Tommaso, prod
+    2026-09-15: "what stands out most?" -> "the mix, or the sharp bite?" -> "the
+    figs, the gorgonzola, or the onions?" -> "what about that mix do you like most?".
+    Each defensible alone; the set is a cross-examination about pizza toppings.
+    """
+
+    def test_asked_questions_accumulate_newest_last(self) -> None:
+        ctx: dict = {}
+        for q in ("What stands out most?", "The mix, or the sharp bite?",
+                  "Figs, gorgonzola, or onions?"):
+            note_ask_streak(ctx, NextAction(kind="reply", utterance=q))
+        self.assertEqual(
+            ctx["policy_recent_asks"],
+            ["What stands out most?", "The mix, or the sharp bite?",
+             "Figs, gorgonzola, or onions?"],
+        )
+
+    def test_the_list_is_capped_so_the_payload_cannot_grow(self) -> None:
+        ctx: dict = {}
+        for i in range(8):
+            note_ask_streak(ctx, NextAction(kind="reply", utterance=f"Q{i}?"))
+        self.assertEqual(ctx["policy_recent_asks"], ["Q5?", "Q6?", "Q7?"])
+
+    def test_giving_instead_of_asking_ends_the_run(self) -> None:
+        """Once she gives, the run is over — the next question starts fresh, so a
+        question three turns and a conversation later is not flagged as drilling."""
+        ctx: dict = {}
+        note_ask_streak(ctx, NextAction(kind="reply", utterance="What stands out?"))
+        note_ask_streak(ctx, NextAction(kind="bridge_offer", utterance="Want me to post it?"))
+        self.assertIsNone(ctx["policy_recent_asks"])
+        self.assertIsNone(ctx["policy_ask_streak"])
+
+    def test_an_ask_gap_stores_what_the_user_actually_read(self) -> None:
+        """note_ask_streak runs after _wire_ask_gap_action, so the vetted question is
+        already merged into the utterance by this point."""
+        ctx: dict = {}
+        note_ask_streak(ctx, NextAction(
+            kind="ask_gap", utterance="Pizza's a good one — which spot do you go to?"
+        ))
+        self.assertEqual(
+            ctx["policy_recent_asks"], ["Pizza's a good one — which spot do you go to?"]
+        )
+

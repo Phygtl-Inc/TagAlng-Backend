@@ -64,6 +64,7 @@ def email_html(
     badge: str | None = None,
     kicker: str | None = None,
     facts: list[tuple[str, str]] | None = None,
+    footer_note: str | None = None,
 ) -> str:
     """One branded transactional email. The only email layout in the app — every
     notification renders through here, so it is worth the inline CSS.
@@ -76,7 +77,12 @@ def email_html(
       kicker     small caps line above the heading ("Community · Lake Nona YMCA").
       facts      (label, value) rows in a bordered block — when, where, who. A meet
                  invite that makes someone open the app to learn the date has failed.
-      note       one muted line under the body.
+      note       one muted line under the body, ABOVE the CTA. HTML is passed through,
+                 so a link belongs here as an <a>, never as a bare URL — mail clients
+                 auto-link a raw one and it wraps across three lines as visible text.
+      footer_note  replaces the default "you joined a community" footer. Any mail that
+                 is NOT about a community must pass this, and it is also where an
+                 unsubscribe belongs: below the CTA, not competing with it.
 
     Layout is a single centred table (Outlook ignores max-width on divs) holding one
     card. Colors are set explicitly on every block: a client that flips to dark mode
@@ -151,10 +157,16 @@ def email_html(
         + cta_html
         + "</td></tr>"
         f'<tr><td style="padding:18px 26px 0;font-size:12px;line-height:1.5;'
-        f'color:{_MUTED};text-align:center">You are getting this because you joined a '
-        f'community in Lana.<br>'
-        f'<a href="{app_url("/")}" style="color:{_MUTED};text-decoration:underline">'
-        "Open Lana</a> to change what you hear about.</td></tr>"
+        f'color:{_MUTED};text-align:center">'
+        + (
+            footer_note
+            or (
+                "You are getting this because you joined a community in Lana.<br>"
+                f'<a href="{app_url("/")}" style="color:{_MUTED};text-decoration:underline">'
+                "Open Lana</a> to change what you hear about."
+            )
+        )
+        + "</td></tr>"
         "</table></div>"
     )
 

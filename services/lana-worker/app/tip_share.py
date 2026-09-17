@@ -63,7 +63,7 @@ Return ONE compact JSON object with exactly these keys:
 - category: what kind of recommendation, e.g. "pediatric dentist","restaurant","playground","plumber","pediatrician". null if unclear.
 - trait: why it's good / the standout detail, e.g. "twin-friendly","amazing tacos","gentle with toddlers". null if not stated.
 - locality: neighborhood/area if mentioned, e.g. "Lake Nona". null otherwise.
-- reco_type: EXACTLY one of <<TYPES>>, or null if genuinely unclear. <<TYPE_RULES>>
+- reco_type: EXACTLY one of <<TYPES>>. NEVER null — 'other' is the answer when none of the rest fits. <<TYPE_RULES>>
 - answers: object mapping any of the CURRENT TYPE FIELDS listed below to what the user ALREADY said,
   verbatim-ish and short. Omit a field rather than guess it. {{}} when nothing was said.
 <<STEPS_SPEC>>- reply_role: what the user's new message IS, relative to the question they were just
@@ -613,6 +613,23 @@ def resolve_community(
                 draft["circle_place_id"] = c["place_id"]
                 draft["circle_name"] = c["name"]
                 return
+    # The subject IS one of their communities — a member recommending Pausa does not need
+    # to be asked whether this is about Pausa. Pre-ANSWERS the step rather than only
+    # pre-filling the id, which is what takes the question off the walk entirely; the chip
+    # still corrects it. Tommaso created the Pausa community and was asked to name it again
+    # eleven minutes later (prod 2026-09-14).
+    #
+    # Full-name match, not a substring: "Joe" must not claim "Joe's Gym" off a three-letter
+    # subject. Their own answer above already returned, so this never overrides a choice.
+    name = str(draft.get("name") or "").strip().casefold()
+    if name:
+        for c in (session_ctx.get("tip_communities") or my_communities(user_jwt)):
+            label = str(c.get("name") or "").strip()
+            if name and (name == label.casefold() or label.casefold().startswith(name + " ")):
+                draft["circle_place_id"] = c["place_id"]
+                draft["circle_name"] = label
+                draft["answers"] = {**(draft.get("answers") or {}), COMMUNITY_FIELD: label}
+                return
     # Nothing said → whatever the app header is scoped to, same pre-fill the hosting
     # setup card uses.
     if active_community_id(session_ctx):
@@ -636,7 +653,13 @@ def _save_tip(
             category=str(draft.get("category") or "").strip() or None,
             block_id=block_id,
             zip_code=zip_code,
-            reco_type=draft.get("reco_type"),
+            # 'other' rather than NULL, always: a typeless row is invisible to every
+            # category read (the chips, the type census, "all the recipes near me"), which
+            # is a recommendation nobody can find. The column stays nullable — the same
+            # table holds meet/swap signals that have no type at all, and the type is
+            # written by set_signal_reco a step AFTER this insert — so the floor lives
+            # here, at the one place a tip_share is ever saved.
+            reco_type=draft.get("reco_type") or "other",
             reco_fields=_reco_fields(draft),
             # What the agree-row tallies group on — the subject, normalized once at write
             # time so a lookup is an index hit and not a scan over every recommendation.
@@ -666,7 +689,20 @@ def _save_tip(
         # missing in a copy-paste. Best-effort — an untagged tip is still a posted tip.
         place_id = str(draft.get("circle_place_id") or "").strip()
         if place_id and (saved or {}).get("id"):
-            tag_local_signal(user_jwt, signal_id=str(saved["id"]), place_id=place_id)
+            try:
+                tag_local_signal(user_jwt, signal_id=str(saved["id"]), place_id=place_id)
+            except Exception:  # noqa: BLE001
+                # "Best-effort" above was a comment, not code: tag_local_signal raises
+                # not_a_member when the author has left the community since the draft
+                # opened, the outer handler caught it, and the user was told their tip
+                # FAILED while the row sat saved in the table. The tag is a nice-to-have;
+                # the recommendation is the thing.
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "tip_community_tag_failed signal=%s place=%s",
+                    saved["id"], place_id, exc_info=True,
+                )
         return saved, ""
     except Exception as exc:  # noqa: BLE001
         import logging
@@ -1023,20 +1059,26 @@ def run_tip_share_turn(
         session_ctx["tip_pending_ask"] = None
 
     # ── Extract fields + tailored follow-up ──
+    from app.i18n import lang_display_name, session_lang
+
     ask: dict[str, Any] | None = None
     weak: dict[str, Any] | None = None
     role = ""
+    # Hoisted: the backfill below runs outside this block and needs the same language.
+    code = session_lang(session_ctx)
+    lang = lang_display_name(code) if code else None
+    # What THIS message answered, kept apart from the running total — the nudge below has
+    # to tell "answered nothing" from "answered four other steps".
+    new_answers: dict[str, Any] = {}
     if msg:
-        from app.i18n import lang_display_name, session_lang
-
-        code = session_lang(session_ctx)
         found, ask = _extract_tip_fields(
             history=history,
             user_message=msg,
             prev=draft,
-            lang=lang_display_name(code) if code else None,
+            lang=lang,
         )
-        merged_answers = {**(draft.get("answers") or {}), **(found.pop("answers", None) or {})}
+        new_answers = found.pop("answers", None) or {}
+        merged_answers = {**(draft.get("answers") or {}), **new_answers}
         weak = found.pop("weak_answer", None)
         role = str(found.pop("reply_role", "") or "")
         for k, v in found.items():
@@ -1139,6 +1181,11 @@ def run_tip_share_turn(
     if (
         weak_field
         and draft.get("step_set")
+        # A message that also answered OTHER steps is not a non-answer — it is a neighbour
+        # telling you more than you asked for. Tommaso's minute about Pausa was judged
+        # "does not answer what dishes are must-tries", binned, and re-asked three times
+        # (prod 2026-09-14). Harvest what landed and move on.
+        and not (set(new_answers) - {weak_field})
         and weak_field not in reasked
         and weak_field not in (SUBJECT_FIELD, COMMUNITY_FIELD, *TAIL_FIELDS)
         and not _PASS_RE.search(msg)
@@ -1267,6 +1314,27 @@ def run_tip_share_turn(
             session_ctx["tip_communities"] = communities
             built = list(built) + [_community_step(communities)]
         draft["step_set"] = built
+        # ── Backfill: re-read the SAME message against the set we just wrote. ──
+        #
+        # The set did not exist when this turn's extraction ran a hundred lines up, so
+        # `_extract_tip_fields` was handed "(type not known yet — return {} for answers)"
+        # and dropped every detail the user gave. The set is then written HERE, on that
+        # same turn, and nothing ever looked at their words again: a minute about Pausa
+        # came back as a name and eight empty rows, and the neighbour tapped out four
+        # answers they had already said aloud (Tommaso, prod 2026-09-14).
+        #
+        # `want_steps` is False now that `step_set` is set, so this is the cheap 320-token
+        # call, and it happens once per recommendation — the set is written once.
+        if msg:
+            back, _ = _extract_tip_fields(
+                history=history, user_message=msg, prev=draft, lang=lang
+            )
+            # Anything already on the draft wins: a tap the user made, or the subject
+            # resolved above, outranks a re-read of their prose.
+            draft["answers"] = {
+                **(back.get("answers") or {}),
+                **(draft.get("answers") or {}),
+            }
     step_set = step_set_of(draft) if reco_type else []
     # Written for THIS subject, or still the type's generic table? The cards fork is a
     # whole set at once, so opening it on the static table means eight generic text boxes

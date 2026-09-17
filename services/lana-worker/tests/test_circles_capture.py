@@ -230,3 +230,46 @@ class TestUpsertPlaceFeature(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── backfill_circle_embeddings ───────────────────────────────────────────────
+
+
+def test_backfill_text_matches_the_live_embed_format():
+    """The suffix is load-bearing.
+
+    circles_capture._embed_circle() embeds "<phrase> (<type> community)". The 23 rows that
+    already carry vectors were built that way, so a backfill that drops the suffix lands
+    its rows somewhere else in the space and every cosine threshold tuned on the existing
+    rows quietly means two things at once.
+    """
+    from scripts.backfill_circle_embeddings import circle_embedding_text
+
+    assert circle_embedding_text(
+        {"detail": "Lakeside Gym", "circle_type": "fitness"}
+    ) == "Lakeside Gym (fitness community)"
+
+
+def test_backfill_text_falls_back_through_the_stored_columns():
+    """raw_phrase is the user's own words and is not a column, so the backfill uses the
+    best stand-in: detail, then the grounded place name, then the de-slugged key."""
+    from scripts.backfill_circle_embeddings import circle_embedding_text
+
+    assert circle_embedding_text(
+        {"place_name": "St Mary's", "circle_type": "faith"}
+    ) == "St Mary's (faith community)"
+    assert circle_embedding_text(
+        {"circle_key": "lakeside_gym", "circle_type": "fitness"}
+    ) == "lakeside gym (fitness community)"
+    # Nothing to say about it — embedding "(other community)" would be noise in the index.
+    assert circle_embedding_text({"circle_type": "other"}) == ""
+
+
+def test_backfill_refuses_to_embed_a_bare_type():
+    """A row with no detail and no place_name degrades to "fitness (fitness community)",
+    which would match every fitness concept strongly and grant behavioural authority for
+    belonging to a slug. NULL is the honest value."""
+    from scripts.backfill_circle_embeddings import circle_embedding_text
+
+    assert circle_embedding_text({"circle_key": "fitness", "circle_type": "fitness"}) == ""
+    assert circle_embedding_text({"detail": "Fitness", "circle_type": "fitness"}) == ""

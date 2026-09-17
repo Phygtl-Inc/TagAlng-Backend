@@ -148,6 +148,17 @@ VAPID_SUBJECT: "${VAPID_SUBJECT:-}"
 RESEND_API_KEY: "${RESEND_API_KEY:-}"
 RESEND_FROM: "${RESEND_FROM:-}"
 APP_BASE_URL: "${APP_BASE_URL:-}"
+# Directed neighbor asks. All three belong together: tip_ask_route.enabled() refuses to
+# send unless the flag is on AND an unsubscribe link can be built, and the link needs both
+# the signing secret and THIS service's own public origin (not APP_BASE_URL — /asks/mute is
+# served by the worker, not the PWA). Missing any one of them is a silent no-send, so they
+# are listed here rather than left to a one-off "gcloud run services update", which the
+# next deploy would wipe: --env-vars-file REPLACES the service environment.
+# NOTE: this heredoc is unquoted (<<EOF), so backticks here are COMMAND SUBSTITUTION, not
+# markdown. A backticked command name in a comment gets executed at build time.
+LANA_ASK_ROUTING: "${LANA_ASK_ROUTING:-0}"
+LANA_WORKER_PUBLIC_URL: "${LANA_WORKER_PUBLIC_URL:-}"
+SIGNAL_SWEEP_TOKEN: "${SIGNAL_SWEEP_TOKEN:-}"
 EOF
 
 # Warm-instance policy, chosen by the caller — this script's own defaults are exactly

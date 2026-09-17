@@ -368,7 +368,7 @@ class TestAskDraftReply(unittest.TestCase):
             _reply, _ctx, routing, _peers = _turn("Yes, ask my neighbors", ctx_in)
 
         self.save.assert_called_once()
-        self.assertEqual(routing.get("tool_to_call"), "tip_ask_posted")
+        self.assertEqual(routing.get("tool_to_call"), "tip_ask_listening")
 
     def test_tweak_asks_what_to_change_then_re_answers_the_merged_ask(self) -> None:
         _reply, ctx, routing, _peers = _turn("Let me tweak that", self._drafted())

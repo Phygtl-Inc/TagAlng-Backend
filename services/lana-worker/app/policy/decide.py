@@ -195,6 +195,11 @@ def _claims_ranked(user_id: str, user_message: str) -> list[dict[str, Any]]:
 # streak exists to stop.
 _ASK_KINDS = ("ask_gap", "ground_place")
 
+# How many of the just-asked questions to hand back to the model. Three is what it
+# takes to SEE a drill-down: two questions can always be read as a topic change,
+# three in a row on one answer cannot.
+_RECENT_ASKS = 3
+
 
 def ask_streak(session_ctx: dict[str, Any]) -> int:
     try:
@@ -252,8 +257,41 @@ def note_ask_streak(session_ctx: dict[str, Any], action: NextAction) -> None:
     (with None, never popped — the session merge resurrects popped keys)."""
     if turn_asks_personal_question(action):
         session_ctx["policy_ask_streak"] = ask_streak(session_ctx) + 1
+        # The question itself, for the NEXT turn's classifier. Every other capture in the
+        # app publishes its open question into _active_capture_context; a policy ask
+        # published nothing, so a typed answer arrived with active_capture=none and was
+        # judged on its own words. Prod 2026-09-14: a rapport answer about the Pausa
+        # recommendation ("the fig, gorgonzola with caramelized onions is the best") read
+        # as a BRAND NEW recommendation, and Lana asked which pizzeria he meant while he
+        # sat inside the Pausa community. A chip TAP survived (the pipeline recognises
+        # policy_chip_msgs); only typing was punished.
+        #
+        # Same text the annoyance counter already judges — no second read, no matching.
+        session_ctx["policy_pending_question"] = str(action.utterance or "").strip()[:300]
+        # The questions THEMSELVES, not just how many. A count tells the model it has
+        # asked three times; it cannot tell it that all three circled one answer.
+        # Tommaso, prod 2026-09-15: "what stands out most?" -> "the mix, or the sharp
+        # bite?" -> "the figs, the gorgonzola, or the onions?" -> "what about that mix
+        # do you like most?". Each was a defensible question on its own and the set was
+        # an interrogation about pizza toppings. Handed the list back, the model can see
+        # the drilling the same way a person reading the transcript does.
+        #
+        # Runs after _wire_ask_gap_action, so an ask_gap's utterance already carries the
+        # vetted question merged in — this stores what the user actually read.
+        recent = [
+            q for q in (session_ctx.get("policy_recent_asks") or []) if isinstance(q, str)
+        ]
+        asked = str(action.utterance or "").strip()[:200]
+        if asked:
+            recent.append(asked)
+        session_ctx["policy_recent_asks"] = recent[-_RECENT_ASKS:]
+        logger.info("policy_question_armed q=%r", session_ctx["policy_pending_question"][:80])
     else:
         session_ctx["policy_ask_streak"] = None
+        session_ctx["policy_pending_question"] = None
+        # Cleared with the streak: once she gives instead of asking, the run is over and
+        # the next question starts a fresh one.
+        session_ctx["policy_recent_asks"] = None
 
 
 def parse_next_action(data: Any) -> NextAction | None:
@@ -398,6 +436,11 @@ _ASK_KINDS_ALL = ("ask_gap", "ground_place", "bridge_offer")
 # utterance for a question may judge these — see the dead-end backstop below.
 _APPENDED_ASK_KINDS = ("ask_gap", "ground_place")
 
+# How many of the just-asked questions to hand back to the model. Three is what it
+# takes to SEE a drill-down: two questions can always be read as a topic change,
+# three in a row on one answer cannot.
+_RECENT_ASKS = 3
+
 
 def _revision_note(action: NextAction, *, streak: int) -> str | None:
     """The one corrective retry, shared by every shape violation.
@@ -484,10 +527,13 @@ def _revision_note(action: NextAction, *, streak: int) -> str | None:
             "Your decision for this turn was " + decision + " — it ends the "
             "conversation with no question, no chips and no actionable offer: a dead "
             "end. Revise it: keep the warm acknowledgement, then continue the thread. "
-            "In order of preference: (1) kind=follow_thread — ONE question about the "
-            "very thing THEY just told you, in your own words, no goal_id needed; this "
-            "is always available and is the right move when nothing stored genuinely "
-            "fits. (2) kind=ask_gap with its goal_id — ONLY when a CANDIDATE GOAL is "
+            "A question is NOT the only way to continue one — when the ask budget is "
+            "spent (may_ask_personal_question: false) options (1) and (2) are closed and "
+            "(3) is the answer. In order of preference: (1) kind=follow_thread — ONE "
+            "question about the very thing THEY just told you, in your own words, no "
+            "goal_id needed; available only while the budget allows, and only when they "
+            "have opened something NEW rather than already answered this subject. "
+            "(2) kind=ask_gap with its goal_id — ONLY when a CANDIDATE GOAL is "
             "about the same specific thing they just raised; a stored question on a "
             "different subject is worse than no question, because they will read it as "
             "you not listening. (3) kind=bridge_offer with a chip — ONE concrete thing "
@@ -586,6 +632,12 @@ def decide_turn(
                 g["context"]["capability_id"] for g in goals if g["kind"] == "capability"
             ],
             "consecutive_personal_asks": streak,
+            # The questions, not just the count. A number says "you asked three
+            # times"; the list says "all three circled the same answer", which is
+            # the thing that actually reads as an interrogation and the only way
+            # the model can spot its own drilling (prod 2026-09-15, four questions
+            # about one pizza).
+            "questions_already_asked": session_ctx.get("policy_recent_asks") or [],
             # Hard, not advisory: at the ceiling `ask_gap` is off the menu this
             # turn. Told up front so the model gives instead of asking, rather
             # than being corrected after the fact.

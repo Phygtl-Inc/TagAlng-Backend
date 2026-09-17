@@ -118,6 +118,7 @@ from app.models import (
     HostingDraftPayload,
     IdentityClaimRow,
     IdentityProfilePayload,
+    ImpressionStatusBody,
     IntroProposalPayload,
     ItemDraft,
     JointMomentCandidate,
@@ -216,6 +217,7 @@ from app.rapport_gaps import (
 )
 from app.rapport_ranker import next_ask as rapport_next_ask
 from pydantic import BaseModel as _BaseModel
+from pydantic import Field as _Field
 
 _LOG = logging.getLogger(__name__)
 
@@ -1009,7 +1011,7 @@ def _block_log_from_ctx(ctx: dict[str, Any]) -> list[BlockLogEntryRow]:
                 match_type=str(row.get("match_type") or "") or None,
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
                 peer_preview_label=str(row.get("peer_preview_label") or "") or None,
-                match_strength=row.get("match_strength"),
+                match_badge=str(row.get("match_badge") or "") or None,
                 match_reasons=[str(r) for r in reasons[:6]],
                 match_summary=str(row.get("match_summary") or "") or None,
                 peer_signal_detail=str(row.get("peer_signal_detail") or "") or None,
@@ -1150,6 +1152,9 @@ def _onboarding_fields(
     auth: AuthSession,
     *,
     ready_to_complete: bool = False,
+    session_id: str | None = None,
+    user_message: str | None = None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     from app.peer_discovery_surface import stamp_peer_discovery_ctx
 
@@ -1230,6 +1235,29 @@ def _onboarding_fields(
     for key in ctx.get("_wiped_turn_surfaces") or []:
         if not ctx.get(key):
             _warn_surface_dropped("wiped:" + str(key), 0, ui_intent=ui_intent, active=active)
+    # ── What we showed (contract v2 §A7) ──────────────────────────────────────────
+    # Here and not in the lanes, deliberately: every ui_intent drop-filter above has
+    # already run, so `peers` and `activities` are what the client receives rather than
+    # what a lane hoped to send — and their order is render order, which is the only
+    # thing that makes metadata.position mean anything to D4's nDCG. Stamps
+    # impression_id onto the rows; the insert itself is a background thread.
+    try:
+        from app.impressions import log_shown
+
+        log_shown(
+            user_id=auth.user_id,
+            session_id=session_id,
+            block_id=auth.home_block_id or str(ctx.get("preview_block_id") or "") or None,
+            query=user_message,
+            peers=peers,
+            activities=activities,
+            ctx=ctx,
+            turn_id=turn_id,
+        )
+    except Exception:  # noqa: BLE001
+        # A logging failure must never cost the user their answer.
+        logger.warning("impressions_log_skipped")
+
     return {
         "onboarding_step": ctx.get("guest_step"),
         "requires_phone_verification": bool(ctx.get("requires_phone_verification")),
@@ -1598,6 +1626,21 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
+        if purpose == "lana" and not auth.is_anonymous:
+            # Somebody agreed to be asked on a neighbor's behalf, and the outreach email's
+            # button dropped them into an ordinary chat that never mentioned it — so from
+            # their side the button did nothing and the ask died there. Raised once
+            # (surfaced_at), only while the asker is still listening, and it REPLACES the
+            # generic greeting rather than stacking on it: two openings is two asks.
+            try:
+                from app.tip_ask_route import opening_for_pending_ask
+
+                pending_opening = opening_for_pending_ask(auth.user_id, session_ctx)
+                if pending_opening:
+                    opening = pending_opening
+            except Exception:  # noqa: BLE001 — never block a session on this
+                logging.getLogger(__name__).debug("pending_ask_opening_failed", exc_info=True)
+
         if purpose == "lana":
             # The saved preference decides how the conversation STARTS — the
             # opening greets in it. users.locale is read for guests too: every
@@ -1753,6 +1796,12 @@ def _run_lana_message(
     from app.community_scope import here_place as community_here
 
     apply_community_selection(session_ctx_in, body.community_id, user_id=auth.user_id)
+    # The category chips on "Find a peer recommendation", stamped the same way and for the
+    # same reason: a recommendation read this turn is scoped to the bucket the user tapped
+    # (app/reco_question_sets.py). None = the client said nothing, [] = they cleared it.
+    from app.reco_question_sets import apply_reco_type_filter
+
+    apply_reco_type_filter(session_ctx_in, body.reco_types)
     # A rename announcement is worth exactly one turn. Cleared with None, never
     # popped — a popped key gets resurrected by the stored-context merge and Lana
     # would re-announce the same name change on every later turn.
@@ -1851,6 +1900,10 @@ def _run_lana_message(
         session_ctx_in["tip_ready"] = None
         session_ctx_in["tip_enrich_count"] = 0
         session_ctx_in["tip_draft"] = None
+        _LOG.info(
+            "tip_share_armed hint=%s phrase=%s", body.intent_hint,
+            looks_like_tip_share_entry(body.message),
+        )
         # Entering tip-share closes any in-flight pass-along flow + its card.
         session_ctx_in["pass_along_active"] = False
         session_ctx_in["item_draft"] = None
@@ -1884,6 +1937,23 @@ def _run_lana_message(
             "weights": [str(w).strip() for w in (body.weights or []) if str(w).strip()][:8],
             "widen": False,
         }
+    # A LIT CATEGORY CHIP IS THE SAME DETERMINISTIC ENTRY as the CTA hint above. The user
+    # picked a recommendation bucket, so this turn is a recommendation ask whatever words it
+    # arrives in — and the words a chip-driven ask arrives in are exactly the ones a
+    # classifier cannot read: "any recommendation" hit the out-of-scope rail and "show all"
+    # got a conversational reply about the user's communities, because neither names a
+    # subject and the chip carried the whole meaning (prod log 2026-09-10).
+    #
+    # Never while the SHARE flow is armed: that one is mid-capture, and its turns are
+    # answers to Lana's questions rather than asks of their own.
+    if (
+        purpose == "lana"
+        and body.reco_types
+        and not session_ctx_in.get("tip_share_active")
+        and not session_ctx_in.get("pass_along_active")
+    ):
+        session_ctx_in["tip_seek_hint"] = True
+        session_ctx_in["tip_draft"] = None
     # A "By the way…" tile answer — route it deterministically to the profile path (save the
     # claim + reply in-thread) rather than the classifier, which would misread a bare answer
     # ("I love trying new restaurants") as a recommendation seek. Carries the gap + tile question.
@@ -2126,7 +2196,17 @@ def _run_lana_message(
     timing_ms["total_ms"] = _timing_total_ms(timing_ms)
 
     ready = status == "ready_to_complete"
-    ob = _onboarding_fields(merged, auth, ready_to_complete=ready)
+    ob = _onboarding_fields(
+        merged,
+        auth,
+        ready_to_complete=ready,
+        session_id=session_id,
+        user_message=body.message,
+        # lana_messages row id of THIS reply — the join that turns an impression back into
+        # "she was asked X, she answered Y, and these are the cards that went with it".
+        # None when the message write failed; the impression is still worth having.
+        turn_id=assistant_msg_id,
+    )
     # Chip-tap language pin, part 1: remember EXACTLY which chip payloads this response
     # offers, so the next turn can tell an app-authored tap from typed text (the pipeline
     # pins the session language on a match — a canonical-English chip payload must never
@@ -3177,6 +3257,41 @@ def hook_signal_matches(
     return {"ok": True, "notified": notified}
 
 
+@app.get("/asks/mute")
+def mute_neighbor_asks(u: str = "", t: str = ""):
+    """One-tap opt-out from the neighbor-ask emails, straight from the mail.
+
+    A GET with a signed token and no session on purpose: the person we are asking to leave
+    us alone is exactly the person who should not have to log in to do it. The token is an
+    HMAC of their user id under a server-only secret, so the link cannot be guessed or
+    edited into someone else's unsubscribe — and when no secret is configured the link is
+    never put in the mail in the first place (see tip_ask_route.mute_link).
+
+    Returns a page rather than JSON because a human clicked it from an inbox.
+    """
+    from fastapi.responses import HTMLResponse
+
+    from app.tip_ask_route import mute_asks, verify_mute
+
+    if not (u and t and verify_mute(u, t)):
+        raise HTTPException(status_code=403, detail="forbidden")
+    ok = mute_asks(u)
+    message = (
+        "You're unsubscribed. I won't email you about neighbors' recommendation asks again."
+        if ok
+        else "Something went wrong on my side — please reply to the email and I'll sort it."
+    )
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Neighbor asks</title>"
+        "<body style='font:16px/1.5 system-ui;margin:0;display:grid;place-items:center;"
+        "min-height:100vh;background:#faf7f2;color:#2b2724'>"
+        f"<main style='max-width:28rem;padding:2rem;text-align:center'><p>{message}</p></main>",
+        status_code=200 if ok else 500,
+    )
+
+
 @app.post("/lana/places/search", response_model=PlaceSearchResponse)
 def search_places_endpoint(
     body: PlaceSearchRequest,
@@ -3258,6 +3373,10 @@ class TipFeedBody(_BaseModel):
     # this place (a places.id). Membership IS the tag — nothing is stamped at write
     # time, so a rec becomes "from CF Fitness" the moment its author joins.
     place_id: str | None = None
+    # The Find screen's category chips, as taxonomy buckets ("Services" is
+    # ["professional", "service"], "Others" is ["location"]). Empty = every type.
+    # Unknown keys are dropped, never guessed at.
+    reco_types: list[str] = _Field(default_factory=list, max_length=8)
 
 
 class TipFeedbackBody(_BaseModel):
@@ -3307,6 +3426,7 @@ def post_tips_recent(
         tab=tab,
         limit=limit,
         circle_place_id=place_id,
+        reco_types=list(body.reco_types) if body else None,
     )
     # "Why Lana sees a fit" — the fellows line's mechanism with the recommendation's own
     # fields as evidence (§43), plus the fit score the For-you tab orders on. Authored ON
@@ -3315,7 +3435,77 @@ def post_tips_recent(
     from app.tip_rec_line import attach_fit
 
     attach_fit(auth.user_id, tips, tab=tab, limit=limit)
+    # Whether a nudge to each recommender is still sendable. One batched relationship
+    # lookup for the page: without it every row offered a Nudge button, including to people
+    # the reader already knows or already has an intro out to — a tap that can only fail
+    # the 7-day pair cooldown, and which the reader had no way to see coming.
+    from app.peer_discovery_surface import stamp_connection_state
+
+    stamp_connection_state(tips, user_id=auth.user_id)
     return {"tab": tab, "tips": tips}
+
+
+class TipTypesBody(_BaseModel):
+    # The community picked in the top filter (a places.id) — same scope the ask uses.
+    place_id: str | None = None
+
+
+@app.post("/lana/tips/types")
+def post_tips_types(
+    body: TipTypesBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """How many neighbour recommendations of each type the caller can SEE — the chip row.
+
+    The Find-a-rec categories were a fixed list, so "Recipes" invited a tap with no recipe
+    within reach, and "Restaurants" invited one when the only restaurant tip was the
+    reader's own (which the search must hide). These counts come from the search's own
+    predicate, so a chip is only offered when a tap will land on something.
+
+    Counts are a FLOOR, not a promise: they are scoped to the caller's block (or their area
+    when they have no block yet), and an ask that widens can find more.
+    """
+    auth = verify_auth(authorization)
+    if auth.is_anonymous:
+        # Neighbours' data, same bar as the feed and the tile.
+        return {"types": {}, "scope": "none"}
+    from app.tip_feed import neighbor_tip_type_counts
+
+    place_id = str((body.place_id if body else None) or "").strip() or None
+    if place_id:
+        from app.community_surface import caller_affiliation_at
+
+        if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
+            # DROPPED, not refused — the same rule apply_community_selection applies to a
+            # chat turn: a place the caller doesn't belong to clears the filter rather than
+            # scoping to it. The top-filter pick lives in the client's localStorage, per
+            # DEVICE and not per account, so a community chosen by the previous signed-in
+            # user survives the switch; 403ing there left the chip row empty while the very
+            # next chat turn answered area-wide (prod 2026-09-11, FIT 407 Lake Nona).
+            # Answering for the area is also the honest number: that is the scope the ask
+            # itself will read once the worker clears the same pick.
+            _LOG.info(
+                "tips_types_scope_dropped user=%s place=%s (not a member)",
+                auth.user_id, place_id,
+            )
+            place_id = None
+    # Block first, because that is what a plain ask reads. No block yet (a preview session,
+    # a fresh signup) would otherwise count nothing at all, so those fall back to the area
+    # radius — the same one a widened ask uses, so the number stays honest either way.
+    block_id = None if place_id else (auth.home_block_id or None)
+    radius = None
+    if not place_id and not block_id:
+        from app.peer_radius import radius_meters
+
+        radius = radius_meters()
+    counts = neighbor_tip_type_counts(
+        _bearer_token(authorization),
+        block_id=block_id,
+        radius_meters=radius,
+        circle_place_id=place_id,
+    )
+    scope = "community" if place_id else ("block" if block_id else "area")
+    return {"types": counts, "scope": scope, "total": sum(counts.values())}
 
 
 class TipGetBody(_BaseModel):
@@ -3400,6 +3590,31 @@ def _tip_feedback_error(exc: HTTPException) -> HTTPException:
     if "tip_not_found" in detail:
         return HTTPException(status_code=404, detail="tip_not_found")
     return exc
+
+
+@app.post("/lana/impression")
+def post_impression(
+    body: ImpressionStatusBody,
+    authorization: str | None = Header(default=None),
+):
+    """The other half of §A7: what the user did with a card Lana showed.
+
+    Without this every row sits at 'shown' forever, and "we showed 400 things" is all the
+    pilot can ever say. 404 rather than 403 on someone else's row — an id that is not
+    yours should not be confirmable as existing.
+    """
+    auth = verify_auth(authorization)
+    from app.impressions import set_impression_status
+
+    ok = set_impression_status(
+        user_id=auth.user_id,
+        impression_id=body.impression_id,
+        status=body.status,
+        converted_action_id=body.converted_action_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="impression_not_found")
+    return {"impression_id": body.impression_id, "status": body.status}
 
 
 @app.post("/lana/circles/list")

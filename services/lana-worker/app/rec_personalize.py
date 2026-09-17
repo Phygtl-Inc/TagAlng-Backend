@@ -132,6 +132,7 @@ def personalize_tip_query(
     request: str,
     category: str | None,
     claims: list[dict[str, Any]] | None,
+    place: str | None = None,
 ) -> dict[str, Any] | None:
     """Return {"relevant","base_query","filters":[{label,query,included_type,required_attrs,
     reframe}]} or None.
@@ -156,10 +157,22 @@ def personalize_tip_query(
         if not llm_configured():
             _log.info("rec_personalize.skip reason=llm_not_configured")
             return None
+        # The place the user is scoped to, when there is one. Without it "what should I
+        # eat there?" loses its subject: the personalizer sees only the words and the
+        # claims, matches "authentic Italian cuisine", and rewrites base_query to
+        # "Italian restaurants" — answering a different question with places 20 miles
+        # away (prod 2026-09-16, asked inside the Pausa Bar & Cookery community).
+        # Passed as context, not as an instruction to search it: "find me a gym" while
+        # scoped to a restaurant is still a gym search, and only the model can tell those
+        # apart.
+        where = str(place or "").strip()
         payload = "\n\n".join(
             [
                 f"REQUEST:\n{req}"
-                + (f"\n(category hint: {str(category).strip()})" if category else ""),
+                + (f"\n(category hint: {str(category).strip()})" if category else "")
+                + (f"\n(the user is currently looking at: {where} — resolve \"there\", "
+                   f"\"here\" and \"it\" to this place, and keep it in base_query when "
+                   f"the request is about it)" if where else ""),
                 "CLAIMS:\n" + json.dumps(trimmed, ensure_ascii=False),
             ]
         )

@@ -117,6 +117,16 @@ _SETS: dict[str, list[dict[str, Any]]] = {
         {"field": "best_for", "label": "Best for", "question": "Who is it for?"},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything to know first?"},
     ],
+    # No "when do people gather" here: a creator community is not a standing gathering, it
+    # is a topic people arrive at from a link. What a member needs to know is what the
+    # community is about and whether they are the right person for it.
+    "creator": [
+        {"field": "draws", "label": "About", "question": "What is this community about?", "required": True},
+        {"field": "who_its_for", "label": "Who it's for", "question": "Who should join?", "required": True},
+        {"field": "level", "label": "Level", "question": "Is it for beginners or the experienced?",
+         "options": ["Beginners", "All levels", "Experienced"]},
+        {"field": "good_to_know", "label": "Good to know", "question": "Anything a new member should know?"},
+    ],
 }
 
 # Every circle type must have a set: an unknown type would otherwise fall to [] and the
@@ -149,11 +159,18 @@ COMMUNITY_TYPE_RULES = (
     "heritage = a cultural or language community. "
     "friends = a hangout spot a circle of friends is built around (cafe, bakery, bar). "
     "other = a real community that fits none of the above. "
+    "creator = a community with NO location: people gathered around a topic, a creator or "
+    "an online following rather than somewhere they go. Pick this whenever the user talks "
+    "about their OWN audience or channel — \"people who follow my account\", \"my "
+    "subscribers\", \"my channel\", \"my newsletter\", \"link in bio\" — or names a "
+    "community that plainly has no venue. A group that gathers somewhere real is that "
+    "place's type instead: a running club meeting at a park is hobby, not creator. "
     "Pick by what people DO there, never by the building's category."
 )
 
 # (eyebrow, fallback question) per type, for when generation fails or the LLM is off. The
-# subject is a PLACE in every one of them — no community without a location.
+# subject is a PLACE in every one of them except 'creator', which has no location to pin
+# and is answered with a typed name instead (20261207120000).
 _SUBJECT_STEP: dict[str, tuple[str, str]] = {
     "fitness": ("Which gym", "Which gym or studio is it?"),
     "faith": ("Which place", "Which place of worship is it?"),
@@ -165,6 +182,8 @@ _SUBJECT_STEP: dict[str, tuple[str, str]] = {
     "heritage": ("Which place", "Which place is it?"),
     "friends": ("Which spot", "Which spot is it?"),
     "other": ("Which place", "Which place is it?"),
+    # The one subject that is not a place: there is no building to pick, so it is typed.
+    "creator": ("Name", "What's the community called?"),
 }
 
 
@@ -194,8 +213,17 @@ def community_head_step(
         "field": COMMUNITY_SUBJECT_FIELD,
         "label": " ".join(str(label or "").split())[:24] or dflt_label,
         "question": written[:140] if written.endswith("?") else dflt_question,
-        "kind": "place",
-        "required": True,
+        # Every other type opens the map picker, because the answer has to carry a
+        # google_place_id. A creator community has no building to pick — its subject is a
+        # name the creator types, and the place row is made from it at publish.
+        "kind": "text" if ctype == "creator" else "place",
+        # Optional, on every type. Relying on the extractor to have classified something
+        # `creator` before this step renders is too fragile a place to put the decision —
+        # "long course triathlon and race prep" comes back `hobby`, and the neighbour is
+        # then stuck on a place search for a community that is not anywhere. Skipping it
+        # is what publish reads as "no location", and the carousel already renders the
+        # Optional affordance off this flag (`optional={!step.required}`).
+        "required": False,
     }
 
 

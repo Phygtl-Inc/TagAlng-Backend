@@ -40,6 +40,9 @@ CIRCLE_TYPES = frozenset(
         "heritage",
         "friends",
         "other",
+        # A community around a topic and a creator's link rather than a location — the
+        # only type whose subject is typed, not picked off the map (20261207120000).
+        "creator",
     }
 )
 

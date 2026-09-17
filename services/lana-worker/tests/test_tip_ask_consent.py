@@ -215,7 +215,7 @@ class TestOfferReply(unittest.TestCase):
         self.save.assert_called_once()
         self.assertEqual(self.save.call_args.kwargs["intent"], "tip_seek")
         self.assertEqual(ctx["signal_saved"]["signal_id"], "sig-1")
-        self.assertEqual(routing.get("tool_to_call"), "tip_ask_posted")
+        self.assertEqual(routing.get("tool_to_call"), "tip_ask_listening")
         # Offer consumed, removal armed and pointed at the row it would close.
         self.assertIsNone(ctx.get("tip_ask_offer_pending"))
         self.assertEqual(ctx["posting_manage_pending"]["signal_id"], "sig-1")
@@ -265,7 +265,7 @@ class TestOfferReply(unittest.TestCase):
         self.save.assert_called_once()
         self.assertEqual(self.save.call_args.kwargs["intent"], "tip_seek")  # NOT tip_share
         self.assertEqual(self.save.call_args.kwargs["detail_text"], "good doctor")
-        self.assertEqual(routing.get("tool_to_call"), "tip_ask_posted")
+        self.assertEqual(routing.get("tool_to_call"), "tip_ask_listening")
         self.assertIsNone(ctx.get("signal_draft"))
 
     def test_refinement_falls_through_to_the_recommendation_lane(self) -> None:
@@ -407,8 +407,16 @@ class TestPolicyGate(unittest.TestCase):
         self.assertFalse(
             self._is_tip_ask({"linear_intent": "discovery.find_peers", "goal": "peers", "confidence": 0.9})
         )
-        # A tip_share (naming a provider they vouch for) is a different lane.
-        self.assertFalse(
+        # A confident tip_share goes to the CAPTURE engine, not to the policy — which is
+        # what _turn_is_engine_action's own docstring has always said ("True ... for
+        # SHARING a recommendation"). This used to assert False because the tip_seek
+        # utterance regex demoted sharing.tip to looking.tip whenever the words carried a
+        # service noun, and the demoted slots then missed the share branch. That override
+        # is gone (see _reconcile_defer_to_llm): seek-vs-share is the model's call.
+        #
+        # The premise here is synthetic — asked for real, "recommend me a doctor nearby"
+        # classifies tip_seek at 0.98 — so nothing rests on the regex rescuing it.
+        self.assertTrue(
             self._is_tip_ask({"linear_intent": "sharing.tip", "signal_intent": "tip_share", "confidence": 0.9})
         )
         # Too unsure to divert.

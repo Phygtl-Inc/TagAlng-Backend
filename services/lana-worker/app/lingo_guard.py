@@ -67,6 +67,25 @@ _UNSHIPPED_FEATURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Channels that DO NOT EXIST. notify_user is web push + Resend email; there is no SMS
+# anywhere in this app. "I'll text you" is nonetheless the phrase every composer reaches
+# for — it shipped in the tip-ask receipt goal, in its fallback, and in messages/*.json in
+# three languages, so a user waited on a text that could never arrive. Same class as the
+# unshipped-feature rule above, and worse in effect: an unshipped word merely confuses,
+# an unshipped CHANNEL makes someone wait. Scoped to the promise forms ("text you",
+# "send you a text", "by SMS") so ordinary uses of the noun stay legal.
+# DELETE THIS RULE the day SMS ships.
+# The lookbehinds keep the NOUN legal ("the text you wrote", "that text you sent me") and
+# catch only the verb sense, which is the one that makes a promise.
+_TEXT_VERB = (
+    r"(?<!the )(?<!a )(?<!this )(?<!that )(?<!your )"
+    r"\btext(?:ing)?\s+(?:you|u|them|her|him)\b"
+)
+_FALSE_CHANNEL_RE = re.compile(
+    _TEXT_VERB + r"|\bsend(?:ing)?\s+(?:you|them)\s+a\s+text\b" + r"|\b(?:via|by|over)\s+SMS\b",
+    re.IGNORECASE,
+)
+
 # Last-resort substitutions when the LLM rewrite is unavailable or still dirty.
 # Crude but always lexicon-clean — a slightly stiff sentence beats a banned word.
 _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
@@ -101,6 +120,13 @@ _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
     # runs first) picks the right phrasing from context.
     (re.compile(r"\b(a|your|new|perfect|great|good)\s+match\b", re.I), r"\1 fit"),
     (re.compile(r"\bmatch(?:ed)?\s+you\s+with\b", re.I), "introduce you to"),
+    # The channel we actually have. Pronoun is preserved so the sentence survives.
+    (re.compile(r"\bsend(?:ing)?\s+(you|them)\s+a\s+text\b", re.I), r"email \1"),
+    (re.compile(r"(?<!the )(?<!a )(?<!this )(?<!that )(?<!your )"
+                r"\btexting\s+(you|u|them|her|him)\b", re.I), r"emailing \1"),
+    (re.compile(r"(?<!the )(?<!a )(?<!this )(?<!that )(?<!your )"
+                r"\btext\s+(you|u|them|her|him)\b", re.I), r"email \1"),
+    (re.compile(r"\b(?:via|by|over)\s+SMS\b", re.I), "by email"),
 ]
 
 
@@ -134,6 +160,7 @@ def find_violations(text: str) -> list[str]:
     hits += [m.group(0).lower() for m in _MATCH_PERSON_RE.finditer(text)]
     hits += [m.group(0).lower() for m in _GAMIFICATION_RE.finditer(text)]
     hits += [m.group(0).lower() for m in _UNSHIPPED_FEATURE_RE.finditer(text)]
+    hits += [m.group(0).lower() for m in _FALSE_CHANNEL_RE.finditer(text)]
     seen: set[str] = set()
     out: list[str] = []
     for h in hits:
@@ -174,7 +201,8 @@ def _rewrite_clean(text: str, chip_labels: list[str], hits: list[str]) -> tuple[
                 "(name the concrete community — 'your gym', 'your people'); calling "
                 "a person a 'match' (say 'someone to meet', 'an intro'); leaderboard/"
                 "streak/level up/points/rank — never adopt a score frame even to "
-                "deny it, say nobody is being scored here. Return JSON "
+                "deny it, say nobody is being scored here; 'text you'/'SMS' — there "
+                "is no texting, say 'email you'. Return JSON "
                 '{"reply": "...", "chips": ["..."]} with exactly one chip per input '
                 "chip, same order."
             ),

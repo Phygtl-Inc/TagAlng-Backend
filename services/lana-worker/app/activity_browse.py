@@ -1510,6 +1510,14 @@ def run_activity_browse_turn(
     session_ctx["browse_draft"] = draft
     session_ctx["activity_browse_active"] = True
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
+    # Telemetry for the impression log (§A7), by event id. Kept in ctx rather than on the
+    # preview row: these are internal ranking numbers with nothing to render, and the wire
+    # model is not the place to park them. Read once by app/impressions.log_shown.
+    session_ctx["browse_scores"] = {
+        str(ev.get("id") or ""): _coerce_topic_score(ev.get("topic_score"))
+        for ev in matched
+        if isinstance(ev, dict) and ev.get("id")
+    }
     session_ctx["routing_phase"] = "listening"
     return _format_browse_message(
         matched, label, phone_verified=phone_verified, lang=lang, far_miles=far_miles

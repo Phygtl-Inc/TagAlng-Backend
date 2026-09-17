@@ -605,7 +605,17 @@ def _turn_is_engine_action(
     is cached per user message — the same parse handle_discovery_turn reuses, so this costs no extra model
     call. Fails CLOSED (False) so a classifier hiccup leaves the policy gate exactly as
     it was rather than diverting every turn to the engines.
+
+    A DETERMINISTIC ENTRY OUTRANKS THE CLASSIFIER: `tip_seek_hint` is stamped by the Find
+    fork's CTA and by a lit category chip (app/main.py), and those are exactly the turns a
+    classifier cannot read, because under a chip the words carry almost none of the meaning.
+    "show all", sent from a screen whose own UI said Professionals, was filed as
+    discovery.find_peers and answered with people to meet; "any recommendation" hit the
+    out-of-scope rail (prod 2026-09-10). The flag is per-turn — discovery_route clears it on
+    the turn it fires — so honouring it here cannot divert a later, unrelated message.
     """
+    if ctx.get("tip_seek_hint"):
+        return True
     try:
         from app.discovery_slots import discovery_slots_for_turn
         from app.layer1_intents import SIGNAL_INTENT_BY_LINEAR, intent_confidence_met
@@ -2182,7 +2192,16 @@ def run_lana_unified_pipeline(
             phone_verified=phone_verified,
             timer=timer,
         )
+        # A lane releasing was invisible in the log: the turn simply reappeared in
+        # discovery_route with no trace of the capture it had just been thrown out of.
         if tip_share_should_release(user_message, session_ctx, pivot_slots):
+            logging.getLogger(__name__).info(
+                "tip_share_released goal=%s signal=%s linear=%s had_draft=%s",
+                (pivot_slots or {}).get("goal"),
+                (pivot_slots or {}).get("signal_intent"),
+                (pivot_slots or {}).get("linear_intent"),
+                bool(session_ctx.get("tip_draft")),
+            )
             reset_tip_share_state(session_ctx)
         else:
             reply = sanitize_assistant_message(

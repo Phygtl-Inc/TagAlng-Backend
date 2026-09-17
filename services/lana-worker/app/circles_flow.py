@@ -580,6 +580,57 @@ def prune_grounded_gaps(
     return [r for r in rows if str(r.get("affiliation_ref") or "") not in stale]
 
 
+CREATOR_PLACE_PREFIX = "creator:"
+
+
+def ensure_creator_place(
+    key: str,
+    name: str,
+    *,
+    created_by: str | None = None,
+    circle_type: str | None = None,
+) -> str | None:
+    """Find-or-make the canonical place behind a community with no location (20261207120000).
+
+    A creator community has no building, so there is nothing for `place_details` to look
+    up — but it still needs a `places` row, because a community has no identity of its own:
+    it IS places.id everywhere (the picker, community_scope, the roster and profile
+    endpoints, and events.circle_place_ref's foreign key).
+
+    `key` is the stable half of google_place_id — "creator:<handle>" or "creator:<slug>".
+    Keyed rather than uuid'd so re-running finds the same row: two places for one community
+    would split its roster in half with no error anywhere.
+
+    No lat/lng/zip/h3, enforced by places_creator_has_no_geography — that is what keeps
+    these out of discover_communities_near, whose no-coordinates arm matches on ZIP.
+    """
+    gpid = key if key.startswith(CREATOR_PLACE_PREFIX) else CREATOR_PLACE_PREFIX + key
+    clean = " ".join(str(name or "").split())[:120]
+    if not clean or gpid == CREATOR_PLACE_PREFIX:
+        return None
+    sb = service_client()
+    found = (
+        sb.table("places").select("id").eq("google_place_id", gpid).limit(1).execute()
+    )
+    if found.data:
+        return str(found.data[0]["id"])
+    row: dict[str, Any] = {
+        "google_place_id": gpid,
+        "name": clean,
+        # 'creator' only when it really is one. A neighbour who skipped an optional place
+        # step on a hobby community has made a placeless hobby community, not a creator
+        # one — stamping 'creator' there would put it in the wrong bucket everywhere the
+        # client branches on type, and bind it to the no-geography CHECK for a place that
+        # may well get grounded later.
+        "place_type": "creator" if circle_type == "creator" else None,
+        "source": "import",
+    }
+    if created_by:
+        row["created_by"] = created_by
+    res = sb.table("places").insert(row).execute()
+    return str(res.data[0]["id"]) if res.data else None
+
+
 def ground_affiliation(
     user_id: str,
     affiliation_id: str,
@@ -595,19 +646,38 @@ def ground_affiliation(
     if not affiliation:
         raise ValueError("affiliation_not_found")
 
-    from app.places import place_details
+    if google_place_id.startswith(CREATOR_PLACE_PREFIX):
+        # A creator community: no Google place to resolve, so skip the lookup and make the
+        # row ourselves. Everything below — the one-per-place dedupe, the confirm, the
+        # parked features — is identical, which is the point of routing through here rather
+        # than writing a second grounding path that drifts.
+        place_name = (
+            str(affiliation.get("detail") or "").strip()
+            or google_place_id[len(CREATOR_PLACE_PREFIX):]
+        )
+        place_id = ensure_creator_place(
+            google_place_id,
+            place_name,
+            created_by=user_id,
+            circle_type=str(affiliation.get("circle_type") or "") or None,
+        )
+        if not place_id:
+            raise ValueError("place_not_found")
+    else:
+        from app.places import place_details
 
-    details = place_details(google_place_id)
-    if not details:
-        raise ValueError("place_not_found")
+        details = place_details(google_place_id)
+        if not details:
+            raise ValueError("place_not_found")
 
-    place_id = upsert_canonical_place(
-        details,
-        circle_type_hint=str(affiliation.get("circle_type") or "") or None,
-        created_by=user_id,
-    )
-    if not place_id:
-        raise ValueError("place_not_found")
+        place_id = upsert_canonical_place(
+            details,
+            circle_type_hint=str(affiliation.get("circle_type") or "") or None,
+            created_by=user_id,
+        )
+        if not place_id:
+            raise ValueError("place_not_found")
+        place_name = str(details["name"] or "")
 
     # One community per place, per person. Two claims can name the same spot in
     # different words ("St. Luke's" → st_lukes_church, "attends St. Luke's" →
@@ -632,7 +702,7 @@ def ground_affiliation(
         return {
             "affiliation_id": str(existing.get("id")),
             "place_id": place_id,
-            "place_name": details["name"],
+            "place_name": place_name,
             "status": "confirmed",
         }
 
@@ -653,7 +723,7 @@ def ground_affiliation(
     # join_community. Local import: community_discovery imports this module.
     from app.community_discovery import notify_members_of_join
 
-    notify_members_of_join(place_id, str(details["name"] or ""), user_id)
+    notify_members_of_join(place_id, place_name, user_id)
 
     _flush_parked_features(user_id, affiliation, place_id)
     _close_grounding_gap(affiliation_id)
@@ -662,12 +732,12 @@ def ground_affiliation(
         try:
             from app.rapport_gaps import open_semantic_gap
 
-            question, teaser, chips = _place_affinity_question(details["name"])
+            question, teaser, chips = _place_affinity_question(place_name)
             open_semantic_gap(
                 user_id,
                 None,
                 question,
-                label=details["name"],
+                label=place_name,
                 bucket="interest",
                 teaser=teaser,
                 place_ref=place_id,
@@ -679,7 +749,7 @@ def ground_affiliation(
     return {
         "affiliation_id": str(affiliation["id"]),
         "place_id": place_id,
-        "place_name": details["name"],
+        "place_name": place_name,
         "status": "confirmed",
     }
 

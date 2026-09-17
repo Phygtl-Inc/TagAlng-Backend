@@ -1087,6 +1087,29 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "up'), never cancelling it. Only an explicit back-out ('cancel', 'forget it', "
             "'don't post it') is an abandon"
         )
+    # LAST, deliberately: every capture above owns its turn outright, and a policy ask is
+    # only the fallback question nobody else is holding. But it must not be NOTHING, which
+    # is what it was — a conversational question Lana asked left no trace, so the answer
+    # was classified cold. Prod 2026-09-14: the answer to "Mortadella pizza especially, or
+    # just the pizza there in general?" became a brand-new recommendation about "pizza"
+    # with no subject, and Lana offered four unrelated pizzerias to a user sitting inside
+    # the Pausa community answering a question about Pausa. A chip TAP survived; only
+    # typing your own answer was punished.
+    pending_q = str(session_ctx.get("policy_pending_question") or "").strip()
+    if pending_q:
+        return (
+            "conversation — Lana asked the user a question IN CHAT last turn and this "
+            f'message is most likely their ANSWER to it. She asked: "{pending_q[:300]}". '
+            "An answer to it is goal=chat, NOT a fresh intent. DECIDE BY THE SUBJECT: when "
+            "the message is about the SAME thing she asked about, it is an ANSWER, however "
+            "short or bare, and praising it does not make it a new tip_share — answering "
+            "\"what do you enjoy most about Pausa?\" with \"the fig and gorgonzola is the "
+            "best\" is a fact about Pausa, whose recommendation already exists; filing a "
+            "second one strands the answer on an empty card. When the message names a "
+            "DIFFERENT subject, it is a PIVOT and you classify it fresh — \"oh also I want "
+            "to recommend Dr Sarah\" while she asked about a restaurant is a real "
+            "sharing.tip, and so is any request to find, host, show or get something"
+        )
     return "none"
 
 

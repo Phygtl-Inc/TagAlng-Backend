@@ -21,6 +21,8 @@ class JointMomentCandidate(BaseModel):
 
 
 class PeerMatchRow(BaseModel):
+    # See ActivityPreviewRow.impression_id — same contract, same endpoint.
+    impression_id: str | None = None
     peer_user_id: str | None = None
     nickname: str | None = None
     avatar_url: str | None = None
@@ -124,6 +126,10 @@ class ActivityPreviewRow(BaseModel):
     # else, so the browse row names it beside the venue.
     community: dict[str, Any] | None = None
     preview: bool = True
+    # The recommendation_impressions row written when this card was sent (contract v2 §A7).
+    # The FE posts it back to /lana/impression on a tap so "shown" becomes "tapped"; a row
+    # we failed to log is simply absent, and the card still renders.
+    impression_id: str | None = None
 
 
 class AuthActionPayload(BaseModel):
@@ -183,7 +189,8 @@ class BlockLogEntryRow(BaseModel):
     match_type: str | None = None
     peer_user_id: str | None = None
     peer_preview_label: str | None = None
-    match_strength: float | None = None
+    # Badge, not score: see local_signals.block_log_badge.
+    match_badge: str | None = None
     match_reasons: list[str] = Field(default_factory=list)
     match_summary: str | None = None
     peer_signal_detail: str | None = None
@@ -1031,6 +1038,13 @@ class SendMessageRequest(BaseModel):
     # own Google search. Those places are in no cached candidate list, so matching the
     # posted text ("It's Fitness CF St. Cloud") would only re-search for them.
     ground_place_id: str | None = None
+    # The category chips on "Find a peer recommendation", as reco_type buckets — one chip
+    # can stand for two ("Services" = professional + service, "Others" = location). The
+    # chip stays lit while the user narrows the ask, so this is STICKY on the session like
+    # the community filter: None means the client said nothing (keep the pick), [] is the
+    # explicit "no category" and clears it. Sent as well as the prose, not instead of it —
+    # a tap still posts a real message, and the filter is what the search is scoped by.
+    reco_types: list[str] | None = None
 
 
 class TurnRouting(BaseModel):
@@ -1115,6 +1129,22 @@ class SendMessageResponse(BaseModel):
     routing_phase: str | None = None
     ui_intent: str | None = None
     ui_actions: list[UiActionRow] = Field(default_factory=list)
+
+
+class ImpressionStatusBody(BaseModel):
+    """What the user did with a card Lana showed (contract v2 §A7).
+
+    `viewed`/`dismissed` are how we learn Lana is showing the wrong things — an outcome
+    log that records only taps makes every ranking look good forever. `accepted` (opened
+    it) is kept separate from `converted` (RSVP'd, joined, accepted the intro) because a
+    card that looks good and a thing that IS good are different failures with different
+    fixes.
+    """
+
+    impression_id: str
+    status: Literal["viewed", "dismissed", "accepted", "converted"]
+    # The row the action created (an event_request, an intro), when there is one.
+    converted_action_id: str | None = None
 
 
 class BlockLogActionRequest(BaseModel):

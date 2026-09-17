@@ -462,12 +462,12 @@ Output ONLY valid JSON (no markdown):
 }}"""
 
 
-def _local_supply(user_id: str) -> list[dict[str, Any]]:
-    """Public concepts held by >= 2 neighbors near this user. [] on any failure."""
+def _local_supply(user_id: str, min_holders: int = 2) -> list[dict[str, Any]]:
+    """Public concepts held by >= min_holders neighbors near this user. [] on failure."""
     try:
         res = service_client().rpc(
             "rapport_local_supply",
-            {"p_user_id": user_id, "p_limit": 8, "p_min_holders": 2},
+            {"p_user_id": user_id, "p_limit": 8, "p_min_holders": int(min_holders)},
         ).execute()
         return res.data or []
     except Exception:
@@ -524,10 +524,21 @@ def seed_cold_start(user_id: str, max_new: int = 3) -> int:
         return 0
 
     supply = _local_supply(user_id)
+    thin = False
+    if not supply:
+        # A thin area is not an empty one. The floor of two holders is a QUALITY
+        # heuristic, not a matcher requirement: score_onion_candidates_for_user awards
+        # +1 off a SINGLE shared public claim and only drops a pair scoring 0. So before
+        # falling back to catalogue questions with no counterpart at all, ask again for
+        # concepts exactly one neighbor holds — one real person to be introduced to
+        # still beats a question nobody in reach can answer alongside you.
+        supply = _local_supply(user_id, min_holders=1)
+        thin = bool(supply)
     logger.info(
-        "rapport-seed[%s]: local supply = %s",
+        "rapport-seed[%s]: local supply = %s%s",
         user_id,
         [(r.get("concept"), r.get("holders")) for r in supply] or "(none)",
+        " (thin: min_holders=1)" if thin else "",
     )
     if supply:
         asked = recent_gap_questions(user_id, limit=60)

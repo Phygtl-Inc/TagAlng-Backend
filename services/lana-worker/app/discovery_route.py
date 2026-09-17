@@ -58,6 +58,7 @@ from app.guest_capabilities import (
     wants_peer_find,
 )
 from app.community_scope import active_community, community_name
+from app.reco_question_sets import active_reco_types, google_searchable
 from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
 from app.tip_embed import tip_headline
 from app.tip_rec_cascade import WIDE_FETCH as WIDE_TIP_FETCH
@@ -3357,6 +3358,15 @@ def _tip_seek_fallback_reply(
     already_asked = bool(session_ctx.get("rec_filter_asked"))
     ctx.pop("rec_filter_asked", None)
 
+    # A recipe and a repair trick are not points on the map. Under those chips a Places
+    # search answers with restaurants and hardware stores — confidently, and about the
+    # wrong thing — so there is no fallback to run: "" sends the caller down the honest
+    # nothing-found-yet path, which offers to ask the neighbours instead.
+    _types = active_reco_types(session_ctx)
+    if not google_searchable(_types):
+        logging.getLogger(__name__).info("tip_seek_fallback.no_places types=%s", _types)
+        return ""
+
     base_query = (detail or category or "").strip()
     noun = (category or detail or "options").strip() or "options"
     zip_for_bias = str(
@@ -3414,8 +3424,12 @@ def _tip_seek_fallback_reply(
         from app.rec_personalize import personalize_tip_query
 
         claims = load_user_context(user_id).get("existing_claims") or []
+        from app.community_scope import community_name
+
         personalized = personalize_tip_query(
             request=base_query, category=category, claims=claims,
+            # "what should I eat there?" has no subject without this.
+            place=community_name(session_ctx),
         )
         if personalized:
             filters = personalized.get("filters") or []
@@ -3864,6 +3878,9 @@ def _tip_seek_answer_turn(
     # asked. The RPC takes it as scope, not as a filter: inside a community distance does
     # not apply, and outside one a community's tips do not show at all.
     _comm = active_community(session_ctx)
+    # The category chips ("Recipes", "Services") are a FILTER, not a flavouring of the
+    # prose: scoped on reco_type so the bucket the user tapped is the bucket they get.
+    _types = active_reco_types(session_ctx)
     neighbor_tips = find_neighbor_tips(
         user_jwt,
         block_id=block_id,
@@ -3873,21 +3890,50 @@ def _tip_seek_answer_turn(
         locale=str(session_ctx.get("preferred_lang") or "en"),
         radius_meters=radius_meters() if widen else None,
         circle_place_id=str(_comm["place_id"]) if _comm else None,
+        reco_types=_types,
     )
     if _comm and not neighbor_tips:
         # Read (and cleared) by _compose_neighbor_tip_reply below, off the same incoming
         # ctx it composes from: name the community that was empty before widening.
         session_ctx["community_widened_from"] = _comm.get("name")
+        # ...and then actually widen. The peers lane has done this since the top filter
+        # shipped (scoped read, fall through to the neighbourhood when it is empty); the
+        # tip lane took the STAMP and not the second query, so an empty community skipped
+        # the neighbourhood entirely and fell to Google — with a matching tip sitting
+        # unscoped in the area (prod 2026-09-16, asked inside Pausa Bar & Cookery).
+        neighbor_tips = find_neighbor_tips(
+            user_jwt,
+            block_id=block_id,
+            query=detail,
+            category=category,
+            limit=WIDE_TIP_FETCH if wide else 3,
+            locale=str(session_ctx.get("preferred_lang") or "en"),
+            radius_meters=radius_meters() if widen else None,
+            circle_place_id=None,
+            reco_types=_types,
+        )
+        if not neighbor_tips:
+            # Nothing wider either, so this turn goes to Google and its composer never
+            # reads the stamp. Left set, it survives into a LATER turn and tells the user
+            # "nobody at Pausa had one, so these are from the wider neighbourhood" over a
+            # list that has nothing to do with Pausa. The flag describes one turn; clear
+            # it on the turn it described.
+            session_ctx["community_widened_from"] = None
     logging.getLogger(__name__).info(
-        "tip_seek_answer.enter block=%s detail=%r category=%r neighbor_tips=%d wide=%s",
-        block_id, detail, category, len(neighbor_tips), wide,
+        "tip_seek_answer.enter block=%s detail=%r category=%r types=%s neighbor_tips=%d "
+        "wide=%s",
+        block_id, detail, category, _types or None, len(neighbor_tips), wide,
     )
 
     if neighbor_tips:
         # The rec rides ON the neighbor's row, not only in the prose (§12a/b): the quote is
         # what makes the row a pre-qualified answer instead of one more person to message.
         shown = stamp_tip_peer_surface(
-            ctx, neighbor_tips, phone_verified=phone_verified, weights=weights
+            ctx,
+            neighbor_tips,
+            phone_verified=phone_verified,
+            weights=weights,
+            user_id=user_id,
         )
         reply = _compose_neighbor_tip_reply(
             neighbor_tips,
@@ -6684,6 +6730,10 @@ def nearest_activity_beyond_radius(
     return far_activity_details(rows[0]) if rows else None
 
 
+# SQL clamps the location query's p_limit to this, so asking for more changes nothing.
+_NEARBY_CANDIDATE_CAP = 50
+
+
 def event_distances_near_block(
     block_id: str, *, limit: int = 50, radius_meters: float | None = None
 ) -> dict[str, float] | None:
@@ -6767,10 +6817,14 @@ def fetch_preview_events_on_block(
 ) -> list[dict[str, Any]]:
     """Upcoming open events on preview block (service role).
 
-    `pool` overrides how many rows to pull from the DB before slicing to `limit` —
-    callers that filter the result downstream (date/host/topic) pass a larger pool so
-    the candidate set isn't pre-truncated to just the soonest few. `with_host_name`
-    attaches each host's nickname for host-aware filtering.
+    `pool` marks a caller that filters the result downstream (date/host/topic). Such a
+    caller gets EVERY candidate the location query found — up to _NEARBY_CANDIDATE_CAP —
+    rather than a slice of them, because any slice taken here is taken before anyone
+    knows what the user asked for. `with_host_name` attaches each host's nickname for
+    host-aware filtering.
+
+    Callers that pass no `pool` are presenting rows directly and still get the `limit`
+    soonest, which for them is the product decision rather than a silent drop.
 
     `exclude_host_id` drops the caller's own meets: browse offers every card as "tap to
     RSVP", so without it Lana asked a host to RSVP to the event he had just created.
@@ -6793,7 +6847,17 @@ def fetch_preview_events_on_block(
         # an un-rolled weekly meet would be filtered out by the starts_at floor below.
         roll_recurring_events()
         now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-        fetch_n = pool if pool and pool > 0 else limit * 3
+        if pool and pool > 0:
+            # Filters downstream, so it needs every candidate: ordering in SQL would
+            # decide which rows survive the limit, not just their order.
+            fetch_n = keep_n = max(pool, _NEARBY_CANDIDATE_CAP)
+            order_in_sql = False
+        else:
+            # Renders rows as-is, so "the soonest few" IS the selection — the order
+            # belongs in SQL where it does that job.
+            fetch_n = limit * 3
+            keep_n = limit
+            order_in_sql = True
         q = (
             sb.table("events")
             .select(
@@ -6807,7 +6871,7 @@ def fetch_preview_events_on_block(
         # (get_activities_near_point returns neither recurrence nor circle_place_ref,
         # and the cards need both), and None falls back to the pre-PR7 behaviour.
         near = event_distances_near_block(
-            block_id, limit=max(fetch_n, 50), radius_meters=radius_meters
+            block_id, limit=max(fetch_n, _NEARBY_CANDIDATE_CAP), radius_meters=radius_meters
         )
         if near is None:
             # Block couldn't be placed: pre-PR7 behaviour, and no distances to stamp. A
@@ -6825,11 +6889,14 @@ def fetch_preview_events_on_block(
             q = q.in_("id", list(near))
         if exclude_host_id:
             q = q.neq("host_id", exclude_host_id)
-        res = q.order("starts_at").limit(fetch_n).execute()
+        if order_in_sql:
+            q = q.order("starts_at")
+        res = q.limit(fetch_n).execute()
         rows = [r for r in (res.data or []) if isinstance(r, dict)]
         for row in rows:
             if near and str(row.get("id") or "") in near:
                 row["distance_meters"] = near[str(row["id"])]
+        rows.sort(key=lambda r: (str(r.get("starts_at") or "9999"), str(r.get("id") or "")))
         if weekend_only:
             from datetime import timezone
 
@@ -6849,7 +6916,7 @@ def fetch_preview_events_on_block(
                 except ValueError:
                     continue
             rows = filtered
-        return rows[:limit]
+        return rows[:keep_n]
     except Exception:
         return []
 
