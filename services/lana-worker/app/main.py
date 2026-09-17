@@ -440,7 +440,16 @@ _RAPPORT_BLOCK_LINEAR = frozenset(
 )
 
 
+# Capture flows ask their own questions. A gap opened mid-capture hands the user back the
+# question the capture just asked them: a bakery reco's "what should people order?" answer
+# opened "do you have a favorite local bakery?" on prod. The finished reco authors one
+# confirming gap instead — see tip_share.open_reco_confirm_gap.
+_RAPPORT_CAPTURE_KEYS = ("tip_share_active", "tip_listed_now")
+
+
 def _rapport_gap_allowed(ctx: dict[str, Any]) -> bool:
+    if any(ctx.get(k) for k in _RAPPORT_CAPTURE_KEYS):
+        return False
     slots = ctx.get("_discovery_slots")
     slots = slots if isinstance(slots, dict) else {}
     goal = str(slots.get("goal") or "")
@@ -2158,6 +2167,17 @@ def _run_lana_message(
         )
         # Close any gaps whose concept the user has since stated.
         background_tasks.add_task(rapport_reconcile_gaps, auth.user_id, user_msg_id)
+    # The reco just posted this turn: author the one gap the capture turns were barred from
+    # opening — a question that names what they recommended and asks if it is their own spot.
+    if merged.get("tip_listed_now"):
+        from app.tip_share import open_reco_confirm_gap
+
+        background_tasks.add_task(
+            open_reco_confirm_gap,
+            auth.user_id,
+            user_msg_id,
+            dict(merged.get("tip_draft") or {}),
+        )
     # Layer 3b latent-intent collection (Phase 1: collect, don't surface). Off by default.
     if purpose == "lana" and latent_extract_enabled():
         from app.latent_extract import run_latent_intent

@@ -532,6 +532,117 @@ def _description(draft: dict[str, Any]) -> str | None:
     return " · ".join([p for p in parts if p]) or None
 
 
+_RECO_CONFIRM_PROMPT = """You write ONE warm question for a neighborhood app user who JUST \
+finished recommending a place to their neighbors. Find out whether it is their OWN regular spot \
+or just somewhere good they know about — recommending a place is not the same as preferring it, \
+and only they can settle which it is.
+
+Output ONLY JSON: {"question": "...", "teaser": "about <place>…", "suggestions": ["...", "...", "..."]}
+
+Rules:
+- Open like you NOTICED what they just did — warm and observational ("Saw you just dropped a \
+rec about …"). Never a receipt: no "Thanks for recommending", no "Your tip is saved".
+- Then ask whether it is their OWN go-to. Name the place.
+- Say the place the way a neighbor would say it out loud: drop any trailing location or filler \
+the user typed ("The backhaus in San Matteo" → "The Backhaus", the locality is given below and \
+is already on the card). Fix obvious casing. Never invent or expand a name.
+- Use the CATEGORY word as the noun ("bakery", "barber", "trail") — never a generic "place".
+- Short (<120 chars), warm, in the app's voice. A yes/no-shaped question is right here.
+- teaser: 2-5 word lead-in ending with "…".
+- suggestions: exactly 3 tappable answers in the USER's voice, each under 28 characters. One \
+confirms it is their regular spot, one allows "good, but not my favorite", one leaves room for \
+a different favorite — so even a "no" teaches you something new.
+- Never invent detail they did not give you.
+- English only (rendered into the user's language downstream)."""
+
+
+def _reco_confirm_question(draft: dict[str, Any]) -> tuple[str, str, list[str]] | None:
+    """The confirming question for a reco that just posted, or None.
+
+    None on ANY failure, deliberately: the fallback would be a templated "is this your
+    favorite X?", which is the canned line this question exists to avoid. No gap beats a
+    generated-looking one.
+    """
+    name = str(draft.get("name") or "").strip()
+    if not name:
+        return None
+    try:
+        from app.circles_flow import _lexicon_clean
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return None
+        answered = "\n".join(
+            f"{f['label']}: {f['answer']}" for f in (_reco_fields(draft) or [])
+        )
+        data = llm_json(
+            model=router_model(),
+            system=_RECO_CONFIRM_PROMPT,
+            user_payload="\n\n".join(
+                [
+                    f'place: "{name}"',
+                    # category, never reco_type: reco_type is what you DO with a reco, so a
+                    # bakery is typed "restaurant" and the question would ask the wrong noun.
+                    f'category: "{str(draft.get("category") or "").strip() or "(unknown)"}"',
+                    f'locality (already on the card — keep it OUT of the question): '
+                    f'"{str(draft.get("locality") or "").strip() or "(none)"}"',
+                    f"their own words: {_description(draft) or '(none)'}",
+                    "what they told you:\n" + (answered or "(nothing)"),
+                ]
+            ),
+            max_tokens=220,
+            temperature=0.4,
+        )
+        question = str((data or {}).get("question") or "").strip()
+        teaser = str((data or {}).get("teaser") or "").strip()
+        raw = (data or {}).get("suggestions")
+        chips = [
+            " ".join(str(c).split())[:48]
+            for c in (raw if isinstance(raw, list) else [])
+            if str(c or "").strip() and _lexicon_clean(str(c))
+        ][:3]
+        if question and _lexicon_clean(question, teaser):
+            return question[:160], (teaser or f"about {name}…")[:80], chips
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("reco_confirm_question_failed")
+    return None
+
+
+def open_reco_confirm_gap(
+    user_id: str, message_id: str | None, draft: dict[str, Any]
+) -> None:
+    """Background: open the one rapport gap a finished reco earns.
+
+    Keyed `reco:<signal_id>` so unique(user_id, gap_id) makes it idempotent per reco, and
+    dedup-exempt because it deliberately restates the cold question it replaces.
+    """
+    signal_id = str((draft or {}).get("signal_id") or "").strip()
+    if not user_id or not signal_id:
+        return
+    authored = _reco_confirm_question(draft)
+    if not authored:
+        return
+    question, teaser, chips = authored
+    try:
+        from app.rapport_gaps import open_semantic_gap
+
+        open_semantic_gap(
+            user_id,
+            message_id,
+            question,
+            label=str(draft.get("name") or "").strip() or None,
+            bucket="interest",
+            teaser=teaser,
+            place_ref=str(draft.get("circle_place_id") or "").strip() or None,
+            gap_id=f"reco:{signal_id}",
+            unlock_score=0.85,
+            answer_options=chips,
+            skip_dedup=True,
+        )
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("reco_confirm_gap_failed")
+
+
 # The community step. Deterministic, appended after the generated set the way the hosting
 # flow puts "For one of your communities?" on its setup card — a destination is not one of
 # the facets Lana writes about the place, and it must never be invented.

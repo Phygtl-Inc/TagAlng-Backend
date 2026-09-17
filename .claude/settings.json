@@ -96,7 +96,10 @@
       "Bash(pg_ctl status *)",
       "Bash(cd /Users/dev/Downloads/TagAlng-backend/services/lana-worker && ls .venv/bin/python && echo \"venv is HERE, not at repo root\")",
       "Read(//usr/local/Cellar/python@3.13/3.13.7/Frameworks/Python.framework/Versions/3.13/bin/**)",
-      "Bash(psql \"postgresql://postgres:postgres@127.0.0.1:54322/postgres\" -c \"select public._tip_match_strength\\('barber', 'Jacas Barber · barber · Service: Men''s haircut', '{}'::text[], null, null, 0.55\\) as barber_vs_barber;\")"
+      "Bash(psql \"postgresql://postgres:postgres@127.0.0.1:54322/postgres\" -c \"select public._tip_match_strength\\('barber', 'Jacas Barber · barber · Service: Men''s haircut', '{}'::text[], null, null, 0.55\\) as barber_vs_barber;\")",
+      "Bash(cp app/main.py /tmp/main.bak)",
+      "Bash(python3 -)",
+      "Bash(cp /tmp/main.bak app/main.py)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",

@@ -645,3 +645,81 @@ class TestAnswerOptions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRecoConfirmGap(unittest.TestCase):
+    """A finished recommendation authors ONE confirming gap; capture turns author none.
+
+    Prod regression: answering the capture's own "what should people order at The backhaus?"
+    opened the cold gap "do you have a favorite local bakery?" 31s later.
+    """
+
+    def test_capture_turns_block_gap_authoring(self):
+        from app.main import _rapport_gap_allowed
+
+        self.assertTrue(_rapport_gap_allowed({}))
+        self.assertFalse(_rapport_gap_allowed({"tip_share_active": True}))
+        # The publish turn clears tip_share_active but still must not author a cold gap.
+        self.assertFalse(_rapport_gap_allowed({"tip_listed_now": True}))
+
+    def test_safety_gate_survives_the_capture_gate(self):
+        from app.main import _rapport_gap_allowed
+
+        self.assertFalse(_rapport_gap_allowed({"_discovery_slots": {"goal": "crisis"}}))
+
+    def test_skip_dedup_inserts_despite_a_duplicate_hit(self):
+        store = _store()
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)), \
+             patch.object(rapport_gaps, "_is_semantic_duplicate", return_value=True):
+            rapport_gaps.open_semantic_gap(
+                "u1", "m1", "Is The Backhaus your go-to bakery?",
+                label="The Backhaus", bucket="interest",
+                gap_id="reco:sig-1", unlock_score=0.85,
+                answer_options=["Yes, that's my spot", "Good, not my favorite"],
+                skip_dedup=True,
+            )
+        rows = [r for (t, r) in store["inserts"] if t == "rapport_gaps"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["gap_id"], "reco:sig-1")
+        self.assertEqual(rows[0]["unlock_score"], 0.85)
+        self.assertEqual(len(rows[0]["answer_options"]), 2)
+
+    def test_dedup_still_applies_by_default(self):
+        store = _store()
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)), \
+             patch.object(rapport_gaps, "_is_semantic_duplicate", return_value=True):
+            rapport_gaps.open_semantic_gap("u1", "m1", "Do you have a favorite bakery?")
+        self.assertEqual(store["inserts"], [])
+
+    def test_confirm_gap_is_dedup_exempt_and_keyed_to_the_reco(self):
+        from app import tip_share
+
+        with patch.object(
+            tip_share, "_reco_confirm_question",
+            return_value=("Is The Backhaus your go-to bakery?", "about The Backhaus…", ["Yes"]),
+        ), patch("app.rapport_gaps.open_semantic_gap") as opened:
+            tip_share.open_reco_confirm_gap(
+                "u1", "m1",
+                {"signal_id": "s1", "name": "The Backhaus", "category": "bakery"},
+            )
+        opened.assert_called_once()
+        kwargs = opened.call_args.kwargs
+        self.assertEqual(kwargs["gap_id"], "reco:s1")
+        self.assertTrue(kwargs["skip_dedup"])
+        self.assertEqual(kwargs["answer_options"], ["Yes"])
+
+    def test_no_gap_when_the_author_declines(self):
+        """Fail closed: a templated 'is this your favorite X?' must never ship."""
+        from app import tip_share
+
+        with patch.object(tip_share, "_reco_confirm_question", return_value=None), \
+             patch("app.rapport_gaps.open_semantic_gap") as opened:
+            tip_share.open_reco_confirm_gap("u1", "m1", {"signal_id": "s1", "name": "X"})
+        opened.assert_not_called()
+
+    def test_no_gap_before_the_reco_is_saved(self):
+        from app import tip_share
+
+        with patch.object(tip_share, "_reco_confirm_question") as authored:
+            tip_share.open_reco_confirm_gap("u1", "m1", {"name": "X"})
+        authored.assert_not_called()

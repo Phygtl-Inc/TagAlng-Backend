@@ -135,6 +135,7 @@ def open_semantic_gap(
     unlock_score: float | None = None,
     from_local_supply: bool = False,
     answer_options: list[str] | None = None,
+    skip_dedup: bool = False,
 ) -> bool:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
 
@@ -188,7 +189,10 @@ def open_semantic_gap(
     # Semantic dedup: don't reopen a question that means the same as one we already asked, even
     # when the wording (and thus the slug) differs. Embedding also stored to power coverage steering.
     embedding = _question_embedding(q_text)
-    if _is_semantic_duplicate(user_id, embedding):
+    # skip_dedup: a confirming question NAMES what the user just did ("is The Backhaus your
+    # go-to bakery?") and so reads as a near-duplicate of the cold ask it is meant to replace.
+    # The embedding is still stored, so later questions dedup against this one.
+    if not skip_dedup and _is_semantic_duplicate(user_id, embedding):
         logger.info("rapport: skipped near-duplicate question for %s: %s", user_id, q_text)
         return False
     row: dict[str, Any] = {
