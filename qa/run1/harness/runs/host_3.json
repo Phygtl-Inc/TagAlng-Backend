@@ -1,0 +1,109 @@
+{
+  "id": "host_3",
+  "tags": [
+    "host"
+  ],
+  "zip": "34786",
+  "turns": [
+    {
+      "sent": "I want to host a meet. stroller walk tomorrow at sunrise, meet at the lake",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 18998,
+      "assistant_message": "Here's your meet — **Sunrise Stroller Walk at Lake Nona**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Sunrise Stroller Walk at Lake Nona",
+        "starts_at": "2026-07-11T05:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "34786",
+      "hint": null,
+      "status": 200,
+      "ms": 9285,
+      "assistant_message": "Updated **Sunrise Stroller Walk at Lake Nona** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Sunrise Stroller Walk at Lake Nona",
+        "starts_at": "2026-07-11T05:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 8282,
+      "assistant_message": "Updated **Sunrise Stroller Walk at Lake Nona** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Sunrise Stroller Walk at Lake Nona",
+        "starts_at": "2026-07-11T05:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T11:12:45.326Z",
+  "session": "44121f82-6153-4840-a5e8-f2c396dc9dc7",
+  "finishedAt": "2026-07-10T11:13:32.776Z"
+}

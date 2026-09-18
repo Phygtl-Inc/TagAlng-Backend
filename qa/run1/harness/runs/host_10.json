@@ -1,0 +1,109 @@
+{
+  "id": "host_10",
+  "tags": [
+    "host"
+  ],
+  "zip": "32827",
+  "turns": [
+    {
+      "sent": "I want to host a meet. book club for moms, first meeting end of july",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 11358,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32827",
+      "hint": null,
+      "status": 200,
+      "ms": 12444,
+      "assistant_message": "Thanks for sharing your zip code! Could you let me know where you'd like to host the book club—your home, a local café, or another spot? Also, if you have a name and a specific date and time in mind, just let me know and I’ll get it set up.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 10918,
+      "assistant_message": "Great! Could you let me know the specific location (like your home or a favorite café), a date and time, and if you’d like to give your book club a name? Once we have those, I can post your event!",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": null,
+        "starts_at": null
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-10T10:47:46.745Z",
+  "session": "077965a8-a2a3-4027-904b-6a3c228512ec",
+  "finishedAt": "2026-07-10T10:48:22.453Z"
+}
