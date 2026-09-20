@@ -18,6 +18,11 @@ TURN_SCOPED_SURFACES = frozenset({
     # (and every other card) silently never rendered. The persistent `intro_proposal`
     # payload is deliberately NOT here — later turns still read it to avoid re-proposing.
     "intro_proposed_now",
+    # "I just offered to introduce you to X" — true only on the turn that armed the
+    # offer, so drop_stale_intro_offer can tell an offer being made from one left over.
+    # The persistent `pending_intro_offer` (the accept arrives a turn later) and
+    # `intro_offer_shown` are deliberately NOT here.
+    "intro_offer_armed_now",
     "event_published_now",
     "item_listed_now",
     "tip_listed_now",

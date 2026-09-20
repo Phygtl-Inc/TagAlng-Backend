@@ -207,6 +207,13 @@ def attach_peer_card_actions(
             continue
         peer_id = str(item.get("peer_user_id") or "").strip()
         nick = str(item.get("nickname") or "").strip()
+        if item.get("can_nudge") is False:
+            # The send RPC would refuse this pair (blocked, consent withdrawn, or —
+            # before 20261212 — out of reach). The button and the send now come off
+            # one predicate, so the card never offers what the tap can't do.
+            item.pop("actions", None)
+            out.append(item)
+            continue
         if item.get("connection"):
             # Intro already sent, or the two already connected — a nudge here can only
             # fail (7-day pair cooldown / duplicate_intro_recent).
@@ -301,6 +308,67 @@ def peer_tiers(user_id: str, peer_ids: list[str]) -> dict[str, str]:
         return {}
 
 
+def peers_can_reach(user_id: str, peer_ids: list[str]) -> dict[str, bool]:
+    """{peer_user_id: can a nudge/intro actually be sent there} for the caller.
+
+    The same `_users_can_reach` the send RPC enforces, in one round trip, so the
+    card's Nudge button is decided by the send's own rule rather than a second one
+    that drifts from it (prod 2026-09-16: a button over a peer the RPC refused).
+
+    {} on any failure — fail-open like peer_tiers. A lookup blip must not strip
+    buttons off a list that would work; the send path still refuses, and now says
+    so in a sentence instead of dying.
+    """
+    ids = [i for i in dict.fromkeys(str(p) for p in peer_ids) if i]
+    if not user_id or not ids:
+        return {}
+    try:
+        from app.auth import service_client
+
+        res = service_client().rpc(
+            "lana_users_can_reach",
+            {"p_user_id": user_id, "p_other_user_ids": ids},
+        ).execute()
+        return {
+            str(r["other_user_id"]): bool(r.get("can_reach"))
+            for r in (res.data or [])
+            if r.get("other_user_id")
+        }
+    except Exception:  # noqa: BLE001 - never let a reach lookup break a search or a card
+        import logging
+
+        logging.getLogger(__name__).exception("peer_reach_lookup_failed")
+        return {}
+
+
+def stamp_reachability(rows: list[dict[str, Any]], *, user_id: str) -> None:
+    """Stamp `can_nudge` on rows that don't carry it yet, in place.
+
+    Idempotent: a row stamped at fetch time is left alone, so the backstop call on
+    the response path costs nothing for lists that already came through the shared
+    peer fetch. Connected rows are skipped — they have no button either way.
+    """
+    ids = [
+        str(r["peer_user_id"])
+        for r in rows
+        if isinstance(r, dict)
+        and r.get("peer_user_id")
+        and not r.get("connection")
+        and r.get("can_nudge") is None
+    ]
+    if not user_id or not ids:
+        return
+    reach = peers_can_reach(user_id, ids)
+    if not reach:
+        return
+    for row in rows:
+        if not isinstance(row, dict) or row.get("can_nudge") is not None:
+            continue
+        pid = str(row.get("peer_user_id") or "")
+        if pid in reach:
+            row["can_nudge"] = reach[pid]
+
+
 def drop_connected_peers(
     rows: list[dict[str, Any]], *, user_id: str | None, keep_connected: bool = False
 ) -> list[dict[str, Any]]:
@@ -381,6 +449,37 @@ def stamp_connection_state(rows: list[dict[str, Any]], *, user_id: str) -> None:
             row["connection"] = "intro_sent"
 
 
+def stamp_name_disambiguation(rows: list[dict[str, Any]]) -> None:
+    """`name_hint` on rows whose nickname collides with another row's, in place.
+
+    Two different accounts both called Jake, both showing the single label "your sushi
+    spot", sat one above the other with nothing to tell them apart (prod 2026-09-18) —
+    and "introduce me to Jake" can only resolve to whichever ranked first. The hint is
+    the most distinguishing fact the row already carries; nickname itself is left alone,
+    because pick_peer_for_intro matches on it and a decorated name would only make the
+    resolution harder. When a row carries nothing distinguishing there is no honest hint
+    to give, and none is stamped.
+    """
+    seen: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        nick = str(row.get("nickname") or "").strip().lower()
+        if nick:
+            seen.setdefault(nick, []).append(row)
+    for dupes in seen.values():
+        if len(dupes) < 2:
+            continue
+        for row in dupes:
+            hint = (
+                str(row.get("distance_text") or "").strip()
+                or str(row.get("shared_place_name") or "").strip()
+                or str(row.get("community_name") or "").strip()
+            )
+            if hint:
+                row["name_hint"] = hint
+
+
 def drop_stale_intro_offer(ctx: dict[str, Any], rows: list[Any]) -> None:
     """A single-peer intro offer cannot outlive the turn that showed that one peer.
 
@@ -411,6 +510,15 @@ def drop_stale_intro_offer(ctx: dict[str, Any], rows: list[Any]) -> None:
         if isinstance(r, dict) and r.get("peer_user_id")
     ]
     if candidate and ids == [candidate]:
+        return
+    # An offer armed THIS turn cannot be stale — it is the turn the user is looking
+    # at. The lane narrows ctx["peer_matches"] to the featured peer, but the pipeline
+    # writes the lane's full list back over it (lana_unified_pipeline:2573), so the
+    # rule below saw five rows and cleared the offer that had just been made. The
+    # "yes" one turn later then had nothing to bind to: no chip, no accept path
+    # (prod 2026-09-16). Same seed-turn class as the de-stick bug — a turn-scoped
+    # signal must never be judged by the state its own turn produced.
+    if ctx.get("intro_offer_armed_now") and candidate and candidate in ids:
         return
     import logging
 
@@ -450,6 +558,10 @@ def stamp_peer_discovery_ctx(
     enriched = enrich_peer_match_rows(raw, phone_verified=phone_verified)
     # Before actions are attached — attach_peer_card_actions skips connected rows.
     stamp_connection_state(enriched, user_id=user_id)
+    # Backstop for rows that reached a card without passing the shared peer fetch
+    # (stale session ctx, orchestrator tool results): no-op when already stamped.
+    stamp_reachability(enriched, user_id=user_id)
+    stamp_name_disambiguation(enriched)
     enriched = attach_peer_card_actions(enriched, phone_verified=phone_verified)
     ctx["peer_matches"] = enriched
     surface = build_discovery_surface(enriched)

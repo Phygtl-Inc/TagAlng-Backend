@@ -512,7 +512,35 @@ POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     # a Find activities chip (prod 2026-09-02): a confirmation of a request the user had
     # already made, costing them a turn while the browse sat right there.
     "discovery.find_activities",
-    # NOT discovery.find_peers — test_tip_ask_consent pins it to the policy on purpose.
+    # Peers, for the same reason and with the same bar (0.75). "find me neighbors
+    # nearby" — classified discovery.find_peers at 0.95, with the search's own progress
+    # card already written — came back as "Got you … Want me to find neighbors around
+    # here who play too?" with a Find neighbors who play chip (prod 2026-09-18,
+    # last_routing.why: "They asked to find neighbors nearby; offering the peer search
+    # is the best available action"). The policy confirmed a request instead of running
+    # it, and the engine never ran: peer_matches null, active_intent null.
+    #
+    # This does NOT touch bridging. The escape reads the classifier's verdict on the
+    # user's OWN words, so a turn where they did not ask — "I'm lonely", "it's quiet
+    # here", a rapport answer — is companionship/identity, stays with the policy, and
+    # still gets pitched peers with a chip. Rapport answers never reach this gate at
+    # all: they go to decide_turn through _policy_rapport_reply. And accepting a pitch
+    # already leaves the policy (_policy_pitch_accepted), so the tapped chip and the
+    # typed sentence now land in the same engine instead of different ones.
+    "discovery.find_peers",
+    # The same ask with the trait spelled out — "find neighbors who play badminton",
+    # "show me people who run" — which the classifier files as find_by_attrs. It is the
+    # SAME bug and the more common phrasing; it is also the text of the chip the policy
+    # itself offers, so the typed sentence and the tapped chip now run the same engine.
+    "discovery.find_by_attrs",
+})
+
+# Intents that double as an expressed need, so the intent alone cannot say whether this
+# turn is an order or a feeling. These require the classifier's `explicit_request`; the
+# rest of the set keeps the condition it shipped with.
+EXPLICIT_REQUEST_REQUIRED: frozenset[str] = frozenset({
+    "discovery.find_peers",
+    "discovery.find_by_attrs",
 })
 
 
@@ -648,6 +676,21 @@ def _turn_is_engine_action(
         # turn to neither of them, which is the failure this whole helper exists to avoid.
         if _turn_is_tip_share(slots, msg):
             return True
+        # Peers is the one intent that doubles as an expressed need, so it needs the
+        # extra question: did they ASK? "find me neighbors nearby" and "we don't know
+        # anyone here yet" both classify discovery.find_peers, and on prod's model both
+        # landed at 0.95 — the intent and its confidence cannot tell them apart (measured
+        # 2026-09-18). The first is the search engine's turn; the second is the policy's
+        # whole job, acknowledge and offer. `explicit_request` is the classifier's own
+        # read of which one this is, and it defaults false — so if the model omits it,
+        # the turn stays with the policy exactly as it does today.
+        #
+        # Scoped to the two peer-search intents deliberately: looking.tip, sharing.tip,
+        # find_activities and communities keep the condition they shipped with, because
+        # nothing about them was ambiguous and a new requirement could only take working
+        # turns away.
+        if linear in EXPLICIT_REQUEST_REQUIRED and not bool(slots.get("explicit_request")):
+            return False
         # The engine's OWN bar, not a second one: escaping the policy below the threshold
         # its handler needs would leave the turn to neither of them.
         return linear in POLICY_ENGINE_ONLY_INTENTS and intent_confidence_met(slots, linear)

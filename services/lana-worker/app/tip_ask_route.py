@@ -242,7 +242,14 @@ def route_tip_ask(
     Recording is synchronous (the caller's own turn must know what it is about to claim);
     the mail goes out on a daemon thread, because nobody's chat should wait on SMTP.
     """
-    outcome: dict[str, Any] = {"recipients": [], "none_qualified": False, "error": False}
+    outcome: dict[str, Any] = {
+        "recipients": [],
+        "none_qualified": False,
+        "error": False,
+        # True when nobody cleared the anti-gaming floor and we fell back to thin standing.
+        # The reply is written from the outcome, so this is how it stays honest about it.
+        "thin_standing": False,
+    }
     ask = str(ask_text or "").strip()
     if not (enabled() and ask and signal_id):
         outcome["none_qualified"] = True
@@ -266,7 +273,9 @@ def route_tip_ask(
             # ponytail: one authority RPC per candidate, N<=8. Batch into a single
             # `attester_authority(p_user_ids[])` if this ever shows up in turn latency.
             standing = best_authority(uid, concepts)
-            if not standing or standing["score"] < MIN_EXPLICIT_SCORE:
+            # No standing on this concept at all = not a candidate. The SCORE floor is
+            # applied below, as a tier rather than a gate — see the shortlist split.
+            if not standing:
                 continue
             candidates.append(
                 {
@@ -285,7 +294,23 @@ def route_tip_ask(
         # Strongest standing first, nearer neighbor breaking the tie — the order Lana reads.
         candidates.sort(key=lambda c: (-c["score"], c.get("distance") or 1e9))
 
-        picks = _pick(ask, candidates[:_SHORTLIST])
+        # MIN_EXPLICIT_SCORE is the §A4 anti-gaming floor: a bare self-declared claim must
+        # never satisfy an EXPLICIT requirement ("someone who has actually run a marathon").
+        # Applied to every ask it also answers an ordinary "anyone know a good dentist?"
+        # with silence, because most neighbours have a thin claim or none — so the one
+        # person who mentioned it is dropped and the asker is told nobody exists.
+        #
+        # Tier instead of gate. Thin standing is a FALLBACK, never mixed in: it is only
+        # ever read when nobody cleared the floor, so it cannot outrank or displace proven
+        # standing and gaming still buys nothing. _pick is the quality gate either way —
+        # it sees the evidence and returns [] when none of them fit.
+        strong = [c for c in candidates if c["score"] >= MIN_EXPLICIT_SCORE]
+        shortlist = strong or [c for c in candidates if c["score"] < MIN_EXPLICIT_SCORE]
+        # The receipt must know which case this was: Lana cannot say "you're the person
+        # for this" about a neighbour who merely mentioned it once.
+        outcome["thin_standing"] = not strong and bool(shortlist)
+
+        picks = _pick(ask, shortlist[:_SHORTLIST])
         if not picks:
             outcome["none_qualified"] = True
             return outcome

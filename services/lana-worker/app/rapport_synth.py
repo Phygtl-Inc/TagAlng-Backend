@@ -35,6 +35,11 @@ _CLUSTER_SIMILARITY = float(os.environ.get("LANA_RAPPORT_CLUSTER_SIMILARITY", "0
 _MAX_NEW = 2
 _BUFFER_TARGET = 2
 
+# Lateral seeding stops only once someone has answered into most of the map. 5 of the 7
+# CLAIM_BUCKETS, so this is near-unreachable by design: the gate exists to stop pestering a
+# fully-covered profile, NOT to ration lateral questions the way the old any-claim gate did.
+_BREADTH_COVERED = 5
+
 # Coalesce burst calls: the ranker attempts a backfill whenever the plate is empty, and a
 # richly-profiled user can yield no new questions — without this, rapid home re-renders would
 # each fire an LLM call. In-process only (best-effort across worker instances), keyed by user.
@@ -489,30 +494,16 @@ def _supply_block(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _has_any_claim(user_id: str) -> bool:
-    """True when the user holds at least one active claim. Fails CLOSED (True): a
-    read error must not seed a user who already has a profile."""
-    try:
-        res = (
-            service_client()
-            .table("user_identity_claims")
-            .select("id")
-            .eq("user_id", user_id)
-            .is_("dismissed_at", "null")
-            .limit(1)
-            .execute()
-        )
-        return bool(res.data)
-    except Exception:
-        logger.exception("rapport-seed: claim check failed for %s", user_id)
-        return True
-
-
 def seed_cold_start(user_id: str, max_new: int = 3) -> int:
-    """Open opening questions for a user we know NOTHING about. Returns how many.
+    """Open lateral questions — about things the user has never mentioned. Returns how many.
 
-    Only ever runs for a user with no claims — anyone with a profile is served by
-    the deepening synth above. Three tiers, cheapest last:
+    Gated on BREADTH, not on holding any claim. It used to stop at claim #1, which made
+    this the only lateral source in a system whose other source (synthesize_gaps_from_claims)
+    can only deepen topics the user already raised: from their first claim onward every
+    question Lana could ask was a facet of something already said, which is what the
+    looping felt like. The replacement gate is deliberately near-unreachable — 5 of the 7
+    CLAIM_BUCKETS answered — so in practice lateral supply stays on for everyone; it exists
+    to stop asking someone who has genuinely covered the map. Three tiers, cheapest last:
       1. Local supply → AI-written questions about what neighbors nearby claim.
       2. Nothing nearby (first user in an area, or no location yet) → the
          no-prior-knowledge catalogue seeds, which need no supply at all.
@@ -520,7 +511,11 @@ def seed_cold_start(user_id: str, max_new: int = 3) -> int:
     """
     if not user_id or _cooling_down(user_id):
         return 0
-    if _has_any_claim(user_id):
+    # covered_buckets returns set() on a read error, so an unreadable profile falls through
+    # to asking rather than to silence. Silence is the failure users actually report.
+    from app.rapport_priority import covered_buckets
+
+    if len(covered_buckets(user_id)) >= _BREADTH_COVERED:
         return 0
 
     supply = _local_supply(user_id)

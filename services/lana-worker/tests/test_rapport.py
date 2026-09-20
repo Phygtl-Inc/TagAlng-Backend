@@ -5,6 +5,8 @@ couple of ranker helpers so we can exercise the decision logic in isolation.
 """
 
 import unittest
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import rapport_gaps, rapport_ranker
@@ -723,3 +725,37 @@ class TestRecoConfirmGap(unittest.TestCase):
         with patch.object(tip_share, "_reco_confirm_question") as authored:
             tip_share.open_reco_confirm_gap("u1", "m1", {"name": "X"})
         authored.assert_not_called()
+
+
+class TestChatCooldownReachesTheTile(unittest.TestCase):
+    """A gap Lana raised in conversation must leave the tile too, not just the chat queue.
+
+    mark_chat_asked leaves status='open' on purpose, so the tile's own query returned it
+    the same minute chat asked it — the user got the same question twice, reworded.
+    """
+
+    @staticmethod
+    def _rows_after_filter(chat_asked_at):
+        from unittest.mock import MagicMock
+
+        row = {
+            "gap_row_id": "g1", "gap_id": "deepen:x", "user_id": "u1",
+            "status": "open", "parent_bucket": "interest",
+            "question": "What do you enjoy about it?", "chat_asked_at": chat_asked_at,
+        }
+        client = MagicMock()
+        client.table.return_value.select.return_value.eq.return_value.eq.return_value \
+            .execute.return_value = SimpleNamespace(data=[row])
+        with patch.object(rapport_ranker, "service_client", return_value=client):
+            return rapport_ranker._load_open_rows("u1")
+
+    def test_a_gap_asked_in_chat_just_now_is_off_the_tile(self):
+        just_now = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        self.assertEqual(self._rows_after_filter(just_now), [])
+
+    def test_the_same_gap_returns_once_the_window_passes(self):
+        long_ago = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+        self.assertEqual(len(self._rows_after_filter(long_ago)), 1)
+
+    def test_a_gap_never_asked_in_chat_is_unaffected(self):
+        self.assertEqual(len(self._rows_after_filter(None)), 1)

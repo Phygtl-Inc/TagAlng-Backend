@@ -337,6 +337,16 @@ def _load_open_rows(user_id: str) -> list[dict[str, Any]]:
     except Exception:
         logger.exception("rapport: candidate load failed for %s", user_id)
         return []
+    # A gap Lana already raised in conversation is not a tile candidate the same minute.
+    # mark_chat_asked deliberately leaves status='open' (the question is still unanswered),
+    # so without this the tile re-asks, in different words, what chat just asked — and the
+    # chat side's own cooldown cannot see it. Same helper, so the two can never disagree.
+    try:
+        from app.policy.goals import _asked_in_chat_recently
+
+        rows = [r for r in rows if not _asked_in_chat_recently(r)]
+    except Exception:  # noqa: BLE001 — a repeated ask beats no ask
+        logger.exception("rapport: chat-cooldown filter failed for %s", user_id)
     if not any(r.get("affiliation_ref") for r in rows):
         return rows
     try:

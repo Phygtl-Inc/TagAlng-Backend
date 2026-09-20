@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 from app.auth import service_client
@@ -39,15 +40,59 @@ def radius_match_enabled() -> bool:
     )
 
 
+_REACH_RADIUS_TTL_S = 600.0
+_REACH_RADIUS_MISS_TTL_S = 60.0
+_reach_radius_cache: tuple[float | None, float] | None = None  # (meters, fetched_at)
+
+
+def _db_reach_radius() -> float | None:
+    """`peer_reach_radius_meters()` — how far a nudge/intro reaches, per the DB.
+
+    The search radius has to equal the send radius or the product shows people it
+    then refuses to contact (prod 2026-09-16), so the number lives in one place —
+    20261212120000_intro_reach_radius.sql — and this side reads it. None when the
+    function isn't there yet (migration unpushed) or the lookup fails; the caller
+    then falls back to the env var, which is what every deploy has today.
+    """
+    global _reach_radius_cache
+    now = time.monotonic()
+    if _reach_radius_cache is not None:
+        cached, at = _reach_radius_cache
+        ttl = _REACH_RADIUS_TTL_S if cached is not None else _REACH_RADIUS_MISS_TTL_S
+        if now - at < ttl:
+            return cached
+    try:
+        res = service_client().rpc("peer_reach_radius_meters", {}).execute()
+        meters = float(res.data)
+        if meters <= 0:
+            raise ValueError(f"non-positive radius {meters}")
+    except Exception:  # noqa: BLE001 - never let this break a search
+        logger.info("peer_reach_radius_lookup_failed — falling back to env")
+        _reach_radius_cache = (None, now)  # negative cache: don't retry per call
+        return None
+    _reach_radius_cache = (meters, now)
+    return meters
+
+
 def radius_meters() -> float:
     raw = os.environ.get("LANA_PEER_RADIUS_METERS", "").strip()
-    if not raw:
-        return _DEFAULT_RADIUS_M
-    try:
-        return max(100.0, min(float(raw), 200000.0))
-    except ValueError:
-        logger.warning("peer_radius_bad_env value=%r — using default", raw)
-        return _DEFAULT_RADIUS_M
+    env_m: float | None = None
+    if raw:
+        try:
+            env_m = max(100.0, min(float(raw), 200000.0))
+        except ValueError:
+            logger.warning("peer_radius_bad_env value=%r — using default", raw)
+    db_m = _db_reach_radius()
+    if db_m is None:
+        return env_m if env_m is not None else _DEFAULT_RADIUS_M
+    if env_m is not None and abs(env_m - db_m) > 1.0:
+        # Not fatal, but say it out loud: the env is no longer what decides, and a
+        # stale value here is how the two radii drifted apart in the first place.
+        logger.warning(
+            "peer_radius_env_ignored env=%.0f db=%.0f — peer_reach_radius_meters() wins",
+            env_m, db_m,
+        )
+    return db_m
 
 
 def radius_rpc(base_name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -77,12 +122,13 @@ def fetch_peer_matches_within_radius(
     """
     if not user_id or not radius_match_enabled():
         return None
+    radius = radius_meters()
     try:
         res = service_client().rpc(
             "match_peers_within_radius",
             {
                 "p_user_id": user_id,
-                "p_radius_meters": radius_meters(),
+                "p_radius_meters": radius,
                 "p_limit": limit,
                 "p_locale": locale,
             },
@@ -98,6 +144,6 @@ def fetch_peer_matches_within_radius(
     )
     logger.info(
         "peer_radius_match user=%s radius_m=%.0f matches=%d",
-        user_id, radius_meters(), len(peers),
+        user_id, radius, len(peers),
     )
     return peers

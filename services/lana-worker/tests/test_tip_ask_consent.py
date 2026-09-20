@@ -404,8 +404,13 @@ class TestPolicyGate(unittest.TestCase):
 
     def test_other_intents_still_belong_to_the_policy(self) -> None:
         self.assertFalse(self._is_tip_ask({"goal": "chat", "confidence": 0.9}))
+        # Was discovery.find_peers, used here only as "some intent that isn't a tip ask".
+        # It is an engine action now (an explicit peers search the policy was answering
+        # with a confirmation question — prod 2026-09-18), so the example moved to a
+        # genuinely conversational intent. Nothing tip-ask-shaped changed: the looking.tip
+        # and sharing.tip assertions above and below are the ones this file is about.
         self.assertFalse(
-            self._is_tip_ask({"linear_intent": "discovery.find_peers", "goal": "peers", "confidence": 0.9})
+            self._is_tip_ask({"linear_intent": "companionship.chat", "goal": "chat", "confidence": 0.9})
         )
         # A confident tip_share goes to the CAPTURE engine, not to the policy — which is
         # what _turn_is_engine_action's own docstring has always said ("True ... for

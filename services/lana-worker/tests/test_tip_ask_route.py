@@ -203,7 +203,12 @@ def test_disabled_routing_reports_an_outcome_not_a_send(monkeypatch):
     outcome = tip_ask_route.route_tip_ask(
         "jwt", signal_id="sig-1", asker_user_id="me", ask_text="good books"
     )
-    assert outcome == {"recipients": [], "none_qualified": True, "error": False}
+    assert outcome == {
+        "recipients": [],
+        "none_qualified": True,
+        "error": False,
+        "thin_standing": False,
+    }
 
 
 # ── the email ────────────────────────────────────────────────────────────────
@@ -318,3 +323,74 @@ def test_no_pending_ask_leaves_the_greeting_alone():
     sb = _PendingSB([], {})
     with patch("app.tip_ask_route.service_client", lambda: sb):
         assert tip_ask_route.opening_for_pending_ask("u1", {}) is None
+
+
+# ── the anti-gaming floor is a tier, not a gate ──────────────────────────────
+
+
+def _route_with(monkeypatch, scores: dict[str, float]):
+    """Run route_tip_ask against a fixed set of candidates and their authority scores.
+
+    Returns (outcome, shortlisted_user_ids) — what _pick was actually offered is the
+    thing under test, since that is what the floor used to discard before Lana ever saw it.
+    """
+    from app import tip_ask_route
+
+    monkeypatch.setenv("LANA_ASK_ROUTING", "1")
+    # enabled() is ANDed with a working unsubscribe — without these it is a no-op turn.
+    monkeypatch.setenv("SIGNAL_SWEEP_TOKEN", "s3cret")
+    monkeypatch.setenv("LANA_WORKER_PUBLIC_URL", "https://worker.example")
+    seen: dict[str, list] = {}
+
+    def fake_pick(_ask, candidates):
+        seen["shortlist"] = [c["user_id"] for c in candidates]
+        return [{"user_id": c["user_id"], "name": "N", "reason": "r"} for c in candidates[:1]]
+
+    with patch("app.layer1_handlers.fetch_peers_semantic",
+               return_value=[{"peer_user_id": u, "peer_nickname": u} for u in scores]), \
+         patch("app.authority.concepts_for_ask", return_value=["dentist"]), \
+         patch("app.authority.best_authority",
+               side_effect=lambda uid, _c, **_k: {"score": scores[uid], "quote": None}), \
+         patch.object(tip_ask_route, "eligible_recipients", side_effect=lambda ids: set(ids)), \
+         patch.object(tip_ask_route, "_pick", side_effect=fake_pick), \
+         patch.object(tip_ask_route, "_record"), \
+         patch.object(tip_ask_route, "_send_async"):
+        outcome = tip_ask_route.route_tip_ask(
+            "jwt", signal_id="sig-1", asker_user_id="me", ask_text="anyone know a good dentist?"
+        )
+    return outcome, seen.get("shortlist", [])
+
+
+def test_thin_standing_is_never_mixed_with_proven_standing(monkeypatch):
+    """A bare claim must not ride along beside a specific one — that is the gaming path."""
+    outcome, shortlist = _route_with(monkeypatch, {"strong": 0.50, "thin": 0.10})
+    assert shortlist == ["strong"]
+    assert outcome["thin_standing"] is False
+
+
+def test_thin_standing_is_asked_when_nobody_cleared_the_floor(monkeypatch):
+    """The ordinary ask used to return nobody because most neighbours have a thin claim.
+    Something beats nothing — and the outcome says so, so the reply can stay honest."""
+    outcome, shortlist = _route_with(monkeypatch, {"thin": 0.10, "thinner": 0.25})
+    assert set(shortlist) == {"thin", "thinner"}
+    assert outcome["thin_standing"] is True
+    assert outcome["recipients"]
+
+
+def test_no_standing_at_all_is_still_not_a_candidate(monkeypatch):
+    """Falling back to a thin claim is not the same as asking someone unconnected."""
+    from app import tip_ask_route
+
+    monkeypatch.setenv("LANA_ASK_ROUTING", "1")
+    monkeypatch.setenv("SIGNAL_SWEEP_TOKEN", "s3cret")
+    monkeypatch.setenv("LANA_WORKER_PUBLIC_URL", "https://worker.example")
+    with patch("app.layer1_handlers.fetch_peers_semantic",
+               return_value=[{"peer_user_id": "nobody", "peer_nickname": "N"}]), \
+         patch("app.authority.concepts_for_ask", return_value=["dentist"]), \
+         patch("app.authority.best_authority", return_value=None), \
+         patch.object(tip_ask_route, "eligible_recipients", side_effect=lambda ids: set(ids)):
+        outcome = tip_ask_route.route_tip_ask(
+            "jwt", signal_id="sig-1", asker_user_id="me", ask_text="good dentist?"
+        )
+    assert outcome["none_qualified"] is True
+    assert outcome["recipients"] == []

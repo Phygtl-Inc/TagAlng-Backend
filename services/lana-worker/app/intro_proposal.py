@@ -490,6 +490,10 @@ def stamp_intro_offer_ctx(
         # answers instead of firing an RPC that can only fail.
         "intro_state": intro_state_of(peer),
     }
+    # Turn-scoped twin of the offer: "this is the turn the offer was made". The offer
+    # itself has to outlive the turn (the "yes" lands on the next one), so the two
+    # cannot be the same key — see drop_stale_intro_offer.
+    ctx["intro_offer_armed_now"] = True
     ctx["active_intent"] = INTENT_PROPOSE_INTRO
 
 
@@ -579,6 +583,33 @@ def try_propose_intro_from_preview(
                     cache=True,
                 ),
                 {"status": "need_verify"},
+            )
+        if detail in ("user_not_on_same_block", "candidate_consent_missing"):
+            # The gate refused this pair: too far with no shared place, mutually
+            # blocked, or intros switched off on their side. Rare once the card only
+            # shows a Nudge where the send works (can_nudge), but it stays reachable
+            # by a race — someone blocks you between render and tap — and by any
+            # future gate. It must cost a sentence, never the turn: re-raising here
+            # left three answered offers with no reply at all, because the assistant
+            # message is written after the lane returns (prod 2026-09-16).
+            _nick = str(peer.get("nickname") or "them").strip() or "them"
+            _why = (
+                f"{_nick} isn't taking introductions right now"
+                if detail == "candidate_consent_missing"
+                else f"I can't reach {_nick} from here"
+            )
+            return (
+                compose_reply(
+                    goal=(
+                        "You cannot send this intro — say so plainly and without blame "
+                        "on either side, don't explain the mechanics, and offer to find "
+                        "someone else nearby instead."
+                    ),
+                    facts=[f"The neighbor: {_nick}", f"What's true: {_why}"],
+                    fallback=f"{_why} — want me to look at someone else nearby?",
+                    max_sentences=2,
+                ),
+                {"status": "unreachable", "candidate_user_id": peer.get("peer_user_id")},
             )
         if "nudge_cooldown_pair" in detail:
             # lana_propose_neighbor_intro sends the nudge itself when the pair are still

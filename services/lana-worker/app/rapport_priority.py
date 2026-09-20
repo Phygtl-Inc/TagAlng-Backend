@@ -77,15 +77,22 @@ def covered_buckets(user_id: str) -> set[str]:
     """
     from app.auth import service_client
 
-    res = (
-        service_client()
-        .table("rapport_gaps")
-        .select("parent_bucket")
-        .eq("user_id", user_id)
-        .eq("status", "answered")
-        .limit(200)
-        .execute()
-    )
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("parent_bucket")
+            .eq("user_id", user_id)
+            .eq("status", "answered")
+            .limit(200)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — the docstring above is the contract; honour it here
+        # Callers treat {} as "unknown", which fails OPEN into asking. seed_cold_start is
+        # documented "Never raises" and runs as a background task, so a propagating read
+        # error here would take the whole cold-start pass down silently.
+        logger.exception("rapport: covered_buckets read failed for %s", user_id)
+        return set()
     return {
         str(r.get("parent_bucket") or "")
         for r in (res.data or [])

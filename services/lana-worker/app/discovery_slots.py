@@ -665,6 +665,7 @@ def _empty_slots() -> dict[str, Any]:
         "declined_slot": None,
         "lang": None,
         "set_preferred_lang": None,
+        "explicit_request": False,
         "confidence": 0.0,
         "progress": [],
     }
@@ -890,6 +891,13 @@ def ai_parse_discovery_turn(
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
             "declined_slot": declined_slot_s,
+            # Did they ASK, or did they just say something an action would serve? The
+            # intent alone cannot tell you: "find me neighbors nearby" and "we don't know
+            # anyone here yet" both classify discovery.find_peers at 0.95 (measured on
+            # prod's model, 2026-09-18). The first belongs to the search engine, the
+            # second to the policy's acknowledge-and-offer. Defaults false, so a model
+            # that omits it leaves the turn exactly where it is today.
+            "explicit_request": bool(raw.get("explicit_request")),
             "confidence": float(raw.get("confidence", 0.0)),
             # AI-authored thinking-status stage, streamed live to the client.
             "progress": normalize_progress(raw.get("progress"), max_stages=1),
@@ -1196,6 +1204,12 @@ def _discovery_slot_payload(
         "commands or borrowed words inside an established conversation (signup, login, ok, cancel, yes — normal "
         'code-switching) are NOT a switch: return null and let conversation_lang stand",\n'
         '  "set_preferred_lang": "ISO code ONLY when the user wants that language as their default (settings.change_language), else null",\n'
+        '  "explicit_request": "true when THIS message ASKS you to run something, in the user\'s own words '
+        "(an instruction or direct request: 'find me neighbors', 'show me who is around', 'recommend a doctor', "
+        "'can you look for people who run'). false when the need is only implied — a feeling, an observation or a "
+        "volunteered interest ('we don't know anyone here yet', 'it's been quiet since we moved', 'I like badminton', "
+        "'I wish I knew more people'). Judge what the MESSAGE does, never how helpful acting would be: wanting "
+        'something and asking for it are different turns",\n'
         '  "confidence": 0.0-1.0,\n'
         '  "progress": [{"label": "thinking-status line ≤6 words, grounded in the user\'s ask", '
         '"detail": "one supporting phrase ≤12 words"}]\n'

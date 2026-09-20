@@ -241,10 +241,43 @@ class TestColdStartSeeding(_StubBase):
         self._patch(gaps, "open_cold_seed_gaps", lambda uid: 3)
         self.assertEqual(rapport_synth.seed_cold_start("u1"), 3)
 
-    def test_claim_read_failure_does_not_seed_an_existing_profile(self) -> None:
-        """Fails CLOSED: better to skip a seed than to interview someone we know."""
-        self._patch(rapport_synth, "_has_any_claim", lambda uid: True)
+    def test_lateral_seeding_survives_the_first_claim(self) -> None:
+        """The gate is BREADTH, not "has any claim".
+
+        Stopping at claim #1 left synthesize_gaps_from_claims as the only source, and that
+        can only deepen topics the user already raised — so every later question was a facet
+        of something already said. One answered bucket must not switch lateral supply off.
+        """
+        import app.rapport_priority as prio
+
+        self._patch(prio, "covered_buckets", lambda uid: {"interest"})
+        self._patch(rapport_synth, "_local_supply", lambda uid, **k: [])
+        import app.rapport_gaps as gaps
+
+        self._patch(gaps, "open_cold_seed_gaps", lambda uid: 3)
+        self._patch(rapport_synth, "_generate_seeds", lambda *a: {"questions": []})
+        self.assertEqual(rapport_synth.seed_cold_start("u1"), 3)
+
+    def test_a_fully_covered_profile_stops_being_seeded(self) -> None:
+        """The gate still exists — it is just near-unreachable by design."""
+        import app.rapport_priority as prio
+
+        self._patch(prio, "covered_buckets",
+                    lambda uid: {"interest", "activity", "faith", "stage", "heritage"})
         self.assertEqual(rapport_synth.seed_cold_start("u1"), 0)
+
+    def test_an_unreadable_profile_fails_OPEN_into_asking(self) -> None:
+        """covered_buckets returns set() on a read error, so we ask rather than go silent —
+        the reverse of the old gate, and deliberate: silence is the failure users report."""
+        import app.rapport_priority as prio
+
+        self._patch(prio, "covered_buckets", lambda uid: set())
+        self._patch(rapport_synth, "_local_supply", lambda uid, **k: [])
+        import app.rapport_gaps as gaps
+
+        self._patch(gaps, "open_cold_seed_gaps", lambda uid: 3)
+        self._patch(rapport_synth, "_generate_seeds", lambda *a: {"questions": []})
+        self.assertEqual(rapport_synth.seed_cold_start("u1"), 3)
 
     def test_catalogue_seeds_span_distinct_buckets(self) -> None:
         """The point of the seed set: four answers, four match axes — not one topic

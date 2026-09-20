@@ -525,7 +525,7 @@ def _ai_slots_block_propose_intro(msg: str, slots: dict[str, Any] | None) -> boo
     return conf >= 0.5 and goal in _SLOTS_BLOCK_PROPOSE_GOALS
 
 
-def _fetch_verified_peer_matches(
+def _fetch_verified_peer_matches_unstamped(
     user_jwt: str,
     *,
     user_id: str | None,
@@ -571,6 +571,36 @@ def _fetch_verified_peer_matches(
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("onion_blend_failed")
         return peers
+
+
+def _fetch_verified_peer_matches(
+    user_jwt: str,
+    *,
+    user_id: str | None,
+    block_id: str | None,
+    limit: int = 5,
+    session_ctx: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The shared peer fetch, with `can_nudge` stamped on every row.
+
+    Stamped HERE, at the one fetch the chat lane, the orchestrator's find_peers tool
+    and /lana/fellows all go through, because the decisions that need it run long
+    before the response is assembled: which neighbour to feature in an intro offer,
+    and which rows get a Nudge button. Both now read the same predicate the send RPC
+    enforces (`_users_can_reach`), so the card cannot offer what the tap would fail.
+    """
+    peers = _fetch_verified_peer_matches_unstamped(
+        user_jwt,
+        user_id=user_id,
+        block_id=block_id,
+        limit=limit,
+        session_ctx=session_ctx,
+    )
+    if peers and user_id:
+        from app.peer_discovery_surface import stamp_reachability
+
+        stamp_reachability(peers, user_id=str(user_id))
+    return peers
 
 
 def _onboarding_wants_peers(
@@ -1032,6 +1062,25 @@ def _try_neighbor_intro_turn(
     return reply, ctx, ctx["last_routing"], []
 
 
+def _peers_as_rendered(
+    ctx: dict[str, Any], peers: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The peer rows this turn actually rendered, not the ones the lane fetched.
+
+    `_maybe_attach_intro_offer` features ONE neighbour and narrows ctx["peer_matches"]
+    to them, because the prose, the card and the "Send X a nudge" chip are all about
+    that one person. The caller used to hand its full list back as the turn's 4th
+    return value, which the pipeline then wrote over ctx (lana_unified_pipeline:2573)
+    — and drop_stale_intro_offer, seeing five rows where the offer named one, cleared
+    the offer on the very turn it was made. The "yes" a turn later had nothing to bind
+    to (prod 2026-09-16). The rendered list is the source of truth; return that.
+    """
+    rendered = ctx.get("peer_matches")
+    if isinstance(rendered, list) and rendered:
+        return rendered
+    return peers
+
+
 def _maybe_attach_intro_offer(
     *,
     reply: str,
@@ -1062,9 +1111,24 @@ def _maybe_attach_intro_offer(
     # thing that cannot be done — which is how "find someone else" led back to a Sent badge.
     # Only when nobody in the list is reachable does an already-introduced peer feature, and
     # then format_intro_offer_turn owns up to it instead of offering.
+    # …and who can actually be reached. `can_nudge is False` means the send RPC would
+    # refuse this pair, so their row carries no Nudge button — featuring them offers an
+    # intro the user cannot accept (prod 2026-09-16: the one unreachable row of five was
+    # the one Lana pitched, and every "yes" died on it). Unstamped rows (None) stay
+    # eligible: the reach lookup fails open, and the send path answers if it refuses.
     peer = next(
-        (p for p in peers if p.get("peer_user_id") and not p.get("connection")), None
-    ) or next((p for p in peers if p.get("peer_user_id")), None)
+        (
+            p
+            for p in peers
+            if p.get("peer_user_id")
+            and not p.get("connection")
+            and p.get("can_nudge") is not False
+        ),
+        None,
+    ) or next(
+        (p for p in peers if p.get("peer_user_id") and p.get("can_nudge") is not False),
+        None,
+    )
     if not peer:
         return reply
     if not peer_matches_identity_snippet(peer, identity_snippet):
@@ -9623,7 +9687,7 @@ def handle_discovery_turn(
         ctx["last_routing"] = _discovery_routing_stub(
             PHASE_PREVIEW, "match_peers_by_claim_vectors"
         )
-        return reply, ctx, ctx["last_routing"], peers
+        return reply, ctx, ctx["last_routing"], _peers_as_rendered(ctx, peers)
 
     if (
         not phone_verified
@@ -9671,7 +9735,7 @@ def handle_discovery_turn(
                 ctx["last_routing"] = _discovery_routing_stub(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
-                return reply, ctx, ctx["last_routing"], peers
+                return reply, ctx, ctx["last_routing"], _peers_as_rendered(ctx, peers)
         peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
         floored = _peers_supply_floor_turn(
             ctx_base, user_id=user_id, block_id=block_id, neighbors=peers
@@ -9737,7 +9801,7 @@ def handle_discovery_turn(
                 ctx["last_routing"] = _discovery_routing_stub(
                     PHASE_PREVIEW, "match_peers_by_claim_vectors"
                 )
-                return reply, ctx, ctx["last_routing"], peers
+                return reply, ctx, ctx["last_routing"], _peers_as_rendered(ctx, peers)
 
         if wants_peers or phase != PHASE_PREVIEW:
             peers = fetch_preview_peers_on_block(block_id, limit=3, exclude_user_id=user_id)
