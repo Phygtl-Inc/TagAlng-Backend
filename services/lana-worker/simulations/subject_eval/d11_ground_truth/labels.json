@@ -1,0 +1,1838 @@
+[
+ {
+  "a": "mom friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.9856,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to seeking mom friends"
+ },
+ {
+  "a": "get hints from lana",
+  "b": "getting hints from lana",
+  "shared_token": "hints",
+  "cosine": 0.9798,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to receiving hints from Lana"
+ },
+ {
+  "a": "get hints from lana",
+  "b": "getting hints from lana",
+  "shared_token": "from",
+  "cosine": 0.9798,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to receiving hints from Lana"
+ },
+ {
+  "a": "get hints from lana",
+  "b": "getting hints from lana",
+  "shared_token": "lana",
+  "cosine": 0.9798,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to receiving hints from Lana"
+ },
+ {
+  "a": "cooking class",
+  "b": "cooking classes",
+  "shared_token": "cooking",
+  "cosine": 0.9744,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to cooking instruction sessions"
+ },
+ {
+  "a": "making mom friends",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.945,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to the concept of having mom friends"
+ },
+ {
+  "a": "local street foods",
+  "b": "street foods",
+  "shared_token": "street",
+  "cosine": 0.9401,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to street foods generally"
+ },
+ {
+  "a": "local street foods",
+  "b": "street foods",
+  "shared_token": "foods",
+  "cosine": 0.9401,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to street foods, just with 'local' added"
+ },
+ {
+  "a": "central park",
+  "b": "central park new york",
+  "shared_token": "park",
+  "cosine": 0.937,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to the same park in New York"
+ },
+ {
+  "a": "central park",
+  "b": "central park new york",
+  "shared_token": "central",
+  "cosine": 0.937,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to the same park in New York"
+ },
+ {
+  "a": "making mom friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.9369,
+  "resolver": "merge",
+  "label": "different",
+  "reason": "one is about making friends, the other about needing them"
+ },
+ {
+  "a": "boost my social",
+  "b": "boost social",
+  "shared_token": "social",
+  "cosine": 0.9316,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to increasing social engagement"
+ },
+ {
+  "a": "boost my social",
+  "b": "boost social",
+  "shared_token": "boost",
+  "cosine": 0.9316,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to increasing social engagement"
+ },
+ {
+  "a": "pre-k",
+  "b": "pre-k programs",
+  "shared_token": "pre-k",
+  "cosine": 0.9274,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to pre-kindergarten education"
+ },
+ {
+  "a": "boost social",
+  "b": "social boost",
+  "shared_token": "social",
+  "cosine": 0.9272,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to enhancing social interaction"
+ },
+ {
+  "a": "boost social",
+  "b": "social boost",
+  "shared_token": "boost",
+  "cosine": 0.9272,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to enhancing social interactions"
+ },
+ {
+  "a": "st. luke's church",
+  "b": "st. luke's united methodist church",
+  "shared_token": "luke's",
+  "cosine": 0.9203,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to the same church with different naming conventions"
+ },
+ {
+  "a": "st. luke's church",
+  "b": "st. luke's united methodist church",
+  "shared_token": "church",
+  "cosine": 0.9203,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to the same church with different naming conventions"
+ },
+ {
+  "a": "boost my social",
+  "b": "social boost",
+  "shared_token": "social",
+  "cosine": 0.9169,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to enhancing social presence"
+ },
+ {
+  "a": "boost my social",
+  "b": "social boost",
+  "shared_token": "boost",
+  "cosine": 0.9169,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to enhancing social presence"
+ },
+ {
+  "a": "fifa",
+  "b": "fifa world cup",
+  "shared_token": "fifa",
+  "cosine": 0.8963,
+  "resolver": "merge",
+  "label": "different",
+  "reason": "fifa is an organization, fifa world cup is an event"
+ },
+ {
+  "a": "italian food",
+  "b": "italian pizza",
+  "shared_token": "italian",
+  "cosine": 0.8896,
+  "resolver": "merge",
+  "label": "different",
+  "reason": "pizza is a specific type of Italian food"
+ },
+ {
+  "a": "social event",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.878,
+  "resolver": "merge",
+  "label": "different",
+  "reason": "one is a general event, the other is a specific challenge event"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "friends meetup",
+  "shared_token": "meetup",
+  "cosine": 0.8639,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to a social gathering with friends"
+ },
+ {
+  "a": "meet playdate",
+  "b": "playdate",
+  "shared_token": "playdate",
+  "cosine": 0.8606,
+  "resolver": "merge",
+  "label": "same",
+  "reason": "both refer to a playdate event"
+ },
+ {
+  "a": "husband travels for work",
+  "b": "wife travels",
+  "shared_token": "travels",
+  "cosine": 0.8575,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different people traveling"
+ },
+ {
+  "a": "morning walks",
+  "b": "walks",
+  "shared_token": "walks",
+  "cosine": 0.8566,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to the activity of walking"
+ },
+ {
+  "a": "brazilian dads",
+  "b": "brazilian moms",
+  "shared_token": "brazilian",
+  "cosine": 0.8459,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different groups of people"
+ },
+ {
+  "a": "2 year old",
+  "b": "4 year old",
+  "shared_token": "year",
+  "cosine": 0.8452,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different ages imply different children"
+ },
+ {
+  "a": "dinner event",
+  "b": "dinner party",
+  "shared_token": "dinner",
+  "cosine": 0.8437,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a social dinner gathering"
+ },
+ {
+  "a": "double stroller",
+  "b": "stroller",
+  "shared_token": "stroller",
+  "cosine": 0.84,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a type of stroller"
+ },
+ {
+  "a": "dentist",
+  "b": "pediatric dentist",
+  "shared_token": "dentist",
+  "cosine": 0.84,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is general, the other is specific to children"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.8389,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to pizza, one specifies it's frozen"
+ },
+ {
+  "a": "japanese pottery",
+  "b": "pottery class",
+  "shared_token": "pottery",
+  "cosine": 0.8363,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a type, the other is an activity"
+ },
+ {
+  "a": "playgroup",
+  "b": "toddler playgroup",
+  "shared_token": "playgroup",
+  "cosine": 0.8288,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a playgroup for toddlers"
+ },
+ {
+  "a": "community events",
+  "b": "family friendly events",
+  "shared_token": "events",
+  "cosine": 0.8278,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "community events may not all be family friendly"
+ },
+ {
+  "a": "stroller walk",
+  "b": "walk",
+  "shared_token": "walk",
+  "cosine": 0.8195,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one involves a stroller, the other is unspecified"
+ },
+ {
+  "a": "coffee morning",
+  "b": "street moms coffee morning",
+  "shared_token": "morning",
+  "cosine": 0.8101,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a coffee morning event"
+ },
+ {
+  "a": "pediatric dentist",
+  "b": "pediatric dentist on narcoossee rd",
+  "shared_token": "pediatric",
+  "cosine": 0.8098,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a pediatric dentist, one with location detail"
+ },
+ {
+  "a": "pediatric dentist",
+  "b": "pediatric dentist on narcoossee rd",
+  "shared_token": "dentist",
+  "cosine": 0.8098,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a pediatric dentist, one with location detail"
+ },
+ {
+  "a": "laureate park",
+  "b": "laureate park zipline playground",
+  "shared_token": "park",
+  "cosine": 0.8077,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to the same park area"
+ },
+ {
+  "a": "laureate park",
+  "b": "laureate park zipline playground",
+  "shared_token": "laureate",
+  "cosine": 0.8077,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to the same park area"
+ },
+ {
+  "a": "italian spot",
+  "b": "pizza spot",
+  "shared_token": "spot",
+  "cosine": 0.8074,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "italian spot could serve more than just pizza"
+ },
+ {
+  "a": "hang out with other moms",
+  "b": "meet other moms",
+  "shared_token": "other",
+  "cosine": 0.807,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both involve socializing with other moms"
+ },
+ {
+  "a": "tennis",
+  "b": "tennis courts",
+  "shared_token": "tennis",
+  "cosine": 0.8044,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a sport, the other is a location"
+ },
+ {
+  "a": "tennis",
+  "b": "tennis meet up",
+  "shared_token": "tennis",
+  "cosine": 0.8026,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to playing tennis"
+ },
+ {
+  "a": "fifa world cup",
+  "b": "world cup",
+  "shared_token": "world",
+  "cosine": 0.8015,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to the same global soccer event"
+ },
+ {
+  "a": "meet or playgroup",
+  "b": "toddler playgroup",
+  "shared_token": "playgroup",
+  "cosine": 0.7971,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "meet could refer to any gathering, not specifically a playgroup"
+ },
+ {
+  "a": "moved to the block",
+  "b": "newly moved",
+  "shared_token": "moved",
+  "cosine": 0.7958,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to someone recently relocating"
+ },
+ {
+  "a": "outdoor",
+  "b": "outdoor adventure",
+  "shared_token": "outdoor",
+  "cosine": 0.7921,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a general category, the other is a specific activity"
+ },
+ {
+  "a": "coffee walks",
+  "b": "walks",
+  "shared_token": "walks",
+  "cosine": 0.7868,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one specifies coffee, the other does not"
+ },
+ {
+  "a": "meet or playgroup",
+  "b": "playgroup",
+  "shared_token": "playgroup",
+  "cosine": 0.7867,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both involve a playgroup"
+ },
+ {
+  "a": "friends meetup",
+  "b": "meeting with friends",
+  "shared_token": "friends",
+  "cosine": 0.7814,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a social gathering with friends"
+ },
+ {
+  "a": "stroller",
+  "b": "stroller walk",
+  "shared_token": "stroller",
+  "cosine": 0.7811,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is an object, the other is an activity"
+ },
+ {
+  "a": "host a party",
+  "b": "host event",
+  "shared_token": "host",
+  "cosine": 0.7802,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to organizing a gathering"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona",
+  "shared_token": "lake",
+  "cosine": 0.7736,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a specific place, the other is a general area"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona",
+  "shared_token": "nona",
+  "cosine": 0.7736,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a specific place, the other is a broader area"
+ },
+ {
+  "a": "cooking class",
+  "b": "pottery class",
+  "shared_token": "class",
+  "cosine": 0.7706,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of classes"
+ },
+ {
+  "a": "playdate",
+  "b": "spanish-english playdate",
+  "shared_token": "playdate",
+  "cosine": 0.7642,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is general, the other is language-specific"
+ },
+ {
+  "a": "playground",
+  "b": "playground meetup",
+  "shared_token": "playground",
+  "cosine": 0.7633,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to the playground as a location"
+ },
+ {
+  "a": "central park new york",
+  "b": "new york",
+  "shared_token": "york",
+  "cosine": 0.7621,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a park, the other is a city"
+ },
+ {
+  "a": "italian pizza",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.7608,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to pizza, with one specifying Italian style"
+ },
+ {
+  "a": "coffee walks",
+  "b": "morning walks",
+  "shared_token": "walks",
+  "cosine": 0.756,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of walks"
+ },
+ {
+  "a": "central park",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.7515,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "central park is a specific park, park is general"
+ },
+ {
+  "a": "mom meetup",
+  "b": "playground meetup",
+  "shared_token": "meetup",
+  "cosine": 0.7493,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of meetups"
+ },
+ {
+  "a": "pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.7479,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to a place for pizza"
+ },
+ {
+  "a": "host a meet",
+  "b": "host event",
+  "shared_token": "host",
+  "cosine": 0.7478,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to organizing a gathering"
+ },
+ {
+  "a": "birthday party",
+  "b": "meeting for all moms with kids under age of 5 for birthday",
+  "shared_token": "birthday",
+  "cosine": 0.746,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a general party, the other is a specific meeting for moms"
+ },
+ {
+  "a": "fun activity",
+  "b": "kids led activity",
+  "shared_token": "activity",
+  "cosine": 0.7421,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is general, the other is specific to kids"
+ },
+ {
+  "a": "activity for 4-year-old",
+  "b": "fun activity",
+  "shared_token": "activity",
+  "cosine": 0.7398,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one specifies age, the other does not"
+ },
+ {
+  "a": "burger eating competition",
+  "b": "burger party",
+  "shared_token": "burger",
+  "cosine": 0.7396,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a competition, the other is a social event"
+ },
+ {
+  "a": "brazilian coffee",
+  "b": "brazilian coffee meet",
+  "shared_token": "brazilian",
+  "cosine": 0.7321,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a type of coffee, the other is a social event"
+ },
+ {
+  "a": "italian food",
+  "b": "italian restaurants",
+  "shared_token": "italian",
+  "cosine": 0.7303,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is cuisine, the other is dining places"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k programs",
+  "shared_token": "pre-k",
+  "cosine": 0.73,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to pre-k programs, one specifies location"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k programs",
+  "shared_token": "programs",
+  "cosine": 0.73,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to pre-k programs, one specifies location"
+ },
+ {
+  "a": "lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "lake",
+  "cosine": 0.7276,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a place, the other is a specific program"
+ },
+ {
+  "a": "lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "nona",
+  "cosine": 0.7276,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a place, the other is a program"
+ },
+ {
+  "a": "italian restaurants",
+  "b": "italian spot",
+  "shared_token": "italian",
+  "cosine": 0.7254,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to Italian dining places"
+ },
+ {
+  "a": "coffee buddy",
+  "b": "walk buddy",
+  "shared_token": "buddy",
+  "cosine": 0.7253,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different activities"
+ },
+ {
+  "a": "activity for 4-year-old",
+  "b": "kids led activity",
+  "shared_token": "activity",
+  "cosine": 0.7229,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one specifies age, the other does not"
+ },
+ {
+  "a": "3 year old",
+  "b": "4 year old",
+  "shared_token": "year",
+  "cosine": 0.7226,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different ages imply different children"
+ },
+ {
+  "a": "2 year old",
+  "b": "3 year old",
+  "shared_token": "year",
+  "cosine": 0.7222,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different ages imply different children"
+ },
+ {
+  "a": "friends meetup",
+  "b": "mom meetup",
+  "shared_token": "meetup",
+  "cosine": 0.722,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different groups of people meeting up"
+ },
+ {
+  "a": "nona’s urban pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.72,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a specific place, the other is generic"
+ },
+ {
+  "a": "friends meetup",
+  "b": "playground meetup",
+  "shared_token": "meetup",
+  "cosine": 0.7184,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about friends, the other about location"
+ },
+ {
+  "a": "cry every night",
+  "b": "cry every night after the kids sleep",
+  "shared_token": "night",
+  "cosine": 0.7182,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both describe crying every night"
+ },
+ {
+  "a": "cry every night",
+  "b": "cry every night after the kids sleep",
+  "shared_token": "every",
+  "cosine": 0.7182,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both describe crying every night"
+ },
+ {
+  "a": "park",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.7154,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to spending time at a park"
+ },
+ {
+  "a": "coffee morning",
+  "b": "morning walks",
+  "shared_token": "morning",
+  "cosine": 0.7153,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about coffee, the other about walking"
+ },
+ {
+  "a": "community events",
+  "b": "events nearby",
+  "shared_token": "events",
+  "cosine": 0.7139,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to local events"
+ },
+ {
+  "a": "fitness cf",
+  "b": "fitness cf - st. cloud",
+  "shared_token": "fitness",
+  "cosine": 0.7138,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to the same fitness location"
+ },
+ {
+  "a": "hang out with other moms",
+  "b": "meeting for all moms with kids under age of 5 for birthday",
+  "shared_token": "with",
+  "cosine": 0.7114,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is general socializing, the other is a specific event"
+ },
+ {
+  "a": "pre-k",
+  "b": "pre-k mom",
+  "shared_token": "pre-k",
+  "cosine": 0.7101,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a school level, the other is a parent"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "mom meetup",
+  "shared_token": "meetup",
+  "cosine": 0.7076,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of meetups"
+ },
+ {
+  "a": "fifa",
+  "b": "fifa screen event",
+  "shared_token": "fifa",
+  "cosine": 0.7038,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a game, the other is an event"
+ },
+ {
+  "a": "walk",
+  "b": "walk buddy",
+  "shared_token": "walk",
+  "cosine": 0.6965,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is an activity, the other is a person"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "playground meetup",
+  "shared_token": "meetup",
+  "cosine": 0.6964,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of meetups"
+ },
+ {
+  "a": "friends",
+  "b": "friends meetup",
+  "shared_token": "friends",
+  "cosine": 0.6937,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to socializing with friends"
+ },
+ {
+  "a": "toddler",
+  "b": "toddler moms",
+  "shared_token": "toddler",
+  "cosine": 0.6937,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about children, the other about their mothers"
+ },
+ {
+  "a": "laureate park",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.6921,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a specific park, the other is generic"
+ },
+ {
+  "a": "tennis courts",
+  "b": "tennis meet up",
+  "shared_token": "tennis",
+  "cosine": 0.6908,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a location, the other is an event"
+ },
+ {
+  "a": "4 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.688,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a child, the other is activities for a child"
+ },
+ {
+  "a": "host a meet",
+  "b": "host a party",
+  "shared_token": "host",
+  "cosine": 0.6847,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "meet and party imply different types of gatherings"
+ },
+ {
+  "a": "minion watch party",
+  "b": "netflix watch party",
+  "shared_token": "watch",
+  "cosine": 0.6839,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different themes for the watch party"
+ },
+ {
+  "a": "events nearby",
+  "b": "family friendly events",
+  "shared_token": "events",
+  "cosine": 0.681,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about location, the other about suitability for families"
+ },
+ {
+  "a": "friends",
+  "b": "meeting with friends",
+  "shared_token": "friends",
+  "cosine": 0.6808,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to socializing with friends"
+ },
+ {
+  "a": "central park new york",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.6799,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is specific, the other is generic"
+ },
+ {
+  "a": "italian pizza",
+  "b": "italian restaurants",
+  "shared_token": "italian",
+  "cosine": 0.6748,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "pizza is a specific dish, restaurants are places"
+ },
+ {
+  "a": "meet playdate",
+  "b": "spanish-english playdate",
+  "shared_token": "playdate",
+  "cosine": 0.6727,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a general playdate, the other specifies a language focus"
+ },
+ {
+  "a": "pottery class",
+  "b": "spin class",
+  "shared_token": "class",
+  "cosine": 0.6716,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of classes"
+ },
+ {
+  "a": "meet pizza party",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.6698,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is an event, the other is a place"
+ },
+ {
+  "a": "hang out with other moms",
+  "b": "meeting with friends",
+  "shared_token": "with",
+  "cosine": 0.6678,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is specific to moms, the other is general friends"
+ },
+ {
+  "a": "pre-k mom",
+  "b": "pre-k programs",
+  "shared_token": "pre-k",
+  "cosine": 0.667,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a person, the other is a service"
+ },
+ {
+  "a": "toddler",
+  "b": "toddler bike",
+  "shared_token": "toddler",
+  "cosine": 0.6638,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a child, the other is an object"
+ },
+ {
+  "a": "cooking class",
+  "b": "spin class",
+  "shared_token": "class",
+  "cosine": 0.6633,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of classes"
+ },
+ {
+  "a": "3 year old",
+  "b": "6 year old",
+  "shared_token": "year",
+  "cosine": 0.6628,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "They refer to children of different ages."
+ },
+ {
+  "a": "dentist",
+  "b": "pediatric dentist on narcoossee rd",
+  "shared_token": "dentist",
+  "cosine": 0.6593,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "general dentist vs specific pediatric dentist"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.6587,
+  "resolver": "adjudicate",
+  "label": "same",
+  "reason": "both refer to pre-k programs"
+ },
+ {
+  "a": "community creation",
+  "b": "community events",
+  "shared_token": "community",
+  "cosine": 0.658,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "creation and events are distinct activities"
+ },
+ {
+  "a": "toddler",
+  "b": "toddler playgroup",
+  "shared_token": "toddler",
+  "cosine": 0.6571,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a child, the other is an activity"
+ },
+ {
+  "a": "italian pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.6565,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a type of pizza, the other is a place"
+ },
+ {
+  "a": "nona’s urban pizza",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.6549,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a specific place, the other is a general food item"
+ },
+ {
+  "a": "friends",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.6525,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is general, the other is specific to moms"
+ },
+ {
+  "a": "double stroller",
+  "b": "stroller walk",
+  "shared_token": "stroller",
+  "cosine": 0.6524,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is an item, the other is an activity"
+ },
+ {
+  "a": "meet & greet for new moms",
+  "b": "meet and greet",
+  "shared_token": "greet",
+  "cosine": 0.6514,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is specific to new moms, the other is general"
+ },
+ {
+  "a": "stroller walk",
+  "b": "walk buddy",
+  "shared_token": "walk",
+  "cosine": 0.6495,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about a stroller, the other about a companion"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "italian pizza",
+  "shared_token": "pizza",
+  "cosine": 0.6493,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different types of pizza"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "playground",
+  "shared_token": "playground",
+  "cosine": 0.6492,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a specific playground, the other is general"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "lake",
+  "cosine": 0.6483,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a fitness studio, the other is educational programs"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "nona",
+  "cosine": 0.6483,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a fitness studio, the other is educational programs"
+ },
+ {
+  "a": "fifa screen event",
+  "b": "fifa world cup",
+  "shared_token": "fifa",
+  "cosine": 0.6447,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is an event, the other is the tournament"
+ },
+ {
+  "a": "italian food",
+  "b": "italian spot",
+  "shared_token": "italian",
+  "cosine": 0.6437,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is cuisine, the other is a place"
+ },
+ {
+  "a": "toddler moms",
+  "b": "toddler playgroup",
+  "shared_token": "toddler",
+  "cosine": 0.6401,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about people, the other is about an activity"
+ },
+ {
+  "a": "morning walks",
+  "b": "street moms coffee morning",
+  "shared_token": "morning",
+  "cosine": 0.6398,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about walking, the other about a coffee gathering"
+ },
+ {
+  "a": "italian pizza",
+  "b": "italian spot",
+  "shared_token": "italian",
+  "cosine": 0.6391,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "pizza and spot refer to food and place"
+ },
+ {
+  "a": "central park",
+  "b": "laureate park",
+  "shared_token": "park",
+  "cosine": 0.6386,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "different parks"
+ },
+ {
+  "a": "meet pizza party",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.6385,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is an event, the other is food"
+ },
+ {
+  "a": "5 people max",
+  "b": "meet people",
+  "shared_token": "people",
+  "cosine": 0.6311,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a limit, the other is an activity"
+ },
+ {
+  "a": "activities for 4 year old",
+  "b": "water activities",
+  "shared_token": "activities",
+  "cosine": 0.6304,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is age-specific, the other is type-specific"
+ },
+ {
+  "a": "friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.6245,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is about friends in general, the other is specifically about needing mom friends"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.6231,
+  "resolver": "adjudicate",
+  "label": "different",
+  "reason": "one is a food item, the other is a place"
+ },
+ {
+  "a": "4 year old",
+  "b": "6 year old",
+  "shared_token": "year",
+  "cosine": 0.6183,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different ages imply different children"
+ },
+ {
+  "a": "pre-k mom",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.6183,
+  "resolver": "new",
+  "label": "same",
+  "reason": "both refer to involvement in pre-k"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.6101,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific playground, the other is a general park area"
+ },
+ {
+  "a": "challenge",
+  "b": "social event challenge",
+  "shared_token": "challenge",
+  "cosine": 0.607,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a general term, the other is specific"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "walk buddy",
+  "shared_token": "buddy",
+  "cosine": 0.6066,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is an event, the other is a walking partner"
+ },
+ {
+  "a": "friends meetup",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.6062,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a social event, the other is a group of people"
+ },
+ {
+  "a": "pre-k",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.605,
+  "resolver": "new",
+  "label": "same",
+  "reason": "both refer to the same pre-k context"
+ },
+ {
+  "a": "3 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.6048,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different age groups"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "playground meetup",
+  "shared_token": "playground",
+  "cosine": 0.6028,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific location, the other is an event"
+ },
+ {
+  "a": "social boost",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.6023,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a general concept, the other is a specific event"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k mom",
+  "shared_token": "pre-k",
+  "cosine": 0.602,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about programs, the other about a parent"
+ },
+ {
+  "a": "canvas restaurant",
+  "b": "kid-friendly restaurant",
+  "shared_token": "restaurant",
+  "cosine": 0.5995,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific restaurant, the other is a type"
+ },
+ {
+  "a": "meeting for all moms with kids under age of 5 for birthday",
+  "b": "meeting with friends",
+  "shared_token": "meeting",
+  "cosine": 0.5979,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific meeting for moms, the other is a general meeting with friends"
+ },
+ {
+  "a": "meeting for all moms with kids under age of 5 for birthday",
+  "b": "meeting with friends",
+  "shared_token": "with",
+  "cosine": 0.5979,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific meeting for moms with young kids, the other is a general meeting with friends"
+ },
+ {
+  "a": "emotional support",
+  "b": "postpartum support",
+  "shared_token": "support",
+  "cosine": 0.5957,
+  "resolver": "new",
+  "label": "different",
+  "reason": "emotional support is broader than postpartum support"
+ },
+ {
+  "a": "2 year old",
+  "b": "6 year old",
+  "shared_token": "year",
+  "cosine": 0.5899,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different ages imply different children"
+ },
+ {
+  "a": "friends",
+  "b": "making mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5898,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about friends in general, the other is about mom friends specifically"
+ },
+ {
+  "a": "friends meetup",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5897,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a social event, the other is a need for companionship"
+ },
+ {
+  "a": "social boost",
+  "b": "social event",
+  "shared_token": "social",
+  "cosine": 0.5888,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about socializing, the other about an event"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.5869,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific playground, the other is a general park"
+ },
+ {
+  "a": "central park",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.5858,
+  "resolver": "new",
+  "label": "different",
+  "reason": "central park is a specific place, park hangout is a general activity"
+ },
+ {
+  "a": "brazilian coffee",
+  "b": "brazilian moms",
+  "shared_token": "brazilian",
+  "cosine": 0.5858,
+  "resolver": "new",
+  "label": "different",
+  "reason": "coffee and moms are unrelated concepts"
+ },
+ {
+  "a": "laureate park",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.5856,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific place, the other is a general activity"
+ },
+ {
+  "a": "italian pizza",
+  "b": "nona’s urban pizza",
+  "shared_token": "pizza",
+  "cosine": 0.583,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different pizza places"
+ },
+ {
+  "a": "pre-k programs",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.5813,
+  "resolver": "new",
+  "label": "same",
+  "reason": "both refer to pre-k education"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "nona’s urban pizza",
+  "shared_token": "pizza",
+  "cosine": 0.5812,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a product, the other a place"
+ },
+ {
+  "a": "italian pizza",
+  "b": "meet pizza party",
+  "shared_token": "pizza",
+  "cosine": 0.5805,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a type of food, the other is an event"
+ },
+ {
+  "a": "central park new york",
+  "b": "laureate park",
+  "shared_token": "park",
+  "cosine": 0.5795,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different parks in different locations"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "coffee buddy",
+  "shared_token": "buddy",
+  "cosine": 0.5775,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is an event, the other is a person"
+ },
+ {
+  "a": "meet pizza party",
+  "b": "nona’s urban pizza",
+  "shared_token": "pizza",
+  "cosine": 0.5754,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a party, the other is a restaurant"
+ },
+ {
+  "a": "friends meetup",
+  "b": "making mom friends",
+  "shared_token": "friends",
+  "cosine": 0.572,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about socializing generally, the other about meeting moms specifically"
+ },
+ {
+  "a": "boost my social",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.5661,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about social media, the other about events"
+ },
+ {
+  "a": "brazilian coffee meet",
+  "b": "brazilian moms",
+  "shared_token": "brazilian",
+  "cosine": 0.564,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a coffee event, the other is a group of people"
+ },
+ {
+  "a": "toddler bike",
+  "b": "toddler moms",
+  "shared_token": "toddler",
+  "cosine": 0.5624,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about a bike, the other about mothers"
+ },
+ {
+  "a": "brazilian coffee",
+  "b": "brazilian dads",
+  "shared_token": "brazilian",
+  "cosine": 0.559,
+  "resolver": "new",
+  "label": "different",
+  "reason": "coffee and dads are unrelated concepts"
+ },
+ {
+  "a": "toddler bike",
+  "b": "toddler playgroup",
+  "shared_token": "toddler",
+  "cosine": 0.5573,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about a bike, the other about a playgroup"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "meet pizza party",
+  "shared_token": "pizza",
+  "cosine": 0.5531,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is food, the other is an event"
+ },
+ {
+  "a": "boost social",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.5514,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about socializing, the other about an event"
+ },
+ {
+  "a": "brazilian coffee meet",
+  "b": "brazilian dads",
+  "shared_token": "brazilian",
+  "cosine": 0.5513,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different activities or groups"
+ },
+ {
+  "a": "faith small group",
+  "b": "walking group",
+  "shared_token": "group",
+  "cosine": 0.5502,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different types of groups"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.5497,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about programs, the other about a specific child"
+ },
+ {
+  "a": "preschool moms",
+  "b": "sunshine preschool",
+  "shared_token": "preschool",
+  "cosine": 0.5495,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a group of people, the other is a place"
+ },
+ {
+  "a": "meeting with friends",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5441,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is an activity, the other is a group of people"
+ },
+ {
+  "a": "central park new york",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.5425,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a specific park, the other is a general activity"
+ },
+ {
+  "a": "boost my social",
+  "b": "social event",
+  "shared_token": "social",
+  "cosine": 0.5416,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about increasing social interaction, the other is about a specific event"
+ },
+ {
+  "a": "cry every night after the kids sleep",
+  "b": "evenings after 6",
+  "shared_token": "after",
+  "cosine": 0.5399,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about crying, the other is a time period"
+ },
+ {
+  "a": "central park",
+  "b": "laureate park zipline playground",
+  "shared_token": "park",
+  "cosine": 0.5382,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different parks mentioned"
+ },
+ {
+  "a": "book club",
+  "b": "book everything is tuberculosis",
+  "shared_token": "book",
+  "cosine": 0.536,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a club, the other is a book title"
+ },
+ {
+  "a": "street foods",
+  "b": "street moms coffee morning",
+  "shared_token": "street",
+  "cosine": 0.534,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about food, the other is a social event"
+ },
+ {
+  "a": "making mom friends",
+  "b": "meeting with friends",
+  "shared_token": "friends",
+  "cosine": 0.5285,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about making new friends, the other about meeting existing ones"
+ },
+ {
+  "a": "2 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.5285,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different age groups"
+ },
+ {
+  "a": "boost social",
+  "b": "social event",
+  "shared_token": "social",
+  "cosine": 0.5263,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is an action, the other is an event"
+ },
+ {
+  "a": "meeting with friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5232,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about a social activity, the other is about seeking connections"
+ },
+ {
+  "a": "6 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.5197,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different age groups"
+ },
+ {
+  "a": "cry every night after the kids sleep",
+  "b": "moms night out",
+  "shared_token": "night",
+  "cosine": 0.5188,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about crying, the other is about going out"
+ },
+ {
+  "a": "food festivals",
+  "b": "italian food",
+  "shared_token": "food",
+  "cosine": 0.5161,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is a type of event, the other is a cuisine"
+ },
+ {
+  "a": "local street foods",
+  "b": "street moms coffee morning",
+  "shared_token": "street",
+  "cosine": 0.5098,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about food, the other about a social event"
+ },
+ {
+  "a": "central park new york",
+  "b": "laureate park zipline playground",
+  "shared_token": "park",
+  "cosine": 0.5054,
+  "resolver": "new",
+  "label": "different",
+  "reason": "different parks in different locations"
+ },
+ {
+  "a": "local professional",
+  "b": "local street foods",
+  "shared_token": "local",
+  "cosine": 0.4898,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one refers to a person, the other to food"
+ },
+ {
+  "a": "communities aligned with nature",
+  "b": "hang out with other moms",
+  "shared_token": "with",
+  "cosine": 0.4327,
+  "resolver": "new",
+  "label": "different",
+  "reason": "phrases describe different activities"
+ },
+ {
+  "a": "cry every night",
+  "b": "moms night out",
+  "shared_token": "night",
+  "cosine": 0.4169,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about crying, the other is about a social event"
+ },
+ {
+  "a": "communities aligned with nature",
+  "b": "meeting with friends",
+  "shared_token": "with",
+  "cosine": 0.4156,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about communities, the other about socializing"
+ },
+ {
+  "a": "communities aligned with nature",
+  "b": "meeting for all moms with kids under age of 5 for birthday",
+  "shared_token": "with",
+  "cosine": 0.3864,
+  "resolver": "new",
+  "label": "different",
+  "reason": "one is about nature communities, the other is a moms' meeting"
+ }
+]

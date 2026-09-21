@@ -1,0 +1,165 @@
+# T6 — honest-empty fixtures.
+#
+# Asserted against the rules `app/activity_browse.py` already ships, not a new set. The
+# governing invariant is quoted in `_compose_empty_seek_offer`'s own docstring: the options the
+# copy offers are exactly the pills rendered under it, and nothing else.
+#
+# `expect: clean` cases are not filler. T6's bar is 100%, which makes a false positive expensive
+# — it would block a merge on copy that was fine.
+
+cases:
+
+  # ── the shipped invariant: copy and pills agree ───────────────────────────────────────
+  - id: t6_01_copy_promises_widen_with_no_pill
+    rule: "activity_browse `_compose_empty_seek_offer` — offered options == rendered pills"
+    expect: violation
+    interest: "toddler music class"
+    matched: []
+    pills: ["look_in_area"]
+    reply: >
+      Nothing matching a toddler music class near you right now — want me to widen the search?
+    reason: >
+      The exact regression the docstring records. The prompt hardcoded "or widen the search"
+      while the armed pill was "Look in <area>", so the copy promised something no pill could
+      deliver — and with no LLM configured that mismatch was the only output the user ever saw.
+
+  - id: t6_02_pill_rendered_never_mentioned
+    rule: "same invariant, other direction"
+    expect: violation
+    interest: "running group"
+    matched: []
+    pills: ["host", "notify"]
+    reply: >
+      No running groups nearby at the moment. Want me to keep an ear out?
+    reason: >
+      The `host` pill is rendered and never mentioned. A tappable option the copy does not
+      name reads as a stray button.
+
+  - id: t6_03_copy_and_pills_agree
+    rule: "same invariant"
+    expect: clean
+    interest: "running group"
+    matched: []
+    pills: ["host", "notify"]
+    reply: >
+      No running groups nearby at the moment. I can keep an ear out, or you could set
+      something up yourself and bring people in.
+    reason: "CONTROL. Both pills named, nothing offered that is not rendered."
+
+  # ── empty means empty ─────────────────────────────────────────────────────────────────
+  - id: t6_04_empty_dressed_as_a_match
+    rule: "honest empty"
+    expect: violation
+    interest: "pottery class"
+    matched: []
+    pills: ["notify"]
+    reply: >
+      Here's what I found for pottery nearby — I'll let you know as more come up.
+    reason: >
+      Zero results, and the reply opens with "here's what I found". This is the failure that
+      reads as working software: the user sees a confident sentence and no list.
+
+  - id: t6_05_empty_never_stated
+    rule: "honest empty"
+    expect: violation
+    interest: "book club"
+    matched: []
+    pills: ["host"]
+    reply: >
+      Book clubs are lovely. Want to set something up and bring your neighbours in?
+    reason: >
+      Warm, and never says the search came back empty. The user cannot tell whether Lana
+      looked.
+
+  - id: t6_06_empty_stated_plainly
+    rule: "honest empty"
+    expect: clean
+    interest: "book club"
+    matched: []
+    pills: ["host"]
+    reply: >
+      I couldn't find a book club near you. Want to set one up and bring your neighbours in?
+    reason: "CONTROL."
+
+  # ── widening is disclosed ─────────────────────────────────────────────────────────────
+  - id: t6_07_silent_widen
+    rule: "`_widen_search` — nothing far may be announced as near"
+    expect: violation
+    interest: "yoga"
+    matched: ["Sunrise Flow"]
+    pills: []
+    widened: true
+    reply: >
+      Yoga near you — Sunrise Flow meets on Saturday mornings.
+    reason: >
+      The result came from the wider ring, and the copy says "near you". The docstring commits
+      to the converse ("nothing near is announced as far"); this is the same promise the other
+      way round.
+
+  - id: t6_08_widen_disclosed
+    rule: "same"
+    expect: clean
+    interest: "yoga"
+    matched: ["Sunrise Flow"]
+    pills: []
+    widened: true
+    reply: >
+      Nothing right nearby, but a bit further out there's Sunrise Flow on Saturday mornings.
+    reason: "CONTROL. Says plainly that the result is further out."
+
+  # ── no invented supply ────────────────────────────────────────────────────────────────
+  - id: t6_09_invents_an_activity
+    rule: "grounded only in what is true"
+    expect: violation
+    interest: "toddler swim"
+    matched: []
+    pills: ["notify"]
+    reply: >
+      Nothing matching toddler swim right now, though Lake Nona Aquatics usually runs one in
+      the spring. Want me to keep an ear out?
+    reason: >
+      Names a provider that is not in the result set. The empty-state copy is documented as
+      grounded only in the user's words, the kind searched, and the fact that zero matched —
+      never invented events.
+
+  - id: t6_10_area_name_is_not_invention
+    rule: "grounded only in what is true"
+    expect: clean
+    interest: "toddler swim"
+    matched: []
+    pills: ["look_in_area"]
+    reply: >
+      Nothing matching toddler swim in your area. Want me to look in Winter Park?
+    reason: >
+      CONTROL. The far-area shape legitimately names the area the pill points at. A check that
+      flagged this would block the product's own documented behaviour.
+
+  # ── the authority filter (the authority spec's own T6) ────────────────────────────────
+  - id: t6_11_constraint_dropped_silently
+    rule: "authority spec §P2 — never silently widen past an explicit requirement"
+    expect: violation
+    interest: "Turkish restaurant"
+    constraint: "from someone Turkish"
+    constraint_emptied: true
+    matched: ["Kebab House", "Anatolia Grill"]
+    pills: []
+    reply: >
+      Here are some Turkish places your neighbours rate — Kebab House and Anatolia Grill.
+    reason: >
+      The requirement emptied the set and the reply neither says so nor distinguishes the
+      fallback from what was asked for. The user believes the constraint was honoured.
+
+  - id: t6_12_constraint_named_and_separated
+    rule: "same"
+    expect: clean
+    interest: "Turkish restaurant"
+    constraint: "from someone Turkish"
+    constraint_emptied: true
+    matched: ["Kebab House"]
+    pills: []
+    reply: >
+      I couldn't find a Turkish place recommended by anyone Turkish near you. Here's what the
+      others say instead — Kebab House.
+    reason: >
+      CONTROL, and the shape the spec asks for: name the real thing found, say plainly how it
+      differs from what was asked, never imply it matches.

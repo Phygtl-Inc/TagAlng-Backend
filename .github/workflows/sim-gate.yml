@@ -1,0 +1,107 @@
+name: Sim gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      # Only run when Lana's brain or the sim pipeline itself changes
+      - 'services/lana-worker/app/**'
+      - 'services/lana-worker/simulations/**'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to post the gate-check comment to (optional — only needed for the comment step, the sim run itself works without it)'
+        required: false
+        default: ''
+
+# The six p*-sim accounts are SHARED. app/db.py create_session(force_new=True) calls
+# abandon_other_active_sessions, so two sim runs against the same project kill each other's
+# sessions and the loser dies mid-transcript with `400 session_not_active`. Nothing in the app
+# prevents that, so the runs must be serialised here. cancel-in-progress is FALSE on purpose:
+# cancelling the earlier run would abandon a half-written transcript and lose the result, which
+# is the outcome this group exists to prevent.
+concurrency:
+  group: lana-sim-accounts
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch tags so we can compare against the last green baseline
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: services/lana-worker
+        run: pip install -r requirements.txt
+
+      # Offline: no secrets, no database, no API key, seconds to run. Deliberately BEFORE the
+      # live matrix so a broken check fails fast instead of after 25 minutes of live turns.
+      #
+      # PyYAML is installed HERE and not in the step above on purpose: it is absent from the
+      # worker's requirements.txt, and reco_eval reads fixtures.yaml — but the worker pins
+      # openai>=1.55,<2 while simulations/requirements.txt pins >=2.50,<3, so installing both
+      # files in one step resolves one of them away.
+      #
+      # What each command is protecting:
+      #   selftest.py  every mechanical axis fed a planted violation AND a clean input, plus
+      #                the drift tripwires (the consent question, the per-type floor, the
+      #                280-char storage transform — all copies of product values).
+      #   --dry-run --gate   the whole pipeline end to end on canned data. The --gate matters:
+      #                without it run_eval exits 0 even on a HARD_FAIL, so the step would only
+      #                have caught a crash. The dry set is built to pass every axis, so any
+      #                failure here is a regression in a check or in validate_steps itself.
+      #   --arm answers --gate   fails ONLY if a good answer starts being rejected. §12.4 rules
+      #                out telling a neighbour their recommendation was not good enough, so
+      #                that is the one regression here worth blocking a PR over. Accepted junk
+      #                is reported as a rate, not gated — it is the known state of the product
+      #                today, and a permanently red gate is an ignored gate.
+      - name: Recommendation-capture checks (offline)
+        working-directory: services/lana-worker/simulations/reco_eval
+        run: |
+          pip install "PyYAML>=6.0.2,<7"
+          python selftest.py
+          python run_eval.py --dry-run --gate
+          python run_eval.py --arm answers --validator shipped --gate
+
+      - name: Run simulation matrix against PR branch
+        working-directory: services/lana-worker/simulations
+        env:
+          LANA_BASE_URL:              ${{ secrets.SIM_LANA_BASE_URL }}
+          OPENAI_API_KEY:             ${{ secrets.OPENAI_API_KEY }}
+          SUPABASE_URL:               ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY:          ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SIM_PASSWORD:               ${{ secrets.SIM_PASSWORD }}
+          GIT_SHA:                    ${{ github.sha }}
+          # CI legitimately targets the SHARED dev project — that is what the gate measures
+          # against. local_guard.require_local() refuses non-local writes by default (it
+          # exists to stop a developer wiping a teammate's seed data by accident), so CI
+          # must opt in explicitly. Safe here only because the concurrency group above
+          # serialises sim runs; without that, this flag would license the collision.
+          SIM_ALLOW_NONLOCAL_WRITES:  "1"
+        # --pr: must-have buckets only (refusals/safety, PII/privacy, core function, routing);
+        # runs 6-way parallel across personas by default. The full matrix runs in sim-nightly.yml.
+        run: python runner.py --pr
+
+      - name: Compare against baseline and gate
+        working-directory: services/lana-worker/simulations
+        env:
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BASELINE_TAG:              ${{ secrets.SIM_BASELINE_TAG }}
+          PR_SHA:                    ${{ github.sha }}
+          GH_TOKEN:                  ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER:                 ${{ github.event.pull_request.number || inputs.pr_number }}
+          REPO:                      ${{ github.repository }}
+        run: python gate_check.py

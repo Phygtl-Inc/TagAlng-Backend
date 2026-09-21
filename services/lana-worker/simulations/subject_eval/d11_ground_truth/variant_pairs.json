@@ -1,0 +1,1430 @@
+[
+ {
+  "a": "mom friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.9856,
+  "resolver": "merge"
+ },
+ {
+  "a": "get hints from lana",
+  "b": "getting hints from lana",
+  "shared_token": "hints",
+  "cosine": 0.9798,
+  "resolver": "merge"
+ },
+ {
+  "a": "get hints from lana",
+  "b": "getting hints from lana",
+  "shared_token": "from",
+  "cosine": 0.9798,
+  "resolver": "merge"
+ },
+ {
+  "a": "get hints from lana",
+  "b": "getting hints from lana",
+  "shared_token": "lana",
+  "cosine": 0.9798,
+  "resolver": "merge"
+ },
+ {
+  "a": "cooking class",
+  "b": "cooking classes",
+  "shared_token": "cooking",
+  "cosine": 0.9744,
+  "resolver": "merge"
+ },
+ {
+  "a": "making mom friends",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.945,
+  "resolver": "merge"
+ },
+ {
+  "a": "local street foods",
+  "b": "street foods",
+  "shared_token": "street",
+  "cosine": 0.9401,
+  "resolver": "merge"
+ },
+ {
+  "a": "local street foods",
+  "b": "street foods",
+  "shared_token": "foods",
+  "cosine": 0.9401,
+  "resolver": "merge"
+ },
+ {
+  "a": "central park",
+  "b": "central park new york",
+  "shared_token": "park",
+  "cosine": 0.937,
+  "resolver": "merge"
+ },
+ {
+  "a": "central park",
+  "b": "central park new york",
+  "shared_token": "central",
+  "cosine": 0.937,
+  "resolver": "merge"
+ },
+ {
+  "a": "making mom friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.9369,
+  "resolver": "merge"
+ },
+ {
+  "a": "boost my social",
+  "b": "boost social",
+  "shared_token": "social",
+  "cosine": 0.9316,
+  "resolver": "merge"
+ },
+ {
+  "a": "boost my social",
+  "b": "boost social",
+  "shared_token": "boost",
+  "cosine": 0.9316,
+  "resolver": "merge"
+ },
+ {
+  "a": "pre-k",
+  "b": "pre-k programs",
+  "shared_token": "pre-k",
+  "cosine": 0.9274,
+  "resolver": "merge"
+ },
+ {
+  "a": "boost social",
+  "b": "social boost",
+  "shared_token": "social",
+  "cosine": 0.9272,
+  "resolver": "merge"
+ },
+ {
+  "a": "boost social",
+  "b": "social boost",
+  "shared_token": "boost",
+  "cosine": 0.9272,
+  "resolver": "merge"
+ },
+ {
+  "a": "st. luke's church",
+  "b": "st. luke's united methodist church",
+  "shared_token": "luke's",
+  "cosine": 0.9203,
+  "resolver": "merge"
+ },
+ {
+  "a": "st. luke's church",
+  "b": "st. luke's united methodist church",
+  "shared_token": "church",
+  "cosine": 0.9203,
+  "resolver": "merge"
+ },
+ {
+  "a": "boost my social",
+  "b": "social boost",
+  "shared_token": "social",
+  "cosine": 0.9169,
+  "resolver": "merge"
+ },
+ {
+  "a": "boost my social",
+  "b": "social boost",
+  "shared_token": "boost",
+  "cosine": 0.9169,
+  "resolver": "merge"
+ },
+ {
+  "a": "fifa",
+  "b": "fifa world cup",
+  "shared_token": "fifa",
+  "cosine": 0.8963,
+  "resolver": "merge"
+ },
+ {
+  "a": "italian food",
+  "b": "italian pizza",
+  "shared_token": "italian",
+  "cosine": 0.8896,
+  "resolver": "merge"
+ },
+ {
+  "a": "social event",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.878,
+  "resolver": "merge"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "friends meetup",
+  "shared_token": "meetup",
+  "cosine": 0.8639,
+  "resolver": "merge"
+ },
+ {
+  "a": "meet playdate",
+  "b": "playdate",
+  "shared_token": "playdate",
+  "cosine": 0.8606,
+  "resolver": "merge"
+ },
+ {
+  "a": "husband travels for work",
+  "b": "wife travels",
+  "shared_token": "travels",
+  "cosine": 0.8575,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "morning walks",
+  "b": "walks",
+  "shared_token": "walks",
+  "cosine": 0.8566,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "brazilian dads",
+  "b": "brazilian moms",
+  "shared_token": "brazilian",
+  "cosine": 0.8459,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "2 year old",
+  "b": "4 year old",
+  "shared_token": "year",
+  "cosine": 0.8452,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "dinner event",
+  "b": "dinner party",
+  "shared_token": "dinner",
+  "cosine": 0.8437,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "double stroller",
+  "b": "stroller",
+  "shared_token": "stroller",
+  "cosine": 0.84,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "dentist",
+  "b": "pediatric dentist",
+  "shared_token": "dentist",
+  "cosine": 0.84,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.8389,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "japanese pottery",
+  "b": "pottery class",
+  "shared_token": "pottery",
+  "cosine": 0.8363,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "playgroup",
+  "b": "toddler playgroup",
+  "shared_token": "playgroup",
+  "cosine": 0.8288,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "community events",
+  "b": "family friendly events",
+  "shared_token": "events",
+  "cosine": 0.8278,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "stroller walk",
+  "b": "walk",
+  "shared_token": "walk",
+  "cosine": 0.8195,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "coffee morning",
+  "b": "street moms coffee morning",
+  "shared_token": "morning",
+  "cosine": 0.8101,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "pediatric dentist",
+  "b": "pediatric dentist on narcoossee rd",
+  "shared_token": "pediatric",
+  "cosine": 0.8098,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "pediatric dentist",
+  "b": "pediatric dentist on narcoossee rd",
+  "shared_token": "dentist",
+  "cosine": 0.8098,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "laureate park",
+  "b": "laureate park zipline playground",
+  "shared_token": "park",
+  "cosine": 0.8077,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "laureate park",
+  "b": "laureate park zipline playground",
+  "shared_token": "laureate",
+  "cosine": 0.8077,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian spot",
+  "b": "pizza spot",
+  "shared_token": "spot",
+  "cosine": 0.8074,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "hang out with other moms",
+  "b": "meet other moms",
+  "shared_token": "other",
+  "cosine": 0.807,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "tennis",
+  "b": "tennis courts",
+  "shared_token": "tennis",
+  "cosine": 0.8044,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "tennis",
+  "b": "tennis meet up",
+  "shared_token": "tennis",
+  "cosine": 0.8026,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "fifa world cup",
+  "b": "world cup",
+  "shared_token": "world",
+  "cosine": 0.8015,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "meet or playgroup",
+  "b": "toddler playgroup",
+  "shared_token": "playgroup",
+  "cosine": 0.7971,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "moved to the block",
+  "b": "newly moved",
+  "shared_token": "moved",
+  "cosine": 0.7958,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "outdoor",
+  "b": "outdoor adventure",
+  "shared_token": "outdoor",
+  "cosine": 0.7921,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "coffee walks",
+  "b": "walks",
+  "shared_token": "walks",
+  "cosine": 0.7868,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "meet or playgroup",
+  "b": "playgroup",
+  "shared_token": "playgroup",
+  "cosine": 0.7867,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "friends meetup",
+  "b": "meeting with friends",
+  "shared_token": "friends",
+  "cosine": 0.7814,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "stroller",
+  "b": "stroller walk",
+  "shared_token": "stroller",
+  "cosine": 0.7811,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "host a party",
+  "b": "host event",
+  "shared_token": "host",
+  "cosine": 0.7802,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona",
+  "shared_token": "lake",
+  "cosine": 0.7736,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona",
+  "shared_token": "nona",
+  "cosine": 0.7736,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cooking class",
+  "b": "pottery class",
+  "shared_token": "class",
+  "cosine": 0.7706,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "playdate",
+  "b": "spanish-english playdate",
+  "shared_token": "playdate",
+  "cosine": 0.7642,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "playground",
+  "b": "playground meetup",
+  "shared_token": "playground",
+  "cosine": 0.7633,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "central park new york",
+  "b": "new york",
+  "shared_token": "york",
+  "cosine": 0.7621,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian pizza",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.7608,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "coffee walks",
+  "b": "morning walks",
+  "shared_token": "walks",
+  "cosine": 0.756,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "central park",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.7515,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "mom meetup",
+  "b": "playground meetup",
+  "shared_token": "meetup",
+  "cosine": 0.7493,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.7479,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "host a meet",
+  "b": "host event",
+  "shared_token": "host",
+  "cosine": 0.7478,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "birthday party",
+  "b": "meeting for all moms with kids under age of 5 for birthday",
+  "shared_token": "birthday",
+  "cosine": 0.746,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "fun activity",
+  "b": "kids led activity",
+  "shared_token": "activity",
+  "cosine": 0.7421,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "activity for 4-year-old",
+  "b": "fun activity",
+  "shared_token": "activity",
+  "cosine": 0.7398,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "burger eating competition",
+  "b": "burger party",
+  "shared_token": "burger",
+  "cosine": 0.7396,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "brazilian coffee",
+  "b": "brazilian coffee meet",
+  "shared_token": "brazilian",
+  "cosine": 0.7321,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian food",
+  "b": "italian restaurants",
+  "shared_token": "italian",
+  "cosine": 0.7303,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k programs",
+  "shared_token": "pre-k",
+  "cosine": 0.73,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k programs",
+  "shared_token": "programs",
+  "cosine": 0.73,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "lake",
+  "cosine": 0.7276,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "nona",
+  "cosine": 0.7276,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian restaurants",
+  "b": "italian spot",
+  "shared_token": "italian",
+  "cosine": 0.7254,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "coffee buddy",
+  "b": "walk buddy",
+  "shared_token": "buddy",
+  "cosine": 0.7253,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "activity for 4-year-old",
+  "b": "kids led activity",
+  "shared_token": "activity",
+  "cosine": 0.7229,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "3 year old",
+  "b": "4 year old",
+  "shared_token": "year",
+  "cosine": 0.7226,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "2 year old",
+  "b": "3 year old",
+  "shared_token": "year",
+  "cosine": 0.7222,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "friends meetup",
+  "b": "mom meetup",
+  "shared_token": "meetup",
+  "cosine": 0.722,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "nona\u2019s urban pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.72,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "friends meetup",
+  "b": "playground meetup",
+  "shared_token": "meetup",
+  "cosine": 0.7184,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cry every night",
+  "b": "cry every night after the kids sleep",
+  "shared_token": "night",
+  "cosine": 0.7182,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cry every night",
+  "b": "cry every night after the kids sleep",
+  "shared_token": "every",
+  "cosine": 0.7182,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "park",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.7154,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "coffee morning",
+  "b": "morning walks",
+  "shared_token": "morning",
+  "cosine": 0.7153,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "community events",
+  "b": "events nearby",
+  "shared_token": "events",
+  "cosine": 0.7139,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "fitness cf",
+  "b": "fitness cf - st. cloud",
+  "shared_token": "fitness",
+  "cosine": 0.7138,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "hang out with other moms",
+  "b": "meeting for all moms with kids under age of 5 for birthday",
+  "shared_token": "with",
+  "cosine": 0.7114,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "pre-k",
+  "b": "pre-k mom",
+  "shared_token": "pre-k",
+  "cosine": 0.7101,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "mom meetup",
+  "shared_token": "meetup",
+  "cosine": 0.7076,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "fifa",
+  "b": "fifa screen event",
+  "shared_token": "fifa",
+  "cosine": 0.7038,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "walk",
+  "b": "walk buddy",
+  "shared_token": "walk",
+  "cosine": 0.6965,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "playground meetup",
+  "shared_token": "meetup",
+  "cosine": 0.6964,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "friends",
+  "b": "friends meetup",
+  "shared_token": "friends",
+  "cosine": 0.6937,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "toddler",
+  "b": "toddler moms",
+  "shared_token": "toddler",
+  "cosine": 0.6937,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "laureate park",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.6921,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "tennis courts",
+  "b": "tennis meet up",
+  "shared_token": "tennis",
+  "cosine": 0.6908,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "4 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.688,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "host a meet",
+  "b": "host a party",
+  "shared_token": "host",
+  "cosine": 0.6847,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "minion watch party",
+  "b": "netflix watch party",
+  "shared_token": "watch",
+  "cosine": 0.6839,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "events nearby",
+  "b": "family friendly events",
+  "shared_token": "events",
+  "cosine": 0.681,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "friends",
+  "b": "meeting with friends",
+  "shared_token": "friends",
+  "cosine": 0.6808,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "central park new york",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.6799,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian pizza",
+  "b": "italian restaurants",
+  "shared_token": "italian",
+  "cosine": 0.6748,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "meet playdate",
+  "b": "spanish-english playdate",
+  "shared_token": "playdate",
+  "cosine": 0.6727,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "pottery class",
+  "b": "spin class",
+  "shared_token": "class",
+  "cosine": 0.6716,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "meet pizza party",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.6698,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "hang out with other moms",
+  "b": "meeting with friends",
+  "shared_token": "with",
+  "cosine": 0.6678,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "pre-k mom",
+  "b": "pre-k programs",
+  "shared_token": "pre-k",
+  "cosine": 0.667,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "toddler",
+  "b": "toddler bike",
+  "shared_token": "toddler",
+  "cosine": 0.6638,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cooking class",
+  "b": "spin class",
+  "shared_token": "class",
+  "cosine": 0.6633,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "3 year old",
+  "b": "6 year old",
+  "shared_token": "year",
+  "cosine": 0.6628,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "dentist",
+  "b": "pediatric dentist on narcoossee rd",
+  "shared_token": "dentist",
+  "cosine": 0.6593,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.6587,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "community creation",
+  "b": "community events",
+  "shared_token": "community",
+  "cosine": 0.658,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "toddler",
+  "b": "toddler playgroup",
+  "shared_token": "toddler",
+  "cosine": 0.6571,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.6565,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "nona\u2019s urban pizza",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.6549,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "friends",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.6525,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "double stroller",
+  "b": "stroller walk",
+  "shared_token": "stroller",
+  "cosine": 0.6524,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "meet & greet for new moms",
+  "b": "meet and greet",
+  "shared_token": "greet",
+  "cosine": 0.6514,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "stroller walk",
+  "b": "walk buddy",
+  "shared_token": "walk",
+  "cosine": 0.6495,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "italian pizza",
+  "shared_token": "pizza",
+  "cosine": 0.6493,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "playground",
+  "shared_token": "playground",
+  "cosine": 0.6492,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "lake",
+  "cosine": 0.6483,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "cyclebar lake nona",
+  "b": "lake nona pre-k programs",
+  "shared_token": "nona",
+  "cosine": 0.6483,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "fifa screen event",
+  "b": "fifa world cup",
+  "shared_token": "fifa",
+  "cosine": 0.6447,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian food",
+  "b": "italian spot",
+  "shared_token": "italian",
+  "cosine": 0.6437,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "toddler moms",
+  "b": "toddler playgroup",
+  "shared_token": "toddler",
+  "cosine": 0.6401,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "morning walks",
+  "b": "street moms coffee morning",
+  "shared_token": "morning",
+  "cosine": 0.6398,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "italian pizza",
+  "b": "italian spot",
+  "shared_token": "italian",
+  "cosine": 0.6391,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "central park",
+  "b": "laureate park",
+  "shared_token": "park",
+  "cosine": 0.6386,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "meet pizza party",
+  "b": "pizza",
+  "shared_token": "pizza",
+  "cosine": 0.6385,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "5 people max",
+  "b": "meet people",
+  "shared_token": "people",
+  "cosine": 0.6311,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "activities for 4 year old",
+  "b": "water activities",
+  "shared_token": "activities",
+  "cosine": 0.6304,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.6245,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "pizza spot",
+  "shared_token": "pizza",
+  "cosine": 0.6231,
+  "resolver": "adjudicate"
+ },
+ {
+  "a": "4 year old",
+  "b": "6 year old",
+  "shared_token": "year",
+  "cosine": 0.6183,
+  "resolver": "new"
+ },
+ {
+  "a": "pre-k mom",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.6183,
+  "resolver": "new"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.6101,
+  "resolver": "new"
+ },
+ {
+  "a": "challenge",
+  "b": "social event challenge",
+  "shared_token": "challenge",
+  "cosine": 0.607,
+  "resolver": "new"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "walk buddy",
+  "shared_token": "buddy",
+  "cosine": 0.6066,
+  "resolver": "new"
+ },
+ {
+  "a": "friends meetup",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.6062,
+  "resolver": "new"
+ },
+ {
+  "a": "pre-k",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.605,
+  "resolver": "new"
+ },
+ {
+  "a": "3 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.6048,
+  "resolver": "new"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "playground meetup",
+  "shared_token": "playground",
+  "cosine": 0.6028,
+  "resolver": "new"
+ },
+ {
+  "a": "social boost",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.6023,
+  "resolver": "new"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "pre-k mom",
+  "shared_token": "pre-k",
+  "cosine": 0.602,
+  "resolver": "new"
+ },
+ {
+  "a": "canvas restaurant",
+  "b": "kid-friendly restaurant",
+  "shared_token": "restaurant",
+  "cosine": 0.5995,
+  "resolver": "new"
+ },
+ {
+  "a": "meeting for all moms with kids under age of 5 for birthday",
+  "b": "meeting with friends",
+  "shared_token": "meeting",
+  "cosine": 0.5979,
+  "resolver": "new"
+ },
+ {
+  "a": "meeting for all moms with kids under age of 5 for birthday",
+  "b": "meeting with friends",
+  "shared_token": "with",
+  "cosine": 0.5979,
+  "resolver": "new"
+ },
+ {
+  "a": "emotional support",
+  "b": "postpartum support",
+  "shared_token": "support",
+  "cosine": 0.5957,
+  "resolver": "new"
+ },
+ {
+  "a": "2 year old",
+  "b": "6 year old",
+  "shared_token": "year",
+  "cosine": 0.5899,
+  "resolver": "new"
+ },
+ {
+  "a": "friends",
+  "b": "making mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5898,
+  "resolver": "new"
+ },
+ {
+  "a": "friends meetup",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5897,
+  "resolver": "new"
+ },
+ {
+  "a": "social boost",
+  "b": "social event",
+  "shared_token": "social",
+  "cosine": 0.5888,
+  "resolver": "new"
+ },
+ {
+  "a": "laureate park zipline playground",
+  "b": "park",
+  "shared_token": "park",
+  "cosine": 0.5869,
+  "resolver": "new"
+ },
+ {
+  "a": "central park",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.5858,
+  "resolver": "new"
+ },
+ {
+  "a": "brazilian coffee",
+  "b": "brazilian moms",
+  "shared_token": "brazilian",
+  "cosine": 0.5858,
+  "resolver": "new"
+ },
+ {
+  "a": "laureate park",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.5856,
+  "resolver": "new"
+ },
+ {
+  "a": "italian pizza",
+  "b": "nona\u2019s urban pizza",
+  "shared_token": "pizza",
+  "cosine": 0.583,
+  "resolver": "new"
+ },
+ {
+  "a": "pre-k programs",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.5813,
+  "resolver": "new"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "nona\u2019s urban pizza",
+  "shared_token": "pizza",
+  "cosine": 0.5812,
+  "resolver": "new"
+ },
+ {
+  "a": "italian pizza",
+  "b": "meet pizza party",
+  "shared_token": "pizza",
+  "cosine": 0.5805,
+  "resolver": "new"
+ },
+ {
+  "a": "central park new york",
+  "b": "laureate park",
+  "shared_token": "park",
+  "cosine": 0.5795,
+  "resolver": "new"
+ },
+ {
+  "a": "buddy meetup event",
+  "b": "coffee buddy",
+  "shared_token": "buddy",
+  "cosine": 0.5775,
+  "resolver": "new"
+ },
+ {
+  "a": "meet pizza party",
+  "b": "nona\u2019s urban pizza",
+  "shared_token": "pizza",
+  "cosine": 0.5754,
+  "resolver": "new"
+ },
+ {
+  "a": "friends meetup",
+  "b": "making mom friends",
+  "shared_token": "friends",
+  "cosine": 0.572,
+  "resolver": "new"
+ },
+ {
+  "a": "boost my social",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.5661,
+  "resolver": "new"
+ },
+ {
+  "a": "brazilian coffee meet",
+  "b": "brazilian moms",
+  "shared_token": "brazilian",
+  "cosine": 0.564,
+  "resolver": "new"
+ },
+ {
+  "a": "toddler bike",
+  "b": "toddler moms",
+  "shared_token": "toddler",
+  "cosine": 0.5624,
+  "resolver": "new"
+ },
+ {
+  "a": "brazilian coffee",
+  "b": "brazilian dads",
+  "shared_token": "brazilian",
+  "cosine": 0.559,
+  "resolver": "new"
+ },
+ {
+  "a": "toddler bike",
+  "b": "toddler playgroup",
+  "shared_token": "toddler",
+  "cosine": 0.5573,
+  "resolver": "new"
+ },
+ {
+  "a": "frozen pizza",
+  "b": "meet pizza party",
+  "shared_token": "pizza",
+  "cosine": 0.5531,
+  "resolver": "new"
+ },
+ {
+  "a": "boost social",
+  "b": "social event challenge",
+  "shared_token": "social",
+  "cosine": 0.5514,
+  "resolver": "new"
+ },
+ {
+  "a": "brazilian coffee meet",
+  "b": "brazilian dads",
+  "shared_token": "brazilian",
+  "cosine": 0.5513,
+  "resolver": "new"
+ },
+ {
+  "a": "faith small group",
+  "b": "walking group",
+  "shared_token": "group",
+  "cosine": 0.5502,
+  "resolver": "new"
+ },
+ {
+  "a": "lake nona pre-k programs",
+  "b": "son jake in pre-k",
+  "shared_token": "pre-k",
+  "cosine": 0.5497,
+  "resolver": "new"
+ },
+ {
+  "a": "preschool moms",
+  "b": "sunshine preschool",
+  "shared_token": "preschool",
+  "cosine": 0.5495,
+  "resolver": "new"
+ },
+ {
+  "a": "meeting with friends",
+  "b": "mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5441,
+  "resolver": "new"
+ },
+ {
+  "a": "central park new york",
+  "b": "park hangout",
+  "shared_token": "park",
+  "cosine": 0.5425,
+  "resolver": "new"
+ },
+ {
+  "a": "boost my social",
+  "b": "social event",
+  "shared_token": "social",
+  "cosine": 0.5416,
+  "resolver": "new"
+ },
+ {
+  "a": "cry every night after the kids sleep",
+  "b": "evenings after 6",
+  "shared_token": "after",
+  "cosine": 0.5399,
+  "resolver": "new"
+ },
+ {
+  "a": "central park",
+  "b": "laureate park zipline playground",
+  "shared_token": "park",
+  "cosine": 0.5382,
+  "resolver": "new"
+ },
+ {
+  "a": "book club",
+  "b": "book everything is tuberculosis",
+  "shared_token": "book",
+  "cosine": 0.536,
+  "resolver": "new"
+ },
+ {
+  "a": "street foods",
+  "b": "street moms coffee morning",
+  "shared_token": "street",
+  "cosine": 0.534,
+  "resolver": "new"
+ },
+ {
+  "a": "making mom friends",
+  "b": "meeting with friends",
+  "shared_token": "friends",
+  "cosine": 0.5285,
+  "resolver": "new"
+ },
+ {
+  "a": "2 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.5285,
+  "resolver": "new"
+ },
+ {
+  "a": "boost social",
+  "b": "social event",
+  "shared_token": "social",
+  "cosine": 0.5263,
+  "resolver": "new"
+ },
+ {
+  "a": "meeting with friends",
+  "b": "need mom friends",
+  "shared_token": "friends",
+  "cosine": 0.5232,
+  "resolver": "new"
+ },
+ {
+  "a": "6 year old",
+  "b": "activities for 4 year old",
+  "shared_token": "year",
+  "cosine": 0.5197,
+  "resolver": "new"
+ },
+ {
+  "a": "cry every night after the kids sleep",
+  "b": "moms night out",
+  "shared_token": "night",
+  "cosine": 0.5188,
+  "resolver": "new"
+ },
+ {
+  "a": "food festivals",
+  "b": "italian food",
+  "shared_token": "food",
+  "cosine": 0.5161,
+  "resolver": "new"
+ },
+ {
+  "a": "local street foods",
+  "b": "street moms coffee morning",
+  "shared_token": "street",
+  "cosine": 0.5098,
+  "resolver": "new"
+ },
+ {
+  "a": "central park new york",
+  "b": "laureate park zipline playground",
+  "shared_token": "park",
+  "cosine": 0.5054,
+  "resolver": "new"
+ },
+ {
+  "a": "local professional",
+  "b": "local street foods",
+  "shared_token": "local",
+  "cosine": 0.4898,
+  "resolver": "new"
+ },
+ {
+  "a": "communities aligned with nature",
+  "b": "hang out with other moms",
+  "shared_token": "with",
+  "cosine": 0.4327,
+  "resolver": "new"
+ },
+ {
+  "a": "cry every night",
+  "b": "moms night out",
+  "shared_token": "night",
+  "cosine": 0.4169,
+  "resolver": "new"
+ },
+ {
+  "a": "communities aligned with nature",
+  "b": "meeting with friends",
+  "shared_token": "with",
+  "cosine": 0.4156,
+  "resolver": "new"
+ },
+ {
+  "a": "communities aligned with nature",
+  "b": "meeting for all moms with kids under age of 5 for birthday",
+  "shared_token": "with",
+  "cosine": 0.3864,
+  "resolver": "new"
+ }
+]

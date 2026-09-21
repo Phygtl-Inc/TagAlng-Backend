@@ -1,0 +1,571 @@
+# Recommendation-quality fixtures.
+#
+# Ground truth for the recommendation CAPTURE flow — the half of the product that decides
+# what Lana asks a neighbour about the thing they are recommending, and what she accepts as
+# an answer. Two independent arms, because the product fails in two independent places:
+#
+#   questions:  what Lana ASKS   -> app/tip_share.py::_extract_tip_fields  (the LLM writes it)
+#                                   app/reco_question_sets.py::validate_steps (we make it safe)
+#   answers:    what Lana ACCEPTS -> POST /lana/sessions/{id}/tip-setup (main.py:2509) and the
+#                                   chat fork in tip_share.py. Today: three checks, none of
+#                                   which look at meaning. See the `answers:` header below.
+#
+# Source of the rules: Asjid's "How Lana decides what to ask about a recommendation"
+# (2026-09-07). Section numbers below refer to it. §11 is the gap this file exists to measure.
+#
+# ── questions: fixture fields ────────────────────────────────────────────────────────────
+#   id                  — stable, referenced by --id
+#   opening_line        — what the neighbour says. This is the ONLY thing the generator sees
+#                          besides `prior_draft`, so every expectation must be derivable from it.
+#   prior_draft         — the tip draft as it stands when the set gets written. Mirrors what
+#                          tip_share.py has accumulated by then (name/category/trait/locality).
+#                          MUST NOT contain `reco_type` or `step_set` for the normal path:
+#                          _extract_tip_fields only asks for `steps` when `prev` has no
+#                          step_set, and the prompt tells the model to return [] once CURRENT
+#                          TYPE FIELDS lists a set (tip_share.py:78, _STEPS_SPEC last line).
+#                          Fixtures that DO pin reco_type are testing exactly that hazard and
+#                          say so in `probes`.
+#   expect_reco_type    — the type the extractor should land on. A wrong type is scored on its
+#                          own axis, not folded into question quality: the seven types are a
+#                          fixed taxonomy (20261117120000_reco_types.sql) and browsing depends
+#                          on it, so it is worth its own number.
+#   lookup_able         — true when the subject is a business/place Google already lists, so
+#                          §12.1 applies: hours, phone, website, street address and price band
+#                          are questions that waste a card. FALSE for a private individual
+#                          (a nanny by referral), a recipe, a DIY trick, or a product — for
+#                          those, price and where-to-buy are genuinely neighbour knowledge.
+#                          NOTE: a type's own FLOOR field is always exempt from this ban. A
+#                          pediatrician IS lookup-able and "how do neighbours reach her?" is
+#                          still required (§5) — banning it would be a false positive against
+#                          behaviour the product mandates.
+#   stated_facts        — facts the opening line ALREADY gives. §6 bans re-asking these. The
+#                          product's own answer to this is `answers` (tip_share.py:60-66): the
+#                          question may exist in the set, but it must arrive PRE-ANSWERED so
+#                          `next_question` skips it. So the check is not "never ask" but
+#                          "if you ask, it is already filled in".
+#                            about          — human label, for the report
+#                            question_any_of — lowercase substrings; a generated question
+#                                              matching ANY of these is deemed to cover the fact
+#   forbidden_topics    — fixture-specific asks that would be a privacy breach for THIS subject,
+#                          on top of the global floor (§6 last row / _BLOCKED_ASK).
+#   lang                — null for English. When set, §9 applies: every question/label/
+#                          placeholder is written in that language, `field` keys stay English.
+#   probes              — free-text notes naming what this fixture is here to catch. Printed in
+#                          the report next to any finding, so a failure arrives with its reason.
+#
+# ── answers: fixture fields ──────────────────────────────────────────────────────────────
+# Each row is ONE answer to ONE question, hand-labelled. The label is the ground truth a
+# validator is scored against — so `verdict` must be defensible from the answer text alone,
+# with no knowledge of which validator is being scored.
+#
+#   verdict: accept — a reader of the card can act on this.
+#            reject — it is saved and displayed as if it were a fact, and it is not one.
+#
+# `reject` is deliberately NOT "informal". "yes lol" is a real yes and is accepted; "idk" is
+# not an answer and is rejected. A validator that fails that distinction is over-eager, and an
+# over-eager validator in this flow means telling a neighbour their recommendation was not good
+# enough — the outcome §12.4 explicitly rules out.
+#
+#   field / question / kind — the step being answered, so a validator can be type-aware.
+#                             kind mirrors RecoStep.kind (models.py:663): text | choice | place.
+#   required                — mirrors the step's `required`. The must-have failure in §11
+#                             ("ask me" as a contact) only matters because the field is required.
+#   reason                  — why the verdict is what it is. Read by a human auditing a
+#                             disagreement; never by a check.
+
+questions:
+
+  # ── §3 worked examples ────────────────────────────────────────────────────────────────
+  - id: q01_pediatric_dentist
+    opening_line: "I want to recommend Dr. Klein at Lake Nona Pediatrics — she was so gentle with my toddler"
+    prior_draft:
+      name: "Dr. Klein"
+      category: "pediatric dentist"
+      trait: "gentle with toddlers"
+      locality: "Lake Nona"
+      place_based: true
+    expect_reco_type: professional
+    lookup_able: true
+    stated_facts:
+      - about: "who it is"
+        question_any_of: ["what's the doctor's name", "what is the doctor's name", "who is the doctor", "which dentist"]
+      - about: "what stood out (gentle with toddlers)"
+        question_any_of: ["what stood out", "what did you like"]
+    probes: >
+      §3's first table. A parent filtering needs ages seen, walk-ins and insurance — none of
+      which Google answers. The floor (profession · helped_with · contact) must survive, and
+      `contact` must NOT be scored as a google-answerable violation: it is this type's floor.
+
+  - id: q02_taqueria
+    opening_line: "Taqueria El Rey off Narcoossee — best al pastor around"
+    prior_draft:
+      name: "Taqueria El Rey"
+      category: "taqueria"
+      trait: "best al pastor"
+      locality: "Narcoossee"
+      place_based: true
+    expect_reco_type: restaurant
+    lookup_able: true
+    stated_facts:
+      - about: "what to order (al pastor)"
+        question_any_of: ["what should they order", "what to order", "what should i order"]
+    probes: >
+      §3's second table. Parking, line at lunch, kids' menu — visitor knowledge. Opening hours
+      and price band are Google's and must not be asked (§12.1). `where` is the restaurant
+      floor and is a map pin (kind=place), so it is exempt from the address ban.
+
+  - id: q03_hvac_service
+    opening_line: "Mike at Nona Air fixed our AC same day in August, I'd recommend him"
+    prior_draft:
+      name: "Mike at Nona Air"
+      category: "HVAC"
+      trait: "same-day in August"
+      locality: null
+      place_based: false
+    expect_reco_type: service
+    lookup_able: false
+    stated_facts:
+      - about: "what he did (fixed the AC)"
+        question_any_of: ["what did he do for you", "what did they do for you", "what did he fix"]
+    probes: >
+      §3's third table and §5's worked failure: Lana writes lovely colour for a tradesman and
+      forgets the phone number, so the card ships unreachable. `contact` is floor for service —
+      it must be present AND positioned early (§5: a user can say "that's it, post it" at any
+      point, and anything at the end never gets asked).
+
+  - id: q04_sheet_pan_recipe
+    opening_line: "My sheet-pan chicken and veggies — 30 minutes, one pan"
+    prior_draft:
+      name: "Sheet-pan chicken and veggies"
+      category: "recipe"
+      trait: "30 minutes, one pan"
+      locality: null
+      place_based: false
+    expect_reco_type: recipe
+    lookup_able: false
+    stated_facts:
+      - about: "how long it takes (30 minutes)"
+        question_any_of: ["how long does it take", "how long does this take", "how much time", "cook time", "how long to make"]
+    probes: >
+      §3's fourth table, row 3: the time question is legitimate but the neighbour ALREADY said
+      "30 minutes". The product's answer to that is the extractor's `answers` map — so the step
+      may exist, but it must arrive pre-filled. If it comes back empty, Lana re-asks what they
+      just told her (§6, "asking again reads as Lana not listening").
+
+  - id: q05_split_oak_trail
+    opening_line: "Split Oak Forest — great trail if you've got a dog"
+    prior_draft:
+      name: "Split Oak Forest"
+      category: "trail"
+      trait: "great with a dog"
+      locality: null
+      place_based: true
+    expect_reco_type: location
+    lookup_able: true
+    stated_facts:
+      - about: "who it suits (dog owners)"
+        question_any_of: ["is it dog friendly", "are dogs allowed", "can you bring a dog"]
+    probes: >
+      §3's fifth table. Shade, stroller-friendliness and off-leash rules are visitor knowledge.
+      NOTE the static `location` set asks "When is it open — and the best time to go?"
+      (reco_question_sets.py `hours`) — a generated set that reproduces it on a lookup-able
+      subject is exactly the §12.1 violation, and a set that FALLS BACK to static will inherit
+      it. That makes this fixture the clearest signal of a silent fallback.
+
+  # ── §11's QA case, verbatim ───────────────────────────────────────────────────────────
+  - id: q06_barnes_noble
+    opening_line: "Barnes & Noble on Narcoossee is a great stationery shop"
+    prior_draft:
+      name: "Barnes & Noble"
+      category: "stationery shop"
+      trait: "good for stationery"
+      locality: "Narcoossee"
+      place_based: true
+    expect_reco_type: location
+    lookup_able: true
+    stated_facts:
+      - about: "what it's known for (stationery)"
+        question_any_of: ["what's it known for", "what is it known for", "what are they known for"]
+    probes: >
+      THE REGRESSION FIXTURE. This is the real QA transcript from §11: Lana spent two of seven
+      cards on "What's the price range?" and "What are their opening hours?" — both things
+      Google already knows. If `google_answerable` ever stops firing here, the check has gone
+      vacuous. §6's good column for this subject: quiet corners to sit and read, price-matching
+      at the register.
+
+  # ── coverage of the remaining types ───────────────────────────────────────────────────
+  - id: q07_robot_vacuum
+    opening_line: "This robot vacuum we got actually handles pet hair on rugs, worth recommending"
+    prior_draft:
+      name: "the robot vacuum"
+      category: "robot vacuum"
+      trait: "handles pet hair on rugs"
+      locality: null
+      place_based: false
+    expect_reco_type: product
+    lookup_able: false
+    stated_facts:
+      - about: "what it's good at (pet hair on rugs)"
+        question_any_of: ["what is it used for", "what's it used for", "what do you use it for"]
+    probes: >
+      lookup_able is FALSE on purpose. Price and where-to-buy ARE neighbour knowledge for a
+      product ("Costco, about $60" — §5's product floor is used_for · where_to_buy), so the
+      §12.1 ban must not fire here. A check that flags price on a product is a false positive,
+      and false positives poison a gate.
+
+  - id: q08_diy_caulk
+    opening_line: "Re-caulking a tub — the painter's tape trick makes the line perfect"
+    prior_draft:
+      name: "painter's tape caulk trick"
+      category: "bathroom DIY"
+      trait: "perfect caulk line"
+      locality: null
+      place_based: false
+    expect_reco_type: diy
+    lookup_able: false
+    stated_facts:
+      - about: "what it fixes (a messy caulk line)"
+        question_any_of: ["what problem does it solve", "what does it fix"]
+    probes: >
+      The one type with no subject in the world — nothing to look up, nothing to pin on a map.
+      Floor is fixes · how. Guards against a set that asks "where is it?" for a technique.
+
+  # ── §9: other languages ───────────────────────────────────────────────────────────────
+  - id: q09_spanish_pediatrician
+    opening_line: "Quiero recomendar a la Dra. Ruiz en Lake Nona, es muy paciente con los niños"
+    prior_draft:
+      name: "Dra. Ruiz"
+      category: "pediatra"
+      trait: "muy paciente con los niños"
+      locality: "Lake Nona"
+      place_based: true
+    expect_reco_type: professional
+    lookup_able: true
+    lang: "Spanish"
+    stated_facts:
+      - about: "what stood out (patient with children)"
+        question_any_of: ["qué destacó", "que destaco", "what stood out"]
+    probes: >
+      §9: the whole set is WRITTEN in Spanish, the `field` keys stay snake_case English because
+      they are storage keys. Two failure modes: English questions for a Spanish speaker, and
+      Spanish field keys that orphan every stored answer. Both are mechanically checkable.
+
+  # ── §6's privacy floor, baited ────────────────────────────────────────────────────────
+  - id: q10_nanny_privacy_bait
+    opening_line: "Our nanny Sofia is wonderful with the twins — she lives right on our street"
+    prior_draft:
+      name: "Sofia"
+      category: "nanny"
+      trait: "wonderful with twins"
+      locality: null
+      place_based: false
+    expect_reco_type: service
+    lookup_able: false
+    forbidden_topics:
+      - about: "where she lives"
+        question_any_of: ["where does she live", "what's her address", "which house", "where do they live", "what street"]
+      - about: "her full name"
+        question_any_of: ["her full name", "last name", "surname"]
+    probes: >
+      The opening line dangles two private facts (a first name, a home street). §6's last row is
+      enforced twice — in the instructions and as a hard filter (_BLOCKED_ASK,
+      reco_question_sets.py) — and the doc says plainly that instructions alone are not a
+      guarantee. This fixture is the proof. `_BLOCKED_ASK` covers "home address" and "full name"
+      literally; "which house is she at?" is the phrasing it does not cover.
+
+  # ── the ordering hazard ───────────────────────────────────────────────────────────────
+  - id: q11_type_before_name
+    opening_line: "I want to recommend a restaurant"
+    prior_draft:
+      name: null
+      category: "restaurant"
+      trait: null
+      locality: null
+      reco_type: "restaurant"
+      place_based: true
+    expect_reco_type: restaurant
+    lookup_able: true
+    expect_generated: false
+    probes: >
+      NOT a quality fixture — a plumbing one, and the reason it is here is that it is invisible
+      from the outside. tip_share.py writes the step set only AFTER the name and category gates
+      (tip_share.py:604), but `reco_type` is a persisted draft field (tip_share.py:52). So when
+      the type lands on an earlier turn than the name, the NEXT extraction sees CURRENT TYPE
+      FIELDS already populated and _STEPS_SPEC tells it to "return []" — and validate_steps
+      falls back to the type's STATIC set. The recommendation then ships with the one-form-for-
+      everything questionnaire §1 says was abandoned, and nothing anywhere reports that it did.
+      expect_generated: false records the CURRENT behaviour, so this fixture passes today and
+      starts failing the day it is fixed. The finding is the report line, not the verdict.
+
+
+answers:
+
+  # ── §11's table, verbatim ─────────────────────────────────────────────────────────────
+  - id: a01_price_hundred_dollars
+    reco_type: restaurant
+    field: price
+    question: "What's the price range?"
+    kind: text
+    required: false
+    answer: "hundred dollars"
+    verdict: reject
+    reason: >
+      §11's headline case, from the Barnes & Noble QA transcript. Not a range, no currency
+      anchoring a reader can compare, and nothing downstream can filter on it. It went straight
+      onto the card.
+
+  - id: a02_known_for_good
+    reco_type: location
+    field: known_for
+    question: "What's it known for?"
+    kind: text
+    required: true
+    answer: "good"
+    verdict: reject
+    reason: "Says nothing. A required field, so this is a card that ships with its headline empty of content."
+
+  - id: a03_walkins_yes_lol
+    reco_type: professional
+    field: walk_ins
+    question: "Does she take walk-ins?"
+    kind: text
+    required: false
+    answer: "yes lol"
+    verdict: accept
+    reason: >
+      DELIBERATE CONTROL. §11 lists this as unchecked, but it is a real yes — informal, not
+      junk. A validator that rejects it is over-eager, and over-eager here means telling a
+      neighbour their recommendation was not good enough, which §12.4 rules out. Any validator
+      scoring high on this file must accept this row.
+
+  - id: a04_insurance_idk
+    reco_type: professional
+    field: insurance
+    question: "Which insurance does she take?"
+    kind: text
+    required: false
+    answer: "idk"
+    verdict: reject
+    reason: "Saved and displayed as if it were a fact. The honest outcome is an unanswered field, not a stored 'idk'."
+
+  - id: a05_contact_ask_me
+    reco_type: service
+    field: contact
+    question: "How do neighbours reach him?"
+    kind: text
+    required: false
+    answer: "ask me"
+    verdict: reject
+    reason: >
+      §11's closing case, and WORSE than §11 says. The doc calls contact a must-have whose
+      blank-check "ask me" slips past. In the shipped code it is not a must-have at all:
+      `required` is assigned to the FIRST TWO floor fields only (reco_question_sets.py:367-368),
+      and service's floor is service · helped_with · contact — so `contact` is the third and
+      is optional. It is offered once (next_question, :163-177) and a neighbour who says
+      "that's it, post it" is never asked for it. So the plumber card ships unreachable by two
+      independent routes: an unusable answer, or no answer at all.
+
+  # ── the meeting's own examples (2026-09-07 standup, Abdullah) ─────────────────────────
+  - id: a06_price_100_dollars
+    reco_type: product
+    field: price
+    question: "Roughly what does it cost?"
+    kind: text
+    required: false
+    answer: "100 dollars"
+    verdict: accept
+    reason: >
+      CONTRAST WITH a01. Raised in the standup as a breaking input, but for a PRODUCT a single
+      price is the correct answer — a robot vacuum costs one number. The same string against a
+      restaurant's "what's the price range?" is a01 and is rejected. This pair is what makes the
+      validator type-aware rather than a string matcher, and it is the reason `reco_type` and
+      `field` are on every row here.
+
+  - id: a07_hours_i_love_pizza
+    reco_type: restaurant
+    field: hours
+    question: "What are their opening hours?"
+    kind: text
+    required: false
+    answer: "I love pizza"
+    verdict: reject
+    reason: >
+      Abdullah's example, verbatim. Answers a different question than the one asked — the
+      failure mode an AI validator is meant to catch, and unreachable by any length or
+      non-blank rule.
+
+  # ── good answers: the controls that keep the metric honest ───────────────────────────
+  - id: a08_time_about_30_minutes
+    reco_type: recipe
+    field: time
+    question: "How long does it take?"
+    kind: text
+    required: false
+    answer: "about 30 minutes"
+    verdict: accept
+    reason: "§6's placeholder example, verbatim. The shape a good short answer takes."
+
+  - id: a09_price_band_real
+    reco_type: restaurant
+    field: price
+    question: "Roughly what does a meal run?"
+    kind: choice
+    required: false
+    answer: "Mid-range"
+    verdict: accept
+    reason: "A chip from the step's own options (reco_question_sets.py restaurant `price`). Always valid by construction."
+
+  - id: a10_contact_phone
+    reco_type: service
+    field: contact
+    question: "How do neighbours reach him?"
+    kind: text
+    required: false
+    answer: "(407) 555-0134"
+    verdict: accept
+    reason: "Reachable. The positive control for a05 — without it, 'reject everything' would score perfectly on contact."
+
+  - id: a11_contact_business_name
+    reco_type: service
+    field: contact
+    question: "How do neighbours reach him?"
+    kind: text
+    required: false
+    answer: "Nona Air, they're on Narcoossee Rd"
+    verdict: accept
+    reason: >
+      A findable business is a reachable contact even with no number. Guards against a
+      validator that only accepts a phone-shaped string — which would reject most real answers
+      a neighbour gives.
+
+  - id: a12_dish_specific
+    reco_type: restaurant
+    field: dish
+    question: "What should they order?"
+    kind: text
+    required: true
+    answer: "the al pastor tacos, get them with the green salsa"
+    verdict: accept
+    reason: "Exactly what a neighbour knows and a listing does not. The best-case control."
+
+  - id: a13_ages_range
+    reco_type: professional
+    field: ages_seen
+    question: "Which ages does she see?"
+    kind: text
+    required: false
+    answer: "newborn through about 12"
+    verdict: accept
+    reason: "Filterable, specific, only knowable from having gone. §6's 'good' column."
+
+  # ── structural failures the shipped rules DO catch (the honesty controls) ─────────────
+  - id: a14_blank_required
+    reco_type: location
+    field: known_for
+    question: "What's it known for?"
+    kind: text
+    required: true
+    answer: ""
+    verdict: reject
+    reason: >
+      HONESTY CONTROL. The shipped validator DOES catch this one — missing_required blocks the
+      ready card. Without it in the file, the shipped validator would score 0% on every reject
+      row and the report would overstate the gap. It catches blanks; it catches nothing else.
+
+  - id: a15_whitespace_required
+    reco_type: service
+    field: service
+    question: "What do they do?"
+    kind: text
+    required: true
+    answer: "   "
+    verdict: reject
+    reason: >
+      Also caught today, but by a different mechanism than a14 — the endpoint does
+      `" ".join(str(value).split())` (main.py:2543) and drops the field when the result is
+      empty, so whitespace never reaches missing_required as a value.
+
+  - id: a16_overlong
+    reco_type: recipe
+    field: steps
+    question: "How do you make it?"
+    kind: text
+    required: false
+    answer: "Preheat the oven to 425. Cut the chicken thighs into strips, toss with olive oil, smoked paprika, garlic powder, salt and pepper. Do the same with the peppers and red onion in a separate bowl so the chicken juice does not steam them. Spread everything on one sheet pan in a single layer, do not crowd it or nothing browns. Roast 25 minutes, turning once at the halfway mark, then broil the last two minutes for colour. Squeeze half a lemon over the whole pan before serving and finish with parsley if you have it."
+    verdict: accept
+    reason: >
+      A GOOD answer that the shipped 280-char cap silently truncates mid-sentence
+      (main.py:2538, `[:280]`). The verdict is `accept` because the answer is not the defect —
+      the truncation is. Scored on its own axis (`truncation`), never as a validator miss.
+      THIS ROW IS ALSO THE ONLY UNSTABLE ONE IN THE FILE, and that instability is the point:
+      truncation happens before any validator sees the text, so a validator is handed a
+      fragment ending mid-sentence and reads it as incomplete. Measured 2026-09-08, four
+      trials each: the same method complete and under the cap scored ACCEPT 4/4; cut at 280 it
+      scored ACCEPT 3/4. Keep this row — it is what will catch a future AI validator being
+      bolted on top of the truncation instead of in front of it.
+
+  # ── the type-awareness pairs ──────────────────────────────────────────────────────────
+  - id: a17_where_to_buy_amazon
+    reco_type: product
+    field: where_to_buy
+    question: "Where can neighbours get it?"
+    kind: text
+    required: true
+    answer: "Amazon, about $60"
+    verdict: accept
+    reason: >
+      §5 says where_to_buy is deliberately NOT a map field — "Amazon · ~$60" is the right
+      answer and a map search would send the user hunting for a warehouse. Guards against a
+      validator that demands a place for every location-shaped field.
+
+  - id: a18_where_vague_place
+    reco_type: restaurant
+    field: where
+    question: "Where can neighbours find it?"
+    kind: place
+    required: true
+    answer: "the strip mall behind Publix"
+    verdict: reject
+    reason: >
+      §5's own example of what the map picker exists to prevent: "a string like 'the strip mall
+      behind Publix'" instead of a real pin. kind=place, so the bar is a resolvable location —
+      and this one is not navigable by anyone who does not already know the Publix.
+
+  - id: a19_serves_number
+    reco_type: recipe
+    field: serves
+    question: "How many does it feed?"
+    kind: text
+    required: false
+    answer: "4"
+    verdict: accept
+    reason: >
+      A one-character answer that is complete. Guards against a length heuristic — the most
+      tempting wrong way to build this validator, and the one that would reject 'Mid-range',
+      '4' and every chip answer in the product.
+
+  - id: a21_answer_reads_as_cta
+    reco_type: recipe
+    field: best_for
+    question: "When is it good for?"
+    kind: text
+    required: false
+    answer: "done"
+    verdict: reject
+    reason: >
+      NOT a semantic failure — a routing one, and it loses the answer silently. `_PASS_RE`
+      (tip_share.py:31-35) matches "done" / "that's it" / "go ahead" / "post it" on the chat
+      fork, so a neighbour whose genuine answer happens to be one of those words has it read
+      as the post-it CTA: nothing is stored, and with no required field outstanding the flow
+      jumps straight to the ready card (done_early, tip_share.py:626). Content-dependent
+      answer loss, reachable with a one-word reply.
+
+  - id: a20_helped_with_nothing
+    reco_type: professional
+    field: helped_with
+    question: "What did she help you with?"
+    kind: text
+    required: true
+    answer: "stuff"
+    verdict: reject
+    reason: "A required floor field answered with a placeholder word. Passes non-blank; tells a reader nothing."

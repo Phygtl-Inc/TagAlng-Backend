@@ -1,0 +1,36 @@
+# Python dependencies for the simulation & evaluation suite.
+#
+# WHY THIS EXISTS SEPARATELY from services/lana-worker/requirements.txt: the suite is run by
+# people who are not running the worker (CI's gate job, a laptop scoring stored transcripts,
+# the offline selftests), and it needs a much smaller set. Installing the worker's full stack
+# to run `python selftest.py` is the wrong trade.
+#
+# The suite DOES import `app.*` in two places — rapport/run_eval.py (vertex_extract,
+# claims_persist) and policy_eval's inproc backend (app.policy.decide). Those two paths need the
+# worker's own requirements as well; everything else here runs standalone.
+#
+#   pip install -r services/lana-worker/simulations/requirements.txt
+#
+# Lower bounds are the versions this suite is verified against (2026-09-07), with upper bounds
+# on the majors so a breaking release cannot silently change what an eval measures.
+
+# HTTP to Lana's API, Supabase PostgREST and GoTrue. Used everywhere.
+httpx>=0.28.1,<1
+
+# The mock user, the judge, and policy_eval's reference policy. `beta.chat.completions.parse`
+# (structured output) is load-bearing — see policy_eval/ports.py on strict-schema constraints.
+openai>=2.50.0,<3
+
+# Data contracts: personas.json / scenarios.json validation, and NextAction as an OpenAI
+# response_format. v2 API (model_validate, field_validator) — v1 will not work.
+pydantic>=2.13.4,<3
+
+# Every entry point loads the repo-root .env.local through this.
+python-dotenv>=1.2.2,<2
+
+# rapport/fixtures.yaml only.
+PyYAML>=6.0.2,<7
+
+# circles_zip/sweep.py plots (deferred import at sweep.py:868 — the sweep still runs and its
+# acceptance checks still pass without it, so this is genuinely optional).
+matplotlib>=3.10.1,<4
