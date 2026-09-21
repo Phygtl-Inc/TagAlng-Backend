@@ -173,9 +173,11 @@ class TestColdStartSeeding(_StubBase):
         self._patch(rapport_synth, "open_semantic_gap", fake_open)
         self._patch(rapport_synth, "recent_gap_questions", lambda uid, limit=10: [])
         rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
 
     def tearDown(self) -> None:
         rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
         super().tearDown()
 
     def test_user_with_claims_is_never_seeded(self) -> None:
@@ -259,11 +261,29 @@ class TestColdStartSeeding(_StubBase):
         self.assertEqual(rapport_synth.seed_cold_start("u1"), 3)
 
     def test_a_fully_covered_profile_stops_being_seeded(self) -> None:
-        """The gate still exists — it is just near-unreachable by design."""
+        """The gate still exists — it is just near-unreachable by design.
+
+        The downstream path is deliberately stubbed to SUCCEED here: without that, this
+        test passes whether or not the gate fires (seeding returns 0 on empty supply
+        anyway), which is a test that cannot fail. 0 must come from the gate, nothing else.
+        """
+        import app.rapport_gaps as gaps
         import app.rapport_priority as prio
 
-        self._patch(prio, "covered_buckets",
-                    lambda uid: {"interest", "activity", "faith", "stage", "heritage"})
+        # Pin everything the gate is NOT: the burst guard would otherwise make the second
+        # call return 0 on its own, which is how this test passed while asserting nothing.
+        self._patch(rapport_synth, "_cooling_down", lambda uid, store=None: False)
+        self._patch(rapport_synth, "_local_supply", lambda uid, **k: [])
+        self._patch(rapport_synth, "_generate_seeds", lambda *a: {"questions": []})
+        self._patch(gaps, "open_cold_seed_gaps", lambda uid: 3)
+
+        # Sanity: with the gate open this user WOULD be seeded 3.
+        self._patch(prio, "covered_buckets", lambda uid: {"interest"})
+        self.assertEqual(rapport_synth.seed_cold_start("u1"), 3)
+        # Close it — bucket coverage is now the ONLY thing that differs.
+        from app.rapport_gap_tree import CLAIM_BUCKETS
+
+        self._patch(prio, "covered_buckets", lambda uid: set(CLAIM_BUCKETS))
         self.assertEqual(rapport_synth.seed_cold_start("u1"), 0)
 
     def test_an_unreadable_profile_fails_OPEN_into_asking(self) -> None:
@@ -366,9 +386,11 @@ class TestThinAreaSupply(_StubBase):
         super().setUp()
         self.store["selects"]["user_identity_claims"] = []
         rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
 
     def tearDown(self) -> None:
         rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
         super().tearDown()
 
     def _holder_floors(self) -> list[int]:
@@ -493,3 +515,204 @@ class TestColdSeedChips(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSeedingIsReachable(unittest.TestCase):
+    """The refill path runs synth, then seeds only if synth made nothing.
+
+    Both shared one 120s burst map, and _cooling_down STAMPS as well as checks — so the
+    synth that had just run blocked the seed that followed it by milliseconds, and
+    seed_cold_start returned 0 at the guard without reaching a single tier. Shipped
+    unnoticed because the old gate (_has_any_claim) made it look intentional.
+    """
+
+    def setUp(self) -> None:
+        rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
+
+    def test_a_synth_attempt_does_not_block_the_seed_that_follows_it(self) -> None:
+        self.assertFalse(rapport_synth._cooling_down("u1"))  # synth runs, stamps
+        self.assertFalse(
+            rapport_synth._cooling_down("u1", rapport_synth._last_seed_attempt),
+            "seeding must not be blocked by the synth that just ran in the same refill",
+        )
+
+    def test_each_path_still_rations_its_own_bursts(self) -> None:
+        self.assertFalse(rapport_synth._cooling_down("u1"))
+        self.assertTrue(rapport_synth._cooling_down("u1"), "a second synth is still blocked")
+        seeds = rapport_synth._last_seed_attempt
+        self.assertFalse(rapport_synth._cooling_down("u1", seeds))
+        self.assertTrue(rapport_synth._cooling_down("u1", seeds), "a second seed is blocked")
+
+    def test_the_two_budgets_are_per_user(self) -> None:
+        self.assertFalse(rapport_synth._cooling_down("u1", rapport_synth._last_seed_attempt))
+        self.assertFalse(rapport_synth._cooling_down("u2", rapport_synth._last_seed_attempt))
+
+    def test_ensure_gap_buffer_actually_reaches_seeding(self) -> None:
+        """The integration the unit guards above cannot prove.
+
+        ensure_gap_buffer is the real refill path: synth first, seed only if synth made
+        nothing. This is the test that fails when the two share one burst budget.
+        """
+        from unittest.mock import patch
+
+        with patch.object(rapport_synth, "ensure_grounding_gaps", create=True), \
+             patch.object(rapport_synth, "_open_gap_count", return_value=0), \
+             patch.object(rapport_synth, "synthesize_gaps_from_claims", return_value=0) as synth, \
+             patch.object(rapport_synth, "seed_cold_start", wraps=rapport_synth.seed_cold_start) as seed, \
+             patch.object(rapport_synth, "_local_supply", return_value=[]), \
+             patch.object(rapport_synth, "_generate_seeds", return_value={"questions": []}):
+            import app.rapport_gaps as gaps
+
+            with patch.object(gaps, "open_cold_seed_gaps", return_value=3):
+                # synth is stubbed, so stamp the synth budget by hand exactly as the real
+                # one would have on its way to returning 0.
+                rapport_synth._cooling_down("u1")
+                made = rapport_synth.ensure_gap_buffer("u1")
+
+        synth.assert_called_once()
+        seed.assert_called_once()
+        self.assertEqual(made, 3, "seeding must run when the synth ahead of it made nothing")
+
+
+class TestUnknownIsNotEmpty(unittest.TestCase):
+    """covered_buckets returns None on a read error and set() when genuinely empty.
+
+    They mean opposite things. Collapsing both to set() made score_for's P_UNKNOWN branch
+    dead code: a Supabase blip scored EVERY gap P_NEW_BUCKET (0.85), flattening priority to
+    first-opened-first for the duration.
+    """
+
+    def test_a_read_error_is_unknown_not_a_new_bucket(self) -> None:
+        from unittest.mock import patch
+
+        import app.rapport_priority as prio
+
+        with patch.object(prio, "covered_buckets", return_value=None):
+            self.assertEqual(prio.score_for("u1", bucket="interest"), prio.P_UNKNOWN)
+            self.assertEqual(
+                prio.score_for("u1", bucket="interest", from_local_supply=True),
+                prio.P_LOCAL_SUPPLY,
+            )
+
+    def test_genuinely_nothing_covered_is_still_a_new_bucket(self) -> None:
+        from unittest.mock import patch
+
+        import app.rapport_priority as prio
+
+        with patch.object(prio, "covered_buckets", return_value=set()):
+            self.assertEqual(prio.score_for("u1", bucket="interest"), prio.P_NEW_BUCKET)
+
+    def test_an_unreadable_profile_is_still_seeded(self) -> None:
+        """The gate must fail OPEN into asking, not closed into silence."""
+        from unittest.mock import patch
+
+        import app.rapport_gaps as gaps
+
+        rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
+        with patch("app.rapport_priority.covered_buckets", return_value=None), \
+             patch.object(rapport_synth, "_local_supply", return_value=[]), \
+             patch.object(rapport_synth, "_generate_seeds", return_value={"questions": []}), \
+             patch.object(gaps, "open_cold_seed_gaps", return_value=3):
+            self.assertEqual(rapport_synth.seed_cold_start("u1"), 3)
+
+
+class TestCoveredBucketsReadError(unittest.TestCase):
+    """The function itself, not its callers. The tests above patch covered_buckets, so
+    they prove the callers handle None — nothing proved None is what a read error returns."""
+
+    def test_a_failing_read_returns_None_not_an_empty_set(self) -> None:
+        from unittest.mock import patch
+
+        import app.auth as auth_mod
+        import app.rapport_priority as prio
+
+        def boom():
+            raise RuntimeError("supabase down")
+
+        with patch.object(auth_mod, "service_client", boom):
+            self.assertIsNone(prio.covered_buckets("u1"))
+
+
+class TestLateralRunsAlongsideDeepening(unittest.TestCase):
+    """The loop, and where it actually lived.
+
+    Deepening sources topics only from the user's OWN claims, so from their first claim it
+    always made something — and `if made: return` meant lateral seeding, the one path that
+    can introduce a topic they never mentioned, was never reached again. Measured before the
+    fix: a user with one claim got five renders alternating two facets of that claim, 0/5
+    lateral. Fixing the gate inside seed_cold_start was necessary and not sufficient.
+    """
+
+    def setUp(self) -> None:
+        rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
+
+    def test_seeding_runs_even_when_deepening_produced_questions(self) -> None:
+        from unittest.mock import patch
+
+        with patch.object(rapport_synth, "ensure_grounding_gaps", create=True), \
+             patch.object(rapport_synth, "_open_gap_count", return_value=0), \
+             patch.object(rapport_synth, "synthesize_gaps_from_claims", return_value=2), \
+             patch.object(rapport_synth, "seed_cold_start", return_value=2) as seed:
+            made = rapport_synth.ensure_gap_buffer("u1", target=5)
+        seed.assert_called_once()
+        self.assertEqual(made, 4, "both sources contribute to one refill")
+
+    def test_seeding_is_skipped_once_the_queue_is_full(self) -> None:
+        """Bounded: deepening alone filling the target must not also trigger a seed."""
+        from unittest.mock import patch
+
+        with patch.object(rapport_synth, "ensure_grounding_gaps", create=True), \
+             patch.object(rapport_synth, "_open_gap_count", return_value=3), \
+             patch.object(rapport_synth, "synthesize_gaps_from_claims", return_value=2), \
+             patch.object(rapport_synth, "seed_cold_start") as seed:
+            made = rapport_synth.ensure_gap_buffer("u1", target=5)
+        seed.assert_not_called()
+        self.assertEqual(made, 2)
+
+    def test_parse_questions_honours_the_callers_cap(self) -> None:
+        """_MAX_NEW is the module default, not a ceiling on every caller — breaking on it
+        meant seed_cold_start(max_new=3) silently kept 2 and the buffer could never fill."""
+        data = {"questions": [{"question": f"Q{i}?"} for i in range(5)]}
+        self.assertEqual(len(rapport_synth._parse_questions(data, 3)), 3)
+        self.assertEqual(len(rapport_synth._parse_questions(data, 5)), 5)
+        self.assertEqual(len(rapport_synth._parse_questions(data)), rapport_synth._MAX_NEW)
+
+
+class TestPartialCoverageStillSeeds(unittest.TestCase):
+    """The gate must not silence the tile while supply remains.
+
+    Measured against a real 10-neighbour stack: at `>= 5 of 7` buckets a user went
+    permanently quiet after about seven answers, with EIGHT unused local-supply concepts
+    still on the table. Seven buckets is far too coarse a taxonomy to mean "covered the
+    map" — supply exhaustion is the real stop, and this gate is only a backstop.
+    """
+
+    def setUp(self) -> None:
+        rapport_synth._last_attempt.clear()
+        rapport_synth._last_seed_attempt.clear()
+
+    def test_six_of_seven_buckets_still_seeds(self) -> None:
+        from unittest.mock import patch
+
+        import app.rapport_gaps as gaps
+        from app.rapport_gap_tree import CLAIM_BUCKETS
+
+        six = set(sorted(CLAIM_BUCKETS)[:6])
+        with patch("app.rapport_priority.covered_buckets", return_value=six), \
+             patch.object(rapport_synth, "_cooling_down", lambda uid, store=None: False), \
+             patch.object(rapport_synth, "_local_supply", return_value=[]), \
+             patch.object(rapport_synth, "_generate_seeds", return_value={"questions": []}), \
+             patch.object(gaps, "open_cold_seed_gaps", return_value=3):
+            self.assertEqual(rapport_synth.seed_cold_start("u1"), 3)
+
+    def test_all_seven_is_the_backstop(self) -> None:
+        from unittest.mock import patch
+
+        from app.rapport_gap_tree import CLAIM_BUCKETS
+
+        with patch("app.rapport_priority.covered_buckets", return_value=set(CLAIM_BUCKETS)), \
+             patch.object(rapport_synth, "_cooling_down", lambda uid, store=None: False):
+            self.assertEqual(rapport_synth.seed_cold_start("u1"), 0)

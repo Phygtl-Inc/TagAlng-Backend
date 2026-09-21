@@ -106,21 +106,32 @@ def lane_should_continue(
     *,
     is_valid_answer: IsValidAnswer,
     pivot_re: "re.Pattern[str] | None" = None,
+    is_offered_option: "IsValidAnswer | None" = None,
 ) -> bool:
     """Return True to STAY in the lane this turn, False to RELEASE to normal routing.
 
     Decision order (first match wins):
       1. empty message      -> stay  (no-op turn)
       2. cancel words       -> stay  (run-turn emits the graceful exit copy)
-      3. slots.abandon      -> release
-      4. cross-lane regex   -> release
-      5. is_valid_answer    -> stay  (answer / refine / confirm / chip edit)
-      6. default            -> RELEASE  (the inversion — nothing keeps a user trapped)
+      3. offered option     -> stay  (they tapped a chip Lana just put in front of them)
+      4. slots.abandon      -> release
+      5. cross-lane regex   -> release
+      6. is_valid_answer    -> stay  (answer / refine / confirm / chip edit)
+      7. default            -> RELEASE  (the inversion — nothing keeps a user trapped)
+
+    Step 3 sits ABOVE abandon deliberately. Lanes offer chips like "Skip that one", and a
+    stateless read of those words is an abandon — so tapping Lana's own button released the
+    lane and threw away the half-built draft behind it (a recommendation, mid-capture, with
+    no signal row written). A chip Lana just offered is an answer to Lana's own question by
+    construction, whatever the bare words look like. Callers pass an EXACT matcher; anything
+    the user composed themselves still reaches the classifier and can still pivot.
     """
     msg = str(message or "").strip()
     if not msg:
         return True
     if _CANCEL_RE.search(msg):
+        return True
+    if is_offered_option is not None and is_offered_option(msg, session_ctx, slots):
         return True
     if slots and slots.get("abandon"):
         return False

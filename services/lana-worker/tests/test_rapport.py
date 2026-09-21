@@ -65,6 +65,12 @@ class _Query:
     def gte(self, *a, **k):
         return self
 
+    def like(self, *a, **k):
+        return self
+
+    def in_(self, *a, **k):
+        return self
+
     def order(self, *a, **k):
         return self
 
@@ -759,3 +765,239 @@ class TestChatCooldownReachesTheTile(unittest.TestCase):
 
     def test_a_gap_never_asked_in_chat_is_unaffected(self):
         self.assertEqual(len(self._rows_after_filter(None)), 1)
+
+
+class TestRepetitionWindows(unittest.TestCase):
+    """Ration repetition, never availability.
+
+    A served gap rests 24h and a skipped one 72h — but if every open gap is inside its
+    window the tile serves them anyway. Rationing availability is what emptied the card in
+    September and got the cadence caps disabled; this must not reintroduce it.
+    """
+
+    @staticmethod
+    def _rows(*specs):
+        out = []
+        for i, (asked_h, skipped_h) in enumerate(specs):
+            def iso(h):
+                return None if h is None else (
+                    datetime.now(timezone.utc) - timedelta(hours=h)
+                ).isoformat()
+            out.append({"gap_row_id": f"g{i}", "asked_at": iso(asked_h), "skipped_at": iso(skipped_h)})
+        return out
+
+    def test_a_gap_served_an_hour_ago_yields_to_a_fresh_one(self):
+        rows = self._rows((1, None), (None, None))
+        self.assertEqual(
+            [r["gap_row_id"] for r in rapport_ranker._apply_repetition_windows(rows)], ["g1"]
+        )
+
+    def test_a_gap_skipped_an_hour_ago_yields_to_a_fresh_one(self):
+        rows = self._rows((None, 1), (None, None))
+        self.assertEqual(
+            [r["gap_row_id"] for r in rapport_ranker._apply_repetition_windows(rows)], ["g1"]
+        )
+
+    def test_the_windows_expire(self):
+        """25h since served and 73h since skipped are both fresh again."""
+        rows = self._rows((25, 73))
+        self.assertEqual(len(rapport_ranker._apply_repetition_windows(rows)), 1)
+
+    def test_everything_held_back_is_served_rather_than_nothing(self):
+        """The whole point: a window is a preference, not a cap."""
+        rows = self._rows((1, None), (None, 2))
+        kept = rapport_ranker._apply_repetition_windows(rows)
+        self.assertEqual(len(kept), 2, "an empty tile is worse than a repeated question")
+
+    def test_an_unparseable_timestamp_does_not_hide_a_gap(self):
+        rows = [{"gap_row_id": "g0", "asked_at": "not-a-date", "skipped_at": None}]
+        self.assertEqual(len(rapport_ranker._apply_repetition_windows(rows)), 1)
+
+
+class TestNoHoldCanEmptyTheTile(unittest.TestCase):
+    """Every repetition hold is a preference. Chained, they must still never return nothing.
+
+    Regression: the chat-cooldown filter was originally applied AFTER the windows with no
+    fallback of its own, so a user whose every open gap had just been raised in chat got an
+    empty card — the exact failure that got the cadence caps disabled on 2026-09-04.
+    """
+
+    def test_served_and_skipped_holds_relax_rather_than_empty(self):
+        now = datetime.now(timezone.utc)
+        rows = [
+            {"gap_row_id": "g0",
+             "asked_at": (now - timedelta(hours=1)).isoformat(),
+             "skipped_at": (now - timedelta(hours=1)).isoformat(),
+             "chat_asked_at": None},
+        ]
+        kept = rapport_ranker._apply_repetition_windows(rows)
+        self.assertEqual(len(kept), 1, "an empty tile is worse than a repeated question")
+
+    def test_the_chat_hold_does_NOT_relax(self):
+        """The deliberate exception: Lana asked it in conversation minutes ago and is
+        waiting on an answer. Re-serving it on the tile reads as not listening — worse
+        than a quiet card, which is the one case where quiet is honest."""
+        now = datetime.now(timezone.utc)
+        rows = [{"gap_row_id": "g0", "asked_at": None, "skipped_at": None,
+                 "chat_asked_at": (now - timedelta(minutes=5)).isoformat()}]
+        self.assertEqual(rapport_ranker._apply_repetition_windows(rows), [])
+
+    def test_the_chat_cooldown_still_wins_when_there_is_an_alternative(self):
+        now = datetime.now(timezone.utc)
+        rows = [
+            {"gap_row_id": "chatted", "asked_at": None, "skipped_at": None,
+             "chat_asked_at": (now - timedelta(minutes=5)).isoformat()},
+            {"gap_row_id": "clean", "asked_at": None, "skipped_at": None, "chat_asked_at": None},
+        ]
+        kept = rapport_ranker._apply_repetition_windows(rows)
+        self.assertEqual([r["gap_row_id"] for r in kept], ["clean"])
+
+
+class TestChatHoldDoesNotStarveTheTile(unittest.TestCase):
+    """Order regression, caught by driving real renders rather than by any unit test.
+
+    The chat hold is HARD and the served/skipped windows are SOFT. Relaxing the soft ones
+    first collapses the pool to the "fresh" rows, and only then does the chat filter drop
+    one — so a user holding one fresh-but-chat-held gap and one older servable gap got an
+    empty card AND a wasted synth call on every render. Hard filter first, relax second.
+    """
+
+    def test_a_chat_held_fresh_gap_does_not_hide_an_older_servable_one(self):
+        now = datetime.now(timezone.utc)
+        rows = [
+            # fresh on both windows, but Lana just raised it in conversation
+            {"gap_row_id": "q_new", "asked_at": None, "skipped_at": None,
+             "chat_asked_at": (now - timedelta(minutes=5)).isoformat()},
+            # served an hour ago: inside the soft window, but genuinely servable
+            {"gap_row_id": "q_old",
+             "asked_at": (now - timedelta(hours=1)).isoformat(),
+             "skipped_at": None, "chat_asked_at": None},
+        ]
+        kept = [r["gap_row_id"] for r in rapport_ranker._apply_repetition_windows(rows)]
+        self.assertEqual(kept, ["q_old"], "an empty tile here is a regression, not a hold")
+
+    def test_the_chat_hold_still_empties_when_it_is_the_only_gap(self):
+        """Deliberate: they were just asked in chat and Lana is waiting on them."""
+        now = datetime.now(timezone.utc)
+        rows = [{"gap_row_id": "only", "asked_at": None, "skipped_at": None,
+                 "chat_asked_at": (now - timedelta(minutes=5)).isoformat()}]
+        self.assertEqual(rapport_ranker._apply_repetition_windows(rows), [])
+
+
+class TestRecoConfirmIsEarned(unittest.TestCase):
+    """Not every recommendation earns a follow-up, and never more than one at a time.
+
+    Unconditional asking turns a warm "I noticed" into small talk — and because the gap is
+    keyed per signal with skip_dedup on (it must be: it deliberately restates the cold ask
+    it replaces), three recommendations in a sitting would queue three near-identical cards.
+    """
+
+    def test_an_explicit_decline_opens_no_gap(self):
+        from app import tip_share
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), \
+             patch("app.orchestrator.llm.llm_json", return_value={
+                 "worth_asking": False, "why_not": "nobody is a regular at a recipe",
+                 # A usable question IS present: the decline must be what suppresses it,
+                 # not an empty payload. Without this the test passes either way.
+                 "question": "Is Nonna's ragu your go-to recipe?",
+                 "teaser": "about the ragu…", "suggestions": ["Yes", "No"]}), \
+             patch.object(tip_share, "_reco_fields", return_value=[]):
+            self.assertIsNone(
+                tip_share._reco_confirm_question({"name": "Nonna's ragu", "category": "recipe"})
+            )
+
+    def test_worth_asking_true_still_produces_a_question(self):
+        from app import tip_share
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), \
+             patch("app.orchestrator.llm.llm_json", return_value={
+                 "worth_asking": True, "question": "Is The Backhaus your go-to bakery?",
+                 "teaser": "about The Backhaus…", "suggestions": ["Yes", "No"]}), \
+             patch.object(tip_share, "_reco_fields", return_value=[]):
+            out = tip_share._reco_confirm_question({"name": "The Backhaus", "category": "bakery"})
+        self.assertIsNotNone(out)
+        self.assertIn("Backhaus", out[0])
+
+    def test_a_pending_confirm_blocks_a_second_one(self):
+        from app import tip_share
+
+        with patch.object(tip_share, "_has_open_reco_confirm", return_value=True), \
+             patch.object(tip_share, "_reco_confirm_question") as authored:
+            tip_share.open_reco_confirm_gap("u1", "m1", {"signal_id": "s2", "name": "Another"})
+        authored.assert_not_called()
+
+    def test_no_pending_confirm_lets_the_next_one_through(self):
+        from app import tip_share
+
+        with patch.object(tip_share, "_has_open_reco_confirm", return_value=False), \
+             patch.object(tip_share, "_reco_confirm_question",
+                          return_value=("Is it your spot?", "about it…", ["Yes"])), \
+             patch("app.rapport_gaps.open_semantic_gap") as opened:
+            tip_share.open_reco_confirm_gap("u1", "m1", {"signal_id": "s2", "name": "Another"})
+        opened.assert_called_once()
+
+    def test_the_pending_check_fails_open(self):
+        """A read error must not silently swallow the follow-up a reco just earned."""
+        from app import tip_share
+
+        def boom():
+            raise RuntimeError("supabase down")
+
+        with patch("app.auth.service_client", boom):
+            self.assertFalse(tip_share._has_open_reco_confirm("u1"))
+
+
+class TestHasOpenRecoConfirm(unittest.TestCase):
+    """The pending-confirm check itself, not a patched stand-in.
+
+    The three dedup tests above patch `_has_open_reco_confirm`, so they prove the CALLER
+    behaves — they said nothing about the function. It was also untestable: the fake client
+    had no `.like`/`.in_`, so the real call raised AttributeError, the bare `except` swallowed
+    it, and the function returned False for every input. A mutation to `return False`
+    survived the whole suite.
+    """
+
+    def test_a_pending_reco_gap_is_found(self):
+        from app import tip_share
+
+        store = _store()
+        store["selects"]["rapport_gaps"] = [{"gap_row_id": "g1"}]
+        import app.auth as auth_mod
+
+        with patch.object(auth_mod, "service_client", return_value=_Supabase(store)):
+            self.assertTrue(tip_share._has_open_reco_confirm("u1"))
+
+    def test_no_pending_reco_gap_is_reported_honestly(self):
+        from app import tip_share
+
+        store = _store()
+        store["selects"]["rapport_gaps"] = []
+        import app.auth as auth_mod
+
+        with patch.object(auth_mod, "service_client", return_value=_Supabase(store)):
+            self.assertFalse(tip_share._has_open_reco_confirm("u1"))
+
+
+class TestRankerBackfillAlsoSeeds(unittest.TestCase):
+    """The ranker's own refill path, which had no test at all.
+
+    _backfill_from_claims used to `return True` the moment deepening produced anything, so
+    lateral seeding was never reached for any user holding a claim — the same defect as
+    ensure_gap_buffer, in the other call site. Removing that early return survived the whole
+    suite until this test existed.
+    """
+
+    def test_seeding_runs_even_when_deepening_produced_questions(self):
+        with patch("app.circles_flow.ensure_grounding_gaps", return_value=0), \
+             patch("app.rapport_synth.synthesize_gaps_from_claims", return_value=2), \
+             patch("app.rapport_synth.seed_cold_start", return_value=1) as seed:
+            made = rapport_ranker._backfill_from_claims("u1")
+        seed.assert_called_once()
+        self.assertTrue(made)
+
+    def test_it_still_reports_nothing_when_no_source_produced_anything(self):
+        with patch("app.circles_flow.ensure_grounding_gaps", return_value=0), \
+             patch("app.rapport_synth.synthesize_gaps_from_claims", return_value=0), \
+             patch("app.rapport_synth.seed_cold_start", return_value=0):
+            self.assertFalse(rapport_ranker._backfill_from_claims("u1"))

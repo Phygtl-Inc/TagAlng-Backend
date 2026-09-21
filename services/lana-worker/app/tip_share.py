@@ -537,9 +537,21 @@ finished recommending a place to their neighbors. Find out whether it is their O
 or just somewhere good they know about — recommending a place is not the same as preferring it, \
 and only they can settle which it is.
 
-Output ONLY JSON: {"question": "...", "teaser": "about <place>…", "suggestions": ["...", "...", "..."]}
+First decide whether the question is worth asking at all, then write it.
 
-Rules:
+Output ONLY JSON: {"worth_asking": true|false, "why_not": "...", "question": "...", \
+"teaser": "about <place>…", "suggestions": ["...", "...", "..."]}
+
+Set worth_asking FALSE, and nothing else matters, when:
+- They have already told you their relationship to it ("I go every Saturday", "our regular \
+spot", "been going for years") — there is nothing left to learn, so asking is noise.
+- "Is it your own go-to" does not make sense for this KIND of thing: a recipe, a product, a \
+one-off emergency callout, anything nobody can be a regular at.
+- The recommendation is plainly on someone else's behalf ("for a friend visiting").
+Otherwise set it TRUE. The bar: would their answer teach you something you do not already \
+have? Prefer silence over a question that reads as small talk.
+
+Rules for the question, when worth_asking is true:
 - Open like you NOTICED what they just did — warm and observational ("Saw you just dropped a \
 rec about …"). Never a receipt: no "Thanks for recommending", no "Your tip is saved".
 - Then ask whether it is their OWN go-to. Name the place.
@@ -593,6 +605,15 @@ def _reco_confirm_question(draft: dict[str, Any]) -> tuple[str, str, list[str]] 
             max_tokens=220,
             temperature=0.4,
         )
+        # An explicit decline is a real outcome, not a failure: not every recommendation
+        # earns a follow-up, and a queue of near-identical "is that your go-to?" cards is
+        # its own kind of noise.
+        if (data or {}).get("worth_asking") is False:
+            logging.getLogger(__name__).info(
+                "reco_confirm_declined name=%s why=%s",
+                name, str((data or {}).get("why_not") or "")[:120],
+            )
+            return None
         question = str((data or {}).get("question") or "").strip()
         teaser = str((data or {}).get("teaser") or "").strip()
         raw = (data or {}).get("suggestions")
@@ -608,6 +629,31 @@ def _reco_confirm_question(draft: dict[str, Any]) -> tuple[str, str, list[str]] 
     return None
 
 
+def _has_open_reco_confirm(user_id: str) -> bool:
+    """True if a confirming question from an earlier reco is still waiting on this user.
+
+    Fails OPEN (False) on a read error: a duplicate card is a smaller harm than silently
+    dropping the follow-up a recommendation just earned.
+    """
+    try:
+        from app.auth import service_client
+
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id")
+            .eq("user_id", user_id)
+            .in_("status", ["open", "asked"])
+            .like("gap_id", "reco:%")
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("reco_confirm_open_check_failed")
+        return False
+
+
 def open_reco_confirm_gap(
     user_id: str, message_id: str | None, draft: dict[str, Any]
 ) -> None:
@@ -618,6 +664,12 @@ def open_reco_confirm_gap(
     """
     signal_id = str((draft or {}).get("signal_id") or "").strip()
     if not user_id or not signal_id:
+        return
+    # One at a time. gap_id is per-signal and skip_dedup bypasses the semantic check (it has
+    # to — the confirming question deliberately restates the cold ask it replaces), so
+    # without this a neighbour who posts three recommendations in a sitting queues three
+    # near-identical "is that your go-to?" cards behind each other.
+    if _has_open_reco_confirm(user_id):
         return
     authored = _reco_confirm_question(draft)
     if not authored:
@@ -891,6 +943,26 @@ def _pending_step(session_ctx: dict[str, Any]) -> dict[str, Any] | None:
     return next((s for s in step_set_of(draft) if s.get("field") == field), None)
 
 
+def _is_offered_chip(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """_SKIP_CHIP only — a control Lana rendered, not content the user composed.
+
+    Deliberately NARROWER than _reply_is_an_offered_option. A draft suggestion like
+    "family doctor" is ordinary words: a user can type them while genuinely meaning to
+    leave, so abandon must still win there — that is the no-trapping rule, and
+    test_abandon_wins_over_an_offered_option pins it.
+
+    "Skip that one" is different in kind. It is a fixed label Lana renders as a button with
+    exactly one meaning; nobody types it by accident and it cannot be what someone says when
+    they want out. Read statelessly the classifier calls it an abandon, so tapping Lana's own
+    button released the lane and destroyed the half-built recommendation behind it, with no
+    signal row written. Scoped to a step Lana actually asked, and an exact match.
+    """
+    msg = str(message or "").strip()
+    return bool(_pending_step(session_ctx)) and msg.casefold() == _SKIP_CHIP.casefold()
+
+
 def tip_share_should_release(
     message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
 ) -> bool:
@@ -907,7 +979,11 @@ def tip_share_should_release(
     if step and step.get("kind") == "toggle":
         return False
     return not lane_should_continue(
-        message, session_ctx, slots, is_valid_answer=_is_tip_share_answer
+        message,
+        session_ctx,
+        slots,
+        is_valid_answer=_is_tip_share_answer,
+        is_offered_option=_is_offered_chip,
     )
 
 

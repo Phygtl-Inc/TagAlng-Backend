@@ -324,6 +324,58 @@ def _place_extras(row: dict[str, Any]) -> dict[str, Any]:
     return extras
 
 
+_SERVED_WINDOW = timedelta(hours=24)
+_SKIPPED_WINDOW = timedelta(hours=72)
+
+
+def _within(raw: Any, window: timedelta) -> bool:
+    """True while `raw` (an ISO timestamp) is still inside `window`. Unparseable = not."""
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (_now() - when) < window
+
+
+def _apply_repetition_windows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prefer gaps the user has not just seen, just dismissed, or just been asked in chat.
+
+    The served/skipped windows RELAX rather than empty the tile — rationing availability is
+    what got the cadence caps disabled on 2026-09-04. The chat cooldown does not relax; see
+    the comment on it below for why the two are treated differently.
+    """
+    # ORDER MATTERS, and getting it wrong empties the tile. The chat hold is HARD, so it
+    # must shrink the pool FIRST; the soft windows then choose among what is genuinely
+    # servable. Relaxing first collapses the pool to the "fresh" rows and only then drops
+    # the chat-held ones — so a user with one fresh-but-chat-held gap and one older
+    # servable gap got an empty card plus a wasted synth call on every render.
+    try:
+        from app.policy.goals import _asked_in_chat_recently
+
+        rows = [r for r in rows if not _asked_in_chat_recently(r)]
+    except Exception:  # noqa: BLE001 — a repeated ask beats no ask
+        logger.exception("rapport: chat-cooldown filter failed")
+
+    # Chat is hard because Lana put that exact question in front of them minutes ago and is
+    # waiting; re-serving it reads as not listening, and a quiet card is the honest answer.
+    # The served/skipped windows are soft for the opposite reason: an empty tile there just
+    # means nothing to do. One freshness test over both axes, not two chained ones — chaining
+    # would make "served recently" outrank "skipped recently" purely by writing order, and
+    # unlock_score is what should decide between two held gaps.
+    fresh = [
+        r
+        for r in rows
+        if not _within(r.get("asked_at"), _SERVED_WINDOW)
+        and not _within(r.get("skipped_at"), _SKIPPED_WINDOW)
+    ]
+    return fresh or rows
+
+
 def _load_open_rows(user_id: str) -> list[dict[str, Any]]:
     try:
         rows = (
@@ -337,16 +389,9 @@ def _load_open_rows(user_id: str) -> list[dict[str, Any]]:
     except Exception:
         logger.exception("rapport: candidate load failed for %s", user_id)
         return []
-    # A gap Lana already raised in conversation is not a tile candidate the same minute.
-    # mark_chat_asked deliberately leaves status='open' (the question is still unanswered),
-    # so without this the tile re-asks, in different words, what chat just asked — and the
-    # chat side's own cooldown cannot see it. Same helper, so the two can never disagree.
-    try:
-        from app.policy.goals import _asked_in_chat_recently
-
-        rows = [r for r in rows if not _asked_in_chat_recently(r)]
-    except Exception:  # noqa: BLE001 — a repeated ask beats no ask
-        logger.exception("rapport: chat-cooldown filter failed for %s", user_id)
+    # Served 24h / skipped 72h / raised in chat 24h — see _apply_repetition_windows. The
+    # supply floor (rapport_synth._BUFFER_TARGET) is what gives these something to prefer.
+    rows = _apply_repetition_windows(rows)
     if not any(r.get("affiliation_ref") for r in rows):
         return rows
     try:
@@ -390,12 +435,11 @@ def _backfill_from_claims(user_id: str) -> bool:
         made += synthesize_gaps_from_claims(user_id)
     except Exception:
         logger.exception("rapport: claim backfill failed for %s", user_id)
-    if made:
-        return True
-    # Nothing to deepen. For a user with no claims at all that is not a dry queue,
-    # it is a queue that never started — every opener above is claim-triggered. Seed
-    # it from what neighbors nearby actually claim, so the first answers are ones the
-    # matcher can score. No-ops for anyone who already has a profile.
+    # NO early return on `made`. Every opener above is claim-triggered, so for anyone
+    # holding a claim deepening always produced something and this seed was never reached
+    # — which is precisely why the tile kept circling one topic. Lateral supply has to run
+    # alongside deepening, not only after it runs dry. seed_cold_start has its own breadth
+    # gate and its own 120s burst budget, so the cost of asking is bounded.
     try:
         from app.rapport_synth import seed_cold_start
 

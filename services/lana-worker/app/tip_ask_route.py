@@ -306,14 +306,14 @@ def route_tip_ask(
         # it sees the evidence and returns [] when none of them fit.
         strong = [c for c in candidates if c["score"] >= MIN_EXPLICIT_SCORE]
         shortlist = strong or [c for c in candidates if c["score"] < MIN_EXPLICIT_SCORE]
-        # The receipt must know which case this was: Lana cannot say "you're the person
-        # for this" about a neighbour who merely mentioned it once.
-        outcome["thin_standing"] = not strong and bool(shortlist)
-
         picks = _pick(ask, shortlist[:_SHORTLIST])
         if not picks:
             outcome["none_qualified"] = True
             return outcome
+        # Stamped only once someone was actually asked. Set before _pick it would read True
+        # on a turn where Lana asked nobody, and a receipt built from the outcome would
+        # narrate a thin-standing ask that never happened.
+        outcome["thin_standing"] = not strong
 
         _record(signal_id=signal_id, asker_user_id=asker_user_id, picks=picks)
         outcome["recipients"] = picks

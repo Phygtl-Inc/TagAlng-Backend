@@ -221,3 +221,56 @@ class HostAnswerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── Lana's own chips outrank the classifier's abandon read ───────────────────
+
+
+def _capture_ctx(pending: bool = True):
+    step = {"field": "wait", "question": "How long is the wait?",
+            "kind": "choice", "required": False}
+    return {
+        "tip_share_active": True,
+        "tip_pending_ask": "wait" if pending else None,
+        "tip_draft": {"name": "The Backhaus", "suggestions": ["5-10 min", "Under 5"],
+                      "step_set": [step]},
+    }
+
+
+def test_tapping_skip_that_one_does_not_destroy_the_recommendation():
+    """Lana offers "Skip that one" on every optional step. Read statelessly those words are
+    an abandon, and abandon was tested BEFORE the offered-option guard — so tapping Lana's
+    own button released the lane and threw away the half-built recommendation behind it, with
+    no signal row ever written. Reproduced twice against the real app."""
+    from app.tip_share import tip_share_should_release
+
+    assert tip_share_should_release("Skip that one", _capture_ctx(), {"abandon": True}) is False
+    assert tip_share_should_release("skip that one", _capture_ctx(), {"abandon": True}) is False
+
+
+def test_a_typed_suggestion_does_NOT_outrank_abandon():
+    """Deliberately narrower than the chip. "5-10 min" is ordinary words a user could type
+    while meaning to leave, so the no-trapping rule still wins — see
+    test_tip_share_answer.TestOfferedOptionNeverReleases.test_abandon_wins_over_an_offered_option,
+    which has pinned this since before the skip-chip bug existed."""
+    from app.tip_share import tip_share_should_release
+
+    assert tip_share_should_release("5-10 min", _capture_ctx(), {"abandon": True}) is True
+
+
+def test_the_chip_text_is_not_a_magic_word_without_a_pending_step():
+    """The guard is scoped to a step Lana actually asked — otherwise "Skip that one" would
+    become an un-abandonable phrase anywhere in the flow."""
+    from app.tip_share import tip_share_should_release
+
+    assert tip_share_should_release("Skip that one", _capture_ctx(pending=False),
+                                    {"abandon": True}) is True
+
+
+def test_a_real_pivot_still_releases():
+    """The fix must not trap anyone: anything the user composed themselves still goes to the
+    classifier and can still leave the lane."""
+    from app.tip_share import tip_share_should_release
+
+    assert tip_share_should_release("actually show me events this weekend",
+                                    _capture_ctx(), {"abandon": True}) is True

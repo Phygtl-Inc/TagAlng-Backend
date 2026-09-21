@@ -67,17 +67,26 @@ _BLOCKING_CONCEPTS = frozenset({"languages_spoken", "home_language"})
 P_UNKNOWN = P_SAME_BUCKET
 
 
-def covered_buckets(user_id: str) -> set[str]:
-    """Buckets where this user has already ANSWERED a question.
+def covered_buckets(user_id: str) -> set[str] | None:
+    """Buckets where this user has already ANSWERED a question, or None if unreadable.
 
     Answered, not merely asked: an open question in a bucket has not yet produced
     the claim that makes the bucket matchable, so the bucket is still worth asking
-    into. Returns an empty set on any read error — the caller treats that as
-    unknown rather than as "nothing covered".
-    """
-    from app.auth import service_client
+    into.
 
+    None, not an empty set, on a read error — the two mean opposite things and the
+    callers need them apart. Empty means "nothing covered yet", which is the correct
+    state for a brand-new user and scores P_NEW_BUCKET. A swallowed error returning
+    empty would give every gap of every user that same 0.85 the moment Supabase
+    blinked, flattening priority to first-opened-first.
+    """
     try:
+        # Import INSIDE the try. It was outside, so an import-time failure propagated
+        # straight through score_for (documented "Never raises") into
+        # rapport_gaps.open_semantic_gap, which calls it unguarded — and a gap silently
+        # failed to open instead of opening at P_UNKNOWN.
+        from app.auth import service_client
+
         res = (
             service_client()
             .table("rapport_gaps")
@@ -87,12 +96,9 @@ def covered_buckets(user_id: str) -> set[str]:
             .limit(200)
             .execute()
         )
-    except Exception:  # noqa: BLE001 — the docstring above is the contract; honour it here
-        # Callers treat {} as "unknown", which fails OPEN into asking. seed_cold_start is
-        # documented "Never raises" and runs as a background task, so a propagating read
-        # error here would take the whole cold-start pass down silently.
+    except Exception:  # noqa: BLE001 — never propagate; seed_cold_start is "Never raises"
         logger.exception("rapport: covered_buckets read failed for %s", user_id)
-        return set()
+        return None
     return {
         str(r.get("parent_bucket") or "")
         for r in (res.data or [])
@@ -122,9 +128,17 @@ def score_for(
         return P_PLACE
 
     bucket = str(bucket or "").strip().lower()
+    # Two layers on purpose. covered_buckets returns None rather than raising, so callers can
+    # tell "unknown" from "nothing covered" — but score_for is documented NEVER RAISES and
+    # rapport_gaps.open_semantic_gap calls it unguarded, so a gap would silently fail to open
+    # if anything here ever threw. Belt and braces; both paths land on the same score.
     try:
         covered = covered_buckets(user_id)
     except Exception:  # noqa: BLE001 — priority must never fail a gap opening
+        covered = None
+    if covered is None:
+        # Unknown, NOT "nothing covered" — scoring this as a new bucket would hand every
+        # gap 0.85 for the duration of a blip.
         logger.warning("rapport_priority: covered-bucket read failed for %s", user_id)
         return P_LOCAL_SUPPLY if from_local_supply else P_UNKNOWN
 

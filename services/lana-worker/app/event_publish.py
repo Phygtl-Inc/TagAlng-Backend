@@ -289,7 +289,9 @@ def skip_event_occurrence(event_id: str, user_jwt: str) -> str | None:
             },
             json={"p_event_id": event_id},
         )
-    if res.status_code >= 400:
+    # >= 300: PostgREST returns 300 (PGRST203) for an ambiguous overload and the body is
+    # an ERROR body, so a 4xx-only guard reads failure as data. See supabase_rpc.call_rpc.
+    if res.status_code >= 300:
         detail = res.text[:300]
         # The RPC's own refusals are the host's answer ("that meet doesn't repeat"), not
         # a server fault — pass them through as 400s the FE can render.
@@ -330,7 +332,9 @@ def publish_event(
             },
             json={"p_fields": fields},
         )
-    if res.status_code >= 400:
+    # >= 300: PostgREST returns 300 (PGRST203) for an ambiguous overload and the body is
+    # an ERROR body, so a 4xx-only guard reads failure as data. See supabase_rpc.call_rpc.
+    if res.status_code >= 300:
         detail = res.text[:300]
         if "phone_not_verified" in detail.lower() or "phone_verified" in detail.lower():
             raise HTTPException(status_code=400, detail="phone_not_verified")

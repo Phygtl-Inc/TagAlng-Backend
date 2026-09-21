@@ -25,7 +25,12 @@ def call_rpc(user_jwt: str, rpc_name: str, payload: dict[str, Any]) -> Any:
             json=payload,
         )
 
-    if res.status_code >= 400:
+    # >= 300, not >= 400. PostgREST answers an ambiguous overload with 300 (PGRST203), and
+    # a 3xx body is an ERROR body — so it sailed through this guard, res.json() handed the
+    # caller that error as data, and save_local_signal's "signal_id" came back None. Lana
+    # then told the user "your tip just went out to neighbors nearby" with zero rows
+    # written. Reproduced live against a real PostgREST on 2026-09-21.
+    if res.status_code >= 300:
         detail = res.text[:400]
         code = _map_rpc_error(detail)
         raise HTTPException(status_code=code["status"], detail=code["detail"])

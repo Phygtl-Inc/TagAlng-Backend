@@ -33,30 +33,47 @@ _CLUSTER_SIMILARITY = float(os.environ.get("LANA_RAPPORT_CLUSTER_SIMILARITY", "0
 # risks stale questions the user never reaches. _MAX_NEW caps a single synth call; _BUFFER_TARGET
 # is how many OPEN gaps we try to keep queued ahead so the tile is never caught empty.
 _MAX_NEW = 2
-_BUFFER_TARGET = 2
+# Five, not two. The repetition windows in rapport_ranker hold a served gap back for 24h and
+# a skipped one for 72h, which only works if there is something else to show — ration
+# repetition, never availability. A floor of two plus those windows is the September empty-card
+# bug again, which is why the floor moves first and the windows read from it.
+_BUFFER_TARGET = 5
 
-# Lateral seeding stops only once someone has answered into most of the map. 5 of the 7
-# CLAIM_BUCKETS, so this is near-unreachable by design: the gate exists to stop pestering a
-# fully-covered profile, NOT to ration lateral questions the way the old any-claim gate did.
-_BREADTH_COVERED = 5
+# Lateral seeding stops when there is nothing left worth asking — which is SUPPLY, not
+# bucket coverage. A bucket gate was tried at 5 of the 7 CLAIM_BUCKETS and measured wrong:
+# a handful of varied answers lands in 5-6 buckets, so a real user went permanently silent
+# after ~7 answers with 8 unused local-supply concepts still available. 7 buckets is far too
+# coarse a taxonomy to mean "covered the map". Kept only as a backstop at FULL coverage.
+from app.rapport_gap_tree import CLAIM_BUCKETS
+
+_BREADTH_COVERED = len(CLAIM_BUCKETS)
 
 # Coalesce burst calls: the ranker attempts a backfill whenever the plate is empty, and a
 # richly-profiled user can yield no new questions — without this, rapid home re-renders would
 # each fire an LLM call. In-process only (best-effort across worker instances), keyed by user.
 _SYNTH_COOLDOWN_S = 120.0
 _last_attempt: dict[str, float] = {}
+# Seeding keeps its OWN budget. Both production refill paths run
+# synthesize_gaps_from_claims and then, only if it made nothing, seed_cold_start —
+# rapport_synth.ensure_gap_buffer and rapport_ranker._backfill_from_claims. Sharing one
+# map meant the synth that just ran stamped the key milliseconds before seeding checked
+# it, so seed_cold_start returned 0 at the guard and NEVER reached a single tier in
+# production. The guard exists to stop repeated LLM bursts per user; synth and seed each
+# make their own call, so a budget each preserves that and unblocks the lateral path.
+_last_seed_attempt: dict[str, float] = {}
 
 
-def _cooling_down(user_id: str) -> bool:
+def _cooling_down(user_id: str, store: dict[str, float] | None = None) -> bool:
+    store = _last_attempt if store is None else store
     now = time.monotonic()
-    last = _last_attempt.get(user_id)
+    last = store.get(user_id)
     if last is not None and (now - last) < _SYNTH_COOLDOWN_S:
         return True
     # Prune stale entries before recording — keeps the map bounded on a long-lived worker.
-    if len(_last_attempt) > 5000:
-        for uid in [u for u, t in _last_attempt.items() if now - t >= _SYNTH_COOLDOWN_S]:
-            _last_attempt.pop(uid, None)
-    _last_attempt[user_id] = now
+    if len(store) > 5000:
+        for uid in [u for u, t in store.items() if now - t >= _SYNTH_COOLDOWN_S]:
+            store.pop(uid, None)
+    store[user_id] = now
     return False
 
 SYNTH_PROMPT = """You are Lana, a warm neighborhood concierge in a block-based neighborhood app where \
@@ -227,7 +244,7 @@ def _asked_block(questions: list[str]) -> str:
     return "\n".join(f"- {q}" for q in questions)
 
 
-def _parse_questions(data: Any) -> list[dict[str, str]]:
+def _parse_questions(data: Any, max_new: int = _MAX_NEW) -> list[dict[str, str]]:
     if not isinstance(data, dict):
         return []
     raw = data.get("questions")
@@ -263,7 +280,10 @@ def _parse_questions(data: Any) -> list[dict[str, str]]:
                 "answer_options": options,
             }
         )
-        if len(out) >= _MAX_NEW:
+        # The CALLER's cap, not the module default. Breaking on _MAX_NEW meant
+        # seed_cold_start(max_new=3) silently kept 2, so raising _BUFFER_TARGET could never
+        # fill the queue faster than the deepening path — the floor of 5 was unreachable.
+        if len(out) >= max(1, max_new):
             break
     return out
 
@@ -328,7 +348,7 @@ def synthesize_gaps_from_claims(user_id: str, max_new: int = _MAX_NEW) -> int:
     # from any point in the past, however old.
     asked = recent_gap_questions(user_id, limit=60)
     data = _generate(_uncovered_block(uncovered), _asked_block(asked), max_new)
-    questions = _parse_questions(data)
+    questions = _parse_questions(data, max_new)
     logger.info(
         "rapport-synth[%s]: generated = %s",
         user_id,
@@ -390,11 +410,18 @@ def ensure_gap_buffer(user_id: str, target: int = _BUFFER_TARGET) -> int:
     if need <= 0:
         return 0
     made = synthesize_gaps_from_claims(user_id, max_new=min(need, _MAX_NEW))
-    if made:
-        return made
-    # No threads to deepen. A user with no claims has a queue that never started
-    # rather than one that ran dry — seed it (no-op once they hold any claim).
-    return seed_cold_start(user_id, max_new=min(need, 3))
+    # Seed when the queue is STILL short, not only when deepening made nothing.
+    #
+    # `if made: return made` is where the loop Tommaso reported actually lived. Deepening
+    # sources topics only from the user's own claims, so from their first claim it always
+    # made something — and lateral seeding, the one path that can introduce a topic they
+    # have never mentioned, was never reached again. Measured: a user with one claim got
+    # five renders alternating two facets of that claim, 0/5 lateral. Fixing the gate
+    # inside seed_cold_start was necessary and not sufficient; this is the other half.
+    still = need - made
+    if still > 0:
+        made += seed_cold_start(user_id, max_new=min(still, 3))
+    return made
 
 
 # ── Cold start ───────────────────────────────────────────────────────────────
@@ -429,21 +456,37 @@ mentioned…", no "your running…". Ask openly.
 2. ONE TOPIC EACH — spread across DIFFERENT threads from the list, never two on the same one. \
 Prefer threads from different buckets over several from the strongest bucket: a first question in \
 an untouched area of their life is worth more than a second in the same area.
-3. CONCRETE ANSWER — a place, a time, an activity, a level, a cadence. Never a feeling, an \
-opinion, or an origin story ("what got you into…", "what do you love most about…").
-4. NEVER YES/NO. Not "Do you run?" — ask "Where do you like to run around here?" so the answer \
-names something. If a thread only supports a yes/no, widen it or drop it.
+3. THE ANSWER MUST RESOLVE TO SOMETHING MATCHABLE — a place, a time, an activity, a level, a \
+cadence, or a plain yes/no to the thread itself ("are you a fan?" resolves to fan-of-that-sport, \
+which is exactly what the matcher scores). What is banned is an answer nothing can be done with: \
+a feeling, an origin story, an essay — "what got you into…", "what do you love most about…".
+4. SAY WHY YOU ARE ASKING, THEN ASK. Open on the neighborhood, then put the question to them:
+     "There are a lot of dog people around here — do you have one?"
+     "This neighborhood is big on soccer. Are you a fan?"
+   This is the shape, and it does two jobs. It is honest about where the topic came from, so
+   the question does not arrive out of nowhere. And it CANNOT PRESUPPOSE: "Where do you take \
+your rescue dog?" assumes they own one, which breaks rule 1 and is how a neighbor's dog became \
+a claim that THIS person has a rescue dog, feeding the matcher a fact they never stated. A "no" \
+must always be an easy, natural answer. A bare yes/no is fine HERE — the neighborhood opener is \
+what stops it being a flat interrogation — but prefer a question whose answer also names \
+something ("...do you have one? What's yours like?" is two questions; don't). If a thread only \
+works by presuming it is already true of them, drop it.
 5. NOT A SURVEY. Warm, curious, like a neighbor asking, under 120 characters. Never stack two \
 questions into one sentence.
 
 Attach 2-3 one-tap ANSWER OPTIONS to each question when the list makes obvious ones (in THEIR \
 voice, first person, under 40 characters) — tapping is much easier than typing for a first \
-question. Options must be real possibilities, never "yes"/"no".
+question. Options carry the CONTENT a bare yes or no would not: "Yes — a rescue beagle", not \
+"Yes". And because rule 4's shape invites a no, ONE option must always be that no, in their own \
+voice — "No, not a dog person", "Not really my thing". A no is what stops a polite guess becoming \
+a fact on their profile, so it is never the option you leave out.
 
 NEVER touch a sensitive topic — health/medical, grief, divorce/relationship trouble, money/debt, \
 legal/immigration, mental health, faith. Never ask about their gender, their name, or their age. \
-Never mention that other neighbors claimed this ("3 neighbors nearby also…") — it is context for \
-YOU, not for them, and repeating it back reads as surveillance.
+Name the NEIGHBORHOOD, never a number and never a person. "There are a lot of dog people \
+around here" is context that explains the question. "3 neighbors nearby also have dogs" is \
+surveillance — a count that small is guessable, and it reports what other people privately told \
+you. No counts, no "someone on your block", no names, no "a neighbor of yours".
 
 Write question, teaser and label in ENGLISH regardless of the language of any quotes — questions \
 are stored English-canonical and rendered into the user's language at display time. Quality over \
@@ -497,25 +540,29 @@ def _supply_block(rows: list[dict[str, Any]]) -> str:
 def seed_cold_start(user_id: str, max_new: int = 3) -> int:
     """Open lateral questions — about things the user has never mentioned. Returns how many.
 
-    Gated on BREADTH, not on holding any claim. It used to stop at claim #1, which made
-    this the only lateral source in a system whose other source (synthesize_gaps_from_claims)
-    can only deepen topics the user already raised: from their first claim onward every
-    question Lana could ask was a facet of something already said, which is what the
-    looping felt like. The replacement gate is deliberately near-unreachable — 5 of the 7
-    CLAIM_BUCKETS answered — so in practice lateral supply stays on for everyone; it exists
-    to stop asking someone who has genuinely covered the map. Three tiers, cheapest last:
+    It used to stop at claim #1, which made this the only lateral source in a system whose
+    other source (synthesize_gaps_from_claims) can only deepen topics the user already
+    raised: from their first claim onward every question Lana could ask was a facet of
+    something already said, which is what the looping felt like.
+
+    What stops it now is SUPPLY — _local_supply returns concepts real neighbours hold, and
+    when there is nothing new left it returns nothing and this returns 0. The bucket gate
+    below is only a backstop for a genuinely complete profile; measured at 5 of 7 it fired
+    after about seven answers and silenced the tile while supply remained. Three tiers,
+    cheapest last:
       1. Local supply → AI-written questions about what neighbors nearby claim.
       2. Nothing nearby (first user in an area, or no location yet) → the
          no-prior-knowledge catalogue seeds, which need no supply at all.
     Never raises.
     """
-    if not user_id or _cooling_down(user_id):
+    if not user_id or _cooling_down(user_id, _last_seed_attempt):
         return 0
-    # covered_buckets returns set() on a read error, so an unreadable profile falls through
-    # to asking rather than to silence. Silence is the failure users actually report.
+    # None means the read failed, not "nothing covered" — an unreadable profile falls
+    # through to asking rather than to silence, which is the failure users report.
     from app.rapport_priority import covered_buckets
 
-    if len(covered_buckets(user_id)) >= _BREADTH_COVERED:
+    covered = covered_buckets(user_id)
+    if covered is not None and len(covered) >= _BREADTH_COVERED:
         return 0
 
     supply = _local_supply(user_id)
@@ -538,7 +585,7 @@ def seed_cold_start(user_id: str, max_new: int = 3) -> int:
     if supply:
         asked = recent_gap_questions(user_id, limit=60)
         data = _generate_seeds(_supply_block(supply), _asked_block(asked), max_new)
-        questions = _parse_questions(data)
+        questions = _parse_questions(data, max_new)
         opened = 0
         for q in questions:
             try:

@@ -99,12 +99,15 @@
       "Bash(psql \"postgresql://postgres:postgres@127.0.0.1:54322/postgres\" -c \"select public._tip_match_strength\\('barber', 'Jacas Barber · barber · Service: Men''s haircut', '{}'::text[], null, null, 0.55\\) as barber_vs_barber;\")",
       "Bash(cp app/main.py /tmp/main.bak)",
       "Bash(python3 -)",
-      "Bash(cp /tmp/main.bak app/main.py)"
+      "Bash(cp /tmp/main.bak app/main.py)",
+      "Bash(cp /tmp/tar.bak app/tip_ask_route.py)",
+      "Bash(cp app/rapport_synth.py /tmp/rs2.bak)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",
       "/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/8dfce14d-bbe0-47fb-bdc5-73bab7488e94/scratchpad",
-      "/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/120ea861-f0ce-4311-9f3d-16e761b209fd/scratchpad"
+      "/tmp/claude-501/-Users-dev-Downloads-TagAlng-backend/120ea861-f0ce-4311-9f3d-16e761b209fd/scratchpad",
+      "/tmp"
     ]
   }
 }

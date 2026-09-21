@@ -394,3 +394,25 @@ def test_no_standing_at_all_is_still_not_a_candidate(monkeypatch):
         )
     assert outcome["none_qualified"] is True
     assert outcome["recipients"] == []
+
+
+def test_thin_standing_is_false_when_nobody_was_actually_asked(monkeypatch):
+    """It records what HAPPENED, not what was considered. Set before _pick, it read True on
+    a turn where Lana asked nobody — and the receipt is built from the outcome."""
+    from app import tip_ask_route
+
+    monkeypatch.setenv("LANA_ASK_ROUTING", "1")
+    monkeypatch.setenv("SIGNAL_SWEEP_TOKEN", "s3cret")
+    monkeypatch.setenv("LANA_WORKER_PUBLIC_URL", "https://worker.example")
+    with patch("app.layer1_handlers.fetch_peers_semantic",
+               return_value=[{"peer_user_id": "thin", "peer_nickname": "T"}]), \
+         patch("app.authority.concepts_for_ask", return_value=["dentist"]), \
+         patch("app.authority.best_authority", return_value={"score": 0.10, "quote": None}), \
+         patch.object(tip_ask_route, "eligible_recipients", side_effect=lambda ids: set(ids)), \
+         patch.object(tip_ask_route, "_pick", return_value=[]):
+        outcome = tip_ask_route.route_tip_ask(
+            "jwt", signal_id="sig-1", asker_user_id="me", ask_text="good dentist?"
+        )
+    assert outcome["recipients"] == []
+    assert outcome["none_qualified"] is True
+    assert outcome["thin_standing"] is False, "nobody was asked, so nothing was thin"

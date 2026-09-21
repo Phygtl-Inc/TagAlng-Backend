@@ -161,3 +161,34 @@ class TestNeighbourFacingText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── PostgREST 3xx is a failure, not data ─────────────────────────────────────
+
+
+def test_a_300_from_postgrest_raises_instead_of_returning_the_error_body():
+    """PGRST203 (ambiguous overload) answers 300, and the body is an ERROR body.
+
+    A `>= 400` guard let it through, `res.json()` handed the caller that error as data, and
+    `save_local_signal`'s signal_id came back None — so Lana said "your tip just went out to
+    neighbors nearby" with zero rows written. Reproduced live against a real PostgREST.
+    """
+    from unittest import mock
+
+    import httpx
+    from fastapi import HTTPException
+
+    from app import supabase_rpc
+
+    resp = httpx.Response(
+        300,
+        json={"code": "PGRST203", "message": "Could not choose the best candidate function"},
+        request=httpx.Request("POST", "http://local/rest/v1/rpc/save_local_signal"),
+    )
+    with mock.patch.object(supabase_rpc.httpx, "Client") as client_cls:
+        client_cls.return_value.__enter__.return_value.post.return_value = resp
+        try:
+            supabase_rpc.call_rpc("jwt", "save_local_signal", {})
+        except HTTPException:
+            return  # the only acceptable outcome
+    raise AssertionError("a 300 was treated as success — the tip lane would claim it posted")
