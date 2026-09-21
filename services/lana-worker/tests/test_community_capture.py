@@ -499,3 +499,95 @@ def test_the_router_is_told_the_capture_is_in_flight() -> None:
     assert line.startswith("community_create")
     assert "sharing.community" in line
     assert _active_capture_context({}) == "none"
+
+
+def test_a_creator_community_can_actually_be_named(monkeypatch: Any) -> None:
+    """The one type whose subject is text, not a map point.
+
+    The step set has always declared a creator's subject as kind="text" (asserted above),
+    because there is no building to pin — its question is literally "What's the community
+    called?". But the pending handler dropped every typed subject answer regardless, so
+    publish_community's "the subject answer wins, draft['name'] is only the fallback" rule
+    could never fire. Result on prod: a community named "people who follow my Jack Russell
+    account" — the phrase the creator opened with, not the name they chose.
+    """
+    ctx: dict[str, Any] = {}
+    _run(monkeypatch, "I want a community for people who follow my Jack Russell account",
+         ctx, {"circle_type": "creator", "name": "people who follow my Jack Russell account"})
+    # The subject is not the first thing asked — answer whatever leads, then the name step.
+    _run(monkeypatch, "Dog people", ctx, {})
+
+    _, draft = _run(monkeypatch, "Jack Russell Owners Club", ctx, {})
+    assert (draft.get("answers") or {}).get(COMMUNITY_SUBJECT_FIELD) == "Jack Russell Owners Club"
+
+    # And publish resolves to it, not to the opening phrase.
+    answers = draft.get("answers") or {}
+    resolved = str(answers.get(COMMUNITY_SUBJECT_FIELD) or "").strip() or str(
+        draft.get("name") or ""
+    ).strip()
+    assert resolved == "Jack Russell Owners Club"
+
+
+def test_a_placed_community_still_refuses_a_typed_subject(monkeypatch: Any) -> None:
+    """The exception is scoped to the step's own kind. A gym answered as free text still
+    cannot be grounded, and an ungrounded community is invisible everywhere."""
+    ctx: dict[str, Any] = {}
+    _run(monkeypatch, "a community for my gym", ctx,
+         {"circle_type": "fitness", "name": "my gym"})
+    # Walk to the subject step the same way, then try to answer it with text.
+    for _ in range(4):
+        if str(ctx.get("community_pending_ask") or "") == COMMUNITY_SUBJECT_FIELD:
+            break
+        _run(monkeypatch, "something", ctx, {})
+    assert str(ctx.get("community_pending_ask") or "") == COMMUNITY_SUBJECT_FIELD, "never reached it"
+
+    _, draft = _run(monkeypatch, "Fitness CF on Main Street", ctx, {})
+    assert COMMUNITY_SUBJECT_FIELD not in (draft.get("answers") or {})
+
+
+def _walk_to_subject(monkeypatch: Any, ctx: dict[str, Any]) -> None:
+    """Open a creator capture and answer steps until the subject is the pending question."""
+    _run(monkeypatch, "I want a creator community", ctx,
+         {"circle_type": "creator", "name": "my thing"})
+    for _ in range(5):
+        if str(ctx.get("community_pending_ask") or "") == COMMUNITY_SUBJECT_FIELD:
+            return
+        _run(monkeypatch, "something", ctx, {})
+    raise AssertionError("never reached the subject step")
+
+
+def test_a_name_containing_a_control_word_is_a_name(monkeypatch: Any) -> None:
+    """_CANCEL_RE matches stop / never mind / not now; _PASS_RE matches pass / skip / done /
+    all good. At a step whose answer is a NAME those eat real ones — "Stop the Stigma"
+    destroyed the whole draft and "Pass the Mic" was silently dropped. Both are plausible
+    community names, and neither is a command."""
+    for name in ("Stop the Stigma", "Pass the Mic", "All Good Vibes", "Skip Day Club"):
+        ctx: dict[str, Any] = {}
+        _walk_to_subject(monkeypatch, ctx)
+        _, draft = _run(monkeypatch, name, ctx, {})
+        assert (draft.get("answers") or {}).get(COMMUNITY_SUBJECT_FIELD) == name, name
+
+
+def test_a_bare_control_word_still_gets_the_user_out(monkeypatch: Any) -> None:
+    """The exception is scoped to the phrase being essentially the WHOLE message. Someone
+    who genuinely wants out while being asked the name must not be trapped."""
+    ctx: dict[str, Any] = {}
+    _walk_to_subject(monkeypatch, ctx)
+    _run(monkeypatch, "cancel", ctx, {})
+    assert not ctx.get("community_draft"), "a bare cancel must still drop the draft"
+
+
+def test_the_published_name_is_what_the_caller_sees(monkeypatch: Any) -> None:
+    """publish_community rebound `draft` locally, so the row got the chosen name while the
+    community filter label and the celebration line kept printing the extractor's opening
+    phrase. Row and copy disagreeing is worse than both being wrong."""
+    draft: dict[str, Any] = {
+        "circle_type": "creator",
+        "name": "people who follow my Jack Russell account",
+        "answers": {COMMUNITY_SUBJECT_FIELD: "Jack Russell Owners Club"},
+    }
+    with mock.patch("app.circles_flow.add_circle",
+                    return_value={"place_id": "p1", "affiliation_id": "a1"}), \
+         mock.patch.object(cc, "upsert_place_feature", create=True, return_value=None):
+        cc.publish_community(draft=draft, user_id="u1")
+    assert draft["name"] == "Jack Russell Owners Club"

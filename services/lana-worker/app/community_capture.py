@@ -374,6 +374,36 @@ def set_community_place(
     return details
 
 
+def _awaiting_text_subject(session_ctx: dict[str, Any], draft: dict[str, Any]) -> bool:
+    """True while the pending question is a free-text subject — "What's the community
+    called?" for a creator community, which has no place to pin."""
+    from app.community_question_sets import COMMUNITY_SUBJECT_FIELD
+
+    if str(session_ctx.get("community_pending_ask") or "") != COMMUNITY_SUBJECT_FIELD:
+        return False
+    step = next(
+        (st for st in step_set_of(draft) if st.get("field") == COMMUNITY_SUBJECT_FIELD), None
+    )
+    return (step or {}).get("kind") == "text"
+
+
+def _is_bare_control(message: str, pattern: "re.Pattern[str]") -> bool:
+    """The message IS the control phrase, rather than merely containing it.
+
+    Both control regexes match ordinary words — stop, pass, skip, done, all good — so at a
+    step whose answer is a NAME they eat real ones: "Stop the Stigma" destroyed the whole
+    draft, "Pass the Mic" was silently dropped. Neither is a command; both are plausible
+    community names. But exempting the step outright would trap someone who genuinely wants
+    out while being asked the name, so the test is whether the control phrase is essentially
+    the entire message.
+    """
+    text = re.sub(r"[\s.!?,]+", " ", str(message or "").strip().lower()).strip()
+    if not text:
+        return False
+    m = pattern.search(text)
+    return bool(m) and len(m.group(0)) >= len(text) - 1
+
+
 def publish_community(
     *, draft: dict[str, Any], user_id: str
 ) -> tuple[dict[str, Any] | None, str]:
@@ -411,7 +441,12 @@ def publish_community(
         slug = _slugify(name)
         if not slug:
             return None, "name_required"
-        draft = {**draft, "name": name}
+        # Mutate the CALLER's draft, not a local copy. `draft = {**draft, ...}` rebound the
+        # name here and nowhere else, so the row got the chosen name while the community
+        # filter label and the celebration line both went on printing the extractor's
+        # opening phrase — the row and the copy disagreeing is worse than both being wrong,
+        # because only one of them is what the creator actually reads.
+        draft["name"] = name
         gpid = CREATOR_PLACE_PREFIX + slug
     try:
         from app.circles_flow import add_circle
@@ -577,7 +612,12 @@ def run_community_capture_turn(
     # ── Loop safety ──
     turns = int(session_ctx.get("community_turns") or 0) + 1
     session_ctx["community_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _COMMUNITY_TURN_CAP:
+    cancelled = (
+        _is_bare_control(msg, _CANCEL_RE)
+        if _awaiting_text_subject(session_ctx, draft)
+        else bool(_CANCEL_RE.search(msg))
+    )
+    if cancelled or turns > _COMMUNITY_TURN_CAP:
         reset_community_state(session_ctx)
         session_ctx["routing_phase"] = "listening"
         return compose_reply(
@@ -697,11 +737,36 @@ def run_community_capture_turn(
 
     # ── Capture a pending answer into the right place ──
     pending = str(session_ctx.get("community_pending_ask") or "")
-    if pending and msg and not _PASS_RE.search(msg) and not tapped_type:
+    passed = (
+        _is_bare_control(msg, _PASS_RE)
+        if _awaiting_text_subject(session_ctx, draft)
+        else bool(_PASS_RE.search(msg))
+    )
+    if pending and msg and not passed and not tapped_type:
         if pending == COMMUNITY_SUBJECT_FIELD:
             # A place is only ever set by the picker (/community-setup), never by text:
             # a typed name cannot be grounded. Left pending so the step is re-asked.
-            pass
+            #
+            # EXCEPT when the subject step is declared kind="text" — which today means a
+            # creator community, whose subject question is literally "What's the community
+            # called?" because there is no location to pin. The step set has always said so
+            # (community_question_sets, and test_community_capture asserts it); this handler
+            # simply did not honour it, which is why publish_community's subject-wins rule
+            # never fired and a community ended up named "people who follow my Jack Russell
+            # account" — the opening phrase, not the name its creator chose.
+            #
+            # Keyed off the step's OWN kind rather than the type name, so a second placeless
+            # type cannot quietly reintroduce the bug.
+            subject_step = next(
+                (st for st in step_set_of(draft) if st.get("field") == COMMUNITY_SUBJECT_FIELD),
+                None,
+            )
+            if (subject_step or {}).get("kind") == "text":
+                draft["answers"] = {
+                    **(draft.get("answers") or {}),
+                    COMMUNITY_SUBJECT_FIELD: msg,
+                }
+                session_ctx["community_pending_ask"] = None
         elif pending == "circle_type":
             resolved = normalize_community_type(msg)
             if resolved:
