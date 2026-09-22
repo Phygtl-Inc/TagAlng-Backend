@@ -94,6 +94,42 @@ def _existing_gap_rows(user_id: str) -> dict[str, dict[str, Any]]:
         return {}
 
 
+def asked_concepts(user_id: str, limit: int = 200) -> set[str]:
+    """Concepts this user has ALREADY been asked about, at any status.
+
+    Supply excludes concepts the user HOLDS, never ones they have been asked — so five
+    honest "no"s pinned five dead topics to the top of a limit-8 supply window forever and
+    the tile ran dry with real supply still sitting there (measured: empty at render 16).
+    A "no" is an answer; the topic is spent either way.
+
+    Empty set on a read error — better a repeat than a silent dead end.
+    """
+    if not user_id:
+        return set()
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("deepens_concept,gap_id")
+            .eq("user_id", user_id)
+            .limit(limit)
+            .execute()
+        )
+    except Exception:
+        logger.exception("rapport: asked-concept read failed for %s", user_id)
+        return set()
+    out: set[str] = set()
+    for row in res.data or []:
+        concept = str(row.get("deepens_concept") or "").strip().lower()
+        if concept:
+            out.add(concept)
+        # Cold seeds carry no deepens_concept; their slug is the topic.
+        gap_id = str(row.get("gap_id") or "")
+        if gap_id.startswith("deepen:"):
+            out.add(gap_id.split(":", 1)[1].strip().lower())
+    return {c for c in out if c}
+
+
 def recent_gap_questions(user_id: str, limit: int = 10) -> list[str]:
     """Recent rapport questions already opened for this user — so the extractor can avoid
     generating a near-duplicate (e.g. asking 'watch with neighbors?' for soccer AND Real Madrid)."""
@@ -118,6 +154,23 @@ def recent_gap_questions(user_id: str, limit: int = 10) -> list[str]:
 def _slug(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_")
     return s[:48] or "topic"
+
+
+def _question_is_servable(question: str) -> str:
+    """"" if the question is structurally fine, else the reason to drop it.
+
+    STRUCTURE ONLY — two question marks is two questions, which is a count, not a judgement.
+    Whether a question presupposes a fact or touches something private is a judgement, and
+    lives with the model that can actually make it (rapport_synth._guard_seed_questions).
+    A keyword list cannot: it dropped "Quiz night at the Temple Bar" and kept "Waiting on
+    scan results".
+    """
+    text = " ".join(str(question or "").split())
+    if not text:
+        return "empty"
+    if text.count("?") > 1:
+        return "two questions in one"
+    return ""
 
 
 def open_semantic_gap(
@@ -188,6 +241,10 @@ def open_semantic_gap(
     q_text = str(question).strip()
     # Semantic dedup: don't reopen a question that means the same as one we already asked, even
     # when the wording (and thus the slug) differs. Embedding also stored to power coverage steering.
+    bad = _question_is_servable(q_text)
+    if bad:
+        logger.info("rapport: refused a gap (%s): %r", bad, q_text)
+        return False
     embedding = _question_embedding(q_text)
     # skip_dedup: a confirming question NAMES what the user just did ("is The Backhaus your
     # go-to bakery?") and so reads as a near-duplicate of the cold ask it is meant to replace.
