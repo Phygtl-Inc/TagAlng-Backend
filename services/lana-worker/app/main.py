@@ -946,9 +946,12 @@ def _community_discovery_from_ctx(ctx: dict[str, Any]) -> CommunityDiscoveryResp
             emoji=r.get("emoji"),
             zip=r.get("zip"),
             member_count=int(r.get("member_count") or 0),
-            distance_text=r.get("distance_text"),
             is_member=bool(r.get("is_member")),
             status_line=r.get("status_line"),
+            # Scored on the chat path too (one RPC), so the same card cannot mean two
+            # things. The authored fit line is NOT: it costs an LLM call, and a chat turn
+            # is already waiting on one.
+            affinity=r.get("affinity"),
         )
         for r in (rows_raw if isinstance(rows_raw, list) else [])
         if isinstance(r, dict) and str(r.get("place_id") or "").strip()
@@ -3925,23 +3928,31 @@ def post_circles_discover(
     authorization: str | None = Header(default=None),
 ):
     """Communities near the caller that already have members — the ones they could
-    join (C-CIRCLE-COMM-DISCOVER).
+    join (C-CIRCLE-COMM-DISCOVER), each with how well SHE fits it.
 
-    Returns places, member counts and coarse distances, and deliberately NO member
-    identities: who is at a place stays members-only (§F), so joining is what earns
-    the names. `is_member` marks the caller's own places instead of hiding them."""
+    Returns places, member counts, a 0-1 `affinity` and the authored "why Lana sees a
+    fit" block — and deliberately NO member identities: who is at a place stays
+    members-only (§F), so joining is what earns the names. `is_member` marks the
+    caller's own places instead of hiding them.
+
+    No distance. The only origin the worker holds is a coarse home/ZIP centroid, which
+    is enough to pick what is inside the radius and nothing like enough to tell a reader
+    how far she is from it right now — that is the client's to compute."""
     auth = verify_auth(authorization)
+    from app.community_affinity import attach_affinity
     from app.community_discovery import discover_communities, radius_meters
+    from app.community_fit_line import attach_fit_lines
 
-    # Distance phrases come back rendered ("1.4 mi away" / "2,3 km"), so the caller's
-    # own locale decides the units — same rule as the peer `_near` RPCs.
-    locale = (recipient_langs([auth.user_id]).get(auth.user_id) or "en").strip() or "en"
     rows = discover_communities(
         auth.user_id,
         limit=max(1, min(int((body.limit if body else 20) or 20), 40)),
         query=(body.query if body else None),
-        locale=locale,
     )
+    # Score, then author — from ONE read, so the number and the sentence can never be
+    # built from different facts. Both are best-effort: a failure leaves `affinity` null
+    # and `fit_line` absent, and the panel still lists real communities.
+    attach_affinity(auth.user_id, rows)
+    attach_fit_lines(auth.user_id, rows)
     return CommunityDiscoveryResponse(
         communities=[
             CommunityDiscoveryRow(
@@ -3953,9 +3964,11 @@ def post_circles_discover(
                 emoji=r.get("emoji"),
                 zip=r.get("zip"),
                 member_count=int(r.get("member_count") or 0),
-                distance_text=r.get("distance_text"),
                 is_member=bool(r.get("is_member")),
                 status_line=r.get("status_line"),
+                affinity=r.get("affinity"),
+                fit_line=r.get("fit_line"),
+                fit_chips=list(r.get("fit_chips") or []),
             )
             for r in rows
             if str(r.get("place_id") or "").strip()

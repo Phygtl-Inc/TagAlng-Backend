@@ -1721,7 +1721,6 @@ def _try_layer1_intent_turn(
             user_id,
             message=msg,
             session_ctx=ctx_base,
-            locale=str(session_ctx.get("preferred_lang") or "en"),
             # "who is in <place>" arrives here now, so the turn needs the place they named
             # and which side of it they asked about (its people, or the place itself).
             community_name=slots_community_name(slots),

@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Any
 
 from app.auth import service_client
-from app.rapport_gaps import open_semantic_gap, recent_gap_questions
+from app.rapport_gaps import asked_concepts, open_semantic_gap, recent_gap_questions
 from app.vec_util import to_pgvector
 
 logger = logging.getLogger(__name__)
@@ -517,7 +518,17 @@ def _local_supply(user_id: str, min_holders: int = 2) -> list[dict[str, Any]]:
             "rapport_local_supply",
             {"p_user_id": user_id, "p_limit": 8, "p_min_holders": int(min_holders)},
         ).execute()
-        return res.data or []
+        rows = list(res.data or [])
+        # Drop what they have already been asked. The RPC only excludes concepts they HOLD,
+        # so a topic they declined stayed in the window and crowded out live supply — the
+        # tile ran dry with real concepts unused. A "no" spends the topic too.
+        spent = asked_concepts(user_id)
+        if spent:
+            rows = [
+                r for r in rows
+                if str(r.get("concept") or "").strip().lower() not in spent
+            ]
+        return rows
     except Exception:
         # Pre-20261123 environments have no such RPC — fall through to the tree seeds.
         logger.info("rapport-seed: local-supply RPC unavailable for %s", user_id)
@@ -535,6 +546,83 @@ def _supply_block(rows: list[dict[str, Any]]) -> str:
         holders = int(r.get("holders") or 0)
         lines.append(f"- {concept} | {label} [{bucket}] — {holders} neighbors")
     return "\n".join(lines)
+
+
+_SEED_GUARD_PROMPT = """You are checking ONE question a neighborhood app is about to ask \
+someone it knows NOTHING about. It was drafted from what OTHER neighbors nearby have on their \
+profiles, so the person being asked has said none of it.
+
+Answer two things about it:
+
+SENSITIVE — would a stranger be hurt, exposed or embarrassed by being asked this, or by \
+learning that someone nearby is? Health and illness, disability, mental health, grief, \
+divorce or separation, single parenthood, custody, fertility, money trouble, debt, \
+unemployment, immigration status, legal matters, faith, recovery, sexuality. Judge the \
+MEANING, not the words: "waiting on scan results" is sensitive; a quiz night at a pub called \
+the Temple Bar, or a dog-walking group called Faithful Friends, is not.
+
+PRESUPPOSES — does it treat something as already true of THEM?
+  presupposes:     "Where do you take your dog?"  "Which gym do you go to?"
+                   "How is your marathon training going?"  "Where do you park your boat?"
+  does NOT:        "There are a lot of dog people around here — do you have one?"
+                   "This neighborhood is big on soccer. Are you a fan?"
+Naming what the NEIGHBORHOOD does and then asking whether it is theirs is exactly right, and \
+is never a presupposition. Assuming they own the dog, the boat or the gym membership is.
+
+Output ONLY JSON: {"sensitive": true|false, "presupposes": true|false, "why": "..."} — `why` \
+only when either is true."""
+
+
+def _guard_seed_questions(questions: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop seed questions that are intrusive or presuppose. AI judgement, not a word list.
+
+    A second opinion on our own output, deliberately a SEPARATE call from the one that wrote
+    it: the generator was observed breaking its own rules (identical prompt and model, clean
+    on one run, compound and presupposing on the next), and something that drifted is not a
+    good judge of whether it drifted.
+
+    ONE CALL PER QUESTION, on purpose. Judging a batch was measurably unstable — the same
+    "do you have one?" came back presupposes=false among three questions and presupposes=true
+    among eight, because it drifts toward the company it keeps. Seeds are capped at 3, and
+    generating them is already a model call, so the cost of independence is small.
+
+    FAILS CLOSED. A seed is optional — deepening and the catalogue still have the tile — but
+    asking a stranger "are you a cancer survivor?" is not recoverable.
+    """
+    if not questions:
+        return []
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+    except Exception:  # noqa: BLE001
+        logger.exception("rapport-seed: guard import failed, dropping seeds")
+        return []
+    if not llm_configured():
+        logger.info("rapport-seed: guard unavailable, dropping %d seed(s)", len(questions))
+        return []
+    kept: list[dict[str, str]] = []
+    for q in questions:
+        text = str(q.get("question") or "").strip()
+        if not text:
+            continue
+        try:
+            v = llm_json(
+                model=router_model(),
+                system=_SEED_GUARD_PROMPT,
+                user_payload=text,
+                max_tokens=160,
+                temperature=0.0,
+            )
+        except Exception:  # noqa: BLE001 — one bad verdict drops one seed, not the batch
+            logger.exception("rapport-seed: guard call failed for %r", text)
+            continue
+        v = v if isinstance(v, dict) else {}
+        if v.get("sensitive") or v.get("presupposes"):
+            logger.info(
+                "rapport-seed: guard refused %r (%s)", text, str(v.get("why") or "")[:120]
+            )
+            continue
+        kept.append(q)
+    return kept
 
 
 def seed_cold_start(user_id: str, max_new: int = 3) -> int:
@@ -585,7 +673,7 @@ def seed_cold_start(user_id: str, max_new: int = 3) -> int:
     if supply:
         asked = recent_gap_questions(user_id, limit=60)
         data = _generate_seeds(_supply_block(supply), _asked_block(asked), max_new)
-        questions = _parse_questions(data, max_new)
+        questions = _guard_seed_questions(_parse_questions(data, max_new))
         opened = 0
         for q in questions:
             try:

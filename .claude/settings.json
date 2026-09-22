@@ -101,7 +101,8 @@
       "Bash(python3 -)",
       "Bash(cp /tmp/main.bak app/main.py)",
       "Bash(cp /tmp/tar.bak app/tip_ask_route.py)",
-      "Bash(cp app/rapport_synth.py /tmp/rs2.bak)"
+      "Bash(cp app/rapport_synth.py /tmp/rs2.bak)",
+      "Bash(not draft *)"
     ],
     "additionalDirectories": [
       "/Users/dev/Downloads/TagAlng-backend/supabase/migrations",

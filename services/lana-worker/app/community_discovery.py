@@ -21,8 +21,8 @@ user said, parked as a candidate, and later confirmed by tapping Join on the
 discovery panel — `source='chat_extraction'`, `confirmed_via='community_join'`.
 A fresh join is `source='community_join'` on both counts.
 
-DISCLOSURE (§F). Discovery returns a place, a member count and a coarse
-distance — never who is there. The people panel stays members-only
+DISCLOSURE (§F). Discovery returns a place, a member count and how well the caller fits
+it (app/community_affinity.py) — never who is there. The people panel stays members-only
 (`app/community_surface.py`), so joining is what earns you the names, and the SQL
 counts only members the caller may be counted alongside (a place kept alive
 solely by a blocked user is not returned at all).
@@ -110,7 +110,6 @@ def discover_communities(
     *,
     limit: int = 20,
     query: str | None = None,
-    locale: str = "en",
     radius_m: float | None = None,
 ) -> list[dict[str, Any]]:
     """Communities near the caller with at least one visible member.
@@ -129,7 +128,8 @@ def discover_communities(
                 "p_user_id": user_id,
                 "p_radius_meters": float(radius_m if radius_m else radius_meters()),
                 "p_limit": max(1, min(int(limit or 20), _MAX_LIMIT)),
-                "p_locale": (locale or "en"),
+                # p_locale is left at its default: it only renders the RPC's
+                # distance_text, which no longer reaches the wire (see the shaper below).
                 "p_query": (str(query).strip() or None) if query else None,
             },
         ).execute()
@@ -162,11 +162,14 @@ def discover_communities(
                 "emoji": place_relation_emoji(primary),
                 "zip": str(r.get("zip") or "").strip() or None,
                 "member_count": int(r.get("member_count") or 0),
-                "distance_text": str(r.get("distance_text") or "").strip() or None,
+                # No distance on the wire. The SQL still measures it — it is what
+                # decides which places are inside the radius and how ties break — but
+                # the only origin the worker has is a coarse home/ZIP centroid, so a
+                # rendered "1.4 mi away" is wrong for anyone who is not standing at
+                # home. Distance is the client's to compute, from where it actually is.
                 "is_member": bool(r.get("is_member")),
                 "status_line": _discovery_status_line(
                     int(r.get("member_count") or 0),
-                    str(r.get("distance_text") or "").strip() or None,
                     bool(r.get("is_member")),
                 ),
             }
@@ -183,14 +186,15 @@ def _first_type(types: Any) -> str:
     return ""
 
 
-def _discovery_status_line(members: int, distance_text: str | None, is_member: bool) -> str:
-    """Only the two facts on the row. `member_count` includes the caller when they
-    are already in, so an "N people" line must not read as N strangers."""
+def _discovery_status_line(members: int, is_member: bool) -> str:
+    """The one fact on the row the worker can state. `member_count` includes the caller
+    when they are already in, so an "N people" line must not read as N strangers.
+
+    Distance used to be the second half of this line and is gone with `distance_text` —
+    the worker measures from a coarse home centroid, which is not where the reader is."""
     if is_member:
-        head = "You're in" if members <= 1 else f"You + {members - 1} others"
-    else:
-        head = "1 person" if members == 1 else f"{members} people"
-    return f"{head} · {distance_text}" if distance_text else head
+        return "You're in" if members <= 1 else f"You + {members - 1} others"
+    return "1 person" if members == 1 else f"{members} people"
 
 
 # ── join ──────────────────────────────────────────────────────────────────────
@@ -643,15 +647,13 @@ def _same_place_name(said: str, row_name: str) -> bool:
     return sa <= sb or sb <= sa
 
 
-def _resolve_named_community(
-    user_id: str, name: str, *, locale: str
-) -> dict[str, Any] | None:
+def _resolve_named_community(user_id: str, name: str) -> dict[str, Any] | None:
     """The community the user NAMED — hers first, then the ones near her."""
     if not str(name or "").strip():
         return None
     for pool in (
         _my_communities(user_id),
-        discover_communities(user_id, limit=_MAX_LIMIT, locale=locale),
+        discover_communities(user_id, limit=_MAX_LIMIT),
     ):
         for c in pool:
             if _same_place_name(name, str(c.get("place_name") or "")):
@@ -1038,7 +1040,6 @@ def communities_chat_turn(
     *,
     message: str,
     session_ctx: dict[str, Any],
-    locale: str = "en",
     community_name: str | None = None,
     community_ask: str = "about",
 ) -> str:
@@ -1061,14 +1062,14 @@ def communities_chat_turn(
     named_miss: str | None = None
     if community_name:
         said = community_name.strip()[:80]
-        hit = _resolve_named_community(user_id, community_name, locale=locale)
+        hit = _resolve_named_community(user_id, community_name)
         inexact: str | None = None
         if not hit:
             near = _near_name_candidates(
                 community_name,
                 [
                     _my_communities(user_id),
-                    discover_communities(user_id, limit=_MAX_LIMIT, locale=locale),
+                    discover_communities(user_id, limit=_MAX_LIMIT),
                 ],
             )
             if len(near) == 1:
@@ -1114,9 +1115,17 @@ def communities_chat_turn(
 
     mine = _my_communities(user_id)
     nearby = [
-        c for c in discover_communities(user_id, limit=_CHAT_NEARBY_MAX * 2, locale=locale)
+        c for c in discover_communities(user_id, limit=_CHAT_NEARBY_MAX * 2)
         if not c.get("is_member")
     ][:_CHAT_NEARBY_MAX]
+    # Same card as /lana/circles/discover, so the same number on it — one RPC, no LLM.
+    # The authored fit line is endpoint-only: it costs a compose, and this turn is
+    # already waiting on one.
+    from app.community_affinity import attach_affinity
+
+    attach_affinity(user_id, nearby)
+    for c in nearby:
+        c.pop("_fit_basis", None)
 
     session_ctx["community_discovery"] = {
         "communities": nearby,

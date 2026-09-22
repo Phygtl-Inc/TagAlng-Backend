@@ -51,7 +51,7 @@ Rules:
 - concept must match ^[a-z][a-z0-9_]{1,63}$
 - NEVER extract race, exact age, sex/gender demographics, street address
 - A fact about the user's CHILD is a claim about the child: subject "child", subject_name when they name them, subject_age when they state it. The label describes the ACTIVITY, never the child ("Does karate", not "Sara does karate")
-- Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
+- disclosure MUST be "mutual", never "public", for anything a neighbour could be hurt or exposed by a stranger knowing: faith, religion, sobriety, recovery, LGBTQ+, health and illness, disability, mental health, grief and bereavement, divorce or separation, single parenthood, custody, fertility, money trouble, debt, unemployment, immigration status, legal matters. If you are unsure whether something belongs on this list, it does.
 
 Transcript:
 """
@@ -159,7 +159,7 @@ language at display time, so a later language switch re-renders the whole queue.
 - subject_updates: a child's name/age with NO activity attached ("Sara is 9", "the little one's name is Tom", "my oldest just turned 12"). These are NOT claims — a child is not an interest. Emit {"name": …, "age": …} here (either field may be null) and leave "claims" empty for that fact. NEVER attach the age to an unrelated thread the child happens to have. Empty [] when the message states no such thing.
 - ONLY extract first-person identity ("I am", "I'm", "my heritage") — NOT who they search for ("find Brazilian mom", "looking for Pakistani neighbors")
 - A COMMAND is a request, not a self-description. When the message tells Lana to DO something, the thing it names is the TARGET of the request — never a claim about the user. "sign me up for the badminton", "RSVP me to the pickleball meetup", "show me tennis activities", "find people who play chess", "help me host a book night" → capture NOTHING from the named activity. It is first-person and it names a real interest word, which is exactly why this is easy to get wrong: "sign me up for the badminton" is not "I play badminton". The user may never have played it, and the command may fail. Wait for them to SAY it about themselves ("I play badminton on Thursdays") — that message will come, and it will be true. As with the search exclusion, this covers ONLY the thing being commanded: background they volunteer in the same message still counts ("sign me up for the badminton, I've played since college" → plays_badminton IS a claim, on the strength of the second clause).
-- Faith, religion, sobriety, recovery, LGBTQ+: disclosure MUST be "mutual"
+- disclosure MUST be "mutual", never "public", for anything a neighbour could be hurt or exposed by a stranger knowing: faith, religion, sobriety, recovery, LGBTQ+, health and illness, disability, mental health, grief and bereavement, divorce or separation, single parenthood, custody, fertility, money trouble, debt, unemployment, immigration status, legal matters. If you are unsure whether something belongs on this list, it does.
 - nickname — ONLY when the user is telling you what THEY want to be called ("I'm Brinda", "call me \
 Sam", "my name is brigade"). A name is the one fact the user hears in EVERY reply, so a wrong one is \
 insulting and obvious. You are the only thing that can change it — be strict:

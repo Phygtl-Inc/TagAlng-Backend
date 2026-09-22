@@ -1001,3 +1001,43 @@ class TestRankerBackfillAlsoSeeds(unittest.TestCase):
              patch("app.rapport_synth.synthesize_gaps_from_claims", return_value=0), \
              patch("app.rapport_synth.seed_cold_start", return_value=0):
             self.assertFalse(rapport_ranker._backfill_from_claims("u1"))
+
+
+class TestTheQuestionGuard(unittest.TestCase):
+    """STRUCTURE only, at the insert point. Two question marks is two questions — a count,
+    not a judgement.
+
+    Whether a question presupposes a fact, or touches something private, is a judgement and
+    lives with a model that can make it (rapport_synth._guard_seed_questions). It used to be
+    a regex here, and the regex was wrong in both directions: it refused "Quiz night at the
+    Temple Bar" and passed "Where do you park your boat?".
+    """
+
+    def test_two_questions_in_one_are_refused(self):
+        from app.rapport_gaps import _question_is_servable
+
+        self.assertIn("two questions", _question_is_servable("Do you run? What time?"))
+
+    def test_an_empty_question_is_refused(self):
+        from app.rapport_gaps import _question_is_servable
+
+        self.assertEqual(_question_is_servable("   "), "empty")
+
+    def test_a_single_question_passes_whatever_it_says(self):
+        """No semantic opinion here — that is the model guard's job, not this one's."""
+        from app.rapport_gaps import _question_is_servable
+
+        self.assertEqual(
+            _question_is_servable("There are a lot of dog people around here — do you have one?"), ""
+        )
+        self.assertEqual(_question_is_servable("Where do you park your boat?"), "")
+
+    def test_a_refused_question_opens_no_gap(self):
+        store = _store()
+        with patch.object(rapport_gaps, "service_client", return_value=_Supabase(store)):
+            ok = rapport_gaps.open_semantic_gap(
+                "u1", "m1", "Do you have a dog? How old is it?",
+                bucket="interest", from_local_supply=True,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(store["inserts"], [])

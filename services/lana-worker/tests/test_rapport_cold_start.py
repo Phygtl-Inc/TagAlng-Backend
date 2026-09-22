@@ -165,6 +165,9 @@ class TestColdStartSeeding(_StubBase):
     def setUp(self) -> None:
         super().setUp()
         self.opened: list[dict] = []
+        # The seed guard is a live model call that fails CLOSED. These tests are about what
+        # the seeder produces, not about the guard — it has its own tests.
+        self._patch(rapport_synth, "_guard_seed_questions", lambda qs: qs)
 
         def fake_open(user_id, message_id, question, **kw):
             self.opened.append({"question": question, **kw})
@@ -197,7 +200,10 @@ class TestColdStartSeeding(_StubBase):
             lambda supply, asked, max_new: {
                 "questions": [
                     {
-                        "question": "Where do you like to run around here?",
+                        # Was "Where do you like to run around here?" — which PRESUPPOSES
+                        # they run, the exact shape the seed guard now refuses. The fixture
+                        # was encoding the bug.
+                        "question": "Plenty of people run the trails here. Do you run?",
                         "teaser": "about your weekends…",
                         "label": "running",
                         "bucket": "activity",
@@ -716,3 +722,142 @@ class TestPartialCoverageStillSeeds(unittest.TestCase):
         with patch("app.rapport_priority.covered_buckets", return_value=set(CLAIM_BUCKETS)), \
              patch.object(rapport_synth, "_cooling_down", lambda uid, store=None: False):
             self.assertEqual(rapport_synth.seed_cold_start("u1"), 0)
+
+
+class TestTheSeedGuard(unittest.TestCase):
+    """A stranger must never be asked about someone else's health, grief or money, and a
+    seeded question must never assume a fact they have not stated.
+
+    Judged by a MODEL, not a word list. The word list was wrong in both directions: it
+    dropped "Quiz night at the Temple Bar" and "Walks dogs with Faithful Friends", and kept
+    "Waiting on scan results", "Which gym do you go to?" and "Where do you park your boat?".
+
+    One call per question, deliberately: judging a batch was measurably unstable — the same
+    question came back presupposes=false among three and presupposes=true among eight,
+    drifting toward the company it kept.
+    """
+
+    @staticmethod
+    def _guard(questions, verdicts):
+        from unittest.mock import patch
+
+        seq = list(verdicts)
+
+        def fake_json(**_kw):
+            return seq.pop(0)
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), \
+             patch("app.orchestrator.llm.llm_json", side_effect=fake_json):
+            return [q["question"] for q in rapport_synth._guard_seed_questions(
+                [{"question": q} for q in questions])]
+
+    def test_a_sensitive_question_is_refused(self) -> None:
+        kept = self._guard(
+            ["Are you a cancer survivor?", "Do you have a dog?"],
+            [{"sensitive": True, "presupposes": False, "why": "health"},
+             {"sensitive": False, "presupposes": False}],
+        )
+        self.assertEqual(kept, ["Do you have a dog?"])
+
+    def test_a_presupposing_question_is_refused(self) -> None:
+        kept = self._guard(
+            ["Where do you park your boat?"],
+            [{"sensitive": False, "presupposes": True, "why": "assumes a boat"}],
+        )
+        self.assertEqual(kept, [])
+
+    def test_each_question_is_judged_on_its_own(self) -> None:
+        """Not one verdict for the batch — that is what made it drift."""
+        from unittest.mock import patch
+
+        calls = []
+
+        def fake_json(**kw):
+            calls.append(kw.get("user_payload"))
+            return {"sensitive": False, "presupposes": False}
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), \
+             patch("app.orchestrator.llm.llm_json", side_effect=fake_json):
+            rapport_synth._guard_seed_questions(
+                [{"question": "a?"}, {"question": "b?"}, {"question": "c?"}])
+        self.assertEqual(calls, ["a?", "b?", "c?"])
+
+    def test_it_fails_closed_when_the_guard_cannot_run(self) -> None:
+        """A seed is optional; asking a stranger about their cancer is not recoverable."""
+        from unittest.mock import patch
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            self.assertEqual(
+                rapport_synth._guard_seed_questions([{"question": "Do you have a dog?"}]), []
+            )
+
+    def test_one_failed_verdict_drops_one_seed_not_the_batch(self) -> None:
+        from unittest.mock import patch
+
+        seq = [{"sensitive": False, "presupposes": False}, RuntimeError("boom"),
+               {"sensitive": False, "presupposes": False}]
+
+        def fake_json(**_kw):
+            v = seq.pop(0)
+            if isinstance(v, Exception):
+                raise v
+            return v
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), \
+             patch("app.orchestrator.llm.llm_json", side_effect=fake_json):
+            kept = rapport_synth._guard_seed_questions(
+                [{"question": "a?"}, {"question": "b?"}, {"question": "c?"}])
+        self.assertEqual([q["question"] for q in kept], ["a?", "c?"])
+
+
+class TestSpentTopicsLeaveTheSupplyWindow(unittest.TestCase):
+    """Supply excluded concepts the user HOLDS, never ones they had been ASKED.
+
+    So five honest "no"s pinned five dead topics to the top of a limit-8 window forever and
+    the tile ran dry with real supply unused — measured empty at render 16. A "no" is an
+    answer; the topic is spent either way.
+    """
+
+    def test_an_already_asked_concept_is_dropped(self) -> None:
+        from unittest.mock import patch
+
+        supply = [
+            {"concept": "dog_owner", "label": "Has a rescue dog"},
+            {"concept": "trail_runner", "label": "Runs the headland trails"},
+        ]
+
+        class _Res:
+            data = supply
+
+        class _RPC:
+            def execute(self):
+                return _Res()
+
+        class _Client:
+            def rpc(self, *a, **k):
+                return _RPC()
+
+        with patch.object(rapport_synth, "service_client", lambda: _Client()), \
+             patch.object(rapport_synth, "asked_concepts", lambda uid: {"dog_owner"}):
+            rows = rapport_synth._local_supply("u1")
+        self.assertEqual([r["concept"] for r in rows], ["trail_runner"])
+
+    def test_nothing_asked_yet_leaves_supply_untouched(self) -> None:
+        from unittest.mock import patch
+
+        supply = [{"concept": "dog_owner", "label": "Has a rescue dog"}]
+
+        class _Res:
+            data = supply
+
+        class _RPC:
+            def execute(self):
+                return _Res()
+
+        class _Client:
+            def rpc(self, *a, **k):
+                return _RPC()
+
+        with patch.object(rapport_synth, "service_client", lambda: _Client()), \
+             patch.object(rapport_synth, "asked_concepts", lambda uid: set()):
+            self.assertEqual(len(rapport_synth._local_supply("u1")), 1)
