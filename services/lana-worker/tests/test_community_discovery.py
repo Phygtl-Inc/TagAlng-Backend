@@ -69,13 +69,21 @@ _RPC_ROWS = [
 
 class TestDiscoveryStatusLine(unittest.TestCase):
     def test_stranger_counts_read_as_people(self) -> None:
-        self.assertEqual(_discovery_status_line(34, "11 min walk", False), "34 people · 11 min walk")
-        self.assertEqual(_discovery_status_line(1, None, False), "1 person")
+        self.assertEqual(_discovery_status_line(34, False), "34 people")
+        self.assertEqual(_discovery_status_line(1, False), "1 person")
 
     def test_own_place_never_reads_as_n_strangers(self) -> None:
         # member_count includes the caller, so "12 people" would overstate by one.
-        self.assertEqual(_discovery_status_line(12, "1.9 mi away", True), "You + 11 others · 1.9 mi away")
-        self.assertEqual(_discovery_status_line(1, None, True), "You're in")
+        self.assertEqual(_discovery_status_line(12, True), "You + 11 others")
+        self.assertEqual(_discovery_status_line(1, True), "You're in")
+
+    def test_no_distance_half(self) -> None:
+        # The worker measures from a coarse home centroid, so it cannot say how far the
+        # reader is from anything; the line is the count and nothing else.
+        for line in (_discovery_status_line(34, False), _discovery_status_line(12, True)):
+            self.assertNotIn("·", line)
+            self.assertNotIn("away", line)
+            self.assertNotIn("walk", line)
 
 
 class TestDiscoverCommunities(unittest.TestCase):
@@ -88,10 +96,20 @@ class TestDiscoverCommunities(unittest.TestCase):
         self.assertEqual(first["place_name"], "OrangeTheory Narcoossee")
         self.assertEqual(first["relation"], "gym")
         self.assertEqual(first["member_count"], 34)
-        self.assertEqual(first["distance_text"], "11 min walk")
         for row in rows:
             for leaked in ("nickname", "avatar_url", "peer_user_id", "members"):
                 self.assertNotIn(leaked, row)
+
+    @patch("app.community_discovery.service_client")
+    def test_distance_never_reaches_the_shaped_row(self, sb) -> None:
+        """The RPC still measures distance — that is what the radius and the ordering
+        stand on — but a phrase rendered from a home/ZIP centroid is wrong for a reader
+        who is not at home, so it stops here."""
+        sb.return_value = _sb({}, rpc_data=_RPC_ROWS)
+        for row in discover_communities("u1"):
+            self.assertNotIn("distance_text", row)
+            self.assertNotIn("distance_meters", row)
+            self.assertNotIn("away", str(row.get("status_line") or ""))
 
     @patch("app.community_discovery.service_client")
     def test_place_type_falls_back_to_what_members_call_it(self, sb) -> None:
@@ -889,11 +907,11 @@ class TestNamedRosterTurn(unittest.TestCase):
             # Shorter than the row, and longer than it — both are the same place.
             for said in ("Mizu Sushi", "the Mizu Sushi & Steakhouse community", "MIZU SUSHI"):
                 self.assertEqual(
-                    (_resolve_named_community("u1", said, locale="en") or {}).get("place_id"),
+                    (_resolve_named_community("u1", said) or {}).get("place_id"),
                     "pMizu",
                     said,
                 )
-            self.assertIsNone(_resolve_named_community("u1", "Trinity Church", locale="en"))
+            self.assertIsNone(_resolve_named_community("u1", "Trinity Church"))
 
 
 class TestAboutACommunity(unittest.TestCase):

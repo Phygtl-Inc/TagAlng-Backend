@@ -399,11 +399,25 @@ class CommunityDiscoveryRow(BaseModel):
     emoji: str | None = None
     zip: str | None = None
     member_count: int = 0
-    # Coarse (block/ZIP centroid) distance phrase, or null when either point is
-    # unknown — never a guess.
-    distance_text: str | None = None
     is_member: bool = False
     status_line: str | None = None
+    # How well this caller fits THIS community, 0-1 (app/community_affinity.py):
+    # shared public concepts, then the cosine between her self-claims and the members',
+    # then whether she already has a community of this kind. `null` means UNSCORED (the
+    # read failed); 0.0 means genuinely nothing in common — a panel must tell those
+    # apart. Deliberately NOT the sort order: rows still come back by how alive a place
+    # is, then how close, and re-ranking the panel is a separate product call.
+    #
+    # There is no `distance_text`. The worker measures distance from a coarse home/ZIP
+    # centroid — enough to decide what is inside the radius, never enough to render
+    # "1.4 mi away" to someone who has moved since. The client computes it.
+    affinity: float | None = None
+    # "WHY LANA SEES A FIT": 2-3 chips over one grounded sentence, authored from the SAME
+    # overlap `affinity` is blended from (app/community_fit_line.py), in the reader's
+    # language. Absent whenever nothing honest could be said — the card renders the block
+    # only when it is there.
+    fit_line: str | None = None
+    fit_chips: list[str] = Field(default_factory=list)
 
 
 class FellowsResponse(BaseModel):

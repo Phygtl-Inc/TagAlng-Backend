@@ -17,6 +17,8 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+import app.tip_share as ts
+
 
 class TestShareCaptureContextLine(unittest.TestCase):
     """The router must be TOLD a share is in flight, and which question is open."""
@@ -317,3 +319,129 @@ class TestBareServiceNounIsNotASeek(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+# ── the offer's subject must reach the capture ───────────────────────────────
+
+
+class TestOfferSubjectReachesTheCapture(unittest.TestCase):
+    """rapport offers to share "your favorite bakery"; the pipeline stamps that into
+    slots["signal_detail"] and calls it authoritative. The tip lane never read it, so the
+    capture opened at "what do you want to recommend?" about the thing the user had just
+    named — and looped there. Prod 2026-09-21: eight minutes, four rounds of "which bakery
+    are you referring to?". hosting_surface has always read it; this side never did.
+    """
+
+    @staticmethod
+    def _extract_input(draft, msg, signal_detail):
+        """What the extractor is actually handed for this turn."""
+        seen = {}
+
+        def fake_extract(*, history, user_message, prev, lang):
+            seen["text"] = user_message
+            return {}, None
+
+        ctx = {"tip_share_active": True, "tip_draft": dict(draft)}
+        with mock.patch.object(ts, "_extract_tip_fields", fake_extract), \
+             mock.patch.object(ts, "resolve_block_id", return_value="b1", create=True), \
+             mock.patch("app.reply_compose.compose_reply",
+                        lambda *, goal, facts, fallback, **k: fallback):
+            try:
+                ts.run_tip_share_turn(
+                    user_message=msg, session_ctx=ctx, history=[], user_jwt="jwt",
+                    home_block_id="b1", slots={"signal_detail": signal_detail},
+                )
+            except Exception:
+                pass
+        return seen.get("text")
+
+    def test_the_offered_subject_is_carried_into_the_opening_turn(self):
+        text = self._extract_input({}, "Yes, I'll share it as a tip", "my favorite bakery")
+        self.assertIsNotNone(text)
+        self.assertIn("my favorite bakery", text)
+
+    def test_it_is_not_duplicated_when_the_message_already_says_it(self):
+        text = self._extract_input({}, "Yes, I'll share my favorite bakery", "my favorite bakery")
+        self.assertEqual(text, "Yes, I'll share my favorite bakery")
+
+    def test_mid_capture_turns_are_untouched(self):
+        """Only the opening turn. Later answers are answers, not a restatement of the offer."""
+        text = self._extract_input({"name": "The Backhaus"}, "Pastries", "my favorite bakery")
+        self.assertEqual(text, "Pastries")
+
+    def test_no_offer_means_no_change(self):
+        self.assertEqual(self._extract_input({}, "I want to recommend a place", ""),
+                         "I want to recommend a place")
+
+
+class TestTheCaptureOwnsItsOwnIgnorance(unittest.TestCase):
+    """Before the subject is known, "what are you referring to?" must stay with the capture.
+
+    It used to release: with no step set there was no pending STEP, so the general chat
+    answered — it can see the conversation but not the capture, and improvised "I was asking
+    about your favorite bakery", then two minutes later "I haven't mentioned a specific
+    bakery yet". Two halves of Lana contradicting each other in front of the user
+    (prod 2026-09-21).
+    """
+
+    _META = {"goal": "chat", "confidence": 0.9}
+
+    def test_a_meta_turn_before_the_subject_stays_in_the_lane(self):
+        from app.tip_share import tip_share_should_release
+
+        ctx = {"tip_share_active": True,
+               "tip_pending_question": "What do you want to recommend?",
+               "tip_draft": {}}
+        self.assertFalse(tip_share_should_release("What are you referring to?", ctx, self._META))
+
+    def test_a_meta_turn_with_nothing_pending_still_releases(self):
+        """Scoped: the capture only owns the answer while it has a question on screen."""
+        from app.tip_share import tip_share_should_release
+
+        ctx = {"tip_share_active": True, "tip_draft": {}}
+        self.assertTrue(tip_share_should_release("What are you referring to?", ctx, self._META))
+
+
+class TestTheOpenerDoesNotLoop(unittest.TestCase):
+    """The opener was a fixed string returned unconditionally, so a stuck user got the
+    identical sentence back every turn — four rounds, eight minutes (prod 2026-09-21)."""
+
+    @staticmethod
+    def _goal_and_facts(ctx, msg, slots=None):
+        seen = {}
+
+        def fake_compose(*, goal, facts, fallback, **k):
+            seen["goal"] = goal
+            seen["facts"] = list(facts or [])
+            return fallback
+
+        with mock.patch.object(ts, "_extract_tip_fields", lambda **k: ({}, None)), \
+             mock.patch.object(ts, "compose_reply", fake_compose):
+            ts.run_tip_share_turn(user_message=msg, session_ctx=ctx, history=[],
+                                  user_jwt="jwt", home_block_id="b1", slots=slots or {})
+        return seen
+
+    def test_the_ask_count_climbs_and_changes_the_instruction(self):
+        ctx = {"tip_share_active": True, "tip_draft": {}}
+        first = self._goal_and_facts(ctx, "sure")
+        self.assertEqual(ctx["tip_opener_asks"], 1)
+        third = self._goal_and_facts(ctx, "still confused")
+        self._goal_and_facts(ctx, "what?")
+        self.assertEqual(ctx["tip_opener_asks"], 3)
+        self.assertNotEqual(first["goal"], third["goal"], "a repeat must not re-issue the same instruction")
+
+    def test_it_is_told_never_to_imply_it_knows(self):
+        ctx = {"tip_share_active": True, "tip_draft": {}}
+        seen = self._goal_and_facts(ctx, "What are you referring to?", {"goal": "chat", "confidence": 0.9})
+        joined = " ".join(seen["facts"]).lower()
+        self.assertIn("never imply", joined)
+        self.assertIn("sharing", joined, "it must not invert into a seek")
+
+    def test_the_counter_resets_once_the_capture_moves_on(self):
+        ctx = {"tip_share_active": True, "tip_draft": {}, "tip_opener_asks": 3}
+        with mock.patch.object(ts, "_extract_tip_fields",
+                               lambda **k: ({"name": "The Backhaus", "category": "bakery"}, None)), \
+             mock.patch.object(ts, "compose_reply", lambda *, goal, facts, fallback, **k: fallback):
+            ts.run_tip_share_turn(user_message="The Backhaus", session_ctx=ctx, history=[],
+                                  user_jwt="jwt", home_block_id="b1", slots={})
+        self.assertEqual(ctx.get("tip_opener_asks"), 0)

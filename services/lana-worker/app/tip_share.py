@@ -925,7 +925,17 @@ def _is_tip_share_answer(
         # they had already named was gone (dev QA 2026-09-08). A capture with a question
         # outstanding owns the answer to "why are you asking" — every other meta turn still
         # releases, which is what the goal=chat read is for.
-        return bool(_pending_step(session_ctx))
+        #
+        # A pending QUESTION, not only a pending STEP. Before the subject is known there is
+        # no step set yet, so "what are you referring to?" released to the general chat —
+        # which can see the conversation but not the capture, and improvised: "I was asking
+        # about your favorite bakery", then two minutes later "I haven't mentioned a
+        # specific bakery yet". Two halves of Lana contradicting each other in front of the
+        # user (prod 2026-09-21). The capture owns the answer whenever it has a question on
+        # screen, because it is the only half that knows what it actually has.
+        return bool(_pending_step(session_ctx)) or bool(
+            str(session_ctx.get("tip_pending_question") or "").strip()
+        )
     return not is_confident_off_lane(
         slots,
         native_goals=_TIP_SHARE_NATIVE_GOALS,
@@ -1258,9 +1268,28 @@ def run_tip_share_turn(
     # to tell "answered nothing" from "answered four other steps".
     new_answers: dict[str, Any] = {}
     if msg:
+        # The offer that opened this lane carried its own subject — rapport offers to share
+        # "your favorite bakery", the pipeline stamps it into slots["signal_detail"] and
+        # calls it authoritative. This side never read it, so a user who had just named the
+        # thing got "what do you want to recommend?" from scratch and the lane LOOPED there:
+        # eight minutes, four rounds of "which bakery are you referring to?" (prod
+        # 2026-09-21). hosting_surface has always read it; the tip lane never did.
+        #
+        # Fed to the extractor rather than assigned to a field, because the subject can be
+        # either a category ("my favorite bakery" -> category) or a specific place ("The
+        # Backhaus" -> name), and guessing which would just move the confusion. Only on the
+        # opening turn, and only when the message does not already carry it — no extra call.
+        extract_from = msg
+        # "Has the capture got anything to go on yet" — the SAME test the opening question
+        # uses below. Not `not draft`: a draft_id is stamped on entry, so the dict is never
+        # actually empty and the guard silently never fired.
+        if not _has(draft, "name") and not _has(draft, "category"):
+            offered = str((slots or {}).get("signal_detail") or "").strip()
+            if offered and offered.casefold() not in msg.casefold():
+                extract_from = f"{offered}. {msg}"
         found, ask = _extract_tip_fields(
             history=history,
-            user_message=msg,
+            user_message=extract_from,
             prev=draft,
             lang=lang,
         )
@@ -1436,14 +1465,67 @@ def run_tip_share_turn(
                 fallback=str(step["question"]),
             )
 
-    # ── P1: nothing yet → "What do you want to recommend?" ──
+    # ── P1: nothing yet → ask what they want to recommend ──
     if not _has(draft, "name") and not _has(draft, "category"):
+        # How many times running we have stood here with nothing. The opener used to be a
+        # fixed string returned unconditionally, so a user who could not tell what Lana
+        # meant got the IDENTICAL sentence back every turn — four rounds and eight minutes
+        # of "which bakery are you referring to?" before giving up (prod 2026-09-21).
+        asks = int(session_ctx.get("tip_opener_asks") or 0) + 1
+        session_ctx["tip_opener_asks"] = asks
         session_ctx["tip_draft"] = draft
         session_ctx["tip_share_active"] = True
         session_ctx["tip_pending_question"] = "What do you want to recommend?"
         session_ctx["routing_phase"] = "listening"
-        return "Love that — what do you want to recommend?"
+        confused = role == "asks_why" or is_meta_or_chat(slots)
+        return compose_reply(
+            goal=(
+                "Ask what they want to recommend — the name of a place or person."
+                if asks == 1 and not confused
+                else "They asked what you meant, and the honest answer is that you do not "
+                "have it yet. Say plainly that they have not named it and ask for the name "
+                "of the place or person. Never imply you already know which one."
+                if confused and asks <= 2
+                else "This is not landing — they have now been asked more than once and are "
+                "still stuck. Do NOT repeat yourself: say it a completely different way, "
+                "give a concrete example of the kind of answer you need, and offer to drop "
+                "it and come back to it later if they would rather."
+            ),
+            facts=(
+                [
+                    "Nothing has been captured yet — no name, no category",
+                    "You do NOT know which place they mean; never imply you do",
+                    # Without this the composer wandered into "a type of event or a "
+                    # particular interest" — it knows it must give an example but not of
+                    # what, because a recommendation is the one thing the facts never said.
+                    "What is being recommended is a PLACE or a PERSON a neighbour could "
+                    "go to — a bakery, a barber, a park, a plumber. Not an event, not an "
+                    "interest, not an activity.",
+                    # They are GIVING a recommendation, not asking for one. The composer
+                    # drifted into "what you're looking for" / "a place you need", which
+                    # inverts the whole intent — the same share-read-as-seek inversion that
+                    # once answered a user's own tip with Google listings.
+                    "They are SHARING a recommendation for other neighbours, not looking "
+                    "for one. Never phrase it as what they need or are looking for.",
+                ]
+                + (
+                    [
+                        f"They have now been asked {asks} times and it is not landing",
+                        "Repeating the same sentence again is the failure being fixed here",
+                    ]
+                    if asks > 1
+                    else []
+                )
+            ),
+            fallback=(
+                "I don't have the name yet — which place or person do you mean?"
+                if confused or asks > 1
+                else "Love that — what do you want to recommend?"
+            ),
+        )
 
+    # Past the opener — the next stall is a different stall.
+    session_ctx["tip_opener_asks"] = 0
     chips = _build_chips(draft)
 
     # ── need the category ──
