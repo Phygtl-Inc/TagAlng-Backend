@@ -265,8 +265,12 @@ class TestPublishWiring(unittest.TestCase):
     def _save(self, draft):
         import app.tip_share as ts
 
+        # ONLY signal_id — exactly what save_local_signal returns
+        # (jsonb_build_object('signal_id', v_row.id), 20261001120000). The old mock also
+        # supplied "id", which is why it never caught the call site reading the wrong key
+        # and skipping grounding entirely on every real publish.
         with patch("app.local_signals.save_local_signal",
-                   return_value={"id": "sig-1", "signal_id": "sig-1", "matches_created": 0}), \
+                   return_value={"signal_id": "sig-1", "matches_created": 0}), \
              patch("app.tip_tags.tags_for_tip", return_value=[]), \
              patch("app.auth.jwt_user_id", return_value="u-1"), \
              patch("app.reco_subject.ground_reco_subject") as ground:
@@ -278,7 +282,7 @@ class TestPublishWiring(unittest.TestCase):
     def test_publish_grounds_the_subject(self):
         saved, err, ground = self._save(self._draft())
         self.assertEqual(err, "")
-        self.assertEqual(saved["id"], "sig-1")
+        self.assertEqual(saved["signal_id"], "sig-1")
         ground.assert_called_once()
         kwargs = ground.call_args.kwargs
         self.assertEqual(kwargs["signal_id"], "sig-1")
@@ -288,7 +292,7 @@ class TestPublishWiring(unittest.TestCase):
         import app.tip_share as ts
 
         with patch("app.local_signals.save_local_signal",
-                   return_value={"id": "sig-2", "signal_id": "sig-2", "matches_created": 0}), \
+                   return_value={"signal_id": "sig-2", "matches_created": 0}), \
              patch("app.tip_tags.tags_for_tip", return_value=[]), \
              patch("app.auth.jwt_user_id", return_value="u-1"), \
              patch("app.reco_subject.ground_reco_subject",
@@ -298,7 +302,7 @@ class TestPublishWiring(unittest.TestCase):
             )
         # The recommendation is the thing; the subject is a nice-to-have.
         self.assertEqual(err, "")
-        self.assertEqual(saved["id"], "sig-2")
+        self.assertEqual(saved["signal_id"], "sig-2")
 
 
 class TestIdentitySpace(unittest.TestCase):
@@ -738,3 +742,49 @@ class TestAdjudicationCache(unittest.TestCase):
              patch.object(mod, "_ask_model") as ask:
             self.assertIsNone(mod._adjudicate("Mike Plumber", "plumber", "Lake Nona", self.CAND))
         ask.assert_not_called()
+
+
+class TestPublishResultKey(unittest.TestCase):
+    """save_local_signal returns `signal_id`, never `id`.
+
+    Reading the wrong key made both post-insert hooks no-ops on every real publish —
+    grounding never ran, and 0 of 26 shared recommendations on dev ever got their
+    community tag. Silent, because a false `if` raises nothing. Only the mocks said `id`.
+    """
+
+    def _draft(self):
+        return {"name": "Dr. Sarah Chen", "reco_type": "professional",
+                "category": "pediatric dentist", "locality": "Lake Nona",
+                "place_based": True, "circle_place_id": "place-cf",
+                "trait": "gentle", "answers": {"profession": "Pediatric dentist"}}
+
+    def _save(self, returned):
+        import app.tip_share as ts
+        with patch("app.local_signals.save_local_signal", return_value=returned), \
+             patch("app.tip_tags.tags_for_tip", return_value=[]), \
+             patch("app.auth.jwt_user_id", return_value="u-1"), \
+             patch("app.local_signals.tag_local_signal") as tag, \
+             patch("app.reco_subject.ground_reco_subject") as ground:
+            ts._save_tip(draft=self._draft(), user_jwt="jwt", block_id="b1", zip_code=None)
+        return tag, ground
+
+    def test_grounding_runs_on_the_real_return_shape(self):
+        tag, ground = self._save({"signal_id": "sig-real", "matches_created": 0})
+        ground.assert_called_once()
+        self.assertEqual(ground.call_args.kwargs["signal_id"], "sig-real")
+
+    def test_the_community_tag_runs_too(self):
+        tag, _ = self._save({"signal_id": "sig-real", "matches_created": 0})
+        tag.assert_called_once()
+        self.assertEqual(tag.call_args.kwargs["signal_id"], "sig-real")
+        self.assertEqual(tag.call_args.kwargs["place_id"], "place-cf")
+
+    def test_a_legacy_id_key_still_works(self):
+        # Tolerated so a future change to either shape cannot re-break this in silence.
+        _, ground = self._save({"id": "sig-legacy", "matches_created": 0})
+        self.assertEqual(ground.call_args.kwargs["signal_id"], "sig-legacy")
+
+    def test_no_id_at_all_skips_both_without_raising(self):
+        tag, ground = self._save({"matches_created": 0})
+        tag.assert_not_called()
+        ground.assert_not_called()

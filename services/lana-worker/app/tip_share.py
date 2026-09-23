@@ -858,10 +858,16 @@ def _save_tip(
         # Tagged AFTER the insert rather than through save_local_signal, which is 150 lines
         # of dedupe/match/notify: threading one column through it is how a behaviour goes
         # missing in a copy-paste. Best-effort — an untagged tip is still a posted tip.
+        # save_local_signal returns `signal_id` (jsonb_build_object('signal_id', v_row.id)
+        # — 20261001120000), never `id`. Reading the wrong key made this whole block a
+        # no-op: 0 of 26 shared recommendations on dev had a circle_place_ref, so "share
+        # this to my community" silently did nothing. Both keys are accepted now so a
+        # future change to either shape cannot re-break it in silence.
+        new_signal_id = str((saved or {}).get("signal_id") or (saved or {}).get("id") or "")
         place_id = str(draft.get("circle_place_id") or "").strip()
-        if place_id and (saved or {}).get("id"):
+        if place_id and new_signal_id:
             try:
-                tag_local_signal(user_jwt, signal_id=str(saved["id"]), place_id=place_id)
+                tag_local_signal(user_jwt, signal_id=new_signal_id, place_id=place_id)
             except Exception:  # noqa: BLE001
                 # "Best-effort" above was a comment, not code: tag_local_signal raises
                 # not_a_member when the author has left the community since the draft
@@ -872,7 +878,7 @@ def _save_tip(
 
                 _logging.getLogger(__name__).warning(
                     "tip_community_tag_failed signal=%s place=%s",
-                    saved["id"], place_id, exc_info=True,
+                    new_signal_id, place_id, exc_info=True,
                 )
 
         # Ground the recommendation to its SUBJECT — the thing recommended, apart from the
@@ -884,14 +890,14 @@ def _save_tip(
         # NOTHING READS subject_ref YET. Best-effort to the point of silence: an ungrounded
         # tip (typed a name, below the search floor, or a type that never merges at all —
         # recipes, DIY tricks) is an ordinary outcome and renders exactly as it does today.
-        if (saved or {}).get("id"):
+        if new_signal_id:
             try:
                 from app.auth import jwt_user_id
                 from app.reco_subject import ground_reco_subject
 
                 ground_reco_subject(
                     user_jwt,
-                    signal_id=str(saved["id"]),
+                    signal_id=new_signal_id,
                     draft=draft,
                     zip_code=zip_code,
                     block_id=block_id,
@@ -901,7 +907,7 @@ def _save_tip(
                 import logging as _logging
 
                 _logging.getLogger(__name__).warning(
-                    "reco_subject_ground_failed signal=%s", saved["id"], exc_info=True,
+                    "reco_subject_ground_failed signal=%s", new_signal_id, exc_info=True,
                 )
         return saved, ""
     except Exception as exc:  # noqa: BLE001
