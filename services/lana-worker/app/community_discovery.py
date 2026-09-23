@@ -105,34 +105,66 @@ def joined_via_label(confirmed_via: str | None, source: str | None) -> str | Non
 # ── discover ──────────────────────────────────────────────────────────────────
 
 
+def _coord(value: Any, limit: float) -> float | None:
+    """A usable coordinate, or None. `limit` is 90 for a latitude, 180 for a longitude.
+
+    Anything that is not a finite number inside the globe is None rather than a raise:
+    on the way out it means the client cannot draw this row (it drops it, exactly as it
+    drops an address the geocoder could not match), and on the way in it means the
+    search falls back to her home point. Neither is worth a 500."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out in (float("inf"), float("-inf")) or abs(out) > limit:
+        return None
+    return out
+
+
 def discover_communities(
     user_id: str,
     *,
     limit: int = 20,
     query: str | None = None,
     radius_m: float | None = None,
+    lat: float | None = None,
+    lng: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Communities near the caller with at least one visible member.
+    """Communities near a point with at least one visible member.
 
-    Ordered by how alive the place is (members), then how close. Returns [] on any
-    error — a discovery panel that fails must read as "nothing yet", never as a
+    The point is `lat`/`lng` when a complete, in-range pair is given — /map sends its
+    own camera centre, so somebody looking at Orlando gets Orlando's communities rather
+    than her own street's. Absent or half-given, it falls back to her home/ZIP centroid,
+    which is what every caller before the map relied on.
+
+    Ordered by how alive the place is (members), then how close to that point. Returns
+    [] on any error — a discovery panel that fails must read as "nothing yet", never as a
     stack trace. `is_member` marks the caller's own places rather than hiding
     them, so the panel can say "you're in this one".
     """
     if not user_id:
         return []
+    args: dict[str, Any] = {
+        "p_user_id": user_id,
+        "p_radius_meters": float(radius_m if radius_m else radius_meters()),
+        "p_limit": max(1, min(int(limit or 20), _MAX_LIMIT)),
+        # p_locale is left at its default: it only renders the RPC's
+        # distance_text, which no longer reaches the wire (see the shaper below).
+        "p_query": (str(query).strip() or None) if query else None,
+    }
+    origin_lat, origin_lng = _coord(lat, 90.0), _coord(lng, 180.0)
+    if origin_lat is not None and origin_lng is not None:
+        # Sent ONLY when there is a real origin, and deliberately so. PostgREST resolves
+        # an RPC by its argument names: naming p_lat/p_lng against a database that has not
+        # taken 20261224120000 yet is a 404 (PGRST202), not an ignored extra. Withholding
+        # them keeps every origin-less caller — the chat card, the named-community
+        # resolver — working across that window, and narrows the blast radius to the one
+        # read that actually needs the new function.
+        args["p_lat"], args["p_lng"] = origin_lat, origin_lng
     try:
-        res = service_client().rpc(
-            "discover_communities_near",
-            {
-                "p_user_id": user_id,
-                "p_radius_meters": float(radius_m if radius_m else radius_meters()),
-                "p_limit": max(1, min(int(limit or 20), _MAX_LIMIT)),
-                # p_locale is left at its default: it only renders the RPC's
-                # distance_text, which no longer reaches the wire (see the shaper below).
-                "p_query": (str(query).strip() or None) if query else None,
-            },
-        ).execute()
+        res = service_client().rpc("discover_communities_near", args).execute()
         rows = res.data if isinstance(res.data, list) else []
     except Exception:
         logger.exception("discover_communities_failed user=%s", user_id)
@@ -161,6 +193,14 @@ def discover_communities(
                 "relation": place_relation_noun(primary),
                 "emoji": place_relation_emoji(primary),
                 "zip": str(r.get("zip") or "").strip() or None,
+                # The place's own point, straight off the row the distance was measured
+                # from — so a pin and the distance beside it can never disagree. Null for
+                # a place we hold no coordinates for (an imported row, a creator
+                # community); the client drops those, exactly as it drops an address the
+                # geocoder could not match. This is strictly less than `place_address`
+                # above already discloses.
+                "lat": _coord(r.get("lat"), 90.0),
+                "lng": _coord(r.get("lng"), 180.0),
                 "member_count": int(r.get("member_count") or 0),
                 # No distance on the wire. The SQL still measures it — it is what
                 # decides which places are inside the radius and how ties break — but
@@ -172,6 +212,115 @@ def discover_communities(
                     int(r.get("member_count") or 0),
                     bool(r.get("is_member")),
                 ),
+            }
+        )
+    return out
+
+
+# ── discover by topic — the only path a creator community has ─────────────────
+
+# Mirrors find_places_by_activity_semantic's default, and the RPC's own. A cosine under
+# this is noise, and a topic community matched on noise is worse than an empty list.
+_TOPIC_MIN_SIMILARITY = 0.55
+_TOPIC_MAX_LIMIT = 20
+
+
+def _similarity(value: Any) -> float | None:
+    """The RPC's cosine, clamped to 0-1, or None when it is not a number.
+
+    Not `_coord`: that one guards a globe, this one guards a score, and a helper that
+    answers both questions is a helper that will one day accept a latitude as a match
+    strength."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out:
+        return None
+    return max(0.0, min(out, 1.0))
+
+
+def discover_communities_by_topic(
+    user_id: str,
+    query: str,
+    *,
+    limit: int = 5,
+    creator_only: bool = True,
+) -> list[dict[str, Any]]:
+    """Communities whose MEMBERS describe themselves like the ask.
+
+    The twin of `discover_communities`, and deliberately NOT a section of it. "Near me" is
+    a claim about geography and stays false for a creator community forever — it has no
+    lat/lng by constraint, so it is excluded from discover_communities_near by
+    construction. "Like me" is a claim about content, and it is the only way anybody inside
+    the app can find "Iron Man Training" at all. A caller that wants both asks for both and
+    labels each section honestly (20261215120000).
+
+    The match runs on the members' own public self-claims, because nothing in the words
+    "Iron Man Training" is about triathlon and everything about the people in it is.
+
+    `hq_city`/`hq_lat`/`hq_lng` come back for RENDERING — a label and a pin at the city the
+    community is run FROM. Never a distance: there is no distance in this read and no
+    ordering by one. Returns [] on anything at all going wrong.
+    """
+    ask = str(query or "").strip()
+    if not user_id or not ask:
+        return []
+    try:
+        from app.layer1_handlers import _embed_attr_filter
+        from app.vec_util import to_pgvector
+
+        literal = to_pgvector(_embed_attr_filter(ask))
+        if not literal:
+            logger.info("discover_by_topic.skip reason=no_embedding ask=%r", ask[:60])
+            return []
+        res = service_client().rpc(
+            "discover_communities_semantic",
+            {
+                "p_user_id": user_id,
+                "p_query_embedding": literal,
+                "p_min_similarity": _TOPIC_MIN_SIMILARITY,
+                "p_limit": max(1, min(int(limit or 5), _TOPIC_MAX_LIMIT)),
+                "p_creator_only": bool(creator_only),
+            },
+        ).execute()
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        logger.exception("discover_by_topic_failed user=%s ask=%r", user_id, ask[:60])
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("place_id"):
+            continue
+        name = str(r.get("name") or "").strip()
+        if not is_joinable_place_name(name):
+            continue
+        ptype = str(r.get("place_type") or "").strip() or None
+        members = int(r.get("member_count") or 0)
+        out.append(
+            {
+                "place_id": str(r["place_id"]),
+                "place_name": name,
+                "place_type": ptype,
+                "relation": place_relation_noun(ptype),
+                "emoji": place_relation_emoji(ptype),
+                # Run FROM here. The client draws it as such — a creator community is not
+                # anywhere, so this is a provenance label with a pin, not a location.
+                "hq_city": str(r.get("hq_city") or "").strip() or None,
+                "hq_lat": _coord(r.get("hq_lat"), 90.0),
+                "hq_lng": _coord(r.get("hq_lng"), 180.0),
+                "member_count": members,
+                "is_member": bool(r.get("is_member")),
+                "status_line": _discovery_status_line(members, bool(r.get("is_member"))),
+                # The member self-claim that matched, which is the card's proof line: it
+                # says WHY this community answered the ask, in a member's own words. The
+                # RPC filters to public, self-subject claims, so this is never somebody's
+                # child and never a mutual-only claim shown to a stranger.
+                "matched_label": str(r.get("matched_label") or "").strip() or None,
+                # How close the matched claim was, 0-1. Kept on the row because the
+                # ordering is by it: a caller that wants to cut a weak tail can, and a
+                # caller that wants to say "a strong match" has the number to stand on.
+                "similarity": _similarity(r.get("similarity")),
             }
         )
     return out

@@ -1902,7 +1902,18 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
             # Coords + the GOOGLE id come along so a caller can use the place as a
             # venue (the host setup card pre-fills the meet's where from the community
             # picked) without a second read or a re-geocode.
-            .select("id, name, address, google_place_id, lat, lng")
+            #
+            # hq_* rides with them for the one kind of community that has no lat/lng at
+            # all: a creator community is not anywhere (places_creator_has_no_geography),
+            # so without its headquarters there is nothing to draw and the creator cannot
+            # see their own community on the map the day they make it. A LABEL and a pin
+            # position — never a distance, and never a discovery predicate
+            # (20261214120000). place_type comes along so a client can tell which it is
+            # holding without inferring it from which coordinate column is null.
+            .select(
+                "id, name, address, google_place_id, lat, lng, "
+                "place_type, hq_city, hq_lat, hq_lng"
+            )
             .in_("id", place_ids)
             .execute()
         )
@@ -1940,6 +1951,16 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "google_place_id": place.get("google_place_id"),
                 "lat": place.get("lat"),
                 "lng": place.get("lng"),
+                # The place's advisory kind, so a client knows a null lat/lng here is a
+                # creator community with a headquarters rather than a place we simply
+                # failed to locate.
+                "place_type": place.get("place_type"),
+                # Where it is RUN FROM. On a creator community this is the only point
+                # there will ever be, and it is drawn as "run from here", never as a
+                # distance from the reader. Null until something geocodes hq_city.
+                "hq_city": place.get("hq_city"),
+                "hq_lat": place.get("hq_lat"),
+                "hq_lng": place.get("hq_lng"),
                 "detail": detail,
                 # What people do here, `mine` marking this user's own — the edit
                 # panel's "your activities" chips and its add-more menu in one list.
@@ -1982,6 +2003,13 @@ _PUBLIC_CIRCLE_FIELDS = (
     "emoji",
     "member_count",
     "active",
+    # Label-level, and already public elsewhere: place_claim_card serves both to anon on
+    # /c/<handle>. A creator community has no address, so hq_city is the ONLY locality
+    # word its row can carry — without it someone else's list renders it as a community
+    # from nowhere. The POINTS (lat/lng, hq_lat/hq_lng) stay out, with google_place_id,
+    # because the place-as-venue block is hers.
+    "place_type",
+    "hq_city",
 )
 
 

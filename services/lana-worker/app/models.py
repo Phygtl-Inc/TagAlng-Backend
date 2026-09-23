@@ -503,6 +503,14 @@ class CommunityDiscoveryRow(BaseModel):
     relation: str | None = None
     emoji: str | None = None
     zip: str | None = None
+    # Where the place actually is, for a map that would otherwise have to forward-geocode
+    # `place_name, place_address` to find a point the RPC already held (it measures the
+    # radius off it). Null when we hold no coordinates — an imported row, or a creator
+    # community, which has none by constraint — and a client drops those rows exactly as
+    # it drops an address the geocoder could not match. Discloses strictly less than
+    # `place_address` beside it: the address names the spot, this only plots it.
+    lat: float | None = None
+    lng: float | None = None
     member_count: int = 0
     is_member: bool = False
     status_line: str | None = None
@@ -549,6 +557,46 @@ class CommunityDiscoveryResponse(BaseModel):
     # The radius actually searched, in metres — so an empty list can be explained
     # ("nothing within ~5 miles") rather than looking like a bug.
     radius_meters: int = 0
+
+
+class TopicCommunityRow(BaseModel):
+    """A community whose MEMBERS describe themselves like the ask — the only discovery
+    path a creator community has (POST /lana/circles/discover-topic).
+
+    Deliberately a different row from `CommunityDiscoveryRow`, because it answers a
+    different question and the two must be allowed to disagree. There is no `lat`/`lng`
+    here and no distance: a creator community is not anywhere, and folding "like me" into
+    "near me" is how a global topic community ends up rendered beside a neighbour's gym
+    under one heading (20261215120000).
+    """
+
+    place_id: str
+    place_name: str | None = None
+    place_type: str | None = None
+    relation: str | None = None
+    emoji: str | None = None
+    # Where it is RUN FROM — a label and a pin position, never a distance and never a
+    # reason a row was returned. A client draws it as "run from Brooklyn, NY".
+    hq_city: str | None = None
+    hq_lat: float | None = None
+    hq_lng: float | None = None
+    member_count: int = 0
+    is_member: bool = False
+    status_line: str | None = None
+    # The member self-claim that matched, in that member's own words — the card's proof
+    # line for WHY this answered the ask. Public, self-subject claims only, so it is never
+    # somebody's child and never a mutual-only claim shown to a stranger. No name attached.
+    matched_label: str | None = None
+    # 0-1. Null means the RPC returned something unreadable, not "no match" — a row with
+    # no match never comes back at all.
+    similarity: float | None = None
+
+
+class TopicCommunityResponse(BaseModel):
+    communities: list[TopicCommunityRow] = Field(default_factory=list)
+    # Echoed so an empty list can be explained by what was actually asked, rather than
+    # looking like the feature is broken.
+    query: str = ""
 
 
 class CommunityJoinResponse(BaseModel):

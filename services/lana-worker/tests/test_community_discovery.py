@@ -2,12 +2,16 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pydantic
+
 from app import community_discovery as cd
+from app.auth import AuthSession
 from app.community_discovery import (
     CONFIRMED_VIA_GROUNDING,
     CONFIRMED_VIA_JOIN,
     _discovery_status_line,
     discover_communities,
+    discover_communities_by_topic,
     join_community,
     joined_via_label,
     mail_join_to_members,
@@ -46,6 +50,8 @@ _RPC_ROWS = [
         "address": "9145 Narcoossee Rd",
         "place_type": "fitness",
         "zip": "32827",
+        "lat": 28.3800,
+        "lng": -81.2700,
         "member_count": 34,
         "member_types": ["fitness"],
         "distance_meters": 900.0,
@@ -58,6 +64,9 @@ _RPC_ROWS = [
         "address": None,
         "place_type": None,
         "zip": "32827",
+        # An imported row we hold no coordinates for — the client drops it from the map.
+        "lat": None,
+        "lng": None,
         "member_count": 12,
         "member_types": ["faith"],
         "distance_meters": 3000.0,
@@ -135,6 +144,354 @@ class TestDiscoverCommunities(unittest.TestCase):
         self.assertEqual(args["p_query"], "orange")
         self.assertEqual(args["p_limit"], 40)  # capped
         self.assertEqual(args["p_user_id"], "u1")
+
+
+class TestDiscoveryPointOnTheRow(unittest.TestCase):
+    """The place's own geography reaches the client (backend-asks §53a).
+
+    Without it /map forward-geocodes `name, address` through Mapbox to recover a point
+    the RPC already measured the radius from: a paid lookup per community per session,
+    and a row Mapbox cannot match is dropped instead of drawn where we knew it was."""
+
+    @patch("app.community_discovery.service_client")
+    def test_point_rides_the_row(self, sb) -> None:
+        sb.return_value = _sb({}, rpc_data=_RPC_ROWS)
+        first = discover_communities("u1")[0]
+        self.assertEqual(first["lat"], 28.3800)
+        self.assertEqual(first["lng"], -81.2700)
+
+    @patch("app.community_discovery.service_client")
+    def test_a_place_with_no_coordinates_sends_null_not_zero(self, sb) -> None:
+        """Null Island is off West Africa. A row coerced to 0.0 does not fail to draw —
+        it draws somewhere real and wrong, which no client can tell from a true point."""
+        sb.return_value = _sb({}, rpc_data=_RPC_ROWS)
+        row = discover_communities("u1")[1]
+        self.assertIsNone(row["lat"])
+        self.assertIsNone(row["lng"])
+
+    @patch("app.community_discovery.service_client")
+    def test_junk_from_the_wire_never_becomes_a_point(self, sb) -> None:
+        for bad in ("", "  ", "not-a-number", float("nan"), float("inf"), 91.0, True, {}):
+            with self.subTest(bad=bad):
+                rows = list(_RPC_ROWS)
+                rows[0] = {**rows[0], "lat": bad, "lng": bad}
+                sb.return_value = _sb({}, rpc_data=rows)
+                self.assertIsNone(discover_communities("u1")[0]["lat"])
+
+    @patch("app.community_discovery.service_client")
+    def test_still_no_member_identities(self, sb) -> None:
+        # A point is strictly less than `place_address` already discloses; it must not
+        # have brought anything else along with it.
+        sb.return_value = _sb({}, rpc_data=_RPC_ROWS)
+        for row in discover_communities("u1"):
+            for leaked in ("nickname", "avatar_url", "peer_user_id", "members", "member_types"):
+                self.assertNotIn(leaked, row)
+
+
+class TestDiscoveryOrigin(unittest.TestCase):
+    """Which point the radius is measured from (backend-asks §53b).
+
+    Reported as "Orlando has no communities on /map". It has dozens — the read only ever
+    searched around the caller's own home, so anyone whose home is elsewhere got an empty
+    list that reads as "nothing here" when it means "you asked about somewhere else"."""
+
+    @patch("app.community_discovery.service_client")
+    def test_an_explicit_origin_reaches_the_rpc(self, sb) -> None:
+        client = _sb({}, rpc_data=[])
+        sb.return_value = client
+        discover_communities("u1", lat=28.3772, lng=-81.2620)
+        args = client.rpc.call_args[0][1]
+        self.assertEqual(args["p_lat"], 28.3772)
+        self.assertEqual(args["p_lng"], -81.2620)
+
+    @patch("app.community_discovery.service_client")
+    def test_no_origin_withholds_the_arguments_entirely(self, sb) -> None:
+        """Not "sends nulls". PostgREST resolves an RPC by argument NAME, so naming
+        p_lat/p_lng at a database that has not taken 20261224120000 is a 404 for the
+        whole read — and would take the chat card down with the map."""
+        client = _sb({}, rpc_data=[])
+        sb.return_value = client
+        discover_communities("u1")
+        args = client.rpc.call_args[0][1]
+        self.assertNotIn("p_lat", args)
+        self.assertNotIn("p_lng", args)
+
+    @patch("app.community_discovery.service_client")
+    def test_an_unusable_origin_falls_back_to_her_home(self, sb) -> None:
+        """Half a pair, or a swapped lat/lng that lands off the globe, is a caller bug.
+        Centring on it returns a plausible-looking empty list; falling back to the point
+        we are sure of returns her own neighbourhood, which is at least true."""
+        for lat, lng in (
+            (28.3772, None),          # half a pair
+            (None, -81.2620),         # the other half
+            (91.0, -81.2620),         # off the globe
+            (28.3772, -181.0),        # ditto
+            (float("nan"), 0.0),
+            ("not-a-number", "-81.2620"),
+            (True, False),            # a bool is an int in Python, and not a latitude
+        ):
+            with self.subTest(lat=lat, lng=lng):
+                client = _sb({}, rpc_data=[])
+                sb.return_value = client
+                discover_communities("u1", lat=lat, lng=lng)
+                args = client.rpc.call_args[0][1]
+                self.assertNotIn("p_lat", args)
+                self.assertNotIn("p_lng", args)
+
+    @patch("app.community_discovery.service_client")
+    def test_a_numeric_string_is_a_coordinate(self, sb) -> None:
+        # Not leniency for its own sake: the route declares lat/lng as floats, so pydantic
+        # has already turned "28.3772" into 28.3772 before the shaper sees it. Refusing it
+        # here would only diverge from the one caller that exists.
+        client = _sb({}, rpc_data=[])
+        sb.return_value = client
+        discover_communities("u1", lat="28.3772", lng="-81.2620")
+        args = client.rpc.call_args[0][1]
+        self.assertEqual(args["p_lat"], 28.3772)
+        self.assertEqual(args["p_lng"], -81.2620)
+
+    @patch("app.community_discovery.service_client")
+    def test_the_equator_is_a_real_origin(self, sb) -> None:
+        # 0.0 is falsy and is also a legitimate coordinate. A truthiness check here would
+        # quietly send anyone on the equator or the prime meridian back to their home.
+        client = _sb({}, rpc_data=[])
+        sb.return_value = client
+        discover_communities("u1", lat=0.0, lng=0.0)
+        args = client.rpc.call_args[0][1]
+        self.assertEqual(args["p_lat"], 0.0)
+        self.assertEqual(args["p_lng"], 0.0)
+
+
+class TestDiscoverRouteCarriesTheOrigin(unittest.TestCase):
+    """POST /lana/circles/discover — the wire half of backend-asks §53.
+
+    The client has been sending lat/lng on every call since the map started tracking its
+    own camera; until this lands the route has nowhere to put them and drops them
+    silently, so the map stays centred on her home no matter where she pans."""
+
+    _ROW = {
+        "place_id": "p1",
+        "place_name": "Lake Nona Fitness",
+        "place_address": "9 Tavistock Lakes Blvd, Orlando, FL",
+        "place_type": "fitness",
+        "relation": "gym",
+        "emoji": "\U0001f3cb",
+        "zip": "32827",
+        "lat": 28.3800,
+        "lng": -81.2700,
+        "member_count": 34,
+        "is_member": False,
+        "status_line": "34 people",
+    }
+
+    def _call(self, body):
+        from app.main import post_circles_discover
+
+        seen = {}
+
+        def _discover(user_id, **kwargs):
+            seen.update(kwargs)
+            return [dict(self._ROW)]
+
+        with (
+            patch("app.main.verify_auth", return_value=AuthSession(
+                user_id="u-caller", is_anonymous=False, phone_verified=True,
+                home_block_id="block-a",
+            )),
+            patch("app.community_discovery.discover_communities", side_effect=_discover),
+            patch("app.community_affinity.attach_affinity"),
+            patch("app.community_fit_line.attach_fit_lines"),
+        ):
+            return post_circles_discover(body, authorization="Bearer test-token"), seen
+
+    def test_the_maps_camera_centre_reaches_the_read(self) -> None:
+        from app.main import CommunityDiscoverBody
+
+        _, seen = self._call(CommunityDiscoverBody(lat=28.3772, lng=-81.2620))
+        self.assertEqual(seen["lat"], 28.3772)
+        self.assertEqual(seen["lng"], -81.2620)
+
+    def test_an_origin_less_call_is_unchanged(self) -> None:
+        from app.main import CommunityDiscoverBody
+
+        _, seen = self._call(CommunityDiscoverBody())
+        self.assertIsNone(seen["lat"])
+        self.assertIsNone(seen["lng"])
+
+    def test_the_point_is_on_the_wire(self) -> None:
+        from app.main import CommunityDiscoverBody
+
+        response, _ = self._call(CommunityDiscoverBody(lat=28.3772, lng=-81.2620))
+        payload = response.communities[0].model_dump()
+        self.assertEqual(payload["lat"], 28.3800)
+        self.assertEqual(payload["lng"], -81.2700)
+        # The point is the place's own, NOT the origin we searched from — a map that
+        # drew every pin at its camera centre would look perfectly plausible.
+        self.assertNotEqual(payload["lat"], 28.3772)
+        # And nothing else came with it.
+        for leaked in ("nickname", "avatar_url", "peer_user_id", "members"):
+            self.assertNotIn(leaked, payload)
+
+    def test_an_off_globe_origin_is_refused_at_the_edge(self) -> None:
+        """The shaper falls back for junk, but the route is where a wired client learns
+        it sent nonsense — a silent fallback to her home would look like a working map
+        showing the wrong city."""
+        from app.main import CommunityDiscoverBody
+
+        for lat, lng in ((91.0, -81.26), (-91.0, -81.26), (28.37, 181.0), (28.37, -181.0)):
+            with self.subTest(lat=lat, lng=lng):
+                with self.assertRaises(pydantic.ValidationError):
+                    CommunityDiscoverBody(lat=lat, lng=lng)
+
+
+_TOPIC_ROWS = [
+    {
+        "place_id": "c1",
+        "name": "Run with Maya",
+        "place_type": "creator",
+        "hq_city": "Brooklyn, NY",
+        "hq_lat": 40.6782,
+        "hq_lng": -73.9442,
+        "member_count": 128,
+        "is_member": False,
+        "matched_label": "Trail running",
+        "similarity": 0.81,
+    },
+    {
+        "place_id": "c2",
+        "name": "Iron Man Training",
+        "place_type": "creator",
+        # Claimed before anything geocoded a headquarters — a label, no pin.
+        "hq_city": None,
+        "hq_lat": None,
+        "hq_lng": None,
+        "member_count": 4,
+        "is_member": True,
+        "matched_label": "5am swims",
+        "similarity": 0.62,
+    },
+]
+
+
+def _embedded(sb, rows):
+    """The RPC mocked with an embedding that resolves — the two patches every topic test
+    needs, since a missing vector short-circuits before the call."""
+    client = _sb({}, rpc_data=rows)
+    sb.return_value = client
+    return client
+
+
+class TestDiscoverByTopic(unittest.TestCase):
+    """The only discovery path a creator community has (20261215120000).
+
+    It is NOT a section of discover_communities and must not become one: "near me" is a
+    claim about geography that stays false for a creator community forever, "like me" is a
+    claim about content, and folding them together is how a global topic community ends up
+    rendered beside a neighbour's gym under one heading."""
+
+    def _call(self, sb, rows, **kwargs):
+        client = _embedded(sb, rows)
+        with (
+            patch("app.layer1_handlers._embed_attr_filter", return_value=[0.1] * 768),
+            patch("app.vec_util.to_pgvector", return_value="[0.1]"),
+        ):
+            return client, discover_communities_by_topic("u1", "long-distance triathlon", **kwargs)
+
+    @patch("app.community_discovery.service_client")
+    def test_rows_carry_the_headquarters_and_the_proof(self, sb) -> None:
+        _, rows = self._call(sb, _TOPIC_ROWS)
+        self.assertEqual(len(rows), 2)
+        first = rows[0]
+        self.assertEqual(first["hq_city"], "Brooklyn, NY")
+        self.assertEqual(first["hq_lat"], 40.6782)
+        self.assertEqual(first["hq_lng"], -73.9442)
+        # The member's own words for WHY this answered the ask.
+        self.assertEqual(first["matched_label"], "Trail running")
+        self.assertAlmostEqual(first["similarity"], 0.81)
+
+    @patch("app.community_discovery.service_client")
+    def test_no_distance_anywhere_on_the_row(self, sb) -> None:
+        """A headquarters is a city centroid somebody typed on a form, not a place the
+        reader can walk to. The moment one of these carries a distance, the constraint
+        that keeps creator communities out of the radius read has been undone in the
+        serializer instead of the SQL."""
+        _, rows = self._call(sb, _TOPIC_ROWS)
+        for row in rows:
+            self.assertNotIn("distance_text", row)
+            self.assertNotIn("distance_meters", row)
+            self.assertNotIn("lat", row)
+            self.assertNotIn("lng", row)
+            self.assertNotIn("away", str(row.get("status_line") or ""))
+
+    @patch("app.community_discovery.service_client")
+    def test_a_headquarters_with_no_point_keeps_its_label(self, sb) -> None:
+        # The city still reads on the card; only the pin is missing. Coercing the absent
+        # point to 0.0 would draw it in the Atlantic, which no client can tell from real.
+        _, rows = self._call(sb, _TOPIC_ROWS)
+        self.assertEqual(rows[1]["hq_city"], None)
+        self.assertIsNone(rows[1]["hq_lat"])
+        self.assertIsNone(rows[1]["hq_lng"])
+
+    @patch("app.community_discovery.service_client")
+    def test_the_ask_reaches_the_rpc_with_creator_only_on(self, sb) -> None:
+        client, _ = self._call(sb, [])
+        args = client.rpc.call_args[0][1]
+        self.assertEqual(client.rpc.call_args[0][0], "discover_communities_semantic")
+        self.assertIs(args["p_creator_only"], True)
+        self.assertEqual(args["p_user_id"], "u1")
+
+    @patch("app.community_discovery.service_client")
+    def test_creator_only_can_be_widened(self, sb) -> None:
+        client, _ = self._call(sb, [], creator_only=False)
+        self.assertIs(client.rpc.call_args[0][1]["p_creator_only"], False)
+
+    @patch("app.community_discovery.service_client")
+    def test_limit_is_capped(self, sb) -> None:
+        client, _ = self._call(sb, [], limit=999)
+        self.assertEqual(client.rpc.call_args[0][1]["p_limit"], 20)
+
+    @patch("app.community_discovery.service_client")
+    def test_no_identities_ride_the_row(self, sb) -> None:
+        # matched_label is a claim's text, never its author. A name arriving with it
+        # would turn a discovery surface into a roster.
+        _, rows = self._call(sb, _TOPIC_ROWS)
+        for row in rows:
+            for leaked in ("nickname", "avatar_url", "peer_user_id", "user_id", "members"):
+                self.assertNotIn(leaked, row)
+
+    @patch("app.community_discovery.service_client")
+    def test_an_empty_ask_never_reaches_the_rpc(self, sb) -> None:
+        client = _embedded(sb, _TOPIC_ROWS)
+        for ask in ("", "   ", None):
+            with self.subTest(ask=ask):
+                self.assertEqual(discover_communities_by_topic("u1", ask), [])
+        client.rpc.assert_not_called()
+
+    @patch("app.community_discovery.service_client")
+    def test_a_missing_embedding_reads_as_nothing_yet(self, sb) -> None:
+        _embedded(sb, _TOPIC_ROWS)
+        with (
+            patch("app.layer1_handlers._embed_attr_filter", return_value=None),
+            patch("app.vec_util.to_pgvector", return_value=None),
+        ):
+            self.assertEqual(discover_communities_by_topic("u1", "triathlon"), [])
+
+    @patch("app.community_discovery.service_client")
+    def test_rpc_failure_reads_as_nothing_yet(self, sb) -> None:
+        client = MagicMock()
+        client.rpc.side_effect = RuntimeError("no such function")
+        sb.return_value = client
+        with (
+            patch("app.layer1_handlers._embed_attr_filter", return_value=[0.1] * 768),
+            patch("app.vec_util.to_pgvector", return_value="[0.1]"),
+        ):
+            self.assertEqual(discover_communities_by_topic("u1", "triathlon"), [])
+
+    @patch("app.community_discovery.service_client")
+    def test_similarity_is_clamped_not_trusted(self, sb) -> None:
+        rows = [{**_TOPIC_ROWS[0], "similarity": bad} for bad in (1.4, -0.2, "x", None)]
+        _, shaped = self._call(sb, rows)
+        self.assertEqual([r["similarity"] for r in shaped], [1.0, 0.0, None, None])
 
 
 class TestJoinProvenance(unittest.TestCase):

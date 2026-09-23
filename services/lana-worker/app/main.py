@@ -89,6 +89,7 @@ from app.models import (
     CommunityCardRow,
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
+    CommunityDraft,
     CommunityEventRow,
     CommunityFeatureRow,
     CommunityJoinResponse,
@@ -97,6 +98,7 @@ from app.models import (
     CommunityMemberRow,
     CommunityMembersResponse,
     CommunityProfileResponse,
+    CommunitySetupRequest,
     CompleteSessionRequest,
     CompleteSessionResponse,
     CreateSessionRequest,
@@ -141,9 +143,9 @@ from app.models import (
     SignalSavedPayload,
     TipDraft,
     TipDraftPayload,
-    CommunityDraft,
-    CommunitySetupRequest,
     TipSetupRequest,
+    TopicCommunityResponse,
+    TopicCommunityRow,
     TurnDebug,
     TurnRouting,
     UiActionRow,
@@ -3835,6 +3837,27 @@ class CommunityDiscoverBody(_BaseModel):
     # Optional name filter ("orange", "st luke") — everything nearby when absent.
     query: str | None = None
     limit: int = 20
+    # The point to search AROUND — /map sends its own camera centre, so somebody looking
+    # at Orlando gets Orlando's communities instead of an empty panel that reads as
+    # "nothing here" when it means "you asked about somewhere else". Absent, the search
+    # falls back to the caller's home/ZIP centroid, which is what every caller before the
+    # map relied on. This changes which point the radius is measured from and discloses
+    # nothing new. A half-given pair falls back too, rather than centring on the equator.
+    lat: float | None = _Field(default=None, ge=-90, le=90)
+    lng: float | None = _Field(default=None, ge=-180, le=180)
+
+
+class CommunityDiscoverTopicBody(_BaseModel):
+    # What they are looking for, in their own words — "people who do long-distance
+    # triathlon" beats "sports", because the ask is embedded and matched against what
+    # members say about THEMSELVES.
+    query: str
+    limit: int = 5
+    # False widens the match to every community, not just the ones geography cannot
+    # reach — "communities like this one". Default true: this endpoint exists for the
+    # creator communities that discover_communities_near excludes by construction, and a
+    # surface that wants the near ones already has that endpoint.
+    creator_only: bool = True
 
 
 class CommunityJoinBody(_BaseModel):
@@ -3964,17 +3987,23 @@ def post_circles_discover(
     body: CommunityDiscoverBody | None = None,
     authorization: str | None = Header(default=None),
 ):
-    """Communities near the caller that already have members — the ones they could
+    """Communities near a point that already have members — the ones the caller could
     join (C-CIRCLE-COMM-DISCOVER), each with how well SHE fits it.
 
-    Returns places, member counts, a 0-1 `affinity` and the authored "why Lana sees a
-    fit" block — and deliberately NO member identities: who is at a place stays
-    members-only (§F), so joining is what earns the names. `is_member` marks the
-    caller's own places instead of hiding them.
+    `lat`/`lng` is the point to search around: /map sends its own camera centre, so
+    somebody looking at Orlando gets Orlando's communities. Without it the search falls
+    back to her home/ZIP centroid, which is what every caller before the map relied on —
+    and what made an Orlando map look empty while dozens of real communities sat in it.
 
-    No distance. The only origin the worker holds is a coarse home/ZIP centroid, which
-    is enough to pick what is inside the radius and nothing like enough to tell a reader
-    how far she is from it right now — that is the client's to compute."""
+    Returns places, their own `lat`/`lng`, member counts, a 0-1 `affinity` and the
+    authored "why Lana sees a fit" block — and deliberately NO member identities: who is
+    at a place stays members-only (§F), so joining is what earns the names. `is_member`
+    marks the caller's own places instead of hiding them.
+
+    Still no distance, and the point does not change that. What the origin fixes is WHICH
+    places come back; how far the reader is from one is a question about where she is
+    standing, which neither a home centroid nor a map camera answers. She has her own
+    position and the place's point on the same row — that subtraction is the client's."""
     auth = verify_auth(authorization)
     from app.community_affinity import attach_affinity
     from app.community_discovery import discover_communities, radius_meters
@@ -3984,6 +4013,8 @@ def post_circles_discover(
         auth.user_id,
         limit=max(1, min(int((body.limit if body else 20) or 20), 40)),
         query=(body.query if body else None),
+        lat=(body.lat if body else None),
+        lng=(body.lng if body else None),
     )
     # Score, then author — from ONE read, so the number and the sentence can never be
     # built from different facts. Both are best-effort: a failure leaves `affinity` null
@@ -4000,6 +4031,8 @@ def post_circles_discover(
                 relation=r.get("relation"),
                 emoji=r.get("emoji"),
                 zip=r.get("zip"),
+                lat=r.get("lat"),
+                lng=r.get("lng"),
                 member_count=int(r.get("member_count") or 0),
                 is_member=bool(r.get("is_member")),
                 status_line=r.get("status_line"),
@@ -4011,6 +4044,59 @@ def post_circles_discover(
             if str(r.get("place_id") or "").strip()
         ],
         radius_meters=int(radius_meters()),
+    )
+
+
+@app.post("/lana/circles/discover-topic", response_model=TopicCommunityResponse)
+def post_circles_discover_topic(
+    body: CommunityDiscoverTopicBody,
+    authorization: str | None = Header(default=None),
+):
+    """Communities whose MEMBERS describe themselves like the ask.
+
+    The twin of /lana/circles/discover, and a separate endpoint on purpose. That one
+    answers "what is near me", which stays false for a creator community forever — it has
+    no coordinates by constraint, so it is excluded from the radius read by construction.
+    This answers "who is like me", which is the only way anyone inside the app can find a
+    creator community at all. A surface that wants both calls both and labels each section
+    honestly; folding them together is how a global topic community ends up rendered
+    beside a neighbour's gym under one heading.
+
+    Rows carry `hq_city`/`hq_lat`/`hq_lng` for drawing — the city the community is RUN
+    FROM, never a distance from the reader and never a reason a row came back. And
+    `matched_label`, the member self-claim that matched, so the card can say why this is
+    an answer. No member identities: public, self-subject claims only, with no name on
+    them."""
+    auth = verify_auth(authorization)
+    from app.community_discovery import discover_communities_by_topic
+
+    rows = discover_communities_by_topic(
+        auth.user_id,
+        body.query,
+        limit=max(1, min(int(body.limit or 5), 20)),
+        creator_only=bool(body.creator_only),
+    )
+    return TopicCommunityResponse(
+        communities=[
+            TopicCommunityRow(
+                place_id=str(r.get("place_id") or ""),
+                place_name=r.get("place_name"),
+                place_type=r.get("place_type"),
+                relation=r.get("relation"),
+                emoji=r.get("emoji"),
+                hq_city=r.get("hq_city"),
+                hq_lat=r.get("hq_lat"),
+                hq_lng=r.get("hq_lng"),
+                member_count=int(r.get("member_count") or 0),
+                is_member=bool(r.get("is_member")),
+                status_line=r.get("status_line"),
+                matched_label=r.get("matched_label"),
+                similarity=r.get("similarity"),
+            )
+            for r in rows
+            if str(r.get("place_id") or "").strip()
+        ],
+        query=str(body.query or "").strip()[:200],
     )
 
 
