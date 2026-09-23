@@ -763,6 +763,32 @@ def _discovery_surface_from_ctx(ctx: dict[str, Any]) -> DiscoverySurfacePayload 
     )
 
 
+def _reco_cards_from_ctx(ctx: dict[str, Any]) -> list["RecoCardRow"]:
+    """Subject cards off ctx, shaped defensively (§Stage 3).
+
+    Pydantic-validated rather than passed through: app/reco_cards.py builds these from RPC
+    rows, and a field it fails to produce must degrade to a default here rather than 500
+    the whole turn. A card that cannot be built is dropped — the answer still ships as
+    `peer_matches`, which is the point of this being a second surface and not a swap.
+    """
+    from app.models import RecoCardRow
+
+    raw = ctx.get("reco_cards")
+    if not isinstance(raw, list):
+        return []
+    out: list[RecoCardRow] = []
+    for row in raw[:8]:
+        if not isinstance(row, dict) or not str(row.get("title") or "").strip():
+            continue
+        try:
+            out.append(RecoCardRow(**row))
+        except Exception:  # noqa: BLE001 — one malformed card never costs the turn
+            logging.getLogger(__name__).warning(
+                "reco_card_dropped subject=%s", row.get("subject_ref"), exc_info=True
+            )
+    return out
+
+
 def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
     raw = ctx.get("peer_matches")
     if not isinstance(raw, list):
@@ -1213,6 +1239,9 @@ def _onboarding_fields(
     show_peers = ui_intent in PEER_SURFACE_UI_INTENTS or (
         bool(peers_raw) and active in PEER_DISCOVERY_ACTIVE_INTENTS
     )
+    # Same gate as peer_matches, deliberately: these are two views of ONE answer, and a
+    # turn that is not showing the neighbours has no business showing the subjects either.
+    reco_cards = _reco_cards_from_ctx(ctx) if show_peers else []
     peers = peers_raw if show_peers else []
     if peers_raw and not peers:
         _warn_surface_dropped(
@@ -1282,6 +1311,8 @@ def _onboarding_fields(
         "phone_verified": auth.phone_verified,
         "home_block_assigned": bool(auth.home_block_id or ctx.get("preview_block_id")),
         "peer_matches": peers,
+        "reco_cards": reco_cards,
+        "reco_cards_total": int(ctx.get("reco_cards_total") or 0) if show_peers else 0,
         "discovery_surface": discovery_surface,
         "activity_previews": activities,
         "communities": _communities_from_ctx(ctx),
@@ -2737,6 +2768,12 @@ def set_tip_setup(
         # not be re-filled from whatever is selected at the top of the app.
         draft["circle_picked"] = True
         draft["circle_name"] = _community_name_for(pid) if ok else None
+    # The place the user tapped on the subject step. Kept on the draft rather than resolved
+    # here: grounding happens at publish, and a draft that is still being edited must not
+    # own a subject row yet. Stored raw and trusted no further than an id — publish hands
+    # it to Google's own place lookup, which is what decides whether it is real.
+    if (body.google_place_id or "").strip():
+        draft["subject_google_place_id"] = str(body.google_place_id).strip()
     ctx["tip_draft"] = draft
     # Every step the carousel showed counts as offered, so the turn after this does not
     # re-ask the optionals the user chose to leave blank — it goes to the ready card.

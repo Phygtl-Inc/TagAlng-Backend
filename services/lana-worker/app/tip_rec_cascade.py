@@ -235,4 +235,79 @@ def stamp_tip_peer_surface(
     surface = tip_discovery_surface(shown)
     if surface:
         ctx["discovery_surface"] = surface
+    _stamp_subject_cards(ctx, tips, phone_verified=phone_verified, user_id=user_id)
     return shown
+
+
+def reco_cards_enabled() -> bool:
+    """§Stage 3, off by default.
+
+    The subject card is a SECOND surface, never a replacement: `peer_matches` keeps its
+    shape and the live client keeps working, while `reco_cards` rides alongside for a
+    client that knows about it. Replacing a surface behind a flag is how PR #96 broke
+    rapport — a flag that swaps one store for another has no safe half-way state, and this
+    one is additive precisely so it does.
+    """
+    import os
+
+    return os.environ.get("LANA_RECO_CARDS", "0").strip().lower() not in {
+        "", "0", "false", "off",
+    }
+
+
+def _ask_chips(ctx: dict[str, Any]) -> list[str]:
+    """The facets the reader asked for, off the ask draft she already confirmed.
+
+    Screen 07/08's "WHY LANA SEES A FIT" chips on a results card are the ASK's own words
+    ("pediatric dentist", "gentle", "toddlers", "Lake Nona") — nothing authored, nothing
+    inferred about the subject. Reusing the draft's chips keeps the results page saying
+    exactly what the confirm card said, rather than a second opinion about the question.
+    """
+    draft = ctx.get("ask_draft")
+    if not isinstance(draft, dict):
+        return []
+    out: list[str] = []
+    for chip in draft.get("chips") or []:
+        label = (
+            str(chip.get("label") or "").strip()
+            if isinstance(chip, dict)
+            else str(chip or "").strip()
+        )
+        if label and label not in out:
+            out.append(label)
+    return out[:4]
+
+
+def _stamp_subject_cards(
+    ctx: dict[str, Any], tips: list[dict[str, Any]], *, phone_verified: bool,
+    user_id: str | None = None,
+) -> None:
+    """One card per recommended subject, beside the person rows.
+
+    Cache-only: a results list must not spend a model call per card (see
+    reco_cards.subject_cards_from_tips). Best-effort — this is an additional surface, and
+    failing to build it must never cost the reader the answer they asked for.
+    """
+    if not reco_cards_enabled():
+        return
+    try:
+        from app.reco_cards import subject_cards_from_tips
+
+        cards = subject_cards_from_tips(
+            tips,
+            phone_verified=phone_verified,
+            lang=str(ctx.get("preferred_lang") or "en"),
+            allow_compose=False,
+            reader_id=user_id,
+            ask_chips=_ask_chips(ctx),
+        )
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("reco_cards_stamp_failed", exc_info=True)
+        return
+    if cards:
+        ctx["reco_cards"] = cards[:PAGE_SIZE]
+        # "9 found nearby" — how many subjects the ask actually turned up, which is not
+        # len(the page). A header that counts the page can only ever say "5 of 5".
+        ctx["reco_cards_total"] = len(cards)

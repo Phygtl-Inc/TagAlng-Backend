@@ -213,8 +213,11 @@ class TestPlaceStepGetsRealPlaces(unittest.TestCase):
             "answers": {"known_for": "the big shaded playground"},
         }
         with mock.patch("app.tip_share._extract_tip_fields", return_value=(draft, None)), mock.patch(
-            "app.places.nearby_place_suggestions",
-            return_value=["Lake Nona Park", "Nona Adventure Park"],
+            "app.places.nearby_place_options",
+            return_value=[
+                {"name": "Lake Nona Park", "place_id": "ChIJ_lnp", "lat": 28.4, "lng": -81.2},
+                {"name": "Nona Adventure Park", "place_id": "ChIJ_nap", "lat": 28.4, "lng": -81.3},
+            ],
         ), mock.patch("app.tip_share._reco_tallies", return_value=[]):
             run_tip_share_turn(
                 user_message="lake nona park is great, big shaded playground",
