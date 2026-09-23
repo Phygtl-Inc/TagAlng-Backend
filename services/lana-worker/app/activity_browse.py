@@ -192,6 +192,19 @@ _TOPIC_SCORE_SCALE = (
     "0.0-0.2 unrelated (basketball / book club)"
 )
 
+# Stretch offer (Rapport Reply): the "closely related" band of the scale above, read
+# straight off its text. Scores are rounded to one decimal (_coerce_topic_score), so the
+# band is exactly 0.6, 0.7 and 0.8, inclusive. 0.9+ is deliberately out: an unmatched
+# "same thing" was rejected for a date, time or host constraint, not for its topic, and
+# is not a topic stretch. Retune this together with _TOPIC_SCORE_SCALE, never apart.
+_STRETCH_BAND = (0.6, 0.8)
+
+# No-match order. True: a nearby stretch is offered BEFORE the 40-200 km ring and the
+# far probe, and showing one skips both. False: the ring runs first, and the stretch is
+# offered before the far probe. "Nearby stretch vs faraway exact match" is an open
+# product call — this is the one switch for it.
+_STRETCH_BEFORE_WIDEN = True
+
 # There is deliberately NO score threshold here. Membership is the model's own
 # match_indices, as it has always been. A cut over the score was tried and reverted: it
 # reads a different axis than the match decision, and the model happily matches an event
@@ -300,6 +313,10 @@ def _widen_search(
             return [], ""
         _attach_host_names(rows)
         matched, label = _filter_events_by_query(rows, interest)
+        if not matched and _filter_unchecked(rows):
+            # The matcher could not judge the ring. Unjudged rows 100 miles out are not a
+            # far find — announcing them would be the show-everything bug at distance.
+            return [], ""
         if matched:
             logging.getLogger(__name__).info(
                 "activity_browse_widened block=%s query=%r ring=%d matched=%d",
@@ -719,7 +736,9 @@ def _coerce_topic_mismatch(value: Any) -> str:
     return str(value or "").strip()[:120]
 
 
-def _log_no_match(query: str, events: list[dict[str, Any]]) -> None:
+def _log_no_match(
+    query: str, events: list[dict[str, Any]], *, unchecked: bool = False
+) -> None:
     """One line when a search comes up empty, carrying the best near-miss it saw.
 
     The score is what makes this worth logging. "cricket, 12 candidates, nothing matched"
@@ -731,11 +750,14 @@ def _log_no_match(query: str, events: list[dict[str, Any]]) -> None:
     scores = [
         s for s in (e.get("topic_score") for e in events) if isinstance(s, (int, float))
     ]
+    # `unchecked`: the matcher never ran (no LLM, or the call failed) — best_score is
+    # meaningless there and must not read as "a supply gap".
     logging.getLogger(__name__).info(
-        "activity_browse_no_match query=%r candidates=%d best_score=%s",
+        "activity_browse_no_match query=%r candidates=%d best_score=%s unchecked=%s",
         query[:120],
         len(events),
         max(scores) if scores else None,
+        unchecked,
     )
 
 
@@ -748,7 +770,17 @@ def _stamp_unjudged(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for ev in events:
         ev["topic_score"] = 0.0
         ev["topic_mismatch"] = ""
+        ev.pop("topic_unchecked", None)
     return events
+
+
+def _filter_unchecked(events: list[dict[str, Any]]) -> bool:
+    """True when _filter_events_by_query could not judge these rows (no LLM, or the call
+    failed, and no row even contains the word). An empty result over unchecked rows is
+    "I couldn't check", never "nothing matched" — say so rather than show them."""
+    return bool(events) and all(
+        isinstance(e, dict) and e.get("topic_unchecked") for e in events
+    )
 
 
 def _filter_events_by_query(
@@ -894,6 +926,7 @@ def _filter_events_by_query(
                     # near-misses are the whole point, and under the old contract they
                     # were dropped before anything could rate them.
                     for i, ev in enumerate(events):
+                        ev.pop("topic_unchecked", None)
                         ev["topic_score"] = _coerce_topic_score(
                             scores[i] if i < len(scores) else None
                         )
@@ -916,9 +949,9 @@ def _filter_events_by_query(
                     return picked, label
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_filter_failed")
-    # Fallback (no LLM, or the call failed): keyword match on title + tags + host;
-    # nothing matched → show all. A substring hit is not a judgement of topic fit, so
-    # every row out of here is unjudged — 0.0, never 1.0.
+    # Fallback (no LLM, or the call failed): keyword match on title + tags + host. A
+    # substring hit is not a judgement of topic fit, so every row out of here is
+    # unjudged — 0.0, never 1.0.
     kw = query.lower()
     matched = [
         e
@@ -936,7 +969,18 @@ def _filter_events_by_query(
     # caller's whole list rated, and a caller reading its near-misses must not hit a
     # KeyError on the one path where the model was never reached.
     _stamp_unjudged(events)
-    return (matched or events), ""
+    if matched:
+        return matched, ""
+    # Nothing contains the word and nobody judged the rest. This used to hand back EVERY
+    # event, which the caller then showed as matches for a topic nobody checked — and
+    # the far probe offered "there are some in <area>" on the same non-judgement. The
+    # honest result is empty AND marked unchecked, on the caller's own rows (same
+    # contract as the scores), so callers can tell "judged, nothing fits" from "could
+    # not judge". See _filter_unchecked.
+    for ev in events:
+        ev["topic_unchecked"] = True
+    _log_no_match(query, events, unchecked=True)
+    return [], ""
 
 
 def _refine_suggestions(events: list[dict[str, Any]]) -> list[str]:
@@ -985,7 +1029,9 @@ def _far_offer(
     if not rows:
         return [], ""
     matched, _label = _filter_events_by_query(rows, interest)
-    if not matched:
+    if not matched or _filter_unchecked(rows):
+        # Nothing judged on topic out there — including when the matcher could not run.
+        # "There are some in <area>" over rows nobody checked is an invented claim.
         return [], ""
     # _filter_events_by_query may reorder; the offer must still name the CLOSEST match.
     nearest = min(matched, key=lambda r: float(r.get("distance_meters") or 0))
@@ -1035,6 +1081,56 @@ def _arm_community_widen(draft: dict[str, Any], comm: dict[str, Any] | None) -> 
     draft["_area_offer_block_id"] = None
     draft["_area_offer_name"] = None
     return chip
+
+
+def _filter_unavailable_reply(
+    draft: dict[str, Any],
+    session_ctx: dict[str, Any],
+    interest: str,
+    comm: dict[str, Any] | None,
+    lang: str | None,
+) -> str:
+    """The honest "couldn't check" state. A fixed, localized string — the model that
+    just failed is not asked to explain its own failure.
+
+    Pills are the ones the next-turn handler already reads: "Yes, listen for me" (saves
+    the seek), and "Widen the search" (drops the topic → an open, honestly unfiltered
+    read) or, under a community filter, "Look beyond <community>". Deliberately no "Try
+    again": anything that is not accept/widen/a known chip is re-searched as a NEW topic.
+    """
+    # Echo the ask only when it is chip-short, same rule as the empty-state copy — a full
+    # sentence would be parroted back and become the saved seek's kind on accept.
+    short = interest if len(interest.split()) <= 4 else ""
+    draft["interest"] = short or interest
+    draft["_seek_offer"] = True
+    community = _community_name(comm)
+    if comm:
+        second = _arm_community_widen(draft, comm)
+        text = (
+            t("browse.filter_unavailable_community_interest", lang,
+              interest=short, community=community)
+            if short
+            else t("browse.filter_unavailable_community_generic", lang, community=community)
+        )
+    else:
+        second = "Widen the search"
+        # Nothing was offered this turn — a pill from an earlier turn must not stay live.
+        draft["_community_chip"] = None
+        draft["_area_offer_chip"] = None
+        draft["_area_offer_block_id"] = None
+        draft["_area_offer_name"] = None
+        text = (
+            t("browse.filter_unavailable_interest", lang, interest=short)
+            if short
+            else t("browse.filter_unavailable_generic", lang)
+        )
+    draft["suggestions"] = ["Yes, listen for me", second]
+    session_ctx["browse_draft"] = draft
+    session_ctx["activity_browse_active"] = True
+    session_ctx["activity_previews"] = []
+    session_ctx["browse_scores"] = None
+    session_ctx["routing_phase"] = "listening"
+    return text
 
 
 def _format_browse_message(
@@ -1380,6 +1476,13 @@ def run_activity_browse_turn(
     matched, label = _filter_events_by_query(events, interest)
 
     from app.discovery_route import activity_previews_from_events
+
+    # The matcher could not run (no model, or the call failed) and no event even contains
+    # the word. Say so plainly: "nothing matched" would be a claim nobody checked, and the
+    # ring / far probe below would only re-run the same failing check. Community browses
+    # included — the empty-community copy ("No X at <community>") is the same false claim.
+    if not matched and _filter_unchecked(events):
+        return _filter_unavailable_reply(draft, session_ctx, interest, comm, lang)
 
     # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
     # text them when a matching meet appears) rather than dead-ending. The accept/widen reply

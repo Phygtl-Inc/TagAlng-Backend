@@ -366,6 +366,54 @@ class FarOfferPillTests(unittest.TestCase):
             )
 
 
+class UncheckedFarProbeTests(unittest.TestCase):
+    """"No cricket near you — though there are some in Foster City" is a claim about
+    topic. When the matcher could not run over the far rows, nobody checked it."""
+
+    _ROWS = [
+        {"id": "e9", "title": "Kayak morning", "distance_meters": 20000.0, "host_id": "h1"},
+        {"id": "e7", "title": "Pottery night", "distance_meters": 90000.0, "host_id": "h1"},
+    ]
+
+    def _offer(self, *, llm):
+        from app.activity_browse import _far_offer
+
+        draft: dict = {}
+        patches = [
+            patch("app.discovery_route.activities_beyond_radius", return_value=[dict(r) for r in self._ROWS]),
+            patch("app.discovery_route.far_activity_details",
+                  side_effect=lambda r: r and {"title": r["title"], "miles": 12, "zip5": "94404",
+                                               "area_label": "Foster City",
+                                               "block_id": "zip-94404", "venue": None}),
+            patch("app.auth.jwt_user_id", return_value="me"),
+            patch("app.orchestrator.llm.llm_configured", return_value=llm != "off"),
+        ]
+        if llm == "raises":
+            patches += [
+                patch("app.orchestrator.llm.llm_json", side_effect=RuntimeError("down")),
+                patch("app.orchestrator.llm.router_model", return_value="m"),
+            ]
+        for p in patches:
+            p.start()
+        try:
+            facts, chip = _far_offer("jwt", "zip-90001", draft, interest="cricket")
+        finally:
+            for p in patches:
+                p.stop()
+        return facts, chip, draft
+
+    def test_a_failed_model_call_offers_no_area(self):
+        facts, chip, draft = self._offer(llm="raises")
+        self.assertEqual((facts, chip), ([], ""))
+        self.assertIsNone(draft.get("_area_offer_chip"))
+        self.assertIsNone(draft.get("_area_offer_name"))
+
+    def test_no_model_offers_no_area(self):
+        facts, chip, draft = self._offer(llm="off")
+        self.assertEqual((facts, chip), ([], ""))
+        self.assertIsNone(draft.get("_area_offer_chip"))
+
+
 class FarAreaSwitchTests(unittest.TestCase):
     """QA 2026-08-31: tapping "Look in Foster City (94404)" re-offered Foster City,
     forever. discovery_route.resolve_block_id returns home_block_id FIRST and only

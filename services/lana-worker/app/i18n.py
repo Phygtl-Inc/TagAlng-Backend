@@ -632,6 +632,46 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Não tem nada chegando em {community} agora. Quer que eu fique de olho e te "
               "avise assim que aparecer algo — ou procuro além de {community}?",
     },
+    # The matcher could not run (no model, or the call failed) and no event even contains
+    # the word. Honest "couldn't check", never "nothing matched" — nobody checked. No
+    # "near you": the same copy answers a community-scoped browse. The two options are the
+    # pills under it (listen / widen, or listen / look beyond the community).
+    "browse.filter_unavailable_interest": {
+        "en": "I couldn't check what's on for **{interest}** right now. Want me to keep an "
+              "ear out and text you the moment one pops up — or widen the search?",
+        "es": "No pude revisar qué hay de **{interest}** ahora mismo. ¿Quieres que me quede "
+              "atenta y te escriba en cuanto aparezca una — o amplío la búsqueda?",
+        "pt": "Não consegui verificar o que tem de **{interest}** agora. Quer que eu fique "
+              "de olho e te avise assim que aparecer uma — ou amplio a busca?",
+    },
+    "browse.filter_unavailable_generic": {
+        "en": "I couldn't check what's on for that right now. Want me to keep an ear out "
+              "and text you the moment something pops up — or widen the search?",
+        "es": "No pude revisar qué hay para eso ahora mismo. ¿Quieres que me quede atenta "
+              "y te escriba en cuanto aparezca algo — o amplío la búsqueda?",
+        "pt": "Não consegui verificar o que tem pra isso agora. Quer que eu fique de olho "
+              "e te avise assim que aparecer algo — ou amplio a busca?",
+    },
+    "browse.filter_unavailable_community_interest": {
+        "en": "I couldn't check what's on for **{interest}** at {community} right now. Want "
+              "me to keep an ear out and text you the moment one pops up — or look beyond "
+              "{community}?",
+        "es": "No pude revisar qué hay de **{interest}** en {community} ahora mismo. "
+              "¿Quieres que me quede atenta y te escriba en cuanto aparezca una — o busco "
+              "más allá de {community}?",
+        "pt": "Não consegui verificar o que tem de **{interest}** em {community} agora. "
+              "Quer que eu fique de olho e te avise assim que aparecer uma — ou procuro "
+              "além de {community}?",
+    },
+    "browse.filter_unavailable_community_generic": {
+        "en": "I couldn't check what's on at {community} right now. Want me to keep an ear "
+              "out and text you the moment something pops up — or look beyond {community}?",
+        "es": "No pude revisar qué hay en {community} ahora mismo. ¿Quieres que me quede "
+              "atenta y te escriba en cuanto aparezca algo — o busco más allá de "
+              "{community}?",
+        "pt": "Não consegui verificar o que tem em {community} agora. Quer que eu fique de "
+              "olho e te avise assim que aparecer algo — ou procuro além de {community}?",
+    },
     "browse.events_header": {
         "en": "Here's what's coming up near you.",
         "es": "Esto es lo que viene cerca de ti.",
