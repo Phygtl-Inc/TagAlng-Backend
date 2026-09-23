@@ -286,6 +286,103 @@ class TestListMyCircles(unittest.TestCase):
         self.assertEqual(rows[0]["place_name"], "OrangeTheory")
 
 
+class TestCreatorCommunityHasSomewhereToDraw(unittest.TestCase):
+    """A creator community has no lat/lng at all — `places_creator_has_no_geography`
+    keeps them null forever, because a point there is a point the radius read measures
+    against. Its headquarters is the only geography it will ever have, so without it on
+    this row a creator cannot see their own community on the map the day they make it."""
+
+    @patch("app.circles_flow._member_count", return_value=1)
+    @patch("app.circles_flow.service_client")
+    def test_the_headquarters_rides_her_own_list(self, sb, _count) -> None:
+        affs = _chain(
+            [
+                {
+                    "id": "a1",
+                    "circle_type": "creator",
+                    "circle_key": "creator_runwithmaya",
+                    "detail": "Run with Maya",
+                    "status": "confirmed",
+                    "place_ref": "p1",
+                    "created_at": "2026-09-01",
+                }
+            ]
+        )
+        affs.not_ = affs
+        places = _chain(
+            [
+                {
+                    "id": "p1",
+                    "name": "Run with Maya",
+                    "address": None,
+                    "place_type": "creator",
+                    # Null by constraint, and they must stay null on the wire: a client
+                    # that reads lat/lng here would draw a global community as a local one.
+                    "lat": None,
+                    "lng": None,
+                    "hq_city": "Brooklyn, NY",
+                    "hq_lat": 40.6782,
+                    "hq_lng": -73.9442,
+                }
+            ]
+        )
+        sb.return_value = _sb_with_tables({"circle_affiliations": affs, "places": places})
+        row = list_my_circles("u1")[0]
+        # The READ itself, not just the shaping: a mocked place row will happily hand
+        # back columns the query never asked for, so dropping them from the select is a
+        # change only this assertion can see.
+        selected = "".join(str(a) for a in places.select.call_args[0])
+        for column in ("place_type", "hq_city", "hq_lat", "hq_lng"):
+            self.assertIn(column, selected)
+        self.assertEqual(row["place_type"], "creator")
+        self.assertEqual(row["hq_city"], "Brooklyn, NY")
+        self.assertEqual(row["hq_lat"], 40.6782)
+        self.assertEqual(row["hq_lng"], -73.9442)
+        # The place's OWN point stays empty — the headquarters is not a substitute for it.
+        self.assertIsNone(row["lat"])
+        self.assertIsNone(row["lng"])
+
+    @patch("app.circles_flow._member_count", return_value=1)
+    @patch("app.circles_flow.service_client")
+    def test_an_ordinary_place_has_no_headquarters(self, sb, _count) -> None:
+        # Every other community has an address. A headquarters on one of those would be
+        # a second, competing answer to "where is this".
+        affs = _chain(
+            [
+                {
+                    "id": "a1",
+                    "circle_type": "fitness",
+                    "circle_key": "gym",
+                    "detail": "my gym",
+                    "status": "confirmed",
+                    "place_ref": "p1",
+                    "created_at": "2026-07-01",
+                }
+            ]
+        )
+        affs.not_ = affs
+        places = _chain(
+            [
+                {
+                    "id": "p1",
+                    "name": "OrangeTheory",
+                    "address": "123 Elm",
+                    "place_type": "fitness",
+                    "lat": 28.38,
+                    "lng": -81.27,
+                    "hq_city": None,
+                    "hq_lat": None,
+                    "hq_lng": None,
+                }
+            ]
+        )
+        sb.return_value = _sb_with_tables({"circle_affiliations": affs, "places": places})
+        row = list_my_circles("u1")[0]
+        self.assertEqual(row["lat"], 28.38)
+        self.assertIsNone(row["hq_city"])
+        self.assertIsNone(row["hq_lat"])
+
+
 class TestOneCommunityPerPlace(unittest.TestCase):
     """Two claims can name one spot in different words ("St. Luke's" /
     "attends St. Luke's"). The list must show it once, and the member count must be
