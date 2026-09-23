@@ -406,20 +406,27 @@ def test_the_subject_step_offers_real_places_to_tap(monkeypatch: Any) -> None:
     """"Which stationery shop?" arrived with nothing to tap and no ZIP in the session, so
     the user was left typing a name Lana could have found (dev QA 2026-09-08). A map search
     needs a centre, and for a signed-in user the only one that resolves is their home —
-    which means the user id has to reach `nearby_place_suggestions`."""
+    which means the user id has to reach `nearby_place_options`."""
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
-        "app.places.nearby_place_suggestions",
-        lambda **kw: (seen.update(kw), ["Sam Flax Orlando", "Rifle Paper Co."])[1],
+        "app.places.nearby_place_options",
+        lambda **kw: (seen.update(kw), [
+            {"name": "Sam Flax Orlando", "place_id": "ChIJ_sf", "lat": 28.5, "lng": -81.3},
+            {"name": "Rifle Paper Co.", "place_id": "ChIJ_rp", "lat": 28.6, "lng": -81.4},
+        ])[1],
     )
     monkeypatch.setattr("app.auth.jwt_user_id", lambda _jwt: "u-1")
+    draft: dict[str, Any] = {"category": "stationery shop", "reco_type": "location"}
     out = tip_share._name_suggestions(
-        {"category": "stationery shop", "reco_type": "location"},
+        draft,
         zip_code=None,
         block_id="b1",
         user_jwt="jwt",
     )
     assert out == ["Sam Flax Orlando", "Rifle Paper Co."]
+    # The FE still gets labels, but the ids now survive on the draft, so a tapped subject
+    # grounds to a real place with no second search (LANA_RECO_SUBJECT_MERGE Stage 1A).
+    assert [o["place_id"] for o in draft["subject_place_options"]] == ["ChIJ_sf", "ChIJ_rp"]
     assert seen["user_id"] == "u-1", "no user id, no map centre, no places to tap"
 
 

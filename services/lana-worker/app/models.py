@@ -907,6 +907,18 @@ class TipSetupRequest(BaseModel):
     # sends one instead of a name the server would have to match back. Membership is
     # re-checked server-side; "" clears the pick.
     circle_place_id: str | None = None
+    # The place the user TAPPED on the subject step, when that step was a map search.
+    #
+    # Opportunistic, never required — and that is what separates it from the community
+    # lane, where the same field is mandatory because an ungrounded community is invisible
+    # everywhere. A recommendation must still accept a typed name: a plumber, a nanny and a
+    # tutor-who-comes-to-you have no listing to pick. Sent, it grounds the recommendation
+    # to a real place exactly, with no search and no fuzzy match; absent, grounding falls
+    # back to searching the name (docs/LANA_RECO_SUBJECT_MERGE.md, Stage 1).
+    #
+    # NOT the same thing as circle_place_id above, which is the community the tip is shared
+    # INTO. This one is the thing the tip is ABOUT.
+    google_place_id: str | None = None
 
 
 class NudgeHookRequest(BaseModel):

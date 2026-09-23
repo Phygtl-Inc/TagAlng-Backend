@@ -125,24 +125,58 @@ def _display_name(place: dict[str, Any]) -> str:
     return str(((place or {}).get("displayName") or {}).get("text") or "").strip()
 
 
+def nearby_place_options(
+    *, query: str, zip_code: str | None = None, block_id: str | None = None,
+    user_id: str | None = None, limit: int = 4,
+) -> list[dict[str, Any]]:
+    """Nearby places matching `query`, as [{name, place_id, lat, lng}].
+
+    Same call as {@link nearby_place_suggestions}, one field mask wider. The id matters
+    because the subject step is where a recommendation could be GROUNDED for free: we
+    already ask Google for these places, render them, and let the user tap one — and the
+    name-only mask then threw the id away, leaving a later pass to re-derive by fuzzy
+    search what we had exactly (docs/LANA_RECO_SUBJECT_MERGE.md, Stage 1A).
+
+    `places.id` and `places.location` are Essentials-tier fields, so widening the mask
+    does not move this call into a pricier billing tier the way `attr_fields` does.
+    """
+    places = _places_search_text(
+        query=query, zip_code=zip_code, block_id=block_id, user_id=user_id,
+        field_mask="places.displayName,places.id,places.location",
+        limit=limit, radius=8000.0,
+    )
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for p in places:
+        name = _display_name(p)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        loc = (p or {}).get("location") or {}
+        out.append({
+            "name": name,
+            "place_id": str((p or {}).get("id") or "").strip() or None,
+            "lat": loc.get("latitude"),
+            "lng": loc.get("longitude"),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 def nearby_place_suggestions(
     *, query: str, zip_code: str | None = None, block_id: str | None = None,
     user_id: str | None = None, limit: int = 4,
 ) -> list[str]:
     """Names of nearby places matching `query` (e.g. "pediatric dentist", "park"),
-    around the block/ZIP centroid. [] if no key, no location, or no results."""
-    places = _places_search_text(
-        query=query, zip_code=zip_code, block_id=block_id, user_id=user_id,
-        field_mask="places.displayName", limit=limit, radius=8000.0,
-    )
-    names: list[str] = []
-    for p in places:
-        name = _display_name(p)
-        if name and name not in names:
-            names.append(name)
-        if len(names) >= limit:
-            break
-    return names
+    around the block/ZIP centroid. [] if no key, no location, or no results.
+
+    The labels of {@link nearby_place_options}. Kept as its own function because callers
+    that only ever render names (the community grounding step) should not have to know
+    about ids they will not use."""
+    return [p["name"] for p in nearby_place_options(
+        query=query, zip_code=zip_code, block_id=block_id, user_id=user_id, limit=limit,
+    )]
 
 
 def search_places(

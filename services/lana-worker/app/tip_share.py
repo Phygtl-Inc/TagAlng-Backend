@@ -488,9 +488,9 @@ def _name_suggestions(
     if not draft.get("place_based") and not subject_is_place(draft.get("reco_type")):
         return []
     try:
-        from app.places import nearby_place_suggestions
+        from app.places import nearby_place_options
 
-        return nearby_place_suggestions(
+        options = nearby_place_options(
             query=str(draft["category"]),
             zip_code=zip_code,
             block_id=block_id,
@@ -498,6 +498,14 @@ def _name_suggestions(
         )
     except Exception:  # noqa: BLE001
         return []
+    # Keep the ids beside the labels on the draft. The FE is handed names, exactly as
+    # before — but when the user taps one, publish can ground the recommendation to a real
+    # Google place with no search and no fuzzy match, because we were already holding the
+    # id (docs/LANA_RECO_SUBJECT_MERGE.md, Stage 1A). Without this the id is fetched,
+    # rendered, tapped and thrown away, leaving a later pass to re-derive it by search.
+    if options:
+        draft["subject_place_options"] = options
+    return [o["name"] for o in options]
 
 
 def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -865,6 +873,35 @@ def _save_tip(
                 _logging.getLogger(__name__).warning(
                     "tip_community_tag_failed signal=%s place=%s",
                     saved["id"], place_id, exc_info=True,
+                )
+
+        # Ground the recommendation to its SUBJECT — the thing recommended, apart from the
+        # recommending — so later reads can show one card per subject carrying how many
+        # neighbours stand behind it (docs/LANA_RECO_SUBJECT_MERGE.md). Here for the same
+        # reason the tag is, plus one more: this is the only place the draft still holds
+        # the place the user TAPPED, which grounds with no search and no fuzzy match.
+        #
+        # NOTHING READS subject_ref YET. Best-effort to the point of silence: an ungrounded
+        # tip (typed a name, below the search floor, or a type that never merges at all —
+        # recipes, DIY tricks) is an ordinary outcome and renders exactly as it does today.
+        if (saved or {}).get("id"):
+            try:
+                from app.auth import jwt_user_id
+                from app.reco_subject import ground_reco_subject
+
+                ground_reco_subject(
+                    user_jwt,
+                    signal_id=str(saved["id"]),
+                    draft=draft,
+                    zip_code=zip_code,
+                    block_id=block_id,
+                    user_id=jwt_user_id(user_jwt) if user_jwt else None,
+                )
+            except Exception:  # noqa: BLE001 — a posted tip must never fail on its subject
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "reco_subject_ground_failed signal=%s", saved["id"], exc_info=True,
                 )
         return saved, ""
     except Exception as exc:  # noqa: BLE001

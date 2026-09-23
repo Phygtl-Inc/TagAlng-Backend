@@ -2737,6 +2737,12 @@ def set_tip_setup(
         # not be re-filled from whatever is selected at the top of the app.
         draft["circle_picked"] = True
         draft["circle_name"] = _community_name_for(pid) if ok else None
+    # The place the user tapped on the subject step. Kept on the draft rather than resolved
+    # here: grounding happens at publish, and a draft that is still being edited must not
+    # own a subject row yet. Stored raw and trusted no further than an id — publish hands
+    # it to Google's own place lookup, which is what decides whether it is real.
+    if (body.google_place_id or "").strip():
+        draft["subject_google_place_id"] = str(body.google_place_id).strip()
     ctx["tip_draft"] = draft
     # Every step the carousel showed counts as offered, so the turn after this does not
     # re-ask the optionals the user chose to leave blank — it goes to the ready card.
