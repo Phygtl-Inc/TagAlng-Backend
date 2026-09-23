@@ -1,6 +1,6 @@
 # Recommendation subjects — merging recs about the same thing
 
-Status: **Stages 1 and 2 built** (2026-09-22), unpushed. Stages 3-4 are still plan.
+Status: **Stages 1-3 and the 80/20 clustering built** (2026-09-22/23), behind `LANA_RECO_CARDS` (off). Dev has 20261219+20261220; prod has 20261219. 20261221 and 20261222 are unpushed. Stage 4 (the evidence panel) is still plan.
 
 ## What changes
 
@@ -26,54 +26,72 @@ The third decision is the one that keeps this honest. A derived count cannot be 
 by someone who has never been to the place, which was the entire objection in
 20261107120000 — *"the one number a stranger is meant to trust"*.
 
-## Which types merge at all
+## Which types merge, and how
 
-Not all of them, and the dividing line is not "can we ground it to a place" — that is only
-the easiest *mechanism*. The question is:
+**Everything merges.** What differs is how a subject's contributions may be COMBINED —
+settled at standup 2026-09-22, where Tommaso answered the "Dr. Sara is a great doctor and
+her parking space is very big" problem with the Pareto shape:
 
-> **Are the captured fields observations ABOUT a shared referent, or are they the artifact
-> itself?**
+> *"80% have more or less the same profile… then 20% is the minority… aggregate those that
+> have 80% similarity in what was expressed, and for those who are uniquely positioned,
+> provide standalone."*
 
-Compare two `reco_fields` sets:
+That is the App Store reviews shape, and it is what stops a card blending *"great doctor"*
+with *"huge parking lot"* into a sentence nobody wrote. The majority cluster is
+summarised; the outliers keep their own voice.
 
-```
-professional   gentle · walk-in · takes insurance     <- three witnesses to one object
-recipe         ingredients · steps · 45 min · easy    <- this IS the recipe
-```
+So `reco_subjects.merge_mode` records which kind of subject it is:
 
-Three neighbours recommending Dr. Sarah are three independent observations of one dentist;
-their fields accumulate, and "3 vouched" means three people stand behind the same
-practitioner. Three neighbours recommending banana bread have **three different recipes**.
-Merging them would force us to discard two authors' ingredients and then claim three people
-vouched for the one we kept. That is the same lie as merging two dentists, arriving by a
-different road.
-
-| reco_type | subject | fields are | merges? |
+| mode | contributions are | the card may | types |
 |---|---|---|---|
-| `restaurant`, `location` | a map point — Places picker (`_PLACE_SUBJECT_TYPES`) | observations | **yes**, Stage 1 |
-| `professional`, `service` | maybe a map point — the extractor's `place_based` read decides | observations | **yes** — Stage 1 when grounded, Stage 2 when not (a plumber, a nanny, a tutor-who-comes-to-you has no storefront) |
-| `product` | a SKU — "Cosori gooseneck" | observations | **yes**, Stage 2 — merges well, but a product is never a place, so it needs its own identity space |
-| `recipe`, `diy` | the thing itself | **the artifact** | **no** |
-| `other` | anything — a bus route, a Facebook group, a broker | mixed | **no** |
+| `aggregate` | observations ABOUT one shared thing | summarise the majority, surface outliers separately | `professional` `restaurant` `location` `service` `product` |
+| `collection` | the artifact ITSELF, one per author | list them side by side — **never blend** | `recipe` `diy` `other` |
 
-`recipe` and `diy` keep exactly today's behaviour: one card per author. That is the
-**correct** answer, not a fallback. A reader asking for a banana bread recipe wants three
-recipes to choose between, not one blended one that belongs to nobody.
+A recipe is simply always on the minority side. "Banana bread" is a perfectly good subject
+that three neighbours can point at; what must never happen is merging their `ingredients`
+and `steps` into one hybrid, which would discard two authors' work and credit the result
+to all three. **The subject merges; the artifacts do not.**
 
-Two consequences:
+The mode lives in the database rather than in a comment because a renderer that blends a
+collection reproduces exactly the bug this design exists to avoid — and it is settled by
+the creating author from the TYPE, never revised, since a subject cannot be observations
+for one neighbour and artifacts for the next.
 
-- **Ask results carry two card languages** — merged subject cards for some types,
-  per-author rows for others. In practice a results page is type-coherent, since the
-  `reco_type` filter chips (20261128120000) already scope it, but the surface has to
-  handle both.
-- **A count is not a merge.** "3 neighbours have a banana bread recipe" as a section
-  header is a grouping affordance and stays honest, because it claims no corroboration.
-  Worth having eventually; it is not this work.
+`reco_subject_candidates` filters on it too, so a recipe is never a candidate for a
+business that happens to share a word. (The blocker is recall-biased by design, so
+"Bread Street Plumbing" does surface against "Banana bread" on the shared word — the
+SCORER refuses it at 0.303, far below the 0.80 floor. Pinned in `TestIdentitySpace`.)
 
-Deliberately skipped: recipes naming a published source ("the NYT no-knead", "Ottolenghi's
-shakshuka") genuinely *are* shared referents. But each author still transcribes their own
-version into `ingredients`/`steps`, and canonical-recipe detection is a lot of machinery
-for a rare case. Revisit only if the data shows it.
+**Earlier position, now superseded:** Stages 1 and 2 excluded `recipe`/`diy`/`other` from
+merging entirely, reasoning that their fields are the artifact. That was right about the
+FIELDS and wrong about the SUBJECT — 20261221120000 corrects it.
+
+## The 80/20 clustering  ✅ BUILT
+
+`app/reco_cluster.py`, cached in `reco_subject_digests` (20261222120000).
+
+It does not produce a summary — that is what makes "great doctor · huge parking lot"
+impossible. It produces **themes**, each carrying how many contributors expressed it and
+one real quote. An outlier is a theme with `n=1`, so nothing is discarded to avoid the
+blend: the card renders big themes big and small themes small. `n` of `total` is exactly
+screen 08's "Gentle with anxious kids **8**/10".
+
+Three rails, each enforced in code rather than asked for in the prompt:
+
+- **Quotes are verified verbatim.** The prompt says to copy a contributor's words; nothing
+  about a prompt makes that true. Every quote is checked against the contributions the
+  theme claims to come from, and dropped when it is not there — a theme can keep a true
+  count while losing an invented quote. A quote under a neighbour's name is the strongest
+  claim the card makes.
+- **Invented ids are dropped, and a theme left with none goes with it** — a count is the
+  whole claim a theme makes.
+- **Collections are never clustered**, and neither is a single contribution.
+
+**Cost shape:** a results list renders from cache only and never blocks on a model call.
+A miss schedules a bounded (`_MAX_WARM = 3`) daemon-thread warm, so the next read has its
+themes — the same fire-and-forget pattern `signal_match_notify` uses. Temperature 0 and a
+`basis_sig` over contribution ids *and* text, so a card cannot regroup between two reads,
+and an author editing their own recommendation authors a new digest.
 
 ## The trap this design avoids
 
@@ -281,26 +299,47 @@ signal→subject attachment. Left standing rather than dropped, for the consolid
 
 ---
 
-## Stage 3 — the subject-grouped read path
+## Stage 3 — the subject-grouped read path  ✅ BUILT
 
-`find_neighbor_tips` gains a subject-grouped sibling (or a v5 — OUT columns change, so a
-`drop` + `create`, not `create or replace`, per 42P13).
+`find_neighbor_tips` v8 (20261222120000) + `app/reco_cards.py`, wired in
+`tip_rec_cascade.stamp_tip_peer_surface` behind **`LANA_RECO_CARDS` (off by default)**.
 
-One row per `subject_ref`:
+**Additive, never a swap.** `peer_matches` keeps its exact shape and the live client keeps
+working; `reco_cards` rides alongside for a client that knows about it. A flag that
+replaces one store with another has no safe half-way state — that is how PR #96 broke
+rapport ([[identity-concepts-pr96]]).
 
-- `vouch_count` — `count(distinct user_id)`, not `count(*)`: one neighbour posting twice
-  about the same place is one voice.
-- `contributor_avatars` — the avatar stack on the card.
-- `match_strength` — the strongest across members, so the merged card ranks on its best
-  evidence.
-- `member_signal_ids` — what the evidence list and per-contributor Helpful read from.
-- `distance_meters` — **the subject's**, not the recommender's (Open question 1).
+**Grouping happens in Python, not a second RPC.** The visibility predicate in
+`find_neighbor_tips` is long and load-bearing (blocks, community-vs-area scope, expiry,
+the type chips, the strength gate). A grouping RPC would restate it, and a second copy is
+how the rules in this repo rot. So rows stay row-shaped and one definition of who may see
+what survives.
 
-[`peer_rows_from_neighbor_tips`](../services/lana-worker/app/tip_rec_cascade.py#L96)
-becomes subject rows. The truthfulness rule in that module's header still binds: these
-rows are not claim-affinity matches and must never be dressed as them.
+**The count is not the window.** `subject_vouch_count` is computed in SQL across every
+visible live contribution, so a `LIMIT 1` page still reports 3. Grouping a paged result in
+Python would have made "3 vouched" silently become "2 vouched" on page two — a count a
+stranger is meant to trust cannot be an artefact of pagination.
 
----
+### The three open questions, answered
+
+| question | answer |
+|---|---|
+| Distance | the **subject's** (`subject_distance_text`), computed from its grounded coordinates; falls back to the lead contributor's when ungrounded, flagged by `distance_is_subject` so copy never implies otherwise |
+| Circle header | **best provenance across contributors**, not the first row's — a subject recommended from a shared circle *and* from nearby files under the circle |
+| Your own rec | **counted, never listed**. The row list still excludes you; `i_contributed` lets the copy read "you and 2 neighbours" instead of crediting your voice to strangers |
+
+### Ranking
+
+Lexicographic on facts that are never multiplied together: provenance, then **max**
+match strength, then vouch count, then title. Max and not mean, so extra voices can never
+dilute a subject's rank — averaging would put a dentist with one strong and four weak
+recommendations below one with a single strong one. Title last makes the order total, so a
+float tie cannot let two cards swap places between reads.
+
+**Recommender affinity is not wired** — it lives in Pouya's module, which is not on main.
+The seam is ready: aggregate it as `max` across contributors, for the same reason, and
+attribute it to the contributor rather than to the subject. Dr. Sarah is not Turkish
+because a Turkish neighbour recommended her.
 
 ## Stage 4 — the evidence panel
 
@@ -323,6 +362,52 @@ n=1 and n=2 states rather than letting them fall out of a layout built for n=8.
 
 ---
 
+## Measured, on a real stack (2026-09-23)
+
+`scripts/eval_reco_resolution.py --trials 5` · 11 cases / 55 pairs · real Google, real
+model calls, local Supabase. Ground truth by construction.
+
+```
+5 trials · precision 100% every trial · 0 false merges across all trials
+recall     60% / 100% / 100% / 60% / 60%
+UNSTABLE   i1+i4 merged 2/5   ("Mike Plumber" vs "Mike the Plumber", both at 0.86)
+```
+
+**The error that matters never happened.** No false merge in 5 trials — nothing invented
+corroboration. Google grounding, auto-merge at ≥0.93 and every separation behaved
+identically every time, including three different dentists kept apart (two sharing the word
+"Pediatric") and an identical name with a different trade refused via the category cap.
+
+### The adjudicated band is not deterministic
+
+One borderline pair merged 2 times in 5 on identical input at an identical score.
+**`temperature=0` is not a determinism guarantee** — an earlier note in this doc claimed a
+card cannot regroup between reads, and that was wrong. The consequence is real: whether two
+neighbours' recommendations merge is decided once at capture and persisted, so the outcome
+is sticky per tip but arbitrary across tips.
+
+The fix is the pattern already used for digests: cache the verdict by the compared PAIR
+(`subject_key` + category on both sides), so one comparison resolves one way forever. Not
+built.
+
+### Three bugs the real runs found that mocks could not
+
+**`ambiguous` was overwritten by `new`.** The refusal was recorded, then `set_signal_subject`
+stamped `method='new'` and nulled the candidate microseconds later. Every unit test passed
+because none ran both calls in sequence against a database. Fixed by recording after the
+create; pinned by a test asserting call ORDER, not call presence.
+
+**Grounding ignored `place_based`.** `subject_is_place()` already decides whether a subject
+has a storefront — "a barber shop is, a plumber is not" — and this module searched Google
+anyway. A search always finds *something*, so "Mike Plumber" was attached to a real plumbing
+company the neighbour never named, and could then never merge with "Mike the Plumber", who
+had no listing. Fixed: a *pick* still grounds regardless (user action outranks a classifier),
+but a *search* defers to the flow's verdict.
+
+**The harness leaked subjects between runs**, so a later run scored against an earlier run's
+rows and turned a correct separation into a merge at 1.00 against a ghost. Fixed with a
+scoped pre-flight reset.
+
 ## Open questions
 
 1. **Distance semantics.** Today `distance_text` is how far the *recommender* lives. The
@@ -344,7 +429,6 @@ n=1 and n=2 states rather than letting them fall out of a layout built for n=8.
 
 - Reviving `set_tip_vouch` or `/lana/tips/vouch` (410). The count is derived.
 - Merging the Recent feed.
-- Merging `recipe`, `diy` or `other` — those stay one card per author, permanently.
 - Canonical-source detection for published recipes.
 - Touching `_signal_match_strength`, which the swap matcher shares and which
   20261126120000 deliberately left alone.

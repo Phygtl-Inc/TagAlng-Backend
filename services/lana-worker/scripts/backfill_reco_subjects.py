@@ -7,12 +7,14 @@ read has nothing to group. Run this once after pushing the migration.
 
 Two passes, mirroring the live path:
   1. PLACES  — the groundable types, searched and accepted only above MATCH_FLOOR.
-  2. IDENTITY — everything left with no place, plus every product (a SKU is never a map
-     point), scored against existing ungrounded subjects and adjudicated in the middle band.
+  2. IDENTITY — everything left with no place: products (a SKU is never a map point) and
+     the collection types (recipe, diy, other), scored against existing ungrounded subjects
+     of the SAME merge_mode and adjudicated in the middle band.
 
-recipe, diy and other are skipped permanently and by design — their captured fields ARE the
-artifact, so two banana-bread recommendations are two different recipes and merging them
-would discard one author's ingredients (docs/LANA_RECO_SUBJECT_MERGE.md).
+Collections merge their SUBJECT, never their fields: three banana breads share the subject
+"banana bread" and a count, and stay standalone (docs/LANA_RECO_SUBJECT_MERGE.md). A
+candidate is only ever compared against subjects of its own merge_mode, so a recipe can
+never be attached to a business that happens to share a word.
 
 Pass 1 is search-only: there is no draft here, so no tapped place id. Anything below a floor
 is left alone rather than guessed at — a wrong merge invents corroboration, and the vouch
@@ -42,6 +44,7 @@ from app.reco_subject import (
     GROUNDABLE_TYPES,
     MATCH_FLOOR,
     MERGEABLE_TYPES,
+    merge_mode_for,
     name_match_score,
     normalize_subject_name,
 )
@@ -148,9 +151,10 @@ def _identity_pass(sb, rows: list[dict[str, Any]], apply: bool) -> int:
         words = [w for w in key.split(" ") if w]
         # Same blocking rule as the RPC: ungrounded only, shares a word, same locality or
         # one of the two never said it.
+        mode = merge_mode_for(row.get("reco_type"))
         query = sb.table("reco_subjects").select(
-            "id, subject_key, display_name, category, locality"
-        ).is_("google_place_id", "null")
+            "id, subject_key, display_name, category, locality, merge_mode"
+        ).is_("google_place_id", "null").eq("merge_mode", mode)
         candidates = [
             c for c in (query.execute().data or [])
             if c["id"] != row.get("subject_ref")
@@ -203,6 +207,7 @@ def main() -> int:
         sb.table("local_signals")
         .select("id, user_id, block_id, reco_name, reco_place, category, reco_type, subject_ref")
         .eq("intent", "tip_share")
+        # Places pass: the aggregate, map-point types only. A recipe has no storefront.
         .in_("reco_type", sorted(GROUNDABLE_TYPES))
         .not_.is_("reco_name", "null")
     )

@@ -57,3 +57,7 @@ deploy/lana-worker-prod.env
 
 # lana-admin-portal is its own repo (Phygtl-Inc/Lana-AdminPortal), not part of the backend
 lana-admin-portal/
+
+# Local env backups — may hold service-role keys, never commit.
+.env.local.*
+.env.*.backup

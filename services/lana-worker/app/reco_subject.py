@@ -5,17 +5,19 @@ Three neighbours recommending Dr. Sarah write three rows today, and an ask retur
 people. Stamping each of those rows with the same `subject_ref` is what will later let one
 card say "3 vouched" instead. Nothing reads the column yet; this only fills it.
 
-WHICH TYPES GROUND, AND WHY NOT THE REST. The line is not "can Google find it" — that is
-only the cheapest mechanism. It is whether a type's captured fields are OBSERVATIONS ABOUT
-a shared referent or the ARTIFACT ITSELF:
+EVERY TYPE SHARES A SUBJECT. What differs is how its contributions may be COMBINED, and
+that turns on whether a type's captured fields are OBSERVATIONS ABOUT a shared referent or
+the ARTIFACT ITSELF:
 
     professional   gentle · walk-in · takes insurance     three witnesses to one dentist
     recipe         ingredients · steps · 45 min · easy    this IS the recipe
 
-Two banana-bread recommendations are two different recipes; merging them would discard one
-author's ingredients and then claim both vouched for the survivor. So `recipe`, `diy` and
-`other` never ground, permanently. `product` merges honestly but a SKU is not a map point,
-so it waits for Stage 2's identity space rather than being forced through this one.
+So a subject carries a `merge_mode`. "aggregate" may be summarised — the Pareto majority
+of neighbours saying much the same thing, with outliers surfaced separately rather than
+blended into a sentence nobody wrote ("great doctor · huge parking lot"). "collection"
+may not: three banana breads share the subject "banana bread" and a count, and are shown
+side by side, because merging their steps discards one author's work and credits the rest
+to everyone. A recipe is always on the minority side, so it is always standalone.
 
 TWO PATHS, AND THE FIRST IS NEARLY FREE.
 
@@ -48,16 +50,31 @@ logger = logging.getLogger(__name__)
 # simply stays null for Stage 2).
 GROUNDABLE_TYPES = frozenset({"professional", "restaurant", "location", "service"})
 
-# Never merge at all, whatever the model says. `recipe`/`diy` fields ARE the artifact;
-# `other` is the escape hatch bucket ("a bus route, a Facebook group, a broker") with no
-# shared shape. This set is the one thing in this module that is a product decision rather
-# than a tuning knob — see the migration headers before touching it.
-NEVER_GROUND_TYPES = frozenset({"recipe", "diy", "other"})
+# Types whose contributions ARE the artifact, one per author: a recipe, a DIY method, and
+# the `other` grab-bag ("a bus route, a Facebook group, a broker"). They share a SUBJECT
+# and a count, and are rendered side by side — never blended into each other, because
+# merging two banana breads discards one author's ingredients and attributes the remainder
+# to both. The Pareto framing from standup 2026-09-22: a recipe is always on the minority
+# side, so it is always standalone.
+COLLECTION_TYPES = frozenset({"recipe", "diy", "other"})
 
-# Everything that merges. The place types plus `product`: a SKU ("Cosori gooseneck") is a
-# shared referent two neighbours can independently point at, it simply is not a map point,
-# so it never takes the place path and goes straight to the identity space below.
-MERGEABLE_TYPES = GROUNDABLE_TYPES | frozenset({"product"})
+# Everything merges now. What differs is HOW contributions may be combined (merge_mode),
+# not whether they share a subject. `product` is here and not in GROUNDABLE_TYPES because
+# a SKU ("Cosori gooseneck") is a shared referent that is not a map point.
+MERGEABLE_TYPES = GROUNDABLE_TYPES | frozenset({"product"}) | COLLECTION_TYPES
+
+
+def merge_mode_for(reco_type: Any) -> str:
+    """'collection' when the contributions ARE the thing, else 'aggregate'.
+
+    Settled from the TYPE, so a subject cannot be observations for one neighbour and
+    artifacts for the next. Stage 3 reads this to decide whether a card may summarise its
+    contributions at all — the read path must never blend a collection.
+    """
+    from app.reco_question_sets import normalize_type
+
+    rtype = normalize_type(reco_type) or "other"
+    return "collection" if rtype in COLLECTION_TYPES else "aggregate"
 
 # How close a TYPED name must be to a Google result before we call them the same place.
 # Deliberately high. Below it we store nothing and the backfill can try again later with
@@ -249,7 +266,8 @@ def score_candidate(
 
 
 def _candidates(
-    user_jwt: str, *, key: str, category: str | None, locality: str | None, limit: int = 10
+    user_jwt: str, *, key: str, category: str | None, locality: str | None,
+    mode: str = "aggregate", limit: int = 10,
 ) -> list[dict[str, Any]]:
     from app.supabase_rpc import call_rpc
 
@@ -262,12 +280,63 @@ def _candidates(
                 "p_category": category,
                 "p_locality": locality,
                 "p_limit": int(limit),
+                # A recipe must never be a candidate for a plumber that shares a word:
+                # what may be combined is part of what the subject IS.
+                "p_merge_mode": mode,
             },
         )
     except Exception:  # noqa: BLE001
         logger.info("reco_subject.candidates_unavailable")
         return []
     return [r for r in (raw or []) if isinstance(r, dict) and r.get("id")]
+
+
+_VERDICT_TO_BOOL = {"same": True, "different": False, "unsure": None}
+_BOOL_TO_VERDICT = {True: "same", False: "different", None: "unsure"}
+
+
+def pair_signature(a_key: str, a_cat: Any, b_key: str, b_cat: Any) -> str:
+    """Fingerprint of a comparison, order-independent.
+
+    "Is A the same as B" and "is B the same as A" are one question, so the sides are
+    sorted before hashing — two entries free to disagree would reintroduce exactly the
+    instability the cache exists to remove. Category is part of the key because it is part
+    of the question (20261223120000).
+    """
+    import hashlib
+
+    sides = sorted([
+        f"{normalize_subject_name(a_key)}|{normalize_subject_name(a_cat)}",
+        f"{normalize_subject_name(b_key)}|{normalize_subject_name(b_cat)}",
+    ])
+    return hashlib.sha256("||".join(sides).encode()).hexdigest()[:40]
+
+
+def _cached_verdict(sig: str) -> tuple[bool, bool | None]:
+    """(hit, verdict). A miss and a broken cache are the same thing: ask the model."""
+    try:
+        from app.db import service_client
+
+        rows = (service_client().table("reco_adjudications").select("verdict")
+                .eq("pair_sig", sig).limit(1).execute().data or [])
+    except Exception:  # noqa: BLE001
+        return False, None
+    if not rows:
+        return False, None
+    return True, _VERDICT_TO_BOOL.get(str(rows[0].get("verdict") or ""), None)
+
+
+def _store_verdict(sig: str, verdict: bool | None, a: tuple[str, Any], b: tuple[str, Any]) -> None:
+    try:
+        from app.db import service_client
+
+        service_client().table("reco_adjudications").upsert({
+            "pair_sig": sig, "verdict": _BOOL_TO_VERDICT[verdict],
+            "a_key": normalize_subject_name(a[0]), "a_category": a[1],
+            "b_key": normalize_subject_name(b[0]), "b_category": b[1],
+        }, on_conflict="pair_sig").execute()
+    except Exception:  # noqa: BLE001 — failing to cache must not fail the turn
+        logger.info("reco_subject.store_verdict_failed sig=%s", sig)
 
 
 def _adjudicate(
@@ -279,7 +348,28 @@ def _adjudicate(
     pairs that are already obvious in either direction. No canned fallback: when the model
     is unconfigured or the call fails, the answer is None and the pair stays unmerged,
     which is the same outcome as the model saying it cannot tell.
+
+    CACHED BY PAIR, because the model is not deterministic even at temperature 0 — measured
+    at 2/5 merges on one identical pair — and the verdict is persisted into subject_ref at
+    capture. Without the cache, whether two neighbours share a card is decided by chance.
     """
+    cand_name = candidate.get("display_name") or candidate.get("subject_key")
+    sig = pair_signature(str(name or ""), category, str(cand_name or ""), candidate.get("category"))
+    hit, cached = _cached_verdict(sig)
+    if hit:
+        logger.info("reco_subject.adjudicate_cached sig=%s verdict=%s", sig, cached)
+        return cached
+
+    verdict = _ask_model(name, category, locality, candidate)
+    _store_verdict(sig, verdict, (str(name or ""), category),
+                   (str(cand_name or ""), candidate.get("category")))
+    return verdict
+
+
+def _ask_model(
+    name: Any, category: Any, locality: Any, candidate: dict[str, Any]
+) -> bool | None:
+    """The call itself. Separated so the cache above reads as policy, not plumbing."""
     try:
         import json
 
@@ -314,6 +404,10 @@ def _adjudicate(
     return same if isinstance(same, bool) else None
 
 
+# "Nothing was close enough" — distinct from a refused near-miss, which carries a candidate.
+_NO_MATCH: dict[str, Any] = {"subject": None, "ambiguous": None}
+
+
 def _create_subject(
     user_jwt: str,
     *,
@@ -322,6 +416,7 @@ def _create_subject(
     category: str | None,
     locality: str | None,
     found: dict[str, Any] | None,
+    mode: str = "aggregate",
 ) -> str | None:
     """This tip's own subject row. `found` set = grounded to a place (method 'google');
     `found` None = the second identity space found nothing to join (method 'new').
@@ -345,6 +440,7 @@ def _create_subject(
                 "p_locality": locality,
                 "p_lat": (found or {}).get("lat"),
                 "p_lng": (found or {}).get("lng"),
+                "p_merge_mode": mode,
             },
         )
     except Exception:  # noqa: BLE001
@@ -360,21 +456,26 @@ def resolve_identity_subject(
     name: str,
     category: str | None,
     locality: str | None,
-) -> str | None:
-    """Stage 2: attach this tip to an existing NON-PLACE subject, or leave it to make its own.
+    mode: str = "aggregate",
+) -> dict[str, Any]:
+    """Stage 2: attach this tip to an existing NON-PLACE subject, or report why not.
 
-    Returns the subject id when it attached to one, else None — and None here does not mean
-    "nothing happened": an ambiguous near-miss is recorded on the signal so it can be
-    settled later without re-running the search and the model call that found it.
+    Returns {"subject": id | None, "ambiguous": (candidate_id, score) | None}. A dict and
+    not a bare id because "did not attach" has two meanings that must not collapse: nothing
+    was close enough (nothing to record), or something WAS close and we refused it (a
+    near-miss worth keeping). The caller records the refusal after creating this tip's own
+    subject — see the comment at the return site.
     """
     from app.supabase_rpc import call_rpc
 
     key = normalize_subject_name(name)
     if not key:
-        return None
-    rows = _candidates(user_jwt, key=key, category=category, locality=locality)
+        return _NO_MATCH
+    rows = _candidates(
+        user_jwt, key=key, category=category, locality=locality, mode=mode
+    )
     if not rows:
-        return None
+        return _NO_MATCH
 
     scored = sorted(
         ((score_candidate(name, category, r), r) for r in rows),
@@ -383,7 +484,7 @@ def resolve_identity_subject(
     )
     best_score, best = scored[0]
     if best_score < ADJUDICATE_FLOOR:
-        return None
+        return _NO_MATCH
 
     if best_score >= AUTO_MERGE_FLOOR:
         method, confidence = "blocked", best_score
@@ -395,19 +496,12 @@ def resolve_identity_subject(
             # False and None part company here only in what they MEAN, not in what they do:
             # neither merges. Both are recorded as the near-miss they were, because a
             # "different Mike" today is exactly the pair a human reviewer wants to see.
-            try:
-                call_rpc(
-                    user_jwt,
-                    "mark_signal_subject_ambiguous",
-                    {
-                        "p_signal_id": signal_id,
-                        "p_candidate": best["id"],
-                        "p_confidence": float(best_score),
-                    },
-                )
-            except Exception:  # noqa: BLE001
-                logger.info("reco_subject.mark_ambiguous_failed signal=%s", signal_id)
-            return None
+            # NOT marked here. The caller still has to CREATE this tip's own subject, and
+            # set_signal_subject rewrites subject_method/candidate_ref unconditionally —
+            # so marking now would be overwritten microseconds later, which is exactly what
+            # happened on the first real run (method read back as 'new', the near-miss
+            # gone). The refusal is returned and the caller records it AFTER creating.
+            return {"subject": None, "ambiguous": (str(best["id"]), float(best_score))}
 
     try:
         call_rpc(
@@ -422,8 +516,8 @@ def resolve_identity_subject(
         )
     except Exception:  # noqa: BLE001
         logger.warning("attach_signal_subject_failed signal_id=%s", signal_id)
-        return None
-    return str(best["id"])
+        return _NO_MATCH
+    return {"subject": str(best["id"]), "ambiguous": None}
 
 
 def ground_reco_subject(
@@ -450,10 +544,9 @@ def ground_reco_subject(
         return None
 
     rtype = normalize_type((draft or {}).get("reco_type")) or "other"
-    if rtype in NEVER_GROUND_TYPES or rtype not in MERGEABLE_TYPES:
-        # Not a failure and not worth a warning: a recipe having no subject row is the
-        # design, because its fields ARE the recipe.
+    if rtype not in MERGEABLE_TYPES:
         return None
+    mode = merge_mode_for(rtype)
 
     category = str((draft or {}).get("category") or "").strip() or None
     locality = str((draft or {}).get("locality") or "").strip() or None
@@ -461,38 +554,73 @@ def ground_reco_subject(
     # ── The place identity space. A google_place_id is a FACT: exact, no threshold. ──
     # Skipped entirely for `product`, whose subject is a SKU — searching Places for a
     # kettle grounds it to whichever shop stocks it.
+    # IS THIS SUBJECT A PLACE AT ALL? The capture flow already decided: subject_is_place()
+    # gives a restaurant or a location the Places picker always, and a professional or a
+    # service only when the extractor's `place_based` read says there is a storefront — "a
+    # barber shop is, a plumber is not". Grounding must honour that verdict rather than
+    # re-litigate it with a search, because a search ALWAYS finds something: "Mike Plumber"
+    # resolved to a real plumbing company the neighbour never named, and then could not
+    # merge with "Mike the Plumber", who had no listing (eval_reco_resolution, 2026-09-23).
+    # Attaching a recommendation to a business nobody mentioned is the same error as
+    # grounding a recipe to whichever bakery sells something like it.
+    from app.reco_question_sets import subject_is_place
+
+    is_place = subject_is_place(rtype, place_based=bool((draft or {}).get("place_based")))
+
     # Strongest first, and they are genuinely ranked, not merely ordered:
     #   1. the carousel pick   an id the user chose off a map — certain
     #   2. the chat-fork chip  an id we offered and she answered with — certain
     #   3. the search          our guess at what she typed — a judgement, floored at 0.82
     found = None
-    if rtype in GROUNDABLE_TYPES:
-        found = (
-            _picked(draft)
-            or _tapped(name, (draft or {}).get("subject_place_options"))
-            or _searched(
+    if rtype in GROUNDABLE_TYPES and mode == "aggregate":
+        # A PICK is user action and outranks the classifier: she chose this place off a
+        # map, which is stronger evidence than any read of whether the subject "is a
+        # place". (The picker only appears when subject_is_place already said yes, so this
+        # is belt-and-braces — but the day those disagree, the human is right.)
+        found = _picked(draft) or _tapped(name, (draft or {}).get("subject_place_options"))
+        # A SEARCH is our guess, and it is the one that must defer: searching always finds
+        # something, so running it for a subject the flow said is not a place is how a
+        # plumber gets attached to a plumbing company nobody named.
+        if not found and is_place:
+            found = _searched(
                 name, category=category, locality=locality,
                 zip_code=zip_code, block_id=block_id, user_id=user_id,
             )
-        )
 
     # ── The second identity space. Everything here is a JUDGEMENT. ──
     # Reached by a product always, and by a professional/service/place that Google could
     # not settle — a plumber, a nanny, "Chef Ana meal prep" have no storefront to find.
     if not found:
-        attached = resolve_identity_subject(
-            user_jwt, signal_id=signal_id, name=name, category=category, locality=locality,
+        outcome = resolve_identity_subject(
+            user_jwt, signal_id=signal_id, name=name, category=category,
+            locality=locality, mode=mode,
         )
-        if attached:
-            return attached
-        # Nothing to attach to: fall through and let this tip create its own subject, so
-        # the NEXT neighbour to name the same thing has something to find.
-        return _create_subject(
+        if outcome["subject"]:
+            return outcome["subject"]
+        # Nothing to attach to: this tip creates its own subject, so the NEXT neighbour to
+        # name the same thing has something to find.
+        created = _create_subject(
             user_jwt, signal_id=signal_id, name=name,
-            category=category, locality=locality, found=None,
+            category=category, locality=locality, found=None, mode=mode,
         )
+        # ORDER MATTERS. set_signal_subject stamps method='new' and clears the candidate,
+        # so a refusal recorded before it is silently erased. Record it after.
+        if outcome["ambiguous"]:
+            candidate, score = outcome["ambiguous"]
+            try:
+                from app.supabase_rpc import call_rpc
+
+                call_rpc(
+                    user_jwt,
+                    "mark_signal_subject_ambiguous",
+                    {"p_signal_id": signal_id, "p_candidate": candidate,
+                     "p_confidence": score},
+                )
+            except Exception:  # noqa: BLE001
+                logger.info("reco_subject.mark_ambiguous_failed signal=%s", signal_id)
+        return created
 
     return _create_subject(
         user_jwt, signal_id=signal_id, name=name,
-        category=category, locality=locality, found=found,
+        category=category, locality=locality, found=found, mode=mode,
     )

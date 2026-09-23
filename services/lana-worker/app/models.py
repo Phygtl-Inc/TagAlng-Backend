@@ -20,6 +20,111 @@ class JointMomentCandidate(BaseModel):
     avatar_url: str | None = None
 
 
+class RecoCohortRow(BaseModel):
+    """Proven overlap between the reader and SEVERAL of a subject's recommenders.
+
+    "4 of these 8 have toddlers, like you". `n` of `total` is the whole claim, so both
+    travel and neither renders alone. Built from PUBLIC claims only, on the resolved
+    concept — never a statement about the subject, only about who recommended it.
+    """
+
+    concept: str | None = None
+    label: str
+    n: int
+    total: int
+    peer_user_ids: list[str] = Field(default_factory=list)
+
+
+class RecoThemeRow(BaseModel):
+    """One thing several neighbours said about a subject (app/reco_cluster.py).
+
+    `n` of `total` IS the evidence — "gentle with anxious kids 8/10" — so both travel, and
+    a client must never render the label without the count. An outlier is simply a theme
+    with n=1; it is not a lesser kind of thing and must not be hidden.
+    """
+
+    label: str
+    n: int
+    total: int
+    # A contributor's OWN words, verified verbatim against the contributions this theme
+    # claims. Null when the model's quote could not be found in any of them — the count
+    # survives a dropped quote, because a count can be true when a quote is not.
+    quote: str | None = None
+    signal_ids: list[str] = Field(default_factory=list)
+    # Of the people who said THIS, how many are like the reader — screen 08's
+    # "4 of these 8 have toddlers, like you". Null when fewer than two of them are.
+    cohort: RecoCohortRow | None = None
+
+
+class RecoContributorRow(BaseModel):
+    """One neighbour's voice on a subject card. Never blended with another's."""
+
+    signal_id: str
+    peer_user_id: str
+    nickname: str
+    avatar_url: str | None = None
+    # Their own words. `detail_text` is the legacy joined recap, carried only for tips
+    # captured before the card fields existed.
+    description: str | None = None
+    detail_text: str | None = None
+    reco_fields: list[dict[str, Any]] = Field(default_factory=list)
+    # How far THIS neighbour lives — distinct from the subject's distance on the card.
+    distance_text: str | None = None
+    shared_circles: list[dict[str, Any]] = Field(default_factory=list)
+    same_block: bool = False
+    helpful_count: int = 0
+    connection: str | None = None
+    actions: list["UiActionRow"] = Field(default_factory=list)
+
+
+class RecoCardRow(BaseModel):
+    """One recommended SUBJECT, with everyone who stands behind it.
+
+    Replaces nothing: `peer_matches` keeps its shape and its meaning (one row per
+    neighbour). This is the same answer grouped by the THING, which is what lets a card
+    say "3 vouched" instead of showing one dentist three times.
+
+    What it may claim is deliberately narrow — see app/reco_cards.py. In particular the
+    subject has no affinity of its own: Dr. Sarah is not Turkish because a Turkish
+    neighbour recommended her, so nothing here grades the subject.
+    """
+
+    subject_ref: str | None = None
+    title: str
+    category: str | None = None
+    locality: str | None = None
+    # The SUBJECT's distance when it is grounded, else the lead contributor's.
+    # `distance_is_subject` says which, so copy never implies the wrong one.
+    distance_text: str | None = None
+    distance_is_subject: bool = False
+    # "aggregate" — contributions are observations, and `themes` may summarise them.
+    # "collection" — each contribution IS the artifact (a recipe, a DIY method); render
+    # them side by side and NEVER blend. `themes` is always null for a collection.
+    merge_mode: str = "aggregate"
+    reco_type: str | None = None
+    # How many neighbours recommended this. Counted across every visible contribution, not
+    # this page, and it INCLUDES the reader's own when they have one — `i_contributed`
+    # says so, so copy can read "you and 2 neighbours" rather than miscrediting her voice.
+    vouch_count: int = 1
+    i_contributed: bool = False
+    match_strength: float = 0.0
+    # Provenance for the result headings: "circle" (with a label), "block", or "nearby".
+    # Best across contributors, not the first one's.
+    group_kind: str | None = None
+    group_key: str | None = None
+    group_label: str | None = None
+    contributors: list[RecoContributorRow] = Field(default_factory=list)
+    themes: list[RecoThemeRow] | None = None
+    # Who among the recommenders is like the reader. Empty is the common case and is not
+    # a failure — most neighbours have no proven claim in common.
+    cohorts: list[RecoCohortRow] = Field(default_factory=list)
+    # The ask's own facets ("pediatric dentist", "gentle", "toddlers", "Lake Nona"),
+    # echoed so the card can show why it is an answer to THIS question. Not authored and
+    # not inferred — they are what the reader asked for.
+    fit_chips: list[str] = Field(default_factory=list)
+    tip_rec: bool = True
+
+
 class PeerMatchRow(BaseModel):
     # See ActivityPreviewRow.impression_id — same contract, same endpoint.
     impression_id: str | None = None
@@ -1019,6 +1124,13 @@ class CreateSessionResponse(BaseModel):
     signal_saved: SignalSavedPayload | None = None
     identity_profile: IdentityProfilePayload | None = None
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    # The same answer grouped by SUBJECT (§Stage 3). Additive: peer_matches is unchanged,
+    # so a client that does not know about this field behaves exactly as before. Empty
+    # unless LANA_RECO_CARDS is on.
+    reco_cards: list[RecoCardRow] = Field(default_factory=list)
+    # How many subjects the ask found, which is not len(reco_cards) — the list is a page.
+    # Screen 07's "pediatric dentist · 9 found nearby".
+    reco_cards_total: int = 0
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
@@ -1143,6 +1255,13 @@ class SendMessageResponse(BaseModel):
     phone_verified: bool = False
     home_block_assigned: bool = False
     peer_matches: list[PeerMatchRow] = Field(default_factory=list)
+    # The same answer grouped by SUBJECT (§Stage 3). Additive: peer_matches is unchanged,
+    # so a client that does not know about this field behaves exactly as before. Empty
+    # unless LANA_RECO_CARDS is on.
+    reco_cards: list[RecoCardRow] = Field(default_factory=list)
+    # How many subjects the ask found, which is not len(reco_cards) — the list is a page.
+    # Screen 07's "pediatric dentist · 9 found nearby".
+    reco_cards_total: int = 0
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)

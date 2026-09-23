@@ -118,6 +118,9 @@ class TestGroundRecoSubject(unittest.TestCase):
             "reco_type": "professional",
             "category": "pediatric dentist",
             "locality": "Lake Nona",
+            # A clinic is walked into; the extractor reads it as a place, and grounding
+            # now honours that rather than searching for every professional.
+            "place_based": True,
         }
         draft.update(over)
         return draft
@@ -167,29 +170,42 @@ class TestGroundRecoSubject(unittest.TestCase):
         self.assertEqual(out, "sub-new")
         self.assertIsNone(_call_of(rpc, "set_signal_subject")["p_google_place_id"])
 
-    def test_recipe_never_grounds(self):
-        # Two banana breads are two different recipes: the fields ARE the artifact.
+    def test_recipe_shares_a_subject_but_never_a_place(self):
+        # Standup 2026-09-22: a recipe DOES share a subject ("banana bread"), it is simply
+        # always on the Pareto minority side, so its contributions stay standalone. What it
+        # must never do is take the place path — a recipe is not a point on a map.
         with patch("app.places.search_places") as search, \
-             patch("app.supabase_rpc.call_rpc") as rpc:
+             patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])) as rpc:
             out = mod.ground_reco_subject(
                 "jwt", signal_id="sig-4",
                 draft=self._draft(reco_type="recipe", name="Banana bread"),
             )
-        self.assertIsNone(out)
+        self.assertEqual(out, "sub-new")
         search.assert_not_called()
-        rpc.assert_not_called()
+        created = _call_of(rpc, "set_signal_subject")
+        self.assertIsNone(created["p_google_place_id"])
+        # The rail that stops Stage 3 blending two authors' ingredients.
+        self.assertEqual(created["p_merge_mode"], "collection")
 
-    def test_diy_and_other_never_ground(self):
+    def test_diy_and_other_are_collections_too(self):
         for rtype in ("diy", "other"):
             with self.subTest(rtype=rtype), \
                  patch("app.places.search_places") as search, \
-                 patch("app.supabase_rpc.call_rpc") as rpc:
+                 patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])) as rpc:
                 out = mod.ground_reco_subject(
                     "jwt", signal_id="sig-5", draft=self._draft(reco_type=rtype),
                 )
-            self.assertIsNone(out)
-            search.assert_not_called()
-            rpc.assert_not_called()
+                self.assertEqual(out, "sub-new")
+                search.assert_not_called()
+                self.assertEqual(
+                    _call_of(rpc, "set_signal_subject")["p_merge_mode"], "collection"
+                )
+
+    def test_aggregate_types_are_marked_aggregate(self):
+        with patch("app.places.search_places", return_value=[]), \
+             patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])) as rpc:
+            mod.ground_reco_subject("jwt", signal_id="sig-5b", draft=self._draft())
+        self.assertEqual(_call_of(rpc, "set_signal_subject")["p_merge_mode"], "aggregate")
 
     def test_product_skips_places_and_uses_the_identity_space(self):
         # A SKU is a shared referent but not a map point: searching Places for a kettle
@@ -388,16 +404,42 @@ class TestIdentitySpace(unittest.TestCase):
         self.assertEqual(out, "sub-mike")
         self.assertEqual(_call_of(rpc, "attach_signal_subject")["p_subject_id"], "sub-mike")
 
-    def test_recipe_never_reaches_the_identity_space(self):
+    def test_two_banana_breads_share_one_subject(self):
+        # The change the standup asked for: the SUBJECT merges, the artifacts do not.
+        bread = {
+            "id": "sub-bread", "subject_key": "banana bread",
+            "display_name": "Banana bread", "category": "baking",
+            "locality": None, "merge_mode": "collection", "signal_count": 1,
+        }
         with patch("app.places.search_places") as search, \
-             patch("app.supabase_rpc.call_rpc") as rpc:
+             patch("app.reco_subject._adjudicate") as adj, \
+             patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[bread])) as rpc:
             out = mod.ground_reco_subject(
                 "jwt", signal_id="sig-r",
-                draft=self._draft(reco_type="recipe", name="Banana bread"),
+                draft=self._draft(reco_type="recipe", name="Banana bread", category="baking"),
             )
-        self.assertIsNone(out)
+        self.assertEqual(out, "sub-bread")
         search.assert_not_called()
-        rpc.assert_not_called()
+        adj.assert_not_called()          # identical names: no model call needed
+        self.assertEqual(_call_of(rpc, "attach_signal_subject")["p_method"], "blocked")
+        # Candidates were asked for collections only — a plumber is not a banana bread.
+        self.assertEqual(
+            _call_of(rpc, "reco_subject_candidates")["p_merge_mode"], "collection"
+        )
+
+    def test_a_word_collision_does_not_merge_a_recipe_into_a_business(self):
+        # The blocker is recall-biased: "Bread Street Plumbing" and "Banana bread" share
+        # the word "bread", so the shortlist legitimately contains it. The SCORER is what
+        # refuses (0.303, far below ADJUDICATE_FLOOR) — verified, not assumed.
+        bread = {
+            "id": "sub-bread", "subject_key": "banana bread",
+            "display_name": "Banana bread", "category": "baking",
+            "locality": None, "merge_mode": "collection", "signal_count": 1,
+        }
+        self.assertLess(
+            mod.score_candidate("Bread Street Plumbing", "plumber", bread),
+            mod.ADJUDICATE_FLOOR,
+        )
 
 
 class TestBands(unittest.TestCase):
@@ -452,6 +494,9 @@ class TestCarouselPick(unittest.TestCase):
             "reco_type": "professional",
             "category": "pediatric dentist",
             "locality": "Lake Nona",
+            # A clinic is walked into; the extractor reads it as a place, and grounding
+            # now honours that rather than searching for every professional.
+            "place_based": True,
         }
         draft.update(over)
         return draft
@@ -499,11 +544,197 @@ class TestCarouselPick(unittest.TestCase):
         self.assertEqual(_call_of(rpc, "set_signal_subject")["p_google_place_id"], "ChIJ_searched")
 
     def test_a_recipe_pick_is_still_ignored(self):
-        # Nothing about a tapped place makes a recipe mergeable.
-        with patch("app.supabase_rpc.call_rpc") as rpc:
+        # A recipe is not a point on a map, so a tapped place is not evidence about it —
+        # grounding "banana bread" to whichever bakery she happened to tap would attribute
+        # her recipe to a business nobody named.
+        with patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])) as rpc:
             out = mod.ground_reco_subject(
                 "jwt", signal_id="sig-p5",
-                draft=self._draft(reco_type="recipe", subject_google_place_id="ChIJ_picked"),
+                draft=self._draft(
+                    reco_type="recipe", name="Banana bread",
+                    subject_google_place_id="ChIJ_picked",
+                ),
             )
-        self.assertIsNone(out)
-        rpc.assert_not_called()
+        self.assertEqual(out, "sub-new")
+        created = _call_of(rpc, "set_signal_subject")
+        self.assertIsNone(created["p_google_place_id"])
+        self.assertEqual(created["p_merge_mode"], "collection")
+
+
+class TestAmbiguousSurvives(unittest.TestCase):
+    """Regression: the refusal must outlive the subject creation that follows it.
+
+    Found by scripts/eval_reco_resolution.py on a real stack, not here — the mocks passed
+    while the database read back method='new' with the near-miss gone, because
+    set_signal_subject stamps method/candidate unconditionally and ran AFTER the marking.
+    An ordering bug is invisible to a test that only asserts each call happened.
+    """
+
+    CANDIDATE = {
+        "id": "sub-plumber", "subject_key": "mike the plumber",
+        "display_name": "Mike the Plumber", "category": "plumber",
+        "locality": "Lake Nona", "merge_mode": "aggregate", "signal_count": 2,
+    }
+
+    def _run(self, verdict):
+        calls: list[str] = []
+
+        def rpc(_jwt, fn, args):
+            calls.append(fn)
+            if fn == "reco_subject_candidates":
+                return [self.CANDIDATE]
+            if fn == "set_signal_subject":
+                return "sub-own"
+            return True
+
+        with patch("app.places.search_places", return_value=[]), \
+             patch("app.reco_subject._adjudicate", return_value=verdict), \
+             patch("app.supabase_rpc.call_rpc", side_effect=rpc):
+            out = mod.ground_reco_subject(
+                "jwt", signal_id="sig-amb",
+                draft={"name": "Mike the Plumber", "reco_type": "service",
+                       "category": "barber", "locality": "Lake Nona"},
+            )
+        return out, calls
+
+    def test_the_mark_comes_after_the_create(self):
+        out, calls = self._run(False)
+        self.assertEqual(out, "sub-own")
+        self.assertIn("mark_signal_subject_ambiguous", calls)
+        self.assertLess(
+            calls.index("set_signal_subject"),
+            calls.index("mark_signal_subject_ambiguous"),
+            f"refusal recorded before the create that erases it: {calls}",
+        )
+
+    def test_unsure_is_recorded_the_same_way(self):
+        _, calls = self._run(None)
+        self.assertLess(calls.index("set_signal_subject"),
+                        calls.index("mark_signal_subject_ambiguous"))
+
+    def test_nothing_close_records_no_near_miss(self):
+        # Below the floor there is no candidate worth remembering.
+        with patch("app.places.search_places", return_value=[]), \
+             patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])) as rpc:
+            mod.ground_reco_subject(
+                "jwt", signal_id="sig-far",
+                draft={"name": "Chef Ana meal prep", "reco_type": "service",
+                       "category": "catering", "locality": "Lake Nona"},
+            )
+        self.assertNotIn("mark_signal_subject_ambiguous",
+                         [c[0][1] for c in rpc.call_args_list])
+
+
+class TestPlaceBasedIsHonoured(unittest.TestCase):
+    """Grounding must not re-litigate whether the subject is a place.
+
+    The capture flow already decided: subject_is_place() gives a restaurant the Places
+    picker always, a professional/service only when the extractor read a storefront. This
+    module used to ignore that and search anyway — and a search ALWAYS finds something, so
+    "Mike Plumber" was attached to a real plumbing company the neighbour never named, and
+    then could not merge with "Mike the Plumber", who had no listing. Found by
+    scripts/eval_reco_resolution.py on a real stack.
+    """
+
+    def _draft(self, **over):
+        d = {"name": "Mike the Plumber", "reco_type": "service", "category": "plumber",
+             "locality": "Lake Nona", "place_based": False}
+        d.update(over)
+        return d
+
+    def test_a_storefrontless_service_never_hits_google(self):
+        with patch("app.places.search_places") as search, \
+             patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])) as rpc:
+            mod.ground_reco_subject("jwt", signal_id="s1", draft=self._draft())
+        search.assert_not_called()
+        self.assertIsNone(_call_of(rpc, "set_signal_subject")["p_google_place_id"])
+
+    def test_a_storefront_service_does(self):
+        hit = [{"name": "Nona Barbers", "place_id": "ChIJ_shop", "lat": 1, "lng": 2}]
+        with patch("app.places.search_places", return_value=hit) as search, \
+             patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])) as rpc:
+            mod.ground_reco_subject(
+                "jwt", signal_id="s2",
+                draft=self._draft(name="Nona Barbers", category="barber", place_based=True),
+            )
+        search.assert_called_once()
+        self.assertEqual(_call_of(rpc, "set_signal_subject")["p_google_place_id"], "ChIJ_shop")
+
+    def test_a_restaurant_grounds_even_without_the_flag(self):
+        # _PLACE_SUBJECT_TYPES: a restaurant's subject IS a map point, flag or no flag.
+        hit = [{"name": "Boxi Park", "place_id": "ChIJ_boxi", "lat": 1, "lng": 2}]
+        with patch("app.places.search_places", return_value=hit) as search, \
+             patch("app.supabase_rpc.call_rpc", side_effect=_rpc(candidates=[])):
+            mod.ground_reco_subject(
+                "jwt", signal_id="s3",
+                draft=self._draft(name="Boxi Park", reco_type="restaurant",
+                                  category="food hall", place_based=False),
+            )
+        search.assert_called_once()
+
+    def test_two_phrasings_of_one_storefrontless_provider_can_meet(self):
+        # The regression in one assertion: both must reach the identity space, where they
+        # can find each other, rather than one being captured by a Google listing.
+        seen = []
+        with patch("app.places.search_places") as search, \
+             patch("app.supabase_rpc.call_rpc",
+                   side_effect=lambda j, fn, a: seen.append(fn) or (
+                       [] if fn == "reco_subject_candidates" else "sub-x")):
+            for nm in ("Mike the Plumber", "Mike Plumber"):
+                mod.ground_reco_subject("jwt", signal_id=f"s-{nm}", draft=self._draft(name=nm))
+        search.assert_not_called()
+        self.assertEqual(seen.count("reco_subject_candidates"), 2)
+
+
+class TestAdjudicationCache(unittest.TestCase):
+    """The model is not deterministic; the product must be.
+
+    Measured on a real stack: one identical pair at an identical score merged on 2 of 5
+    runs. Since the verdict is persisted into subject_ref at capture, an uncached
+    adjudicator means two neighbours share a card by luck.
+    """
+
+    CAND = {"id": "sub-x", "subject_key": "mike the plumber",
+            "display_name": "Mike the Plumber", "category": "plumber",
+            "locality": "Lake Nona", "merge_mode": "aggregate", "signal_count": 1}
+
+    def test_the_question_is_symmetric(self):
+        self.assertEqual(
+            mod.pair_signature("Mike the Plumber", "plumber", "Mike Plumber", "plumber"),
+            mod.pair_signature("Mike Plumber", "plumber", "Mike the Plumber", "plumber"),
+        )
+
+    def test_category_is_part_of_the_question(self):
+        self.assertNotEqual(
+            mod.pair_signature("Mike the Plumber", "plumber", "Mike the Plumber", "plumber"),
+            mod.pair_signature("Mike the Plumber", "plumber", "Mike the Plumber", "barber"),
+        )
+
+    def test_a_hit_never_asks_the_model(self):
+        with patch.object(mod, "_cached_verdict", return_value=(True, False)), \
+             patch.object(mod, "_ask_model") as ask:
+            self.assertIs(mod._adjudicate("Mike Plumber", "plumber", "Lake Nona", self.CAND), False)
+        ask.assert_not_called()
+
+    def test_a_miss_asks_once_and_stores(self):
+        with patch.object(mod, "_cached_verdict", return_value=(False, None)), \
+             patch.object(mod, "_ask_model", return_value=True) as ask, \
+             patch.object(mod, "_store_verdict") as store:
+            self.assertIs(mod._adjudicate("Mike Plumber", "plumber", "Lake Nona", self.CAND), True)
+        ask.assert_called_once()
+        store.assert_called_once()
+
+    def test_unsure_is_cached_like_any_other_answer(self):
+        # Re-asking a question the model could not answer is how a refusal becomes a merge
+        # on the third attempt.
+        with patch.object(mod, "_cached_verdict", return_value=(False, None)), \
+             patch.object(mod, "_ask_model", return_value=None), \
+             patch.object(mod, "_store_verdict") as store:
+            mod._adjudicate("Mike Plumber", "plumber", "Lake Nona", self.CAND)
+        self.assertIsNone(store.call_args[0][1])
+
+    def test_a_cached_none_is_not_mistaken_for_a_miss(self):
+        with patch.object(mod, "_cached_verdict", return_value=(True, None)), \
+             patch.object(mod, "_ask_model") as ask:
+            self.assertIsNone(mod._adjudicate("Mike Plumber", "plumber", "Lake Nona", self.CAND))
+        ask.assert_not_called()
