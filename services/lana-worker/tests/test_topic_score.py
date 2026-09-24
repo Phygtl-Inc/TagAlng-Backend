@@ -19,7 +19,7 @@ import unittest
 from unittest.mock import patch
 
 import app.activity_browse as ab
-from app.activity_browse import _filter_events_by_query
+from app.activity_browse import _filter_events_by_query, _filter_unchecked
 
 _EVENTS = [
     {"id": "e0", "title": "Sunday Cricket", "cohort_tags": ["sports"]},
@@ -282,17 +282,53 @@ class UnjudgedPathTests(unittest.TestCase):
         self.assertTrue(all(e["topic_score"] == 0.0 for e in rows))
         self.assertTrue(all(e["topic_mismatch"] == "" for e in rows))
 
-    def test_keyword_fallback_showing_everything_still_scores_zero(self):
-        """Nothing matched → show all. "All" is not "all perfect"."""
+    def test_keyword_fallback_with_no_hit_is_empty_and_unchecked(self):
+        """No model and no row contains the word: the honest answer is "couldn't check",
+        not every event shown as a match. It used to return all of them."""
+        rows = _events()
         with patch("app.orchestrator.llm.llm_configured", return_value=False):
-            matched, _ = _filter_events_by_query(_events(), "underwater basket weaving")
-        self.assertEqual(len(matched), 3)
-        self.assertTrue(all(e["topic_score"] == 0.0 for e in matched))
+            matched, label = _filter_events_by_query(rows, "underwater basket weaving")
+        self.assertEqual(matched, [])
+        self.assertEqual(label, "")
+        self.assertTrue(_filter_unchecked(rows))
+        self.assertTrue(all(e["topic_score"] == 0.0 for e in rows))
+        self.assertTrue(all(e["topic_mismatch"] == "" for e in rows))
+
+    def test_a_failed_model_call_with_no_hit_is_unchecked_too(self):
+        rows = _events()
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", side_effect=RuntimeError("model down")
+        ), patch("app.orchestrator.llm.router_model", return_value="m"):
+            matched, _ = _filter_events_by_query(rows, "underwater basket weaving")
+        self.assertEqual(matched, [])
+        self.assertTrue(_filter_unchecked(rows))
+
+    def test_a_judged_empty_result_is_not_unchecked(self):
+        rows = _events()
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json",
+            return_value={"match_indices": [], "scores": [0.1, 0.1, 0.1],
+                          "mismatches": ["", "", ""], "label": ""},
+        ), patch("app.orchestrator.llm.router_model", return_value="m"):
+            matched, _ = _filter_events_by_query(rows, "underwater basket weaving")
+        self.assertEqual(matched, [])
+        self.assertFalse(_filter_unchecked(rows))
+
+    def test_a_vague_phrase_outside_the_open_list_is_unchecked_without_a_model(self):
+        """"what's happening" is NOT an _OPEN_RE phrase, so with no model it goes through
+        the keyword fallback. It used to be shown everything by accident of that fallback;
+        with the model up, the prompt's "If open, return all indices" still covers it."""
+        rows = _events()
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            matched, _ = _filter_events_by_query(rows, "what's happening")
+        self.assertEqual(matched, [])
+        self.assertTrue(_filter_unchecked(rows))
 
     def test_vague_query_path_yields_zero(self):
         """An open request returns everything, but nothing was judged — there was no
         topic to judge against."""
-        matched, label = _filter_events_by_query(_events(), "what's happening")
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            matched, label = _filter_events_by_query(_events(), "anything")
         self.assertEqual(len(matched), 3)
         self.assertTrue(all(e["topic_score"] == 0.0 for e in matched))
         self.assertTrue(all(e["topic_mismatch"] == "" for e in matched))
@@ -410,15 +446,36 @@ class NoMatchLoggingTests(_LLMCase):
         self.assertIn("candidates=0", lines[0])
         self.assertIn("best_score=None", lines[0])
 
-    def test_the_keyword_fallback_cannot_return_empty_so_it_never_logs(self):
-        """Documenting the reason there is no log call on that path rather than leaving
-        dead code there: the fallback returns `matched or events`, and events is known
-        non-empty by then, so it always hands back at least the full candidate list."""
+    def test_an_unchecked_empty_result_logs_and_says_it_was_unchecked(self):
+        """The fallback no longer hands back every event, so it CAN come back empty now —
+        and that empty result is logged, flagged unchecked so it never reads as a supply
+        gap. (It used to be unlogged because it could not be empty.)"""
         with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
             "app.activity_browse._log_no_match"
         ) as spy:
             matched, _ = _filter_events_by_query(_events(), "nothing will match this")
-        self.assertEqual(len(matched), 3)
+        self.assertEqual(matched, [])
+        spy.assert_called_once()
+        self.assertTrue(spy.call_args.kwargs.get("unchecked"))
+
+    def test_the_logged_query_is_redacted(self):
+        """The no-match line used to log the raw ask. An email or a child's name in it
+        must not reach the logs."""
+        with patch("app.orchestrator.llm.llm_configured", return_value=False), self.assertLogs(
+            "app.activity_browse", level="INFO"
+        ) as captured:
+            _filter_events_by_query(_events(), "violin for my son Leo, email jo@example.com")
+        line = [m for m in captured.output if "activity_browse_no_match" in m][0]
+        self.assertNotIn("jo@example.com", line)
+        self.assertIn("[email]", line)
+        self.assertNotIn("Leo", line)
+
+    def test_a_keyword_hit_in_the_fallback_does_not_log(self):
+        with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
+            "app.activity_browse._log_no_match"
+        ) as spy:
+            matched, _ = _filter_events_by_query(_events(), "cricket")
+        self.assertTrue(matched)
         spy.assert_not_called()
 
     def test_a_long_request_is_truncated_in_the_log(self):

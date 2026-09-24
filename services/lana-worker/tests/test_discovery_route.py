@@ -865,7 +865,12 @@ class TestDiscoveryRouting(unittest.TestCase):
                 "identity_snippet": None,
             },
         ]
-        with patch("app.discovery_route.fetch_preview_events_on_block") as mock_events:
+        # The matcher is not what this routes on — stand it in so the pivot's events
+        # render as results. (With no model, the filter now says "couldn't check" rather
+        # than showing every event as a match for "find activities".)
+        with patch("app.discovery_route.fetch_preview_events_on_block") as mock_events, patch(
+            "app.activity_browse._filter_events_by_query", side_effect=lambda ev, q: (ev, "")
+        ):
             mock_events.return_value = [{"title": "Stroller walk", "venue_name": "Park"}]
             peers_turn = handle_discovery_turn(
                 "find neighbors",
