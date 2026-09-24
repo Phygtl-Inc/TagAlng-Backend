@@ -54,6 +54,33 @@
 --   another person wants to read. The band exists to rank, filter and match — to answer
 --   "find me somewhere the owner is good" — and the moment it is rendered as a number or
 --   a row of icons we have rebuilt the thing this replaces.
+--
+-- ============================================================================
+-- DECISIONS LOCKED 2026-09-24 (post-standup) — these are settled, not open
+-- ============================================================================
+--   A. THEIR SECTIONS ONLY. A statement's questions come from the statement. reco_fields
+--      is NOT appended to the same round. It keeps running, but for a different question:
+--      what the subject IS (hours, delivery, profession) rather than what you noticed.
+--      Six mentioned, six asked — not six plus four.
+--
+--   B. FREE WORDS ONLY. No chip list, no suggested-word tray, no scale. The method rests
+--      on their vocabulary; a fixed chip set is a star rating wearing words.
+--      ('tap' survives in answer_source only for interop with reco_fields answers.)
+--
+--   C. NEGATIVES DISPLAY EXACTLY LIKE POSITIVES. "3 of 8 said the front desk was cold"
+--      shows, on the subject, including on a claimed operator's own surface. A place
+--      where only good things appear is read as marketing, and the asker is the person
+--      this product is for.
+--
+--   D. DISPLAY FROM n=1. One person's porcelain is precisely what Google cannot give
+--      you. The count is shown, so "1 person mentioned this" is honest rather than
+--      inflated. subject_aspects(p_min_n) defaults to 1 and callers should not raise it
+--      without a reason.
+--
+--   E. PARTIAL ROUNDS SURVIVE. Someone who answers 2 of their 6 sections and leaves keeps
+--      the 2, and the other 4 stay OPEN for Lana to pick up in a later conversation.
+--      Hence the 'open' answer_source below. Open ≠ skipped: skipped is a decision, open
+--      is an unfinished round.
 
 create table if not exists public.reco_aspect (
   id             uuid primary key default gen_random_uuid(),
@@ -74,8 +101,8 @@ create table if not exists public.reco_aspect (
 
   -- Their answer, in their words. THIS is what gets displayed.
   answer_verbatim text,
-  answer_source  text not null default 'voice'
-                   check (answer_source in ('voice','tap','text','skipped')),
+  answer_source  text not null default 'open'
+                   check (answer_source in ('open','voice','tap','text','skipped')),
 
   -- The second axis. -2..+2, internal only. Null when skipped or unreadable — a null
   -- band is honest; a zero would claim we read neutrality where we read nothing.
@@ -84,6 +111,10 @@ create table if not exists public.reco_aspect (
 
   embedding      extensions.vector(768),
   created_at     timestamptz not null default now(),
+  -- Re-offer bookkeeping (decision E). asked_at lets Lana avoid re-asking the same open
+  -- aspect twice in one sitting; answered_at is when the round actually closed for it.
+  asked_at       timestamptz,
+  answered_at    timestamptz,
 
   -- One row per aspect per statement. Re-answering updates.
   unique (signal_id, aspect_key),
@@ -92,7 +123,10 @@ create table if not exists public.reco_aspect (
   constraint reco_aspect_skipped_has_no_sentiment check (
     answer_source <> 'skipped' or sentiment is null),
   constraint reco_aspect_sentiment_has_answer check (
-    sentiment is null or answer_verbatim is not null)
+    sentiment is null or answer_verbatim is not null),
+  -- An open aspect is a question not yet answered: no words, no band, nothing to display.
+  constraint reco_aspect_open_is_empty check (
+    answer_source <> 'open' or (answer_verbatim is null and sentiment is null))
 );
 
 create index if not exists reco_aspect_subject_idx
@@ -101,6 +135,10 @@ create index if not exists reco_aspect_signal_idx
   on public.reco_aspect(signal_id);
 create index if not exists reco_aspect_key_idx
   on public.reco_aspect(aspect_key);
+-- The re-offer queue. Small and hot: "what did this person raise and never grade?"
+create index if not exists reco_aspect_open_idx
+  on public.reco_aspect(author_id, asked_at)
+  where answer_source = 'open';
 
 -- Find-side: "somewhere the owner speaks Italian and the porcelain is unique" is an
 -- aspect-level query, so aspects have to be searchable as text, not just as labels.
@@ -119,20 +157,24 @@ comment on column public.reco_aspect.sentiment is
   'the star system this replaces. Null means skipped or unreadable, never neutral.';
 
 comment on column public.reco_aspect.answer_source is
-  '''skipped'' is a first-class answer and is stored. That someone raised the front desk '
-  'and then declined to grade it is information — it tells us the aspect is salient here '
-  'even when this person would not say more.';
+  'Four terminal states and one pending. ''skipped'' is a first-class answer and is '
+  'stored: that someone raised the front desk and then declined to grade it is '
+  'information. ''open'' is different — the round was abandoned, the question is still '
+  'owed, and Lana may re-offer it later. Open rows never display.';
 
 -- ---------------------------------------------------------------------------
 -- Read model: aspects of a subject, across everyone, for one viewer.
 --
 -- Returns the distribution, never an average. "9 of 12 said the wait was bad" survives
 -- scrutiny; "2.4/5 on wait" does not, and cannot be argued with.
+--
+-- Negative aspects come back exactly like positive ones (decision C). The caller does
+-- not get to filter by band — that choice is not the display layer's to make.
 -- ---------------------------------------------------------------------------
 create or replace function public.subject_aspects(
   p_subject_ref uuid,
   p_viewer_id   uuid,
-  p_min_n       int default 1
+  p_min_n       int default 1   -- decision D: show from one person
 )
 returns table (
   aspect_key     text,
@@ -156,6 +198,8 @@ as $$
            a.sentiment, a.answer_source, a.created_at
     from public.reco_aspect a
     where a.subject_ref = p_subject_ref
+      -- Open aspects are unfinished business, not content.
+      and a.answer_source <> 'open'
   ),
   -- Same shape as everywhere else: who the viewer shares a place with. A neighbour's
   -- word and a stranger's word are not the same object.
@@ -194,10 +238,60 @@ grant execute on function public.subject_aspects(uuid, uuid, int) to authenticat
 comment on function public.subject_aspects(uuid, uuid, int) is
   'Aspects of a subject across everyone who spoke about it, for one viewer. Returns a '
   'DISTRIBUTION and quotes — never a mean. n_shared_community is what makes "4 of 8, and '
-  '2 of them from your church" possible, which is the number the UI shows as "4 out of 8".';
+  '2 of them from your church" possible, which is the number the UI shows as "4 out of 8". '
+  'Negative aspects are returned identically to positive ones, by design.';
+
+-- ---------------------------------------------------------------------------
+-- The re-offer queue (decision E).
+--
+-- Someone raised six things and graded two. The other four are theirs, still owed, and
+-- worth more than a fresh cold question — Lana already knows they care about the front
+-- desk because they brought it up.
+-- ---------------------------------------------------------------------------
+create or replace function public.open_aspects_for_author(
+  p_author_id  uuid,
+  p_limit      int default 3,
+  p_cooldown   interval default '6 hours'
+)
+returns table (
+  id           uuid,
+  signal_id    uuid,
+  subject_ref  uuid,
+  aspect_key   text,
+  aspect_label text,
+  source_span  text,
+  asked_at     timestamptz,
+  created_at   timestamptz
+)
+language sql
+stable
+security definer
+set search_path = pg_catalog, public, extensions
+as $$
+  select a.id, a.signal_id, a.subject_ref, a.aspect_key, a.aspect_label,
+         a.source_span, a.asked_at, a.created_at
+  from public.reco_aspect a
+  where a.author_id = p_author_id
+    and a.answer_source = 'open'
+    -- Don't re-ask something we put in front of them minutes ago.
+    and (a.asked_at is null or a.asked_at < now() - p_cooldown)
+  -- Oldest statement first: finish what was started before opening new ground.
+  order by a.created_at asc
+  limit greatest(p_limit, 0);
+$$;
+
+revoke all on function public.open_aspects_for_author(uuid, int, interval) from public, anon;
+grant execute on function public.open_aspects_for_author(uuid, int, interval)
+  to authenticated, service_role;
+
+comment on function public.open_aspects_for_author(uuid, int, interval) is
+  'Sections this person raised and never graded, for Lana to re-offer later. Cooldown '
+  'stops the same question reappearing in one sitting. This is a warm re-engagement '
+  'hook, not a nag: they chose the subject themselves.';
 
 -- ============================================================================
 -- ROLLBACK
+--   drop function if exists public.open_aspects_for_author(uuid, int, interval);
 --   drop function if exists public.subject_aspects(uuid, uuid, int);
 --   drop table if exists public.reco_aspect;
 --   Additive: reco_fields, reco_subject_digests.themes and every existing read path are
