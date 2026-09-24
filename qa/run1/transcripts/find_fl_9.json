@@ -1,0 +1,142 @@
+{
+  "id": "find_fl_9",
+  "tags": [
+    "find",
+    "fl",
+    "Sports"
+  ],
+  "zip": "32801",
+  "turns": [
+    {
+      "sent": "I'm looking for a meet or playgroup",
+      "hint": "look_meet",
+      "status": 200,
+      "ms": 4036,
+      "assistant_message": "Love it — what kind of thing are you up for?",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "Sports",
+      "hint": null,
+      "status": 200,
+      "ms": 5352,
+      "assistant_message": "What's your ZIP code? Once I know your block I can show what's happening nearby.",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "32801",
+      "hint": null,
+      "status": 200,
+      "ms": 4310,
+      "assistant_message": "I couldn't find a block for ZIP 32801. Try another (e.g. 32827 for Lake Nona).",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "just something with other preschool moms",
+      "hint": null,
+      "status": 200,
+      "ms": 4183,
+      "assistant_message": "You mentioned wanting to do just something with other preschool moms — would you like me to show you existing events or help match you with neighbors for a meet?",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "clarify_browse_or_meet",
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Show me events",
+        "Match me with neighbors",
+        "Not sure"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T00:52:30.532Z",
+  "session": "116ce174-065c-45e1-81bb-7bc266f5f645",
+  "finishedAt": "2026-07-09T00:52:49.893Z"
+}
