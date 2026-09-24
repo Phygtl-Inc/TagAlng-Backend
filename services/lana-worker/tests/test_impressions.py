@@ -105,3 +105,27 @@ def test_a_peer_row_without_a_tip_is_still_a_peer():
     assert rows[0]["recommendation_type"] == "neighbor"
     assert rows[0]["candidate_user_id"] == "u-882"
     assert rows[0].get("signal_id") is None
+
+
+def test_the_stretch_card_is_marked_and_nothing_else_is():
+    """Rapport Reply: the one stretch event is closely related, NOT a match — its taps
+    must never be counted as taps on a matched result."""
+    acts = [ActivityPreviewRow(activity_id="e2", title="Sunday jam night"),
+            ActivityPreviewRow(activity_id="e9", title="Other")]
+    with patch("app.orchestrator.llm.llm_configured", return_value=False):
+        rows = _captured(
+            activities=acts,
+            ctx={"browse_scores": {"e2": 0.7},
+                 "browse_no_match": {"stretch_event_id": "e2", "stretch_shown": True}},
+        )
+    by_id = {r["event_id"]: r for r in rows}
+    assert by_id["e2"]["metadata"]["stretch"] is True
+    assert by_id["e2"]["score"] == 0.7
+    assert "stretch" not in by_id["e9"]["metadata"]
+
+
+def test_no_stretch_means_no_marker():
+    acts = [ActivityPreviewRow(activity_id="e1", title="t")]
+    with patch("app.orchestrator.llm.llm_configured", return_value=False):
+        rows = _captured(activities=acts, ctx={"browse_no_match": None})
+    assert "stretch" not in rows[0]["metadata"]

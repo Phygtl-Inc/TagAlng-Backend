@@ -458,6 +458,18 @@ class NoMatchLoggingTests(_LLMCase):
         spy.assert_called_once()
         self.assertTrue(spy.call_args.kwargs.get("unchecked"))
 
+    def test_the_logged_query_is_redacted(self):
+        """The no-match line used to log the raw ask. An email or a child's name in it
+        must not reach the logs."""
+        with patch("app.orchestrator.llm.llm_configured", return_value=False), self.assertLogs(
+            "app.activity_browse", level="INFO"
+        ) as captured:
+            _filter_events_by_query(_events(), "violin for my son Leo, email jo@example.com")
+        line = [m for m in captured.output if "activity_browse_no_match" in m][0]
+        self.assertNotIn("jo@example.com", line)
+        self.assertIn("[email]", line)
+        self.assertNotIn("Leo", line)
+
     def test_a_keyword_hit_in_the_fallback_does_not_log(self):
         with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
             "app.activity_browse._log_no_match"

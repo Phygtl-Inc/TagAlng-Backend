@@ -813,7 +813,7 @@ def _log_no_match(
     # meaningless there and must not read as "a supply gap".
     logging.getLogger(__name__).info(
         "activity_browse_no_match query=%r candidates=%d best_score=%s unchecked=%s",
-        query[:120],
+        _redact(query[:120]),
         len(events),
         max(scores) if scores else None,
         unchecked,
@@ -840,6 +840,77 @@ def _filter_unchecked(events: list[dict[str, Any]]) -> bool:
     return bool(events) and all(
         isinstance(e, dict) and e.get("topic_unchecked") for e in events
     )
+
+
+def _redact(text: str) -> str:
+    """PII-redacted text for logs. A failed redaction drops the text, never passes it
+    through raw — same rule as impressions._redacted."""
+    try:
+        from app.pii import redact_pii
+
+        return redact_pii(text) or ""
+    except Exception:  # noqa: BLE001
+        return "[redaction_failed]"
+
+
+# How many rejected candidates a no-match record keeps. Enough to see whether the
+# matcher was nearly right (a 0.8 just missed) without logging the whole pool.
+_NEAR_MISS_LOG_LIMIT = 3
+
+
+def _record_no_match(
+    session_ctx: dict[str, Any],
+    events: list[dict[str, Any]],
+    *,
+    stretch: StretchCandidate | None = None,
+) -> None:
+    """Stamp this turn's no-match record (turn-scoped; main.py writes it into the
+    assistant message metadata). The best nearby near misses — what the matcher itself
+    scored and said — whether a stretch was shown, and whether the matcher ran at all.
+
+    `filter`: "judged" (the matcher scored these rows), "unchecked" (it could not run),
+    or "no_candidates" (nothing was fetched, so there was nothing to judge)."""
+    if _filter_unchecked(events):
+        state = "unchecked"
+    elif not events:
+        state = "no_candidates"
+    else:
+        state = "judged"
+    near: list[dict[str, Any]] = []
+    if state == "judged":
+        scored = [
+            e for e in events
+            if isinstance(e, dict) and isinstance(e.get("topic_score"), (int, float))
+            and not isinstance(e.get("topic_score"), bool)
+        ]
+        scored.sort(key=lambda e: float(e["topic_score"]), reverse=True)  # stable on ties
+        near = [
+            {
+                "event_id": str(e.get("id") or ""),
+                "score": _coerce_topic_score(e.get("topic_score")),
+                # The mismatch echoes the ask ("asked for my son Leo's party…").
+                "mismatch": _redact(_coerce_topic_mismatch(e.get("topic_mismatch"))),
+            }
+            for e in scored[:_NEAR_MISS_LOG_LIMIT]
+        ]
+    session_ctx["browse_no_match"] = {
+        "near_misses": near,
+        "stretch_shown": stretch is not None,
+        "stretch_event_id": stretch.event_id if stretch is not None else None,
+        "filter": state,
+        "stretch_first": _STRETCH_BEFORE_WIDEN,
+    }
+
+
+def browse_turn_metadata(ctx: dict[str, Any] | None) -> dict[str, Any]:
+    """Browse telemetry for the assistant message's metadata: this turn's no-match record
+    and the user's answer to the previous turn's offer. Only keys that are set."""
+    out: dict[str, Any] = {}
+    for key in ("browse_no_match", "browse_offer_response"):
+        val = (ctx or {}).get(key)
+        if isinstance(val, dict) and val:
+            out[key] = val
+    return out
 
 
 def _filter_events_by_query(
@@ -1222,6 +1293,8 @@ def _stretch_offer_reply(
     draft["_area_offer_block_id"] = None
     draft["_area_offer_name"] = None
     draft["suggestions"] = ["Yes, listen for me", "Widen the search"]
+    # So next turn's answer can be tied back to the stretch it answered.
+    draft["_stretch_event_id"] = stretch.event_id
     session_ctx["browse_draft"] = draft
     session_ctx["activity_browse_active"] = True
     session_ctx["activity_previews"] = activity_previews_from_events([stretch.event])
@@ -1327,7 +1400,21 @@ def run_activity_browse_turn(
     if draft.get("_seek_offer"):
         area_chip = str(draft.get("_area_offer_chip") or "")
         chip = str(draft.get("_community_chip") or "")
+        # Which way the user answered last turn's offer — the only signal of whether a
+        # stretch (or any empty-state offer) helped. Read by label, like the pills.
+        offered_stretch = draft.pop("_stretch_event_id", None)
+        answer: dict[str, Any] = {}
+
+        def _answered(response: str) -> None:
+            # First answer wins: a chip tap blanks msg and then falls through the ZIP /
+            # widen / fresh-search checks below, whose else would re-label it.
+            if answer:
+                return
+            answer.update(response=response, offered_stretch_event_id=offered_stretch)
+            session_ctx["browse_offer_response"] = dict(answer)
+
         if area_chip and msg.strip().lower() == area_chip.lower():
+            _answered("area")
             # "Look in Lake Nona — Area A" — the far-supply pill. Re-anchor on the block
             # id we remembered when we made the offer, rather than parsing a ZIP back out
             # of the label: the seeded pilot areas are H3 cells with no ZIP in them, and
@@ -1340,6 +1427,7 @@ def run_activity_browse_turn(
             draft["_asked"] = True
             msg = ""  # same interest, new area — re-runs the search below
         elif chip and msg.strip().lower() == chip.lower():
+            _answered("community")
             from app.community_scope import clear_active_community
 
             clear_active_community(session_ctx)
@@ -1348,6 +1436,7 @@ def run_activity_browse_turn(
             draft["_asked"] = True
             msg = ""  # same interest, no filter — re-runs the search below
         elif _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg):
+            _answered("listen")
             from app.discovery_route import resolve_block_id
             from app.look_meet import start_meet_seek_from_interest
 
@@ -1371,15 +1460,18 @@ def run_activity_browse_turn(
         from app.discovery_route import extract_zip as _extract_zip
 
         if _extract_zip(msg):
+            _answered("zip")
             draft["_seek_offer"] = None
             draft["_need_zip"] = True
         elif _WIDEN_RE.search(msg):
+            _answered("widen")
             draft["interest"] = ""  # clear the filter → show everything below
             draft["_asked"] = True  # widening means show all — never re-ask P1
             draft["_seek_offer"] = None
             msg = ""
         else:
             # Not an accept/widen tap — treat it as a fresh kind to search for.
+            _answered("new_search")
             draft["_seek_offer"] = None
 
     # ── P1: ask the interest ONCE (with chips) — only when there's nothing to mine (the
@@ -1591,6 +1683,7 @@ def run_activity_browse_turn(
     # ring / far probe below would only re-run the same failing check. Community browses
     # included — the empty-community copy ("No X at <community>") is the same false claim.
     if not matched and _filter_unchecked(events):
+        _record_no_match(session_ctx, events)
         return _filter_unavailable_reply(draft, session_ctx, interest, comm, lang)
 
     # Stretch offer (Rapport Reply, behind LANA_STRETCH_OFFER): nothing matched, but the
@@ -1608,6 +1701,7 @@ def run_activity_browse_turn(
     if stretch is not None and _STRETCH_BEFORE_WIDEN:
         # Change topic before widening distance: a close stretch nearby skips the ring
         # and the far probe (up to two matcher calls saved).
+        _record_no_match(session_ctx, events, stretch=stretch)
         return _stretch_offer_reply(
             draft, session_ctx, stretch,
             interest=interest, label=label, msg=msg, lang=lang, user_id=user_id,
@@ -1633,6 +1727,7 @@ def run_activity_browse_turn(
     if not matched and stretch is not None:
         # _STRETCH_BEFORE_WIDEN is False and the ring found nothing on topic: the nearby
         # stretch still comes before the far probe.
+        _record_no_match(session_ctx, events, stretch=stretch)
         return _stretch_offer_reply(
             draft, session_ctx, stretch,
             interest=interest, label=label, msg=msg, lang=lang, user_id=user_id,
@@ -1657,6 +1752,7 @@ def run_activity_browse_turn(
         session_ctx["activity_previews"] = []
         # No cards this turn — scores from an earlier match must not ride along.
         session_ctx["browse_scores"] = None
+        _record_no_match(session_ctx, events)
         session_ctx["routing_phase"] = "listening"
         frame = _zip_gate_frame(user_id)
         area_facts = None
@@ -1687,6 +1783,7 @@ def run_activity_browse_turn(
             session_ctx["activity_previews"] = []
             # No cards this turn — scores from an earlier match must not ride along.
             session_ctx["browse_scores"] = None
+            _record_no_match(session_ctx, events)
             session_ctx["routing_phase"] = "listening"
             return _compose_area_warming_empty(msg, frame, session_ctx)
 
@@ -1704,6 +1801,7 @@ def run_activity_browse_turn(
             session_ctx["activity_previews"] = []
             # No cards this turn — scores from an earlier match must not ride along.
             session_ctx["browse_scores"] = None
+            _record_no_match(session_ctx, events)
             session_ctx["routing_phase"] = "listening"
             return _compose_empty_seek_offer(
                 "", user_msg=msg, lang=lang, community=_community_name(comm)
@@ -1717,6 +1815,7 @@ def run_activity_browse_turn(
             session_ctx["activity_previews"] = []
             # No cards this turn — scores from an earlier match must not ride along.
             session_ctx["browse_scores"] = None
+            _record_no_match(session_ctx, events)
             session_ctx["routing_phase"] = "listening"
             return _compose_empty_seek_offer(
                 "",
@@ -1739,6 +1838,7 @@ def run_activity_browse_turn(
         session_ctx["activity_previews"] = []
         # No cards this turn — scores from an earlier match must not ride along.
         session_ctx["browse_scores"] = None
+        _record_no_match(session_ctx, events)
         session_ctx["routing_phase"] = "listening"
         return _compose_empty_seek_offer(
             "",

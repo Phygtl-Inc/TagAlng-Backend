@@ -7774,6 +7774,11 @@ def _start_activity_browse_from_discovery(
     card = session_ctx.get("communities_card")
     if card:
         ctx["communities_card"] = card
+    # Same for the browse telemetry this turn stamped (no-match record, offer answer):
+    # wiped here, it would never reach the assistant message on the entry turn.
+    for key in ("browse_no_match", "browse_offer_response"):
+        if session_ctx.get(key):
+            ctx[key] = session_ctx[key]
     return reply, ctx, _discovery_routing_stub(phase, "activity_browse"), []
 
 

@@ -539,9 +539,9 @@ class UncheckedRingTests(unittest.TestCase):
         self.assertEqual(ctx.get("activity_previews"), [])
 
 
-class StretchOfferTurnTests(unittest.TestCase):
-    """Rapport Reply at turn level: nothing matched, but a NEARBY event was rated closely
-    related — offer it as the one card, ending on the listen offer. Behind the flag."""
+class _StretchTurnHarness:
+    """Drives one browse turn with the matcher stood in (it stamps scores in place, like
+    the real one), the ring / far probe as mocks, and the writer's model off."""
 
     _PHRASE = "asked for violin, this is a jam night"
 
@@ -580,6 +580,22 @@ class StretchOfferTurnTests(unittest.TestCase):
                 user_jwt="jwt", home_block_id="b1",
             )
         return reply, ctx, widen, far
+
+    def _rows_with_pii(self):
+        rows = [_ev("e1", "Book club"), _ev("e2", "Sunday jam night"),
+                _ev("e3", "Pottery"), _ev("e4", "Guitar circle")]
+        judged = {
+            "e1": (0.1, "asked for violin, this is a book club"),
+            "e2": (0.7, "asked for violin, email me at jo@example.com"),
+            "e3": (0.2, "asked for violin, this is pottery"),
+            "e4": (0.5, "asked for violin, this is guitar"),
+        }
+        return rows, judged
+
+
+class StretchOfferTurnTests(_StretchTurnHarness, unittest.TestCase):
+    """Rapport Reply at turn level: nothing matched, but a NEARBY event was rated closely
+    related — offer it as the one card, ending on the listen offer. Behind the flag."""
 
     def test_a_close_stretch_is_offered_as_one_card(self):
         rows, judged = self._rows()
@@ -693,3 +709,194 @@ class StretchOfferTurnTests(unittest.TestCase):
             )
         self.assertEqual(reply, "saved")
         self.assertEqual(seek.call_args.kwargs["interest"], "violin")
+
+
+class NoMatchRecordTests(unittest.TestCase):
+    """Checkpoint C: every no-match turn leaves a redacted record of what the matcher
+    nearly matched, whether a stretch was shown, and whether the matcher ran at all."""
+
+    _h = _StretchTurnHarness()
+
+    def test_a_stretch_turn_records_the_top_three_redacted(self):
+        rows, judged = self._h._rows_with_pii()
+        _reply, ctx, _w, _f = self._h._turn(rows=rows, judged=judged)
+        rec = ctx["browse_no_match"]
+        self.assertEqual([n["event_id"] for n in rec["near_misses"]], ["e2", "e4", "e3"])
+        self.assertEqual([n["score"] for n in rec["near_misses"]], [0.7, 0.5, 0.2])
+        self.assertIn("[email]", rec["near_misses"][0]["mismatch"])
+        self.assertNotIn("jo@example.com", str(rec))
+        self.assertTrue(rec["stretch_shown"])
+        self.assertEqual(rec["stretch_event_id"], "e2")
+        self.assertEqual(rec["filter"], "judged")
+        self.assertTrue(rec["stretch_first"])
+
+    def test_a_no_match_without_a_stretch_still_records_near_misses(self):
+        rows, judged = self._h._rows_with_pii()
+        judged["e2"] = (0.4, "asked for violin, this is a jam night")
+        _reply, ctx, _w, _f = self._h._turn(rows=rows, judged=judged)
+        rec = ctx["browse_no_match"]
+        self.assertFalse(rec["stretch_shown"])
+        self.assertIsNone(rec["stretch_event_id"])
+        self.assertEqual(len(rec["near_misses"]), 3)
+        self.assertEqual(rec["filter"], "judged")
+
+    def test_flag_off_still_records(self):
+        rows, judged = self._h._rows_with_pii()
+        _reply, ctx, _w, _f = self._h._turn(rows=rows, judged=judged, flag=False)
+        rec = ctx["browse_no_match"]
+        self.assertFalse(rec["stretch_shown"])
+        self.assertEqual(rec["near_misses"][0]["event_id"], "e2")
+
+    def test_an_empty_area_records_no_candidates(self):
+        _reply, ctx, _w, _f = self._h._turn(rows=[], judged={})
+        rec = ctx["browse_no_match"]
+        self.assertEqual(rec["filter"], "no_candidates")
+        self.assertEqual(rec["near_misses"], [])
+
+    def test_a_match_turn_records_nothing(self):
+        rows = [_ev("p1", "Pizza night")]
+        _reply, ctx, _w, _f = self._h._turn(
+            rows=rows, judged={"p1": (1.0, "")}, matched_ids=("p1",), message="pizza",
+        )
+        self.assertNotIn("browse_no_match", ctx)
+
+    def test_the_unchecked_turn_records_unchecked_with_no_scores(self):
+        ctx = {"activity_browse_active": True, "browse_draft": {"_asked": True},
+               "phone_verified": True}
+        with patch("app.activity_browse._fetch_block_events",
+                   return_value=[_ev("e1", "Book club")]), patch(
+            "app.activity_browse._zip_gate_frame", return_value=None
+        ), patch("app.orchestrator.llm.llm_configured", return_value=False):
+            run_activity_browse_turn(user_message="violin", session_ctx=ctx, history=[],
+                                     user_jwt="jwt", home_block_id="b1")
+        rec = ctx["browse_no_match"]
+        self.assertEqual(rec["filter"], "unchecked")
+        self.assertEqual(rec["near_misses"], [])
+
+
+class OfferResponseTests(unittest.TestCase):
+    """The next turn records which way the user answered the offer — and, after a
+    stretch, which event they were answering."""
+
+    _h = _StretchTurnHarness()
+
+    def _offer_then(self, message, *, extra_patches=()):
+        rows, judged = self._h._rows_with_pii()
+        _reply, ctx, _w, _f = self._h._turn(rows=rows, judged=judged)
+        self.assertEqual(ctx["browse_draft"].get("_stretch_event_id"), "e2")
+        patches = [
+            patch("app.orchestrator.llm.llm_configured", return_value=False),
+            patch("app.look_meet.start_meet_seek_from_interest", return_value="saved"),
+            patch("app.discovery_route.resolve_block_id", return_value="b1"),
+            patch("app.activity_browse._fetch_block_events", return_value=[]),
+            patch("app.activity_browse._widen_search", return_value=([], "")),
+            patch("app.activity_browse._far_offer", return_value=([], "")),
+            patch("app.activity_browse._zip_gate_frame", return_value=None),
+            *extra_patches,
+        ]
+        for p in patches:
+            p.start()
+        try:
+            run_activity_browse_turn(user_message=message, session_ctx=ctx, history=[],
+                                     user_jwt="jwt", home_block_id="b1")
+        finally:
+            for p in patches:
+                p.stop()
+        return ctx
+
+    def _response(self, ctx):
+        return ctx["browse_offer_response"]
+
+    def test_listen(self):
+        ctx = self._offer_then("Yes, listen for me")
+        self.assertEqual(self._response(ctx),
+                         {"response": "listen", "offered_stretch_event_id": "e2"})
+
+    def test_a_bare_sure_is_listen(self):
+        self.assertEqual(self._response(self._offer_then("sure"))["response"], "listen")
+
+    def test_widen(self):
+        self.assertEqual(self._response(self._offer_then("Widen the search"))["response"],
+                         "widen")
+
+    def test_a_new_topic_is_a_new_search(self):
+        ctx = self._offer_then("pottery")
+        self.assertEqual(self._response(ctx)["response"], "new_search")
+        self.assertEqual(self._response(ctx)["offered_stretch_event_id"], "e2")
+
+    def test_a_typed_zip(self):
+        ctx = self._offer_then(
+            "what about 94404", extra_patches=(
+                patch("app.discovery_route.resolve_zip_coverage", return_value=(None, "x")),
+                patch("app.discovery_route.note_zip_out_of_coverage"),
+            ),
+        )
+        self.assertEqual(self._response(ctx)["response"], "zip")
+
+    def test_the_stretch_id_is_consumed_once(self):
+        ctx = self._offer_then("pottery")
+        self.assertNotIn("_stretch_event_id", ctx.get("browse_draft") or {})
+
+    def test_area_and_community_chips(self):
+        rows, judged = self._h._rows_with_pii()
+        for chip_key, chip, expected in (
+            ("_area_offer_chip", "Look in Foster City", "area"),
+            ("_community_chip", "Look beyond CF Fitness", "community"),
+        ):
+            ctx = {"activity_browse_active": True, "phone_verified": True,
+                   "browse_draft": {"_asked": True, "_seek_offer": True, "interest": "violin",
+                                    chip_key: chip, "_area_offer_block_id": "b9"}}
+            with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
+                "app.activity_browse._fetch_block_events", return_value=[]
+            ), patch("app.activity_browse._widen_search", return_value=([], "")), patch(
+                "app.activity_browse._far_offer", return_value=([], "")
+            ), patch("app.activity_browse._zip_gate_frame", return_value=None), patch(
+                "app.community_scope.clear_active_community"
+            ):
+                run_activity_browse_turn(user_message=chip, session_ctx=ctx, history=[],
+                                         user_jwt="jwt", home_block_id="b1")
+            self.assertEqual(ctx["browse_offer_response"],
+                             {"response": expected, "offered_stretch_event_id": None})
+
+
+class BrowseTelemetryPlumbingTests(unittest.TestCase):
+    def test_metadata_helper_carries_only_what_was_set(self):
+        from app.activity_browse import browse_turn_metadata
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            self.assertEqual(browse_turn_metadata(None), {})
+            self.assertEqual(browse_turn_metadata({"browse_no_match": None}), {})
+            rec = {"filter": "judged"}
+            self.assertEqual(
+                browse_turn_metadata({"browse_no_match": rec, "browse_offer_response": {},
+                                      "other": 1}),
+                {"browse_no_match": rec},
+            )
+
+    def test_both_keys_are_turn_scoped(self):
+        from app.turn_surfaces import TURN_SCOPED_SURFACES, clear_turn_surfaces
+
+        self.assertIn("browse_no_match", TURN_SCOPED_SURFACES)
+        self.assertIn("browse_offer_response", TURN_SCOPED_SURFACES)
+        ctx = {"browse_no_match": {"filter": "judged"}, "browse_offer_response": {"r": 1}}
+        clear_turn_surfaces(ctx)
+        self.assertIsNone(ctx["browse_no_match"])
+        self.assertIsNone(ctx["browse_offer_response"])
+
+    def test_the_entry_turn_keeps_the_record_through_the_routing_wipe(self):
+        """The first browse turn's ctx goes through _routing_ctx, which wipes turn
+        surfaces. Without the re-attach the record would never reach the metadata."""
+        from app.discovery_route import _start_activity_browse_from_discovery
+
+        def _stamp(**kw):
+            kw["session_ctx"]["browse_no_match"] = {"filter": "judged"}
+            return "reply"
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
+            "app.activity_browse.run_activity_browse_turn", side_effect=_stamp
+        ):
+            _reply, ctx, _stub, _peers = _start_activity_browse_from_discovery(
+                msg="violin", session_ctx={}, history=[], user_jwt="jwt",
+                home_block_id="b1",
+            )
+        self.assertEqual(ctx.get("browse_no_match"), {"filter": "judged"})

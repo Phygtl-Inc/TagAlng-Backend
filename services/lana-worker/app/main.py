@@ -2141,12 +2141,19 @@ def _run_lana_message(
         # session handles concurrent requests.
         merged = merge_session_context(session.get("context"), session_ctx)
 
+        # Browse no-match record + the answer to last turn's offer (Rapport Reply
+        # telemetry). Rides on the assistant row — written every turn, cards or not, and
+        # its id is the impressions' turn_id — so no migration is needed.
+        from app.activity_browse import browse_turn_metadata
+
+        _browse_meta = browse_turn_metadata(session_ctx)
+
         def _save_assistant_message() -> str | None:
             return insert_message(
                 session_id,
                 "assistant",
                 reply,
-                {"status": status, "ui": ui_raw, "orchestrator": orch_used},
+                {"status": status, "ui": ui_raw, "orchestrator": orch_used, **_browse_meta},
                 embed=False,
             )
 
