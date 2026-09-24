@@ -67,6 +67,11 @@ class RecoContributorRow(BaseModel):
     # captured before the card fields existed.
     description: str | None = None
     detail_text: str | None = None
+    # Their recommendation as prose, composed from THIS person's description and answered
+    # steps only (app/reco_body.py) — screens 11/12's DESCRIPTION block. Null whenever the
+    # capture was too thin to write from or the prose did not survive its grounding check;
+    # a client falls back to `description`, which is what the card showed before this.
+    body: str | None = None
     reco_fields: list[dict[str, Any]] = Field(default_factory=list)
     # How far THIS neighbour lives — distinct from the subject's distance on the card.
     distance_text: str | None = None
@@ -75,6 +80,33 @@ class RecoContributorRow(BaseModel):
     helpful_count: int = 0
     connection: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
+
+
+class RecoSynthesisSideRow(BaseModel):
+    """One faction of a disagreement, with the rows that prove it."""
+
+    label: str
+    n: int
+    signal_ids: list[str] = Field(default_factory=list)
+
+
+class RecoSynthesisRow(BaseModel):
+    """"Six say it freezes well, two say it went watery — both froze it cooked."
+
+    The line makes a COUNTED CLAIM about a disagreement between identifiable neighbours,
+    so it travels with its evidence rather than as a sentence: both sides carry the
+    signal_ids behind them, and app/reco_synthesis.py drops the whole thing rather than
+    render a line whose numbers its own citations do not support.
+
+    Null is the ordinary case. Neighbours usually agree, and there is nothing to reconcile.
+    """
+
+    line: str
+    majority: RecoSynthesisSideRow
+    minority: RecoSynthesisSideRow
+    # What the dissenters had in common, when it is traceable to EVERY one of their own
+    # contributions. Null when the disagreement is real but unexplained.
+    shared_trait: str | None = None
 
 
 class RecoCardRow(BaseModel):
@@ -115,6 +147,9 @@ class RecoCardRow(BaseModel):
     group_label: str | None = None
     contributors: list[RecoContributorRow] = Field(default_factory=list)
     themes: list[RecoThemeRow] | None = None
+    # The agreement/disagreement read across those same themes. Aggregate subjects only,
+    # and null whenever the voices simply agree — see RecoSynthesisRow.
+    synthesis: RecoSynthesisRow | None = None
     # Who among the recommenders is like the reader. Empty is the common case and is not
     # a failure — most neighbours have no proven claim in common.
     cohorts: list[RecoCohortRow] = Field(default_factory=list)

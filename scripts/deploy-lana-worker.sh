@@ -157,6 +157,12 @@ APP_BASE_URL: "${APP_BASE_URL:-}"
 # NOTE: this heredoc is unquoted (<<EOF), so backticks here are COMMAND SUBSTITUTION, not
 # markdown. A backticked command name in a comment gets executed at build time.
 LANA_ASK_ROUTING: "${LANA_ASK_ROUTING:-0}"
+# Merged subject cards on a recommendation ask (Stage 3). Additive: peer_matches keeps
+# its shape whatever this says, so a client that does not know about reco_cards is
+# unaffected either way. Listed here for the reason stated above — the file REPLACES the
+# service environment, so a flag set only in the .env would be silently absent in prod,
+# which is exactly why the cards never rendered there on 2026-09-24.
+LANA_RECO_CARDS: "${LANA_RECO_CARDS:-0}"
 LANA_WORKER_PUBLIC_URL: "${LANA_WORKER_PUBLIC_URL:-}"
 SIGNAL_SWEEP_TOKEN: "${SIGNAL_SWEEP_TOKEN:-}"
 EOF

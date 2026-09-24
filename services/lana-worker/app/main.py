@@ -4,6 +4,7 @@ import os
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator
 from typing import Any, Callable
 from uuid import UUID
 
@@ -782,13 +783,38 @@ def _reco_cards_from_ctx(ctx: dict[str, Any]) -> list["RecoCardRow"]:
     for row in raw[:8]:
         if not isinstance(row, dict) or not str(row.get("title") or "").strip():
             continue
-        try:
-            out.append(RecoCardRow(**row))
-        except Exception:  # noqa: BLE001 — one malformed card never costs the turn
+        built = False
+        for attempt in _reco_card_degradations(row):
+            try:
+                out.append(RecoCardRow(**attempt))
+                built = True
+                break
+            except Exception:  # noqa: BLE001 — one malformed card never costs the turn
+                continue
+        if not built:
             logging.getLogger(__name__).warning(
                 "reco_card_dropped subject=%s", row.get("subject_ref"), exc_info=True
             )
     return out
+
+
+def _reco_card_degradations(row: dict[str, Any]) -> "Iterator[dict[str, Any]]":
+    """The card, then the same card with each narrative extra given up in turn.
+
+    The RECOMMENDATION is the answer. The synthesis and the per-neighbour bodies are what
+    a reader gets once enough neighbours have spoken — so a malformed one of those must
+    cost the reader that extra and never the recommendation itself. Ordered most to least
+    complete, and the ORDER matters: a broken synthesis must not also take the bodies,
+    which were never the problem.
+    """
+    yield row
+    contributors = row.get("contributors") if isinstance(row.get("contributors"), list) else []
+    yield {**row, "synthesis": None}
+    stripped = [
+        {k: v for k, v in c.items() if k != "body"} if isinstance(c, dict) else c
+        for c in contributors
+    ]
+    yield {**row, "synthesis": None, "contributors": stripped}
 
 
 def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
@@ -2184,6 +2210,20 @@ def _run_lana_message(
         background_tasks.add_task(embed_message_by_id, user_msg_id, body.message.strip())
     if assistant_msg_id:
         background_tasks.add_task(embed_message_by_id, assistant_msg_id, reply)
+    # Warm the rapport queue OFF the render path.
+    #
+    # next_ask builds questions synchronously when the pool is empty, and for a brand-new
+    # user that is a ~10s chain (supply read, one call to write the questions, one guard
+    # call each) inside the request the home screen is waiting on. nextRapportAsk in the
+    # PWA swallows every failure into `return null`, so a slow first render is
+    # indistinguishable from "no questions" — a new signup saw an empty tile and nothing
+    # was ever written (prod, asjid.m+3, 2026-09-24: 0 gaps with healthy supply).
+    #
+    # Building here instead means the queue is already full by the time anyone looks, and
+    # next_ask is a fast read. ensure_gap_buffer returns immediately when the pool is full
+    # and carries its own 120s per-user burst guard, so a per-turn call is cheap.
+    if purpose in ("lana", "profile_intake"):
+        background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
     if purpose in ("lana", "profile_intake") and should_extract_claims_from_message(
         body.message
     ) and not merged.get("skip_claims_background_extract"):

@@ -91,6 +91,10 @@ def _contributor(row: dict[str, Any], *, phone_verified: bool) -> dict[str, Any]
         # fallback for rows captured before the card fields existed.
         "description": str(row.get("reco_description") or "").strip() or None,
         "detail_text": str(row.get("detail_text") or "").strip() or None,
+        # Their recommendation written out as prose, from THEIR OWN description and
+        # answers (app/reco_body.py). Attached below; None whenever there was nothing
+        # honest to compose, and the card falls back to the one-liner above.
+        "body": None,
         "reco_fields": row.get("reco_fields") if isinstance(row.get("reco_fields"), list) else [],
         "match_strength": _strength(row),
         # How far THIS neighbour lives — distinct from the subject's distance on the card.
@@ -155,6 +159,11 @@ def _card_from_group(
         "match_strength": max(c["match_strength"] for c in contributors),
         "contributors": contributors,
         "themes": None,
+        # "Six say it freezes well, two say it went watery — both froze it cooked."
+        # Aggregate subjects only, and None whenever the voices simply agree — which is
+        # the common case. A synthesis that manufactures tension to have something to say
+        # is inventing the most damaging thing it could (app/reco_synthesis.py).
+        "synthesis": None,
         # Proven overlap between the reader and SEVERAL contributors — "4 of these 8 have
         # toddlers, like you". Never a claim about the subject: four toddler parents
         # recommended her, and that is all it says.
@@ -203,7 +212,7 @@ def subject_cards_from_tips(
         if card:
             cards.append(card)
 
-    _attach_digests(cards, lang=lang, allow_compose=allow_compose)
+    _attach_reads(cards, lang=lang, allow_compose=allow_compose)
     _attach_cohorts(cards, reader_id=reader_id)
     if ask_chips:
         chips = [c for c in (str(x or "").strip() for x in ask_chips) if c][:4]
@@ -219,10 +228,12 @@ def subject_cards_from_tips(
         c["title"].casefold(),
     ))
     logger.info(
-        "reco_cards rows=%d cards=%d merged=%d themed=%d compose=%s",
+        "reco_cards rows=%d cards=%d merged=%d themed=%d synth=%d bodies=%d compose=%s",
         len(tips), len(cards),
         sum(1 for c in cards if c["vouch_count"] > 1),
         sum(1 for c in cards if c.get("themes")),
+        sum(1 for c in cards if c.get("synthesis")),
+        sum(1 for c in cards for x in c["contributors"] if x.get("body")),
         allow_compose,
     )
     return cards
@@ -261,14 +272,65 @@ def _attach_cohorts(cards: list[dict[str, Any]], *, reader_id: str | None) -> No
                 theme["cohort"] = narrowed
 
 
-def _attach_digests(cards: list[dict[str, Any]], *, lang: str, allow_compose: bool) -> None:
-    """The Pareto read, for the aggregate cards that have enough voices to have one.
+def _attach_reads(cards: list[dict[str, Any]], *, lang: str, allow_compose: bool) -> None:
+    """Every AI-authored read on a card, and one background warm for all of them.
+
+    Three reads, all optional and all cache-first: the themes across a subject, the
+    synthesis that reconciles agreement with dissent, and each contributor's own body. A
+    card renders completely without any of them — they are what a reader gets once enough
+    neighbours have spoken, never what the card needs to exist.
+    """
+    subjects = _attach_digests(cards, lang=lang, allow_compose=allow_compose)
+    bodies = _attach_bodies(cards, lang=lang, allow_compose=allow_compose)
+    if subjects or bodies:
+        _warm(subjects, bodies, lang=lang)
+
+
+def _attach_bodies(
+    cards: list[dict[str, Any]], *, lang: str, allow_compose: bool
+) -> list[tuple[str, dict[str, Any]]]:
+    """Each contributor's recommendation as prose. Returns what needs warming.
+
+    PER CONTRIBUTION, which is the whole safety of it: a body is composed from ONE
+    person's words and answers, so a merged card stacks several bodies rather than
+    blending its neighbours into a description none of them wrote.
+    """
+    from app.reco_body import MIN_FACTS, body_for, facts_for
+
+    pending: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for card in cards:
+        for c in card["contributors"]:
+            row = {"description": c["description"], "reco_fields": c["reco_fields"]}
+            # A lone one-liner IS the body already. Composing from it could only pad it,
+            # so these are never warmed and never retried.
+            if len(facts_for(row)) < MIN_FACTS:
+                continue
+            try:
+                c["body"] = body_for(
+                    c["signal_id"], row, lang=lang, allow_compose=allow_compose
+                )
+            except Exception:  # noqa: BLE001 — a card without bodies is still a card
+                logger.warning("reco_cards.body_failed signal=%s", c["signal_id"])
+                continue
+            if c["body"] is None and not allow_compose and c["signal_id"] not in seen:
+                seen.add(c["signal_id"])
+                pending.append((c["signal_id"], row))
+    return pending
+
+
+def _attach_digests(
+    cards: list[dict[str, Any]], *, lang: str, allow_compose: bool
+) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    """The Pareto read and the synthesis, for the aggregate cards that have the voices.
 
     Best-effort and per card: a digest that fails leaves that card listing its
     contributors, which is a complete card already — themes are the extra a reader gets
     when several neighbours agree, never the thing the card needs to render.
     """
     from app.reco_cluster import MIN_FOR_DIGEST, contribution_text, digest_for_subject
+    from app.reco_synthesis import MIN_CONTRIBUTIONS as MIN_FOR_SYNTHESIS
+    from app.reco_synthesis import synthesis_for_subject
 
     pending: list[tuple[str, str, list[dict[str, Any]]]] = []
     for card in cards:
@@ -287,6 +349,7 @@ def _attach_digests(cards: list[dict[str, Any]], *, lang: str, allow_compose: bo
             }
             for c in card["contributors"]
         ]
+        want_warm = False
         try:
             digest = digest_for_subject(
                 card["subject_ref"], contributions,
@@ -294,28 +357,60 @@ def _attach_digests(cards: list[dict[str, Any]], *, lang: str, allow_compose: bo
             )
         except Exception:  # noqa: BLE001 — a card without themes is still a card
             logger.warning("reco_cards.digest_failed subject=%s", card["subject_ref"])
-            continue
+            digest = None
         if digest:
             card["themes"] = digest["themes"]
         elif not allow_compose:
-            # Cache miss on a list render. Warm it behind the turn so the NEXT read of this
-            # card has its themes, instead of either blocking the reader now or leaving the
-            # digest permanently uncomposed because nothing ever asks for it.
+            want_warm = True
+
+        # The same contributions, read for what they DISAGREE about. Keyed on the same
+        # basis_sig, so themes and synthesis on one card are always built from the same
+        # set of voices.
+        try:
+            syn = synthesis_for_subject(
+                card["subject_ref"], contributions,
+                lang=lang, merge_mode=card["merge_mode"], allow_compose=allow_compose,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("reco_cards.synthesis_failed subject=%s", card["subject_ref"])
+            # Not None, which would schedule a warm on a call that just threw, and not {},
+            # which would put an empty object on the wire. Nothing is persisted, so the
+            # next turn asks again.
+            syn = {"absent": True}
+        # None means UNDECIDED, so it is worth warming — but ONLY where a synthesis is
+        # possible at all. Below the floor there is no "most neighbours" to speak of and
+        # None is the permanent answer, so warming it would re-ask an unanswerable
+        # question on every render forever. A stored `absent` is the same trap one step
+        # later: the question WAS asked, and these neighbours simply agreed.
+        if syn is None:
+            want_warm = want_warm or len(contributions) >= MIN_FOR_SYNTHESIS
+        elif not syn.get("absent"):
+            card["synthesis"] = syn
+
+        if want_warm:
+            # Cache miss on a list render. Warm it behind the turn so the NEXT read of
+            # this card has its themes, instead of either blocking the reader now or
+            # leaving the digest permanently uncomposed because nothing ever asks for it.
             pending.append((card["subject_ref"], card["merge_mode"], contributions))
 
-    if pending:
-        _warm_digests(pending, lang=lang)
+    return pending
 
 
 # At most this many subjects warmed per turn. A results page is five cards; warming every
 # one of a widened twelve-row fetch would put twelve model calls behind one question.
 _MAX_WARM = 3
+# Bodies are per CONTRIBUTION, so one card of four neighbours is four calls on its own.
+# A slightly wider budget than subjects, still far below "every voice on the page".
+_MAX_WARM_BODIES = 6
 
 
-def _warm_digests(
-    pending: list[tuple[str, str, list[dict[str, Any]]]], *, lang: str
+def _warm(
+    subjects: list[tuple[str, str, list[dict[str, Any]]]],
+    bodies: list[tuple[str, dict[str, Any]]],
+    *,
+    lang: str,
 ) -> None:
-    """Compose missing digests off the turn, on a daemon thread.
+    """Compose the missing reads off the turn, on a daemon thread.
 
     Same shape as signal_match_notify: the reader's turn never waits on work that only
     improves the NEXT read. Bounded and best-effort — a warm that fails leaves the card
@@ -323,10 +418,14 @@ def _warm_digests(
     """
     import threading
 
+    from app.reco_body import body_for
     from app.reco_cluster import digest_for_subject
+    from app.reco_synthesis import synthesis_for_subject
 
     def _run() -> None:
-        for subject_ref, mode, contributions in pending[:_MAX_WARM]:
+        for subject_ref, mode, contributions in subjects[:_MAX_WARM]:
+            # Themes FIRST: the synthesis caches into the digest row, and updates nothing
+            # when that row does not exist yet.
             try:
                 digest_for_subject(
                     subject_ref, contributions, lang=lang,
@@ -334,8 +433,20 @@ def _warm_digests(
                 )
             except Exception:  # noqa: BLE001
                 logger.info("reco_cards.warm_failed subject=%s", subject_ref)
+            try:
+                synthesis_for_subject(
+                    subject_ref, contributions, lang=lang,
+                    merge_mode=mode, allow_compose=True,
+                )
+            except Exception:  # noqa: BLE001
+                logger.info("reco_cards.warm_synthesis_failed subject=%s", subject_ref)
+        for signal_id, row in bodies[:_MAX_WARM_BODIES]:
+            try:
+                body_for(signal_id, row, lang=lang, allow_compose=True)
+            except Exception:  # noqa: BLE001
+                logger.info("reco_cards.warm_body_failed signal=%s", signal_id)
 
     try:
-        threading.Thread(target=_run, daemon=True, name="reco-digest-warm").start()
+        threading.Thread(target=_run, daemon=True, name="reco-read-warm").start()
     except Exception:  # noqa: BLE001
         pass
