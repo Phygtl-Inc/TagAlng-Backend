@@ -672,6 +672,37 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Não consegui verificar o que tem em {community} agora. Quer que eu fique de "
               "olho e te avise assim que aparecer algo — ou procuro além de {community}?",
     },
+    # Stretch offer (Rapport Reply): nothing matched, but ONE nearby event was rated closely
+    # related. Three parts — nothing matched; the closest thing and how it differs, in the
+    # matcher's own phrase ({mismatch}, verbatim, never paraphrased here); the options.
+    # Ends on the listen offer so a bare "sure" means "Yes, listen for me". The event is on
+    # a card under the message, so the copy never asks "worth a look?".
+    "browse.stretch_offer": {
+        "en": "Nothing **{interest}**-specific near you right now. The closest thing is "
+              "**{title}**, on the card below. How it differs: {mismatch}. Want me to keep "
+              "an ear out and text you the moment a **{interest}** one pops up — or widen "
+              "the search?",
+        "es": "No hay nada específico de **{interest}** cerca de ti ahora mismo. Lo más "
+              "parecido es **{title}**, en la tarjeta de abajo. En qué se diferencia: "
+              "{mismatch}. ¿Quieres que me quede atenta y te escriba en cuanto aparezca "
+              "una de **{interest}** — o amplío la búsqueda?",
+        "pt": "Não tem nada específico de **{interest}** perto de você agora. O mais "
+              "próximo é **{title}**, no cartão abaixo. A diferença: {mismatch}. Quer que "
+              "eu fique de olho e te avise assim que aparecer uma de **{interest}** — ou "
+              "amplio a busca?",
+    },
+    "browse.stretch_offer_generic": {
+        "en": "Nothing matching that near you right now. The closest thing is **{title}**, "
+              "on the card below. How it differs: {mismatch}. Want me to keep an ear out "
+              "and text you the moment a match pops up — or widen the search?",
+        "es": "No hay nada que encaje cerca de ti ahora mismo. Lo más parecido es "
+              "**{title}**, en la tarjeta de abajo. En qué se diferencia: {mismatch}. "
+              "¿Quieres que me quede atenta y te escriba en cuanto aparezca algo — o amplío "
+              "la búsqueda?",
+        "pt": "Não tem nada que combine perto de você agora. O mais próximo é **{title}**, "
+              "no cartão abaixo. A diferença: {mismatch}. Quer que eu fique de olho e te "
+              "avise assim que aparecer algo — ou amplio a busca?",
+    },
     "browse.events_header": {
         "en": "Here's what's coming up near you.",
         "es": "Esto es lo que viene cerca de ti.",

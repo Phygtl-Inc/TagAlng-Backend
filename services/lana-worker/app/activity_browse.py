@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.i18n import session_lang, t
+
+if TYPE_CHECKING:
+    from app.stretch_offer import StretchCandidate
 
 _INTEREST_SUGGESTIONS = ["Sports", "Family & kids", "Outdoors", "Social"]
 _BROWSE_TURN_CAP = 12
@@ -563,6 +566,7 @@ def _compose_empty_seek_offer(
     far_facts: list[str] | None = None,
     community: str | None = None,
     area: str | None = None,
+    stretch: StretchCandidate | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -574,11 +578,26 @@ def _compose_empty_seek_offer(
     ("Look in <area>"), and a community filter ("Look beyond <community>") — and each has
     its own facts AND its own localized fallback. The system prompt below therefore names
     no options of its own; it used to hardcode "or widen the search", which contradicted
-    the pill whenever one of the other two shapes was armed."""
+    the pill whenever one of the other two shapes was armed.
+
+    `stretch` (Rapport Reply): ONE nearby event the matcher rated closely related but did
+    not match. The copy then has three parts — nothing matched, the closest thing and how
+    it differs (in the matcher's own words), the options — and the event rides as a card.
+    Only the plain shape carries a stretch (no community, no far area)."""
     interest = str(interest or "").strip()
     community = str(community or "").strip()
     area = str(area or "").strip()
-    if community:
+    if stretch is not None:
+        # The honest template, and the post-check's safety net: it names the event and
+        # carries the matcher's phrase verbatim, then ends on the listen offer.
+        fallback = (
+            t("browse.stretch_offer", lang, interest=interest,
+              title=stretch.title, mismatch=stretch.mismatch)
+            if interest
+            else t("browse.stretch_offer_generic", lang,
+                   title=stretch.title, mismatch=stretch.mismatch)
+        )
+    elif community:
         fallback = (
             t("browse.empty_community_interest", lang, interest=interest, community=community)
             if interest
@@ -635,7 +654,12 @@ def _compose_empty_seek_offer(
             ),
             "Option A: you can keep an ear out and TEXT them the moment a matching one pops up "
             "(the pill under your message says 'Yes, listen for me')",
-            "Never invent or promise events, and never claim something is happening nearby",
+            (
+                "Never invent or promise events other than the one closest event named "
+                "below, and never claim anything else is happening nearby"
+                if stretch is not None
+                else "Never invent or promise events, and never claim something is happening nearby"
+            ),
         ]
         # "Widen the search" only clears the TOPIC filter — it never changes the
         # geography, so promising other areas with it is a lie the chip can't keep.
@@ -666,26 +690,61 @@ def _compose_empty_seek_offer(
             # that context so the empty result reads as "area still waking up", not
             # "the app is dead". Both pills above must still survive in the copy.
             facts.extend(area_facts)
+        if stretch is not None:
+            from app.stretch_offer import stretch_facts
+
+            facts.extend(stretch_facts(stretch))
+            facts.append(
+                "The event is already shown as a card under your message — they can tap "
+                "it to take a look"
+            )
         from app.i18n import synth_language_directive
 
         lang_line = synth_language_directive(lang) if lang else None
-        data = llm_json(
-            model=synthesizer_model(),
-            system=(
+        if stretch is not None:
+            # Three parts, and the question it ends on is the listen offer: a bare "sure"
+            # is read as "Yes, listen for me" next turn (_ACCEPT_SEEK_RE), so the reply
+            # must never end on "worth a look?" — the card already answers that.
+            system = (
+                "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
+                "in exactly three parts, max 3 sentences: (1) say plainly that nothing "
+                f"matched what they asked for in {where} right now; (2) name the ONE "
+                "closest event from the facts and say how it differs, using ONLY the "
+                "difference given in the facts; (3) end with a question offering EXACTLY "
+                "the options named in the facts below — every one of them, and no others "
+                "— with keeping an ear out offered first. The facts describe the buttons "
+                "shown under your message, so an option you invent or omit contradicts "
+                "what they can tap. Do not ask whether they want to see the event; it is "
+                "already on a card. Ground it ONLY in the facts given. "
+            )
+        else:
+            system = (
                 "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
                 f"(max 2 sentences) telling the user nothing matched in {where} right now, "
                 "then offer EXACTLY the options named in the facts below — every one of "
                 "them, and no others. The facts describe the buttons shown under your "
                 "message, so an option you invent or omit contradicts what they can tap. "
                 "Ground it ONLY in the facts given. "
+            )
+        data = llm_json(
+            model=synthesizer_model(),
+            system=(
+                system
                 + (f"{lang_line} " if lang_line else "")
                 + 'Return JSON {"message": "..."}.'
             ),
             user_payload="\n".join(f"- {f}" for f in facts),
-            max_tokens=140,
+            max_tokens=200 if stretch is not None else 140,
             temperature=0.4,
         )
         msg_out = str((data or {}).get("message") or "").strip() if isinstance(data, dict) else ""
+        if stretch is not None and msg_out and stretch.title.lower() not in msg_out.lower():
+            # Zero-cost honesty check: a reply that dropped or renamed the event is not
+            # an offer of THIS event. The template names it and quotes the phrase.
+            logging.getLogger(__name__).info(
+                "stretch_offer_post_check_fallback event=%s", stretch.event_id
+            )
+            return fallback
         return msg_out or fallback
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("activity_browse_empty_offer_failed")
@@ -1133,6 +1192,56 @@ def _filter_unavailable_reply(
     return text
 
 
+def _stretch_offer_reply(
+    draft: dict[str, Any],
+    session_ctx: dict[str, Any],
+    stretch: StretchCandidate,
+    *,
+    interest: str,
+    label: str | None,
+    msg: str,
+    lang: str | None,
+    user_id: str | None,
+) -> str:
+    """Offer ONE nearby event the matcher rated closely related (Rapport Reply).
+
+    The event rides as the only card; the copy says nothing matched, names it, gives the
+    matcher's own difference phrase, and ends on the listen offer. Pills are the plain
+    seek-offer pair the next-turn handler already reads — "Yes, listen for me" saves the
+    seek for the ORIGINAL ask (never the stretch), "Widen the search" drops the topic.
+    """
+    from app.discovery_route import activity_previews_from_events
+
+    # Same echo rule as the empty state: the matcher's label, or the ask if chip-short.
+    short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
+    draft["interest"] = short or interest
+    draft["_seek_offer"] = True
+    # Nothing else was offered this turn — pills from an earlier turn must not stay live.
+    draft["_community_chip"] = None
+    draft["_area_offer_chip"] = None
+    draft["_area_offer_block_id"] = None
+    draft["_area_offer_name"] = None
+    draft["suggestions"] = ["Yes, listen for me", "Widen the search"]
+    session_ctx["browse_draft"] = draft
+    session_ctx["activity_browse_active"] = True
+    session_ctx["activity_previews"] = activity_previews_from_events([stretch.event])
+    # The one card's closeness, for the impression log — same channel as matched results.
+    session_ctx["browse_scores"] = {stretch.event_id: stretch.score}
+    session_ctx["routing_phase"] = "listening"
+    frame = _zip_gate_frame(user_id)
+    area_facts = None
+    if frame:
+        from app.zip_unlock import gate_framing_facts
+
+        area_facts = gate_framing_facts(frame)
+    logging.getLogger(__name__).info(
+        "stretch_offer_shown event=%s score=%s", stretch.event_id, stretch.score
+    )
+    return _compose_empty_seek_offer(
+        short, user_msg=msg, lang=lang, area_facts=area_facts, stretch=stretch
+    )
+
+
 def _format_browse_message(
     events: list[dict[str, Any]],
     label: str | None,
@@ -1484,6 +1593,26 @@ def run_activity_browse_turn(
     if not matched and _filter_unchecked(events):
         return _filter_unavailable_reply(draft, session_ctx, interest, comm, lang)
 
+    # Stretch offer (Rapport Reply, behind LANA_STRETCH_OFFER): nothing matched, but the
+    # matcher rated a NEARBY event closely related. Read only from `events` — the nearby
+    # rows this turn's filter just scored in place — never from the ring or far lists.
+    # Zero new model calls: the scores and difference phrases already came back.
+    stretch = None
+    if not matched and interest and not comm and not _OPEN_RE.match(interest):
+        from app.lana_paths import stretch_offer_enabled
+
+        if stretch_offer_enabled():
+            from app.stretch_offer import pick_stretch
+
+            stretch = pick_stretch(events, _STRETCH_BAND)
+    if stretch is not None and _STRETCH_BEFORE_WIDEN:
+        # Change topic before widening distance: a close stretch nearby skips the ring
+        # and the far probe (up to two matcher calls saved).
+        return _stretch_offer_reply(
+            draft, session_ctx, stretch,
+            interest=interest, label=label, msg=msg, lang=lang, user_id=user_id,
+        )
+
     # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
     # text them when a matching meet appears) rather than dead-ending. The accept/widen reply
     # is read next turn. No interest (a "show me anything" browse) keeps the generic message.
@@ -1500,6 +1629,14 @@ def run_activity_browse_turn(
         if matched:
             label = wide_label or label
             far_miles = _nearest_miles(matched)
+
+    if not matched and stretch is not None:
+        # _STRETCH_BEFORE_WIDEN is False and the ring found nothing on topic: the nearby
+        # stretch still comes before the far probe.
+        return _stretch_offer_reply(
+            draft, session_ctx, stretch,
+            interest=interest, label=label, msg=msg, lang=lang, user_id=user_id,
+        )
 
     if not matched and interest:
         # Echo (and store) the filter's short label, not the raw sentence — a full NL entry
@@ -1518,6 +1655,8 @@ def run_activity_browse_turn(
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
+        # No cards this turn — scores from an earlier match must not ride along.
+        session_ctx["browse_scores"] = None
         session_ctx["routing_phase"] = "listening"
         frame = _zip_gate_frame(user_id)
         area_facts = None
@@ -1546,6 +1685,8 @@ def run_activity_browse_turn(
             session_ctx["browse_draft"] = draft
             session_ctx["activity_browse_active"] = True
             session_ctx["activity_previews"] = []
+            # No cards this turn — scores from an earlier match must not ride along.
+            session_ctx["browse_scores"] = None
             session_ctx["routing_phase"] = "listening"
             return _compose_area_warming_empty(msg, frame, session_ctx)
 
@@ -1561,6 +1702,8 @@ def run_activity_browse_turn(
             session_ctx["browse_draft"] = draft
             session_ctx["activity_browse_active"] = True
             session_ctx["activity_previews"] = []
+            # No cards this turn — scores from an earlier match must not ride along.
+            session_ctx["browse_scores"] = None
             session_ctx["routing_phase"] = "listening"
             return _compose_empty_seek_offer(
                 "", user_msg=msg, lang=lang, community=_community_name(comm)
@@ -1572,6 +1715,8 @@ def run_activity_browse_turn(
             session_ctx["browse_draft"] = draft
             session_ctx["activity_browse_active"] = True
             session_ctx["activity_previews"] = []
+            # No cards this turn — scores from an earlier match must not ride along.
+            session_ctx["browse_scores"] = None
             session_ctx["routing_phase"] = "listening"
             return _compose_empty_seek_offer(
                 "",
@@ -1592,6 +1737,8 @@ def run_activity_browse_turn(
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = []
+        # No cards this turn — scores from an earlier match must not ride along.
+        session_ctx["browse_scores"] = None
         session_ctx["routing_phase"] = "listening"
         return _compose_empty_seek_offer(
             "",

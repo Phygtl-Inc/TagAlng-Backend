@@ -627,6 +627,130 @@ class EmptyStateSaysWhatThePillDoesTests(unittest.TestCase):
             msg = self._compose(**kw)
             self.assertNotIn("{", msg, kw)
 
+    # ── Stretch offer (Rapport Reply) ────────────────────────────────────────────────
+
+    _PHRASE = "asked for violin, this is a jam night"
+
+    def _stretch(self):
+        from app.stretch_offer import StretchCandidate
+
+        row = {"id": "e1", "title": "Sunday jam night", "starts_at": "2026-09-27T18:00:00+00:00",
+               "has_time": True, "description": "Bring an instrument, all levels.",
+               "cohort_tags": ["lifestyle_social"], "topic_score": 0.7,
+               "topic_mismatch": self._PHRASE}
+        return StretchCandidate(event=row, score=0.7, mismatch=self._PHRASE)
+
+    def _stretch_llm(self, reply="Nothing violin-specific near you right now. The closest "
+                                 "thing is Sunday jam night — it's a jam, not violin. Want "
+                                 "me to keep an ear out, or widen the search?"):
+        from app.activity_browse import _compose_empty_seek_offer
+
+        cap: dict = {}
+
+        def _llm_json(**k):
+            cap.update(k)
+            return {"message": reply}
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", _llm_json
+        ), patch("app.orchestrator.llm.synthesizer_model", return_value="m"):
+            out = _compose_empty_seek_offer("violin", lang="en", stretch=self._stretch())
+        return out, cap
+
+    def test_stretch_fallback_names_the_event_and_quotes_the_phrase(self):
+        from app.activity_browse import _compose_empty_seek_offer
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            msg = _compose_empty_seek_offer("violin", lang="en", stretch=self._stretch())
+        self.assertIn("Sunday jam night", msg)
+        self.assertIn(self._PHRASE, msg)
+        self.assertNotIn("{", msg)
+        # Ends on the options, listen first — a bare "sure" must mean "listen for me".
+        self.assertTrue(msg.rstrip().endswith("widen the search?"))
+        self.assertLess(msg.index("keep an ear out"), msg.index("widen the search"))
+        self.assertNotIn("worth a look", msg.lower())
+
+    def test_stretch_generic_fallback_when_the_ask_is_too_long_to_echo(self):
+        from app.activity_browse import _compose_empty_seek_offer
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            msg = _compose_empty_seek_offer("", lang="en", stretch=self._stretch())
+        self.assertIn("Sunday jam night", msg)
+        self.assertIn(self._PHRASE, msg)
+        # No ask to echo: the opener names no topic in bold.
+        self.assertTrue(msg.startswith("Nothing matching that near you right now."))
+        self.assertNotIn("{", msg)
+
+    def test_stretch_strings_exist_in_every_language(self):
+        from app.i18n import _STRINGS, t
+
+        for key in ("browse.stretch_offer", "browse.stretch_offer_generic"):
+            self.assertEqual(set(_STRINGS[key]), {"en", "es", "pt"}, key)
+            with patch("app.orchestrator.llm.llm_configured", return_value=False):
+                for lang in ("en", "es", "pt"):
+                    out = t(key, lang, interest="violin", title="Sunday jam night",
+                            mismatch=self._PHRASE)
+                    self.assertIn(self._PHRASE, out, (key, lang))
+                    self.assertNotIn("{", out, (key, lang))
+
+    def test_stretch_prompt_asks_for_three_parts_ending_on_the_listen_offer(self):
+        _out, cap = self._stretch_llm()
+        system = cap["system"]
+        self.assertIn("exactly three parts", system)
+        self.assertIn("keeping an ear out offered first", system)
+        self.assertIn("Do not ask whether they want to see the event", system)
+        self.assertIn("ONLY the difference given in the facts", system)
+        self.assertEqual(cap["max_tokens"], 200)
+
+    def test_stretch_facts_reach_the_writer_verbatim(self):
+        _out, cap = self._stretch_llm()
+        payload = cap["user_payload"]
+        self.assertIn(f'"{self._PHRASE}"', payload)
+        self.assertIn('"Sunday jam night"', payload)
+        self.assertIn("already shown as a card", payload)
+        # Fact 4 allows the one named event and nothing else.
+        self.assertIn("other than the one closest event named below", payload)
+        self.assertNotIn("never claim something is happening nearby", payload)
+        # The plain shape's widen option is what the pill says.
+        self.assertIn("Widen the search", payload)
+
+    def test_post_check_falls_back_when_the_writer_drops_the_title(self):
+        out, _cap = self._stretch_llm(
+            reply="Nothing violin-specific right now, but there's a music night. Want me "
+                  "to keep an ear out?"
+        )
+        self.assertIn("Sunday jam night", out)
+        self.assertIn(self._PHRASE, out)
+
+    def test_post_check_keeps_a_reply_that_names_the_event_any_case(self):
+        reply = ("Nothing violin-specific near you right now. The closest is SUNDAY JAM "
+                 "NIGHT — a jam, not violin. Want me to keep an ear out, or widen the search?")
+        out, _cap = self._stretch_llm(reply=reply)
+        self.assertEqual(out, reply)
+
+    def test_no_stretch_leaves_the_writer_exactly_as_it_was(self):
+        """stretch=None: same prompt, same fact 4, same token budget."""
+        from app.activity_browse import _compose_empty_seek_offer
+
+        cap: dict = {}
+
+        def _llm_json(**k):
+            cap.update(k)
+            return {"message": "ok"}
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", _llm_json
+        ), patch("app.orchestrator.llm.synthesizer_model", return_value="m"):
+            _compose_empty_seek_offer("kayak", lang="en")
+        self.assertIn("(max 2 sentences) telling the user nothing matched", cap["system"])
+        self.assertNotIn("three parts", cap["system"])
+        self.assertEqual(cap["max_tokens"], 140)
+        self.assertIn(
+            "Never invent or promise events, and never claim something is happening nearby",
+            cap["user_payload"],
+        )
+        self.assertNotIn("closest event", cap["user_payload"])
+
 
 if __name__ == "__main__":
     unittest.main()

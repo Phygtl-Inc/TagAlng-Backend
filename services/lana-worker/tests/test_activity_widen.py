@@ -537,3 +537,159 @@ class UncheckedRingTests(unittest.TestCase):
             )
         self.assertNotIn("miles out", reply.lower())
         self.assertEqual(ctx.get("activity_previews"), [])
+
+
+class StretchOfferTurnTests(unittest.TestCase):
+    """Rapport Reply at turn level: nothing matched, but a NEARBY event was rated closely
+    related — offer it as the one card, ending on the listen offer. Behind the flag."""
+
+    _PHRASE = "asked for violin, this is a jam night"
+
+    def _rows(self, *, score=0.7, phrase=_PHRASE):
+        return [
+            _ev("e1", "Book club", description="Monthly reads."),
+            _ev("e2", "Sunday jam night", description="Bring an instrument."),
+        ], {"e1": (0.1, "asked for violin, this is a book club"), "e2": (score, phrase)}
+
+    def _turn(self, *, rows, judged, matched_ids=(), flag=True, stretch_first=True,
+              message="violin", ctx=None, ring=([], ""), label="violin"):
+        ctx = ctx if ctx is not None else {"activity_browse_active": True,
+                                           "browse_draft": {"_asked": True},
+                                           "phone_verified": True}
+
+        def _filter(ev, q):
+            # Stamp in place, exactly like the real matcher: every row scored.
+            for row in ev:
+                score, phrase = judged.get(row["id"], (0.0, ""))
+                row["topic_score"] = score
+                row["topic_mismatch"] = phrase
+            return [r for r in ev if r["id"] in matched_ids], label
+
+        with patch("app.activity_browse._fetch_block_events", return_value=rows), patch(
+            "app.activity_browse._filter_events_by_query", side_effect=_filter
+        ), patch("app.activity_browse._widen_search", return_value=ring) as widen, patch(
+            "app.activity_browse._far_offer", return_value=([], "")
+        ) as far, patch("app.activity_browse._zip_gate_frame", return_value=None), patch(
+            "app.lana_paths.stretch_offer_enabled", return_value=flag
+        ), patch("app.activity_browse._STRETCH_BEFORE_WIDEN", stretch_first), patch(
+            # The writer's model is off: the deterministic template is the output.
+            "app.orchestrator.llm.llm_configured", return_value=False
+        ):
+            reply = run_activity_browse_turn(
+                user_message=message, session_ctx=ctx, history=[],
+                user_jwt="jwt", home_block_id="b1",
+            )
+        return reply, ctx, widen, far
+
+    def test_a_close_stretch_is_offered_as_one_card(self):
+        rows, judged = self._rows()
+        reply, ctx, widen, far = self._turn(rows=rows, judged=judged)
+        self.assertIn("Sunday jam night", reply)
+        self.assertIn(self._PHRASE, reply)
+        self.assertEqual([p["title"] for p in ctx["activity_previews"]], ["Sunday jam night"])
+        self.assertEqual(ctx["browse_draft"]["suggestions"],
+                         ["Yes, listen for me", "Widen the search"])
+        self.assertTrue(ctx["browse_draft"]["_seek_offer"])
+        # The listen offer is for the ORIGINAL ask, never the stretch.
+        self.assertEqual(ctx["browse_draft"]["interest"], "violin")
+        self.assertEqual(ctx["browse_scores"], {"e2": 0.7})
+        widen.assert_not_called()
+        far.assert_not_called()
+
+    def test_nothing_close_runs_todays_path(self):
+        rows, judged = self._rows(score=0.4)
+        reply, ctx, widen, far = self._turn(rows=rows, judged=judged)
+        self.assertNotIn("Sunday jam night", reply)
+        self.assertEqual(ctx["activity_previews"], [])
+        widen.assert_called_once()
+        far.assert_called_once()
+
+    def test_a_category_ask_that_matched_never_reaches_the_picker(self):
+        rows = [_ev("p1", "Pizza night"), _ev("c1", "Coffee walk")]
+        judged = {"p1": (0.7, ""), "c1": (0.7, "")}
+        with patch("app.stretch_offer.pick_stretch") as picker:
+            reply, ctx, widen, _far = self._turn(
+                rows=rows, judged=judged, matched_ids=("p1", "c1"),
+                message="food or drink", label="food or drink",
+            )
+        picker.assert_not_called()
+        widen.assert_not_called()
+        self.assertIn("coming up", reply.lower())
+        self.assertEqual([p["title"] for p in ctx["activity_previews"]],
+                         ["Pizza night", "Coffee walk"])
+
+    def test_an_unmatched_same_thing_score_is_not_a_stretch(self):
+        """0.9 unmatched = right topic, wrong date/time/host. Not a topic stretch."""
+        rows, judged = self._rows(score=0.9)
+        reply, ctx, widen, _far = self._turn(rows=rows, judged=judged)
+        self.assertNotIn("Sunday jam night", reply)
+        self.assertEqual(ctx["activity_previews"], [])
+        widen.assert_called_once()
+
+    def test_an_empty_phrase_is_not_offered(self):
+        rows, judged = self._rows(phrase="")
+        reply, ctx, widen, _far = self._turn(rows=rows, judged=judged)
+        self.assertNotIn("Sunday jam night", reply)
+        widen.assert_called_once()
+
+    def test_flag_off_is_todays_behaviour(self):
+        rows, judged = self._rows()
+        reply, ctx, widen, far = self._turn(rows=rows, judged=judged, flag=False)
+        self.assertNotIn("Sunday jam night", reply)
+        self.assertEqual(ctx["activity_previews"], [])
+        self.assertIn("keep an ear out", reply)
+        widen.assert_called_once()
+        far.assert_called_once()
+
+    def test_order_flipped_runs_the_ring_first_then_the_stretch_before_the_far_probe(self):
+        rows, judged = self._rows()
+        reply, ctx, widen, far = self._turn(rows=rows, judged=judged, stretch_first=False)
+        widen.assert_called_once()
+        far.assert_not_called()
+        self.assertIn("Sunday jam night", reply)
+        self.assertEqual([p["title"] for p in ctx["activity_previews"]], ["Sunday jam night"])
+
+    def test_order_flipped_and_the_ring_matches_shows_the_far_results_instead(self):
+        rows, judged = self._rows()
+        far_rows = [_ev("f1", "Violin circle", distance_meters=90000.0)]
+        reply, ctx, widen, _far = self._turn(
+            rows=rows, judged=judged, stretch_first=False, ring=(far_rows, "violin"),
+        )
+        widen.assert_called_once()
+        self.assertIn("miles out", reply.lower())
+        self.assertEqual([p["title"] for p in ctx["activity_previews"]], ["Violin circle"])
+
+    def test_a_community_browse_never_stretches(self):
+        from app.community_scope import CTX_KEY
+
+        rows, judged = self._rows()
+        ctx = {"activity_browse_active": True, "browse_draft": {"_asked": True},
+               "phone_verified": True, CTX_KEY: {"place_id": "p1", "name": "CF Fitness"}}
+        with patch("app.auth.jwt_user_id", return_value="me"), patch(
+            "app.community_scope.community_events", return_value=rows
+        ), patch("app.activity_browse._attach_host_names"):
+            reply, ctx, _w, _f = self._turn(rows=[], judged=judged, ctx=ctx)
+        self.assertNotIn("Sunday jam night", reply)
+        self.assertEqual(ctx["activity_previews"], [])
+
+    def test_stale_scores_are_cleared_on_a_no_match_turn(self):
+        rows, judged = self._rows(score=0.4)
+        ctx = {"activity_browse_active": True, "browse_draft": {"_asked": True},
+               "phone_verified": True, "browse_scores": {"old": 0.9}}
+        _reply, ctx, _w, _f = self._turn(rows=rows, judged=judged, ctx=ctx)
+        self.assertIsNone(ctx["browse_scores"])
+
+    def test_a_bare_sure_next_turn_means_listen_for_the_original_ask(self):
+        """The "yes" problem: the reply ends on the listen offer, and the pill handler
+        reads "sure" as accept — it saves a VIOLIN seek, never the jam night."""
+        rows, judged = self._rows()
+        _reply, ctx, _w, _f = self._turn(rows=rows, judged=judged)
+        with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
+            "app.look_meet.start_meet_seek_from_interest", return_value="saved"
+        ) as seek, patch("app.discovery_route.resolve_block_id", return_value="b1"):
+            reply = run_activity_browse_turn(
+                user_message="sure", session_ctx=ctx, history=[],
+                user_jwt="jwt", home_block_id="b1",
+            )
+        self.assertEqual(reply, "saved")
+        self.assertEqual(seek.call_args.kwargs["interest"], "violin")
