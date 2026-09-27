@@ -49,7 +49,13 @@ _PIVOT_OUT_RE = re.compile(
 def reset_activity_browse_state(session_ctx: dict[str, Any]) -> None:
     """Drop the browse flow + its state so the turn falls through to normal routing.
     Keys set to None (not popped) so the {**old, **new} session merge clears them."""
-    for k in ("activity_browse_active", "browse_draft", "activity_previews", "browse_skip_seed"):
+    for k in (
+        "activity_browse_active",
+        "browse_draft",
+        "activity_previews",
+        "browse_skip_seed",
+        "browse_truncated",
+    ):
         session_ctx[k] = None
     session_ctx["browse_turns"] = 0
 
@@ -166,20 +172,6 @@ def activity_browse_should_release(
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
 
-# Pass 2 of the search. A FIXED second radius, not a loop: the widening terminates by
-# construction and costs at most one extra model call.
-#
-# 200 km is not a taste decision — it is the ceiling Postgres clamps to
-# (20260920120000_geolocation_aware_search.sql:411), so anything larger is the same
-# query. There is deliberately no middle rung: without distance tiers nothing downstream
-# would treat 40 miles differently from 120, so a third pass would buy a model call and
-# a round trip for no change in what the user is told.
-#
-# Supply past 200 km is NOT covered here and cannot be — that is what _far_offer's
-# uncapped probe is for (discovery_route.activities_beyond_radius; ZIP 90001 to Lake Nona
-# is 3,555 km). The two are complementary, not alternatives.
-_WIDE_RADIUS_M = 200_000.0
-
 # Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
 # retuned without reading around prose. These are what make a 0.7 mean the same thing on
 # Tuesday as on Friday: the model is told to score each event against the REQUEST, never
@@ -250,65 +242,158 @@ def _fetch_block_events(
         return []
 
 
-def _widen_search(
+def _weekend_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows whose start falls on a Saturday or Sunday in the event's LOCAL timezone —
+    starts_at is UTC, so a Friday 8:30 PM ET meet is Saturday in UTC and vice versa.
+    Same rule as fetch_preview_events_on_block's inline filter."""
+    from datetime import datetime, timezone
+
+    from app.event_publish import event_tz
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        when = str(row.get("starts_at") or "")
+        try:
+            dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt.astimezone(event_tz()).weekday() in (5, 6):
+            out.append(row)
+    return out
+
+
+def _fetch_admitted_events(
     user_jwt: str,
     block_id: str | None,
     *,
     interest: str,
     weekend_only: bool = False,
-) -> tuple[list[dict[str, Any]], str]:
-    """Pass 2: the same topic, searched out to _WIDE_RADIUS_M, over the ring the nearby
-    pass could not see. Returns (matched, label) — ([], "") when there is nothing.
+    limit: int = 200,
+    radius_m: float = 200_000.0,
+) -> tuple[list[dict[str, Any]], bool] | None:
+    """Meets ranked by meaning within `radius_m`, admitted by distance (C3).
 
-    Only ever called from the "a topical search found nothing" branch, so a turn that
-    matches nearby never reaches it and is untouched by construction rather than by a
-    flag. Returns empty when the block can't be placed, when there is no interest to
-    hold constant, and on any failure: a widened search is an improvement on an empty
-    state, never a reason to break one.
+    Returns (admitted_rows, truncated). `truncated` is true when the RPC filled its
+    page, in which case nothing downstream may conclude that nothing further out
+    matched. Returns None — not ([], False) — when the search could not run at all
+    (no embedding, no centroid, RPC failure): the caller falls back to the
+    distance-only read on None, and a dead model never reads as an empty area.
 
-    The ring is cut on measured distance, not on the ids the nearby pass returned — see
-    fetch_preview_events_on_block. The pool stays at _BROWSE_POOL: the wider pass is the
-    rare path, and paying for a bigger prompt on every browse turn to serve it is the
-    wrong trade.
+    `limit` is the RPC page size (SQL caps it at 200). `radius_m` is the outer bound
+    the rule scores inside, not a cut — SQL clamps it to 200 km.
     """
     interest = str(interest or "").strip()
-    # An open request ("anything", "what's happening") has no topic to hold constant, and
-    # _filter_events_by_query would pass the whole ring through unjudged — so a generic
-    # browse of an empty block would answer with meets 100 miles away. Same guard the
-    # matcher itself uses, for the same reason.
-    if not block_id or not interest or _OPEN_RE.match(interest):
-        return [], ""
-    try:
-        from app.auth import jwt_user_id
-        from app.discovery_route import (
-            activity_radius_meters,
-            fetch_preview_events_on_block,
-        )
+    if not block_id or not interest:
+        return None
+    log = logging.getLogger(__name__)
 
-        rows = fetch_preview_events_on_block(
-            block_id,
-            limit=_BROWSE_POOL,
-            pool=_BROWSE_POOL,
-            weekend_only=weekend_only,
-            exclude_host_id=jwt_user_id(user_jwt),
-            radius_meters=_WIDE_RADIUS_M,
-            # Strictly beyond whatever the nearby pass just covered, so nothing is
-            # re-scored and nothing near is announced as far.
-            min_distance_meters=activity_radius_meters(),
+    # 1-2. The query vector, from the same helper that embedded the rows.
+    from app.layer1_handlers import _embed_attr_filter
+    from app.vec_util import to_pgvector
+
+    literal = to_pgvector(_embed_attr_filter(interest))
+    if not literal:
+        log.warning(
+            "activity_browse_embed_unavailable interest=%r — distance-only fallback",
+            interest[:60],
         )
-        if not rows:
-            return [], ""
-        _attach_host_names(rows)
-        matched, label = _filter_events_by_query(rows, interest)
-        if matched:
-            logging.getLogger(__name__).info(
-                "activity_browse_widened block=%s query=%r ring=%d matched=%d",
-                block_id, interest[:120], len(rows), len(matched),
+        return None
+
+    from app.auth import jwt_user_id, service_client
+    from app.discovery_route import activity_window, block_centroid
+    from app.distance_admission import _admission_floor, _admit
+
+    loc = block_centroid(block_id)
+    if not loc:
+        log.warning("activity_browse_block_unplaceable block=%s", block_id)
+        return None
+
+    # 3. Rank by meaning, distance returned as data. p_min_similarity is the floor at
+    #    distance zero — the lowest value the rule can ever admit — so SQL drops what
+    #    could never pass while still returning unembedded rows (similarity NULL).
+    try:
+        from app.event_publish import roll_recurring_events
+
+        roll_recurring_events()  # a weekly meet's row carries its NEXT occurrence
+        res = (
+            service_client()
+            .rpc(
+                "search_events_semantic",
+                {
+                    "p_query_embedding": literal,
+                    "p_lat": loc[0],
+                    "p_lng": loc[1],
+                    "p_radius_meters": float(radius_m),
+                    "p_window": activity_window(),
+                    "p_circle_place_id": None,
+                    "p_min_similarity": _admission_floor(0.0),
+                    "p_limit": int(limit),
+                },
             )
-        return matched, label
+            .execute()
+        )
     except Exception:  # noqa: BLE001
-        logging.getLogger(__name__).exception("activity_browse_widen_failed")
-        return [], ""
+        log.exception("activity_browse_semantic_search_failed block=%s", block_id)
+        return None
+    raw = [r for r in (res.data if isinstance(res.data, list) else []) if isinstance(r, dict)]
+
+    # 4. Before anything is dropped: a full page means the set was cut, whatever
+    #    survives the filters below.
+    truncated = len(raw) >= int(limit)
+
+    # 5. Stamp — the RPC returns both, but as JSON they may arrive as int or None.
+    rows: list[dict[str, Any]] = []
+    for r in raw:
+        if not r.get("id"):
+            continue
+        try:
+            r["distance_meters"] = float(r.get("distance_meters") or 0.0)
+        except (TypeError, ValueError):
+            r["distance_meters"] = 0.0
+        sim = r.get("similarity")
+        try:
+            r["similarity"] = None if sim is None else float(sim)
+        except (TypeError, ValueError):
+            r["similarity"] = None
+        rows.append(r)
+
+    # 6. The caller's own meets — browse offers every card as "tap to RSVP".
+    me = jwt_user_id(user_jwt)
+    if me:
+        rows = [r for r in rows if str(r.get("host_id") or "") != str(me)]
+
+    # 7.
+    if weekend_only:
+        rows = _weekend_rows(rows)
+
+    # 8. The RPC returns neither column and the cards need both (community badge,
+    #    recurrence). A lookup by id, best-effort: a miss leaves them absent.
+    if rows:
+        try:
+            extra = (
+                service_client()
+                .table("events")
+                .select("id, recurrence, circle_place_ref")
+                .in_("id", [str(r["id"]) for r in rows])
+                .execute()
+            )
+            by_id = {
+                str(e.get("id")): e
+                for e in (extra.data or [])
+                if isinstance(e, dict) and e.get("id")
+            }
+            for r in rows:
+                e = by_id.get(str(r["id"]))
+                if e:
+                    r["recurrence"] = e.get("recurrence")
+                    r["circle_place_ref"] = e.get("circle_place_ref")
+        except Exception:  # noqa: BLE001
+            log.exception("activity_browse_event_columns_failed")
+
+    # 9. Order is the RPC's (similarity desc, unembedded last); _admit only filters.
+    return _admit(rows), truncated
 
 
 def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
@@ -321,6 +406,24 @@ def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
         if isinstance(e.get("distance_meters"), (int, float))
     ]
     return int(round(min(dists) / 1609.34)) if dists else None
+
+
+def _far_miles(
+    events: list[dict[str, Any]], *, far_copy_m: float = 40_000.0
+) -> int | None:
+    """Miles to the nearest of these meets when the far header is the honest one, else
+    None. The far header says "nothing near you", which is only true when the CLOSEST
+    admitted meet is beyond `far_copy_m`; one match close by makes the plain header
+    correct however far the others are. None when no meet carries a distance — never
+    invent a number."""
+    dists = [
+        float(e["distance_meters"])
+        for e in events
+        if isinstance(e.get("distance_meters"), (int, float))
+    ]
+    if not dists or min(dists) <= far_copy_m:
+        return None
+    return _nearest_miles(events)
 
 
 def _today_str() -> str:
@@ -1053,9 +1156,9 @@ def _format_browse_message(
     # The FE renders these same events as a card list (activity_previews) right under this
     # message — a short lead-in is enough; enumerating them in text too reads as a bug.
     #
-    # far_miles is set only by a WIDENED search. Saying "near you" over a meet 90 miles
-    # out would be the same lie as claiming supply we never measured: the distance was
-    # the whole reason we looked further, so it has to reach the copy.
+    # far_miles is set only when the NEAREST match is far (see _far_miles). Saying "near
+    # you" over a meet 90 miles out would be the same lie as claiming supply we never
+    # measured, so the distance has to reach the copy.
     if far_miles is not None:
         head = (
             t("browse.events_header_label_far", lang, label=label, miles=f"{far_miles:,}")
@@ -1369,8 +1472,27 @@ def run_activity_browse_turn(
             str(comm["place_id"]), exclude_host_id=jwt_user_id(user_jwt)
         )
         _attach_host_names(events)
+        truncated = False
+    elif interest and not _OPEN_RE.match(interest):
+        # Topical: one semantic read, distance as data, the admission rule decides
+        # (C3). None means the search could not run (no embedding, no centroid) —
+        # fall back to the distance-only read rather than show an empty area.
+        admitted = _fetch_admitted_events(
+            user_jwt, block_id, interest=interest, weekend_only=weekend_only
+        )
+        if admitted is None:
+            events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
+            truncated = False
+        else:
+            events, truncated = admitted
+            _attach_host_names(events)
     else:
+        # Open/vague: nothing to embed, so the distance-only read as before.
         events = _fetch_block_events(user_jwt, block_id, weekend_only=weekend_only)
+        truncated = False
+    # A full page means the set was cut; nothing downstream may read an empty result
+    # as "nothing further out matched" while this is true.
+    session_ctx["browse_truncated"] = truncated
 
     # No pre-open block here (reverted 2026-08-05, see zip_unlock.discovery_zip_gate):
     # §D.2 is supply-aware — a host's event stays visible to the neighbours it was
@@ -1384,20 +1506,6 @@ def run_activity_browse_turn(
     # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
     # text them when a matching meet appears) rather than dead-ending. The accept/widen reply
     # is read next turn. No interest (a "show me anything" browse) keeps the generic message.
-    # Pass 2: nothing on topic nearby, so search the ring out to _WIDE_RADIUS_M holding
-    # the topic constant. Sits INSIDE the "found nothing" branch, so a turn that matched
-    # nearby cannot reach it — no flag, no second code path to keep in sync. Community
-    # scope is excluded: "what's on at CF Fitness" is a question about a place, and
-    # answering it with a meet 90 miles away is not a wider answer, it is a wrong one.
-    far_miles: int | None = None
-    if not matched and interest and not comm:
-        matched, wide_label = _widen_search(
-            user_jwt, block_id, interest=interest, weekend_only=weekend_only
-        )
-        if matched:
-            label = wide_label or label
-            far_miles = _nearest_miles(matched)
-
     if not matched and interest:
         # Echo (and store) the filter's short label, not the raw sentence — a full NL entry
         # ("are there any fifa activities for my 6 year old") would otherwise be parroted
@@ -1520,5 +1628,5 @@ def run_activity_browse_turn(
     }
     session_ctx["routing_phase"] = "listening"
     return _format_browse_message(
-        matched, label, phone_verified=phone_verified, lang=lang, far_miles=far_miles
+        matched, label, phone_verified=phone_verified, lang=lang, far_miles=_far_miles(matched)
     )
