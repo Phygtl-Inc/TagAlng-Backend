@@ -169,6 +169,9 @@ SIGNAL_SWEEP_TOKEN: "${SIGNAL_SWEEP_TOKEN:-}"
 # otherwise — and only turn it on once migrations 20261229120000-02 are on THAT database,
 # or every answer write fails into a log line.
 LANA_ASPECTS: "${LANA_ASPECTS:-0}"
+# "Why Lana sees a fit" relevance line + proof headlines on results (app/reco_fit.py). On
+# by default; 0 turns off its one bounded model call per results page.
+LANA_RECO_FIT: "${LANA_RECO_FIT:-1}"
 EOF
 
 # Warm-instance policy, chosen by the caller — this script's own defaults are exactly

@@ -311,7 +311,25 @@ def _stamp_subject_cards(
         _logging.getLogger(__name__).warning("reco_cards_stamp_failed", exc_info=True)
         return
     if cards:
-        ctx["reco_cards"] = cards[:PAGE_SIZE]
+        # "Why Lana sees a fit": the relevance line + proof headlines, ONE model call for
+        # the page, STARTED here and joined after the reply is composed (reco_fit.finish_fit
+        # in discovery_route) so it runs alongside it. Slow or failed: today's card.
+        try:
+            from app.reco_fit import start_fit
+
+            page = cards[:PAGE_SIZE]
+            start_fit(
+                page,
+                lang=str(ctx.get("preferred_lang") or "en"),
+                ask_chips=_ask_chips(ctx),
+                reader_id=user_id,
+            )
+        except Exception:  # noqa: BLE001
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning("reco_fit_failed", exc_info=True)
+            page = cards[:PAGE_SIZE]
+        ctx["reco_cards"] = page
         # "9 found nearby" — how many subjects the ask actually turned up, which is not
         # len(the page). A header that counts the page can only ever say "5 of 5".
         ctx["reco_cards_total"] = len(cards)

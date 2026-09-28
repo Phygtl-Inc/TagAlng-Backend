@@ -4036,6 +4036,11 @@ def _tip_seek_answer_turn(
             weights=weights,
             widened=widen,
         )
+        # Join the "Why Lana sees a fit" compose started when the cards were built — it
+        # ran alongside the reply above, so this waits only for what is left of its budget.
+        from app.reco_fit import finish_fit
+
+        finish_fit(ctx.get("reco_cards"))
         _stamp_tip_ask_offer(ctx, detail=detail, category=category)
         ctx["last_routing"] = _discovery_routing_stub(
             phase or "listening",
