@@ -150,6 +150,14 @@ def _card_from_group(
             str(head.get("subject_distance_text") or "").strip() or lead["distance_text"]
         ),
         "distance_is_subject": bool(str(head.get("subject_distance_text") or "").strip()),
+        # The same distance as a number, for the results' "Nearest" sort. Paired with the
+        # text above (subject's where grounded, else the lead contributor's) so the order
+        # and the label can never disagree.
+        "distance_meters": (
+            head.get("subject_distance_meters")
+            if str(head.get("subject_distance_text") or "").strip()
+            else head.get("distance_meters")
+        ),
         "merge_mode": str(head.get("subject_merge_mode") or "aggregate"),
         "reco_type": str(head.get("reco_type") or "").strip() or None,
         "vouch_count": vouch,

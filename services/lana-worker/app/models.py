@@ -151,6 +151,8 @@ class RecoCardRow(BaseModel):
     # `distance_is_subject` says which, so copy never implies the wrong one.
     distance_text: str | None = None
     distance_is_subject: bool = False
+    # The same distance in meters, for the "Nearest" sort. Null when neither is known.
+    distance_meters: float | None = None
     # "aggregate" — contributions are observations, and `themes` may summarise them.
     # "collection" — each contribution IS the artifact (a recipe, a DIY method); render
     # them side by side and NEVER blend. `themes` is always null for a collection.
