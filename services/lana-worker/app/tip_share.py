@@ -895,7 +895,9 @@ def _save_tip(
                 from app.auth import jwt_user_id
                 from app.reco_subject import ground_reco_subject
 
-                ground_reco_subject(
+                # Kept on the row: the aspect round (app/aspect_round.py) files each
+                # answer under this subject so "4 of 8 mentioned the wait" can count it.
+                saved["subject_ref"] = ground_reco_subject(
                     user_jwt,
                     signal_id=new_signal_id,
                     draft=draft,
@@ -1202,6 +1204,21 @@ def run_tip_share_turn(
         draft["chips"] = _build_chips(draft)
         session_ctx["tip_draft"] = draft
         session_ctx["tip_listed_now"] = True
+        # "Help Lana learn more": one follow-up per thing they mentioned. Off unless
+        # LANA_ASPECTS; a stale round from an earlier post never survives a new one.
+        from app.aspect_round import CTX_KEY as _ASPECT_KEY, aspects_enabled, open_after_post
+
+        if aspects_enabled():
+            from app.auth import jwt_user_id
+
+            if not open_after_post(
+                session_ctx,
+                draft=draft,
+                signal_id=saved.get("signal_id"),
+                subject_ref=saved.get("subject_ref"),
+                user_id=jwt_user_id(user_jwt) if user_jwt else None,
+            ) and session_ctx.get(_ASPECT_KEY):
+                session_ctx[_ASPECT_KEY] = None
         summary = _summary(draft)
         tail = (
             f" {matches} neighbor{'s' if matches != 1 else ''} asking for this just got it."

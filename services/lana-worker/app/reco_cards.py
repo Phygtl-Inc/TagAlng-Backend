@@ -176,6 +176,7 @@ def subject_cards_from_tips(
     allow_compose: bool = False,
     reader_id: str | None = None,
     ask_chips: list[str] | None = None,
+    user_jwt: str | None = None,
 ) -> list[dict[str, Any]]:
     """Tip rows in, subject cards out.
 
@@ -201,6 +202,11 @@ def subject_cards_from_tips(
     for key in order:
         card = _card_from_group(grouped[key], phone_verified=phone_verified)
         if card:
+            # Why this subject answered a multi-part ask — stamped on its rows by
+            # aspect_round.rerank_tips_by_aspects. Best match across the group.
+            matches = [r["_aspect_match"] for r in grouped[key] if r.get("_aspect_match")]
+            if matches:
+                card["aspect_match"] = max(matches, key=lambda m: m["clauses_matched"])
             cards.append(card)
 
     _attach_digests(cards, lang=lang, allow_compose=allow_compose)
@@ -214,10 +220,16 @@ def subject_cards_from_tips(
     # total — a float tie must not leave two cards swapping places between reads.
     cards.sort(key=lambda c: (
         _GROUP_RANK.get(str(c.get("group_kind")), 3),
+        # Coverage of a multi-part ask, after provenance: a subject that meets both parts
+        # of "great with toddlers and no wait" beats one that meets one of them well.
+        -int((c.get("aspect_match") or {}).get("clauses_matched") or 0),
         -c["match_strength"],
         -c["vouch_count"],
         c["title"].casefold(),
     ))
+    from app.aspect_round import attach_aspects
+
+    attach_aspects(cards, user_jwt=user_jwt)
     logger.info(
         "reco_cards rows=%d cards=%d merged=%d themed=%d compose=%s",
         len(tips), len(cards),

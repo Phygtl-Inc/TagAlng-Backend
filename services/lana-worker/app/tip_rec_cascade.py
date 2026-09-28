@@ -202,6 +202,7 @@ def stamp_tip_peer_surface(
     phone_verified: bool = True,
     weights: list[str] | None = None,
     user_id: str | None = None,
+    user_jwt: str | None = None,
 ) -> list[dict[str, Any]]:
     """Put the ranked rec rows (and their counts strip) on ctx. Returns the rows shown.
 
@@ -235,7 +236,9 @@ def stamp_tip_peer_surface(
     surface = tip_discovery_surface(shown)
     if surface:
         ctx["discovery_surface"] = surface
-    _stamp_subject_cards(ctx, tips, phone_verified=phone_verified, user_id=user_id)
+    _stamp_subject_cards(
+        ctx, tips, phone_verified=phone_verified, user_id=user_id, user_jwt=user_jwt
+    )
     return shown
 
 
@@ -280,7 +283,7 @@ def _ask_chips(ctx: dict[str, Any]) -> list[str]:
 
 def _stamp_subject_cards(
     ctx: dict[str, Any], tips: list[dict[str, Any]], *, phone_verified: bool,
-    user_id: str | None = None,
+    user_id: str | None = None, user_jwt: str | None = None,
 ) -> None:
     """One card per recommended subject, beside the person rows.
 
@@ -300,6 +303,7 @@ def _stamp_subject_cards(
             allow_compose=False,
             reader_id=user_id,
             ask_chips=_ask_chips(ctx),
+            user_jwt=user_jwt,
         )
     except Exception:  # noqa: BLE001
         import logging as _logging

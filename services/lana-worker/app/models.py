@@ -77,6 +77,28 @@ class RecoContributorRow(BaseModel):
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
+class RecoAspectRow(BaseModel):
+    """One thing people noticed about a subject, from the aspect round (subject_aspects).
+
+    People-counts and their own words ONLY. There is no score field on purpose: a band
+    on the wire gets rendered, and a rendered band is a star rating with extra steps."""
+
+    aspect_key: str
+    label: str
+    n_people: int = 0
+    # Of those, how many the reader shares a community with — the "2 from your church".
+    n_shared_community: int = 0
+    quotes: list[str] = Field(default_factory=list)
+
+
+class RecoAspectMatchRow(BaseModel):
+    """Why this subject answered a multi-part ask ("owner speaks Italian AND …")."""
+
+    clauses_matched: int = 0
+    clauses_total: int = 0
+    quotes: list[str] = Field(default_factory=list)
+
+
 class RecoCardRow(BaseModel):
     """One recommended SUBJECT, with everyone who stands behind it.
 
@@ -122,6 +144,11 @@ class RecoCardRow(BaseModel):
     # echoed so the card can show why it is an answer to THIS question. Not authored and
     # not inferred — they are what the reader asked for.
     fit_chips: list[str] = Field(default_factory=list)
+    # What people noticed, section by section (LANA_ASPECTS). Null when off or when no
+    # one has answered a round about this subject yet.
+    aspects: list[RecoAspectRow] | None = None
+    # Present only when the ask was matched at aspect level (find_by_aspects).
+    aspect_match: RecoAspectMatchRow | None = None
     tip_rec: bool = True
 
 
@@ -1046,6 +1073,48 @@ class EventSetupRequest(BaseModel):
     circle_place_id: str | None = None
 
 
+class AspectRoundItem(BaseModel):
+    aspect_key: str
+    # THEIR noun, as they said it ("the wait", "the lady at the front").
+    label: str
+    # Written per section by the splitter, in the statement's language.
+    question: str
+    state: Literal["open", "answered", "skipped"] = "open"
+    answer: str | None = None
+
+
+class AspectRoundPayload(BaseModel):
+    """ "Help Lana learn more" (screens 07/08). See app/aspect_round.py.
+
+    Carried on the turn that posted the recommendation (mode "post") or on a session
+    opening that re-offers an unfinished one (mode "reoffer"). Absent everywhere else."""
+
+    round_id: str
+    mode: Literal["post", "reoffer"] = "post"
+    subject_name: str | None = None
+    status: Literal["offered", "active", "done", "skipped"] = "offered"
+    # Index of the next open question; null when none is left.
+    current: int | None = None
+    total: int = 0
+    answered: int = 0
+    items: list[AspectRoundItem] = Field(default_factory=list)
+
+
+class AspectAnswerRequest(BaseModel):
+    """One move in the round. `aspect_key` is required for answer/skip and must belong
+    to this session's round — the endpoint rejects anything else."""
+
+    action: Literal["start", "answer", "skip", "skip_all"]
+    aspect_key: str | None = None
+    answer: str | None = None
+    source: Literal["voice", "text"] = "voice"
+
+
+class AspectAnswerResponse(BaseModel):
+    ok: bool = True
+    aspect_round: AspectRoundPayload | None = None
+
+
 class TipSetupRequest(BaseModel):
     """The carousel fork of the recommendation capture (C-4-EVENT-P1B-FORK, "flip through
     cards"): every answer at once instead of one per turn.
@@ -1166,6 +1235,8 @@ class CreateSessionResponse(BaseModel):
     onboarding_step: str | None = None
     requires_phone_verification: bool = False
     joint_moment: JointMomentPayload | None = None
+    # A recommendation they raised sections of and never finished (mode "reoffer").
+    aspect_round: AspectRoundPayload | None = None
     intro_proposal: IntroProposalPayload | None = None
     pending_intros: list[PendingIntroRow] = Field(default_factory=list)
     block_log_entries: list[BlockLogEntryRow] = Field(default_factory=list)
@@ -1288,6 +1359,8 @@ class SendMessageResponse(BaseModel):
     # The "which spot is it?" card, when this turn asked a place-grounding question.
     # Absent on every other turn.
     grounding: GroundingCardPayload | None = None
+    # "Help Lana learn more" — only on the turn a recommendation was posted.
+    aspect_round: AspectRoundPayload | None = None
     routing: TurnRouting | None = None
     # See CreateSessionResponse.preferred_language — echoed every turn so the FE
     # can follow a mid-chat language switch (auto-persisted after 2 diverging turns).

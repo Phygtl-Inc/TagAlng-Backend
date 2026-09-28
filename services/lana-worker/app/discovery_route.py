@@ -3989,6 +3989,11 @@ def _tip_seek_answer_turn(
     )
 
     if neighbor_tips:
+        # Multi-part asks ("great with toddlers AND no wait") re-ranked by what people
+        # said about each part (LANA_ASPECTS; a no-op when off or nothing matches).
+        from app.aspect_round import rerank_tips_by_aspects
+
+        neighbor_tips = rerank_tips_by_aspects(neighbor_tips, request=msg, user_jwt=user_jwt)
         # The rec rides ON the neighbor's row, not only in the prose (§12a/b): the quote is
         # what makes the row a pre-qualified answer instead of one more person to message.
         shown = stamp_tip_peer_surface(
@@ -3997,6 +4002,7 @@ def _tip_seek_answer_turn(
             phone_verified=phone_verified,
             weights=weights,
             user_id=user_id,
+            user_jwt=user_jwt,
         )
         reply = _compose_neighbor_tip_reply(
             neighbor_tips,
