@@ -282,3 +282,97 @@ def test_find_runs_as_the_viewer_not_the_service_role():
     assert (jwt, name) == ("jwt-1", "search_subjects_by_aspect")
     assert "p_viewer_id" not in args
     assert all(isinstance(v, str) for v in args["p_clauses"])
+
+
+def test_an_aspect_they_never_said_is_dropped():
+    """Observed live: the prompt's own "the wait" example came back as an aspect on a
+    plumber nobody said kept them waiting. Every aspect must trace to their words."""
+    statement = "He came the same day and fixed our leak fast, but he left a mess."
+    out = ra._parse_aspects({"aspects": [
+        {"label": "the mess", "key": "mess", "span": "he left a mess", "confidence": 0.9},
+        {"label": "the wait", "key": "wait_time", "span": "the wait was bad", "confidence": 0.9},
+        {"label": "nothing", "key": "nothing", "span": "", "confidence": 0.9},
+    ]}, statement=statement)
+    assert [a["aspect_key"] for a in out] == ["mess"]
+
+
+def test_traceable_tolerates_light_rephrasing_and_other_languages():
+    assert ra._traceable("fixed the leak fast", "He fixed our leak fast.")
+    assert ra._traceable("la espera fue larguísima", "pero la espera fue larguísima y")
+    assert not ra._traceable("the parking was hard", "Great croissants, long line.")
+
+
+def test_the_subject_itself_is_never_an_aspect():
+    """"What is Carlos the barber like to deal with?" — the subject is what is being
+    recommended, not one of the things said about it."""
+    out = ra._parse_aspects({"aspects": [
+        {"label": "barber", "key": "barber", "span": "a barber", "confidence": 0.9},
+        {"label": "the shop", "key": "shop", "span": "the shop is tidy", "confidence": 0.9},
+    ]}, statement="a barber whose shop is tidy", subject_terms=["Carlos the barber", "barber"])
+    assert [a["aspect_key"] for a in out] == ["shop"]
+
+
+
+class _BackfillDB:
+    """Just enough of the supabase query builder for backfill_embeddings."""
+
+    def __init__(self, label_rows, content_rows):
+        self.label_rows, self.content_rows, self.updates = label_rows, content_rows, []
+        self._mode = None
+
+    def table(self, _):
+        return self
+
+    def select(self, cols):
+        self._mode = "label" if "aspect_key" in cols else "content"
+        self._update = None
+        return self
+
+    def is_(self, *a):
+        return self
+
+    def in_(self, *a):
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def limit(self, _):
+        return self
+
+    def update(self, patch):
+        self._update = patch
+        return self
+
+    def eq(self, _col, val):
+        self.updates.append((val, self._update))
+        return self
+
+    def execute(self):
+        class R:
+            pass
+        r = R()
+        r.data = (self.label_rows if self._mode == "label" else self.content_rows) \
+            if self._update is None else []
+        return r
+
+
+def test_backfill_fills_both_vectors():
+    db = _BackfillDB([{"id": "a", "aspect_key": "wait_time", "aspect_label": "the wait"}],
+                     [{"id": "b", "aspect_label": "the price", "answer_verbatim": "$20"}])
+    with patch.object(ra, "service_client", return_value=db), \
+         patch("app.vertex_extract.vertex_embed", return_value=[0.1, 0.2]):
+        out = ra.backfill_embeddings()
+    assert out == {"label": 1, "content": 1, "failed": 0}
+    assert [(i, sorted(p)) for i, p in db.updates] == [("a", ["label_embedding"]),
+                                                       ("b", ["embedding"])]
+
+
+def test_backfill_stops_at_first_failed_embed():
+    db = _BackfillDB([{"id": "a", "aspect_key": "k", "aspect_label": "l"},
+                      {"id": "b", "aspect_key": "k2", "aspect_label": "l2"}], [])
+    with patch.object(ra, "service_client", return_value=db), \
+         patch("app.vertex_extract.vertex_embed", return_value=[]) as emb:
+        out = ra.backfill_embeddings()
+    assert out["failed"] == 1 and emb.call_count == 1 and db.updates == []

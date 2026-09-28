@@ -144,6 +144,9 @@ from app.models import (
     TipDraft,
     TipDraftPayload,
     TipSetupRequest,
+    AspectAnswerRequest,
+    AspectAnswerResponse,
+    AspectRoundPayload,
     TopicCommunityResponse,
     TopicCommunityRow,
     TurnDebug,
@@ -533,6 +536,32 @@ def _item_draft_from_dict(raw: dict[str, Any] | None) -> ItemDraft | None:
         return None
     fields = set(ItemDraft.model_fields)
     return ItemDraft(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _aspect_round_payload(raw: Any) -> AspectRoundPayload | None:
+    from app.aspect_round import public_round
+
+    pub = public_round(raw if isinstance(raw, dict) else None)
+    if not pub:
+        return None
+    try:
+        return AspectRoundPayload.model_validate(pub)
+    except Exception:  # noqa: BLE001 — a malformed round is no round, never a 500
+        logging.getLogger(__name__).warning("aspect_round_payload_invalid", exc_info=True)
+        return None
+
+
+def _aspect_round_for_turn(merged: dict[str, Any]) -> AspectRoundPayload | None:
+    """Only on the turn the recommendation posted. The round stays on the session so the
+    aspect-answer endpoint can validate against it, but it is NOT re-sent on later turns:
+    if they move on, the app moves on (the open rows are re-offered in a later session)."""
+    if not merged.get("tip_listed_now"):
+        return None
+    from app.aspect_round import CTX_KEY, aspects_enabled
+
+    if not aspects_enabled():
+        return None
+    return _aspect_round_payload(merged.get(CTX_KEY))
 
 
 def _tip_draft_from_dict(raw: dict[str, Any] | None) -> TipDraft | None:
@@ -1671,6 +1700,7 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
+        pending_opening_used = False
         if purpose == "lana" and not auth.is_anonymous:
             # Somebody agreed to be asked on a neighbor's behalf, and the outreach email's
             # button dropped them into an ordinary chat that never mentioned it — so from
@@ -1683,6 +1713,7 @@ def create_lana_session(
                 pending_opening = opening_for_pending_ask(auth.user_id, session_ctx)
                 if pending_opening:
                     opening = pending_opening
+                    pending_opening_used = True
             except Exception:  # noqa: BLE001 — never block a session on this
                 logging.getLogger(__name__).debug("pending_ask_opening_failed", exc_info=True)
 
@@ -1702,6 +1733,20 @@ def create_lana_session(
                 effective_lang = session_lang(session_ctx)
                 if effective_lang:
                     opening = localize_text(opening, effective_lang)
+
+        # "Earlier you mentioned the wait…" — sections of a past recommendation they
+        # never graded. Only when nothing else claimed the opening (a pending ask
+        # replaces the greeting and is the more urgent of the two), and never for guests.
+        opening_aspect_round = None
+        if purpose == "lana" and not auth.is_anonymous and not pending_opening_used:
+            from app.aspect_round import aspects_enabled, reoffer_round
+
+            if aspects_enabled():
+                opening_aspect_round = _aspect_round_payload(
+                    reoffer_round(
+                        session_ctx, user_id=auth.user_id, lang=session_lang(session_ctx)
+                    )
+                )
 
         # The community filter the app opened with (top-of-screen switcher), so the
         # very first turn already reads inside it — app/community_scope.py.
@@ -1759,6 +1804,7 @@ def create_lana_session(
         orchestrator=use_orch,
         is_anonymous=auth.is_anonymous,
         preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
+        aspect_round=opening_aspect_round,
         **ob,
     )
 
@@ -2368,6 +2414,7 @@ def _run_lana_message(
         look_draft=look_draft,
         ask_draft=_ask_draft_from_ctx(merged),
         grounding=_grounding_card_from_ctx(merged),
+        aspect_round=_aspect_round_for_turn(merged),
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
@@ -2806,6 +2853,59 @@ def set_tip_setup(
         # Empty when they all land, and the client then advances the flow.
         "weak": weak,
     }
+
+
+@app.post(
+    "/lana/sessions/{session_id}/aspect-answer", response_model=AspectAnswerResponse
+)
+def set_aspect_answer(
+    session_id: str,
+    body: AspectAnswerRequest,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+) -> AspectAnswerResponse:
+    """One move in the "Help Lana learn more" round (app/aspect_round.py).
+
+    start → the invite's Start. answer → one section, in their words (voice or typed).
+    skip → one section, stored as skipped. skip_all → the invite's Skip, or "skip the
+    rest" mid-round. Returns the updated round; a finished one is cleared from the
+    session and comes back with status done/skipped so the app can close it."""
+    from app.aspect_round import (
+        CTX_KEY,
+        RoundError,
+        apply_action,
+        aspects_enabled,
+        public_round,
+        settle,
+    )
+
+    if not aspects_enabled():
+        raise HTTPException(status_code=404, detail="aspects_disabled")
+    auth = verify_auth(authorization)
+    session = get_session_for_user(session_id, auth.user_id)
+    ctx = dict(session.get("context") or {})
+    try:
+        rnd = apply_action(
+            ctx,
+            action=body.action,
+            author_id=auth.user_id,
+            aspect_key=body.aspect_key,
+            answer=body.answer,
+            source=body.source,
+        )
+    except RoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ctx[CTX_KEY] = rnd
+    out = public_round(rnd)
+    settle(ctx)
+    update_session_context(session_id, ctx)
+    # Any row saved while Vertex was down gets its vectors now, off the request path.
+    from app.reco_aspects import backfill_embeddings
+
+    background_tasks.add_task(backfill_embeddings)
+    return AspectAnswerResponse(
+        ok=True, aspect_round=AspectRoundPayload.model_validate(out) if out else None
+    )
 
 
 @app.post("/hooks/event-join")
