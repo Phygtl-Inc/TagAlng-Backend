@@ -509,3 +509,18 @@ class TestPrivateClaimsNeverLeak(unittest.TestCase):
         ]}})
         self.assertEqual(chips, ["pediatric dentist", "gentle", "toddlers", "Lake Nona"])
         self.assertEqual(trc._ask_chips({}), [])
+
+
+def test_card_carries_numeric_distance_matching_its_label():
+    """The Nearest tab sorts on distance_meters; it must be the distance the label shows."""
+    from app.reco_cards import subject_cards_from_tips
+
+    base = {"peer_user_id": "p", "detail_text": "x", "match_strength": 0.8,
+            "subject_vouch_count": 1, "subject_merge_mode": "aggregate",
+            "distance_meters": 120.0, "distance_text": "0.1 mi"}
+    grounded = {**base, "signal_id": "1", "subject_ref": "A", "reco_name": "A",
+                "subject_distance_meters": 5000.0, "subject_distance_text": "3.1 mi"}
+    ungrounded = {**base, "signal_id": "2", "subject_ref": None, "reco_name": "B"}
+    by_title = {c["title"]: c for c in subject_cards_from_tips([grounded, ungrounded])}
+    assert by_title["A"]["distance_meters"] == 5000.0
+    assert by_title["B"]["distance_meters"] == 120.0
