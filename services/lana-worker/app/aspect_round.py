@@ -312,7 +312,7 @@ def settle(session_ctx: dict[str, Any]) -> None:
 
 # Cards per results page that get an aspect read: one RPC each, and the list is short.
 ASPECT_CARDS = 5
-ASPECTS_PER_CARD = 3
+ASPECTS_PER_CARD = 5
 
 
 def attach_aspects(cards: list[dict[str, Any]], *, user_jwt: str | None) -> None:
@@ -334,6 +334,11 @@ def attach_aspects(cards: list[dict[str, Any]], *, user_jwt: str | None) -> None
         except Exception:  # noqa: BLE001
             logger.debug("aspects_attach_failed subject=%s", ref, exc_info=True)
             continue
+        # What the reader ASKED about goes first: "a barber with good prices" hid the one
+        # pricing answer under three others at the old cap of 3 (prod QA 2026-09-28).
+        asked = set((card.get("aspect_match") or {}).get("keys") or [])
+        if isinstance(rows, list) and asked:
+            rows = sorted(rows, key=lambda r: 0 if r.get("aspect_key") in asked else 1)
         out = []
         for r in rows if isinstance(rows, list) else []:
             quotes = [q for q in (r.get("sample_quotes") or []) if str(q or "").strip()]
@@ -389,6 +394,11 @@ def rerank_tips_by_aspects(
             "clauses_matched": int(h.get("clauses_matched") or 0),
             "clauses_total": int(h.get("clauses_total") or 0),
             "quotes": quotes[:3],
+            # Which of the subject's aspects answered the ask — the card lists these first.
+            "keys": [
+                str(m.get("aspect_key")) for m in (h.get("matched_aspects") or [])
+                if isinstance(m, dict) and m.get("aspect_key")
+            ],
         }
     if not by_ref:
         return tips
