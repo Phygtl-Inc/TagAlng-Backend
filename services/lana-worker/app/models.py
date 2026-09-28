@@ -94,6 +94,9 @@ class RecoAspectRow(BaseModel):
     # Of those, how many the reader shares a community with — the "2 from your church".
     n_shared_community: int = 0
     quotes: list[str] = Field(default_factory=list)
+    # "2 Spanish-speaking parents said they cut in Spanish with everyone" — who said what,
+    # model-written from the quotes, count-checked (app/reco_fit.py). Null = use the count.
+    headline: str | None = None
 
 
 class RecoAspectMatchRow(BaseModel):
@@ -181,6 +184,9 @@ class RecoCardRow(BaseModel):
     # echoed so the card can show why it is an answer to THIS question. Not authored and
     # not inferred — they are what the reader asked for.
     fit_chips: list[str] = Field(default_factory=list)
+    # Why THIS reader: one short line from the card's facts (app/reco_fit.py). Null when
+    # it could not be written in time — the card is complete without it.
+    fit_line: str | None = None
     # What people noticed, section by section (LANA_ASPECTS). Null when off or when no
     # one has answered a round about this subject yet.
     aspects: list[RecoAspectRow] | None = None
