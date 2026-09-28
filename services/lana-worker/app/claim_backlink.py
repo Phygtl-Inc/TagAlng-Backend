@@ -50,7 +50,7 @@ from app.auth import service_client
 logger = logging.getLogger(__name__)
 
 # The public route. Flat, on the app host, no type prefix — a type-encoded route would
-# break the day a creator adds an address (20261214120000).
+# break the day a creator adds an address (20261228120000).
 LANA_HOST = "get.lana.help"
 
 # Providers that render a public profile to an anonymous client. Anything outside this

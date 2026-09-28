@@ -29,7 +29,7 @@
 -- an "Advisory canonical type (O6)". This restores that intent.
 --
 -- ============================================================================
--- THE LEAK IT WAS PROTECTING IS REAL, AND IS CLOSED PROPERLY IN 20261215120000
+-- THE LEAK IT WAS PROTECTING IS REAL, AND IS CLOSED PROPERLY IN 20261228120001
 -- ============================================================================
 -- The constraint existed for a good reason, quoted from its own comment: "A creator
 -- community is not anywhere. Geography on it would leak it into
@@ -67,6 +67,6 @@ comment on column public.places.hq_city is
 --       place_type is distinct from 'creator'
 --       or (lat is null and lng is null and zip is null and h3 is null));
 --
---   Roll back 20261215120000 at the same time or the ZIP arm stays narrowed (which is
+--   Roll back 20261228120001 at the same time or the ZIP arm stays narrowed (which is
 --   harmless — it is strictly more conservative — but it is not the prior behaviour).
 -- ============================================================================

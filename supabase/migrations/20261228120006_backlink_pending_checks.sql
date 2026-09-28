@@ -1,6 +1,6 @@
 -- "I'll add the link in a minute."
 --
--- 20261216120000 wrote an identity row only on SUCCESS, and claim_backlink checked once.
+-- 20261228120002 wrote an identity row only on SUCCESS, and claim_backlink checked once.
 -- That serves exactly one creator: the one who had already put the link up before
 -- submitting. Everyone else — and it is most people, because the natural order is claim
 -- the handle, THEN go edit your bio — got BACKLINK_NOT_FOUND and a dead end.

@@ -1,12 +1,12 @@
 -- The external audience a community brings with it.
 --
--- The second kind of evidence from 20261214120000. Geography says a community is
+-- The second kind of evidence from 20261228120000. Geography says a community is
 -- somewhere; this says it already has people elsewhere. Either, both, or neither.
 --
 -- NEVER IDENTIFY AN ACCOUNT BY ITS URL OR USERNAME. Both change, and both change
 -- silently — a creator rebrands, and the row we hold now points at whoever took the old
 -- handle. provider_account_id is the immutable id the platform issues; it is nullable
--- only because the backlink method (20261218120000) can prove control of a profile
+-- only because the backlink method (20261228120004) can prove control of a profile
 -- without the platform telling us its internal id.
 
 create table if not exists public.external_community_identities (

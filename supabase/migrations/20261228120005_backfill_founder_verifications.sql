@@ -93,7 +93,7 @@ comment on function public.places_verified_needs_claim() is
 --     and not exists (select 1 from public.place_claims c
 --                     where c.place_id = p.id and c.status = 'verified');
 --
--- ORDER: this migration must run AFTER 20261218120000, which adds 'manual_founder' to
+-- ORDER: this migration must run AFTER 20261228120004, which adds 'manual_founder' to
 -- the verification_method CHECK. Applied out of order, every insert above fails.
 --
 -- ROLLBACK

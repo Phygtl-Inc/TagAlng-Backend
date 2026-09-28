@@ -1,6 +1,6 @@
 -- The ZIP-equality arm now requires an address.
 --
--- PAIR WITH 20261214120000. That migration drops places_creator_has_no_geography, whose
+-- PAIR WITH 20261228120000. That migration drops places_creator_has_no_geography, whose
 -- job was to keep coordinate-less communities out of geographic discovery. This one does
 -- the same job properly: at the source, for every row, with no reference to place_type.
 --
@@ -26,7 +26,7 @@
 --   A community appears on the map if and only if it has lat/lng.
 --   A community appears in "near me" if it has lat/lng in range, or an address in the
 --   caller's home ZIP.
---   hq_city puts a community NOWHERE. It is a label (see 20261214120000).
+--   hq_city puts a community NOWHERE. It is a label (see 20261228120000).
 
 create or replace function public.discover_communities_near(
   p_user_id       uuid,
@@ -127,7 +127,7 @@ begin
   where
     case
       -- With a point: everything inside the radius. A place with no coordinates can
-      -- still qualify on ZIP equality — but ONLY if it has an address (20261215120000).
+      -- still qualify on ZIP equality — but ONLY if it has an address (20261228120001).
       -- That arm rescues imported rows awaiting a geocode; a community with no address
       -- is not un-geocoded, it is not anywhere, and it must not surface as "near me".
       when v_origin is not null then
@@ -146,7 +146,7 @@ comment on function public.discover_communities_near(uuid, double precision, int
   'Communities near the caller. On the map if lat/lng; in "near me" if lat/lng in range '
   'OR an address in her home ZIP. A community with no address never surfaces here — that '
   'is what keeps coordinate-less communities (creator communities, and any other) out of '
-  'geographic discovery, replacing places_creator_has_no_geography (20261214120000).';
+  'geographic discovery, replacing places_creator_has_no_geography (20261228120000).';
 
 -- ============================================================================
 -- ROLLBACK

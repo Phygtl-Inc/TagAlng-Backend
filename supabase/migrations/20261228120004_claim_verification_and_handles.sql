@@ -14,7 +14,7 @@
 -- creator who will not put the link up has no funnel to verify anyway.
 --
 -- manual_founder: retroactive only. Closed-beta verifications made before any policy
--- existed (20261219120000 backfills them). New claims must never use it.
+-- existed (20261228120005 backfills them). New claims must never use it.
 -- ---------------------------------------------------------------------------
 alter table public.place_claims
   drop constraint if exists place_claims_verification_method_check;
@@ -27,7 +27,7 @@ alter table public.place_claims
       'platform_oauth',    -- reserved; not implemented
       'admin_approval',
       'manual_review',
-      'manual_founder'     -- RETROACTIVE ONLY. See 20261219120000
+      'manual_founder'     -- RETROACTIVE ONLY. See 20261228120005
     )
   );
 
@@ -118,6 +118,19 @@ begin
     return new;
   end if;
 
+  -- A bare token is the SAME SHAPE as a user handle (users.handle is
+  -- '^[a-z0-9]{3,20}$'). Until this migration the mandatory hyphen made the two
+  -- namespaces structurally unable to collide, which is why 20261106120000 states
+  -- "no cross-table uniqueness check, no coordination between the two namespaces".
+  -- Option C removes that guarantee, so the check it made unnecessary has to become
+  -- explicit — otherwise get.lana.help/maya resolves to both a person and a community
+  -- and neither owns it. Guarded on the other two write paths below.
+  if exists (select 1 from public.users u where u.handle = new.handle) then
+    raise exception 'handle_taken_by_user'
+      using errcode = 'P0001',
+            hint = 'That handle already belongs to a member. Use a compound handle (run-with-maya).';
+  end if;
+
   -- Single token: a verified external identity must carry the same username.
   if not exists (
     select 1
@@ -179,3 +192,114 @@ comment on column public.places.handle_provisional_until is
 --   drop table if exists public.non_verifying_email_domains;
 --   -- and restore the previous verification_method CHECK.
 -- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- THE OTHER TWO WRITE PATHS INTO THE SHARED NAMESPACE
+--
+-- The trigger above stops a community taking a name a member already holds. Option C
+-- opens the collision in BOTH directions, so the user side has to be closed too or the
+-- guarantee only holds for whoever writes second.
+--
+--   generate_handle()  — signup picks from a fixed word vocabulary (coralgold, maplemoss).
+--                        A creator who verifies @coralgold takes that handle, and the next
+--                        signup can be handed the same string.
+--   set_my_handle()    — an explicit rename to any handle not held by another USER.
+--
+-- Both now consult places. The helper is SECURITY DEFINER because set_my_handle is
+-- SECURITY INVOKER: under RLS the caller may not see the place row that owns the name,
+-- and a check that cannot see the conflict is not a check.
+-- ---------------------------------------------------------------------------
+create or replace function public.handle_held_by_place(p_handle text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+  select exists (select 1 from public.places pl where pl.handle = lower(btrim(p_handle)));
+$$;
+
+revoke all on function public.handle_held_by_place(text) from public, anon;
+grant execute on function public.handle_held_by_place(text) to authenticated, service_role;
+
+comment on function public.handle_held_by_place(text) is
+  'Is this handle already a community handle? Exists because Option C (20261228120004) '
+  'allows hyphen-free place handles, which made places and users share one namespace for '
+  'the first time. SECURITY DEFINER so RLS cannot hide a conflict from the check.';
+
+-- generate_handle: skip anything a community already holds. One added predicate; the
+-- 40-try loop and the uuid fallback are unchanged.
+create or replace function public.generate_handle()
+returns text
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_first text[] := array[
+    'rose', 'coral', 'maple', 'sunny', 'wild', 'amber', 'olive', 'indigo', 'hazel',
+    'ember', 'dusk', 'sage', 'plum', 'cedar', 'luna', 'misty', 'river', 'clover',
+    'honey', 'juniper'
+  ];
+  v_second text[] := array[
+    'gold', 'fern', 'lune', 'luz', 'sky', 'moss', 'wren', 'dawn', 'vale', 'tide',
+    'wood', 'stone', 'brook', 'finch', 'cove', 'birch', 'reed', 'flint', 'haven', 'peak'
+  ];
+  v_try text;
+begin
+  for i in 1..40 loop
+    v_try := v_first[1 + floor(random() * array_length(v_first, 1))::int]
+          || v_second[1 + floor(random() * array_length(v_second, 1))::int]
+          || case when i <= 4 then '' else (10 + floor(random() * 90))::int::text end;
+    exit when not exists (select 1 from public.users u where u.handle = v_try)
+          and not exists (select 1 from public.places pl where pl.handle = v_try);
+    v_try := null;
+  end loop;
+  return coalesce(v_try, 'n' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 11));
+end;
+$$;
+
+comment on function public.generate_handle() is
+  'One unused public handle. Word pair first, digits appended only on collision. Excludes '
+  'handles held by communities (20261228120004) — places and users share one namespace '
+  'since Option C.';
+
+-- set_my_handle: same error as any other taken name. A member does not need to know
+-- whether the holder is a person or a community.
+create or replace function public.set_my_handle(p_handle text)
+returns jsonb
+language plpgsql
+security invoker
+set search_path = pg_catalog, public
+as $$
+declare
+  v_handle text := lower(btrim(coalesce(p_handle, '')));
+begin
+  if auth.uid() is null then
+    raise exception 'not_authenticated' using errcode = 'P0001';
+  end if;
+  if v_handle !~ '^[a-z0-9]{3,20}$' then
+    raise exception 'handle_invalid' using errcode = 'P0001';
+  end if;
+  if exists (select 1 from public.users u where u.handle = v_handle and u.id <> auth.uid()) then
+    raise exception 'handle_taken' using errcode = 'P0001';
+  end if;
+  if public.handle_held_by_place(v_handle) then
+    raise exception 'handle_taken' using errcode = 'P0001';
+  end if;
+
+  update public.users set handle = v_handle where id = auth.uid();
+  return jsonb_build_object('handle', v_handle);
+exception
+  when unique_violation then
+    raise exception 'handle_taken' using errcode = 'P0001';
+end;
+$$;
+
+revoke all on function public.set_my_handle(text) from public, anon;
+grant execute on function public.set_my_handle(text) to authenticated;
+
+comment on function public.set_my_handle(text) is
+  'Rename the caller''s public handle. 3-20 lowercase alphanumerics, unique across BOTH '
+  'users and places (20261228120004). Raises handle_invalid / handle_taken.';
