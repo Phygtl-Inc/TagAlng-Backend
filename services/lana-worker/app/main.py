@@ -2861,6 +2861,7 @@ def set_tip_setup(
 def set_aspect_answer(
     session_id: str,
     body: AspectAnswerRequest,
+    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ) -> AspectAnswerResponse:
     """One move in the "Help Lana learn more" round (app/aspect_round.py).
@@ -2898,6 +2899,10 @@ def set_aspect_answer(
     out = public_round(rnd)
     settle(ctx)
     update_session_context(session_id, ctx)
+    # Any row saved while Vertex was down gets its vectors now, off the request path.
+    from app.reco_aspects import backfill_embeddings
+
+    background_tasks.add_task(backfill_embeddings)
     return AspectAnswerResponse(
         ok=True, aspect_round=AspectRoundPayload.model_validate(out) if out else None
     )

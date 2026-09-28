@@ -3988,12 +3988,37 @@ def _tip_seek_answer_turn(
         block_id, detail, category, _types or None, len(neighbor_tips), wide,
     )
 
-    if neighbor_tips:
-        # Multi-part asks ("great with toddlers AND no wait") re-ranked by what people
-        # said about each part (LANA_ASPECTS; a no-op when off or nothing matches).
-        from app.aspect_round import rerank_tips_by_aspects
+    # "Help Lana learn more" answers, used to FIND and to rank (LANA_ASPECTS; a no-op when
+    # off). A second pass of this same search for the kind asked about ("barber") lets a
+    # barber surface because his recommenders said he speaks Spanish in the round, even
+    # though his card never did — see aspect_round.recall_and_rerank. Same scope as the
+    # search that just ran, including the community widen.
+    from app.aspect_round import aspects_enabled, recall_and_rerank
 
-        neighbor_tips = rerank_tips_by_aspects(neighbor_tips, request=msg, user_jwt=user_jwt)
+    if aspects_enabled():
+        _recall_circle = (
+            str(_comm["place_id"])
+            if _comm and not session_ctx.get("community_widened_from")
+            else None
+        )
+        neighbor_tips = recall_and_rerank(
+            neighbor_tips,
+            request=msg,
+            user_jwt=user_jwt,
+            fetch=lambda kind, n: find_neighbor_tips(
+                user_jwt,
+                block_id=block_id,
+                query=kind,
+                category=None,
+                limit=n,
+                locale=str(session_ctx.get("preferred_lang") or "en"),
+                radius_meters=radius_meters() if widen else None,
+                circle_place_id=_recall_circle,
+                reco_types=_types,
+            ),
+        )
+
+    if neighbor_tips:
         # The rec rides ON the neighbor's row, not only in the prose (§12a/b): the quote is
         # what makes the row a pre-qualified answer instead of one more person to message.
         shown = stamp_tip_peer_surface(

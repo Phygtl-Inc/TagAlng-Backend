@@ -292,7 +292,9 @@ def _endpoint(ctx, body):
          mock.patch("app.main.update_session_context",
                     side_effect=lambda sid, c: written.update(c)), \
          mock.patch("app.reco_aspects.record_aspect") as rec:
-        res = set_aspect_answer("s-1", body, authorization="Bearer t")
+        from fastapi import BackgroundTasks
+
+        res = set_aspect_answer("s-1", body, BackgroundTasks(), authorization="Bearer t")
     return res, written, rec
 
 
@@ -380,3 +382,44 @@ def test_control_lines_never_replace_the_statement():
     assert posting_cta("pass the tip along") and posting_cta("Looks good")
     assert posting_cta("fix:profession")
     assert not posting_cta("Carlos at Fade Factory, great fades")
+
+
+# ── recall: pass 2 finds, pass 1 is never dropped ───────────────────────────
+
+def test_recall_adds_only_aspect_matched_rows_of_the_asked_kind(on):
+    pass1 = [{"signal_id": "1", "subject_ref": "A"}]
+    pass2 = [{"signal_id": "1", "subject_ref": "A"},          # already in pass 1
+             {"signal_id": "2", "subject_ref": "B"},          # a barber who matches
+             {"signal_id": "3", "subject_ref": "C"}]          # a barber who does not
+    fetched = []
+    hits = [{"subject_ref": "B", "clauses_matched": 2, "clauses_total": 2,
+             "matched_aspects": [{"quote": "he cuts in Spanish"}]}]
+    with mock.patch("app.reco_aspects.split_query_full",
+                    return_value={"clauses": [{"text": "speaks Spanish"}, {"text": "fair"}],
+                                  "subject_kind": "barber"}), \
+         mock.patch("app.reco_aspects.find_by_aspects", return_value=hits) as f:
+        out = ar.recall_and_rerank(
+            pass1, request="a barber who speaks Spanish with fair prices", user_jwt="j",
+            fetch=lambda q, n: fetched.append((q, n)) or pass2)
+    assert fetched == [("barber", ar.RECALL_POOL)]
+    assert sorted(f.call_args.kwargs["subject_scope"]) == ["A", "B", "C"]
+    assert [t["signal_id"] for t in out] == ["2", "1"]      # B found and first; C not padded in
+
+
+def test_recall_off_never_fetches(monkeypatch):
+    monkeypatch.delenv("LANA_ASPECTS", raising=False)
+    fetch = mock.Mock()
+    tips = [{"signal_id": "1"}]
+    assert ar.recall_and_rerank(tips, request="x", user_jwt="j", fetch=fetch) is tips
+    fetch.assert_not_called()
+
+
+def test_recall_survives_a_failing_second_pass(on):
+    def boom(q, n):
+        raise RuntimeError("rpc down")
+    with mock.patch("app.reco_aspects.split_query_full",
+                    return_value={"clauses": [{"text": "x"}], "subject_kind": "barber"}), \
+         mock.patch("app.reco_aspects.find_by_aspects", return_value=[]):
+        out = ar.recall_and_rerank([{"signal_id": "1", "subject_ref": "A"}], request="x y z",
+                                   user_jwt="j", fetch=boom)
+    assert [t["signal_id"] for t in out] == ["1"]

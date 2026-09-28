@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +353,8 @@ def attach_aspects(cards: list[dict[str, Any]], *, user_jwt: str | None) -> None
 
 
 def rerank_tips_by_aspects(
-    tips: list[dict[str, Any]], *, request: str, user_jwt: str | None
+    tips: list[dict[str, Any]], *, request: str, user_jwt: str | None,
+    clauses: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Re-order tip rows by how many parts of a multi-part ask their subject satisfies.
 
@@ -369,7 +370,9 @@ def rerank_tips_by_aspects(
     try:
         from app.reco_aspects import find_by_aspects
 
-        hits = find_by_aspects(request=request, user_jwt=user_jwt, subject_scope=scope)
+        hits = find_by_aspects(
+            request=request, user_jwt=user_jwt, subject_scope=scope, clauses=clauses
+        )
     except Exception:  # noqa: BLE001
         logger.debug("aspects_rerank_failed", exc_info=True)
         return tips
@@ -396,3 +399,61 @@ def rerank_tips_by_aspects(
     return sorted(
         tips, key=lambda t: -int((t.get("_aspect_match") or {}).get("clauses_matched") or 0)
     )
+
+
+# How many rows the kind-only second pass pulls in as aspect candidates.
+RECALL_POOL = 12
+
+
+def recall_and_rerank(
+    tips: list[dict[str, Any]],
+    *,
+    request: str,
+    user_jwt: str | None,
+    fetch: Callable[[str, int], list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Aspect search that can FIND, not only re-order.
+
+    Pass 1 is the caller's ordinary tip search (`tips`). Pass 2 asks that SAME search —
+    through `fetch(query, limit)`, so block / circle / expiry / area visibility is still
+    find_neighbor_tips' one definition — for every visible tip of the kind being asked for
+    ("barber"). Rows from pass 2 are kept only when their subject actually matches a part
+    of the ask at aspect level: "a barber who speaks Spanish" surfaces the barber whose
+    recommenders said so in the round, and does not pad the list with every other barber.
+
+    Not done by folding aspect answers into each tip's own vector: app/tip_embed.py
+    measured that more text on that vector matches WORSE (logistics dilute the topic).
+    Never raises; returns `tips` unchanged when off or when nothing splits."""
+    if not aspects_enabled() or not user_jwt:
+        return tips
+    try:
+        from app.reco_aspects import split_query_full
+
+        parsed = split_query_full(request)
+    except Exception:  # noqa: BLE001
+        return tips
+    clauses = parsed.get("clauses") or []
+    if not clauses:
+        return tips
+    pool = list(tips)
+    kind = parsed.get("subject_kind")
+    extra: list[dict[str, Any]] = []
+    if kind:
+        try:
+            extra = list(fetch(kind, RECALL_POOL) or [])
+        except Exception:  # noqa: BLE001
+            logger.debug("aspects_recall_fetch_failed kind=%s", kind, exc_info=True)
+    seen = {str(t.get("signal_id")) for t in pool}
+    new = [t for t in extra if str(t.get("signal_id")) not in seen]
+    ranked = rerank_tips_by_aspects(pool + new, request=request, user_jwt=user_jwt,
+                                    clauses=clauses)
+    new_ids = {str(t.get("signal_id")) for t in new}
+    # Pass-2 rows earn their place by an aspect match; pass-1 rows are always kept.
+    out = [t for t in ranked
+           if str(t.get("signal_id")) not in new_ids or t.get("_aspect_match")]
+    logger.info(
+        "aspects_recall kind=%r clauses=%d pass1=%d pass2_new=%d kept_new=%d",
+        kind, len(clauses), len(tips), len(new),
+        sum(1 for t in out if str(t.get("signal_id")) in new_ids),
+    )
+    return out

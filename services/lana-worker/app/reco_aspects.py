@@ -594,16 +594,15 @@ def reoffer_open_aspects(author_id: str, limit: int = REOFFER_BATCH) -> list[dic
 
 # ── Find ────────────────────────────────────────────────────────────────────
 
-def split_query(request: str) -> list[dict[str, Any]]:
-    """Split a search request into its separate requirements.
+def split_query_full(request: str) -> dict[str, Any]:
+    """{"clauses": [...], "subject_kind": "barber" | None}. Never raises.
 
-    "A restaurant where the owner speaks Italian and the porcelain is unique" is two
-    clauses, and the right answer satisfies both. Averaging them into one vector is how
-    every other search works and why none of them can answer this.
-    """
+    subject_kind is what lets aspect search RECALL, not just rank: the second pass asks
+    the ordinary tip search for every visible "barber", so a barber whose card never says
+    "Spanish" — but whose recommenders did, in the round — can still be found."""
     text = (request or "").strip()
     if len(text) < 8:
-        return []
+        return {"clauses": [], "subject_kind": None}
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
@@ -616,7 +615,7 @@ def split_query(request: str) -> list[dict[str, Any]]:
                 temperature=0.1,
             )
             if not isinstance(data, dict):
-                return []
+                return {"clauses": [], "subject_kind": None}
             out = []
             for c in (data.get("clauses") or [])[:MAX_ASPECTS]:
                 if isinstance(c, dict) and str(c.get("text") or "").strip():
@@ -624,15 +623,26 @@ def split_query(request: str) -> list[dict[str, Any]]:
                         "text": str(c["text"]).strip()[:200],
                         "aspect_hint": _slug(str(c.get("aspect_hint") or "")) or None,
                     })
-            return out
+            kind = str(data.get("subject_kind") or "").strip()[:60] or None
+            return {"clauses": out, "subject_kind": kind}
     except Exception:
         logger.exception("reco_aspects: query split failed")
-    return []
+    return {"clauses": [], "subject_kind": None}
+
+
+def split_query(request: str) -> list[dict[str, Any]]:
+    """Split a search request into its separate requirements.
+
+    "A restaurant where the owner speaks Italian and the porcelain is unique" is two
+    clauses, and the right answer satisfies both. Averaging them into one vector is how
+    every other search works and why none of them can answer this.
+    """
+    return split_query_full(request)["clauses"]
 
 
 def find_by_aspects(
     *, request: str, user_jwt: str, subject_scope: list[str] | None = None,
-    limit: int = 20,
+    limit: int = 20, clauses: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Aspect-level retrieval. Ranks by how many clauses a subject actually satisfies.
 
@@ -643,7 +653,8 @@ def find_by_aspects(
     Runs as the VIEWER (user_jwt): the RPC reads auth.uid() for block and circle
     visibility, so a service-role call would see nothing — and must not see everything.
     """
-    clauses = split_query(request)
+    if clauses is None:
+        clauses = split_query(request)
     if not clauses:
         return []
     try:
@@ -671,3 +682,74 @@ def find_by_aspects(
     except Exception:
         logger.exception("reco_aspects: aspect find failed")
         return []
+
+
+# ── embedding backfill ──────────────────────────────────────────────────────
+
+BACKFILL_BATCH = 25
+
+
+def backfill_embeddings(limit: int = BACKFILL_BATCH) -> dict[str, int]:
+    """Fill the vectors a row was saved without. Never raises.
+
+    record_aspect / open_aspect_questions embed best-effort: when Vertex is down the row
+    is still written (the answer is the product), but a row without `label_embedding`
+    never merges with anyone's "front desk", and one without `embedding` can never be
+    found by aspect search — silently, forever. This is what brings them back.
+
+    Stops at the first failed embed: if Vertex is down, one probe is enough to know, and a
+    batch of guaranteed failures is just load."""
+    from app.vec_util import to_pgvector
+    from app.vertex_extract import vertex_embed
+
+    done = {"label": 0, "content": 0, "failed": 0}
+    try:
+        table = service_client().table("reco_aspect")
+        need_label = (
+            table.select("id,aspect_key,aspect_label")
+            .is_("label_embedding", "null").limit(limit).execute().data or []
+        )
+        need_content = (
+            table.select("id,aspect_label,answer_verbatim")
+            .is_("embedding", "null")
+            .in_("answer_source", ["voice", "text", "tap"])
+            .not_.is_("answer_verbatim", "null")
+            .limit(limit).execute().data or []
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("reco_aspects: backfill lookup failed")
+        return done
+
+    def _embed(text: str) -> str | None:
+        try:
+            vec = vertex_embed(text)
+            return to_pgvector(vec) if vec else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    for row in need_label:
+        lit = _embed(_label_text(row["aspect_label"], row["aspect_key"]))
+        if not lit:
+            done["failed"] += 1
+            return done
+        service_client().table("reco_aspect").update({"label_embedding": lit}).eq(
+            "id", row["id"]).execute()
+        done["label"] += 1
+    for row in need_content:
+        lit = _embed(f"{row['aspect_label']}: {row['answer_verbatim']}")
+        if not lit:
+            done["failed"] += 1
+            return done
+        service_client().table("reco_aspect").update({"embedding": lit}).eq(
+            "id", row["id"]).execute()
+        done["content"] += 1
+    if done["label"] or done["content"]:
+        logger.info("reco_aspects: backfilled label=%d content=%d", done["label"], done["content"])
+    return done
+
+
+if __name__ == "__main__":  # python -m app.reco_aspects  → one backfill pass
+    import json as _json
+
+    logging.basicConfig(level=logging.INFO)
+    print(_json.dumps(backfill_embeddings(limit=500)))

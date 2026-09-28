@@ -310,3 +310,69 @@ def test_the_subject_itself_is_never_an_aspect():
         {"label": "the shop", "key": "shop", "span": "the shop is tidy", "confidence": 0.9},
     ]}, statement="a barber whose shop is tidy", subject_terms=["Carlos the barber", "barber"])
     assert [a["aspect_key"] for a in out] == ["shop"]
+
+
+
+class _BackfillDB:
+    """Just enough of the supabase query builder for backfill_embeddings."""
+
+    def __init__(self, label_rows, content_rows):
+        self.label_rows, self.content_rows, self.updates = label_rows, content_rows, []
+        self._mode = None
+
+    def table(self, _):
+        return self
+
+    def select(self, cols):
+        self._mode = "label" if "aspect_key" in cols else "content"
+        self._update = None
+        return self
+
+    def is_(self, *a):
+        return self
+
+    def in_(self, *a):
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def limit(self, _):
+        return self
+
+    def update(self, patch):
+        self._update = patch
+        return self
+
+    def eq(self, _col, val):
+        self.updates.append((val, self._update))
+        return self
+
+    def execute(self):
+        class R:
+            pass
+        r = R()
+        r.data = (self.label_rows if self._mode == "label" else self.content_rows) \
+            if self._update is None else []
+        return r
+
+
+def test_backfill_fills_both_vectors():
+    db = _BackfillDB([{"id": "a", "aspect_key": "wait_time", "aspect_label": "the wait"}],
+                     [{"id": "b", "aspect_label": "the price", "answer_verbatim": "$20"}])
+    with patch.object(ra, "service_client", return_value=db), \
+         patch("app.vertex_extract.vertex_embed", return_value=[0.1, 0.2]):
+        out = ra.backfill_embeddings()
+    assert out == {"label": 1, "content": 1, "failed": 0}
+    assert [(i, sorted(p)) for i, p in db.updates] == [("a", ["label_embedding"]),
+                                                       ("b", ["embedding"])]
+
+
+def test_backfill_stops_at_first_failed_embed():
+    db = _BackfillDB([{"id": "a", "aspect_key": "k", "aspect_label": "l"},
+                      {"id": "b", "aspect_key": "k2", "aspect_label": "l2"}], [])
+    with patch.object(ra, "service_client", return_value=db), \
+         patch("app.vertex_extract.vertex_embed", return_value=[]) as emb:
+        out = ra.backfill_embeddings()
+    assert out["failed"] == 1 and emb.call_count == 1 and db.updates == []
