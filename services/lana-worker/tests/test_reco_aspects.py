@@ -282,3 +282,21 @@ def test_find_runs_as_the_viewer_not_the_service_role():
     assert (jwt, name) == ("jwt-1", "search_subjects_by_aspect")
     assert "p_viewer_id" not in args
     assert all(isinstance(v, str) for v in args["p_clauses"])
+
+
+def test_an_aspect_they_never_said_is_dropped():
+    """Observed live: the prompt's own "the wait" example came back as an aspect on a
+    plumber nobody said kept them waiting. Every aspect must trace to their words."""
+    statement = "He came the same day and fixed our leak fast, but he left a mess."
+    out = ra._parse_aspects({"aspects": [
+        {"label": "the mess", "key": "mess", "span": "he left a mess", "confidence": 0.9},
+        {"label": "the wait", "key": "wait_time", "span": "the wait was bad", "confidence": 0.9},
+        {"label": "nothing", "key": "nothing", "span": "", "confidence": 0.9},
+    ]}, statement=statement)
+    assert [a["aspect_key"] for a in out] == ["mess"]
+
+
+def test_traceable_tolerates_light_rephrasing_and_other_languages():
+    assert ra._traceable("fixed the leak fast", "He fixed our leak fast.")
+    assert ra._traceable("la espera fue larguísima", "pero la espera fue larguísima y")
+    assert not ra._traceable("the parking was hard", "Great croissants, long line.")

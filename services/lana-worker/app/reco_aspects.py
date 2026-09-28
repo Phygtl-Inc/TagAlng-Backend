@@ -40,6 +40,7 @@ Defensive by contract: never raises into the request path.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.auth import service_client
@@ -69,22 +70,51 @@ Output ONLY valid JSON (no markdown):
 {
   "aspects": [
     {"label": "the owner", "key": "owner", "span": "the owner came over to the table",
-     "question": "You mentioned the owner — what was he like?", "confidence": 0.9}
+     "question": "...", "confidence": 0.9}
   ]
 }
 
 Rules:
 - ONE entry per distinct thing THEY raised. Not a checklist of what a place of this type
   usually has — if they did not mention parking, there is no parking aspect.
-- "label" is how THEY framed it, so Lana can echo it back: "you mentioned the owner…".
-  Keep their noun. Do not tidy "the lady at the front" into "reception staff".
-- "key" is a short lowercase slug for matching across people: owner, porcelain,
+- "label" is THEIR noun for the thing — short, 1-4 words, no verb, no verdict:
+  "the mess", "the price", "the owner", "the wait", "the noise", "Carlos". Not the whole
+  clause ("he left a mess in the kitchen"). Keep their word — do not tidy "the lady at the
+  front" into "reception staff".
+- "key" is a short lowercase English slug for matching across people: owner, porcelain,
   front_desk, wait_time, parking.
 - "span" is the fragment of their words this came from. Every aspect must be traceable to
   something they said.
-- "question" is the ONE follow-up Lana asks about it, in the SAME language as the
-  statement. Echo their noun and what they hinted at ("You mentioned the wait — was it
-  bad?"), keep it short and open, never a scale ("rate", "out of 5").
+- "question" is the ONE follow-up Lana asks. Its whole job is to get THEIR VERDICT on this
+  thing IN THEIR OWN WORDS — how it actually went — so a neighbour can read it later.
+  · If they gave NO verdict on it, ask how it went, echoing their noun.
+  · If they ALREADY gave a verdict (fair, rude, slow, cheap, fast, big, great), ask for the
+    one concrete detail behind it that they have NOT said yet — never re-ask the verdict.
+  · Exactly ONE question mark. One short conversational sentence. No "and ...", no second
+    clause, no "can you tell me more".
+  · Forbidden: how important it was, how it made them feel / affected them, yes/no about
+    their own verdict, scales or choices ("rate", "out of 5", "good or bad?").
+    NOT "the portions — were they enough?"   (they said big)   BUT "the portions — big
+      enough to share?"
+    NOT "the price — how important was it?"                    BUT "the price — roughly
+      what did he charge, and for what?"
+    NOT "la espera — ¿qué tan larga fue y cómo te afectó?"     BUT "la espera — ¿cuánto
+      esperaste?"
+- LANGUAGE: "label" and "question" are in the SAME language as the statement. A Spanish
+  statement gets Spanish labels and Spanish questions. Only "key" is always English.
+- When the thing is how the subject is WITH someone ("amazing with my son", "good with
+  kids"), the label is that trait ("with kids", "con niños"), not the person.
+
+Worked example —
+Statement: "Rosa's bakery has amazing croissants, the line is always out the door, and the
+guy at the register never smiles."
+  {"label": "the croissants", "key": "croissants", "span": "amazing croissants",
+   "question": "You said the croissants are amazing — which ones should a first-timer get?"}
+  {"label": "the line", "key": "line", "span": "the line is always out the door",
+   "question": "You said the line is always out the door — how long did you wait?"}
+  {"label": "the register", "key": "register_staff", "span": "the guy at the register never smiles",
+   "question": "You mentioned the guy at the register — what is he like to deal with?"}
+Nothing else: they said nothing about parking, prices or the owner, so none of those exist.
 - Skip the subject itself. "Dr. Sarah is great with toddlers" about Dr. Sarah is ONE
   aspect (good with toddlers), not two.
 - Skip pure sentiment with no object. "It was amazing" alone is not an aspect.
@@ -171,7 +201,7 @@ def split_statement(statement: str, *, subject_name: str | None = None) -> list[
                 max_tokens=640,
                 temperature=0.2,
             )
-            return _parse_aspects(data)
+            return _parse_aspects(data, statement=text)
     except Exception:
         logger.exception("reco_aspects: split failed")
 
@@ -181,7 +211,8 @@ def split_statement(statement: str, *, subject_name: str | None = None) -> list[
         from app.orchestrator.llm import vertex_generate_json
 
         return _parse_aspects(
-            vertex_generate_json(
+            statement=text,
+            data=vertex_generate_json(
                 model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
                 system=None,
                 user_payload=_split_prompt() + payload,
@@ -194,7 +225,26 @@ def split_statement(statement: str, *, subject_name: str | None = None) -> list[
         return []
 
 
-def _parse_aspects(data: Any) -> list[dict[str, Any]]:
+_WORD = re.compile(r"\w+", re.UNICODE)
+
+
+def _traceable(span: str | None, statement: str | None) -> bool:
+    """Does this aspect come from something they actually said?
+
+    Most of the span's words must be in the statement. An aspect whose span is not there
+    is one the model invented — observed live: the prompt's own "You mentioned the wait"
+    example turning up as a "wait" aspect on a plumber nobody said kept them waiting. A
+    provenance check on the model's output, not a reading of the user's intent."""
+    if statement is None:
+        return True
+    words = {w.lower() for w in _WORD.findall(span or "") if len(w) > 2}
+    if not words:
+        return False
+    said = {w.lower() for w in _WORD.findall(statement)}
+    return len(words & said) / len(words) >= 0.6
+
+
+def _parse_aspects(data: Any, statement: str | None = None) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
     raw = data.get("aspects")
@@ -214,6 +264,9 @@ def _parse_aspects(data: Any) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             conf = 0.8
         if conf < MIN_ASPECT_CONFIDENCE:
+            continue
+        if not _traceable(str(item.get("span") or ""), statement):
+            logger.info("reco_aspects: dropped untraceable aspect %r span=%r", key, item.get("span"))
             continue
         seen.add(key)
         out.append({
