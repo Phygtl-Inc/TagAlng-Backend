@@ -102,6 +102,16 @@ Rules:
       esperaste?"
 - LANGUAGE: "label" and "question" are in the SAME language as the statement. A Spanish
   statement gets Spanish labels and Spanish questions. Only "key" is always English.
+- A quality they attach TO the subject is something they said about it, and IS an aspect:
+  "a Spanish barber", "a female dentist", "a 24-hour plumber", "a vegan bakery". Only the
+  category word itself (barber, dentist, plumber) is the subject and is never an aspect.
+  Check every word they put BEFORE or AROUND the category noun — each such quality gets
+  its own entry, even when the rest of the statement has more to say. Its question asks the PRACTICAL fact a neighbour would act on — never how it affected
+  them, never why it matters, never to explain or justify who someone is:
+    "Spanish"  → "Does he cut in Spanish if you'd rather?"
+    "female"   → "Was it easy to book with her specifically?"
+    "24-hour"  → "You said they came at 2am — how fast did they get there?"
+    "vegan"    → "Is everything vegan, or just some of it?"
 - When the thing is how the subject is WITH someone ("amazing with my son", "good with
   kids"), the label is that trait ("with kids", "con niños"), not the person.
 
