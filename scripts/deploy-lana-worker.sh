@@ -159,6 +159,10 @@ APP_BASE_URL: "${APP_BASE_URL:-}"
 LANA_ASK_ROUTING: "${LANA_ASK_ROUTING:-0}"
 LANA_WORKER_PUBLIC_URL: "${LANA_WORKER_PUBLIC_URL:-}"
 SIGNAL_SWEEP_TOKEN: "${SIGNAL_SWEEP_TOKEN:-}"
+# "Help Lana learn more" aspect round (app/aspect_round.py). Off unless the env file says
+# otherwise — and only turn it on once migrations 20261229120000-02 are on THAT database,
+# or every answer write fails into a log line.
+LANA_ASPECTS: "${LANA_ASPECTS:-0}"
 EOF
 
 # Warm-instance policy, chosen by the caller — this script's own defaults are exactly
