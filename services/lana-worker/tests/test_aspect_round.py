@@ -423,3 +423,27 @@ def test_recall_survives_a_failing_second_pass(on):
         out = ar.recall_and_rerank([{"signal_id": "1", "subject_ref": "A"}], request="x y z",
                                    user_jwt="j", fetch=boom)
     assert [t["signal_id"] for t in out] == ["1"]
+
+
+def test_card_lists_what_the_reader_asked_about_first(on):
+    """Prod QA: the one pricing answer hid under three others at a cap of 3 while the ask
+    was "good prices". Asked-for aspects lead, and the card shows up to 5."""
+    rows = [{"aspect_key": k, "aspect_label": k, "n_people": n, "sample_quotes": [f"{k} q"]}
+            for k, n in [("spanish", 2), ("fades", 1), ("wait", 1), ("shop", 1),
+                         ("pricing", 1), ("parking", 1)]]
+    cards = [{"subject_ref": "s", "aspect_match": {"keys": ["pricing"]}}]
+    with mock.patch("app.supabase_rpc.call_rpc", return_value=rows):
+        ar.attach_aspects(cards, user_jwt="j")
+    keys = [a["aspect_key"] for a in cards[0]["aspects"]]
+    assert keys[0] == "pricing"
+    assert len(keys) == ar.ASPECTS_PER_CARD == 5
+
+
+def test_rerank_records_which_aspects_answered_the_ask(on):
+    tips = [{"signal_id": "1", "subject_ref": "A"}]
+    hits = [{"subject_ref": "A", "clauses_matched": 2, "clauses_total": 2,
+             "matched_aspects": [{"aspect_key": "barbers_spanish", "quote": "sí"},
+                                 {"aspect_key": "pricing", "quote": "$25"}]}]
+    with mock.patch("app.reco_aspects.find_by_aspects", return_value=hits):
+        out = ar.rerank_tips_by_aspects(tips, request="x y", user_jwt="j")
+    assert out[0]["_aspect_match"]["keys"] == ["barbers_spanish", "pricing"]
