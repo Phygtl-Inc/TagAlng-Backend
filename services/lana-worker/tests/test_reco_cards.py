@@ -141,7 +141,7 @@ class TestDigestPolicy(unittest.TestCase):
         # isolate the SYNCHRONOUS path, which is the one the reader waits on.
         with patch("app.reco_cluster._compose") as compose, \
              patch("app.reco_cluster._cached", return_value=None), \
-             patch("app.reco_cards._warm_digests"):
+             patch("app.reco_cards._warm"):
             mod.subject_cards_from_tips(self._rows(), allow_compose=False)
         compose.assert_not_called()
 
@@ -269,7 +269,7 @@ class TestSurfaceWiring(unittest.TestCase):
         ctx: dict = {}
         with patch.dict("os.environ", env, clear=False), \
              patch("app.reco_cluster._cached", return_value=None), \
-             patch("app.reco_cards._warm_digests"), \
+             patch("app.reco_cards._warm"), \
              patch("app.reco_cluster._compose") as compose:
             trc.stamp_tip_peer_surface(ctx, self._tips(), phone_verified=True)
         return ctx, compose
@@ -311,7 +311,7 @@ class TestDigestWarming(unittest.TestCase):
 
     def test_a_list_miss_schedules_a_warm(self):
         with patch("app.reco_cluster._cached", return_value=None), \
-             patch("app.reco_cards._warm_digests") as warm:
+             patch("app.reco_cards._warm") as warm:
             mod.subject_cards_from_tips(self._rows(), allow_compose=False)
         warm.assert_called_once()
         pending = warm.call_args[0][0]
@@ -321,7 +321,7 @@ class TestDigestWarming(unittest.TestCase):
         hit = {"themes": [{"label": "x", "n": 2, "total": 3, "signal_ids": ["s0"], "quote": None}],
                "total": 3}
         with patch("app.reco_cluster._cached", return_value=hit), \
-             patch("app.reco_cards._warm_digests") as warm:
+             patch("app.reco_cards._warm") as warm:
             mod.subject_cards_from_tips(self._rows(), allow_compose=False)
         warm.assert_not_called()
 
@@ -330,7 +330,7 @@ class TestDigestWarming(unittest.TestCase):
         with patch("app.reco_cluster._cached", return_value=None), \
              patch("app.reco_cluster._compose", return_value=raw), \
              patch("app.reco_cluster._store"), \
-             patch("app.reco_cards._warm_digests") as warm:
+             patch("app.reco_cards._warm") as warm:
             mod.subject_cards_from_tips(self._rows(), allow_compose=True)
         warm.assert_not_called()
 
@@ -432,7 +432,7 @@ class TestCohorts(unittest.TestCase):
                   "p2": {}}
         with patch("app.reco_cohort._claims_by_concept", side_effect=self._claims(claims)), \
              patch("app.reco_cluster._cached", return_value=None), \
-             patch("app.reco_cards._warm_digests"):
+             patch("app.reco_cards._warm"):
             card = mod.subject_cards_from_tips(self._rows(), reader_id="reader")[0]
         self.assertEqual(len(card["cohorts"]), 1)
         self.assertEqual(card["cohorts"][0]["n"], 2)
@@ -446,13 +446,13 @@ class TestCohorts(unittest.TestCase):
         claims = {"reader": {"c-tod": "Toddler parent"}, "p0": {"c-tod": "toddler"}}
         with patch("app.reco_cohort._claims_by_concept", side_effect=self._claims(claims)), \
              patch("app.reco_cluster._cached", return_value=None), \
-             patch("app.reco_cards._warm_digests"):
+             patch("app.reco_cards._warm"):
             card = mod.subject_cards_from_tips(self._rows(), reader_id="reader")[0]
         self.assertEqual(card["cohorts"], [])
 
     def test_no_reader_means_no_cohort(self):
         with patch("app.reco_cluster._cached", return_value=None), \
-             patch("app.reco_cards._warm_digests"):
+             patch("app.reco_cards._warm"):
             card = mod.subject_cards_from_tips(self._rows())[0]
         self.assertEqual(card["cohorts"], [])
 
@@ -463,7 +463,7 @@ class TestCohorts(unittest.TestCase):
                               "signal_ids": ["s0", "s1"], "quote": None}], "total": 3}
         with patch("app.reco_cohort._claims_by_concept", side_effect=self._claims(claims)), \
              patch("app.reco_cluster._cached", return_value=digest), \
-             patch("app.reco_cards._warm_digests"):
+             patch("app.reco_cards._warm"):
             card = mod.subject_cards_from_tips(self._rows(), reader_id="reader")[0]
         theme = card["themes"][0]
         # Of the 2 who said it, both are like her — "2 of these 2", not "3 of these 3".
@@ -473,7 +473,7 @@ class TestCohorts(unittest.TestCase):
     def test_a_failing_cohort_never_costs_the_card(self):
         with patch("app.reco_cohort.cohorts_for", side_effect=RuntimeError("db down")), \
              patch("app.reco_cluster._cached", return_value=None), \
-             patch("app.reco_cards._warm_digests"):
+             patch("app.reco_cards._warm"):
             cards = mod.subject_cards_from_tips(self._rows(), reader_id="reader")
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]["cohorts"], [])
