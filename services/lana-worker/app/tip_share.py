@@ -1059,6 +1059,12 @@ def reset_tip_share_state(session_ctx: dict[str, Any]) -> None:
     session_ctx["tip_turns"] = 0
 
 
+def posting_cta(msg: str) -> bool:
+    """A control line (post it / looks good / fix:<field>), never a statement."""
+    low = msg.strip().lower()
+    return bool(_PASS_RE.search(low)) or low.startswith("fix:") or low in {"looks good", "yes", "no"}
+
+
 def run_tip_share_turn(
     *,
     user_message: str,
@@ -1088,6 +1094,14 @@ def run_tip_share_turn(
     # cards-or-chat pick does not carry over.
     if not draft.get("draft_id"):
         draft["draft_id"] = uuid.uuid4().hex[:12]
+    # Their own words, verbatim — what the "Help Lana learn more" round splits into
+    # sections (app/aspect_round.py). The extracted trait keeps one clause ("shop is always
+    # tidy") and drops the rest ("pricing is good", "Spanish"), and the card answers are the
+    # template's facts, not things they said. Kept from the turn that opened the capture;
+    # replaced only while it is still a bare CTA tap ("A tip to share").
+    kept = str(draft.get("statement") or "")
+    if msg and not posting_cta(msg) and len(kept) < 24 and len(msg) > len(kept):
+        draft["statement"] = msg[:1200]
     zip_code = str(session_ctx.get("zip_code") or session_ctx.get("zip") or "").strip() or None
     # The block the tip is posted to — resolved the way every other save path resolves it,
     # not the raw home block. A session whose block lives in the session (browsed an area,

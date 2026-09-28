@@ -42,24 +42,33 @@ def aspects_enabled() -> bool:
 
 
 def _statement(draft: dict[str, Any]) -> str:
-    """The author's own words about the thing: the trait + details, then what they said
-    on the card. Never the joined recap (_detail_text), which carries the name, category
-    and locality — splitting that would produce "aspects" they never commented on."""
-    from app.tip_share import _description, _reco_fields
+    """The author's OWN words about the thing, and nothing else.
+
+    Their message as typed (draft["statement"]), plus the trait and any corrections they
+    added. NOT the card answers: those answer the template's questions about what the
+    subject IS (profession, walk-in, ages) — Tommaso's decision A keeps them out of this
+    round. Feeding them in turned "Profession: Barber" into "What is Carlos the barber like
+    to deal with?" and two things said into seven questions (dev QA 2026-09-28)."""
+    from app.tip_share import _description
 
     parts: list[str] = []
+    said = str(draft.get("statement") or "").strip()
+    if said:
+        parts.append(said)
     desc = str(_description(draft) or "").strip()
-    if desc:
+    if desc and desc.lower() not in said.lower():
         parts.append(desc)
-    # The answered steps, as the draft actually stores them (step_set + answers) —
-    # _reco_fields is the one reader of that shape.
-    for step in _reco_fields(draft) or []:
-        ans = str(step.get("answer") or "").strip()
-        # The consent toggle / agree row are the server's wording, and a picked place is a
-        # name, not something they said about it.
-        if ans and step.get("kind") not in {"toggle", "agree", "place"}:
-            parts.append(ans)
-    return ". ".join(parts)
+    return " ".join(p if p[-1:] in ".!?" else p + "." for p in parts)
+
+
+def _subject_terms(draft: dict[str, Any]) -> list[str]:
+    """What the recommendation is ABOUT — never itself a section to ask about."""
+    return [
+        t for t in (
+            str(draft.get("name") or "").strip(),
+            str(draft.get("category") or "").strip(),
+        ) if t
+    ]
 
 
 def open_after_post(
@@ -85,6 +94,7 @@ def open_after_post(
             author_id=str(user_id),
             statement=_statement(draft),
             subject_name=str(draft.get("name") or "").strip() or None,
+            subject_terms=_subject_terms(draft),
         )
     except Exception:  # noqa: BLE001 — a posted tip must never fail on its follow-ups
         logger.exception("aspect_round_open_failed signal=%s", signal_id)

@@ -300,3 +300,13 @@ def test_traceable_tolerates_light_rephrasing_and_other_languages():
     assert ra._traceable("fixed the leak fast", "He fixed our leak fast.")
     assert ra._traceable("la espera fue larguísima", "pero la espera fue larguísima y")
     assert not ra._traceable("the parking was hard", "Great croissants, long line.")
+
+
+def test_the_subject_itself_is_never_an_aspect():
+    """"What is Carlos the barber like to deal with?" — the subject is what is being
+    recommended, not one of the things said about it."""
+    out = ra._parse_aspects({"aspects": [
+        {"label": "barber", "key": "barber", "span": "a barber", "confidence": 0.9},
+        {"label": "the shop", "key": "shop", "span": "the shop is tidy", "confidence": 0.9},
+    ]}, statement="a barber whose shop is tidy", subject_terms=["Carlos the barber", "barber"])
+    assert [a["aspect_key"] for a in out] == ["shop"]

@@ -71,12 +71,25 @@ def test_round_opens_from_their_own_words(on):
     ctx, rnd, m = _open()
     stmt = m.call_args.kwargs["statement"]
     assert "the wait was over an hour" in stmt and "front desk was kind of rude" in stmt
-    assert "pediatrician" in stmt                    # a text step answer is theirs
-    assert "Let them ask" not in stmt                 # the toggle's wording is ours
+    # Card answers are the template's facts (decision A) — never split into questions.
+    # "Profession: pediatrician" became "What is Dr. Sarah the pediatrician like?".
+    assert "pediatrician" not in stmt
+    assert "Let them ask" not in stmt
     assert m.call_args.kwargs["author_id"] == "u-1"
     assert m.call_args.kwargs["subject_ref"] == "sub-1"
+    assert m.call_args.kwargs["subject_terms"] == ["Dr. Sarah", "pediatrician"]
     assert ctx[ar.CTX_KEY]["status"] == "offered"
     assert [i["aspect_key"] for i in rnd["items"]] == ["wait_time", "front_desk"]
+
+
+def test_their_verbatim_message_is_what_gets_split(on):
+    """The extracted trait keeps one clause; their message keeps all of them."""
+    draft = {**_DRAFT, "trait": "shop is always tidy", "details": [],
+             "statement": "a spanish barber whose pricing is good but the shop is tidy"}
+    with mock.patch("app.reco_aspects.open_aspect_questions", return_value=list(_QS)) as m:
+        ar.open_after_post({}, draft=draft, signal_id="s", subject_ref=None, user_id="u")
+    stmt = m.call_args.kwargs["statement"]
+    assert "pricing is good" in stmt and "spanish" in stmt
 
 
 def test_nothing_specific_said_means_no_round(on):
@@ -344,3 +357,26 @@ def test_subject_cards_rank_aspect_coverage_after_provenance(on):
         cards = subject_cards_from_tips(tips, user_jwt="j")
     assert [c["subject_ref"] for c in cards][:2] == ["B", "A"]
     assert cards[0]["aspect_match"]["clauses_matched"] == 2
+
+
+def test_capture_keeps_their_opening_words_on_the_draft(on):
+    from app.tip_share import run_tip_share_turn
+
+    ctx: dict = {}
+    with mock.patch("app.tip_share.llm_configured", return_value=False, create=True):
+        try:
+            run_tip_share_turn(
+                user_message="I want to recommend Carlos, pricing is good and the shop is tidy",
+                session_ctx=ctx, history=[], user_jwt="jwt", home_block_id="blk")
+        except Exception:  # noqa: BLE001 — only the stamp is under test
+            pass
+    said = (ctx.get("tip_draft") or {}).get("statement") or ""
+    assert "pricing is good" in said
+
+
+def test_control_lines_never_replace_the_statement():
+    from app.tip_share import posting_cta
+
+    assert posting_cta("pass the tip along") and posting_cta("Looks good")
+    assert posting_cta("fix:profession")
+    assert not posting_cta("Carlos at Fade Factory, great fades")

@@ -113,8 +113,10 @@ guy at the register never smiles."
   {"label": "the line", "key": "line", "span": "the line is always out the door",
    "question": "You said the line is always out the door — how long did you wait?"}
   {"label": "the register", "key": "register_staff", "span": "the guy at the register never smiles",
-   "question": "You mentioned the guy at the register — what is he like to deal with?"}
-Nothing else: they said nothing about parking, prices or the owner, so none of those exist.
+   "question": "You said he never smiles — what happened when you paid?"}
+Nothing else: they said nothing about parking, prices or the owner, so none of those exist —
+and Rosa's bakery itself is the subject, never an aspect. These are illustrations of the
+SHAPE only; never reuse their wording.
 - Skip the subject itself. "Dr. Sarah is great with toddlers" about Dr. Sarah is ONE
   aspect (good with toddlers), not two.
 - Skip pure sentiment with no object. "It was amazing" alone is not an aspect.
@@ -183,7 +185,9 @@ def _split_prompt() -> str:
     return SPLIT_PROMPT.replace("{max_aspects}", str(MAX_ASPECTS))
 
 
-def split_statement(statement: str, *, subject_name: str | None = None) -> list[dict[str, Any]]:
+def split_statement(
+    statement: str, *, subject_name: str | None = None, subject_terms: list[str] | None = None
+) -> list[dict[str, Any]]:
     """The sections of one statement. [] on any failure — never raises."""
     text = (statement or "").strip()
     if len(text) < 12:
@@ -201,7 +205,7 @@ def split_statement(statement: str, *, subject_name: str | None = None) -> list[
                 max_tokens=640,
                 temperature=0.2,
             )
-            return _parse_aspects(data, statement=text)
+            return _parse_aspects(data, statement=text, subject_terms=subject_terms)
     except Exception:
         logger.exception("reco_aspects: split failed")
 
@@ -212,6 +216,7 @@ def split_statement(statement: str, *, subject_name: str | None = None) -> list[
 
         return _parse_aspects(
             statement=text,
+            subject_terms=subject_terms,
             data=vertex_generate_json(
                 model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
                 system=None,
@@ -244,7 +249,24 @@ def _traceable(span: str | None, statement: str | None) -> bool:
     return len(words & said) / len(words) >= 0.6
 
 
-def _parse_aspects(data: Any, statement: str | None = None) -> list[dict[str, Any]]:
+_FILLER = {"the", "a", "an", "my", "our", "his", "her", "their", "el", "la", "los", "las", "mi", "o", "os", "as"}
+
+
+def _is_subject(label: str, subject_terms: list[str] | None) -> bool:
+    """Is this "aspect" just the thing being recommended? ("the barber" on Carlos the
+    barber.) Its label's words all sit inside the subject's name or category."""
+    words = {w.lower() for w in _WORD.findall(label or "")} - _FILLER
+    if not words or not subject_terms:
+        return False
+    for term in subject_terms:
+        if words <= {w.lower() for w in _WORD.findall(term)}:
+            return True
+    return False
+
+
+def _parse_aspects(
+    data: Any, statement: str | None = None, subject_terms: list[str] | None = None
+) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
     raw = data.get("aspects")
@@ -264,6 +286,9 @@ def _parse_aspects(data: Any, statement: str | None = None) -> list[dict[str, An
         except (TypeError, ValueError):
             conf = 0.8
         if conf < MIN_ASPECT_CONFIDENCE:
+            continue
+        if _is_subject(label, subject_terms):
+            logger.info("reco_aspects: dropped the subject itself as an aspect %r", label)
             continue
         if not _traceable(str(item.get("span") or ""), statement):
             logger.info("reco_aspects: dropped untraceable aspect %r span=%r", key, item.get("span"))
@@ -386,6 +411,7 @@ def canonical_key(subject_ref: str | None, aspect_key: str, aspect_label: str) -
 def open_aspect_questions(
     *, signal_id: str, subject_ref: str | None, author_id: str, statement: str,
     subject_name: str | None = None, persist: bool = True,
+    subject_terms: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Split the statement, PERSIST one open row per section, return the questions.
 
@@ -397,7 +423,9 @@ def open_aspect_questions(
     Returns [{aspect_key, aspect_label, source_span, question, skippable}]. The caller
     asks one at a time and calls record_aspect per answer or per skip.
     """
-    aspects = split_statement(statement, subject_name=subject_name)
+    aspects = split_statement(
+        statement, subject_name=subject_name, subject_terms=subject_terms
+    )
     if not aspects:
         return []
 
