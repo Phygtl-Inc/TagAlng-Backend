@@ -39,8 +39,8 @@ alter table public.places
 
 comment on column public.places.blurb_embedding is
   'Embedding of blurb. Lets a community be discovered on its OWN description rather than '
-  'on its membersّ claims — which is the only thing that works on day one, when it has no '
-  'members. Refreshed by the worker whenever blurb_stale is true.';
+  'on its members'' claims — which is the only thing that works on day one, when it has '
+  'no members. Refreshed by the worker whenever blurb_stale is true.';
 
 comment on column public.places.blurb_stale is
   'blurb no longer matches the place. Set by trigger on name change; cleared by the worker '
@@ -155,8 +155,8 @@ alter table public.community_entry_events enable row level security;
 --   · returns blurb + hqCity so the landing page and Lana's first question read from one
 --     source instead of a second round trip
 --   · returns the creator block the client is already wired for but never receives
---     (frontend backend-asks §56b: PlaceCommunity.creatorName/creatorAvatarUrl exist and
---     are always null today)
+--     (frontend backend-asks §56b: PlaceCommunity.creatorName / creatorAvatarUrl exist
+--     client-side and are always null today)
 
 create or replace function public.resolve_place_handle(p_handle text)
 returns jsonb
@@ -197,7 +197,7 @@ begin
   -- The operator, for the card head. Only for creator communities: on a gym or a church
   -- the operator is staff, and naming them turns a place page into a personal profile.
   if v_place.place_type = 'creator' then
-    select u.id, u.nickname, u.avatar_url
+    select u.id, u.nickname, u.profile_photo_url
       into v_creator
       from public.place_managers m
       join public.users u on u.id = m.user_id
@@ -226,7 +226,7 @@ begin
                           when v_creator.id is null then null
                           else jsonb_build_object(
                                  'displayName', v_creator.nickname,
-                                 'avatarUrl',   v_creator.avatar_url)
+                                 'avatarUrl',   v_creator.profile_photo_url)
                         end);
 end;
 $$;
