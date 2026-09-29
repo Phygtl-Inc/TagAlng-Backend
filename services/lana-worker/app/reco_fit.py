@@ -323,7 +323,10 @@ def _compose(
                          for f in r.get("for_you") or []]}
             for r in out.values()
         ]
-        keep_judged(judged, claims)
+        # The ask is the page's chips — what the reader just said, which a "For you" must
+        # go beyond (asked for Italian, "loves Italian food" is not a reason).
+        _ask = ", ".join(sorted({c for f in facts_list for c in f.get("asked_for") or []}))
+        keep_judged(judged, claims, _ask)
         for r, j in zip(out.values(), judged):
             r["for_you"] = [
                 {**x["_f"], "quotes": [q["text"] for q in x["quotes"]]} for x in j["for_you"]

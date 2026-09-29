@@ -78,6 +78,10 @@ def shape_claims(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 COMPOSER_RULES = """READER CLAIMS ("reader_claims") are what the reader has told Lana about
 THEMSELVES or their household. Use them to find a "for_you" match: a claim the place (or
 recommendation) genuinely serves, PROVEN by a quote that is about that thing.
+- NEVER use a claim that is the same thing they just asked for. Asked for Italian
+  restaurants, a claim "Loves Italian food" adds nothing — they know what they asked. A
+  "For you" is a reason BEYOND the ask: their kids, their diet, their pets, how they like
+  to go out. If no claim adds something beyond the ask, for_you is [].
 - "for_you": 0-1 item per card — the reader's strongest fit — {"claim": "<claim id>",
   "line": "…", "quotes": [<exactly one quote>]}.
   NO item without a supporting quote. Never stretch: a steakhouse does not serve a
@@ -97,26 +101,33 @@ recommendation) genuinely serves, PROVEN by a quote that is about that thing.
 - The line is in the "language" given, one sentence, no counts of people.
 """
 
-_JUDGE = """You check "For you" evidence on recommendation cards. Each item pairs something a
-reader told us about themselves with ONE quote from a review or a neighbour.
+_JUDGE = """You check "For you" evidence on recommendation cards. Each item has:
+"ask" (what the reader asked for in THIS message), "claim" (something they told us about
+themselves earlier) and ONE "quote" from a review or a neighbour.
 
-For each item answer "supports": true ONLY if the quote, on its own, explicitly shows the
-place is GOOD for that exact claim — positive, and about that very thing. Examples:
-- claim "Has young kids" + "so patient with our two toddlers" → true
-- claim "Has young kids" + "the kids were hungry and agitated" → false (negative)
-- claim "Has young kids" + "my son was not a fan of the kids burrito" → false (negative)
-- claim "Vegetarian" + "the chips are gluten-free" → false (a different diet)
-- claim "Vegetarian" + "rich stuffed French toast" → false (not about being vegetarian)
-- claim "Vegetarian" + "lots of veggie options, the falafel is amazing" → true
-- claim "Vegetarian" + "the gluten free yuca waffle BLT was dairy free" → false (a BLT is
-  bacon; dairy-free and gluten-free are other diets)
-A diet claim is served only by food that IS that diet: vegetarian = no meat or fish, vegan
-= no animal products, halal / kosher = said to be so. "Healthy", "light", "dairy-free",
-"gluten-free" or "has salads" serve none of them. A quote naming a meat dish never serves
-vegetarian or vegan.
-When unsure, false.
+Answer TWO questions per item, in order:
 
-Output ONLY JSON: {"items": [{"key": "<key>", "supports": true|false}]}
+1. "same_as_ask": compare ONLY the claim with the ask — ignore the quote for this one.
+   Is the claim about the SAME thing the ask already names (the same cuisine, category,
+   activity or kind of place)? Asked "good italian restaurants": "Loves Italian food",
+   "Finds Italian restaurants", "Enjoys pasta", "Sicilian heritage" → true. "Has two
+   kids", "Vegetarian", "Has a dog", "Likes quiet places" → false. A DIET (vegetarian,
+   vegan, halal, gluten-free) is never the same as a CUISINE (Italian, Turkish) — only an
+   ask that names the diet itself ("vegetarian restaurants") makes it the same.
+
+2. "supports": does the quote, on its own, explicitly show the place is GOOD for that
+   exact claim — positive and about that very thing?
+   - "Has young kids" + "so patient with our two toddlers" → true
+   - "Has young kids" + "the kids were hungry and agitated" → false (negative)
+   - "Vegetarian" + "the chips are gluten-free" → false (a different diet)
+   - "Vegetarian" + "a gluten free waffle BLT" → false (a BLT is bacon)
+   - "Vegetarian" + "lots of veggie options, the falafel is amazing" → true
+   A diet claim is served only by food that IS that diet (vegetarian = no meat or fish;
+   halal / kosher = said to be so). "Healthy", "dairy-free", "gluten-free", "salads" serve
+   none. When unsure, false.
+
+Output ONLY JSON:
+{"items": [{"key": "<key>", "same_as_ask": true|false, "supports": true|false}]}
 """
 
 
@@ -132,15 +143,17 @@ def judge_for_you(pairs: list[dict[str, str]]) -> set[str]:
     try:
         import json
 
-        from app.orchestrator.llm import llm_configured, llm_json, router_model
+        from app.orchestrator.llm import composer_model, llm_configured, llm_json
 
         if not llm_configured():
             return set()
         data = llm_json(
-            model=router_model(),
+            # The composer tier, not the router: small and cheap either way, and the
+            # mini model passed "Loves Italian food" on an Italian ask 3/3 (2026-09-29).
+            model=composer_model(),
             system=_JUDGE,
             user_payload=json.dumps({"items": pairs}, ensure_ascii=False),
-            max_tokens=40 + 24 * len(pairs),
+            max_tokens=40 + 36 * len(pairs),
             temperature=0.0,
         )
     except Exception:  # noqa: BLE001
@@ -148,11 +161,14 @@ def judge_for_you(pairs: list[dict[str, str]]) -> set[str]:
         return set()
     items = data.get("items") if isinstance(data, dict) else None
     return {
-        str(i.get("key")) for i in items if isinstance(i, dict) and i.get("supports") is True
+        str(i.get("key")) for i in items
+        if isinstance(i, dict) and i.get("supports") is True and i.get("same_as_ask") is False
     } if isinstance(items, list) else set()
 
 
-def keep_judged(items: list[dict[str, Any]], claims: list[dict[str, Any]]) -> None:
+def keep_judged(
+    items: list[dict[str, Any]], claims: list[dict[str, Any]], ask: str = "",
+) -> None:
     """In place: drop from each item's `for_you` whatever the judge does not confirm, and
     within a confirmed one keep only confirmed quotes. `items` are dicts carrying
     `for_you: [{claim_id, quotes: [{text, …}]}]`. One judge call for the whole page."""
@@ -161,7 +177,8 @@ def keep_judged(items: list[dict[str, Any]], claims: list[dict[str, Any]]) -> No
     for i, it in enumerate(items):
         for j, f in enumerate(it.get("for_you") or []):
             for k, q in enumerate(f.get("quotes") or []):
-                pairs.append({"key": f"{i}.{j}.{k}", "claim": labels.get(f.get("claim_id"), ""),
+                pairs.append({"key": f"{i}.{j}.{k}", "ask": ask,
+                              "claim": labels.get(f.get("claim_id"), ""),
                               "quote": str(q.get("text") or "")})
     ok = judge_for_you(pairs)
     for i, it in enumerate(items):

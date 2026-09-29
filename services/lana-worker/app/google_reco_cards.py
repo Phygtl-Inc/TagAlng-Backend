@@ -288,7 +288,7 @@ def _compose_page(
     if claims:
         from app.reader_claims import keep_judged
 
-        keep_judged(list(grounded.values()), claims)
+        keep_judged(list(grounded.values()), claims, ask)
     return grounded
 
 

@@ -58,3 +58,15 @@ def test_judge_fails_closed():
             mock.patch("app.orchestrator.llm.llm_json", side_effect=RuntimeError("down")):
         assert rc.judge_for_you([{"key": "0", "claim": "Has kids", "quote": "q"}]) == set()
     assert rc.judge_for_you([]) == set()
+
+
+def test_the_ask_reaches_the_judge_so_a_restated_ask_can_be_refused():
+    from unittest import mock
+
+    from app import reader_claims as rc
+
+    seen = {}
+    items = [{"for_you": [{"claim_id": "c1", "line": "x", "quotes": [{"text": "authentic lasagna"}]}]}]
+    with mock.patch.object(rc, "judge_for_you", side_effect=lambda pairs: seen.update(p=pairs) or set()):
+        rc.keep_judged(items, [{"id": "c1", "label": "Loves Italian food"}], "italian restaurants")
+    assert seen["p"][0]["ask"] == "italian restaurants" and items[0]["for_you"] == []
