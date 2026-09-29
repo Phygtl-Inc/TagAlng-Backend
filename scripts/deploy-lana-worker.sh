@@ -176,6 +176,9 @@ LANA_RECO_FIT: "${LANA_RECO_FIT:-1}"
 # (app/reco_authority.py). Off unless the env file says otherwise; wants migration
 # 20261230120000 on THAT database (without it, one authority read per result row).
 LANA_RECO_AUTHORITY: "${LANA_RECO_AUTHORITY:-0}"
+# Google fallback places as recommendation cards with review evidence
+# (app/google_reco_cards.py). On by default; 0 = the plain Google list only.
+LANA_GOOGLE_RECO_CARDS: "${LANA_GOOGLE_RECO_CARDS:-1}"
 EOF
 
 # Warm-instance policy, chosen by the caller — this script's own defaults are exactly

@@ -3397,6 +3397,46 @@ def _tip_seek_fallback_reply(
     user_id: str | None,
     posted: bool = True,
 ) -> str:
+    """The Google fallback, then the same places as recommendation CARDS.
+
+    Every path below (plain, verified, widen) ends by setting google_place_suggestions;
+    this is the one place the cards are built from it, so no path can skip them
+    (app/google_reco_cards.py). The plain list stays on the wire for older clients."""
+    reply = _tip_seek_fallback_core(
+        ctx=ctx, msg=msg, detail=detail, category=category, block_id=block_id,
+        session_ctx=session_ctx, user_id=user_id, posted=posted,
+    )
+    try:
+        from app.google_reco_cards import stamp_google_cards
+        from app.places import _centroid
+        from app.tip_rec_cascade import _ask_chips, _ask_recommender_chips
+
+        # The recommender chip is about neighbours; Google reviewers can never meet it.
+        _by = {c.casefold() for c in _ask_recommender_chips(ctx)}
+        stamp_google_cards(
+            ctx,
+            ask=str(detail or msg or ""),
+            chips=[c for c in _ask_chips(ctx) if c.casefold() not in _by],
+            lang=str(session_ctx.get("preferred_lang") or "en"),
+            origin=_centroid(None, block_id, user_id),
+            category=category,
+        )
+    except Exception:  # noqa: BLE001 — the plain list is still the answer
+        logging.getLogger(__name__).warning("google_reco_cards_stamp_failed", exc_info=True)
+    return reply
+
+
+def _tip_seek_fallback_core(
+    *,
+    ctx: dict[str, Any],
+    msg: str,
+    detail: str,
+    category: str | None,
+    block_id: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+    posted: bool = True,
+) -> str:
     """Empty tip-seek → Google Places fallback, claim-personalized + verified (hybrid loop).
 
     Mutates ctx (google_place_suggestions, rec_chips, rec_widen_noun, rec_filter_asked) and

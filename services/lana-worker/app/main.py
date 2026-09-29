@@ -795,7 +795,7 @@ def _discovery_surface_from_ctx(ctx: dict[str, Any]) -> DiscoverySurfacePayload 
     )
 
 
-def _reco_cards_from_ctx(ctx: dict[str, Any]) -> list["RecoCardRow"]:
+def _reco_cards_from_ctx(ctx: dict[str, Any], key: str = "reco_cards") -> list["RecoCardRow"]:
     """Subject cards off ctx, shaped defensively (§Stage 3).
 
     Pydantic-validated rather than passed through: app/reco_cards.py builds these from RPC
@@ -805,7 +805,7 @@ def _reco_cards_from_ctx(ctx: dict[str, Any]) -> list["RecoCardRow"]:
     """
     from app.models import RecoCardRow
 
-    raw = ctx.get("reco_cards")
+    raw = ctx.get(key)
     if not isinstance(raw, list):
         return []
     out: list[RecoCardRow] = []
@@ -1370,6 +1370,9 @@ def _onboarding_fields(
         "peer_matches": peers,
         "reco_cards": reco_cards,
         "reco_cards_total": int(ctx.get("reco_cards_total") or 0) if show_peers else 0,
+        # The Google fallback's places as recommendation cards — its own surface, so not
+        # behind the peer gate (app/google_reco_cards.py).
+        "google_reco_cards": _reco_cards_from_ctx(ctx, "google_reco_cards"),
         "discovery_surface": discovery_surface,
         "activity_previews": activities,
         "communities": _communities_from_ctx(ctx),
@@ -2212,6 +2215,12 @@ def _run_lana_message(
         # share the cached Supabase client across threads: its underlying httpx
         # session handles concurrent requests.
         merged = merge_session_context(session.get("context"), session_ctx)
+        # Google review text must never be stored (Google's terms), and this context is
+        # written to lana_sessions below. Held out of the write, put back only for building
+        # this turn's response.
+        from app.google_reco_cards import CTX_KEY as _GOOGLE_CARDS, hold_out_of_storage
+
+        _google_cards = hold_out_of_storage(merged, session_ctx)
 
         def _save_assistant_message() -> str | None:
             return insert_message(
@@ -2235,6 +2244,8 @@ def _run_lana_message(
                 session_future = pool.submit(_persist_session)
                 assistant_msg_id = msg_future.result()
                 session_future.result()
+        if _google_cards:
+            merged[_GOOGLE_CARDS] = _google_cards
         ui = _ui_from_dict(ui_raw)
         event_draft = _draft_from_dict(draft_raw or merged.get("event_draft"), auth.user_id)
         item_draft = _item_draft_from_dict(merged.get("item_draft"))

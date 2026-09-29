@@ -85,6 +85,23 @@ class RecoContributorRow(BaseModel):
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
+class RecoReviewQuoteRow(BaseModel):
+    """A Google reviewer's words on a Google card, attributed as Google requires. Verified
+    verbatim against the review it came from (app/google_reco_cards.py); never stored."""
+
+    text: str
+    author: str | None = None
+    author_url: str | None = None
+
+
+class RecoGoogleRow(BaseModel):
+    """Google's own numbers for a Google card's header — theirs, not Lana's."""
+
+    rating: float | None = None
+    rating_count: int | None = None
+    maps_url: str | None = None
+
+
 class RecoAspectRow(BaseModel):
     """One thing people noticed about a subject, from the aspect round (subject_aspects).
 
@@ -100,6 +117,8 @@ class RecoAspectRow(BaseModel):
     # "2 Spanish-speaking parents said they cut in Spanish with everyone" — who said what,
     # model-written from the quotes, count-checked (app/reco_fit.py). Null = use the count.
     headline: str | None = None
+    # On a Google card: the quotes with their reviewer, as Google's terms require.
+    review_quotes: list[RecoReviewQuoteRow] = Field(default_factory=list)
 
 
 class RecoAspectMatchRow(BaseModel):
@@ -220,6 +239,11 @@ class RecoCardRow(BaseModel):
     # only when the ask named such a requirement and someone on the page has standing.
     # A rank, never a score.
     standing_rank: int | None = None
+    # "google" for a Google place in the empty-neighbourhood fallback: no contributors,
+    # vouches or standing — its evidence is Google reviews (`aspects[].review_quotes`) and
+    # its numbers are Google's (`google`). "neighbours" for every other card.
+    source: str = "neighbours"
+    google: RecoGoogleRow | None = None
     tip_rec: bool = True
 
 
@@ -1321,6 +1345,10 @@ class CreateSessionResponse(BaseModel):
     # How many subjects the ask found, which is not len(reco_cards) — the list is a page.
     # Screen 07's "pediatric dentist · 9 found nearby".
     reco_cards_total: int = 0
+    # The empty-neighbourhood fallback's Google places as the SAME cards (source "google"),
+    # beside the plain `place_suggestions` older clients render. Not gated on the peer
+    # surface: this is the fallback's own answer. Never persisted (Google's terms).
+    google_reco_cards: list[RecoCardRow] = Field(default_factory=list)
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
@@ -1454,6 +1482,10 @@ class SendMessageResponse(BaseModel):
     # How many subjects the ask found, which is not len(reco_cards) — the list is a page.
     # Screen 07's "pediatric dentist · 9 found nearby".
     reco_cards_total: int = 0
+    # The empty-neighbourhood fallback's Google places as the SAME cards (source "google"),
+    # beside the plain `place_suggestions` older clients render. Not gated on the peer
+    # surface: this is the fallback's own answer. Never persisted (Google's terms).
+    google_reco_cards: list[RecoCardRow] = Field(default_factory=list)
     discovery_surface: DiscoverySurfacePayload | None = None
     activity_previews: list[ActivityPreviewRow] = Field(default_factory=list)
     place_suggestions: list[PlaceSuggestionRow] = Field(default_factory=list)
