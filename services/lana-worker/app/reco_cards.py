@@ -194,6 +194,7 @@ def subject_cards_from_tips(
     reader_id: str | None = None,
     ask_chips: list[str] | None = None,
     user_jwt: str | None = None,
+    recommender_chips: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Tip rows in, subject cards out.
 
@@ -239,9 +240,14 @@ def subject_cards_from_tips(
     _attach_reads(cards, lang=lang, allow_compose=allow_compose)
     _attach_cohorts(cards, reader_id=reader_id)
     if ask_chips:
+        from app.reco_authority import chips_for_card
+
         chips = [c for c in (str(x or "").strip() for x in ask_chips) if c][:4]
         for card in cards:
-            card["fit_chips"] = chips
+            # Under "Why Lana sees a fit" a chip reads as MET. The ask's requirement on who
+            # recommends ("recommended by someone from Turkey") stays only on a card whose
+            # recommenders meet it in their own words (prod QA 2026-09-29).
+            card["fit_chips"] = chips_for_card(chips, recommender_chips, card)
 
     # Provenance, then best match, then most voices, then title. Title last so the order is
     # total — a float tie must not leave two cards swapping places between reads.

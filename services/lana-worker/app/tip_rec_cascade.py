@@ -258,6 +258,19 @@ def reco_cards_enabled() -> bool:
     }
 
 
+def _ask_recommender_chips(ctx: dict[str, Any]) -> list[str]:
+    """The ask draft's chip(s) carrying a requirement on WHO recommends — labelled by the
+    draft's own model (field "recommended_by"), never matched from text."""
+    draft = ctx.get("ask_draft")
+    if not isinstance(draft, dict):
+        return []
+    return [
+        str(c.get("label") or "").strip()
+        for c in draft.get("chips") or []
+        if isinstance(c, dict) and c.get("field") == "recommended_by" and c.get("label")
+    ]
+
+
 def _ask_chips(ctx: dict[str, Any]) -> list[str]:
     """The facets the reader asked for, off the ask draft she already confirmed.
 
@@ -304,6 +317,7 @@ def _stamp_subject_cards(
             reader_id=user_id,
             ask_chips=_ask_chips(ctx),
             user_jwt=user_jwt,
+            recommender_chips=_ask_recommender_chips(ctx),
         )
     except Exception:  # noqa: BLE001
         import logging as _logging

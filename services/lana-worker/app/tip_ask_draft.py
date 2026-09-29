@@ -32,7 +32,8 @@ _log = logging.getLogger(__name__)
 _SYSTEM = (
     "You turn ONE neighbor's recommendation ask into a compact draft card, in a "
     "neighborhood app. Output only valid JSON: "
-    '{"title":"…","detail":"…","category":"…","locality":"…","qualifiers":["…"]}. '
+    '{"title":"…","detail":"…","category":"…","locality":"…","qualifiers":["…"],'
+    '"recommended_by":"…"}. '
     "title = the ask as a short noun phrase a person would put on a card, 2-5 words "
     "('Gentle pediatric dentist', 'Weekend dog walker'). NEVER a sentence, never a "
     "question, never 'Looking for…'. "
@@ -44,7 +45,12 @@ _SYSTEM = (
     "locality = the neighborhood/area THEY named, or empty string. Never guess a location "
     "they did not say. "
     "qualifiers = each distinct requirement as its own 1-3 word chip label, at most 4. "
-    "Use ONLY what is in their words. Reproduce their language — if they wrote in Spanish, "
+    "Use ONLY what is in their words. "
+    "recommended_by = a requirement on the PERSON RECOMMENDING, never on the thing, as one "
+    "short chip label in their words ('recommended by someone from Turkey', 'from a Spanish "
+    "speaker', 'from a marathon runner'); empty string if they set none. It is NOT also a "
+    "qualifier. 'Turkish restaurant' is about the restaurant — the category, not this. "
+    "Reproduce their language — if they wrote in Spanish, "
     "every field is in Spanish. Anything you are unsure of is an empty string, never a guess."
 )
 
@@ -52,6 +58,7 @@ _TONE_BY_FIELD = {
     "category": "sky",
     "locality": "green",
     "qualifier": "violet",
+    "recommended_by": "violet",
 }
 
 
@@ -141,6 +148,14 @@ def build_ask_draft(
             label = str(q or "").strip()
             if label and label.lower() not in {c["label"].lower() for c in chips}:
                 chips.append(_chip(label, "qualifier"))
+    # The requirement on WHO recommends is its own field, so a results card can tell it
+    # from the ask's facets about the thing: it is shown there only when a recommender
+    # meets it (reco_authority.chips_for_card). Last, so it never displaces a facet.
+    # A model that ALSO listed it as a qualifier gets it moved, not duplicated.
+    by = _s("recommended_by")[:40]
+    if by:
+        chips = [c for c in chips if c["label"].lower() != by.lower()][:5]
+        chips.append(_chip(by, "recommended_by"))
 
     return {
         "title": title,

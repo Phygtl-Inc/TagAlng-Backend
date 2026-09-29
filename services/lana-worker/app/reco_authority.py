@@ -248,3 +248,18 @@ def composer_fact(tips: list[dict[str, Any]], trait: str | None) -> str | None:
         f"recommenders below has said that about themselves. Do NOT describe or imply that "
         f"any of them is \"{trait}\" — you may say you couldn't confirm who is."
     )
+
+
+def chips_for_card(
+    chips: list[str], recommender_chips: list[str] | None, card: dict[str, Any]
+) -> list[str]:
+    """The ask's chips as ONE card may show them under "Why Lana sees a fit".
+
+    Every facet of the ask stays. The chip carrying its requirement on the recommender —
+    labelled so by the ask draft's own model (field "recommended_by"), never matched from
+    text — is shown only when the card has `recommender_standing`, i.e. a recommender said
+    it in their own public words. Without it the chip claims a fit nobody checked."""
+    drop = {str(c).strip().casefold() for c in recommender_chips or [] if str(c).strip()}
+    if not drop or card.get("recommender_standing"):
+        return list(chips)
+    return [c for c in chips if str(c).strip().casefold() not in drop]

@@ -116,7 +116,9 @@ def _facts(card: dict[str, Any], ask_chips: list[str]) -> dict[str, Any]:
             if isinstance(cohort, dict) else None
         ),
         "cohort_label": cohort_label,
-        "asked_for": ask_chips,
+        # The card's OWN chips when it has them — the recommender requirement is removed
+        # from cards that do not meet it, so the line cannot claim it either.
+        "asked_for": card["fit_chips"] if "fit_chips" in card else ask_chips,
         "recommended_by": _recommended_by(card),
         "matches_of_ask": (card.get("aspect_match") or {}).get("clauses_matched"),
         "parts_of_ask": (card.get("aspect_match") or {}).get("clauses_total"),

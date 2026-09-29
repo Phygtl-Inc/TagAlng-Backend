@@ -384,3 +384,72 @@ def test_composer_receives_the_rule(monkeypatch):
     seen.clear()
     dr._compose_neighbor_tip_reply(rows, detail="a barber", session_ctx={})
     assert not any("recommendation from someone" in f for f in seen["facts"])
+
+
+# ── the fit chips ───────────────────────────────────────────────────────────
+
+
+ASK = ["barber", "recommended by someone from Turkey"]
+BY = ["recommended by someone from Turkey"]
+
+
+def test_recommender_chip_dropped_from_a_card_nobody_meets():
+    assert ra.chips_for_card(ASK, BY, {"title": "Prestige"}) == ["barber"]
+
+
+def test_recommender_chip_kept_when_a_recommender_meets_it():
+    card = {"title": "Tony", "recommender_standing": {"n_people": 1}}
+    assert ra.chips_for_card(ASK, BY, card) == ASK
+
+
+def test_facet_chips_about_the_thing_are_never_dropped():
+    # "turkish restaurant" is the category — only the chip the draft LABELLED goes.
+    chips = ["turkish restaurant", "recommended by a Turkish person"]
+    assert ra.chips_for_card(chips, ["recommended by a Turkish person"], {}) == ["turkish restaurant"]
+
+
+def test_chips_untouched_without_a_recommender_chip():
+    assert ra.chips_for_card(ASK, [], {"title": "x"}) == ASK
+
+
+def test_cards_and_fit_facts_carry_the_filtered_chips():
+    from app.reco_cards import subject_cards_from_tips
+    from app.reco_fit import _facts
+
+    cards = subject_cards_from_tips([_tip("s", "dom")], ask_chips=ASK, recommender_chips=BY)
+    assert cards[0]["fit_chips"] == ["barber"]
+    assert _facts(cards[0], ASK)["asked_for"] == ["barber"]
+
+
+def test_draft_labels_the_recommender_chip_its_own_field(monkeypatch):
+    import app.orchestrator.llm as llm
+    from app.tip_ask_draft import build_ask_draft
+    from app.tip_rec_cascade import _ask_chips, _ask_recommender_chips
+
+    monkeypatch.setattr(llm, "llm_configured", lambda: True)
+    monkeypatch.setattr(llm, "llm_json", lambda **kw: {
+        "title": "Barber", "detail": "", "category": "barber", "locality": "",
+        "qualifiers": ["recommended by someone from Turkey"],
+        "recommended_by": "recommended by someone from Turkey",
+    })
+    draft = build_ask_draft(msg="barber recommended by someone from Turkey", detail="barber")
+    by = [c for c in draft["chips"] if c["field"] == "recommended_by"]
+    assert [c["label"] for c in by] == ["recommended by someone from Turkey"]
+    # not duplicated as a qualifier
+    assert [c["label"] for c in draft["chips"]].count("recommended by someone from Turkey") == 1
+    ctx = {"ask_draft": draft}
+    assert _ask_recommender_chips(ctx) == ["recommended by someone from Turkey"]
+    assert "recommended by someone from Turkey" in _ask_chips(ctx)
+
+
+def test_cascade_passes_the_labelled_chip_into_the_cards(monkeypatch):
+    import app.tip_rec_cascade as cascade
+
+    monkeypatch.setenv("LANA_RECO_CARDS", "1")
+    monkeypatch.setattr("app.reco_fit.start_fit", lambda *a, **k: None)
+    ctx = {"ask_draft": {"chips": [
+        {"label": "barber", "field": "category"},
+        {"label": "recommended by someone from Turkey", "field": "recommended_by"},
+    ]}}
+    cascade._stamp_subject_cards(ctx, [_tip("s", "dom")], phone_verified=True)
+    assert ctx["reco_cards"][0]["fit_chips"] == ["barber"]
