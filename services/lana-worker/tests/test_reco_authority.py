@@ -13,6 +13,7 @@ import app.reco_authority as ra
 def on(monkeypatch):
     monkeypatch.setenv("LANA_RECO_AUTHORITY", "1")
     monkeypatch.setattr("app.authority.concepts_for_ask", lambda text, **_: ["c-spain"])
+    monkeypatch.setattr(ra, "_concept_labels", lambda ids: {})
 
 
 def _tip(sig: str, peer: str, **over: Any) -> dict[str, Any]:
@@ -57,7 +58,8 @@ def test_strong_then_thin_then_none_and_stable_inside_a_tier(on, monkeypatch):
     # Search order stands within the strong tier (c before d), nothing pass 1 found is dropped.
     assert [t["signal_id"] for t in out] == ["c", "d", "b", "a"]
     assert out[0]["_standing"] == {
-        "tier": "strong", "quote": "I grew up in Madrid and came here in 2019", "trait": "from Spain",
+        "tier": "strong", "quote": "I grew up in Madrid and came here in 2019", "said": None,
+        "trait": "from Spain",
     }
     assert "_standing" not in out[3]
 
@@ -176,7 +178,8 @@ def test_batch_maps_idx_back_per_row_and_scores_as_of_each_post(monkeypatch):
         _tip("c", "p2", created_at="2026-03-01T00:00:00Z"),  # same author, later post
     ]
     out = ra.score_rows(rows, ["c1", "c2"])
-    assert out == [None, {"score": 0.45, "quote": "grew up in Madrid"}, None]
+    assert out == [None, {"score": 0.45, "quote": "grew up in Madrid", "stated": False,
+                          "concept_id": "c2"}, None]
     name, args = client.calls[0]
     assert name == "attester_authority_many"
     assert args["p_user_ids"] == ["p1", "p2", "p2"]
@@ -192,11 +195,11 @@ def test_batch_missing_falls_back_per_row(monkeypatch):
     def per_row(uid, concept_ids, *, as_of=None, public_only=False, **_):
         assert public_only, "a results page must never score on private claims"
         seen.append((uid, as_of))
-        return {"c1": {"score": 0.5, "quote": "q", "evidence": []}} if uid == "p2" else {}
+        return {"c1": {"score": 0.5, "quote": "q", "evidence": ["stated"]}} if uid == "p2" else {}
 
     monkeypatch.setattr("app.authority.authority_for", per_row)
     out = ra.score_rows([_tip("a", "p1"), _tip("b", "p2")], ["c1"])
-    assert out == [None, {"score": 0.5, "quote": "q"}]
+    assert out == [None, {"score": 0.5, "quote": "q", "stated": True, "concept_id": "c1"}]
     assert seen == [("p1", "2026-09-01T10:00:00+00:00"), ("p2", "2026-09-01T10:00:00+00:00")]
 
 
@@ -344,26 +347,62 @@ def test_authority_for_sends_public_only_only_when_asked(monkeypatch):
 # ── the reply composer ──────────────────────────────────────────────────────
 
 
-def test_composer_rule_forbids_the_trait_when_nobody_said_it():
-    rows = [_tip("a", "dom", _standing={"tier": "thin", "quote": None, "trait": "from Spain"}),
+def test_composer_rule_leads_with_nobody_when_nobody_said_it():
+    rows = [_tip("a", "ed"), _tip("b", "fay", _standing={"tier": "thin", "quote": None,
+                                                        "said": None, "trait": "from Turkey"})]
+    rule = ra.composer_fact(rows, "from Turkey")
+    assert "NONE of the recommenders" in rule and "FIRST" in rule and "NEVER" in rule
+    assert "n-ed" not in rule and "n-fay" not in rule
+
+
+def test_composer_rule_reports_a_bare_claim_as_exactly_what_was_said():
+    # Dom said "I grew up in Madrid" publicly — thin standing, but he DID say it.
+    rows = [_tip("a", "dom", _standing={"tier": "thin", "quote": None,
+                                        "said": "From Madrid", "trait": "from Spain"}),
             _tip("b", "ed")]
     rule = ra.composer_fact(rows, "from Spain")
-    assert "NONE of the recommenders" in rule and "Do NOT" in rule
-    assert "n-dom" not in rule
+    assert "n-dom has mentioned this about themselves: From Madrid" in rule
+    assert "NONE" not in rule and "n-ed" not in rule
 
 
-def test_composer_rule_names_only_quote_backed_recommenders():
+def test_composer_rule_names_quote_backed_recommenders_first():
     rows = [
-        _tip("a", "ana", _standing={"tier": "strong", "quote": "I grew up in Madrid", "trait": "from Spain"}),
-        _tip("b", "dom", _standing={"tier": "thin", "quote": None, "trait": "from Spain"}),
+        _tip("a", "ana", _standing={"tier": "strong", "quote": "I grew up in Madrid",
+                                    "said": "From Madrid", "trait": "from Spain"}),
+        _tip("b", "dom", _standing={"tier": "thin", "quote": None, "said": "From Madrid",
+                                    "trait": "from Spain"}),
     ]
     rule = ra.composer_fact(rows, "from Spain")
-    assert 'n-ana ("I grew up in Madrid")' in rule and "n-dom" not in rule
-    assert "ONLY" in rule
+    assert rule.index('n-ana said, in their own words: "I grew up in Madrid"') < rule.index("n-dom has mentioned")
+
+
+def test_composer_rule_when_unchecked_never_claims_nobody():
+    rule = ra.composer_fact([_tip("a", "ed")], "from Turkey", checked=False)
+    assert "cannot check" in rule and "NONE" not in rule
 
 
 def test_composer_rule_absent_without_a_trait():
     assert ra.composer_fact([_tip("a", "p")], None) is None
+
+
+def test_stamp_carries_what_they_said(on, monkeypatch):
+    monkeypatch.setattr(ra, "score_rows", lambda rows, ids: [
+        {"score": 0.25, "quote": None, "stated": True, "concept_id": "c-spain"},
+        {"score": 0.20, "quote": None, "stated": False, "concept_id": "c-spain"},
+    ])
+    monkeypatch.setattr(ra, "_concept_labels", lambda ids: {"c-spain": "From Madrid"})
+    out = ra.recall_and_rank_by_standing([_tip("a", "dom"), _tip("b", "behav")],
+                                         parsed=PARSED, fetch=lambda k, n: [])
+    by = {t["signal_id"]: t["_standing"] for t in out}
+    assert by["a"]["said"] == "From Madrid"
+    # Standing from behaviour alone (recs near the concept) is not something they SAID.
+    assert by["b"]["said"] is None
+
+
+def test_best_marks_stated_evidence():
+    got = ra._best([{"authority": 0.25, "evidence_quote": None,
+                     "evidence_kinds": ["corroborated", "stated"], "concept_id": "c1"}])
+    assert got == {"score": 0.25, "quote": None, "stated": True, "concept_id": "c1"}
 
 
 def test_composer_receives_the_rule(monkeypatch):
@@ -380,7 +419,7 @@ def test_composer_receives_the_rule(monkeypatch):
                  _standing={"tier": "thin", "quote": None, "trait": "from Spain"})]
     dr._compose_neighbor_tip_reply(rows, detail="a barber recommended by someone from Spain",
                                    session_ctx={}, recommender_trait="from Spain")
-    assert any("NONE of the recommenders" in f for f in seen["facts"])
+    assert any("recommendation from someone" in f for f in seen["facts"])
     seen.clear()
     dr._compose_neighbor_tip_reply(rows, detail="a barber", session_ctx={})
     assert not any("recommendation from someone" in f for f in seen["facts"])
@@ -453,3 +492,24 @@ def test_cascade_passes_the_labelled_chip_into_the_cards(monkeypatch):
     ]}}
     cascade._stamp_subject_cards(ctx, [_tip("s", "dom")], phone_verified=True)
     assert ctx["reco_cards"][0]["fit_chips"] == ["barber"]
+
+
+def test_composer_uses_the_unchecked_wording_when_the_flag_is_off(monkeypatch):
+    import app.discovery_route as dr
+
+    seen = {}
+
+    def fake_compose(*, goal, facts, session_ctx, fallback, max_sentences):
+        seen["facts"] = facts
+        return "ok"
+
+    monkeypatch.setattr(dr, "compose_reply", fake_compose)
+    rows = [_tip("a", "dom", detail_text="Tony at Sharp Fades · barber")]
+    monkeypatch.setenv("LANA_RECO_AUTHORITY", "0")
+    dr._compose_neighbor_tip_reply(rows, detail="barber from someone from Turkey",
+                                   session_ctx={}, recommender_trait="from Turkey")
+    assert any("cannot check" in f for f in seen["facts"])
+    monkeypatch.setenv("LANA_RECO_AUTHORITY", "1")
+    dr._compose_neighbor_tip_reply(rows, detail="barber from someone from Turkey",
+                                   session_ctx={}, recommender_trait="from Turkey")
+    assert any("NONE of the recommenders" in f for f in seen["facts"])

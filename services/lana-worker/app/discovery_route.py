@@ -3761,7 +3761,9 @@ def _compose_neighbor_tip_reply(
     # may. Without it the ask's trait gets pinned on whichever neighbour is named first.
     from app.reco_authority import composer_fact
 
-    _trait_rule = composer_fact(tips[:3], recommender_trait)
+    from app.reco_authority import authority_enabled
+
+    _trait_rule = composer_fact(tips[:3], recommender_trait, checked=authority_enabled())
     if _trait_rule:
         facts.append(_trait_rule)
     if approximate:

@@ -69,7 +69,13 @@ def _best(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not scored:
         return None
     top = max(scored, key=lambda r: float(r.get("authority") or 0.0))
-    return {"score": float(top.get("authority") or 0.0), "quote": top.get("evidence_quote")}
+    return {
+        "score": float(top.get("authority") or 0.0),
+        "quote": top.get("evidence_quote"),
+        # They SAID it (a public claim), as opposed to standing from behaviour alone.
+        "stated": "stated" in (top.get("evidence_kinds") or []),
+        "concept_id": str(top.get("concept_id") or "") or None,
+    }
 
 
 def score_rows(tips: list[dict[str, Any]], concept_ids: list[str]) -> list[dict[str, Any] | None]:
@@ -104,9 +110,27 @@ def score_rows(tips: list[dict[str, Any]], concept_ids: list[str]) -> list[dict[
         # returns {}, and the page is simply unranked — fail closed, never on private claims.
         scored = authority_for(uid, concept_ids, as_of=when, public_only=True)
         out.append(_best([
-            {"authority": v["score"], "evidence_quote": v.get("quote")} for v in scored.values()
+            {"authority": v["score"], "evidence_quote": v.get("quote"),
+             "evidence_kinds": v.get("evidence") or [], "concept_id": cid}
+            for cid, v in scored.items()
         ]))
     return out
+
+
+def _concept_labels(concept_ids: list[str]) -> dict[str, str]:
+    """{concept id: label} for the (at most 3) concepts an ask resolved to. {} on failure —
+    the reply then simply has no "said" line to report."""
+    try:
+        from app.auth import service_client
+
+        res = (
+            service_client().table("identity_concepts").select("id,label")
+            .in_("id", concept_ids).execute()
+        )
+        return {str(r["id"]): str(r["label"]) for r in res.data or [] if r.get("label")}
+    except Exception:  # noqa: BLE001
+        logger.warning("reco_authority_concept_labels_failed", exc_info=True)
+        return {}
 
 
 def recall_and_rank_by_standing(
@@ -154,13 +178,17 @@ def recall_and_rank_by_standing(
     except Exception:  # noqa: BLE001
         logger.warning("reco_authority_score_failed", exc_info=True)
         return tips
+    labels = _concept_labels(concept_ids)
     for row, st in zip(rows, standings):
         tier = tier_of(st["score"]) if st else None
         if tier:
             row["_standing"] = {
                 "tier": tier,
-                # Only a specific claim has a quote; a bare one renders nothing.
+                # Only a specific claim has a quote; a bare one renders nothing on a card.
                 "quote": (str(st.get("quote") or "").strip() or None) if tier == TIER_STRONG else None,
+                # What they publicly said, as the concept names it ("From Madrid") — so the
+                # reply can report a bare claim truthfully instead of calling it nothing.
+                "said": labels.get(str(st.get("concept_id") or "")) if st.get("stated") else None,
                 "trait": trait,
             }
 
@@ -218,35 +246,70 @@ def card_standing(rows: list[dict[str, Any]], contributors: list[dict[str, Any]]
     }
 
 
-def composer_fact(tips: list[dict[str, Any]], trait: str | None) -> str | None:
+def composer_fact(
+    tips: list[dict[str, Any]], trait: str | None, *, checked: bool = True
+) -> str | None:
     """The reply composer's rule for an ask that names who must recommend.
 
     Without it the composer reads "What they asked for: …recommended by someone from Spain"
     beside "Dom recommended Tony" and writes "a neighbour from Spain named Dom" — a claim
-    about who a real person is, made from the ASK, true or not (prod QA 2026-09-29). This
-    names exactly who may be described that way (strong standing, their own public words)
-    and forbids it for everyone else. Applies with the flag off too: the composer sees
-    the ask either way, and then nobody is named."""
+    about who a real person is, made from the ASK (prod QA 2026-09-29). And staying silent
+    is no better: under an ask that named a requirement, a plain list reads as meeting it.
+
+    So the reply MUST say where the list stands, from the data, in one of three cases:
+      · someone meets it in their own words (strong + quote)  → name them, with the quote;
+      · someone only mentioned it (a bare public claim)       → report exactly that;
+      · nobody has said it                                    → lead with that, plainly.
+    `checked=False` (LANA_RECO_AUTHORITY off): Lana never looked, so she says she can't
+    tell yet — never "nobody is", which would be a claim she did not check."""
     trait = str(trait or "").strip()
     if not trait:
         return None
-    named: dict[str, str] = {}
+    # Pronouns are not in the data; a name does not tell you them.
+    ask = (
+        f"They asked for a recommendation from someone who is \"{trait}\". Refer to "
+        "recommenders by name or \"they\" — never he/she."
+    )
+    if not checked:
+        return (
+            f"{ask} You cannot check who recommends yet. Say that plainly FIRST — that you "
+            "can't tell which of these neighbours, if any, are that — then give the list. "
+            f"NEVER describe or imply that anyone below is \"{trait}\"."
+        )
+    strong: dict[str, str] = {}
+    said: dict[str, str] = {}
     for t in tips:
         st = t.get("_standing") or {}
         who = str(t.get("neighbor_label") or "").strip()
-        if st.get("tier") == TIER_STRONG and st.get("quote") and who and who not in named:
-            named[who] = str(st["quote"])
-    if named:
-        proof = "; ".join(f'{who} ("{q}")' for who, q in list(named.items())[:3])
+        if not who:
+            continue
+        if st.get("tier") == TIER_STRONG and st.get("quote"):
+            strong.setdefault(who, str(st["quote"]))
+        elif st.get("said") and who not in strong:
+            said.setdefault(who, str(st["said"]))
+    if strong or said:
+        parts = [f'{who} said, in their own words: "{q}"' for who, q in list(strong.items())[:3]]
+        parts += [
+            f"{who} has mentioned this about themselves: {lbl} — a profile note, not their "
+            "words: paraphrase it briefly (\"mentioned being from Madrid\"), never in quotes"
+            for who, lbl in list(said.items())[:3]
+        ]
+        quoting = (
+            " The words given in quotation marks above are theirs: repeat them EXACTLY, in "
+            "quotation marks (keep their \"I\")."
+            if strong else ""
+        )
         return (
-            f"They asked for a recommendation from someone who is \"{trait}\". Only these "
-            f"recommenders have said so in their own words: {proof}. You may describe ONLY "
-            "them that way, and never anyone else below."
+            f"{ask} What the recommenders below have actually said about that: "
+            f"{'; '.join(parts)}. Say this FIRST — who said what.{quoting} NEVER write any "
+            "quotation that is not given here. Never apply it to anyone else below; if "
+            "others are listed, say plainly that they haven't said."
         )
     return (
-        f"They asked for a recommendation from someone who is \"{trait}\". NONE of the "
-        f"recommenders below has said that about themselves. Do NOT describe or imply that "
-        f"any of them is \"{trait}\" — you may say you couldn't confirm who is."
+        f"{ask} NONE of the recommenders below has said that about themselves. Say that "
+        "plainly FIRST (e.g. that none of these come from someone who has said they are "
+        "that), then that these are the closest neighbour recommendations anyway. NEVER "
+        f"describe or imply that anyone below is \"{trait}\"."
     )
 
 
