@@ -118,7 +118,12 @@ guess, or assume any language they haven't stated themselves — no "besides X" 
 unless one of their threads explicitly states they speak X. Their answer lets Lana speak their language \
 and match them with neighbors who share it.
 
-Each uncovered thread below is shown as `concept | Label [bucket] — "quote"`. For every question
+Each uncovered thread below is shown as `concept | Label [bucket] — "quote"`, sometimes followed by \
+`(said about <name>, a <kind> they recommended)`. That note means the quote describes THAT place: \
+when your question names a place, use that name. Only ever name a place the thread itself names as \
+a place — a word in the quote is not a venue just because it is capitalised ("the chef is a Da Vinci \
+of Italian cuisine" is praise, not a restaurant called Da Vinci's). If you cannot tell which place a \
+thread is about, ask without naming one. For every question
 you write, echo back the `concept` of the thread it deepens (copy it EXACTLY from the list) so we
 can record what we asked about.
 
@@ -223,6 +228,58 @@ def _uncovered_claims(user_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def _squash(text: Any) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
+def _attach_reco_subjects(user_id: str, claims: list[dict[str, Any]]) -> None:
+    """Stamp each claim whose quote came out of one of the user's recommendations with
+    WHAT that recommendation was about (``about_name`` / ``about_category``), in place.
+
+    Claims are also extracted from reco capture turns, and there the words describe a place
+    the user recommended, not the user. Without the subject the question writer guesses:
+    "…the chef is always present a Da Vinci of the Italian cuisine", from a recommendation
+    of Pausa, became a question about a restaurant called "Da Vinci's" (prod 2026-09-28).
+
+    Provenance lookup, not interpretation: the quote is the user's own text, so it either
+    appears in a reco they wrote or it does not. Best-effort — on a read error the threads
+    simply go out without a subject, as they did before.
+    """
+    quoted = [c for c in claims if _squash(c.get("source_quote"))]
+    if not user_id or not quoted:
+        return
+    try:
+        rows = (
+            service_client()
+            .table("local_signals")
+            .select("reco_name, category, reco_description, detail_text")
+            .eq("user_id", user_id)
+            .not_.is_("reco_name", "null")
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("rapport-synth: reco subject lookup failed for %s", user_id)
+        return
+    recos = [
+        (
+            str(r.get("reco_name") or "").strip(),
+            str(r.get("category") or "").strip(),
+            _squash(r.get("reco_description")) + " \n " + _squash(r.get("detail_text")),
+        )
+        for r in rows
+        if isinstance(r, dict) and str(r.get("reco_name") or "").strip()
+    ]
+    for c in quoted:
+        quote = _squash(c.get("source_quote"))
+        for name, category, text in recos:
+            if quote in text:
+                c["about_name"] = name
+                c["about_category"] = category
+                break
+
+
 def _uncovered_block(claims: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     for c in claims:
@@ -231,10 +288,17 @@ def _uncovered_block(claims: list[dict[str, Any]]) -> str:
         if not label or not concept:
             continue
         bucket = str(c.get("bucket") or "general").strip()
-        quote = str(c.get("source_quote") or "").strip()
+        # The whole quote. A character slice cannot know where a thought ends: [:120] cut
+        # "…always present a Da Vinci of the Italian cuisine" after "a Da Vinci", and the
+        # metaphor read as a venue name. A handful of threads is a small prompt either way.
+        quote = " ".join(str(c.get("source_quote") or "").split())
         line = f"- {concept} | {label} [{bucket}]"
         if quote:
-            line += f' — "{quote[:120]}"'
+            line += f' — "{quote}"'
+        about = str(c.get("about_name") or "").strip()
+        if about:
+            kind = str(c.get("about_category") or "").strip() or "place"
+            line += f" (said about {about}, a {kind} they recommended)"
         lines.append(line)
     return "\n".join(lines)
 
@@ -348,6 +412,7 @@ def synthesize_gaps_from_claims(user_id: str, max_new: int = _MAX_NEW) -> int:
     # Pass the FULL ask history (not just the recent few) so we never repeat or reword a question
     # from any point in the past, however old.
     asked = recent_gap_questions(user_id, limit=60)
+    _attach_reco_subjects(user_id, uncovered)
     data = _generate(_uncovered_block(uncovered), _asked_block(asked), max_new)
     questions = _parse_questions(data, max_new)
     logger.info(

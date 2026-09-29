@@ -28,7 +28,7 @@ Output ONLY valid JSON (no markdown):
       "confidence": 0.85,
       "disclosure": "public",
       "synonyms": ["tag1"],
-      "source_quote": "exact short quote from user",
+      "source_quote": "the user's own sentence(s) that show this",
       "bucket": "heritage",
       "transient": false
     }
@@ -45,7 +45,7 @@ Rules:
 - NEVER emit a claim that is only a bare topic label ("Health", "Wellness", "Lifestyle", "General") or that expresses uncertainty ("Unsure what to call", "Not sure about time"). Skip these entirely — they are not threads.
 - "transient": true for TEMPORARY states that are NOT durable identity — an injury or illness ("sprained ankle"), an upcoming trip/vacation, a passing mood. Durable identity (heritage, life stage, ongoing interests, occupation, faith) is transient=false. When in doubt, false.
 - Capture languages spoken as one claim (bucket "interest", e.g. "Speaks 7 languages")
-- Every claim MUST have source_quote (verbatim or tight paraphrase from user) and bucket
+- Every claim MUST have source_quote (verbatim or tight paraphrase from user) and bucket. The quote must stand on its own: whole sentence(s), never cut mid-sentence, and it must keep WHAT the words are about — the place, activity or group they name. "So the restaurant Pausa in San Mateo is one of the best for authentic Italian cuisine", never "authentic Italian cuisine. The chef is a Da Vinci" — a fragment with its subject removed gets misread downstream.
 - synonyms: 3-6 lowercase tags per claim — include broader/related terms, not just the literal word (e.g. "sicilian" → ["sicilian","italian","mediterranean"])
 - spans: 3-8 phrases covering the mapped_summary for frontend color highlights
 - concept must match ^[a-z][a-z0-9_]{1,63}$
@@ -78,7 +78,7 @@ Output ONLY valid JSON (no markdown):
       "disclosure": "public",
       "synonyms": ["tag1", "tag2", "tag3"],
       "details": [],
-      "source_quote": "exact short quote from this message",
+      "source_quote": "the user's own sentence(s) from this message that show this",
       "bucket": "heritage",
       "vague": false,
       "transient": false,
@@ -134,7 +134,7 @@ language at display time, so a later language switch re-renders the whole queue.
 - Capture LANGUAGES spoken as one claim, bucket "interest" (e.g. "speak 7 languages" → concept "multilingual", label "Speaks 7 languages")
 - Capture RELATIONSHIP status as a claim, bucket "stage" (e.g. "married 10 years" → concept "long_married", label "Married 10 years")
 - Capture occupation/work as a claim, bucket "activity" or "interest" (e.g. "work in tech" → tech_worker). Mark it "vague": true when it is coarse and a specific would help (e.g. "tech worker", "athlete", "in finance")
-- Every claim MUST have source_quote from this message and bucket
+- Every claim MUST have source_quote from this message and bucket. The quote must stand on its own: whole sentence(s), never cut mid-sentence, and it must keep WHAT the words are about — the place, activity or group they name. "So the restaurant Pausa in San Mateo is one of the best for authentic Italian cuisine", never "authentic Italian cuisine. The chef is a Da Vinci" — a fragment with its subject removed gets misread downstream.
 - concept must match ^[a-z][a-z0-9_]{1,63}$
 - synonyms: 3-6 lowercase tags per claim — include BROADER and RELATED terms, not just the literal word (e.g. "sicilian" → ["sicilian","italian","mediterranean","sicily"]; "triathlon" → ["triathlon","endurance","running","cycling","swimming"]). These power match discovery.
 - "vague": true when the claim is coarse enough that a follow-up would sharpen it — e.g. "tech worker", "athlete", "in finance", OR a COUNT without specifics ("speaks 5 languages" → vague until they name them, "plays sports" → which). false when already specific.
@@ -366,7 +366,11 @@ def _parse_claims(data: Any) -> list[ExtractedClaim]:
             details = []
         details = [str(d).strip()[:80] for d in details[:3] if str(d).strip()]
         tone = item.get("tone")
-        source_quote = str(item.get("source_quote", "")).strip()[:160] or None
+        # No length cut. A character slice cannot tell a whole thought from half of one: [:160]
+        # kept "…the chef is always present a Da Vinci of the Italian cuisine. All appetizer p"
+        # from a Pausa recommendation, and the question writer then asked about a restaurant
+        # called "Da Vinci's" (prod 2026-09-28). Length is the prompt's job, by meaning.
+        source_quote = str(item.get("source_quote", "")).strip() or None
         bucket = normalize_bucket(item.get("bucket"))
         transient = bool(item.get("transient", False))
         vague = bool(item.get("vague", False))
