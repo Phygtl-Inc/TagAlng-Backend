@@ -4098,6 +4098,17 @@ def _tip_seek_answer_turn(
             neighbor_tips, parsed=_parsed, fetch=_recall_fetch
         )
 
+    # The thing asked for decides what is in the list: "kid friendly restaurants" must be
+    # restaurants, not a barbershop tagged "kid friendly" (prod QA 2026-09-29). With no
+    # row of the right kind left, the Google fallback below answers instead.
+    if neighbor_tips:
+        from app.reco_aspects import split_query_full
+        from app.reco_kind_gate import keep_asked_kind
+
+        if _parsed is None:
+            _parsed = split_query_full(msg)
+        neighbor_tips = keep_asked_kind(neighbor_tips, (_parsed or {}).get("subject_kind"))
+
     if neighbor_tips:
         # The rec rides ON the neighbor's row, not only in the prose (§12a/b): the quote is
         # what makes the row a pre-qualified answer instead of one more person to message.
