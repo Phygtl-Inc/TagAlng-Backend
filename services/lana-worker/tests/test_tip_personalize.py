@@ -105,6 +105,7 @@ class TestTipFallbackHybrid(unittest.TestCase):
                 ctx=ctx, msg="find me restaurants", detail="restaurants", category="Food",
                 block_id="zip-32827", session_ctx={"zip": "32827"}, user_id="u1",
             )
+        # One plain search of the cleaned ask — never a filtered one for a claim angle.
         self.assertEqual(seen, [{"query": "restaurant", "type": None, "attrs": None}])
         self.assertNotIn("veg-friendly", reply)
         self.assertEqual([p["name"] for p in ctx["google_place_suggestions"]], ["Steak & Co"])

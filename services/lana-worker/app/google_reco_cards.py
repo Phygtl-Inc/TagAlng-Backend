@@ -43,7 +43,9 @@ CTX_KEY = "google_reco_cards"
 POOL_KEY = "google_place_pool"
 POOL_SIZE = 6
 MAX_CARDS = 3
-MAX_ASPECTS = 3
+# Two lines of evidence, one quote each: the model writes every word of the answer, and on
+# the cards it IS the wait — half the words, about half the time (2026-09-29).
+MAX_ASPECTS = 2
 _DETAILS_URL = "https://places.googleapis.com/v1/places/"
 _DETAILS_FIELDS = "id,displayName,rating,userRatingCount,googleMapsUri,primaryTypeDisplayName,reviews"
 _DETAILS_TIMEOUT_S = 15.0
@@ -56,14 +58,15 @@ For each place write:
 1. "fit_line": ONE short sentence (max ~25 words) on why this place answers what they
    asked for, from the reviews — spoken to the reader ("you"). Never say neighbours,
    community or friends recommend it: these are Google reviewers. Never a rating or
-   "great"/"best" in your own voice. Only what DOES fit; null if the reviews show nothing.
-2. "aspects": up to 3 things reviewers bring up that bear on the ask (a dish, the owner,
+   "great"/"best" in your own voice. Only what DOES fit — never a complaint, a caveat or
+   "though some reviewers…"; null if the reviews show nothing that fits.
+2. "aspects": up to 2 things reviewers bring up that bear on the ask (a dish, the owner,
    the atmosphere, authenticity, the wait). Each:
    - "label": 1-4 words, their noun ("the lamb adana").
    - "headline": one line, "Google reviewers mention …" / "Google reviewers say …" — NO
      numbers, never a count of people.
-   - "quotes": 1-2 items {"review": <review number>, "excerpt": "<words copied EXACTLY,
-     character for character, from that review — 4 to 30 words>"}. Never paraphrase an
+   - "quotes": exactly 1 item {"review": <review number>, "excerpt": "<words copied
+     EXACTLY, character for character, from that review — 4 to 25 words>"}. Never paraphrase an
      excerpt, never join two sentences, never cite a review for words it does not contain.
 
 EVERY fit_line, label and headline MUST be in the "language" given. Excerpts stay exactly
@@ -198,7 +201,7 @@ def _compose(
             model=router_model(),
             system=_prompt(bool(claims)),
             user_payload=json.dumps(payload, ensure_ascii=False),
-            max_tokens=700,
+            max_tokens=420,
             temperature=0.2,
         )
     except Exception:  # noqa: BLE001
@@ -211,7 +214,7 @@ def _ground_quotes(raw: Any, reviews: list[dict[str, Any]]) -> list[dict[str, An
     """The cited excerpts that appear verbatim (case and spacing aside) in the review they
     name, as the review's own words with the reviewer attributed. At most two."""
     quotes: list[dict[str, Any]] = []
-    for q in (raw if isinstance(raw, list) else [])[:2]:
+    for q in (raw if isinstance(raw, list) else [])[:1]:
         if not isinstance(q, dict):
             continue
         try:

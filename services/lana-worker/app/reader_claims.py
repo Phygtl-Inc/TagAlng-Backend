@@ -78,7 +78,8 @@ def shape_claims(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 COMPOSER_RULES = """READER CLAIMS ("reader_claims") are what the reader has told Lana about
 THEMSELVES or their household. Use them to find a "for_you" match: a claim the place (or
 recommendation) genuinely serves, PROVEN by a quote that is about that thing.
-- "for_you": 0-2 items per card, each {"claim": "<claim id>", "line": "…", "quotes": [...]}.
+- "for_you": 0-1 item per card — the reader's strongest fit — {"claim": "<claim id>",
+  "line": "…", "quotes": [<exactly one quote>]}.
   NO item without a supporting quote. Never stretch: a steakhouse does not serve a
   vegetarian claim because it "has a salad".
 - If the claim's "sayable" is true, the line may name it, spoken to the reader: "You've

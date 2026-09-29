@@ -3492,8 +3492,8 @@ def _tip_seek_fallback_core(
 
     from app.google_reco_cards import POOL_SIZE
 
-    def _plain(reason_widen: bool) -> str:
-        places = _search_tip_places(
+    def _plain(reason_widen: bool, prefetched: list[dict[str, Any]] | None = None) -> str:
+        places = prefetched if prefetched is not None else _search_tip_places(
             query=base_query, block_id=block_id, zip_for_bias=zip_for_bias, user_id=user_id,
             limit=POOL_SIZE,
         )
@@ -3530,28 +3530,35 @@ def _tip_seek_fallback_core(
         return _plain(reason_widen=widen)
 
     # Ask the personalizer for candidate angles from the user's own claims + the request.
-    filters: list[dict[str, Any]] = []
-    try:
-        from app.context import load_user_context
-        from app.rec_personalize import personalize_tip_query
+    def _personalize() -> tuple[list[dict[str, Any]], str]:
+        try:
+            from app.community_scope import community_name
+            from app.context import load_user_context
+            from app.rec_personalize import personalize_tip_query
 
-        claims = load_user_context(user_id).get("existing_claims") or []
-        from app.community_scope import community_name
-
-        personalized = personalize_tip_query(
-            request=base_query, category=category, claims=claims,
-            # "what should I eat there?" has no subject without this.
-            place=community_name(session_ctx),
+            claims = load_user_context(user_id).get("existing_claims") or []
+            personalized = personalize_tip_query(
+                request=base_query, category=category, claims=claims,
+                place=community_name(session_ctx),
+            )
+        except Exception:  # noqa: BLE001 — personalization never blocks the reply
+            logging.getLogger(__name__).exception("rec_personalize_failed")
+            return [], base_query
+        if not personalized:
+            return [], base_query
+        return (
+            personalized.get("filters") or [],
+            str(personalized.get("base_query") or base_query).strip() or base_query,
         )
-        if personalized:
-            filters = personalized.get("filters") or []
-            base_query = str(personalized.get("base_query") or base_query).strip() or base_query
-    except Exception:  # noqa: BLE001 — personalization never blocks the reply
-        logging.getLogger(__name__).exception("rec_personalize_failed")
-        filters = []
+
+    # Sequential on purpose: the personalizer also cleans the query ("good restaurants" →
+    # "restaurant"), and searching the raw ask in parallel returned worse places (a bar
+    # instead of Keke's, dev QA 2026-09-29) to save ~1s. Quality over that second.
+    filters, base_query = _personalize()
+    prefetched: list[dict[str, Any]] | None = None
 
     if not filters:
-        return _plain(reason_widen=False)
+        return _plain(reason_widen=False, prefetched=prefetched)
 
     # The REQUEST is authoritative. If the user stated a constraint ("kids friendly
     # restaurant"), the personalizer marks that angle source="request"; honor it directly and
@@ -3568,7 +3575,7 @@ def _tip_seek_fallback_core(
     # used to hard-filter on one claim angle and ask "want kid-friendly or vegetarian?"
     # before searching at all when there were two.
     if not request_filters:
-        reply = _plain(reason_widen=False)
+        reply = _plain(reason_widen=False, prefetched=prefetched)
         if reply and claim_filters:
             ctx["rec_chips"] = [
                 {"label": f["label"], "message": f["query"], "style": "secondary"}

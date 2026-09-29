@@ -2360,6 +2360,12 @@ def _run_lana_message(
         # None when the message write failed; the impression is still worth having.
         turn_id=assistant_msg_id,
     )
+    # The Google cards were back on `merged` only to build this response. Out again before
+    # anything below can re-persist it — the chip-pin write does, in the background, and
+    # wrote review text to lana_sessions (dev QA 2026-09-29, caught driving a real chat).
+    from app.google_reco_cards import hold_out_of_storage as _hold_google
+
+    _hold_google(merged)
     # Chip-tap language pin, part 1: remember EXACTLY which chip payloads this response
     # offers, so the next turn can tell an app-authored tap from typed text (the pipeline
     # pins the session language on a match — a canonical-English chip payload must never
