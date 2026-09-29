@@ -79,6 +79,9 @@ class RecoContributorRow(BaseModel):
     same_block: bool = False
     helpful_count: int = 0
     connection: str | None = None
+    # Their own words on why they meet the ask's requirement on the recommender ("I grew
+    # up in Madrid") — strong standing only; see RecoStandingRow.
+    standing_quote: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
@@ -132,6 +135,23 @@ class RecoSynthesisRow(BaseModel):
     # What the dissenters had in common, when it is traceable to EVERY one of their own
     # contributions. Null when the disagreement is real but unexplained.
     shared_trait: str | None = None
+
+
+class RecoStandingQuoteRow(BaseModel):
+    nickname: str
+    quote: str
+
+
+class RecoStandingRow(BaseModel):
+    """Why the people behind a card meet the ask's requirement on WHO recommends
+    ("recommended by someone from Spain"), in their own words. Strong standing only, and
+    no score field on purpose — the number never leaves the worker (app/reco_authority.py).
+    `n_people` of `of_people` recommenders have it; copy must never say more."""
+
+    trait: str
+    n_people: int
+    of_people: int
+    quotes: list[RecoStandingQuoteRow] = Field(default_factory=list)
 
 
 class RecoCardRow(BaseModel):
@@ -192,6 +212,9 @@ class RecoCardRow(BaseModel):
     aspects: list[RecoAspectRow] | None = None
     # Present only when the ask was matched at aspect level (find_by_aspects).
     aspect_match: RecoAspectMatchRow | None = None
+    # Present only when the ask named a requirement on the recommender and at least one of
+    # them meets it with a specific claim (LANA_RECO_AUTHORITY).
+    recommender_standing: RecoStandingRow | None = None
     tip_rec: bool = True
 
 

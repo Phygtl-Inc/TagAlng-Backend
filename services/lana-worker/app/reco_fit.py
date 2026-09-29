@@ -68,6 +68,12 @@ Write:
    parents said …"); otherwise say "neighbours". Never invent how long anyone has gone
    there, their background, or anything else not in the facts.
 
+If a card has "recommended_by", the reader asked for a recommendation from a certain kind
+of person and that many of the recommenders are one — the fit_line SHOULD lead with it:
+exactly "people" of them (never more, never "all" unless people equals "of"), described by
+"trait" and grounded in their "quotes" ("2 neighbours who grew up in Spain recommend him").
+Never apply that trait to anyone else, and never to the place itself.
+
 When a card's "write_fit_line" is false, set its "fit_line" to null.
 
 Output ONLY JSON:
@@ -111,6 +117,7 @@ def _facts(card: dict[str, Any], ask_chips: list[str]) -> dict[str, Any]:
         ),
         "cohort_label": cohort_label,
         "asked_for": ask_chips,
+        "recommended_by": _recommended_by(card),
         "matches_of_ask": (card.get("aspect_match") or {}).get("clauses_matched"),
         "parts_of_ask": (card.get("aspect_match") or {}).get("clauses_total"),
         "aspects": [
@@ -126,6 +133,20 @@ def _facts(card: dict[str, Any], ask_chips: list[str]) -> dict[str, Any]:
     }
 
 
+def _recommended_by(card: dict[str, Any]) -> dict[str, Any] | None:
+    """The recommender-standing fact (app/reco_authority.py): strong standing only, as
+    people-counts and their own quotes. Null when the ask named no such requirement."""
+    st = card.get("recommender_standing")
+    if not isinstance(st, dict) or int(st.get("n_people") or 0) <= 0:
+        return None
+    return {
+        "trait": st.get("trait"),
+        "people": int(st["n_people"]),
+        "of": int(st.get("of_people") or st["n_people"]),
+        "quotes": [q.get("quote") for q in (st.get("quotes") or []) if isinstance(q, dict)][:3],
+    }
+
+
 def _has_reason(facts: dict[str, Any]) -> bool:
     """A relevance line needs something that DOES fit. Without one, the model fills the
     sentence with what is missing ("33 miles away and not in your community") — a card
@@ -135,6 +156,7 @@ def _has_reason(facts: dict[str, Any]) -> bool:
         or facts.get("same_block")
         or (facts.get("matches_of_ask") or 0) > 0
         or facts.get("reader_cohort")
+        or facts.get("recommended_by")
     )
 
 

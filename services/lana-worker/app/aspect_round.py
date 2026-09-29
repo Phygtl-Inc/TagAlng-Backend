@@ -421,6 +421,7 @@ def recall_and_rerank(
     request: str,
     user_jwt: str | None,
     fetch: Callable[[str, int], list[dict[str, Any]]],
+    parsed: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Aspect search that can FIND, not only re-order.
 
@@ -436,12 +437,13 @@ def recall_and_rerank(
     Never raises; returns `tips` unchanged when off or when nothing splits."""
     if not aspects_enabled() or not user_jwt:
         return tips
-    try:
-        from app.reco_aspects import split_query_full
+    if parsed is None:  # the caller may have split the ask already (reco_authority shares it)
+        try:
+            from app.reco_aspects import split_query_full
 
-        parsed = split_query_full(request)
-    except Exception:  # noqa: BLE001
-        return tips
+            parsed = split_query_full(request)
+        except Exception:  # noqa: BLE001
+            return tips
     clauses = parsed.get("clauses") or []
     if not clauses:
         return tips

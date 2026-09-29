@@ -3994,18 +3994,17 @@ def _tip_seek_answer_turn(
     # though his card never did — see aspect_round.recall_and_rerank. Same scope as the
     # search that just ran, including the community widen.
     from app.aspect_round import aspects_enabled, recall_and_rerank
+    from app.reco_authority import authority_enabled, recall_and_rank_by_standing
 
-    if aspects_enabled():
+    if aspects_enabled() or authority_enabled():
         _recall_circle = (
             str(_comm["place_id"])
             if _comm and not session_ctx.get("community_widened_from")
             else None
         )
-        neighbor_tips = recall_and_rerank(
-            neighbor_tips,
-            request=msg,
-            user_jwt=user_jwt,
-            fetch=lambda kind, n: find_neighbor_tips(
+
+        def _recall_fetch(kind: str, n: int) -> list[dict[str, Any]]:
+            return find_neighbor_tips(
                 user_jwt,
                 block_id=block_id,
                 query=kind,
@@ -4015,7 +4014,25 @@ def _tip_seek_answer_turn(
                 radius_meters=radius_meters() if widen else None,
                 circle_place_id=_recall_circle,
                 reco_types=_types,
-            ),
+            )
+
+        # ONE split of the ask, read by both passes: its clauses (aspects) and its
+        # requirement on who recommends (standing). Same model call as before.
+        from app.reco_aspects import split_query_full
+
+        _parsed = split_query_full(msg)
+        if aspects_enabled():
+            neighbor_tips = recall_and_rerank(
+                neighbor_tips,
+                request=msg,
+                user_jwt=user_jwt,
+                fetch=_recall_fetch,
+                parsed=_parsed,
+            )
+        # "A barber recommended by someone from Spain": the recommenders' own claims,
+        # after aspects so a strong-standing tier is the outermost order.
+        neighbor_tips = recall_and_rank_by_standing(
+            neighbor_tips, parsed=_parsed, fetch=_recall_fetch
         )
 
     if neighbor_tips:

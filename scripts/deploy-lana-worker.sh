@@ -172,6 +172,10 @@ LANA_ASPECTS: "${LANA_ASPECTS:-0}"
 # "Why Lana sees a fit" relevance line + proof headlines on results (app/reco_fit.py). On
 # by default; 0 turns off its one bounded model call per results page.
 LANA_RECO_FIT: "${LANA_RECO_FIT:-1}"
+# Recommender standing on results — "a barber recommended by someone from Spain"
+# (app/reco_authority.py). Off unless the env file says otherwise; wants migration
+# 20261230120000 on THAT database (without it, one authority read per result row).
+LANA_RECO_AUTHORITY: "${LANA_RECO_AUTHORITY:-0}"
 EOF
 
 # Warm-instance policy, chosen by the caller — this script's own defaults are exactly

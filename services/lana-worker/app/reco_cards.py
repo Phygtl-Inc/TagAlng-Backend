@@ -224,6 +224,16 @@ def subject_cards_from_tips(
             matches = [r["_aspect_match"] for r in grouped[key] if r.get("_aspect_match")]
             if matches:
                 card["aspect_match"] = max(matches, key=lambda m: m["clauses_matched"])
+            # Who stands behind it, when the ask named a requirement on the recommender
+            # ("from someone from Spain") — stamped by reco_authority on the rows. The tier
+            # sorts; only strong standing reaches the wire, with their own quotes.
+            from app.reco_authority import card_standing
+
+            tier, standing = card_standing(grouped[key], card["contributors"])
+            if tier:
+                card["_standing_tier"] = tier
+            if standing:
+                card["recommender_standing"] = standing
             cards.append(card)
 
     _attach_reads(cards, lang=lang, allow_compose=allow_compose)
@@ -235,7 +245,13 @@ def subject_cards_from_tips(
 
     # Provenance, then best match, then most voices, then title. Title last so the order is
     # total — a float tie must not leave two cards swapping places between reads.
+    from app.reco_authority import NO_TIER_RANK, TIER_RANK
+
     cards.sort(key=lambda c: (
+        # An explicit requirement on the recommender outranks provenance: the reader said
+        # WHO the recommendation must come from. Strong, then thin, never interleaved; when
+        # the ask named no such requirement every card shares the last rank and this is inert.
+        TIER_RANK.get(str(c.get("_standing_tier")), NO_TIER_RANK),
         _GROUP_RANK.get(str(c.get("group_kind")), 3),
         # Coverage of a multi-part ask, after provenance: a subject that meets both parts
         # of "great with toddlers and no wait" beats one that meets one of them well.

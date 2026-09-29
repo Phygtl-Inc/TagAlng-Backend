@@ -112,6 +112,7 @@ def authority_for(
     *,
     as_of: str | None = None,
     include_relations: bool = False,
+    public_only: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """One attester's standing on each concept, keyed by concept_id.
 
@@ -130,6 +131,11 @@ def authority_for(
     }
     if as_of:
         args["p_as_of"] = as_of
+    # Any surface other people see (a results page) passes public_only: it may only rank
+    # by or quote a claim its owner shared publicly. Sent only when set, so a database
+    # without 20261230120000 still answers the directed ask exactly as before.
+    if public_only:
+        args["p_public_only"] = True
 
     try:
         res = service_client().rpc("attester_authority", args).execute()

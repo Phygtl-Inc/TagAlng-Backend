@@ -172,12 +172,24 @@ Output ONLY valid JSON:
     {"text": "the owner speaks Italian", "aspect_hint": "owner"},
     {"text": "the porcelain is unique",  "aspect_hint": "porcelain"}
   ],
-  "subject_kind": "restaurant"
+  "subject_kind": "restaurant",
+  "recommender_trait": null
 }
 
 Rules:
 - ONE clause per requirement. "A quiet cafe with good wifi where the barista knows you"
   is three.
+- "recommender_trait" is a requirement about the PERSON RECOMMENDING, never the thing:
+  "a Turkish restaurant recommended by someone from Turkey" → "from Turkey";
+  "a barber a Spanish speaker would go to" → "speaks Spanish";
+  "a running shop, ideally from someone who has run a marathon" → "has run a marathon".
+  "a Turkish restaurant a Turkish person would vouch for" → "Turkish".
+  ONLY who the person IS or has done, in a few of the asker's words — never the verb
+  around it ("would vouch for", "recommended by"). It is NOT also a clause. Null when the
+  request says nothing about who recommends — "a Spanish barber" is about the BARBER:
+  "Spanish" is a clause and recommender_trait is null.
+- The thing they want ("a barber", "a Turkish restaurant") is subject_kind, NEVER a clause.
+  When the only requirement is on the recommender, "clauses" is empty.
 - Keep the clause in the asker's words. Do not normalise "the owner speaks Italian" into
   "multilingual staff" — the words have to match how someone else would have SAID it.
 - "aspect_hint" is a slug guess, optional, best-effort.
@@ -594,15 +606,24 @@ def reoffer_open_aspects(author_id: str, limit: int = REOFFER_BATCH) -> list[dic
 
 # ── Find ────────────────────────────────────────────────────────────────────
 
+def _empty_split() -> dict[str, Any]:
+    return {"clauses": [], "subject_kind": None, "recommender_trait": None}
+
+
 def split_query_full(request: str) -> dict[str, Any]:
-    """{"clauses": [...], "subject_kind": "barber" | None}. Never raises.
+    """{"clauses": [...], "subject_kind": "barber" | None, "recommender_trait": str | None}.
+    Never raises.
 
     subject_kind is what lets aspect search RECALL, not just rank: the second pass asks
     the ordinary tip search for every visible "barber", so a barber whose card never says
-    "Spanish" — but whose recommenders did, in the round — can still be found."""
+    "Spanish" — but whose recommenders did, in the round — can still be found.
+
+    recommender_trait is a requirement on WHO recommends ("from Turkey"), read by
+    app/reco_authority.py against the recommenders' own claims. It is never a clause: the
+    subject is not Turkish because a Turkish neighbour recommended it."""
     text = (request or "").strip()
     if len(text) < 8:
-        return {"clauses": [], "subject_kind": None}
+        return _empty_split()
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
@@ -615,7 +636,7 @@ def split_query_full(request: str) -> dict[str, Any]:
                 temperature=0.1,
             )
             if not isinstance(data, dict):
-                return {"clauses": [], "subject_kind": None}
+                return _empty_split()
             out = []
             for c in (data.get("clauses") or [])[:MAX_ASPECTS]:
                 if isinstance(c, dict) and str(c.get("text") or "").strip():
@@ -624,10 +645,11 @@ def split_query_full(request: str) -> dict[str, Any]:
                         "aspect_hint": _slug(str(c.get("aspect_hint") or "")) or None,
                     })
             kind = str(data.get("subject_kind") or "").strip()[:60] or None
-            return {"clauses": out, "subject_kind": kind}
+            trait = str(data.get("recommender_trait") or "").strip()[:80] or None
+            return {"clauses": out, "subject_kind": kind, "recommender_trait": trait}
     except Exception:
         logger.exception("reco_aspects: query split failed")
-    return {"clauses": [], "subject_kind": None}
+    return _empty_split()
 
 
 def split_query(request: str) -> list[dict[str, Any]]:
