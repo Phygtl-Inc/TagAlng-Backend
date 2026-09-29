@@ -339,3 +339,48 @@ def test_authority_for_sends_public_only_only_when_asked(monkeypatch):
     authority.authority_for("u", ["c"], public_only=True)
     assert "p_public_only" not in client.calls[0][1]
     assert client.calls[1][1]["p_public_only"] is True
+
+
+# ── the reply composer ──────────────────────────────────────────────────────
+
+
+def test_composer_rule_forbids_the_trait_when_nobody_said_it():
+    rows = [_tip("a", "dom", _standing={"tier": "thin", "quote": None, "trait": "from Spain"}),
+            _tip("b", "ed")]
+    rule = ra.composer_fact(rows, "from Spain")
+    assert "NONE of the recommenders" in rule and "Do NOT" in rule
+    assert "n-dom" not in rule
+
+
+def test_composer_rule_names_only_quote_backed_recommenders():
+    rows = [
+        _tip("a", "ana", _standing={"tier": "strong", "quote": "I grew up in Madrid", "trait": "from Spain"}),
+        _tip("b", "dom", _standing={"tier": "thin", "quote": None, "trait": "from Spain"}),
+    ]
+    rule = ra.composer_fact(rows, "from Spain")
+    assert 'n-ana ("I grew up in Madrid")' in rule and "n-dom" not in rule
+    assert "ONLY" in rule
+
+
+def test_composer_rule_absent_without_a_trait():
+    assert ra.composer_fact([_tip("a", "p")], None) is None
+
+
+def test_composer_receives_the_rule(monkeypatch):
+    import app.discovery_route as dr
+
+    seen = {}
+
+    def fake_compose(*, goal, facts, session_ctx, fallback, max_sentences):
+        seen["facts"] = facts
+        return "ok"
+
+    monkeypatch.setattr(dr, "compose_reply", fake_compose)
+    rows = [_tip("a", "dom", detail_text="Tony at Sharp Fades · barber",
+                 _standing={"tier": "thin", "quote": None, "trait": "from Spain"})]
+    dr._compose_neighbor_tip_reply(rows, detail="a barber recommended by someone from Spain",
+                                   session_ctx={}, recommender_trait="from Spain")
+    assert any("NONE of the recommenders" in f for f in seen["facts"])
+    seen.clear()
+    dr._compose_neighbor_tip_reply(rows, detail="a barber", session_ctx={})
+    assert not any("recommendation from someone" in f for f in seen["facts"])

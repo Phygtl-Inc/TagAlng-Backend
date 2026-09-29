@@ -216,3 +216,35 @@ def card_standing(rows: list[dict[str, Any]], contributors: list[dict[str, Any]]
         "of_people": len(everyone),
         "quotes": quotes,
     }
+
+
+def composer_fact(tips: list[dict[str, Any]], trait: str | None) -> str | None:
+    """The reply composer's rule for an ask that names who must recommend.
+
+    Without it the composer reads "What they asked for: …recommended by someone from Spain"
+    beside "Dom recommended Tony" and writes "a neighbour from Spain named Dom" — a claim
+    about who a real person is, made from the ASK, true or not (prod QA 2026-09-29). This
+    names exactly who may be described that way (strong standing, their own public words)
+    and forbids it for everyone else. Applies with the flag off too: the composer sees
+    the ask either way, and then nobody is named."""
+    trait = str(trait or "").strip()
+    if not trait:
+        return None
+    named: dict[str, str] = {}
+    for t in tips:
+        st = t.get("_standing") or {}
+        who = str(t.get("neighbor_label") or "").strip()
+        if st.get("tier") == TIER_STRONG and st.get("quote") and who and who not in named:
+            named[who] = str(st["quote"])
+    if named:
+        proof = "; ".join(f'{who} ("{q}")' for who, q in list(named.items())[:3])
+        return (
+            f"They asked for a recommendation from someone who is \"{trait}\". Only these "
+            f"recommenders have said so in their own words: {proof}. You may describe ONLY "
+            "them that way, and never anyone else below."
+        )
+    return (
+        f"They asked for a recommendation from someone who is \"{trait}\". NONE of the "
+        f"recommenders below has said that about themselves. Do NOT describe or imply that "
+        f"any of them is \"{trait}\" — you may say you couldn't confirm who is."
+    )

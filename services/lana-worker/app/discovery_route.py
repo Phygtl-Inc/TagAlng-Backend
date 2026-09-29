@@ -3717,6 +3717,7 @@ def _compose_neighbor_tip_reply(
     session_ctx: dict[str, Any],
     weights: list[str] | None = None,
     widened: bool = False,
+    recommender_trait: str | None = None,
 ) -> str:
     """A real neighbor recommendation — the one answer that beats Google. Every fact the
     composer gets is one the row itself carries (who, what they recommended, how far), so
@@ -3756,6 +3757,13 @@ def _compose_neighbor_tip_reply(
         if not _ask_is_covered(detail, tags, text):
             approximate = True
     facts.extend(lines)
+    # "…recommended by someone from Spain": who may be called that, and that nobody else
+    # may. Without it the ask's trait gets pinned on whichever neighbour is named first.
+    from app.reco_authority import composer_fact
+
+    _trait_rule = composer_fact(tips[:3], recommender_trait)
+    if _trait_rule:
+        facts.append(_trait_rule)
     if approximate:
         # Matched on MEANING, not on words — the ask and the recommendation share no
         # vocabulary at all. That is exactly the case the reader cannot verify for
@@ -3996,6 +4004,7 @@ def _tip_seek_answer_turn(
     from app.aspect_round import aspects_enabled, recall_and_rerank
     from app.reco_authority import authority_enabled, recall_and_rank_by_standing
 
+    _parsed: dict[str, Any] | None = None
     if aspects_enabled() or authority_enabled():
         _recall_circle = (
             str(_comm["place_id"])
@@ -4052,6 +4061,7 @@ def _tip_seek_answer_turn(
             session_ctx=session_ctx,
             weights=weights,
             widened=widen,
+            recommender_trait=(_parsed or {}).get("recommender_trait"),
         )
         # Join the "Why Lana sees a fit" compose started when the cards were built — it
         # ran alongside the reply above, so this waits only for what is left of its budget.
