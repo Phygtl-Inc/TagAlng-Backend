@@ -107,7 +107,9 @@ def test_cards_are_google_cards_top_three_and_never_community_rows(monkeypatch):
     rows = [_row("c", community={"member_count": 3}), _row("a"), _row("b"), _row("d"), _row("e")]
     cards = g.build_cards(rows, ask="turkish places", chips=["turkish restaurant"],
                           origin=(28.4, -81.25))
-    assert sorted(fetched) == ["a", "b", "d"]
+    # The whole pool is enriched (our community row never is); three are shown.
+    assert sorted(fetched) == ["a", "b", "d", "e"]
+    assert [x["subject_ref"] for x in cards] == ["google:a", "google:b", "google:d"]
     c = cards[0]
     assert c["source"] == "google" and c["group_kind"] == "google" and c["contributors"] == []
     assert c["google"] == {"rating": 4.6, "rating_count": 1240, "maps_url": "https://maps.google.com/?cid=a"}
@@ -172,6 +174,7 @@ def test_fallback_wrapper_stamps_cards_without_the_recommender_chip(monkeypatch)
     monkeypatch.setattr(dr, "_tip_seek_fallback_core", core)
     monkeypatch.setattr("app.places._centroid", lambda *a: (28.4, -81.25))
     monkeypatch.setattr(g, "stamp_google_cards", lambda ctx, **kw: seen.update(kw))
+    monkeypatch.setattr("app.reader_claims.load_reader_claims", lambda uid: [{"id": "c1", "for": uid}])
     ctx = {"ask_draft": {"chips": [
         {"label": "turkish restaurant", "field": "category"},
         {"label": "from a Turkish person", "field": "recommended_by"},
@@ -181,6 +184,7 @@ def test_fallback_wrapper_stamps_cards_without_the_recommender_chip(monkeypatch)
     assert out == "reply"
     assert seen["chips"] == ["turkish restaurant"] and seen["lang"] == "es"
     assert seen["origin"] == (28.4, -81.25)
+    assert seen["claims"] == [{"id": "c1", "for": "u"}]
 
 
 def test_response_carries_google_cards_outside_the_peer_gate():
@@ -201,3 +205,85 @@ def test_turn_payload_ships_google_cards_on_a_non_peer_turn():
                                                   phone_verified=True, home_block_id="b"))
     assert [c.title for c in payload["google_reco_cards"]] == ["Cafe 34 Istanbul"]
     assert payload["reco_cards"] == []  # the neighbour surface stays gated
+
+
+
+# ── For you: the reader's claims ─────────────────────────────────────────────
+
+CLAIMS = [
+    {"id": "c1", "label": "Eats out with their kids", "bucket": "stage", "sayable": True, "about": "self"},
+    {"id": "c2", "label": "Muslim", "bucket": "faith", "sayable": False, "about": "self"},
+]
+FAMILY = [{"text": "So patient with our two toddlers, and they have a kids menu.",
+           "author": "Maria G.", "author_url": "https://maps.google.com/u/3"}]
+
+
+def test_for_you_needs_a_real_claim_and_a_verbatim_quote():
+    quotes = lambda raw: g._ground_quotes(raw, FAMILY)  # noqa: E731
+    good = {"claim": "c1", "line": "You've mentioned your kids — reviewers say it's great for families.",
+            "quotes": [{"review": 1, "excerpt": "So patient with our two toddlers"}]}
+    assert g.ground_for_you([good], CLAIMS, quotes)[0]["claim_label"] == "Eats out with their kids"
+    invented = {**good, "quotes": [{"review": 1, "excerpt": "best place for kids in Orlando"}]}
+    not_theirs = {**good, "claim": "c9"}
+    no_quote = {**good, "quotes": []}
+    assert g.ground_for_you([invented, not_theirs, no_quote], CLAIMS, quotes) == []
+
+
+def test_a_quiet_claim_orders_but_is_never_named():
+    halal = [{"text": "Everything here is halal and freshly grilled.", "author": "A", "author_url": None}]
+    item = {"claim": "c2", "line": "Reviewers note everything here is halal.",
+            "quotes": [{"review": 1, "excerpt": "Everything here is halal"}]}
+    out = g.ground_for_you([item], CLAIMS, lambda raw: g._ground_quotes(raw, halal))
+    assert out and out[0]["claim_label"] is None
+
+
+def test_places_the_reader_fits_lead_and_nothing_is_dropped(monkeypatch):
+    monkeypatch.setattr(g, "place_reviews", lambda pid, **k: _details(pid, reviews=FAMILY))
+
+    def compose(places, **k):
+        assert k["claims"] == CLAIMS
+        return {"places": [
+            {"id": p["place_id"], "fit_line": "x",
+             "for_you": [{"claim": "c1", "line": "Great for your kids.",
+                          "quotes": [{"review": 1, "excerpt": "So patient with our two toddlers"}]}]
+             if p["place_id"] == "d" else []}
+            for p in places]}
+
+    monkeypatch.setattr(g, "_compose", compose)
+    # The independent relevance check confirms everything it is shown here.
+    monkeypatch.setattr("app.reader_claims.judge_for_you", lambda pairs: {p["key"] for p in pairs})
+    cards = g.build_cards([_row("a"), _row("b"), _row("d"), _row("e")], ask="restaurants",
+                          chips=[], claims=CLAIMS)
+    assert [c["subject_ref"] for c in cards] == ["google:d", "google:a", "google:b"]
+    assert cards[0]["for_you"][0]["review_quotes"][0]["author"] == "Maria G."
+    assert cards[1]["for_you"] == []
+
+
+def test_no_claims_is_todays_page(monkeypatch):
+    monkeypatch.setattr(g, "place_reviews", lambda pid, **k: _details(pid))
+    seen = {}
+
+    def compose(places, **k):
+        seen["claims"] = k.get("claims")
+        return {}
+
+    monkeypatch.setattr(g, "_compose", compose)
+    cards = g.build_cards([_row("a"), _row("b")], ask="x", chips=[])
+    assert [c["subject_ref"] for c in cards] == ["google:a", "google:b"]
+    assert all(c["for_you"] == [] for c in cards) and not seen["claims"]
+    assert "no reader_claims" in g._prompt(False) and "reader_claims" in g._prompt(True)
+
+
+def test_pool_is_used_and_held_out_of_storage_too():
+    ctx = {g.CTX_KEY: ["cards"], g.POOL_KEY: [{"place_id": "a"}]}
+    g.hold_out_of_storage(ctx)
+    assert g.POOL_KEY not in ctx
+
+
+
+def test_the_page_is_composed_one_call_per_place(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g, "place_reviews", lambda pid, **k: _details(pid))
+    monkeypatch.setattr(g, "_compose", lambda places, **k: calls.append([p["place_id"] for p in places]) or {})
+    g.build_cards([_row("a"), _row("b"), _row("d")], ask="x", chips=[])
+    assert sorted(calls) == [["a"], ["b"], ["d"]]

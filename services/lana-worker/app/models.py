@@ -156,6 +156,18 @@ class RecoSynthesisRow(BaseModel):
     shared_trait: str | None = None
 
 
+class RecoForYouRow(BaseModel):
+    """Why this card fits THE READER: one of their own claims it is proven to serve, with
+    the quotes that prove it (docs/superpowers/specs/2026-09-29-claims-rank-for-you-design.md).
+    `claim_label` only for an everyday claim — a quiet one (faith, heritage, health) may
+    order and explain the place, never be named."""
+
+    line: str
+    claim_label: str | None = None
+    quotes: list[str] = Field(default_factory=list)
+    review_quotes: list[RecoReviewQuoteRow] = Field(default_factory=list)
+
+
 class RecoStandingQuoteRow(BaseModel):
     nickname: str
     quote: str
@@ -244,6 +256,9 @@ class RecoCardRow(BaseModel):
     # its numbers are Google's (`google`). "neighbours" for every other card.
     source: str = "neighbours"
     google: RecoGoogleRow | None = None
+    # The reader's own claims this card is proven to serve — orders the page and opens
+    # "Why Lana sees a fit". Empty for a reader with no claims, which is today's card.
+    for_you: list[RecoForYouRow] = Field(default_factory=list)
     tip_rec: bool = True
 
 

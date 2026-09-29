@@ -134,7 +134,7 @@ def test_changed_facts_are_rewritten():
 
 
 def test_slow_model_leaves_the_card_and_fills_the_cache_later():
-    def slow(facts, lang):
+    def slow(facts, lang, claims=None):
         time.sleep(0.4)
         return GOOD
 
@@ -149,7 +149,7 @@ def test_slow_model_leaves_the_card_and_fills_the_cache_later():
 
 
 def test_start_and_finish_overlap_other_work():
-    def compose(facts, lang):
+    def compose(facts, lang, claims=None):
         time.sleep(0.2)
         return GOOD
 
@@ -181,3 +181,62 @@ def test_language_goes_by_name():
     assert rf._language_name("es") == "Spanish (es)"
     assert rf._language_name("pt-BR") == "Portuguese (Brazil) (pt-br)"
     assert rf._language_name("xx") == "xx"
+
+
+# ── For you: the reader's claims (2026-09-29 claims-rank spec) ───────────────
+
+CLAIMS = [{"id": "c1", "label": "Has toddlers", "bucket": "stage", "sayable": True, "about": "self"}]
+
+
+def _fy_card(**kw):
+    card = _card(**kw)
+    card["contributors"] = [{"description": "so gentle with the toddlers, they loved her", "peer_user_id": "p"}]
+    return card
+
+
+def test_for_you_quote_must_be_the_neighbours_own_words():
+    facts = rf._facts(_fy_card(), [])
+    good = {"id": facts["id"], "fit_line": "x", "for_you": [
+        {"claim": "c1", "line": "You've mentioned your toddlers — a neighbour says she's gentle with them.",
+         "quotes": ["so gentle with the toddlers"]}]}
+    out = rf._valid({"cards": [good]}, {facts["id"]: facts}, CLAIMS)[facts["id"]]
+    assert out["for_you"][0]["quotes"] == ["so gentle with the toddlers"]
+    assert out["for_you"][0]["claim_label"] == "Has toddlers"
+    bad = {**good, "for_you": [{**good["for_you"][0], "quotes": ["the best pediatric dentist in town"]}]}
+    assert rf._valid({"cards": [bad]}, {facts["id"]: facts}, CLAIMS)[facts["id"]]["for_you"] == []
+
+
+def test_order_for_you_moves_up_only_within_tier_and_group():
+    cards = [
+        {"title": "circle-plain", "group_kind": "circle"},
+        {"title": "block-plain", "group_kind": "block"},
+        {"title": "block-fits", "group_kind": "block", "for_you": [{"line": "x"}]},
+        {"title": "strong-plain", "group_kind": "nearby", "_standing_tier": "strong"},
+    ]
+    rf.order_for_you(cards)
+    assert [c["title"] for c in cards] == ["strong-plain", "circle-plain", "block-fits", "block-plain"]
+
+
+def test_no_claims_keeps_todays_order_and_prompt():
+    cards = [{"title": "a", "group_kind": "block"}, {"title": "b", "group_kind": "block"}]
+    rf.order_for_you(cards)
+    assert [c["title"] for c in cards] == ["a", "b"]
+    assert "no reader_claims" in rf._prompt(False)
+
+
+def test_start_fit_hands_the_readers_claims_to_the_one_call():
+    seen = {}
+
+    def compose(facts, lang, claims=None):
+        seen["claims"] = claims
+        return {facts[0]["id"]: {"fit_line": "Fits.", "headlines": {},
+                                 "for_you": [{"line": "For your toddlers.", "claim_label": "Has toddlers",
+                                              "quotes": ["so gentle with the toddlers"]}]}}
+
+    cards = [_fy_card(), _card(title="Other", subject_ref="s2")]
+    with mock.patch("app.reader_claims.load_reader_claims", return_value=CLAIMS), \
+            mock.patch.object(rf, "_compose", side_effect=compose):
+        rf.attach_fit(cards, reader_id="r-claims")
+    assert seen["claims"] == CLAIMS
+    fitted = [c for c in cards if c.get("for_you")]
+    assert fitted and fitted[0]["for_you"][0]["claim_label"] == "Has toddlers"

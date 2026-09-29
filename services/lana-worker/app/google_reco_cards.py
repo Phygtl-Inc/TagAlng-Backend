@@ -38,6 +38,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 CTX_KEY = "google_reco_cards"
+# The wider set the fallback searches and enriches; the reader's claims pick the order and
+# the top MAX_CARDS are shown (docs/superpowers/specs/2026-09-29-claims-rank-for-you-design.md).
+POOL_KEY = "google_place_pool"
+POOL_SIZE = 6
 MAX_CARDS = 3
 MAX_ASPECTS = 3
 _DETAILS_URL = "https://places.googleapis.com/v1/places/"
@@ -65,10 +69,16 @@ For each place write:
 EVERY fit_line, label and headline MUST be in the "language" given. Excerpts stay exactly
 as written in the review, whatever language that is.
 
+{reader_rules}
+For a Google place, a for_you quote is {"review": <n>, "excerpt": "<exact words>"}, the
+same rule as aspect quotes.
+
 Output ONLY JSON:
 {"places": [{"id": "<place id>", "fit_line": "…",
              "aspects": [{"label": "…", "headline": "…",
-                          "quotes": [{"review": 1, "excerpt": "…"}]}]}]}
+                          "quotes": [{"review": 1, "excerpt": "…"}]}],
+             "for_you": [{"claim": "c1", "line": "…",
+                          "quotes": [{"review": 2, "excerpt": "…"}]}]}]}
 """
 
 _LANG_NAMES = {"en": "English", "es": "Spanish", "pt": "Portuguese", "pt-br": "Portuguese (Brazil)"}
@@ -145,7 +155,20 @@ def place_reviews(place_id: str, *, lang: str = "en") -> dict[str, Any] | None:
     }
 
 
-def _compose(places: list[dict[str, Any]], *, ask: str, chips: list[str], lang: str) -> dict[str, Any]:
+def _prompt(has_claims: bool) -> str:
+    # NOT str.format: the prompt is full of literal JSON braces.
+    from app.reader_claims import COMPOSER_RULES
+
+    return _PROMPT.replace(
+        "{reader_rules}",
+        COMPOSER_RULES if has_claims else 'There are no reader_claims: "for_you" is always [].',
+    )
+
+
+def _compose(
+    places: list[dict[str, Any]], *, ask: str, chips: list[str], lang: str,
+    claims: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """ONE model call for the page. {} on any failure."""
     from app.orchestrator.llm import llm_configured, llm_json, router_model
 
@@ -155,6 +178,10 @@ def _compose(places: list[dict[str, Any]], *, ask: str, chips: list[str], lang: 
         "language": _language(lang),
         "what_they_asked_for": ask,
         "their_ask_chips": chips,
+        "reader_claims": [
+            {"id": c["id"], "claim": c["label"], "sayable": c["sayable"], "about": c["about"]}
+            for c in claims or []
+        ],
         "places": [
             {
                 "id": p["place_id"],
@@ -169,9 +196,9 @@ def _compose(places: list[dict[str, Any]], *, ask: str, chips: list[str], lang: 
     try:
         data = llm_json(
             model=router_model(),
-            system=_PROMPT,
+            system=_prompt(bool(claims)),
             user_payload=json.dumps(payload, ensure_ascii=False),
-            max_tokens=1600,
+            max_tokens=700,
             temperature=0.2,
         )
     except Exception:  # noqa: BLE001
@@ -180,7 +207,92 @@ def _compose(places: list[dict[str, Any]], *, ask: str, chips: list[str], lang: 
     return data if isinstance(data, dict) else {}
 
 
-def ground(parsed: dict[str, Any], places: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _ground_quotes(raw: Any, reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The cited excerpts that appear verbatim (case and spacing aside) in the review they
+    name, as the review's own words with the reviewer attributed. At most two."""
+    quotes: list[dict[str, Any]] = []
+    for q in (raw if isinstance(raw, list) else [])[:2]:
+        if not isinstance(q, dict):
+            continue
+        try:
+            idx = int(q.get("review")) - 1
+        except (TypeError, ValueError):
+            continue
+        excerpt = str(q.get("excerpt") or "").strip().strip('"“”').strip()
+        if not (0 <= idx < len(reviews)) or len(excerpt) < 8:
+            continue
+        review = reviews[idx]
+        if _norm(excerpt) not in _norm(review["text"]):
+            continue
+        if any(_norm(x["text"]) == _norm(excerpt) for x in quotes):
+            continue
+        quotes.append({
+            "text": excerpt,
+            "author": review.get("author"),
+            "author_url": review.get("author_url"),
+        })
+    return quotes
+
+
+def ground_for_you(
+    raw: Any, claims: list[dict[str, Any]], quotes_of: Any,
+) -> list[dict[str, Any]]:
+    """The "For you" items the evidence supports: a claim the reader actually holds, a line,
+    and at least one verified quote (`quotes_of(item_quotes)` does the verifying for the
+    surface). `claim_label` is set ONLY for a sayable claim — a quiet one (faith,
+    heritage) may order and explain the place, never be named."""
+    by_id = {c["id"]: c for c in claims or []}
+    out: list[dict[str, Any]] = []
+    for f in (raw if isinstance(raw, list) else [])[:2]:
+        if not isinstance(f, dict):
+            continue
+        claim = by_id.get(str(f.get("claim") or ""))
+        line = str(f.get("line") or "").strip()
+        if not claim or not line or len(line) > 240:
+            continue
+        quotes = quotes_of(f.get("quotes"))
+        if not quotes:
+            continue
+        out.append({
+            "claim_id": claim["id"],
+            "claim_label": claim["label"] if claim["sayable"] else None,
+            "line": line,
+            "quotes": quotes,
+        })
+    return out
+
+
+def _compose_page(
+    places: list[dict[str, Any]], *, ask: str, chips: list[str], lang: str,
+    claims: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """One model call PER PLACE, all at once, then one judge call for the page's "For you".
+
+    It was one call for the whole page, and it was the whole wait: 28.7s of a 33s turn for
+    six places (live, 2026-09-29) — one long answer is written token by token. Six short
+    ones in parallel take about as long as one. Grounded per place; any place whose call
+    fails simply has no fit line or evidence."""
+    if not places:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(places), thread_name_prefix="gcompose") as pool:
+        parsed = list(pool.map(
+            lambda p: _compose([p], ask=ask, chips=chips, lang=lang, claims=claims), places
+        ))
+    items: list[dict[str, Any]] = []
+    for p in parsed:
+        items.extend(i for i in (p.get("places") or []) if isinstance(i, dict))
+    grounded = ground({"places": items}, places, claims)
+    if claims:
+        from app.reader_claims import keep_judged
+
+        keep_judged(list(grounded.values()), claims)
+    return grounded
+
+
+def ground(
+    parsed: dict[str, Any], places: list[dict[str, Any]],
+    claims: list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Keep only what the reviews support. {place id: {"fit_line", "aspects"}}.
 
     A quote survives only when its excerpt appears verbatim (case and spacing aside) in the
@@ -205,33 +317,16 @@ def ground(parsed: dict[str, Any], places: list[dict[str, Any]]) -> dict[str, di
             # No counts, by decision: five reviews of thousands is not a tally.
             if not label or not headline or _DIGIT.search(headline):
                 continue
-            quotes: list[dict[str, Any]] = []
-            for q in (a.get("quotes") or [])[:2]:
-                if not isinstance(q, dict):
-                    continue
-                try:
-                    idx = int(q.get("review")) - 1
-                except (TypeError, ValueError):
-                    continue
-                excerpt = str(q.get("excerpt") or "").strip().strip('"“”').strip()
-                if not (0 <= idx < len(reviews)) or len(excerpt) < 8:
-                    continue
-                review = reviews[idx]
-                if _norm(excerpt) not in _norm(review["text"]):
-                    continue
-                if any(_norm(x["text"]) == _norm(excerpt) for x in quotes):
-                    continue
-                quotes.append({
-                    "text": excerpt,
-                    "author": review.get("author"),
-                    "author_url": review.get("author_url"),
-                })
+            quotes = _ground_quotes(a.get("quotes"), reviews)
             if quotes:
                 aspects.append({"label": label, "headline": headline, "quotes": quotes})
         line = str(item.get("fit_line") or "").strip()
         out[place["place_id"]] = {
             "fit_line": line if 0 < len(line) <= 240 else None,
             "aspects": aspects,
+            "for_you": ground_for_you(
+                item.get("for_you"), claims or [], lambda raw, _r=reviews: _ground_quotes(raw, _r)
+            ),
         }
     return out
 
@@ -259,15 +354,19 @@ def build_cards(
     lang: str = "en",
     origin: tuple[float, float] | None = None,
     category: str | None = None,
+    claims: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Google search rows in, RecoCardRow-shaped dicts out. [] on any failure."""
+    """Google search rows in, RecoCardRow-shaped dicts out. [] on any failure.
+
+    The whole pool is enriched; places a reader claim is PROVEN to serve lead (Google's
+    order among equals), and the top MAX_CARDS are returned."""
     candidates = [
         p for p in places
         if isinstance(p, dict) and p.get("place_id") and not (p.get("community") or {}).get("member_count")
-    ][:MAX_CARDS]
+    ][:POOL_SIZE]
     if not candidates:
         return []
-    with ThreadPoolExecutor(max_workers=MAX_CARDS, thread_name_prefix="gplace") as pool:
+    with ThreadPoolExecutor(max_workers=POOL_SIZE, thread_name_prefix="gplace") as pool:
         details = list(pool.map(lambda p: place_reviews(str(p["place_id"]), lang=lang), candidates))
     enriched = []
     for p, d in zip(candidates, details):
@@ -276,7 +375,11 @@ def build_cards(
     if not enriched:
         return []
     with_reviews = [e for e in enriched if e["reviews"]]
-    grounded = ground(_compose(with_reviews, ask=ask, chips=chips, lang=lang), with_reviews) if with_reviews else {}
+    grounded = _compose_page(with_reviews, ask=ask, chips=chips, lang=lang, claims=claims)
+    # Claims RANK, never filter: a place the reader's claims are proven to fit leads.
+    # Stable, so Google's own order holds among equals.
+    enriched.sort(key=lambda e: -len((grounded.get(e["place_id"]) or {}).get("for_you") or []))
+    enriched = enriched[:MAX_CARDS]
 
     cards: list[dict[str, Any]] = []
     for e in enriched:
@@ -309,6 +412,15 @@ def build_cards(
                 }
                 for a in g.get("aspects") or []
             ] or None,
+            "for_you": [
+                {
+                    "line": f["line"],
+                    "claim_label": f["claim_label"],
+                    "quotes": [q["text"] for q in f["quotes"]],
+                    "review_quotes": f["quotes"],
+                }
+                for f in g.get("for_you") or []
+            ],
             "source": "google",
             "google": {
                 "rating": e.get("rating"),
@@ -318,9 +430,11 @@ def build_cards(
             "tip_rec": False,
         })
     logger.info(
-        "google_reco_cards places=%d details=%d with_reviews=%d grounded=%d aspects=%d",
-        len(candidates), len(enriched), len(with_reviews), len(grounded),
-        sum(len(c["aspects"] or []) for c in cards),
+        "google_reco_cards pool=%d with_reviews=%d grounded=%d shown=%d aspects=%d "
+        "claims=%d for_you=%d",
+        len(candidates), len(with_reviews), len(grounded), len(cards),
+        sum(len(c["aspects"] or []) for c in cards), len(claims or []),
+        sum(len(c["for_you"]) for c in cards),
     )
     return cards
 
@@ -333,17 +447,21 @@ def stamp_google_cards(
     lang: str,
     origin: tuple[float, float] | None,
     category: str | None,
+    claims: list[dict[str, Any]] | None = None,
 ) -> None:
     """Build the Google cards for this turn's fallback list onto ctx[CTX_KEY]. Never
     raises; clears the key when there is nothing to show, so a stale set never renders."""
     ctx[CTX_KEY] = None
     if not google_cards_enabled():
         return
-    places = ctx.get("google_place_suggestions")
+    places = ctx.get(POOL_KEY) or ctx.get("google_place_suggestions")
     if not isinstance(places, list) or not places:
         return
     try:
-        cards = build_cards(places, ask=ask, chips=chips, lang=lang, origin=origin, category=category)
+        cards = build_cards(
+            places, ask=ask, chips=chips, lang=lang, origin=origin, category=category,
+            claims=claims,
+        )
     except Exception:  # noqa: BLE001 — the plain list is still the answer
         logger.warning("google_reco_cards.build_failed", exc_info=True)
         return
@@ -358,5 +476,7 @@ def hold_out_of_storage(*ctxs: dict[str, Any]) -> Any:
     for c in ctxs:
         if isinstance(c, dict):
             val = c.pop(CTX_KEY, None)
+            # The pool is Google place content too, and only ever needed this turn.
+            c.pop(POOL_KEY, None)
             held = held or val
     return held

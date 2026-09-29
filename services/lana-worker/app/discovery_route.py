@@ -3410,6 +3410,7 @@ def _tip_seek_fallback_reply(
         from app.google_reco_cards import stamp_google_cards
         from app.places import _centroid
         from app.tip_rec_cascade import _ask_chips, _ask_recommender_chips
+        from app.reader_claims import load_reader_claims
 
         # The recommender chip is about neighbours; Google reviewers can never meet it.
         _by = {c.casefold() for c in _ask_recommender_chips(ctx)}
@@ -3420,6 +3421,7 @@ def _tip_seek_fallback_reply(
             lang=str(session_ctx.get("preferred_lang") or "en"),
             origin=_centroid(None, block_id, user_id),
             category=category,
+            claims=load_reader_claims(user_id),
         )
     except Exception:  # noqa: BLE001 — the plain list is still the answer
         logging.getLogger(__name__).warning("google_reco_cards_stamp_failed", exc_info=True)
@@ -3457,6 +3459,7 @@ def _tip_seek_fallback_core(
     ctx.pop("rec_widen_noun", None)
     ctx.pop("rec_chips", None)
     ctx.pop("google_place_suggestions", None)
+    ctx.pop("google_place_pool", None)
     # Consume the "already asked to pick" flag (re-set below only if we ask again this turn).
     already_asked = bool(session_ctx.get("rec_filter_asked"))
     ctx.pop("rec_filter_asked", None)
@@ -3487,13 +3490,19 @@ def _tip_seek_fallback_core(
         user_id, block_id, detail, category, widen, _enabled, already_asked,
     )
 
+    from app.google_reco_cards import POOL_SIZE
+
     def _plain(reason_widen: bool) -> str:
         places = _search_tip_places(
             query=base_query, block_id=block_id, zip_for_bias=zip_for_bias, user_id=user_id,
+            limit=POOL_SIZE,
         )
         if not places:
             return ""
         ctx["google_place_suggestions"] = places[:3]
+        # The wider pool the cards rank by the reader's claims (app/google_reco_cards.py);
+        # the plain list above stays three for older clients.
+        ctx["google_place_pool"] = places[:POOL_SIZE]
         if reason_widen:
             if not posted:
                 return (
@@ -3552,30 +3561,22 @@ def _tip_seek_fallback_core(
     request_filters = [f for f in filters if f.get("source") == "request"]
     claim_filters = [f for f in filters if f.get("source") != "request"]
 
-    if request_filters:
-        chosen = request_filters[0]
-        refinements = request_filters[1:] + claim_filters
-    else:
-        # Open request — 2+ genuinely distinct claim angles and we haven't asked yet → ask the
-        # user to pick (chips post each angle's own query back; "Just show all" widens).
-        if len(claim_filters) >= 2 and not already_asked:
-            ctx["rec_filter_asked"] = True
-            chips = [
-                {"label": f["label"], "message": f["query"], "style": "primary"}
+    # Claims RANK, they never filter and never cost a turn (docs/superpowers/specs/
+    # 2026-09-29-claims-rank-for-you-design.md). Only what the ASK itself says filters; a
+    # claim angle ("Vegetarian" from a profile) becomes an optional chip after the answer,
+    # and the reader's claims order the cards instead (google_reco_cards "For you"). This
+    # used to hard-filter on one claim angle and ask "want kid-friendly or vegetarian?"
+    # before searching at all when there were two.
+    if not request_filters:
+        reply = _plain(reason_widen=False)
+        if reply and claim_filters:
+            ctx["rec_chips"] = [
+                {"label": f["label"], "message": f["query"], "style": "secondary"}
                 for f in claim_filters[:3]
             ]
-            chips.append(
-                {"label": "Just show all", "message": f"show me all {noun}", "style": "secondary"}
-            )
-            ctx["rec_chips"] = chips
-            angles = _join_labels([f["label"] for f in claim_filters[:3]])
-            return (
-                f"I can tailor this to you — want {angles}? Tap one, or “Just show all” for "
-                "everything nearby."
-            )
-        # Single obvious claim angle, or we already asked → apply the top one.
-        chosen = claim_filters[0]
-        refinements = claim_filters[1:]
+        return reply
+    chosen = request_filters[0]
+    refinements = request_filters[1:] + claim_filters
     req_attrs = list(chosen.get("required_attrs") or [])
     places = _search_tip_places(
         query=str(chosen.get("query") or base_query), block_id=block_id,
@@ -3583,6 +3584,8 @@ def _tip_seek_fallback_core(
         included_type=chosen.get("included_type"), required_attrs=req_attrs, limit=10,
     )
     verified = _verify_places(places, req_attrs)
+    if verified:
+        ctx["google_place_pool"] = verified[:POOL_SIZE]
     logging.getLogger(__name__).info(
         "tip_seek_fallback.applied label=%r type=%r attrs=%s found=%d verified=%d",
         chosen.get("label"), chosen.get("included_type"), req_attrs, len(places), len(verified),
@@ -3618,10 +3621,12 @@ def _tip_seek_fallback_core(
     # back to the plain nearby list rather than claiming an unverified match.
     fallback = _search_tip_places(
         query=base_query, block_id=block_id, zip_for_bias=zip_for_bias, user_id=user_id,
+        limit=POOL_SIZE,
     )
     if not fallback:
         return ""
     ctx["google_place_suggestions"] = fallback[:3]
+    ctx["google_place_pool"] = fallback[:POOL_SIZE]
     ctx["rec_widen_noun"] = noun
     label = str(chosen.get("label") or "").strip().lower() or "matching"
     if not posted:

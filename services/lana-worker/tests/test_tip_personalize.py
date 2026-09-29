@@ -82,18 +82,22 @@ class TestTipFallbackHybrid(unittest.TestCase):
     def _patch_search(self, fn):
         return mock.patch.object(dr, "_search_tip_places", side_effect=fn)
 
-    def test_single_filter_applies_and_verifies(self) -> None:
+    def test_a_claim_angle_never_filters_it_becomes_a_chip(self) -> None:
+        """Claims RANK, they never filter (2026-09-29 claims-rank spec): a vegetarian claim
+        on a plain "restaurants" ask searches the plain ask — a great place Google has not
+        tagged veg must not vanish — and offers the angle as a chip after the answer."""
         filters = [{
             "label": "Vegetarian", "query": "vegetarian restaurant",
             "included_type": "vegetarian_restaurant",
             "required_attrs": ["servesVegetarianFood"],
             "reframe": "Since you're vegetarian, I kept these veg-friendly.",
         }]
+        seen: list[dict] = []
 
         def fake_search(*, query, block_id, zip_for_bias, user_id,
                         included_type=None, required_attrs=None, limit=3):
-            return [{"name": "Green Fork", "address": "1 St", "place_id": "p1",
-                     "attrs": {"servesVegetarianFood": True}}]
+            seen.append({"query": query, "type": included_type, "attrs": required_attrs})
+            return [{"name": "Steak & Co", "address": "1 St", "place_id": "p1", "attrs": {}}]
 
         ctx = _ctx()
         with self._patch_personalize(filters), self._patch_search(fake_search):
@@ -101,15 +105,13 @@ class TestTipFallbackHybrid(unittest.TestCase):
                 ctx=ctx, msg="find me restaurants", detail="restaurants", category="Food",
                 block_id="zip-32827", session_ctx={"zip": "32827"}, user_id="u1",
             )
-        self.assertIn("veg-friendly", reply)
-        self.assertIn("genuinely match", reply)
-        self.assertEqual([p["name"] for p in ctx["google_place_suggestions"]], ["Green Fork"])
-        self.assertEqual(ctx["rec_widen_noun"], "Food")
-        # refine chip present: a "See all Food" widen
-        labels = [c["label"] for c in ctx["rec_chips"]]
-        self.assertIn("See all Food", labels)
+        self.assertEqual(seen, [{"query": "restaurant", "type": None, "attrs": None}])
+        self.assertNotIn("veg-friendly", reply)
+        self.assertEqual([p["name"] for p in ctx["google_place_suggestions"]], ["Steak & Co"])
+        self.assertEqual([c["label"] for c in ctx["rec_chips"]], ["Vegetarian"])
+        self.assertEqual(ctx["rec_chips"][0]["message"], "vegetarian restaurant")
 
-    def test_two_filters_asks_first_no_search(self) -> None:
+    def test_two_claim_angles_answer_now_never_ask_first(self) -> None:
         filters = [
             {"label": "Kid-friendly", "query": "kid friendly restaurant",
              "included_type": None, "required_attrs": ["goodForChildren"], "reframe": "x"},
@@ -121,7 +123,7 @@ class TestTipFallbackHybrid(unittest.TestCase):
 
         def fake_search(**kw):
             called["n"] += 1
-            return [{"name": "Should Not Search", "attrs": {}}]
+            return [{"name": "Anything", "place_id": "p9", "attrs": {}}]
 
         ctx = _ctx()
         with self._patch_personalize(filters), self._patch_search(fake_search):
@@ -129,37 +131,10 @@ class TestTipFallbackHybrid(unittest.TestCase):
                 ctx=ctx, msg="find me restaurants", detail="restaurants", category="Food",
                 block_id="zip-32827", session_ctx={"zip": "32827"}, user_id="u1",
             )
-        self.assertEqual(called["n"], 0)  # ask first, don't search yet
-        self.assertNotIn("google_place_suggestions", ctx)
-        self.assertTrue(ctx.get("rec_filter_asked"))
-        self.assertIn("Kid-friendly", reply)
-        self.assertIn("Vegetarian", reply)
-        chip_labels = [c["label"] for c in ctx["rec_chips"]]
-        self.assertEqual(chip_labels, ["Kid-friendly", "Vegetarian", "Just show all"])
-
-    def test_two_filters_already_asked_applies_top(self) -> None:
-        filters = [
-            {"label": "Kid-friendly", "query": "kid friendly restaurant",
-             "included_type": None, "required_attrs": ["goodForChildren"], "reframe": "kids!"},
-            {"label": "Vegetarian", "query": "vegetarian restaurant",
-             "included_type": "vegetarian_restaurant",
-             "required_attrs": ["servesVegetarianFood"], "reframe": "veg!"},
-        ]
-
-        def fake_search(*, query, block_id, zip_for_bias, user_id,
-                        included_type=None, required_attrs=None, limit=3):
-            return [{"name": "Playland Diner", "attrs": {"goodForChildren": True}}]
-
-        ctx = _ctx()
-        with self._patch_personalize(filters), self._patch_search(fake_search):
-            reply = dr._tip_seek_fallback_reply(
-                ctx=ctx, msg="kid friendly restaurant", detail="restaurants", category="Food",
-                block_id="zip-32827",
-                session_ctx={"zip": "32827", "rec_filter_asked": True}, user_id="u1",
-            )
-        self.assertIn("kids!", reply)
-        self.assertEqual([p["name"] for p in ctx["google_place_suggestions"]], ["Playland Diner"])
-        self.assertNotIn("rec_filter_asked", ctx)  # cleared after applying
+        self.assertEqual(called["n"], 1)  # searched straight away
+        self.assertFalse(ctx.get("rec_filter_asked"))
+        self.assertNotIn("tailor", reply)
+        self.assertEqual([c["label"] for c in ctx["rec_chips"]], ["Kid-friendly", "Vegetarian"])
 
     def test_request_constraint_wins_over_claim(self) -> None:
         """Demo bug: 'kids friendly restaurant' must not be overridden by a Sicilian-heritage
@@ -202,6 +177,9 @@ class TestTipFallbackHybrid(unittest.TestCase):
         filters = [{
             "label": "Kid-friendly", "query": "kid friendly restaurant",
             "included_type": None, "required_attrs": ["goodForChildren"], "reframe": "kids!",
+            # The ASK said kid-friendly — request constraints still filter, and are honest
+            # when Google cannot confirm them.
+            "source": "request",
         }]
 
         def fake_search(*, query, block_id, zip_for_bias, user_id,
