@@ -513,3 +513,25 @@ def test_composer_uses_the_unchecked_wording_when_the_flag_is_off(monkeypatch):
     dr._compose_neighbor_tip_reply(rows, detail="barber from someone from Turkey",
                                    session_ctx={}, recommender_trait="from Turkey")
     assert any("NONE of the recommenders" in f for f in seen["facts"])
+
+
+def test_standing_rank_rides_every_card_only_when_someone_has_standing():
+    from app.reco_cards import subject_cards_from_tips
+
+    strong = _tip("s", "ana", _standing={"tier": "strong", "quote": "I grew up in Madrid and moved here",
+                                         "said": None, "trait": "from Spain"})
+    thin = _tip("t", "dom", _standing={"tier": "thin", "quote": None, "said": "From Madrid",
+                                       "trait": "from Spain"})
+    cards = subject_cards_from_tips([_tip("n", "ed", same_block=True), thin, strong])
+    assert [(c["title"], c["standing_rank"]) for c in cards] == [
+        ("Barber s", 0), ("Barber t", 1), ("Barber n", 2),
+    ]
+    plain = subject_cards_from_tips([_tip("n", "ed"), _tip("m", "fay")])
+    assert all("standing_rank" not in c for c in plain)
+
+
+def test_standing_rank_on_the_wire():
+    from app.models import RecoCardRow
+
+    assert RecoCardRow(title="x", standing_rank=1).model_dump()["standing_rank"] == 1
+    assert RecoCardRow(title="x").model_dump()["standing_rank"] is None

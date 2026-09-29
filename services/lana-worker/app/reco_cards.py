@@ -253,6 +253,13 @@ def subject_cards_from_tips(
     # total — a float tie must not leave two cards swapping places between reads.
     from app.reco_authority import NO_TIER_RANK, TIER_RANK
 
+    # The order hint a client needs to keep the standing tier when it re-sorts (the PWA's
+    # tabs do): only when the ask named a requirement on the recommender AND somebody on
+    # the page has standing — otherwise absent, and every client sort is unchanged.
+    if any(c.get("_standing_tier") for c in cards):
+        for c in cards:
+            c["standing_rank"] = TIER_RANK.get(str(c.get("_standing_tier")), NO_TIER_RANK)
+
     cards.sort(key=lambda c: (
         # An explicit requirement on the recommender outranks provenance: the reader said
         # WHO the recommendation must come from. Strong, then thin, never interleaved; when

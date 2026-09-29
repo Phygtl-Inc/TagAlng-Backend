@@ -215,6 +215,11 @@ class RecoCardRow(BaseModel):
     # Present only when the ask named a requirement on the recommender and at least one of
     # them meets it with a specific claim (LANA_RECO_AUTHORITY).
     recommender_standing: RecoStandingRow | None = None
+    # Order hint for clients that re-sort: 0 = a recommender meets the ask's requirement on
+    # who recommends in their own words, 1 = one only mentioned it, 2 = neither. Present
+    # only when the ask named such a requirement and someone on the page has standing.
+    # A rank, never a score.
+    standing_rank: int | None = None
     tip_rec: bool = True
 
 
