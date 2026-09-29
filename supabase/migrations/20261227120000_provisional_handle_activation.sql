@@ -24,6 +24,15 @@
 --   answer engine that ingests a wrong or impersonated place page cannot be made to
 --   un-ingest it. A reservation is reversible; a citation is not.
 
+-- ── 0 · a missing constraint, found while wiring this ───────────────────────
+--
+-- external_community_identities has only a PRIMARY KEY on id. Nothing stops the same
+-- Instagram account being registered against two different places — which is exactly the
+-- impersonation this table exists to prevent. Safe to add now: the table is empty.
+
+create unique index if not exists external_community_identities_account_uniq
+  on public.external_community_identities (provider, provider_account_id);
+
 -- Config, not a constant. Starts permissive and ratchets against observed data — nobody
 -- guesses a number and then defends it.
 create table if not exists public.handle_policy (
@@ -85,11 +94,11 @@ grant execute on function public.start_handle_provisional(uuid) to service_role;
 -- "I did it" throws that away.
 
 create or replace function public.activate_handle_on_backlink(
-  p_place_id     uuid,
-  p_platform     text,
-  p_account_id   text,
-  p_profile_url  text,
-  p_backlink_url text
+  p_place_id           uuid,
+  p_provider           text,
+  p_provider_account_id text,
+  p_canonical_url      text,
+  p_backlink_url_seen  text
 )
 returns jsonb
 language plpgsql
@@ -99,35 +108,45 @@ set search_path = pg_catalog, public
 as $$
 declare
   v_claim_id uuid;
-  v_user_id  uuid;
+  v_operator uuid;
 begin
-  select m.user_id into v_user_id
+  select m.user_id into v_operator
     from public.place_managers m
    where m.place_id = p_place_id and m.role = 'operator' and m.removed_at is null
    order by m.created_at asc limit 1;
 
-  if v_user_id is null then
+  if v_operator is null then
     raise exception 'no_operator' using hint = 'A place with no operator cannot be activated.';
   end if;
 
+  -- The claim this verification belongs to, so the evidence and the decision stay joined.
+  select c.id into v_claim_id
+    from public.place_claims c
+   where c.place_id = p_place_id
+     and c.status in ('pending_verification','draft','needs_more_info')
+   order by c.submitted_at desc nulls last
+   limit 1;
+
   insert into public.external_community_identities
-    (place_id, user_id, platform, platform_account_id, profile_url,
-     backlink_url, verified_at)
-  values (p_place_id, v_user_id, p_platform, p_account_id, p_profile_url,
-          p_backlink_url, now())
-  on conflict (platform, platform_account_id) do update
-    set backlink_url = excluded.backlink_url,
-        verified_at  = now();
+    (place_id, provider, provider_account_id, canonical_url,
+     backlink_url_seen, ownership_method, ownership_verified_at, last_checked_at, claim_id)
+  values (p_place_id, p_provider, p_provider_account_id, p_canonical_url,
+          p_backlink_url_seen, 'profile_backlink', now(), now(), v_claim_id)
+  on conflict (provider, provider_account_id) do update
+    set backlink_url_seen     = excluded.backlink_url_seen,
+        ownership_verified_at = now(),
+        last_checked_at       = now(),
+        updated_at            = now();
 
   -- Record the method. This is the first profile_backlink row in the system, and the
   -- point of recording it is that the next five verifications are not NULL.
-  update public.place_claims c
-     set verification_method = 'profile_backlink',
-         status = 'verified',
-         resolved_at = coalesce(c.resolved_at, now())
-   where c.place_id = p_place_id
-     and c.status in ('pending_verification','submitted')
-  returning c.id into v_claim_id;
+  if v_claim_id is not null then
+    update public.place_claims
+       set verification_method = 'profile_backlink',
+           status = 'verified',
+           resolved_at = coalesce(resolved_at, now())
+     where id = v_claim_id;
+  end if;
 
   update public.places
      set handle_activated_at = now(),
@@ -181,7 +200,7 @@ create or replace view public.handle_activation_status as
 select p.id as place_id, p.name, p.handle, p.place_type, p.governance_state,
        p.handle_provisional_until, p.handle_activated_at,
        (select count(*) from public.external_community_identities e
-         where e.place_id = p.id and e.verified_at is not null) as verified_identities,
+         where e.place_id = p.id and e.ownership_verified_at is not null) as verified_identities,
        (select c.verification_method from public.place_claims c
          where c.place_id = p.id and c.status = 'verified'
          order by c.resolved_at desc nulls last limit 1) as claim_method,
@@ -207,6 +226,7 @@ comment on view public.handle_activation_status is
 --   drop function if exists public.start_handle_provisional(uuid);
 --   drop function if exists public.handle_provisional_days();
 --   drop table if exists public.handle_policy;
+--   drop index if exists public.external_community_identities_account_uniq;
 --   No existing place is modified by applying this. Windows only start when
 --   start_handle_provisional is called.
 -- ============================================================================
