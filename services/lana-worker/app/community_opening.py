@@ -254,7 +254,10 @@ def community_opening(
         if helps:
             facts.append(f"What members help each other with: {helps}")
         if purpose:
-            facts.append(f"A first question its creator expects people to ask: {purpose}")
+            facts.append(
+                f"A question its creator expects members to ask (context only — the card "
+                f"below asks it, never you): {purpose}"
+            )
         if creator:
             facts.append(f"Run by: {creator} (refer to them by name — never he/she)")
         if row.get("place_type") == "creator":
@@ -278,18 +281,21 @@ def community_opening(
                     else "Greet them as a returning member in a few words — never "
                     "'welcome to', they already belong here. "
                 )
-                + "Then ask ONE easy question about the community's SUBJECT, drawn from "
-                "what it is about or what its creator wants people to do — something a "
-                "stranger could answer on the spot without sharing anything personal. "
-                "Do not ask for their ZIP, neighborhood or location. Do not ask them to "
-                "tell you about themselves. Do not list what you can do."
+                + "Then invite them, in the same breath, to find something here or "
+                "create something for its members — grounded in what the community is "
+                "about (e.g. 'find people who…', 'share a…'). The Find / Create buttons "
+                "sit right under this message, so this line is their caption. "
+                "Ask NO question: a question about them or the topic is the 'By the way' "
+                "card's job, and two questions on one screen is one too many. Do not ask "
+                "for their ZIP, neighborhood or location. At most two short sentences."
             ),
             facts=facts,
             fallback=(
-                f"Welcome to **{name}**! Ask me anything about it, or tell me what "
-                "you're looking for."
+                f"Welcome to **{name}**! Find something here, or create something for "
+                "its members."
                 if joined_now
-                else f"You're in **{name}**. What are you looking for today?"
+                else f"You're in **{name}** — find something here, or create something "
+                "for its members."
             ),
             max_sentences=2,
         )

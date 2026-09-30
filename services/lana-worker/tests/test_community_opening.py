@@ -60,9 +60,11 @@ class CommunityOpeningTests(unittest.TestCase):
         self.assertIn("table rule", facts)
         self.assertIn("Zenaide", facts)
         self.assertIn("just joined", facts)
-        # The whole point: never the ZIP / tell-me-about-yourself opener.
+        # Never the ZIP opener, and never a question: that is the "By the way" card's job.
         self.assertIn("Do not ask for their ZIP", seen["goal"])
-        self.assertIn("SUBJECT", seen["goal"])
+        self.assertIn("Ask NO question", seen["goal"])
+        self.assertIn("find something here or create something", seen["goal"])
+        self.assertNotIn("?", seen["fallback"])
 
     def test_existing_member_is_greeted_not_welcomed(self) -> None:
         _, seen = self._run(joined_at=_old())

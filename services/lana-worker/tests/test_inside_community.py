@@ -422,7 +422,7 @@ class CreatorFormAnswersTests(unittest.TestCase):
         facts = "\n".join(seen["facts"])
         self.assertIn("MrBeast's big stunts", facts)
         self.assertIn("Video ideas, challenge tips", facts)
-        self.assertIn("A first question its creator expects", facts)
+        self.assertIn("the card below asks it, never you", facts)
 
     def test_policy_sees_what_members_help_with(self) -> None:
         from app.policy.decide import _inside_community
