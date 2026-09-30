@@ -24,7 +24,7 @@ def claude_extract_profile_from_transcript(
     data = llm_json(
         model=_extract_model(),
         system=(
-            "You extract structured identity claims from TagAlng profile intake transcripts. "
+            "You extract structured identity claims from Lana profile intake transcripts. "
             "Output only valid JSON. Keep strings on one line. Escape quotes inside strings."
         ),
         user_payload=EXTRACT_PROMPT + transcript.strip(),
@@ -44,7 +44,7 @@ def claude_extract_event_from_transcript(
     data = llm_json(
         model=_extract_model(),
         system=(
-            "You extract structured event drafts from TagAlng host transcripts. "
+            "You extract structured event drafts from Lana host transcripts. "
             "Output only valid JSON. Keep strings on one line."
         ),
         user_payload=prompt + transcript.strip(),

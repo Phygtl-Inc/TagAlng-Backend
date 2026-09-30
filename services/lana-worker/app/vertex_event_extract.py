@@ -4,7 +4,7 @@ from typing import Any
 from app.lana_ui import merge_event_drafts, parse_event_draft
 from app.models import EventDraft, MappedSpan
 
-EVENT_EXTRACT_PROMPT = """You are an event extraction model for TagAlng host flow.
+EVENT_EXTRACT_PROMPT = """You are an event extraction model for Lana's host flow.
 
 Read the full conversation between Lana and the host. Produce a structured event draft for create_event.
 

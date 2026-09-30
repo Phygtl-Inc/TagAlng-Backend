@@ -567,6 +567,15 @@ def name_change_signal(session_ctx: dict[str, Any]) -> dict[str, Any] | None:
     return {"from": str(raw.get("from") or "").strip() or None, "to": to}
 
 
+def _inside_community(session_ctx: dict[str, Any]) -> dict[str, Any] | None:
+    from app.community_opening import active_community_facts
+
+    facts = active_community_facts(session_ctx)
+    if not facts:
+        return None
+    return {k: facts.get(k) for k in ("name", "kind", "about", "creator_wants", "creator")}
+
+
 def decide_turn(
     *,
     user_id: str,
@@ -645,6 +654,8 @@ def decide_turn(
             "session_language": session_ctx.get("lang") or "en",
             # Set only on a turn that actually changed their name. Present = say so.
             "name_just_changed": name_change_signal(session_ctx),
+            # The community this chat is INSIDE (creator link or switcher). Null = none.
+            "inside_community": _inside_community(session_ctx),
         }
         data = llm_json(
             model=policy_model(),

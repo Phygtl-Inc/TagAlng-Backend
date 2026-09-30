@@ -1545,6 +1545,37 @@ def create_lana_session(
                     raise HTTPException(
                         status_code=500, detail="resumed_session_empty"
                     )
+            # Resumed into a DIFFERENT community than the thread was in — a creator's link
+            # tapped while a chat was still open. The resume path used to ignore the
+            # selection entirely, so the thread carried on in the old scope and never
+            # said a word about where they had just arrived. Same community (a refresh)
+            # or no selection sent: nothing changes, the thread resumes as it was.
+            if purpose == "lana" and body.community_id:
+                from app.community_scope import active_community_id, apply_community_selection
+
+                before = active_community_id(merged_ctx)
+                entered = apply_community_selection(
+                    merged_ctx, body.community_id, user_id=auth.user_id
+                )
+                if entered and entered.get("place_id") != before:
+                    from app.community_opening import community_opening
+
+                    line = community_opening(entered, user_id=auth.user_id)
+                    if line:
+                        lang = session_lang(merged_ctx)
+                        opening = localize_text(line, lang) if lang else line
+                        status = "continue"
+                        ui_raw = None
+                        opening_msg_id = insert_message(
+                            session_id,
+                            "assistant",
+                            opening,
+                            {"status": status, "ui": None, "orchestrator": False},
+                        )
+                        use_orch = False
+                    update_session_context(
+                        session_id, merged_ctx, core_block=merged_ctx.get("core_block")
+                    )
             ready = status == "ready_to_complete"
             ob = _onboarding_fields(merged_ctx, auth, ready_to_complete=ready)
             ui = _ui_from_dict(ui_raw)
@@ -1565,6 +1596,10 @@ def create_lana_session(
             )
 
         use_orch = use_orchestrator_for_purpose(purpose)
+        # True only for the plain "how can I help" greeting — the one a community opening
+        # may replace. A recovered event, a carried-over ask or the name-ask is the more
+        # urgent thing to say and keeps its line.
+        generic_opening = False
         if purpose == "lana":
             # Recover an event a guest built before logging into this (existing) account —
             # the login reset would otherwise lose it. Seed the host context so their next
@@ -1665,6 +1700,7 @@ def create_lana_session(
                 opening, status, session_ctx, ui_raw = lana_unified_opening(
                     is_anonymous=auth.is_anonymous, needs_name=_needs_name
                 )
+                generic_opening = not _needs_name
                 # Anything else the guest had in flight before logging into this
                 # account (a recommendation ask, a community join, a drafted ask).
                 # Restoring the keys is enough: the post-verify resume paths already
@@ -1680,6 +1716,7 @@ def create_lana_session(
                         session_ctx = {**session_ctx, **_carry}
                         _waiting = describe_carry(_carry)
                         if _waiting and not _needs_name:
+                            generic_opening = False
                             opening = compose_reply(
                                 goal=(
                                     "Greet them back after signing in and say you still "
@@ -1729,6 +1766,23 @@ def create_lana_session(
             opening, status, session_ctx, ui_raw = lana_opening(user_block, purpose)
             draft_raw = None
 
+        # The community filter the app opened with (top-of-screen switcher, or the one a
+        # creator's link just joined them to), so the very first turn already reads
+        # inside it — app/community_scope.py. Applied BEFORE the opening is final: when it
+        # ran after, the greeting could not know the community existed, and a follower
+        # arriving from a creator's bio was greeted like any neighbour.
+        from app.community_scope import apply_community_selection
+
+        entered_community = apply_community_selection(
+            session_ctx, body.community_id, user_id=auth.user_id
+        )
+        if purpose == "lana" and generic_opening and entered_community:
+            from app.community_opening import community_opening
+
+            community_line = community_opening(entered_community, user_id=auth.user_id)
+            if community_line:
+                opening = community_line
+
         pending_opening_used = False
         if purpose == "lana" and not auth.is_anonymous:
             # Somebody agreed to be asked on a neighbor's behalf, and the outreach email's
@@ -1777,11 +1831,6 @@ def create_lana_session(
                     )
                 )
 
-        # The community filter the app opened with (top-of-screen switcher), so the
-        # very first turn already reads inside it — app/community_scope.py.
-        from app.community_scope import apply_community_selection
-
-        apply_community_selection(session_ctx, body.community_id, user_id=auth.user_id)
         opening_msg_id = insert_message(
             session_id,
             "assistant",

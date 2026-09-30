@@ -32,7 +32,7 @@ _MIN_MATCH_SCORE = 0.45
 _SUGGESTION_TTL_DAYS = 30
 _SKIP_SHORT = frozenset({"ok", "okay", "yes", "no", "yep", "nope", "sure", "thanks", "thank you"})
 
-LATENT_EXTRACT_PROMPT = """You extract latent signals from ONE user message in a TagAlng block chat \
+LATENT_EXTRACT_PROMPT = """You extract latent signals from ONE user message in a Lana chat \
 (a neighborhood app for local families). These are things the user MENTIONED but did not explicitly ask for — \
 activities, places, gear, needs, life events — that might map to something the app could help with.
 

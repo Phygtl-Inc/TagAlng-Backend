@@ -1691,13 +1691,68 @@ def _try_layer1_intent_turn(
         # "show me communities around me" — answered from circle_affiliations + places.
         # Verification gates the READ the same way find-peers does: the block/place read
         # and the member counts are neighbours' data.
-        if not phone_verified or not user_id:
+        #
+        # EXCEPT a question about the community the chat is INSIDE. Everyone arriving from
+        # a creator's link is a guest, so "what is this community?" / "what do people do
+        # here?" hit this gate three times in a row and the answer was always "verify your
+        # email" (2026-09-30). What the community is about is on its public landing page;
+        # withholding it from someone who just joined it protects nothing. WHO is in it
+        # stays behind verification — that one is people's data.
+        from app.community_discovery import _same_place_name
+        from app.community_scope import active_community
+        from app.discovery_slots import slots_community_ask, slots_community_name
+
+        _here = active_community(ctx_base)
+        _named = slots_community_name(slots)
+        _about_here = bool(
+            _here and user_id and _named and _same_place_name(_named, str(_here.get("name") or ""))
+        )
+        _ask = slots_community_ask(slots)
+        logging.getLogger(__name__).info(
+            "communities_turn here=%s named=%r ask=%s about_here=%s verified=%s",
+            (_here or {}).get("name"), _named, _ask, _about_here, phone_verified,
+        )
+        if (not phone_verified or not user_id) and _about_here and _ask == "people":
+            return (
+                compose_reply(
+                    goal=(
+                        "They asked who is in the community they are chatting inside. The "
+                        "member list opens once they verify their email — say that in one "
+                        "warm line, naming the community, and invite them to verify. Offer "
+                        "to tell them what the community is about meanwhile. No guilt."
+                    ),
+                    facts=[f"The community: {_here.get('name')}"],
+                    fallback=(
+                        f"Verify your email and I can show you who's in {_here.get('name')} — "
+                        "happy to tell you what it's about in the meantime."
+                    ),
+                    session_ctx=ctx_base,
+                    user_message=msg,
+                ),
+                _routing_ctx(
+                    ctx_base,
+                    phase=phase or "listening",
+                    active_intent="discovery.communities",
+                ),
+                _discovery_routing_stub(phase or "listening", "community_roster_need_verify"),
+                [],
+            )
+        if (not phone_verified or not user_id) and not _about_here:
             return (
                 compose_reply(
                     goal=(
                         "They asked what communities are around them. Verifying their "
                         "email is what unlocks seeing neighbours' spots — say that in one "
                         "warm line and invite them to verify. No guilt, no list."
+                        + (
+                            # Inside a community the wall must never be the whole answer:
+                            # if this was really a question about THIS one that the router
+                            # did not name, the offer still gets them there.
+                            f" They are inside {_here.get('name')} right now — also offer "
+                            "to tell them about it meanwhile."
+                            if _here
+                            else ""
+                        )
                     ),
                     fallback=(
                         "Verify your email and I can show you the communities near you — "
@@ -2533,7 +2588,7 @@ def _compose_help_reply(
         data = llm_json(
             model=synthesizer_model(),
             system=(
-                "You are Lana, a warm neighborhood concierge for TagAlng. "
+                "You are Lana, a warm neighborhood concierge. "
                 + _HELP_FACTS
                 + " Write ONE short chat message (2-3 sentences, no bullet lists) that "
                 "answers the user's actual question — mirror their wording, don't dump "
@@ -3912,6 +3967,11 @@ def _tip_seek_answer_turn(
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors."""
     ctx_base = dict(session_ctx)
+    # Inside a community the recommendations that matter are the ones SHARED there, and that
+    # read needs no location (local_signals.find_neighbor_tips: "the roster is the audience,
+    # not the radius"). Asking a creator's follower for their ZIP before looking inside
+    # Founders Table was the neighbourhood gate answering a community question (2026-10-01).
+    _in_comm = active_community(session_ctx)
 
     if not phone_verified:
         # Unchanged auth surface (a signed-out session still can't run block reads or
@@ -3929,7 +3989,10 @@ def _tip_seek_answer_turn(
             _compose_verify_gate_ask(
                 msg,
                 purpose=(
-                    "you'll look up recommendations near them (from neighbors who have "
+                    f"you'll look up what members of {_in_comm.get('name')} have "
+                    "recommended — nothing gets posted anywhere"
+                    if _in_comm
+                    else "you'll look up recommendations near them (from neighbors who have "
                     "shared one, and from what's nearby) — nothing gets posted anywhere"
                 ),
             ),
@@ -3955,7 +4018,7 @@ def _tip_seek_answer_turn(
                 ctx_base["preview_block_id"] = block_id
                 ctx_base["preview_zip"] = zip5
                 session_ctx["preview_block_id"] = block_id
-    if not block_id:
+    if not block_id and not _in_comm:
         ctx_base["tip_seek_pending"] = {"detail": detail, "category": category}
         zip_ctx = _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent=active_intent)
         _stamp_tip_ask_draft(
@@ -4139,6 +4202,38 @@ def _tip_seek_answer_turn(
             "tip_seek_reranked" if (weights or widen) else "tip_seek_neighbor_tip",
         )
         return reply, ctx, ctx["last_routing"], list(shown)
+
+    if not block_id:
+        # Only reachable inside a community (the ZIP gate above stops everyone else): its
+        # members had nothing, and without a location there is nowhere else to look. Say
+        # so, and make the ZIP an offer rather than a gate. No ask-neighbors offer: that
+        # posts to a neighbourhood this person has not given us.
+        ctx["last_routing"] = _discovery_routing_stub(
+            phase or "listening", "tip_seek_community_empty"
+        )
+        return (
+            compose_reply(
+                goal=(
+                    "They asked for a recommendation inside this community and none of its "
+                    "members has shared one for it yet. Say that plainly, naming the "
+                    "community. Then offer ONE next step: if they tell you their ZIP you can "
+                    "also look near them. Never invent a recommendation, never say "
+                    "'neighbors', and never imply anything was posted."
+                ),
+                facts=[
+                    f"The community: {_in_comm.get('name')}",
+                    f"What they asked for: {_ask_excerpt(detail)}",
+                ],
+                session_ctx=session_ctx,
+                fallback=(
+                    f"Nobody in {_in_comm.get('name')} has shared one for "
+                    f"{_ask_excerpt(detail)} yet. Tell me your ZIP and I'll look near you too."
+                ),
+            ),
+            ctx,
+            ctx["last_routing"],
+            [],
+        )
 
     rec = _tip_seek_fallback_reply(
         ctx=ctx,

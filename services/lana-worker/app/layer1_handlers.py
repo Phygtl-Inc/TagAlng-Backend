@@ -44,7 +44,7 @@ HELP_WHAT_CAN_YOU_DO = (
 )
 
 HELP_WHO_ARE_YOU = (
-    "I'm Lana — your local concierge for TagAlng. I remember who you are, "
+    "I'm Lana — your local concierge. I remember who you are, "
     "what's happening near you, and I help connect you with neighbors at your pace. "
     "Nothing leaves your neighborhood without you saying so."
 )

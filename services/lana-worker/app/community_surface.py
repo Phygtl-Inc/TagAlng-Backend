@@ -649,6 +649,7 @@ def _blurb(
     place_id: str = "",
     stored: str | None = None,
     stored_key: str | None = None,
+    generate: bool = True,
 ) -> str | None:
     """AI-authored from true facts, with a factual template as the floor
     ([[ai-authored-copy-not-canned]]). None when we know nothing to say.
@@ -668,6 +669,17 @@ def _blurb(
     text = str(stored or "").strip()
     if text and str(stored_key or "") == key:
         return text
+    # A description with NO fingerprint was not written here — a person wrote it (the
+    # creator's claim, an operator). It is theirs and is never regenerated: rewriting it
+    # replaced "a community for early-stage founders swapping honest notes" with "a spot
+    # known to neighbors… cherished by those who call it their place" on the first
+    # profile open, and that line then grounded every answer about the community.
+    if text and not stored_key:
+        return text
+    if not generate:
+        # Nothing true to say and no licence to invent it (a creator community with no
+        # description yet): None, so readers say it has not been described.
+        return None
     if place_id and key not in _BLURB_INFLIGHT:
         _BLURB_INFLIGHT.add(key)
         _BLURB_POOL.submit(
@@ -1224,6 +1236,9 @@ def community_profile(
             members=count,
             stored=place.get("blurb"),
             stored_key=place.get("blurb_key"),
+            # The generator writes neighbourhood-venue lines ("a spot known to neighbors").
+            # A creator's group is described by its creator, or not at all.
+            generate=place.get("place_type") != "creator",
         ),
         "features": features,
         # Everything anyone does here, `mine` marking the caller's own — one list

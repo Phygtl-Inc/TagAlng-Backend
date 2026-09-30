@@ -374,20 +374,24 @@ def is_joinable_place_name(name: str) -> bool:
 
 
 def _place_row(place_id: str) -> dict[str, Any]:
-    try:
-        res = (
-            service_client()
-            .table("places")
-            .select("id, name, address, place_type")
-            .eq("id", place_id)
-            .limit(1)
-            .execute()
-        )
+    # blurb first (the noun model needs it for creator communities); step down without it
+    # rather than fail the join on an environment that predates the column.
+    for fields in ("id, name, address, place_type, blurb", "id, name, address, place_type"):
+        try:
+            res = (
+                service_client()
+                .table("places")
+                .select(fields)
+                .eq("id", place_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            continue
         rows = res.data if isinstance(res.data, list) else []
-    except Exception:
-        logger.exception("community_join_place_read_failed place=%s", place_id)
-        return {}
-    return rows[0] if rows else {}
+        return rows[0] if rows else {}
+    logger.exception("community_join_place_read_failed place=%s", place_id)
+    return {}
 
 
 def _existing_rows(user_id: str) -> list[dict[str, Any]]:
@@ -419,6 +423,10 @@ name, never a brand, never an address — "mizu sushi" is wrong, "sushi spot" is
 - Pick the word a regular would use: a CrossFit box is "gym", a parish hall is "church", \
 a branch library is "library", a taproom is "brewery".
 - emoji: exactly one, matching the kind of place.
+- category "creator" is NOT a place: it is an online community run by one person (an \
+influencer, a coach, a writer) around a topic. Name it from its description as the kind of \
+GROUP it is — "founder circle", "running crew", "etiquette club", "book club" — never a \
+venue word (studio, spot, shop, café, gym unless it truly is one).
 - English only."""
 
 
@@ -450,6 +458,9 @@ def _llm_place_noun(place: dict[str, Any]) -> dict[str, str]:
                     "name": name,
                     "address": str(place.get("address") or ""),
                     "category": str(place.get("place_type") or ""),
+                    # Without it a creator community is just a name and the word "creator",
+                    # and the model guessed "creative studio 🎨" for a founders' group.
+                    "description": str(place.get("blurb") or "")[:300],
                 }
             ),
             max_tokens=60,
@@ -954,6 +965,14 @@ def _community_about_turn(
         if str((e or {}).get("title") or "").strip()
     ]
     facts = [f"Community: {place}"]
+    # The community the chat is INSIDE carries what its creator said it is for — the one
+    # fact that answers "what do people do here?" on day one, when nobody has added
+    # features or meets yet (every creator community today).
+    from app.community_opening import active_community_facts
+
+    here = active_community_facts(session_ctx)
+    here = here if here and here.get("place_id") == pid else None
+    creator_here = bool(here and here.get("kind") == "creator community")
     if inexact:
         # They did not name it exactly, so the reply has to say which place it answered
         # about — otherwise a wrong guess reads as a confident answer.
@@ -961,14 +980,44 @@ def _community_about_turn(
             f'They said "{inexact}" and this is the one place near them it could be — '
             "name it in your reply so they can correct you"
         )
-    if prof.get("relation"):
+    if creator_here:
+        # Not the stored member noun: for a creator community that was model-guessed from
+        # the name alone ("creative studio 🎨" for a founders' group), and it is not a place.
+        facts.append(
+            "(How to talk about it, not something to say: it is a creator's community, so "
+            "describe it by its topic and purpose only — never a spot, place, venue, local "
+            "or nearby, and never whether it is online or physical)"
+        )
+        if not (here.get("about") or here.get("creator_wants") or prof.get("description")):
+            # "Big Bros" with no description came back as "supporting and mentoring others"
+            # — invented from the name. Nothing described is an answer, not a gap to fill.
+            facts.append(
+                "Its creator has not described it yet — say so plainly and never guess what "
+                "it is about from its name"
+            )
+    elif prof.get("relation"):
         facts.append(f"What kind of place it is: {prof['relation']}")
     if prof.get("description"):
         facts.append(f"How it is described: {prof['description']}")
     if prof.get("place_address"):
         facts.append(f"Where it is: {prof['place_address']}")
+    if here:
+        if here.get("about") and not prof.get("description"):
+            facts.append(f"How it is described: {here['about']}")
+        if here.get("creator_wants"):
+            facts.append(f"What its creator wants people to do here: {here['creator_wants']}")
+        if here.get("creator"):
+            facts.append(
+                f"It is run by {here['creator']}, whose community this is — refer to them "
+                "by name, never with he/she (you do not know their pronouns)"
+            )
+        facts.append("The person asking is inside this community's chat")
+        if creator_here:
+            facts.append('Call the people in it "members", never "neighbors"')
     facts.append(
-        f"People who go here: {count}"
+        # "go here" reads as a venue, and the model turned it into "two neighbors who
+        # consider it their spot" for a creator's group.
+        (f"Members: {count}" if creator_here else f"People who go here: {count}")
         + (f", plus {curious} curious about it" if curious else "")
     )
     if features:
@@ -1004,14 +1053,20 @@ def _community_about_turn(
         # "I can't pull up any events for Barnes & Noble right now", which claims a
         # limitation where there is simply nothing on (QA 2026-08-21).
         facts.append(
-            "Nothing is scheduled there at the moment — say that as a fact, never as "
-            "something you were unable to look up"
+            "Nothing is scheduled there at the moment — mention it ONLY if they asked about "
+            "events, plans or what is on, and then say that as a fact, never as something "
+            "you were unable to look up"
         )
     if not features:
-        facts.append("Nobody has said yet what it has — again a fact, not a failed look-up")
+        facts.append(
+            "Nobody has said yet what it has — only relevant if they asked what it has; "
+            "again a fact, not a failed look-up"
+        )
     facts.append(
         {
-            "member": "They are a member here",
+            # Background, not news: "you're already a member and can join the chat inside"
+            # was the model narrating this line back to someone who had just joined.
+            "member": "They are a member here (background — do not tell them unless asked)",
             "curious": "They joined as curious — they have not said they go here",
         }.get(membership, "They are NOT in this community")
     )
@@ -1032,8 +1087,9 @@ def _community_about_turn(
         ),
         facts=facts,
         fallback=(
-            f"{place} — {prof.get('relation') or 'a spot'} near you, with {count} "
-            f"{'person' if count == 1 else 'people'} in it."
+            # A creator community has no geography: "near you" would be false.
+            f"{place} — {'a community' if creator_here else (prof.get('relation') or 'a spot') + ' near you'}"
+            f", with {count} {'person' if count == 1 else 'people'} in it."
         ),
         session_ctx=session_ctx,
         user_message=message,
@@ -1059,6 +1115,16 @@ def _roster_chat_turn(
 
     pid = str(community.get("place_id") or "")
     place = str(community.get("place_name") or "").strip()
+    from app.community_opening import _community_row, active_community_facts
+
+    _here = active_community_facts(session_ctx)
+    if _here and _here.get("place_id") == pid:
+        creator_group = _here.get("kind") == "creator community"
+    else:
+        try:
+            creator_group = (_community_row(pid) or {}).get("place_type") == "creator"
+        except Exception:  # noqa: BLE001 — wording only; the venue words are the old default
+            creator_group = False
     try:
         roster: dict[str, Any] | None = community_members(
             user_id, place_id=pid, phone_verified=True
@@ -1113,7 +1179,10 @@ def _roster_chat_turn(
                 # The tie is the PLACE, and their own threads are what else is true about
                 # them ([[truthful-peer-match-model]]). similarity_score stays null and
                 # there is no badge: nothing here compared two people.
-                "matching_peer_label": attrs[0] if attrs else f"Goes to {place}",
+                # "Goes to" is a venue's word; a creator's group has members.
+                "matching_peer_label": attrs[0]
+                if attrs
+                else (f"Member of {place}" if creator_group else f"Goes to {place}"),
                 "similarity_score": None,
                 "preview": False,
                 "trait_tags": attrs[1:4],
@@ -1145,7 +1214,7 @@ def _roster_chat_turn(
     # fix exists to end.
     facts = [
         f"Community: {place}",
-        f"People who go here: {count}, counting them",
+        (f"Members: {count}, counting them" if creator_group else f"People who go here: {count}, counting them"),
         f"Cards under your message: {len(others)} — everyone here except them, each with "
         "a Nudge. Give the count and at most two names; do NOT read the names out one by one",
     ]
@@ -1161,13 +1230,25 @@ def _roster_chat_turn(
         )
     if named:
         facts.append("Names, for anchoring at most TWO of them: " + ", ".join(named[:6]))
+    elif others:
+        # Guests from a creator's link have no name yet. Told to "anchor with two names"
+        # and given none, the model made up "Alex and Jordan" (2026-10-01).
+        facts.append(
+            "None of them has shared a name yet — do NOT name anyone and never invent a name"
+        )
+    if creator_group:
+        facts.append(
+            'A creator\'s group, not a venue: call them "members", never "neighbors", and '
+            "never say nearby, local or \"go to\""
+        )
     if not others:
         facts.append("They are the only one here so far")
     return compose_reply(
         goal=(
             "Answer who is in this place. Say how many and that their cards are right "
-            "below, anchor with at most TWO names from the facts, and offer an intro to "
-            "any of them. TWO SHORT SENTENCES, never a list."
+            "below, "
+            + ("anchor with at most TWO names from the facts, " if named else "")
+            + "and offer an intro to any of them. TWO SHORT SENTENCES, never a list."
             if others
             else "Tell them they are the only one here so far, and offer to help them "
             "bring someone in or start something here. Never call the place dead."

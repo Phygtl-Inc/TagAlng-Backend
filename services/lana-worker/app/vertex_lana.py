@@ -47,7 +47,7 @@ Rules:
 
 OPENING_INSTRUCTION = """
 The user just started profile intake. No prior chat.
-Welcome them to TagAlng on their block; invite them to share their story in their own words.
+Welcome them to Lana; invite them to share their story in their own words.
 
 Output ONLY valid JSON:
 {

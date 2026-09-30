@@ -74,7 +74,7 @@ Rules:
 
 PROFILE_OPENING = """
 The user just started profile intake. No prior chat.
-Welcome them to TagAlng on their block. In ONE message, greet them and ask:
+Welcome them to Lana. In ONE message, greet them and ask:
 where their family heritage traces back to, and what they hope to find or do nearby
 (never say the word "block" to the user).
 
