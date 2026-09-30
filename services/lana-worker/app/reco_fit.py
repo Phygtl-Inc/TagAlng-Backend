@@ -83,7 +83,7 @@ For a neighbour card, a for_you quote is the EXACT words copied from that card's
 Output ONLY JSON:
 {"cards": [{"id": "<card id>", "fit_line": "...",
             "aspects": [{"key": "<aspect_key>", "headline": "..."}],
-            "for_you": [{"claim": "c1", "line": "...", "quotes": ["<exact words>"]}]}]}
+            "for_you": [{"claim": "c1", "evidence": "...", "quotes": ["<exact words>"]}]}]}
 """
 
 
@@ -291,6 +291,7 @@ def _compose(
     facts_list: list[dict[str, Any]], lang: str, claims: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     from app.orchestrator.llm import llm_configured, llm_json, router_model
+    from app.reader_claims import claims_payload
 
     if not llm_configured():
         return {}
@@ -300,10 +301,7 @@ def _compose(
         user_payload=json.dumps(
             {
                 "language": _language_name(lang),
-                "reader_claims": [
-                    {"id": c["id"], "claim": c["label"], "sayable": c["sayable"], "about": c["about"]}
-                    for c in claims or []
-                ],
+                "reader_claims": claims_payload(claims),
                 "cards": facts_list,
             },
             ensure_ascii=False,
@@ -318,7 +316,7 @@ def _compose(
         from app.reader_claims import keep_judged
 
         judged = [
-            {"for_you": [{"claim_id": f.get("claim_id"), "quotes":
+            {"for_you": [{"claim_id": f.get("claim_id"), "line": f.get("line"), "quotes":
                           [{"text": q} for q in f.get("quotes") or []], "_f": f}
                          for f in r.get("for_you") or []]}
             for r in out.values()
@@ -331,6 +329,9 @@ def _compose(
             r["for_you"] = [
                 {**x["_f"], "quotes": [q["text"] for q in x["quotes"]]} for x in j["for_you"]
             ]
+        from app.reader_claims import one_claim_per_card
+
+        one_claim_per_card([out[f["id"]] for f in facts_list if f["id"] in out])
     return out
 
 
@@ -407,7 +408,11 @@ def start_fit(
         return
 
     def run() -> dict[str, dict[str, Any]]:
-        res = _compose([f for _, f, _ in todo], lang, claims)
+        from app.reader_claims import expand_for_ask
+
+        # What each claim means for what they asked, decided once for the page.
+        looked = expand_for_ask(claims, ", ".join(chips), lang) if claims else []
+        res = _compose([f for _, f, _ in todo], lang, looked)
         for _, f, k in todo:
             if f["id"] in res:
                 _cache_put(k, res[f["id"]])

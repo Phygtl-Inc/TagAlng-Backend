@@ -234,9 +234,29 @@ def test_start_fit_hands_the_readers_claims_to_the_one_call():
                                               "quotes": ["so gentle with the toddlers"]}]}}
 
     cards = [_fy_card(), _card(title="Other", subject_ref="s2")]
+    looked = [{**CLAIMS[0], "look_for": "gentle with toddlers", "because": ""}]
     with mock.patch("app.reader_claims.load_reader_claims", return_value=CLAIMS), \
+            mock.patch("app.reader_claims.expand_for_ask", return_value=looked), \
             mock.patch.object(rf, "_compose", side_effect=compose):
         rf.attach_fit(cards, reader_id="r-claims")
-    assert seen["claims"] == CLAIMS
+    # The writer gets the claims as expanded for this ask, not the raw list.
+    assert seen["claims"] == looked
     fitted = [c for c in cards if c.get("for_you")]
     assert fitted and fitted[0]["for_you"][0]["claim_label"] == "Has toddlers"
+
+
+def test_two_neighbour_cards_never_give_the_same_reason():
+    claims = CLAIMS + [{"id": "c2", "label": "Plays guitar", "bucket": "hobby", "sayable": True, "about": "self"}]
+    words = "so gentle with the toddlers, they loved her. live music on fridays"
+    a = rf._facts(_fy_card(subject_ref="a"), [])
+    b = rf._facts(_fy_card(subject_ref="b"), [])
+    for f in (a, b):
+        f["their_words"] = [words]
+    kids = {"claim": "c1", "line": "kids", "quotes": ["so gentle with the toddlers"]}
+    music = {"claim": "c2", "line": "music", "quotes": ["live music on fridays"]}
+    parsed = {"cards": [{"id": f["id"], "fit_line": "x", "for_you": [kids, music]} for f in (a, b)]}
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json", return_value=parsed), \
+            mock.patch("app.reader_claims.judge_for_you", side_effect=lambda pairs: {p["key"] for p in pairs}):
+        out = rf._compose([a, b], "en", claims)
+    assert [[x["line"] for x in out[f["id"]]["for_you"]] for f in (a, b)] == [["Kids."], ["Music."]]

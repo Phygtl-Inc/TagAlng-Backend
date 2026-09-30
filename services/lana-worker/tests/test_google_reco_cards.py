@@ -252,6 +252,7 @@ def test_places_the_reader_fits_lead_and_nothing_is_dropped(monkeypatch):
     monkeypatch.setattr(g, "_compose", compose)
     # The independent relevance check confirms everything it is shown here.
     monkeypatch.setattr("app.reader_claims.judge_for_you", lambda pairs: {p["key"] for p in pairs})
+    monkeypatch.setattr(g, "_expand", lambda claims, ask, lang="en": claims)
     cards = g.build_cards([_row("a"), _row("b"), _row("d"), _row("e")], ask="restaurants",
                           chips=[], claims=CLAIMS)
     assert [c["subject_ref"] for c in cards] == ["google:d", "google:a", "google:b"]
@@ -287,3 +288,77 @@ def test_the_page_is_composed_one_call_per_place(monkeypatch):
     monkeypatch.setattr(g, "_compose", lambda places, **k: calls.append([p["place_id"] for p in places]) or {})
     g.build_cards([_row("a"), _row("b"), _row("d")], ask="x", chips=[])
     assert sorted(calls) == [["a"], ["b"], ["d"]]
+
+
+def test_an_opening_hours_line_proves_a_when_claim_attributed_to_google_maps():
+    hours = ["Monday: 5:00 AM – 10:00 PM", "Tuesday: 5:00 AM – 10:00 PM"]
+    got = g._ground_for_you_quotes([{"hours": "Monday: 5:00 AM - 10:00 PM"}], [], hours, "https://maps/x")
+    assert got == [{"text": hours[0], "author": "Google Maps", "author_url": "https://maps/x"}]
+    # Hours Google never gave, or none at all, prove nothing.
+    assert g._ground_for_you_quotes([{"hours": "Monday: 4:00 AM - 10:00 PM"}], [], hours, None) == []
+    assert g._ground_for_you_quotes([{"hours": "Monday: 5:00 AM - 10:00 PM"}], [], [], None) == []
+    assert g._ground_for_you_quotes([{"hours": ""}], [], hours, None) == []
+
+
+def test_hours_reach_the_for_you_but_never_an_aspect():
+    place = {"place_id": "p1", "name": "Track", "reviews": [{"text": "a great track"}],
+             "hours": ["Monday: Open 24 hours"], "maps_url": None}
+    claims = [{"id": "c1", "label": "Morning Runner", "sayable": True, "by_hours": True}]
+    parsed = {"places": [{"id": "p1", "fit_line": "x",
+                          "aspects": [{"label": "hours", "headline": "Google says open all day",
+                                       "quotes": [{"hours": "Monday: Open 24 hours"}]}],
+                          "for_you": [{"claim": "c1", "line": "You run mornings — it's open 24 hours.",
+                                       "quotes": [{"hours": "Monday: Open 24 hours"}]}]}]}
+    out = g.ground(parsed, [place], claims)["p1"]
+    assert out["aspects"] == []
+    assert out["for_you"][0]["quotes"][0]["text"] == "Monday: Open 24 hours"
+
+
+def test_a_claim_is_offered_once_per_card():
+    halal = [{"text": "Everything here is halal and freshly grilled.", "author": "A", "author_url": None}]
+    quotes = lambda raw: g._ground_quotes(raw, halal)  # noqa: E731
+    item = {"claim": "c2", "line": "Reviewers note it's halal.",
+            "quotes": [{"review": 1, "excerpt": "Everything here is halal"}]}
+    assert len(g.ground_for_you([item, item], CLAIMS, quotes)) == 1
+
+
+def test_three_places_fitting_the_same_claim_each_say_something_different(monkeypatch):
+    reviews = FAMILY + [{"text": "A jazz trio plays on Friday nights.", "author": "B", "author_url": None}]
+    monkeypatch.setattr(g, "place_reviews", lambda pid, **k: _details(pid, reviews=reviews))
+    guitar = [{"id": "c1", "label": "Eats out with their kids", "bucket": "family", "sayable": True, "about": "child"},
+              {"id": "c3", "label": "Plays guitar", "bucket": "hobby", "sayable": True, "about": "self"}]
+    kids = {"claim": "c1", "line": "kids", "quotes": [{"review": 1, "excerpt": "So patient with our two toddlers"}]}
+    music = {"claim": "c3", "line": "music",
+             "quotes": [{"review": 2, "excerpt": "A jazz trio plays on Friday nights"}]}
+    monkeypatch.setattr(g, "_compose", lambda places, **k: {"places": [
+        {"id": p["place_id"], "fit_line": "x", "for_you": [kids, music]} for p in places]})
+    monkeypatch.setattr("app.reader_claims.judge_for_you", lambda pairs: {p["key"] for p in pairs})
+    monkeypatch.setattr(g, "_expand", lambda claims, ask, lang="en": claims)
+    cards = g.build_cards([_row("a"), _row("b"), _row("d")], ask="steakhouses", chips=[], claims=guitar)
+    said = [[f["line"] for f in c["for_you"]] for c in cards]
+    assert said == [["Kids."], ["Music."], []]
+
+
+def test_the_writer_only_sees_claims_the_expansion_kept(monkeypatch):
+    monkeypatch.setattr(g, "place_reviews", lambda pid, **k: _details(pid, reviews=FAMILY))
+    seen = {}
+    monkeypatch.setattr(g, "_compose", lambda places, **k: seen.update(claims=k["claims"]) or {})
+    kept = [{**CLAIMS[0], "look_for": "kid-friendly", "because": ""}]
+    monkeypatch.setattr(g, "_expand", lambda claims, ask, lang="en": seen.update(ask=ask) or kept)
+    g.build_cards([_row("a")], ask="pizza near me", chips=[], claims=CLAIMS)
+    assert seen["ask"] == "pizza near me" and seen["claims"] == kept
+    # And what the writer is shown of them: the one thing to look for.
+    from app.reader_claims import claims_payload
+
+    assert claims_payload(kept)[0]["look_for"] == "kid-friendly"
+
+
+def test_opening_hours_prove_only_a_claim_the_expansion_marked_by_hours():
+    hours = ["Friday: 11:00 AM – 11:00 PM"]
+    quotes = lambda raw: g._ground_for_you_quotes(raw, [], hours, None)  # noqa: E731
+    item = {"claim": "c1", "line": "You're a night owl — it's open until 11 PM on Fridays.",
+            "quotes": [{"hours": "Friday: 11:00 AM - 11:00 PM"}]}
+    late = [{"id": "c1", "label": "Usually late", "sayable": True, "by_hours": False}]
+    owl = [{"id": "c1", "label": "Night owl", "sayable": True, "by_hours": True}]
+    assert g.ground_for_you([item], late, quotes) == []
+    assert g.ground_for_you([item], owl, quotes)[0]["quotes"][0]["text"] == hours[0]

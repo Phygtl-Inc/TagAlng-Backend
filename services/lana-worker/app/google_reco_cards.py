@@ -47,7 +47,7 @@ MAX_CARDS = 3
 # the cards it IS the wait — half the words, about half the time (2026-09-29).
 MAX_ASPECTS = 2
 _DETAILS_URL = "https://places.googleapis.com/v1/places/"
-_DETAILS_FIELDS = "id,displayName,rating,userRatingCount,googleMapsUri,primaryTypeDisplayName,reviews"
+_DETAILS_FIELDS = "id,displayName,rating,userRatingCount,googleMapsUri,primaryTypeDisplayName,reviews,regularOpeningHours"
 _DETAILS_TIMEOUT_S = 15.0
 
 _PROMPT = """You write the "Why Lana sees a fit" panel for places found on GOOGLE, for a
@@ -74,13 +74,15 @@ as written in the review, whatever language that is.
 
 {reader_rules}
 For a Google place, a for_you quote is {"review": <n>, "excerpt": "<exact words>"}, the
-same rule as aspect quotes.
+same rule as aspect quotes — or, when WHEN they go is the part beyond the ask (a morning
+runner, a late-night reader), one line of "opening_hours" copied exactly:
+{"hours": "<one line, character for character>"}. Hours are never an aspect.
 
 Output ONLY JSON:
 {"places": [{"id": "<place id>", "fit_line": "…",
              "aspects": [{"label": "…", "headline": "…",
                           "quotes": [{"review": 1, "excerpt": "…"}]}],
-             "for_you": [{"claim": "c1", "line": "…",
+             "for_you": [{"claim": "c1", "evidence": "…",
                           "quotes": [{"review": 2, "excerpt": "…"}]}]}]}
 """
 
@@ -135,6 +137,10 @@ def place_reviews(place_id: str, *, lang: str = "en") -> dict[str, Any] | None:
         logger.info("google_reco_cards.details_empty place_id=%s status=%s", pid,
                     getattr(res, "status_code", "?"))
         return None
+    hours = [
+        str(h).strip() for h in ((data.get("regularOpeningHours") or {}).get("weekdayDescriptions") or [])
+        if str(h or "").strip()
+    ][:7]
     reviews: list[dict[str, Any]] = []
     for r in data.get("reviews") or []:
         if not isinstance(r, dict):
@@ -155,6 +161,9 @@ def place_reviews(place_id: str, *, lang: str = "en") -> dict[str, Any] | None:
         "maps_url": str(data.get("googleMapsUri") or "").strip() or None,
         "type_label": str(((data.get("primaryTypeDisplayName") or {}).get("text")) or "").strip() or None,
         "reviews": reviews,
+        # Google's own "Monday: 5:00 AM – 10:00 PM" lines — a fact, not a review, and the
+        # only proof there usually is for a claim about WHEN ("Morning Runner").
+        "hours": hours,
     }
 
 
@@ -174,6 +183,7 @@ def _compose(
 ) -> dict[str, Any]:
     """ONE model call for the page. {} on any failure."""
     from app.orchestrator.llm import llm_configured, llm_json, router_model
+    from app.reader_claims import claims_payload
 
     if not llm_configured():
         return {}
@@ -181,10 +191,7 @@ def _compose(
         "language": _language(lang),
         "what_they_asked_for": ask,
         "their_ask_chips": chips,
-        "reader_claims": [
-            {"id": c["id"], "claim": c["label"], "sayable": c["sayable"], "about": c["about"]}
-            for c in claims or []
-        ],
+        "reader_claims": claims_payload(claims),
         "places": [
             {
                 "id": p["place_id"],
@@ -192,6 +199,7 @@ def _compose(
                 "reviews": [
                     {"review": i + 1, "text": r["text"]} for i, r in enumerate(p["reviews"])
                 ],
+                "opening_hours": p.get("hours") or [],
             }
             for p in places
         ],
@@ -201,7 +209,7 @@ def _compose(
             model=router_model(),
             system=_prompt(bool(claims)),
             user_payload=json.dumps(payload, ensure_ascii=False),
-            max_tokens=420,
+            max_tokens=620 if claims else 420,
             temperature=0.2,
         )
     except Exception:  # noqa: BLE001
@@ -237,6 +245,24 @@ def _ground_quotes(raw: Any, reviews: list[dict[str, Any]]) -> list[dict[str, An
     return quotes
 
 
+def _ground_for_you_quotes(
+    raw: Any, reviews: list[dict[str, Any]], hours: list[str], maps_url: str | None,
+) -> list[dict[str, Any]]:
+    """A for_you quote: a verbatim review excerpt, or one of the place's own opening-hours
+    lines, verbatim, attributed to Google Maps (never to a reviewer)."""
+    first = (raw if isinstance(raw, list) else [])[:1]
+    if first and isinstance(first[0], dict) and first[0].get("hours") is not None:
+        # Google writes "5:00\u202fAM\u2009–\u200910:00\u202fPM"; a copy may carry plain
+        # spaces and a hyphen. Same line either way.
+        def same(h: str) -> str:
+            return _norm(h).replace("–", "-").replace("—", "-").replace(" - ", "-")
+
+        line = same(str(first[0].get("hours") or ""))
+        match = next((h for h in hours or [] if line and same(h) == line), None)
+        return [{"text": match, "author": "Google Maps", "author_url": maps_url}] if match else []
+    return _ground_quotes(raw, reviews)
+
+
 def ground_for_you(
     raw: Any, claims: list[dict[str, Any]], quotes_of: Any,
 ) -> list[dict[str, Any]]:
@@ -246,15 +272,29 @@ def ground_for_you(
     heritage) may order and explain the place, never be named."""
     by_id = {c["id"]: c for c in claims or []}
     out: list[dict[str, Any]] = []
-    for f in (raw if isinstance(raw, list) else [])[:2]:
+    for f in (raw if isinstance(raw, list) else [])[:3]:
         if not isinstance(f, dict):
             continue
         claim = by_id.get(str(f.get("claim") or ""))
-        line = str(f.get("line") or "").strip()
-        if not claim or not line or len(line) > 240:
+        if not claim:
             continue
-        quotes = quotes_of(f.get("quotes"))
+        from app.reader_claims import assemble_line
+
+        # The writer gives only what the quote shows; the opening ("You play guitar —")
+        # was written once for the page by the expansion, so every card reads the same way.
+        line = assemble_line(claim, str(f.get("evidence") or f.get("line") or ""))
+        if not line or len(line) > 240:
+            continue
+        raw_quotes = f.get("quotes") if isinstance(f.get("quotes"), list) else []
+        # Opening hours prove only what the expansion said hours can prove (a night owl's
+        # "open late") — never "usually late → open until 11 PM" (prod QA 2026-09-30).
+        if any(isinstance(q, dict) and q.get("hours") is not None for q in raw_quotes) \
+                and not claim.get("by_hours"):
+            continue
+        quotes = quotes_of(raw_quotes)
         if not quotes:
+            continue
+        if any(o["claim_id"] == claim["id"] for o in out):
             continue
         out.append({
             "claim_id": claim["id"],
@@ -288,7 +328,11 @@ def _compose_page(
     if claims:
         from app.reader_claims import keep_judged
 
+        from app.reader_claims import one_claim_per_card
+
         keep_judged(list(grounded.values()), claims, ask)
+        # Google's order: the best-placed card gets first pick of the reader's claims.
+        one_claim_per_card([grounded[p["place_id"]] for p in places if p["place_id"] in grounded])
     return grounded
 
 
@@ -311,6 +355,7 @@ def ground(
         if not place:
             continue
         reviews = place["reviews"]
+        hours = place.get("hours") or []
         aspects: list[dict[str, Any]] = []
         for a in (item.get("aspects") or [])[:MAX_ASPECTS]:
             if not isinstance(a, dict):
@@ -328,7 +373,9 @@ def ground(
             "fit_line": line if 0 < len(line) <= 240 else None,
             "aspects": aspects,
             "for_you": ground_for_you(
-                item.get("for_you"), claims or [], lambda raw, _r=reviews: _ground_quotes(raw, _r)
+                item.get("for_you"), claims or [],
+                lambda raw, _r=reviews, _h=hours, _u=place.get("maps_url"):
+                    _ground_for_you_quotes(raw, _r, _h, _u),
             ),
         }
     return out
@@ -347,6 +394,12 @@ def _distance(origin: tuple[float, float] | None, p: dict[str, Any]) -> tuple[st
     miles = meters / 1609.344
     text = f"{miles:.0f} mi" if miles >= 10 else f"{max(miles, 0.1):.1f} mi"
     return text, round(meters, 1)
+
+
+def _expand(claims: list[dict[str, Any]], ask: str, lang: str = "en") -> list[dict[str, Any]]:
+    from app.reader_claims import expand_for_ask
+
+    return expand_for_ask(claims, ask, lang)
 
 
 def build_cards(
@@ -369,8 +422,11 @@ def build_cards(
     ][:POOL_SIZE]
     if not candidates:
         return []
-    with ThreadPoolExecutor(max_workers=POOL_SIZE, thread_name_prefix="gplace") as pool:
+    with ThreadPoolExecutor(max_workers=POOL_SIZE + 1, thread_name_prefix="gplace") as pool:
+        # What each claim means for THIS ask is decided once, while the reviews load.
+        expanded = pool.submit(_expand, claims, ask, lang) if claims else None
         details = list(pool.map(lambda p: place_reviews(str(p["place_id"]), lang=lang), candidates))
+        claims = expanded.result() if expanded else []
     enriched = []
     for p, d in zip(candidates, details):
         if d:
