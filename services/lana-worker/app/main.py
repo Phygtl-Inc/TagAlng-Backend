@@ -5114,6 +5114,9 @@ class RapportNextAskBody(_BaseModel):
     # True when the user taps the tile's refresh (⟳): retire the current ask and return a
     # different one now, bypassing the 24h cap.
     cycle: bool = False
+    # The community the app is inside (top pill). Set → the tile asks about the person in
+    # relation to that community first (app/rapport_community.py). Omitted → unchanged.
+    community_id: str | None = None
 
 
 @app.post("/lana/rapport/next-ask")
@@ -5124,13 +5127,35 @@ def post_rapport_next_ask(
     # POST (not GET): the PWA service worker breaks cross-origin GETs to the worker but
     # lets POSTs through — same reason the chat/places calls are POST.
     auth = verify_auth(authorization)
+    surface = (body.surface if body else "homescreen") or "homescreen"
+    cycle = bool(body.cycle) if body else False
+    community_id = (body.community_id or "").strip() if body else ""
+    if community_id:
+        # Inside a community the tile asks about THEM in relation to it first. Membership
+        # is re-checked (the id comes from the client) exactly as the chat scope does.
+        from app.community_scope import apply_community_selection
+        from app.rapport_community import next_ask_in_community
+        from app.rapport_ranker import _preferred_lang
+
+        scope: dict = {}
+        if apply_community_selection(scope, community_id, user_id=auth.user_id):
+            handled, ask = next_ask_in_community(
+                auth.user_id,
+                scope,
+                lang=_preferred_lang(auth.user_id) or "en",
+                surface=surface,
+                cycle=cycle,
+                # A guest gets the community's own question — the reason they came —
+                # but still never the personal profile queue below.
+                allow_personal_queue=not auth.is_anonymous,
+            )
+            if handled:
+                return {"ask": ask}
     # Guests (anonymous auth) never get the "By the way…" tile — profile-deepening
     # questions are for committed accounts. Their claims still accrue in chat and
     # carry over on verify (same user_id), so nothing is lost by waiting.
     if auth.is_anonymous:
         return {"ask": None}
-    surface = (body.surface if body else "homescreen") or "homescreen"
-    cycle = bool(body.cycle) if body else False
     return {"ask": rapport_next_ask(auth.user_id, surface, cycle=cycle)}
 
 

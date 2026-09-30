@@ -66,6 +66,9 @@ class _Query:
     def gte(self, *a, **k):
         return self
 
+    def like(self, *a, **k):
+        return self
+
     def order(self, *a, **k):
         return self
 

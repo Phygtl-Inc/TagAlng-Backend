@@ -573,7 +573,10 @@ def _inside_community(session_ctx: dict[str, Any]) -> dict[str, Any] | None:
     facts = active_community_facts(session_ctx)
     if not facts:
         return None
-    return {k: facts.get(k) for k in ("name", "kind", "about", "creator_wants", "creator")}
+    return {
+        k: facts.get(k)
+        for k in ("name", "kind", "about", "members_help", "creator_wants", "creator")
+    }
 
 
 def decide_turn(

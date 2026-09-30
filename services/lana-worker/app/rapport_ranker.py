@@ -144,6 +144,9 @@ def _skip_brake(user_id: str) -> bool:
             .select("status, asked_at, answered_at, skipped_count")
             .eq("user_id", user_id)
             .not_.is_("asked_at", "null")
+            # Community questions live in their own lane (rapport_community) and must not
+            # brake — or un-brake — the personal tile.
+            .not_.like("gap_id", "community:%")
             .order("asked_at", desc=True)
             .limit(limit)
             .execute()
@@ -389,6 +392,9 @@ def _load_open_rows(user_id: str) -> list[dict[str, Any]]:
     except Exception:
         logger.exception("rapport: candidate load failed for %s", user_id)
         return []
+    # A community's own questions (rapport_community) are asked only inside it — out
+    # here "What's your all-time favourite MrBeast video?" is a non-sequitur.
+    rows = [r for r in rows if not str(r.get("gap_id") or "").startswith("community:")]
     # Served 24h / skipped 72h / raised in chat 24h — see _apply_repetition_windows. The
     # supply floor (rapport_synth._BUFFER_TARGET) is what gives these something to prefer.
     rows = _apply_repetition_windows(rows)
@@ -546,6 +552,7 @@ def _pending_ask(user_id: str) -> dict[str, Any] | None:
             .select("*")
             .eq("user_id", user_id)
             .eq("status", "asked")
+            .not_.like("gap_id", "community:%")
             .order("asked_at", desc=True)
             .limit(1)
             .execute()

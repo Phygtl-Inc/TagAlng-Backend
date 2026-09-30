@@ -988,7 +988,10 @@ def _community_about_turn(
             "describe it by its topic and purpose only — never a spot, place, venue, local "
             "or nearby, and never whether it is online or physical)"
         )
-        if not (here.get("about") or here.get("creator_wants") or prof.get("description")):
+        if not (
+            here.get("about") or here.get("members_help") or here.get("creator_wants")
+            or prof.get("description")
+        ):
             # "Big Bros" with no description came back as "supporting and mentoring others"
             # — invented from the name. Nothing described is an answer, not a gap to fill.
             facts.append(
@@ -1004,8 +1007,12 @@ def _community_about_turn(
     if here:
         if here.get("about") and not prof.get("description"):
             facts.append(f"How it is described: {here['about']}")
+        if here.get("members_help"):
+            facts.append(f"What members help each other with: {here['members_help']}")
         if here.get("creator_wants"):
-            facts.append(f"What its creator wants people to do here: {here['creator_wants']}")
+            facts.append(
+                f"A first question its creator expects people to ask here: {here['creator_wants']}"
+            )
         if here.get("creator"):
             facts.append(
                 f"It is run by {here['creator']}, whose community this is — refer to them "

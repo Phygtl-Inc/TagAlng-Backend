@@ -51,6 +51,38 @@ def _community_row(place_id: str) -> dict[str, Any]:
     return {}
 
 
+def _creator_answers(place_id: str) -> dict[str, str]:
+    """What the creator wrote on lana.help's "Community fit" step.
+
+    "What connects your followers?" and "What can they help each other with?" are stored
+    as place_features (shared_context / member_value), never as places.blurb — so a new
+    creator community has a creator-written description that nothing here read, and
+    Lana said "its creator hasn't described it yet" over the creator's own words.
+    """
+    from app.auth import service_client
+
+    try:
+        res = (
+            service_client()
+            .table("place_features")
+            .select("key, value, confidence, created_at")
+            .eq("place_id", place_id)
+            .in_("key", ["shared_context", "member_value"])
+            .order("confidence", desc=True)
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — missing answers only cost facts
+        return {}
+    out: dict[str, str] = {}
+    for r in res.data if isinstance(res.data, list) else []:
+        key, value = str(r.get("key") or ""), _clean(r.get("value"))
+        if value and key not in out:
+            out[key] = value
+    return out
+
+
 def _creator_name(place_id: str) -> str:
     """Same source as place_claim_card: what the creator typed to be found."""
     from app.auth import service_client
@@ -152,11 +184,16 @@ def active_community_facts(session_ctx: dict[str, Any] | None) -> dict[str, Any]
         logger.exception("active_community_facts_failed place=%s", place_id)
         row = {}
     is_creator = row.get("place_type") == "creator"
+    answers = _creator_answers(place_id) if is_creator else {}
     facts = {
         "place_id": place_id,
         "name": _clean(row.get("name")) or _clean(comm.get("name")),
         "kind": "creator community" if is_creator else _clean(row.get("place_type")) or "community",
-        "about": _clean(row.get("blurb")) or None,
+        # The creator's own "what connects your followers?" outranks a stored blurb: the
+        # blurb on a creator row may be a generated line from before 2026-10-01.
+        "about": answers.get("shared_context") or _clean(row.get("blurb")) or None,
+        "members_help": answers.get("member_value") or None,
+        # lana.help stores "What might someone ask first?" here.
         "creator_wants": _clean(row.get("first_action")) or None,
         "creator": (_creator_name(place_id) or None) if is_creator else None,
         "at": datetime.now(timezone.utc).isoformat(),
@@ -177,8 +214,10 @@ def active_community_prompt_line(session_ctx: dict[str, Any] | None) -> str:
         parts.append(f'run by {facts["creator"]}')
     if facts.get("about"):
         parts.append(f'about: {facts["about"][:200]}')
+    if facts.get("members_help"):
+        parts.append(f'members help each other with: {facts["members_help"][:160]}')
     if facts.get("creator_wants"):
-        parts.append(f'its creator wants people to: {facts["creator_wants"][:160]}')
+        parts.append(f'a first question its creator expects: {facts["creator_wants"][:160]}')
     return " — ".join(parts)
 
 
@@ -198,7 +237,9 @@ def community_opening(
         name = _clean(row.get("name")) or _clean((community or {}).get("name"))
         if not name:
             return None
-        blurb = _clean(row.get("blurb"))
+        answers = _creator_answers(place_id) if row.get("place_type") == "creator" else {}
+        blurb = answers.get("shared_context") or _clean(row.get("blurb"))
+        helps = answers.get("member_value", "")
         purpose = _clean(row.get("first_action"))
         creator = _creator_name(place_id) if row.get("place_type") == "creator" else ""
         joined_now = bool(user_id) and _just_joined(str(user_id), place_id)
@@ -210,8 +251,10 @@ def community_opening(
             facts.append(
                 "It has no description yet — never guess what it is about from its name"
             )
+        if helps:
+            facts.append(f"What members help each other with: {helps}")
         if purpose:
-            facts.append(f"What its creator wants people to do here: {purpose}")
+            facts.append(f"A first question its creator expects people to ask: {purpose}")
         if creator:
             facts.append(f"Run by: {creator} (refer to them by name — never he/she)")
         if row.get("place_type") == "creator":

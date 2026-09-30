@@ -382,3 +382,51 @@ class RecommendationInsideCommunityTests(unittest.TestCase):
         (reply, _c, routing, _p), find = self._ask(ctx={}, tips=[])
         find.assert_not_called()
         self.assertIn("tip_seek_need_zip", str(routing))
+
+
+class CreatorFormAnswersTests(unittest.TestCase):
+    """lana.help's "Community fit" answers live in place_features, not places.blurb. A new
+    creator community therefore had the creator's own description and Lana read none of
+    it (2026-10-01)."""
+
+    ROW = {"name": "Beast Bros", "place_type": "creator", "blurb": "a spot known to neighbors",
+           "first_action": "What's your all-time favourite MrBeast video?"}
+    ANSWERS = {"shared_context": "Fans of MrBeast's big stunts, giveaways and philanthropy",
+               "member_value": "Video ideas, challenge tips and premiere watch-alongs"}
+
+    def test_facts_prefer_the_creators_words_over_a_stored_blurb(self) -> None:
+        from app import community_opening as co
+
+        ctx = {CTX_KEY: {"place_id": PLACE, "name": "Beast Bros"}}
+        with patch.object(co, "_community_row", return_value=self.ROW), patch.object(
+            co, "_creator_answers", return_value=self.ANSWERS
+        ), patch.object(co, "_creator_name", return_value="Jimmy"):
+            facts = co.active_community_facts(ctx)
+            line = co.active_community_prompt_line(ctx)
+        self.assertEqual(facts["about"], self.ANSWERS["shared_context"])
+        self.assertEqual(facts["members_help"], self.ANSWERS["member_value"])
+        self.assertIn("members help each other with: Video ideas", line)
+        self.assertIn("a first question its creator expects", line)
+        self.assertNotIn("spot known to neighbors", line)
+
+    def test_opening_is_grounded_in_the_form_answers(self) -> None:
+        from app import community_opening as co
+
+        seen: dict = {}
+        with patch.object(co, "_community_row", return_value=self.ROW), patch.object(
+            co, "_creator_answers", return_value=self.ANSWERS
+        ), patch.object(co, "_creator_name", return_value="Jimmy"), patch(
+            "app.community_surface.caller_affiliation_at", return_value={"created_at": ""}
+        ), patch.object(co, "compose_reply", side_effect=lambda **kw: seen.update(kw) or "ok"):
+            co.community_opening({"place_id": PLACE}, user_id="u1")
+        facts = "\n".join(seen["facts"])
+        self.assertIn("MrBeast's big stunts", facts)
+        self.assertIn("Video ideas, challenge tips", facts)
+        self.assertIn("A first question its creator expects", facts)
+
+    def test_policy_sees_what_members_help_with(self) -> None:
+        from app.policy.decide import _inside_community
+
+        ctx = _ctx()
+        ctx["_active_community_facts"]["members_help"] = "honest product feedback"
+        self.assertEqual(_inside_community(ctx)["members_help"], "honest product feedback")

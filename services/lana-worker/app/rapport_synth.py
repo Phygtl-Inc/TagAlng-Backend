@@ -449,6 +449,9 @@ def _open_gap_count(user_id: str) -> int:
             .select("gap_row_id", count="exact")
             .eq("user_id", user_id)
             .eq("status", "open")
+            # A community's own questions are not the personal buffer: counting them would
+            # stop the tile's reserve refilling for someone who joined a few communities.
+            .not_.like("gap_id", "community:%")
             .execute()
         )
         return res.count if getattr(res, "count", None) is not None else len(res.data or [])
