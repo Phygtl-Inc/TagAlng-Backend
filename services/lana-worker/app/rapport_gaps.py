@@ -189,8 +189,12 @@ def open_semantic_gap(
     from_local_supply: bool = False,
     answer_options: list[str] | None = None,
     skip_dedup: bool = False,
+    community: str | None = None,
 ) -> bool:
     """Open ONE contextual follow-up gap carrying the AI's own per-turn question.
+
+    `community`: the name of the community this is asked inside (rapport_community), so
+    the card's why-line speaks of its members, never "neighbors nearby".
 
     `deepens_concept` records WHICH identity claim this question is about, so coverage is an
     exact fact (not a fuzzy similarity guess) — see rapport_uncovered_claims.
@@ -313,6 +317,7 @@ def open_semantic_gap(
                 label=label,
                 why_frame=why_frame,
                 grounding=bool(affiliation_ref),
+                community=community,
             )
         except Exception:  # noqa: BLE001 — the gap itself is already saved
             logger.exception("rapport: why-reason kickoff failed")

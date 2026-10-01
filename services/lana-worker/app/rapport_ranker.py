@@ -290,9 +290,29 @@ def _heal_reason(row: dict[str, Any], question: str) -> None:
             user_id=str(row.get("user_id") or "") or None,
             why_frame=str(row.get("why_frame") or "") or None,
             grounding=bool(row.get("affiliation_ref")),
+            community=_community_name_for(row),
         )
     except Exception:  # noqa: BLE001 — the ask still serves without a why-line
         logger.exception("rapport: why-reason self-heal kickoff failed")
+
+
+def _community_name_for(row: dict[str, Any]) -> str | None:
+    """The community a community-lane ask (rapport_community) belongs to, by name — so its
+    why-line talks about that community's members, not "neighbors nearby"."""
+    if not str(row.get("gap_id") or "").startswith("community:") or not row.get("place_ref"):
+        return None
+    try:
+        res = (
+            service_client()
+            .table("places")
+            .select("name")
+            .eq("id", str(row["place_ref"]))
+            .limit(1)
+            .execute()
+        )
+        return str(((res.data or [{}])[0] or {}).get("name") or "").strip() or None
+    except Exception:  # noqa: BLE001 — the reason still writes, just without the community
+        return None
 
 
 def _place_extras(row: dict[str, Any]) -> dict[str, Any]:
@@ -321,7 +341,12 @@ def _place_extras(row: dict[str, Any]) -> dict[str, Any]:
     name = str(place.get("name") or "").strip()
     if not name:
         return {}
-    extras: dict[str, Any] = {"kind": "place_affinity", "place_name": name}
+    # A community-lane ask (rapport_community) is not "a place you pinned": the card said
+    # "TOMMASO · PINNED" over a question asked inside Tommaso's community (2026-10-01).
+    kind = (
+        "community" if str(row.get("gap_id") or "").startswith("community:") else "place_affinity"
+    )
+    extras: dict[str, Any] = {"kind": kind, "place_name": name}
     if place.get("place_type"):
         extras["place_type"] = str(place["place_type"])
     return extras

@@ -255,6 +255,7 @@ def next_ask_in_community(
             bucket="community",
             teaser=f"from {facts['name']}",
             place_ref=pid,
+            community=str(facts["name"]),
             gap_id=first_id,
             unlock_score=0.95,
             skip_dedup=True,
@@ -294,6 +295,7 @@ def next_ask_in_community(
                 bucket="community",
                 teaser=made["teaser"],
                 place_ref=pid,
+                community=str(facts["name"]),
                 gap_id=community_gap_id(pid, suffix),
                 unlock_score=0.9,
             ):

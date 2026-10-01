@@ -74,6 +74,9 @@ Weak: "It helps me get to know you better." \
 Strong: "Knowing which nights you play lets me point you to neighbors who hit the courts then."
 - Truthful and modest: it is about connecting them with people and plans nearby. NEVER claim \
 it unlocks features, feeds ads, is shared with anyone, or is required.
+- When `community` is given, the question is asked INSIDE that community: the honest reason \
+is about its MEMBERS ("so I can connect you with other members of <community> who…") — \
+never "neighbors", "nearby" or "local".
 - Never the words "circle", "block", "match", "mom", or "profile".
 - English only — it is rendered into the user's language downstream."""
 
@@ -96,6 +99,7 @@ def compose_ask_reason(
     label: str | None = None,
     why_frame: str | None = None,
     grounding: bool = False,
+    community: str | None = None,
 ) -> str | None:
     """AI-author the why-line for one ask. None when it can't be written.
 
@@ -111,6 +115,10 @@ def compose_ask_reason(
         payload["topic"] = str(label)[:80]
     if why_frame:
         payload["teaser_shown"] = str(why_frame)[:80]
+    if community:
+        # Asked inside a creator's community: "neighbors nearby" was the wrong promise
+        # (2026-10-01) — the people it reaches are that community's members.
+        payload["community"] = str(community)[:80]
     if grounding:
         # A grounding ask wants the specific local spot, so the honest reason is about
         # reaching the people who go there — not about the topic in the abstract.
@@ -163,13 +171,14 @@ def attach_ask_reason(
     label: str | None = None,
     why_frame: str | None = None,
     grounding: bool = False,
+    community: str | None = None,
 ) -> str | None:
     """Compose the why-line, store it on the gap, and render it into the user's
     language. Returns the stored reason, or None when nothing was written."""
     if not gap_row_id:
         return None
     reason = compose_ask_reason(
-        question, label=label, why_frame=why_frame, grounding=grounding
+        question, label=label, why_frame=why_frame, grounding=grounding, community=community
     )
     if not reason:
         return None
@@ -224,6 +233,7 @@ def attach_ask_reason_async(
     label: str | None = None,
     why_frame: str | None = None,
     grounding: bool = False,
+    community: str | None = None,
 ) -> None:
     """Fire-and-forget ``attach_ask_reason`` — every caller sits on a turn or a
     home render, and neither may wait on an LLM for a subtitle."""
@@ -239,6 +249,7 @@ def attach_ask_reason_async(
             "label": label,
             "why_frame": why_frame,
             "grounding": grounding,
+            "community": community,
         },
         daemon=True,
         name="rapport-reason",

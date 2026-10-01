@@ -198,3 +198,50 @@ class RankerIsolationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CardLabelTests(unittest.TestCase):
+    """The expanded card read "TOMMASO · PINNED" and promised "neighbors nearby" over a
+    question asked inside Tommaso's community (2026-10-01)."""
+
+    def _extras(self, gap_id):
+        from app import rapport_ranker as rr
+
+        class _Q:
+            def __getattr__(self, _n):
+                return lambda *a, **k: self
+
+            def execute(self):
+                class R:
+                    data = [{"name": "Tommaso", "place_type": "creator"}]
+                return R()
+
+        class _C:
+            def table(self, _n):
+                return _Q()
+
+        with patch.object(rr, "service_client", return_value=_C()):
+            return rr._place_extras({"gap_id": gap_id, "place_ref": PID, "gap_row_id": "r"}), \
+                rr._community_name_for({"gap_id": gap_id, "place_ref": PID})
+
+    def test_community_question_is_kind_community_not_pinned(self) -> None:
+        extras, name = self._extras(f"community:{PID}:gen-1")
+        self.assertEqual(extras["kind"], "community")
+        self.assertEqual(name, "Tommaso")
+
+    def test_a_pinned_place_enrichment_ask_is_unchanged(self) -> None:
+        extras, name = self._extras("deepen:gym")
+        self.assertEqual(extras["kind"], "place_affinity")
+        self.assertIsNone(name)
+
+    def test_reason_writer_is_told_the_community(self) -> None:
+        from app import rapport_reasons as rs
+
+        seen = {}
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", side_effect=lambda **kw: seen.update(kw) or {"reason": "so I can connect you"}
+        ):
+            rs.compose_ask_reason("What are you building?", community="Tommaso")
+        import json
+        self.assertEqual(json.loads(seen["user_payload"])["community"], "Tommaso")
+        self.assertIn("never \"neighbors\"", seen["system"])
