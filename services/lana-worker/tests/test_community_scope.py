@@ -167,6 +167,49 @@ class BrowseScopeTests(unittest.TestCase):
             [p["title"] for p in ctx.get("activity_previews") or []], ["FIFA watch party"]
         )
 
+    _EV = [
+        {
+            "id": "e1",
+            "title": "FIFA watch party",
+            "starts_at": "2026-06-27T18:00:00",
+            "venue_name": "CF Fitness",
+            "cohort_tags": [],
+        }
+    ]
+
+    @patch("app.auth.jwt_user_id", return_value="me")
+    @patch("app.community_surface.stamp_communities_card")
+    @patch("app.community_scope.community_events")
+    def test_find_a_meet_inside_a_community_shows_its_meets_not_a_question(
+        self, comm_events, card, _uid
+    ) -> None:
+        # "Find a meet" posts a seed the lane drops, so the turn arrives with no message.
+        # Inside a community that used to ask "Love it — what kind of thing are you up
+        # for?" over cards that already answered it (Tommaso, 2026-10-01).
+        comm_events.return_value = list(self._EV)
+        ctx = self._ctx()
+        reply = run_activity_browse_turn(
+            user_message="", session_ctx=ctx, history=[], user_jwt="jwt", home_block_id="b1"
+        )
+        self.assertNotIn("what kind of thing", reply.lower())
+        self.assertIn("here's what i found in cf fitness", reply.lower())
+        self.assertNotIn("near you", reply.lower())
+        self.assertEqual(
+            [p["title"] for p in ctx.get("activity_previews") or []], ["FIFA watch party"]
+        )
+        card.assert_not_called()  # the all-communities card is not this community's meets
+
+    @patch("app.auth.jwt_user_id", return_value="me")
+    @patch("app.community_surface.stamp_communities_card")
+    def test_find_a_meet_outside_a_community_still_asks_the_interest(self, card, _uid) -> None:
+        ctx = self._ctx()
+        ctx[CTX_KEY] = None
+        reply = run_activity_browse_turn(
+            user_message="", session_ctx=ctx, history=[], user_jwt="jwt", home_block_id="b1"
+        )
+        self.assertIn("what kind of thing", reply.lower())
+        card.assert_called_once()
+
     @patch("app.auth.jwt_user_id", return_value="me")
     @patch("app.community_scope.community_events", return_value=[])
     def test_an_empty_community_offers_the_way_out_and_the_tap_clears_the_filter(

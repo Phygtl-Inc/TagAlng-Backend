@@ -1299,6 +1299,10 @@ class PlaceResult(BaseModel):
     place_id: str | None = None
     lat: float | None = None
     lng: float | None = None
+    # Reverse geocode only: where the pin is, at the scale a person names it.
+    neighborhood: str | None = None
+    city: str | None = None
+    area_label: str | None = None
 
 
 class PlaceSuggestionRow(BaseModel):
