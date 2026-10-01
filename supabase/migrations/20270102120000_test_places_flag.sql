@@ -10,20 +10,28 @@
 --     asjid-test-6           Running with asjid
 --     mrbeast-community      MrBeast
 --
---   They sit in discovery next to Etiqueta do Reino, which is our actual pilot
---   creator. They also inflate every count we might show someone.
+--   They sit in discovery next to Etiqueta do Reino, which is our actual pilot creator.
+--   They also inflate every count we might show someone.
 --
 --   The obvious answer is "don't test on prod", and the obvious answer is wrong here:
---   the team needs to exercise real flows against real data, and a separate
---   environment is a bigger lift than the problem deserves right now.
+--   the team needs to exercise real flows against real data, and a separate environment
+--   is a bigger lift than the problem deserves right now.
 --
---   So: one boolean. A test place still exists, still resolves from a direct link,
---   and is visible to anyone who holds that link. It simply does not appear in
---   anything that lists or counts places for the public.
+--   So: one boolean. A test place still exists, still resolves from a direct link, and
+--   is visible to anyone who holds that link. It simply does not appear in anything that
+--   lists or counts places for the public.
 --
---   TRANSPARENT ON PURPOSE. resolve_place_handle returns isTest so the client can say
---   so out loud. A test place that is indistinguishable from a real one is how test
---   data ends up in a screenshot in a pitch deck.
+-- REVISION NOTE (please read before reviewing)
+--
+--   The first version of this file re-emitted discover_communities AND
+--   resolve_place_handle using the bodies from PR #170. Production runs the #172
+--   versions, which are different and correct, so applying that would have silently
+--   reverted four of Asjid's fixes — the unassigned-record error on every non-creator
+--   handle, the creator block source, the threshold ordering that made a one-member
+--   community return zero rows, and the p_user_id default.
+--
+--   This version instead takes #172's discover_communities VERBATIM and adds exactly one
+--   predicate. resolve_place_handle is not touched at all — see the note at the bottom.
 
 alter table public.places
   add column if not exists is_test boolean not null default false;
@@ -38,9 +46,9 @@ create index if not exists places_is_test_idx on public.places (is_test) where i
 
 -- ── mark what is already there ──────────────────────────────────────────────
 --
--- Matched by name AND handle so a real community called "Testa" or a creator whose
--- handle contains "test" is not caught. Conservative: it is cheap to flag one more
--- later, and expensive to hide a real creator.
+-- Matched by exact handle, not a pattern. A real community called "Testa", or a creator
+-- whose handle happens to contain "test", would be caught by a regex. Cheap to flag one
+-- more later; expensive to hide a real creator.
 
 update public.places
    set is_test = true, updated_at = now()
@@ -49,6 +57,10 @@ update public.places
  );
 
 -- ── toggling ────────────────────────────────────────────────────────────────
+--
+-- service_role only, deliberately. Marking a live community as test hides it from
+-- discovery, which is a quiet way to break somebody's launch — that should not be one
+-- mis-click away for an operator. Open to being argued down to operator-with-confirmation.
 
 create or replace function public.set_place_test_flag(p_place_id uuid, p_is_test boolean)
 returns boolean
@@ -57,13 +69,9 @@ volatile
 security definer
 set search_path = pg_catalog, public
 as $$
-declare v_uid uuid := auth.uid();
 begin
-  if v_uid is null then
-    raise exception 'not_authenticated';
-  end if;
-  if not public.is_community_operator(p_place_id, v_uid) then
-    raise exception 'not_operator';
+  if not exists (select 1 from public.places where id = p_place_id) then
+    raise exception 'place_not_found';
   end if;
 
   update public.places
@@ -74,21 +82,28 @@ begin
 end;
 $$;
 
-revoke all on function public.set_place_test_flag(uuid, boolean) from public, anon;
-grant execute on function public.set_place_test_flag(uuid, boolean) to authenticated, service_role;
+revoke all on function public.set_place_test_flag(uuid, boolean)
+  from public, anon, authenticated;
+grant execute on function public.set_place_test_flag(uuid, boolean) to service_role;
 
 -- ── keep test places out of discovery ───────────────────────────────────────
 --
--- Only change from the version in 20261231120003: `and not p.is_test`. Everything
--- else is byte-identical, so the diff is the filter.
+-- #172's body, unchanged except for ONE added predicate in the final WHERE:
+--
+--     and not p.is_test
+--
+-- Everything else — the pre-merge thresholding on both arms, the `me` CTE resolving
+-- auth.uid() over p_user_id, the defaults, the grants — is Asjid's and is reproduced
+-- verbatim. If anything here has drifted from 20261231120003, that is a mistake on my
+-- part and his version wins.
 
 create or replace function public.discover_communities(
-  p_user_id         uuid,
-  p_query_embedding extensions.vector(768),
-  p_min_similarity  real    default 0.55,
-  p_limit           int     default 10,
-  p_creator_only    boolean default false,
-  p_include_mine    boolean default false
+  p_user_id         uuid                    default null,
+  p_query_embedding extensions.vector(768)  default null,
+  p_min_similarity  real                    default 0.55,
+  p_limit           int                     default 10,
+  p_creator_only    boolean                 default false,
+  p_include_mine    boolean                 default false
 )
 returns table (
   place_id      uuid,
@@ -109,26 +124,33 @@ stable
 security definer
 set search_path = pg_catalog, public, extensions
 as $$
-  with visible as (
-    select vm.place_ref, vm.user_id from public.visible_place_members(p_user_id) vm
+  with me as (
+    select coalesce(auth.uid(), p_user_id) as uid
+  ),
+  visible as (
+    select vm.place_ref, vm.user_id
+    from me, public.visible_place_members(me.uid) vm
   ),
   counted as (
     select v.place_ref as pid,
            count(distinct v.user_id)::int as members,
-           bool_or(v.user_id = p_user_id) as mine
+           bool_or(v.user_id = (select uid from me)) as mine
     from visible v group by v.place_ref
   ),
   by_claim as (
-    select distinct on (v.place_ref)
-      v.place_ref as pid, c.label as lbl, 'member_claim'::text as kind,
-      (1 - (c.embedding <=> p_query_embedding))::real as sim
-    from visible v
-    join public.user_identity_claims c
-      on c.user_id = v.user_id
-     and c.dismissed_at is null and c.transient = false
-     and c.disclosure = 'public' and c.subject_kind = 'self'
-     and c.embedding is not null
-    order by v.place_ref, c.embedding <=> p_query_embedding
+    select distinct on (s.pid) s.pid, s.lbl, s.kind, s.sim
+    from (
+      select v.place_ref as pid, c.label as lbl, 'member_claim'::text as kind,
+             (1 - (c.embedding <=> p_query_embedding))::real as sim
+      from visible v
+      join public.user_identity_claims c
+        on c.user_id = v.user_id
+       and c.dismissed_at is null and c.transient = false
+       and c.disclosure = 'public' and c.subject_kind = 'self'
+       and c.embedding is not null
+    ) s
+    where s.sim >= p_min_similarity
+    order by s.pid, s.sim desc
   ),
   by_blurb as (
     select p.id as pid, p.blurb as lbl, 'blurb'::text as kind,
@@ -141,7 +163,8 @@ as $$
     select * from by_claim
     union all
     select * from by_blurb b
-    where not exists (select 1 from by_claim c where c.pid = b.pid)
+    where b.sim >= p_min_similarity
+      and not exists (select 1 from by_claim c where c.pid = b.pid)
   )
   select
     m.pid, p.name, p.place_type, p.hq_city, p.hq_lat, p.hq_lng,
@@ -151,97 +174,39 @@ as $$
   from merged m
   join public.places p on p.id = m.pid
   left join counted c  on c.pid = m.pid
-  where m.sim >= p_min_similarity
+  where p_query_embedding is not null
     and (not p_creator_only or p.place_type = 'creator')
     and (p_include_mine or not coalesce(c.mine, false))
     and p.governance_state <> 'suspended'
-    -- Test data does not belong next to the pilot creator in a discovery list.
+    -- THE ONLY ADDED LINE. Test data does not belong next to the pilot creator.
     and not p.is_test
   order by (m.kind = 'member_claim') desc, m.sim desc, coalesce(c.members,0) desc, p.name
   limit greatest(1, least(coalesce(p_limit, 10), 50));
 $$;
 
 revoke all on function public.discover_communities(uuid, extensions.vector, real, int, boolean, boolean)
-  from public, anon;
+  from public, anon, authenticated;
 grant execute on function public.discover_communities(uuid, extensions.vector, real, int, boolean, boolean)
   to authenticated, service_role;
 
--- ── resolve still works, but says what it is ────────────────────────────────
-
-create or replace function public.resolve_place_handle(p_handle text)
-returns jsonb
-language plpgsql
-stable
-security definer
-set search_path = pg_catalog, public, extensions
-as $$
-declare
-  v_in      text := public.normalize_place_handle(p_handle);
-  v_place   record;
-  v_alias   boolean := false;
-  v_creator record;
-begin
-  select p.id, p.handle, p.name, p.place_type, p.zip, p.first_action,
-         p.governance_state, p.blurb, p.hq_city, p.claimed_by, p.is_test
-    into v_place
-    from public.places p
-   where p.handle = v_in
-     and p.governance_state = 'operator_verified';
-
-  if v_place.id is null then
-    select p.id, p.handle, p.name, p.place_type, p.zip, p.first_action,
-           p.governance_state, p.blurb, p.hq_city, p.claimed_by, p.is_test
-      into v_place
-      from public.place_handle_aliases a
-      join public.places p on p.id = a.place_id
-     where a.handle = v_in
-       and p.governance_state = 'operator_verified';
-    v_alias := v_place.id is not null;
-  end if;
-
-  if v_place.id is null then
-    return null;
-  end if;
-
-  if v_place.place_type = 'creator' then
-    select u.id, u.nickname, u.profile_photo_url
-      into v_creator
-      from public.place_managers m
-      join public.users u on u.id = m.user_id
-     where m.place_id = v_place.id
-       and m.role = 'operator'
-       and m.removed_at is null
-     order by m.created_at asc
-     limit 1;
-  end if;
-
-  return jsonb_build_object(
-    'placeId',          v_place.id,
-    'handle',           v_place.handle,
-    'displayName',      v_place.name,
-    'placeType',        v_place.place_type,
-    'zip',              v_place.zip,
-    'firstAction',      v_place.first_action,
-    'governanceState',  v_place.governance_state,
-    'operatorVerified', true,
-    'blurb',            v_place.blurb,
-    'hqCity',           v_place.hq_city,
-    'viaAlias',         v_alias,
-    -- Said out loud on purpose. A test place that looks real is how test data ends
-    -- up in a screenshot somebody shows an investor.
-    'isTest',           coalesce(v_place.is_test, false),
-    'creator',          case
-                          when v_creator.id is null then null
-                          else jsonb_build_object(
-                                 'displayName', v_creator.nickname,
-                                 'avatarUrl',   v_creator.profile_photo_url)
-                        end);
-end;
-$$;
-
 -- ============================================================================
+-- NOT DONE HERE · resolve_place_handle
+--
+--   The client needs to know a place is test data so the page can say so — a test place
+--   indistinguishable from a real one is how test data ends up in a screenshot in a
+--   pitch deck.
+--
+--   That means one line in resolve_place_handle's jsonb_build_object:
+--
+--       'isTest', coalesce(v_is_test, false),
+--
+--   @asjid9 — deliberately leaving this to you rather than re-emitting a function whose
+--   current body you wrote and I have already got wrong once today. tagalng-pwa #99
+--   reads it as `r.isTest === true`, so it degrades to false if the field is absent and
+--   nothing breaks while this is outstanding.
+--
 -- ROLLBACK
 --   drop function if exists public.set_place_test_flag(uuid, boolean);
 --   alter table public.places drop column if exists is_test;
---   -- discover_communities and resolve_place_handle: restore from 20261231120001/3.
+--   -- discover_communities: restore verbatim from 20261231120003.
 -- ============================================================================
