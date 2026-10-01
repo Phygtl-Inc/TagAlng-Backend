@@ -30,6 +30,10 @@ WHAT THIS DOES NOT DO
     community-entry session. From the second turn the existing engine resumes, now with
     the community as standing context.
 
+    It no longer owns what Lana says when the community CANNOT answer. That is
+    app.scope_response, which has three branches rather than two — see the note on
+    widen_ask below.
+
 Defensive by contract: never raises into the request path. A failure returns the
 existing generic opening rather than an error.
 """
@@ -90,22 +94,6 @@ Rules:
 - Not a welcome message. What should they DO.
 
 Return ONLY valid JSON: {{"first_action": "..."}}
-"""
-
-WIDEN_PROMPT = """Lana looked inside one community for an answer and found none. Write the \
-one line asking whether to look wider.
-
-Community: {community}
-They asked: {question}
-
-Rules:
-- Name the community. The boundary has to be FELT — that is the point of being in one.
-- State plainly that nobody here has answered this. Do not apologise, do not soften it
-  into vagueness. It is not a failure, it is a fact about a young community.
-- Then offer, as a question, to look beyond it.
-- Under 25 words. No emoji.
-
-Return ONLY valid JSON: {{"ask": "..."}}
 """
 
 
@@ -296,58 +284,32 @@ def draft_first_action(place_id: str) -> str | None:
         return None
 
 
+# ── moved to app.scope_response ─────────────────────────────────────────────
+#
+# The version that lived here had TWO branches: answer, or offer to leave. Pouya's
+# point in review was that this opens exactly one door and it leads out of the
+# community — at the moment the community should be proving it is worth being in.
+#
+# scope_response.compose() has three: answer it, offer what the scope DOES have, or
+# only then offer to widen. These shims exist so nothing breaks mid-review; prefer
+# compose() directly in new code.
+
+
 def widen_ask(*, community_name: str, question: str) -> str:
-    """Ask before looking beyond the community. Never widen silently.
+    """Deprecated. Use scope_response.compose(), which can offer an alternative first."""
+    from app.scope_response import compose
 
-    Decision H: this is a conversational step, asked EVERY time, and the answer is not
-    remembered. Remembering it would quietly dissolve the boundary, and the boundary is
-    what being in a community means.
-    """
-    try:
-        from app.orchestrator.llm import llm_configured, llm_json, router_model
-
-        if llm_configured():
-            data = llm_json(
-                model=router_model(),
-                system=WIDEN_PROMPT.format(community=community_name, question=question),
-                user_payload=question,
-                max_tokens=100,
-                temperature=0.4,
-            )
-            if isinstance(data, dict):
-                ask = str(data.get("ask") or "").strip()
-                if ask:
-                    return ask[:220]
-    except Exception:
-        logger.exception("community_intro: widen ask generation failed")
-
-    # Deterministic fallback. Still names the community, still asks.
-    return (
-        f"Nobody in {community_name} has answered this yet. "
-        "Want me to look wider?"
-    )
+    return compose(
+        scope_name=community_name,
+        question=question,
+        best_score=None,
+    )["reply"]
 
 
 def record_widen(
     *, place_id: str, question: str, session_id: str | None = None, widened: bool = True
-) -> str | None:
-    """Write the unanswered ask into the radar.
+) -> None:
+    """Deprecated. compose() records the gap itself, on both non-strong branches."""
+    from app.scope_response import _record_gap
 
-    THE ASK IS THE SIGNAL. A question a community could not answer, with the community
-    attached, is the most valuable row in the product — it is demand with a named audience
-    and nobody serving it. `inquiry_signals` exists for exactly this and has zero rows.
-    """
-    try:
-        res = service_client().rpc(
-            "record_community_widen",
-            {
-                "p_place_id": place_id,
-                "p_free_text": question,
-                "p_session_id": session_id,
-                "p_widened": widened,
-            },
-        ).execute()
-        return res.data if isinstance(res.data, str) else None
-    except Exception:
-        logger.exception("community_intro: radar write failed for place=%s", place_id)
-        return None
+    _record_gap(place_id, question, session_id, widened=widened)
