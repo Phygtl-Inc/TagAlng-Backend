@@ -57,7 +57,7 @@ from app.guest_capabilities import (
     wants_host_activity,
     wants_peer_find,
 )
-from app.community_scope import active_community, community_name
+from app.community_scope import active_community, clear_active_community, community_name
 from app.reco_question_sets import active_reco_types, google_searchable
 from app.peer_radius import fetch_peer_matches_within_radius, radius_meters
 from app.tip_embed import tip_headline
@@ -4080,33 +4080,6 @@ def _tip_seek_answer_turn(
         circle_place_id=str(_comm["place_id"]) if _comm else None,
         reco_types=_types,
     )
-    if _comm and not neighbor_tips:
-        # Read (and cleared) by _compose_neighbor_tip_reply below, off the same incoming
-        # ctx it composes from: name the community that was empty before widening.
-        session_ctx["community_widened_from"] = _comm.get("name")
-        # ...and then actually widen. The peers lane has done this since the top filter
-        # shipped (scoped read, fall through to the neighbourhood when it is empty); the
-        # tip lane took the STAMP and not the second query, so an empty community skipped
-        # the neighbourhood entirely and fell to Google — with a matching tip sitting
-        # unscoped in the area (prod 2026-09-16, asked inside Pausa Bar & Cookery).
-        neighbor_tips = find_neighbor_tips(
-            user_jwt,
-            block_id=block_id,
-            query=detail,
-            category=category,
-            limit=WIDE_TIP_FETCH if wide else 3,
-            locale=str(session_ctx.get("preferred_lang") or "en"),
-            radius_meters=radius_meters() if widen else None,
-            circle_place_id=None,
-            reco_types=_types,
-        )
-        if not neighbor_tips:
-            # Nothing wider either, so this turn goes to Google and its composer never
-            # reads the stamp. Left set, it survives into a LATER turn and tells the user
-            # "nobody at Pausa had one, so these are from the wider neighbourhood" over a
-            # list that has nothing to do with Pausa. The flag describes one turn; clear
-            # it on the turn it described.
-            session_ctx["community_widened_from"] = None
     logging.getLogger(__name__).info(
         "tip_seek_answer.enter block=%s detail=%r category=%r types=%s neighbor_tips=%d "
         "wide=%s",
@@ -4123,11 +4096,7 @@ def _tip_seek_answer_turn(
 
     _parsed: dict[str, Any] | None = None
     if aspects_enabled() or authority_enabled():
-        _recall_circle = (
-            str(_comm["place_id"])
-            if _comm and not session_ctx.get("community_widened_from")
-            else None
-        )
+        _recall_circle = str(_comm["place_id"]) if _comm else None
 
         def _recall_fetch(kind: str, n: int) -> list[dict[str, Any]]:
             return find_neighbor_tips(
@@ -4171,6 +4140,47 @@ def _tip_seek_answer_turn(
         if _parsed is None:
             _parsed = split_query_full(msg)
         neighbor_tips = keep_asked_kind(neighbor_tips, (_parsed or {}).get("subject_kind"))
+
+    if _comm and not neighbor_tips and block_id:
+        # Nothing in the community — ASK before looking past it, the way meets do
+        # (activity_browse "Look beyond <community>"). This used to widen silently to the
+        # neighbourhood and then Google (prod 2026-09-16 fix), which inside a creator's
+        # community answered "what to eat" in Pausa with places nobody there had shared
+        # (Tommaso, 2026-10-01). The tap is read back by exact label in
+        # _try_tip_cascade_control_turn; with no location the branch below asks for one.
+        from app.community_scope import widen_chip
+
+        chip = widen_chip(_comm.get("name"))
+        ctx["rec_chips"] = [{"label": chip, "message": chip, "style": "primary"}]
+        ctx["tip_community_chip"] = chip
+        ctx["last_routing"] = _discovery_routing_stub(
+            phase or "listening", "tip_seek_community_widen_offer"
+        )
+        return (
+            compose_reply(
+                goal=(
+                    "They asked for a recommendation inside this community and none of its "
+                    "members has shared one for it yet. Say that plainly, naming the "
+                    "community. Then ask ONE question: should you look beyond the community "
+                    "for them? The button under your message says exactly "
+                    f"'{chip}'. Never invent a recommendation, never list places, and never "
+                    "imply anything was posted."
+                ),
+                facts=[
+                    f"The community: {_comm.get('name')}",
+                    f"What they asked for: {_ask_excerpt(detail)}",
+                ],
+                session_ctx=session_ctx,
+                fallback=(
+                    f"Nobody in {_comm.get('name')} has shared one for "
+                    f"{_ask_excerpt(detail)} yet. Want me to look beyond "
+                    f"{_comm.get('name')}?"
+                ),
+            ),
+            ctx,
+            ctx["last_routing"],
+            [],
+        )
 
     if neighbor_tips:
         # The rec rides ON the neighbor's row, not only in the prose (§12a/b): the quote is
@@ -4530,11 +4540,18 @@ def _try_tip_cascade_control_turn(
         return None
 
     text = str(msg or "").strip().lower()
+    # "Look beyond <community>", offered when the community had nothing. Read once, by the
+    # exact label we rendered; cleared with None either way ([[ctx-pop-resurrection]]).
+    comm_chip = str(session_ctx.get("tip_community_chip") or "").strip()
+    session_ctx["tip_community_chip"] = None
+    looked_beyond = bool(comm_chip) and text == comm_chip.lower()
+    if looked_beyond:
+        clear_active_community(session_ctx)
     # Chip-payload comparison, not a phrase matcher: these are the exact strings Lana's own
     # pills post back (labels are localized at render time — see the canonical list above).
     if text == _TIP_FIND_MORE_MSG.lower():
         widen = True
-    if not weights and not widen:
+    if not weights and not widen and not looked_beyond:
         return None
 
     return _tip_seek_answer_turn(

@@ -1367,6 +1367,7 @@ def _format_browse_message(
     phone_verified: bool,
     lang: str | None = None,
     far_miles: int | None = None,
+    community: str | None = None,
 ) -> str:
     label = (label or "").strip() or None
     if not events:
@@ -1379,7 +1380,14 @@ def _format_browse_message(
     # far_miles is set only by a WIDENED search. Saying "near you" over a meet 90 miles
     # out would be the same lie as claiming supply we never measured: the distance was
     # the whole reason we looked further, so it has to reach the copy.
-    if far_miles is not None:
+    if community:
+        # These are the community's own meets — "near you" would be wrong twice over.
+        head = (
+            t("browse.events_header_label_community", lang, label=label, community=community)
+            if label
+            else t("browse.events_header_community", lang, community=community)
+        )
+    elif far_miles is not None:
         head = (
             t("browse.events_header_label_far", lang, label=label, miles=f"{far_miles:,}")
             if label
@@ -1523,20 +1531,27 @@ def run_activity_browse_turn(
     #    CTA's generic seed was dropped above, leaving msg empty). A natural-language entry
     #    ("any fifa activities for my 6 year old?") IS the interest — it falls through and
     #    is searched immediately instead of being discarded for a generic re-ask. ──
+    from app.community_scope import active_community
+
     if not msg and not draft.get("interest") and not draft.get("_asked"):
         draft["_asked"] = True
-        draft["suggestions"] = _INTEREST_SUGGESTIONS
-        session_ctx["browse_draft"] = draft
-        session_ctx["activity_browse_active"] = True
-        session_ctx["routing_phase"] = "listening"
-        # The look screen's "YOUR COMMUNITIES" card (C-CIRCLE-LOOK-COMMS). This is the
-        # one turn it rides on: the user just opened "find a meet" and hasn't said what
-        # for yet, and her own places are the most useful thing on screen while she
-        # decides. Absent (not empty) when she has no community — see community_surface.
-        from app.community_surface import stamp_communities_card
+        # Inside a community the community IS the answer: its meets, under "here's what I
+        # found in <community>", not "what kind of thing are you up for?" over cards that
+        # already answered it (Tommaso, 2026-10-01). The generic browse below reads the
+        # community's own calendar and has its own empty-community offer.
+        if not active_community(session_ctx):
+            draft["suggestions"] = _INTEREST_SUGGESTIONS
+            session_ctx["browse_draft"] = draft
+            session_ctx["activity_browse_active"] = True
+            session_ctx["routing_phase"] = "listening"
+            # The look screen's "YOUR COMMUNITIES" card (C-CIRCLE-LOOK-COMMS). This is the
+            # one turn it rides on: the user just opened "find a meet" and hasn't said what
+            # for yet, and her own places are the most useful thing on screen while she
+            # decides. Absent (not empty) when she has no community — see community_surface.
+            from app.community_surface import stamp_communities_card
 
-        stamp_communities_card(session_ctx, user_id)
-        return t("browse.ask_interest", lang)
+            stamp_communities_card(session_ctx, user_id)
+            return t("browse.ask_interest", lang)
 
     from app.discovery_route import (
         ZIP_INVALID,
@@ -1667,8 +1682,6 @@ def run_activity_browse_turn(
     # The community filter at the top of the screen. It answers the "where" outright:
     # a community IS a place, so nothing below needs her ZIP to run this search — and
     # asking for one here would gate a question she already scoped herself.
-    from app.community_scope import active_community
-
     comm = active_community(session_ctx)
 
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
@@ -1919,5 +1932,6 @@ def run_activity_browse_turn(
     }
     session_ctx["routing_phase"] = "listening"
     return _format_browse_message(
-        matched, label, phone_verified=phone_verified, lang=lang, far_miles=far_miles
+        matched, label, phone_verified=phone_verified, lang=lang, far_miles=far_miles,
+        community=_community_name(comm) if comm else None,
     )

@@ -321,10 +321,44 @@ def reverse_geocode(lat: float, lng: float) -> dict[str, Any] | None:
     address = str(top.get("formatted_address") or "").strip()
     if not address:
         return None
+    neighborhood, city = _area_parts(results)
     return {
         "name": address.split(",")[0].strip()[:120],
         "address": address[:300],
         "place_id": str(top.get("place_id") or "").strip() or None,
         "lat": float(lat),
         "lng": float(lng),
+        "neighborhood": neighborhood,
+        "city": city,
+        # "Lake Nona, Orlando" — what the "Around me" pill shows. A street is the wrong
+        # name for where someone is when they are travelling (Tommaso, 2026-10-01); the
+        # street stays in `name` for pinning a meet at "my current location".
+        "area_label": ", ".join(p for p in (neighborhood, city) if p) or None,
     }
+
+
+# Most specific first. sublocality covers places Google files no "neighborhood" for.
+_NEIGHBORHOOD_TYPES = ("neighborhood", "sublocality_level_1", "sublocality")
+_CITY_TYPES = ("locality", "postal_town", "administrative_area_level_3")
+
+
+def _area_parts(results: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    """(neighborhood, city) from the geocoder's address_components — the parts that
+    used to be thrown away. Read across every result, since the top street_address row
+    does not always carry a neighborhood that a later row does."""
+
+    def first(types: tuple[str, ...]) -> str | None:
+        for kind in types:
+            for row in results:
+                for comp in (row or {}).get("address_components") or []:
+                    if kind in (comp.get("types") or []):
+                        name = str(comp.get("long_name") or "").strip()
+                        if name:
+                            return name[:80]
+        return None
+
+    city = first(_CITY_TYPES)
+    neighborhood = first(_NEIGHBORHOOD_TYPES)
+    if neighborhood and city and neighborhood.lower() == city.lower():
+        neighborhood = None
+    return neighborhood, city

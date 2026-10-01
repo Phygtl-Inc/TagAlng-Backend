@@ -384,6 +384,95 @@ class RecommendationInsideCommunityTests(unittest.TestCase):
         self.assertIn("tip_seek_need_zip", str(routing))
 
 
+class RecommendationLookBeyondTests(unittest.TestCase):
+    """Inside a community with a location, an empty community used to widen SILENTLY to the
+    neighbourhood and then Google — "what to eat" in Pausa answered with places nobody there
+    had shared (Tommaso, 2026-10-01). Now it asks first, the way meets do."""
+
+    def _ask(self, *, ctx, tips, msg="what to eat"):
+        from app import discovery_route as dr
+
+        with patch.object(dr, "_resolve_block_id_for_turn", return_value="blk1"), patch.object(
+            dr, "find_neighbor_tips", return_value=tips
+        ) as find, patch.object(
+            dr, "compose_reply", side_effect=lambda **kw: "REPLY:" + kw["goal"]
+        ), patch.object(dr, "_stamp_tip_ask_draft"), patch.object(
+            dr, "_tip_seek_fallback_reply", return_value="GOOGLE"
+        ) as google:
+            out = dr._tip_seek_answer_turn(
+                msg=msg, detail="somewhere to eat", category=None,
+                session_ctx=ctx, user_jwt="jwt", phone_verified=True, home_block_id="blk1",
+                phase="listening", user_id="u1", active_intent="looking.tip",
+            )
+        return out, find, google
+
+    def test_empty_community_asks_before_looking_beyond(self) -> None:
+        (reply, ctx, routing, peers), find, google = self._ask(ctx=_ctx(), tips=[])
+        # Only the community was read — no silent neighbourhood widen, no Google.
+        self.assertEqual(find.call_count, 1)
+        self.assertEqual(find.call_args.kwargs["circle_place_id"], PLACE)
+        google.assert_not_called()
+        self.assertIn("tip_seek_community_widen_offer", str(routing))
+        self.assertIn("look beyond the community", reply)
+        self.assertEqual(ctx["rec_chips"][0]["message"], "Look beyond Tommaso")
+        self.assertEqual(ctx["tip_community_chip"], "Look beyond Tommaso")
+        self.assertFalse(ctx.get("tip_ask_offer"))
+        self.assertEqual(peers, [])
+
+    def test_offer_renders_the_look_beyond_pill(self) -> None:
+        from app.ui_actions import derive_ui_actions
+
+        (_r, ctx, _rt, _p), _f, _g = self._ask(ctx=_ctx(), tips=[])
+        actions = derive_ui_actions(ctx, "chat")
+        self.assertEqual([a["message"] for a in actions], ["Look beyond Tommaso"])
+
+    def test_community_with_a_rec_is_unchanged(self) -> None:
+        from app import discovery_route as dr
+
+        tip = {"detail_text": "Pausa's pasta", "user_id": "u2"}
+        with patch.object(dr, "stamp_tip_peer_surface", return_value=[tip]), patch.object(
+            dr, "_compose_neighbor_tip_reply", return_value="TIPS"
+        ), patch("app.reco_fit.finish_fit"), patch(
+            "app.reco_kind_gate.keep_asked_kind", side_effect=lambda rows, _k: rows
+        ), patch("app.reco_aspects.split_query_full", return_value={}):
+            (reply, ctx, routing, _p), find, google = self._ask(ctx=_ctx(), tips=[tip])
+        self.assertEqual(reply, "TIPS")
+        self.assertIsNone(ctx.get("tip_community_chip"))
+        google.assert_not_called()
+
+    def test_tapping_look_beyond_releases_the_community_and_searches_wider(self) -> None:
+        from app import discovery_route as dr
+        from app.community_scope import RELEASED_KEY
+
+        ctx = _ctx()
+        ctx["tip_last_ask"] = {"detail": "somewhere to eat", "category": None}
+        ctx["tip_community_chip"] = "Look beyond Tommaso"
+        with patch.object(dr, "_tip_seek_answer_turn", return_value=("R", {}, {}, [])) as ans:
+            out = dr._try_tip_cascade_control_turn(
+                msg="Look beyond Tommaso", session_ctx=ctx, user_jwt="jwt",
+                phone_verified=True, home_block_id="blk1", phase="listening", user_id="u1",
+            )
+        self.assertIsNotNone(out)
+        self.assertIsNone(ctx[CTX_KEY])
+        self.assertEqual(ctx[RELEASED_KEY], PLACE)
+        self.assertIsNone(ctx["tip_community_chip"])
+        self.assertEqual(ans.call_args.kwargs["detail"], "somewhere to eat")
+
+    def test_other_messages_disarm_the_pill_and_keep_the_community(self) -> None:
+        from app import discovery_route as dr
+
+        ctx = _ctx()
+        ctx["tip_last_ask"] = {"detail": "somewhere to eat", "category": None}
+        ctx["tip_community_chip"] = "Look beyond Tommaso"
+        out = dr._try_tip_cascade_control_turn(
+            msg="actually, any good dentist?", session_ctx=ctx, user_jwt="jwt",
+            phone_verified=True, home_block_id="blk1", phase="listening", user_id="u1",
+        )
+        self.assertIsNone(out)
+        self.assertEqual(ctx[CTX_KEY]["place_id"], PLACE)
+        self.assertIsNone(ctx["tip_community_chip"])
+
+
 class CreatorFormAnswersTests(unittest.TestCase):
     """lana.help's "Community fit" answers live in place_features, not places.blurb. A new
     creator community therefore had the creator's own description and Lana read none of

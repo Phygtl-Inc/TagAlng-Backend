@@ -728,6 +728,16 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Olha o que vem por aí de {label} perto de você.",
     },
     # Widened search (pass 2). Never says "near you" — the distance is the point.
+    "browse.events_header_community": {
+        "en": "Here's what I found in {community}.",
+        "es": "Esto es lo que encontré en {community}.",
+        "pt": "Olha o que encontrei em {community}.",
+    },
+    "browse.events_header_label_community": {
+        "en": "Here's what I found for {label} in {community}.",
+        "es": "Esto es lo que encontré de {label} en {community}.",
+        "pt": "Olha o que encontrei de {label} em {community}.",
+    },
     "browse.events_header_far": {
         "en": "Nothing near you, but here's what I found about {miles} miles out.",
         "es": "No hay nada cerca de ti, pero esto es lo que encontré a unas {miles} millas.",
