@@ -1655,7 +1655,9 @@ def mail_join_to_members(place_id: str, place_name: str, joiner_id: str) -> int:
                 t("notify.community_join.title", lang, name=name, place=place_name),
                 t("notify.community_join.body", lang, place=place_name),
                 t("notify.community_join.cta", lang),
-                "/",
+                # Opens the chat INSIDE this community (the PWA reads ?inside=, checks they
+                # belong, sets the pill and starts there) — "/" dropped them in plain Lana.
+                f"/chat?inside={place_id}",
                 preheader=t("notify.community_join.preheader", lang, name=name),
                 badge="👋",
                 kicker=t("notify.community_note", lang, name=place_name),

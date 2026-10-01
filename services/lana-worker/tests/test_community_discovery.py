@@ -711,6 +711,8 @@ class TestJoinTellsTheMembers(unittest.TestCase):
         self.assertIn("Ada joined Lake Nona YMCA", html)
         self.assertIn("3 now", html)  # the member count is what makes it feel like growth
         self.assertIn("Ada is in — say hi.", html)  # inbox preheader, not a body leak
+        # "Open Lana" lands INSIDE this community, not on plain Lana (2026-10-01).
+        self.assertIn("/chat?inside=p1", html)
 
     @patch("app.community_discovery.service_client")
     @patch("app.notifications.send_email")
