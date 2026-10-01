@@ -5221,6 +5221,11 @@ def post_rapport_record_answer(
 
     claim_id: str | None = None
     saved = 0
+    # Everything this answer creates is newer than this — so ALL of it can carry the gap's
+    # place tag, not just the newest row (one answer often yields two claims).
+    from datetime import datetime as _dt_now, timezone as _tz
+
+    _answer_started = _dt_now.now(_tz.utc).isoformat()
     if text:
         # Extract claims from the answer (no per-message rapport gap — the coverage synth owns
         # tile questions), then reconcile any now-covered gaps.
@@ -5253,8 +5258,12 @@ def post_rapport_record_answer(
             # so "the Saturday long runs" is attributable to that gym. Best-effort.
             if claim_id:
                 from app.circles_flow import tag_claim_place_from_gap
+                from app.claims_persist import claim_ids_created_since
 
-                tag_claim_place_from_gap(body.gap_row_id, claim_id)
+                # "Working on posture" + "Practices speaking at work meetings" from one
+                # answer: only the newest was tagged to the community (2026-10-01).
+                for _cid in claim_ids_created_since(auth.user_id, _answer_started) or [claim_id]:
+                    tag_claim_place_from_gap(body.gap_row_id, _cid)
     # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
     rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
     # Refill the reserve so the "By the way…" tile always has a fresh, non-repeat question queued

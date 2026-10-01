@@ -1807,6 +1807,29 @@ def extract_and_upsert_claims_from_message(
     ).saved
 
 
+def claim_ids_created_since(user_id: str, since_iso: str, limit: int = 6) -> list[str]:
+    """Active claims this user gained at or after `since_iso` — the claims ONE answer
+    produced. Empty on any failure (callers fall back to the single newest claim)."""
+    if not user_id or not since_iso:
+        return []
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("id")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .gte("created_at", since_iso)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("claims: created-since lookup failed for %s", user_id)
+        return []
+    return [str(r["id"]) for r in (res.data or []) if r.get("id")]
+
+
 def latest_claim_id(user_id: str) -> str | None:
     """The user's most recently created active claim — used to link a rapport answer to the
     claim the extractor just made from it (best-effort). Returns None if there's none."""

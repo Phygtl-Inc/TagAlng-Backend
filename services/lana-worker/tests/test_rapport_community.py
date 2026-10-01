@@ -230,7 +230,7 @@ class CardLabelTests(unittest.TestCase):
     """The expanded card read "TOMMASO · PINNED" and promised "neighbors nearby" over a
     question asked inside Tommaso's community (2026-10-01)."""
 
-    def _extras(self, gap_id):
+    def _extras(self, gap_id, place_type="creator"):
         from app import rapport_ranker as rr
 
         class _Q:
@@ -239,7 +239,7 @@ class CardLabelTests(unittest.TestCase):
 
             def execute(self):
                 class R:
-                    data = [{"name": "Tommaso", "place_type": "creator"}]
+                    data = [{"name": "Tommaso", "place_type": place_type}]
                 return R()
 
         class _C:
@@ -256,7 +256,7 @@ class CardLabelTests(unittest.TestCase):
         self.assertEqual(name, "Tommaso")
 
     def test_a_pinned_place_enrichment_ask_is_unchanged(self) -> None:
-        extras, name = self._extras("deepen:gym")
+        extras, name = self._extras("deepen:gym", place_type="fitness")
         self.assertEqual(extras["kind"], "place_affinity")
         self.assertIsNone(name)
 
@@ -291,3 +291,46 @@ class GeneratorContextTests(unittest.TestCase):
         self.assertEqual(sent["members_might_ask"], FACTS["creator_wants"])
         self.assertIn("never ask it, quote it", sent["_system"])
         self.assertEqual(out["question"], "Which etiquette rule do you practise most?")
+
+
+class LocationNeverFitsACommunityTests(unittest.TestCase):
+    def test_grounding_asks_never_reach_the_relevance_picker(self) -> None:
+        sent = {}
+
+        def fake(**kw):
+            import json
+            sent.update(json.loads(kw["user_payload"]))
+            return {"pick": None}
+
+        rows = [
+            {"gap_row_id": "g1", "question": "Where do you usually host your dinner?", "affiliation_ref": "a1"},
+            {"gap_row_id": "g2", "question": "How long have you practiced etiquette?"},
+        ]
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", side_effect=fake
+        ):
+            rc._pick_relevant(dict(FACTS), rows)
+        self.assertEqual([q["id"] for q in sent["questions"]], ["g2"])
+
+    def test_the_picker_is_told_location_never_fits(self) -> None:
+        self.assertIn("how long they have lived somewhere", rc._RELEVANCE_PROMPT)
+
+    def test_a_creator_communitys_join_question_is_not_pinned(self) -> None:
+        from app import rapport_ranker as rr
+
+        class _Q:
+            def __getattr__(self, _n):
+                return lambda *a, **k: self
+
+            def execute(self):
+                class R:
+                    data = [{"name": "Etiqueta", "place_type": "creator"}]
+                return R()
+
+        class _C:
+            def table(self, _n):
+                return _Q()
+
+        with patch.object(rr, "service_client", return_value=_C()):
+            extras = rr._place_extras({"gap_id": "deepen:etiqueta", "place_ref": PID, "gap_row_id": "r"})
+        self.assertEqual(extras["kind"], "community")

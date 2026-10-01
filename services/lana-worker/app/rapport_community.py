@@ -41,8 +41,11 @@ community they are chatting inside right now.
 Output ONLY JSON: {"pick": "<id>"} or {"pick": null}
 
 Pick a question ONLY if asking it inside this community would feel natural — it is about the \
-community's topic or something its members share. Otherwise null. Never pick a question \
-about health, money, family trouble or anything private."""
+community's TOPIC or something its members share. Otherwise null. Never pick a question \
+about health, money, family trouble or anything private. Never pick a question about \
+where they live, their neighborhood, how long they have lived somewhere, or which local \
+place or spot they go to: a creator's community has no geography, so those belong to \
+their neighborhood, not here."""
 
 _GENERATE_PROMPT = """You write ONE short question Lana asks a member inside a community, to \
 learn something about THEM that relates to what the community is about.
@@ -157,7 +160,12 @@ def _serve(user_id: str, row: dict[str, Any], *, lang: str, surface: str, kind: 
 
 def _pick_relevant(facts: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The queued question that fits this community, judged by the model — or None."""
-    pool = [r for r in rows if _clean(r.get("question"))][:_RELEVANCE_POOL]
+    # Grounding asks ("which spot do you…?") pin a LOCAL place — never a community topic.
+    # "How long have you been in the neighborhood?" was picked as fitting Etiqueta do Reino
+    # (2026-10-01); the prompt now rules location out, and these never reach it.
+    pool = [
+        r for r in rows if _clean(r.get("question")) and not r.get("affiliation_ref")
+    ][:_RELEVANCE_POOL]
     if not pool:
         return None
     try:

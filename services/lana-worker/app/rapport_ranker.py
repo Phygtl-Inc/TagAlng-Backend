@@ -343,8 +343,13 @@ def _place_extras(row: dict[str, Any]) -> dict[str, Any]:
         return {}
     # A community-lane ask (rapport_community) is not "a place you pinned": the card said
     # "TOMMASO · PINNED" over a question asked inside Tommaso's community (2026-10-01).
+    # …and so is the join's own "What do you enjoy most about <creator community>?": a
+    # creator's group is not a venue anyone pinned.
     kind = (
-        "community" if str(row.get("gap_id") or "").startswith("community:") else "place_affinity"
+        "community"
+        if str(row.get("gap_id") or "").startswith("community:")
+        or str(place.get("place_type") or "") == "creator"
+        else "place_affinity"
     )
     extras: dict[str, Any] = {"kind": kind, "place_name": name}
     if place.get("place_type"):
