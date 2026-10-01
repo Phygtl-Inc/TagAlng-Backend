@@ -360,3 +360,47 @@ class PeerReplyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseTests(unittest.TestCase):
+    """"Look beyond Tommaso" then "Widen the search" searched Tommaso again: the app kept
+    sending the same community_id (its pill had not changed), and the worker re-applied
+    it on the very next turn (2026-10-01)."""
+
+    def _member(self):
+        return patch(
+            "app.community_surface.caller_affiliation_at", return_value={"id": "a1"}
+        ), patch("app.community_surface._place_row", return_value={"name": "Tommaso"})
+
+    def test_the_released_community_is_not_reapplied_by_the_same_id(self) -> None:
+        from app.community_scope import RELEASED_KEY, clear_active_community
+
+        ctx: dict = {CTX_KEY: {"place_id": PLACE, "name": "Tommaso"}}
+        clear_active_community(ctx)
+        self.assertEqual(ctx[RELEASED_KEY], PLACE)
+        a, b = self._member()
+        with a, b:
+            self.assertIsNone(apply_community_selection(ctx, PLACE, user_id="u1"))
+        self.assertIsNone(active_community_id(ctx))
+
+    def test_picking_the_area_then_the_community_again_rescopes(self) -> None:
+        from app.community_scope import RELEASED_KEY, clear_active_community
+
+        ctx: dict = {CTX_KEY: {"place_id": PLACE, "name": "Tommaso"}}
+        clear_active_community(ctx)
+        a, b = self._member()
+        with a, b:
+            apply_community_selection(ctx, "", user_id="u1")  # pill moved to their area
+            self.assertIsNone(ctx[RELEASED_KEY])
+            self.assertEqual(apply_community_selection(ctx, PLACE, user_id="u1")["name"], "Tommaso")
+
+    def test_a_different_community_is_applied_and_clears_the_release(self) -> None:
+        from app.community_scope import RELEASED_KEY, clear_active_community
+
+        ctx: dict = {CTX_KEY: {"place_id": PLACE, "name": "Tommaso"}}
+        clear_active_community(ctx)
+        a, b = self._member()
+        with a, b:
+            other = "22222222-2222-2222-2222-222222222222"
+            self.assertEqual(apply_community_selection(ctx, other, user_id="u1")["place_id"], other)
+        self.assertIsNone(ctx[RELEASED_KEY])

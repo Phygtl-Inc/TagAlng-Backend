@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 # session_ctx key. {"place_id": str, "name": str} or None (= the ZIP default).
 CTX_KEY = "active_community"
+# The community they asked to look past ("Look beyond <community>"). The app keeps
+# sending that same id on every turn until its pill catches up, so without this the very
+# next turn re-scoped the search: "Widen the search" right after "Look beyond Tommaso"
+# searched Tommaso again, in a loop (2026-10-01).
+RELEASED_KEY = "community_released"
 
 
 def active_community(session_ctx: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -60,7 +65,13 @@ def apply_community_selection(
     place_id = str(raw).strip()
     if not place_id:
         session_ctx[CTX_KEY] = None  # None, not pop — [[ctx-pop-resurrection]]
+        session_ctx[RELEASED_KEY] = None
         return None
+    if place_id == str(session_ctx.get(RELEASED_KEY) or ""):
+        # The same community they just looked beyond — the client simply has not caught
+        # up yet. Stay released; a different pick (or "" for their area) clears this.
+        return None
+    session_ctx[RELEASED_KEY] = None
     current = active_community(session_ctx)
     if current and current.get("place_id") == place_id:
         return current
@@ -80,7 +91,13 @@ def apply_community_selection(
 
 def clear_active_community(session_ctx: dict[str, Any]) -> None:
     """The user asked to look past the filter (the widen pill). Cleared for the rest
-    of the session — they can pick the community again in the switcher."""
+    of the session — they can pick the community again in the switcher.
+
+    Remembers WHICH community, so the client re-sending it (its pill still shows it until
+    the reply's community_released lands) does not re-apply it on the next turn."""
+    current = active_community(session_ctx)
+    if current:
+        session_ctx[RELEASED_KEY] = str(current["place_id"])
     session_ctx[CTX_KEY] = None
 
 

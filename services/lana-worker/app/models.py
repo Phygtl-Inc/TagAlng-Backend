@@ -1513,6 +1513,9 @@ class SendMessageResponse(BaseModel):
     routing_phase: str | None = None
     ui_intent: str | None = None
     ui_actions: list[UiActionRow] = Field(default_factory=list)
+    # The community this turn looked past ("Look beyond <community>"). The app moves its
+    # pill back to the area so the pill and the next turn's search agree.
+    community_released: str | None = None
 
 
 class ImpressionStatusBody(BaseModel):

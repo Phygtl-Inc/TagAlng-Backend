@@ -2531,6 +2531,8 @@ def _run_lana_message(
         event_id=(str(merged.get("event_id")) if merged.get("event_id") else None),
         routing=_routing_from_ctx(merged),
         orchestrator=orch_used,
+        # Idempotent: the app acts only while its pill still shows this community.
+        community_released=str(merged.get("community_released") or "") or None,
         **ob,
     )
 
