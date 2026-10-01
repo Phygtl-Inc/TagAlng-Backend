@@ -691,6 +691,20 @@ _STRINGS: dict[str, dict[str, str]] = {
               "eu fique de olho e te avise assim que aparecer uma de **{interest}** — ou "
               "amplio a busca?",
     },
+    # Inside a community: the closest thing comes from ITS calendar, and the second option
+    # is the "Look beyond <community>" pill — never "near you", never "widen the search".
+    "browse.stretch_offer_community": {
+        "en": "No **{interest}** in {community} right now. The closest thing in it is "
+              "**{title}**, on the card below. How it differs: {mismatch}. Want me to keep "
+              "an ear out and text you the moment one pops up — or look beyond {community}?",
+        "es": "No hay **{interest}** en {community} ahora mismo. Lo más parecido ahí es "
+              "**{title}**, en la tarjeta de abajo. En qué se diferencia: {mismatch}. "
+              "¿Quieres que me quede atenta y te escriba en cuanto aparezca — o busco más "
+              "allá de {community}?",
+        "pt": "Não tem **{interest}** em {community} agora. O mais próximo ali é "
+              "**{title}**, no cartão abaixo. A diferença: {mismatch}. Quer que eu fique de "
+              "olho e te avise assim que aparecer — ou procuro além de {community}?",
+    },
     "browse.stretch_offer_generic": {
         "en": "Nothing matching that near you right now. The closest thing is **{title}**, "
               "on the card below. How it differs: {mismatch}. Want me to keep an ear out "

@@ -83,17 +83,21 @@ def pick_stretch(
     return best
 
 
-def stretch_facts(candidate: StretchCandidate) -> list[str]:
+def stretch_facts(candidate: StretchCandidate, *, community: str | None = None) -> list[str]:
     """Facts for the empty-state writer, built ONLY from the event row and the
     matcher's phrase. Nothing here is inferred: every sentence is a field of the row,
-    or an instruction about what may not be added."""
+    or an instruction about what may not be added.
+
+    `community`: the stretch came from a community's own calendar, so it is the closest
+    thing IN that community — "near them" would be a claim about distance nobody made."""
     from app.activity_browse import _event_when_parts
 
     ev = candidate.event
     title = candidate.title
     when = _event_when_parts(ev.get("starts_at"), has_time=ev.get("has_time") is not False)
     facts = [
-        f'The closest event near them is "{title}"'
+        (f'The closest event in {community} is "{title}"' if community
+         else f'The closest event near them is "{title}"')
         + (f" on {when}" if when else "")
         + f'. Name it by its exact title, "{title}", unchanged.',
     ]

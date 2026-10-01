@@ -587,7 +587,12 @@ def _compose_empty_seek_offer(
     interest = str(interest or "").strip()
     community = str(community or "").strip()
     area = str(area or "").strip()
-    if stretch is not None:
+    if stretch is not None and community:
+        fallback = t(
+            "browse.stretch_offer_community", lang, interest=interest or "that",
+            community=community, title=stretch.title, mismatch=stretch.mismatch,
+        )
+    elif stretch is not None:
         # The honest template, and the post-check's safety net: it names the event and
         # carries the matcher's phrase verbatim, then ends on the listen offer.
         fallback = (
@@ -653,7 +658,9 @@ def _compose_empty_seek_offer(
                 else ". Nothing outside it was looked at, so any wider claim would be invented"
             ),
             "Option A: you can keep an ear out and TEXT them the moment a matching one pops up "
-            "(the pill under your message says 'Yes, listen for me')",
+            "(the pill under your message says 'Yes, listen for me'). It is an OFFER they "
+            "have not accepted — ask it once, never announce you are already keeping an eye "
+            "out",
             (
                 "Never invent or promise events other than the one closest event named "
                 "below, and never claim anything else is happening nearby"
@@ -693,7 +700,7 @@ def _compose_empty_seek_offer(
         if stretch is not None:
             from app.stretch_offer import stretch_facts
 
-            facts.extend(stretch_facts(stretch))
+            facts.extend(stretch_facts(stretch, community=community))
             facts.append(
                 "The event is already shown as a card under your message — they can tap "
                 "it to take a look"
@@ -1302,8 +1309,13 @@ def _stretch_offer_reply(
     msg: str,
     lang: str | None,
     user_id: str | None,
+    comm: dict[str, Any] | None = None,
 ) -> str:
     """Offer ONE nearby event the matcher rated closely related (Rapport Reply).
+
+    Inside a community (`comm`) the stretch is from the community's own calendar, and the
+    second pill is "Look beyond <community>" — the same way out the empty community state
+    offers, so the closest thing inside comes first and the wider search is one tap.
 
     The event rides as the only card; the copy says nothing matched, names it, gives the
     matcher's own difference phrase, and ends on the listen offer. Pills are the plain
@@ -1321,7 +1333,10 @@ def _stretch_offer_reply(
     draft["_area_offer_chip"] = None
     draft["_area_offer_block_id"] = None
     draft["_area_offer_name"] = None
-    draft["suggestions"] = ["Yes, listen for me", "Widen the search"]
+    draft["suggestions"] = [
+        "Yes, listen for me",
+        _arm_community_widen(draft, comm) if comm else "Widen the search",
+    ]
     # So next turn's answer can be tied back to the stretch it answered.
     draft["_stretch_event_id"] = stretch.event_id
     session_ctx["browse_draft"] = draft
@@ -1340,7 +1355,8 @@ def _stretch_offer_reply(
         "stretch_offer_shown event=%s score=%s", stretch.event_id, stretch.score
     )
     return _compose_empty_seek_offer(
-        short, user_msg=msg, lang=lang, area_facts=area_facts, stretch=stretch
+        short, user_msg=msg, lang=lang, area_facts=area_facts, stretch=stretch,
+        community=_community_name(comm) if comm else None,
     )
 
 
@@ -1720,7 +1736,11 @@ def run_activity_browse_turn(
     # rows this turn's filter just scored in place — never from the ring or far lists.
     # Zero new model calls: the scores and difference phrases already came back.
     stretch = None
-    if not matched and interest and not comm and not _OPEN_RE.match(interest):
+    # Inside a community too (Tommaso + Pouya, 2026-10-01): `events` there IS the
+    # community's own calendar, so the closest related thing comes from inside it first —
+    # "No yoga in Run with Maya, but there's a Sunday stretch session" — and looking
+    # beyond the community stays one tap away instead of being the only answer.
+    if not matched and interest and not _OPEN_RE.match(interest):
         from app.lana_paths import stretch_offer_enabled
 
         if stretch_offer_enabled():
@@ -1733,7 +1753,7 @@ def run_activity_browse_turn(
         _record_no_match(session_ctx, events, stretch=stretch)
         return _stretch_offer_reply(
             draft, session_ctx, stretch,
-            interest=interest, label=label, msg=msg, lang=lang, user_id=user_id,
+            interest=interest, label=label, msg=msg, lang=lang, user_id=user_id, comm=comm,
         )
 
     # Search-first fallback: a concrete search that found nothing → offer the seek (listen and
@@ -1759,7 +1779,7 @@ def run_activity_browse_turn(
         _record_no_match(session_ctx, events, stretch=stretch)
         return _stretch_offer_reply(
             draft, session_ctx, stretch,
-            interest=interest, label=label, msg=msg, lang=lang, user_id=user_id,
+            interest=interest, label=label, msg=msg, lang=lang, user_id=user_id, comm=comm,
         )
 
     if not matched and interest:

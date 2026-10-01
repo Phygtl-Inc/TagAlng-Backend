@@ -731,18 +731,40 @@ class StretchOfferTurnTests(_StretchTurnHarness, unittest.TestCase):
         self.assertIn("miles out", reply.lower())
         self.assertEqual([p["title"] for p in ctx["activity_previews"]], ["Violin circle"])
 
-    def test_a_community_browse_never_stretches(self):
+    def _community_turn(self, *, score):
         from app.community_scope import CTX_KEY
 
-        rows, judged = self._rows()
+        rows, judged = self._rows(score=score)
         ctx = {"activity_browse_active": True, "browse_draft": {"_asked": True},
                "phone_verified": True, CTX_KEY: {"place_id": "p1", "name": "CF Fitness"}}
         with patch("app.auth.jwt_user_id", return_value="me"), patch(
             "app.community_scope.community_events", return_value=rows
         ), patch("app.activity_browse._attach_host_names"):
-            reply, ctx, _w, _f = self._turn(rows=[], judged=judged, ctx=ctx)
+            return self._turn(rows=[], judged=judged, ctx=ctx)
+
+    def test_inside_a_community_the_closest_thing_in_it_comes_first(self):
+        """Tommaso + Pouya (2026-10-01): "No yoga in Run with Maya, but Maya's group does a
+        Sunday stretch session". The stretch comes from the community's OWN calendar, and
+        looking beyond the community stays one tap away — never the only answer."""
+        reply, ctx, widen, far = self._community_turn(score=0.7)
+        self.assertIn("Sunday jam night", reply)
+        self.assertIn("CF Fitness", reply)
+        self.assertNotIn("near you", reply.lower())
+        self.assertEqual([p["title"] for p in ctx["activity_previews"]], ["Sunday jam night"])
+        draft = ctx["browse_draft"]
+        self.assertEqual(draft["suggestions"][0], "Yes, listen for me")
+        # The way out is the community's own pill, not "widen the search".
+        self.assertEqual(draft["suggestions"][1], draft["_community_chip"])
+        self.assertIn("CF Fitness", draft["_community_chip"])
+        # Community scope never reaches the ring or the far probe.
+        widen.assert_not_called()
+        far.assert_not_called()
+
+    def test_nothing_related_inside_a_community_still_asks_to_look_beyond(self):
+        reply, ctx, _w, _f = self._community_turn(score=0.3)
         self.assertNotIn("Sunday jam night", reply)
         self.assertEqual(ctx["activity_previews"], [])
+        self.assertIn("CF Fitness", ctx["browse_draft"]["_community_chip"])
 
     def test_stale_scores_are_cleared_on_a_no_match_turn(self):
         rows, judged = self._rows(score=0.4)
