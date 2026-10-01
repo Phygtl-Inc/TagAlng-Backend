@@ -7,8 +7,10 @@ THEM in relation to the community, and every answer is an ordinary identity clai
 to the place (rapport_gaps.place_ref → circles_flow.tag_claim_place_from_gap).
 
 Order, first that yields:
-  1. the creator's own first question (lana.help "What might someone ask first?",
-     places.first_action) — once, in the creator's words;
+  1. (retired 2026-10-01) the creator's "What might someone ask first?" used to be asked
+     verbatim. It is a question MEMBERS ask the community — Etiqueta do Reino's creator
+     wrote her own answer into it ("What do I gain from this? I would say personal and
+     professional growth."), which then showed as the question. It is context now;
   2. a question already in their queue that bears on this community (the model judges
      relevance; nothing is added, the row is just asked here instead of later);
   3. a new question written from what the community is about — at most _MAX_GENERATED per
@@ -57,6 +59,9 @@ are — never ask for favourites, opinions of the creator's content, or hypothet
 - Never a quiz about the community, never about the creator.
 - Never ask where they live, their age, health, money, family, or anything private.
 - Never repeat or rephrase a question in `already_asked`.
+- `members_might_ask` is what members ask EACH OTHER here (it may even contain the \
+creator's own answer) — use it only to understand the topic; never ask it, quote it or \
+turn it into your question.
 - teaser: 2-5 lowercase words starting with "about", e.g. "about what you're building".
 - English only (rendered into their language downstream)."""
 
@@ -184,7 +189,7 @@ def _pick_relevant(facts: dict[str, Any], rows: list[dict[str, Any]]) -> dict[st
 
 
 def _generate(facts: dict[str, Any], already: list[str]) -> dict[str, str] | None:
-    if not (facts.get("about") or facts.get("members_help")):
+    if not (facts.get("about") or facts.get("members_help") or facts.get("creator_wants")):
         # Nothing true to ground it in — no question beats an invented one.
         return None
     try:
@@ -198,6 +203,9 @@ def _generate(facts: dict[str, Any], already: list[str]) -> dict[str, str] | Non
             user_payload=json.dumps(
                 {
                     "community": {k: facts.get(k) for k in ("name", "about", "members_help")},
+                    # lana.help "What might someone ask first?" — what MEMBERS ask the
+                    # community. Context for the topic, never a question to repeat.
+                    "members_might_ask": facts.get("creator_wants"),
                     "already_asked": already[:10],
                 },
                 ensure_ascii=False,
@@ -236,6 +244,13 @@ def next_ask_in_community(
     pid = str(facts["place_id"])
     mine = _rows(user_id, pid)
 
+    # Rows from the retired verbatim step (`…:first`) never show again — one could still be
+    # pending on someone's screen, reading as a statement rather than a question.
+    for r in mine:
+        if str(r.get("gap_id") or "").endswith(":first") and r.get("status") in ("open", "asked"):
+            _set_status(str(r["gap_row_id"]), "expired")
+            r["status"] = "expired"
+
     # 0) A community question already on screen: re-show it (idempotent across reloads),
     #    unless they tapped ⟳, which retires it as a skip.
     pending = next((r for r in mine if r.get("status") == "asked"), None)
@@ -245,28 +260,10 @@ def next_ask_in_community(
         _set_status(str(pending["gap_row_id"]), "skipped")
     open_rows = [r for r in mine if r.get("status") == "open"]
 
-    # 1) The creator's own first question — once.
-    first_id = community_gap_id(pid, "first")
-    if facts.get("creator_wants") and not any(r.get("gap_id") == first_id for r in mine):
-        open_semantic_gap(
-            user_id,
-            None,
-            str(facts["creator_wants"]),
-            bucket="community",
-            teaser=f"from {facts['name']}",
-            place_ref=pid,
-            community=str(facts["name"]),
-            gap_id=first_id,
-            unlock_score=0.95,
-            skip_dedup=True,
-        )
-        mine = _rows(user_id, pid)
-        open_rows = [r for r in mine if r.get("status") == "open"]
-    row = next((r for r in open_rows if r.get("gap_id") == first_id), None) or (
-        open_rows[0] if open_rows else None
-    )
+    # 1) A community question already opened for them but not yet shown.
+    row = open_rows[0] if open_rows else None
     if row and _set_status(str(row["gap_row_id"]), "asked"):
-        return True, _serve(user_id, row, lang=lang, surface=surface, kind="community_first")
+        return True, _serve(user_id, row, lang=lang, surface=surface, kind="community_open")
 
     # 2) Something already in their queue that fits here. Asked HERE instead of later —
     #    nothing is added. A different personal ask left pending is put back unpenalised,

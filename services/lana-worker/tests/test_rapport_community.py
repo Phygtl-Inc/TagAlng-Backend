@@ -75,27 +75,56 @@ def _run(q, *, scope=None, pick=None, made=None, cycle=False, allow_personal=Tru
 
 
 class OrderTests(unittest.TestCase):
-    def test_first_visit_asks_the_creators_own_question_verbatim(self) -> None:
+    MADE = {"question": "Which etiquette rule do you practise most?", "teaser": "about your manners"}
+
+    def test_first_visit_writes_a_question_never_the_creators_text(self) -> None:
+        """Etiqueta do Reino's creator wrote her own answer into "What might someone ask
+        first?" and it showed as the question ("What do I gain from this? I would say
+        personal and professional growth."). It is context for Lana's question now."""
         q = _Queue()
-        (handled, ask), _ = _run(q)
-        self.assertTrue(handled)
-        self.assertEqual(ask, {"q": FACTS["creator_wants"], "kind": "community_first"})
+        seen = {}
+
+        def gen(facts, already):
+            seen["facts"] = facts
+            return self.MADE
+
+        with patch.object(rc, "_rows", side_effect=q.community), patch(
+            "app.rapport_gaps.open_semantic_gap", side_effect=q.open_gap
+        ), patch.object(rc, "_set_status", side_effect=q.set_status), patch.object(
+            rc, "_personal_open_rows", side_effect=q.personal_open
+        ), patch.object(rc, "_personal_pending", side_effect=q.personal_pending), patch.object(
+            rc, "_pick_relevant", return_value=None
+        ), patch.object(rc, "_generate", side_effect=gen), patch.object(
+            rc, "_serve", side_effect=lambda u, row, **kw: {"q": row["question"], "kind": kw["kind"]}
+        ):
+            handled, ask = rc.next_ask_in_community("u1", _scope(), lang="en")
+        self.assertEqual(ask, {"q": self.MADE["question"], "kind": "community_generated"})
+        self.assertNotEqual(ask["q"], FACTS["creator_wants"])
+        # The creator's text still informs the question as context.
+        self.assertEqual(seen["facts"]["creator_wants"], FACTS["creator_wants"])
         row = q.community("u1", PID)[0]
-        self.assertEqual(row["gap_id"], f"community:{PID}:first")
-        # The answer's claim inherits the community (tag_claim_place_from_gap).
+        self.assertTrue(row["gap_id"].startswith(f"community:{PID}:gen-"))
         self.assertEqual(row["place_ref"], PID)
+
+    def test_a_retired_verbatim_question_on_screen_is_never_shown_again(self) -> None:
+        stale = {"gap_row_id": "s1", "gap_id": f"community:{PID}:first", "status": "asked",
+                 "question": FACTS["creator_wants"], "place_ref": PID}
+        q = _Queue([stale])
+        (handled, ask), _ = _run(q, made=self.MADE)
+        self.assertEqual(stale["status"], "expired")
+        self.assertEqual(ask["kind"], "community_generated")
 
     def test_a_reload_reshows_the_same_question(self) -> None:
         q = _Queue()
-        _run(q)
-        (handled, ask), _ = _run(q)
+        _run(q, made=self.MADE)
+        (handled, ask), _ = _run(q, made=self.MADE)
         self.assertEqual(ask["kind"], "community_pending")
         self.assertEqual(len(q.community("u1", PID)), 1)
 
-    def test_answered_first_question_never_returns_then_a_fitting_queued_one(self) -> None:
+    def test_answered_question_never_returns_then_a_fitting_queued_one(self) -> None:
         tri = {"gap_row_id": "p1", "gap_id": "deepen:triathlon", "question": "Long course triathlon?", "status": "open"}
         q = _Queue([tri])
-        _run(q)
+        _run(q, made=self.MADE)
         q.set_status(q.community("u1", PID)[0]["gap_row_id"], "answered")
         (handled, ask), _ = _run(q, pick=tri)
         self.assertEqual(ask, {"q": "Long course triathlon?", "kind": "community_relevant"})
@@ -106,15 +135,13 @@ class OrderTests(unittest.TestCase):
         other = {"gap_row_id": "p0", "gap_id": "deepen:pizza", "question": "Pizza?", "status": "asked"}
         fits = {"gap_row_id": "p1", "gap_id": "deepen:videos", "question": "Videos?", "status": "open"}
         q = _Queue([other, fits])
-        facts = dict(FACTS, creator_wants=None)
-        _run(q, scope=_scope(facts), pick=fits)
+        _run(q, pick=fits)
         self.assertEqual(other["status"], "open")
         self.assertEqual(fits["status"], "asked")
 
     def test_nothing_fits_so_one_is_written_from_the_community(self) -> None:
         q = _Queue()
-        facts = dict(FACTS, creator_wants=None)
-        (handled, ask), _ = _run(q, scope=_scope(facts), made={"question": "Which challenge would you try?", "teaser": "about you"})
+        (handled, ask), _ = _run(q, made={"question": "Which challenge would you try?", "teaser": "about you"})
         self.assertEqual(ask["kind"], "community_generated")
         self.assertTrue(q.community("u1", PID)[0]["gap_id"].startswith(f"community:{PID}:gen-"))
 
@@ -123,8 +150,7 @@ class OrderTests(unittest.TestCase):
             {"gap_row_id": f"g{i}", "gap_id": f"community:{PID}:gen-{i}", "question": f"q{i}", "status": "answered"}
             for i in range(rc._MAX_GENERATED)
         ])
-        facts = dict(FACTS, creator_wants=None)
-        (handled, ask), _ = _run(q, scope=_scope(facts), made={"question": "another?", "teaser": "x"})
+        (handled, ask), _ = _run(q, made={"question": "another?", "teaser": "x"})
         # Nothing new was written: falls through to the normal queue.
         self.assertFalse(handled)
         self.assertIsNone(ask)
@@ -137,7 +163,7 @@ class OrderTests(unittest.TestCase):
 
     def test_cycle_skips_the_pending_community_question(self) -> None:
         q = _Queue()
-        _run(q)
+        _run(q, made=self.MADE)
         first = q.community("u1", PID)[0]
         _run(q, cycle=True, made=None)
         self.assertEqual(first["status"], "skipped")
@@ -145,8 +171,8 @@ class OrderTests(unittest.TestCase):
 
 class GuestTests(unittest.TestCase):
     def test_guest_gets_the_community_question(self) -> None:
-        (handled, ask), _ = _run(_Queue(), allow_personal=False)
-        self.assertEqual(ask["kind"], "community_first")
+        (handled, ask), _ = _run(_Queue(), allow_personal=False, made=OrderTests.MADE)
+        self.assertEqual(ask["kind"], "community_generated")
 
     def test_guest_never_reaches_the_personal_queue(self) -> None:
         tri = {"gap_row_id": "p1", "gap_id": "deepen:t", "question": "T?", "status": "open"}
@@ -245,3 +271,23 @@ class CardLabelTests(unittest.TestCase):
         import json
         self.assertEqual(json.loads(seen["user_payload"])["community"], "Tommaso")
         self.assertIn("never \"neighbors\"", seen["system"])
+
+
+class GeneratorContextTests(unittest.TestCase):
+    def test_the_creators_first_ask_is_context_for_the_model_never_the_question(self) -> None:
+        import json
+
+        sent = {}
+
+        def fake(**kw):
+            sent.update(json.loads(kw["user_payload"]))
+            sent["_system"] = kw["system"]
+            return {"question": "Which etiquette rule do you practise most?", "teaser": "about you"}
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", side_effect=fake
+        ):
+            out = rc._generate(dict(FACTS), [])
+        self.assertEqual(sent["members_might_ask"], FACTS["creator_wants"])
+        self.assertIn("never ask it, quote it", sent["_system"])
+        self.assertEqual(out["question"], "Which etiquette rule do you practise most?")
