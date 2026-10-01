@@ -362,7 +362,14 @@ class TestRunBrowseTurn(unittest.TestCase):
             }
         ],
     )
-    def test_shows_events_after_interest(self, _fetch) -> None:
+    @patch(
+        "app.activity_browse._filter_events_by_query",
+        # This test is about rendering results, not about the matcher. It used to lean on
+        # the no-model fallback showing EVERY event for "sports"; that fallback now says
+        # "couldn't check" instead, so the match is stood in explicitly.
+        side_effect=lambda ev, q: (ev, ""),
+    )
+    def test_shows_events_after_interest(self, _filter, _fetch) -> None:
         ctx: dict = {
             "activity_browse_active": True,
             "browse_draft": {"_asked": True},

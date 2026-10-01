@@ -124,6 +124,12 @@ def log_shown(
     scores = scores if isinstance(scores, dict) else {}
     tip_scores = ctx.get("tip_scores")
     tip_scores = tip_scores if isinstance(tip_scores, dict) else {}
+    # The one event shown as a stretch (Rapport Reply): closely related, NOT a match.
+    # Marked so its taps are never counted as taps on a matched result.
+    no_match = ctx.get("browse_no_match")
+    stretch_id = (
+        str(no_match.get("stretch_event_id") or "") if isinstance(no_match, dict) else ""
+    )
 
     rows: list[dict[str, Any]] = []
     position = 0
@@ -137,6 +143,7 @@ def log_shown(
         action: str,
         also: dict[str, str] | None = None,
         model: Any = None,
+        meta: dict[str, Any] | None = None,
     ) -> None:
         nonlocal position
         if not ident or kind not in _TYPES or position >= _MAX_PER_TURN:
@@ -168,6 +175,7 @@ def log_shown(
                     "admission_rule": admission_rule,
                     "turn_id": turn_id,
                     "truncated": bool(truncated) if truncated is not None else None,
+                    **(meta or {}),
                 },
             }
         )
@@ -205,14 +213,16 @@ def log_shown(
             model=p,
         )
     for a in activities:
+        aid = str(getattr(a, "activity_id", "") or "")
         _row(
             "event",
             "event_id",
             getattr(a, "activity_id", None),
-            scores.get(str(getattr(a, "activity_id", "") or "")),
+            scores.get(aid),
             None,
             "view_event",
             model=a,
+            meta={"stretch": True} if stretch_id and aid == stretch_id else None,
         )
 
     if not rows:

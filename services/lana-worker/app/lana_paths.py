@@ -55,6 +55,22 @@ def rec_personalize_enabled() -> bool:
     return _llm_ready()
 
 
+def stretch_offer_enabled() -> bool:
+    """Stretch offer on the event browse no-match path (product name: Rapport Reply).
+
+    When a topical search matches nothing nearby but the matcher rated a nearby event
+    "closely related", Lana offers that one event as a card and says how it differs,
+    using the difference phrase the matcher already wrote. Zero new model calls — it
+    reads scores the filter call already returns. Default OFF so it ships dark
+    (set LANA_STRETCH_OFFER=1). Requires LLM ready: without the model there are no
+    scores to read.
+    """
+    flag = os.environ.get("LANA_STRETCH_OFFER", "0").strip().lower()
+    if flag in ("0", "false", "off"):
+        return False
+    return _llm_ready()
+
+
 def tip_ask_consent_enabled() -> bool:
     """Answer a recommendation ask FIRST; post it to neighbors only if they say yes.
 

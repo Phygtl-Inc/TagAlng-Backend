@@ -78,6 +78,11 @@ TURN_SCOPED_SURFACES = frozenset({
     # Without this a login turn's send_login_otp survived the merge and kept
     # re-announcing an auth stage on unrelated later turns.
     "auth_action",
+    # Browse telemetry for THIS turn's assistant message (activity_browse): the no-match
+    # record and the user's answer to the previous turn's offer. Must never carry into a
+    # later turn's metadata, where it would describe a search that turn never ran.
+    "browse_no_match",
+    "browse_offer_response",
 })
 
 
