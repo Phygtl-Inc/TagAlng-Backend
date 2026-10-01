@@ -20,6 +20,8 @@ def _row(eid, score, mismatch="asked for violin, this is a jam night", **kw):
         "has_time": True,
         "topic_score": score,
         "topic_mismatch": mismatch,
+        # Meets the ask's date/time/host (or the ask named none) unless a test says not.
+        "fits_other_constraints": True,
     }
     row.update(kw)
     return row
@@ -56,6 +58,26 @@ class PickStretchTests(unittest.TestCase):
         """No phrase means no reason Lana is allowed to give."""
         for mismatch in ("", "   ", None):
             self.assertIsNone(pick_stretch([_row("e1", 0.7, mismatch)], _STRETCH_BAND))
+
+    def test_a_row_off_on_date_time_or_host_never_qualifies(self):
+        """One honest gap at a time: a stretch differs in topic ONLY. Asjid's case — a
+        tennis meetup next Wednesday for "badminton this Saturday" — is in band, has a
+        phrase, and must still not be offered."""
+        row = _row("e1", 0.7, mismatch="asked for badminton, this is tennis",
+                   fits_other_constraints=False)
+        self.assertIsNone(pick_stretch([row], _STRETCH_BAND))
+
+    def test_a_missing_or_non_true_fit_never_qualifies(self):
+        for val in (None, "true", 1):
+            row = _row("e1", 0.7, fits_other_constraints=val)
+            self.assertIsNone(pick_stretch([row], _STRETCH_BAND), val)
+        row = _row("e1", 0.7)
+        del row["fits_other_constraints"]
+        self.assertIsNone(pick_stretch([row], _STRETCH_BAND))
+
+    def test_a_lower_score_that_fits_beats_a_higher_one_that_does_not(self):
+        rows = [_row("e1", 0.8, fits_other_constraints=False), _row("e2", 0.6)]
+        self.assertEqual(pick_stretch(rows, _STRETCH_BAND).event_id, "e2")
 
     def test_an_unchecked_row_never_qualifies(self):
         self.assertIsNone(

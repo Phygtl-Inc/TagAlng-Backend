@@ -46,15 +46,24 @@ def pick_stretch(
     """The best stretch among `rows`, or None.
 
     A row qualifies only when the matcher actually judged it (not `topic_unchecked`),
-    its score sits inside `band` (inclusive), it carries a non-empty difference phrase,
-    and it has an id and a title to put on a card. Highest score wins; ties keep input
-    order. Callers pass only rows the matcher did NOT match — this never second-guesses
+    it meets every NON-topic constraint the ask named (`fits_other_constraints` is
+    literally True — date/timeframe, time of day, host, or the ask named none), its score
+    sits inside `band` (inclusive), it carries a non-empty difference phrase, and it has
+    an id and a title to put on a card. Highest score wins; ties keep input order.
+
+    One honest gap at a time: a stretch differs from the ask in topic ONLY. An event that
+    is also on the wrong day would make the reply, which explains just the topic, read as
+    if the day were right ("badminton this Saturday" → a tennis meetup next Wednesday).
+
+    Callers pass only rows the matcher did NOT match — this never second-guesses
     membership, it only reads what was already rated.
     """
     lo, hi = band
     best: StretchCandidate | None = None
     for row in rows or []:
         if not isinstance(row, dict) or row.get("topic_unchecked"):
+            continue
+        if row.get("fits_other_constraints") is not True:
             continue
         raw = row.get("topic_score")
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):

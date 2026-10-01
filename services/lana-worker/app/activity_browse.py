@@ -829,6 +829,8 @@ def _stamp_unjudged(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for ev in events:
         ev["topic_score"] = 0.0
         ev["topic_mismatch"] = ""
+        # Unknown, so not a fit: nothing unjudged may pass as "fits the date/host".
+        ev["fits_other_constraints"] = False
         ev.pop("topic_unchecked", None)
     return events
 
@@ -890,6 +892,8 @@ def _record_no_match(
                 "score": _coerce_topic_score(e.get("topic_score")),
                 # The mismatch echoes the ask ("asked for my son Leo's party…").
                 "mismatch": _redact(_coerce_topic_mismatch(e.get("topic_mismatch"))),
+                # False = also off on date/time/host, so never a stretch candidate.
+                "fits": e.get("fits_other_constraints") is True,
             }
             for e in scored[:_NEAR_MISS_LOG_LIMIT]
         ]
@@ -931,10 +935,13 @@ def _filter_events_by_query(
     read. Under the old contract non-matches were dropped before anything could rate
     them, and "how close was the closest thing?" had no answer at all.
 
-    EVERY event carries `topic_score` (0.0-1.0 against _TOPIC_SCORE_SCALE) and
-    `topic_mismatch` (a short phrase naming how it differs, "" on an exact match). Rows
-    no model judged carry 0.0 and "". The score describes closeness only; it decides
-    nothing, and a matched event may legitimately carry a low one.
+    EVERY event carries `topic_score` (0.0-1.0 against _TOPIC_SCORE_SCALE),
+    `topic_mismatch` (a short phrase naming how it differs, "" on an exact match) and
+    `fits_other_constraints` (True only when the model said the event meets every
+    NON-topic constraint the request names — date/timeframe, time of day, host — or the
+    request names none). Rows no model judged carry 0.0, "" and False. The score
+    describes closeness only; it decides nothing, and a matched event may legitimately
+    carry a low one.
 
     Note the scores land on the caller's OWN list: rows are stamped in place, so after
     this returns, `events` holds every candidate scored — matched or not. A caller that
@@ -986,7 +993,8 @@ def _filter_events_by_query(
                     #    closeness are different axes — the model matched a 0.6 event.
                     #    Only the JSON key list below is new. Do not paraphrase this.
                     'JSON {"match_indices":[ints], "scores":[floats], '
-                    '"mismatches":[strings], "label":"short phrase"}: indices of '
+                    '"mismatches":[strings], "fits_other":[booleans], '
+                    '"label":"short phrase"}: indices of '
                     "events satisfying EVERY constraint the request expresses (a date query "
                     "must match the event's date; a time-of-day query the start time; a "
                     "host query the host). When the request names an activity, interest or "
@@ -1009,7 +1017,18 @@ def _filter_events_by_query(
                     "anything: match_indices alone says what matched, and a matching "
                     "event may score low. Each mismatch is a short phrase naming how that "
                     'event differs from the request ("asked for violin, this is guitar"), '
-                    'or "" when it is exactly what was asked for. label '
+                    'or "" when it is exactly what was asked for. '
+                    # ── fits_other. Additive, like the scores: it decides no membership.
+                    #    It is what lets a topic-only near miss be told apart from one
+                    #    that is also on the wrong day (stretch offer, activity_browse).
+                    "fits_other is POSITIONALLY PARALLEL too, one boolean per event "
+                    "shown: true when that event satisfies every constraint in the "
+                    "request OTHER than the topic — the date or timeframe, the time of "
+                    "day and the host it names — and true when the request names none "
+                    "of those; false when it breaks one, or when the request names one "
+                    "and you cannot tell whether the event meets it (a time of day asked "
+                    "but no time set; a host asked but host is '?'). It says nothing "
+                    "about the topic. label "
                     "is a short human phrase naming the filter in the REQUEST'S OWN WORDS "
                     "('FIFA' for 'show me FIFA events'; a resolved date like 'July 5'; "
                     "'hosted by Asjid') or \"\" if the request is open/unfiltered. Never "
@@ -1019,10 +1038,11 @@ def _filter_events_by_query(
                 ),
                 user_payload=(
                     f"Request: {query}\nEvents:\n" + "\n".join(lines)
-                    + f"\nReturn match_indices, plus {len(lines)} scores and "
-                    f"{len(lines)} mismatches in event order: "
+                    + f"\nReturn match_indices, plus {len(lines)} scores, "
+                    f"{len(lines)} mismatches and {len(lines)} fits_other values in "
+                    "event order: "
                     '{"match_indices":[...], "scores":[...], '
-                    '"mismatches":[...], "label":"..."}.'
+                    '"mismatches":[...], "fits_other":[...], "label":"..."}.'
                 ),
                 # 200 was sized for a bare index list. Scores and mismatch phrases for a
                 # full _BROWSE_POOL of 40 run 700-900 output tokens, and an overflowing
@@ -1031,8 +1051,10 @@ def _filter_events_by_query(
                 # nothing about it. Raise this with any growth in the response shape.
                 #
                 # Every event is rated now, not just the matches, so the arrays are always
-                # full-length rather than as short as the match list.
-                max_tokens=1200,
+                # full-length rather than as short as the match list. fits_other adds one
+                # boolean per event (~80-120 tokens at 40): 1200 -> 1400 keeps the same
+                # headroom. A cap, not a spend — unused tokens cost nothing.
+                max_tokens=1400,
                 temperature=0.0,
             )
             if isinstance(data, dict):
@@ -1045,10 +1067,12 @@ def _filter_events_by_query(
                 if isinstance(idxs, list):
                     raw_scores = data.get("scores")
                     raw_mismatches = data.get("mismatches")
+                    raw_fits = data.get("fits_other")
                     scores = raw_scores if isinstance(raw_scores, list) else []
                     mismatches = (
                         raw_mismatches if isinstance(raw_mismatches, list) else []
                     )
+                    fits = raw_fits if isinstance(raw_fits, list) else []
                     # Score EVERY event, by INPUT position — scores are parallel to the
                     # event list, not to match_indices, so nothing the model chose to
                     # return can shift a score onto the wrong row, and a short array just
@@ -1062,6 +1086,11 @@ def _filter_events_by_query(
                         )
                         ev["topic_mismatch"] = _coerce_topic_mismatch(
                             mismatches[i] if i < len(mismatches) else None
+                        )
+                        # Only a literal true counts: missing, short, null or "true"
+                        # all read as False, so a stretch is never offered on a guess.
+                        ev["fits_other_constraints"] = (
+                            i < len(fits) and fits[i] is True
                         )
                     # Membership is the model's call and the score has no vote — a
                     # matched event may score low. A threshold here read the wrong axis

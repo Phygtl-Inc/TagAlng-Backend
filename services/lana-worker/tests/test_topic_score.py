@@ -358,11 +358,13 @@ class PromptContractTests(unittest.TestCase):
             self.assertIn(band, ab._TOPIC_SCORE_SCALE)
         seen = self._prompt()
         self.assertIn(ab._TOPIC_SCORE_SCALE, seen["system"])
-        self.assertGreaterEqual(seen["max_tokens"], 1200)
+        # 1200 fit scores + mismatches for a pool of 40; fits_other adds a boolean per
+        # event, and an overflow falls SILENTLY into the keyword fallback.
+        self.assertGreaterEqual(seen["max_tokens"], 1400)
 
-    def test_the_model_is_asked_for_all_four_keys(self):
+    def test_the_model_is_asked_for_all_five_keys(self):
         seen = self._prompt()
-        for key in ("match_indices", "scores", "mismatches", "label"):
+        for key in ("match_indices", "scores", "mismatches", "fits_other", "label"):
             self.assertIn(key, seen["system"])
             self.assertIn(key, seen["user_payload"])
 
@@ -383,12 +385,76 @@ class PromptContractTests(unittest.TestCase):
         ):
             self.assertIn(sentence, system)
 
+    def test_fits_other_is_defined_as_the_non_topic_constraints(self):
+        """What the stretch offer gates on: does the event meet the ask's date / time of
+        day / host? True when the ask names none — and "cannot tell" is false ONLY for a
+        constraint the ask actually named, so a missing host name can never block a
+        stretch for an ask that never mentioned a host."""
+        system = self._prompt()["system"]
+        self.assertIn("fits_other is POSITIONALLY PARALLEL too", system)
+        self.assertIn("every constraint in the request OTHER than the topic", system)
+        self.assertIn("true when the request names none of those", system)
+        self.assertIn(
+            "when the request names one and you cannot tell whether the event meets it",
+            system,
+        )
+        self.assertIn("It says nothing about the topic.", system)
+
     def test_the_prompt_says_the_score_decides_nothing(self):
         """The model must not start withholding low scores from match_indices to be
         helpful — that would re-couple the two axes inside the model instead of here."""
         system = self._prompt()["system"]
         self.assertIn("rate EVERY event you were shown", system)
         self.assertIn("match_indices alone says what matched", system)
+
+
+class FitsOtherTests(_LLMCase):
+    """fits_other: did each event meet the ask's NON-topic constraints (date/timeframe,
+    time of day, host)? Read by position like the scores, and fail-closed: only a literal
+    true counts, because a stretch offered on a guess is the bug this exists to stop."""
+
+    def _resp(self, fits, **kw):
+        base = {"match_indices": [], "scores": [0.7, 0.7, 0.7],
+                "mismatches": ["a", "b", "c"], "label": "badminton"}
+        if fits is not ...:
+            base["fits_other"] = fits
+        base.update(kw)
+        return base
+
+    def test_read_by_position_like_the_scores(self):
+        _m, _l, rows = self._run(self._resp([True, False, True]))
+        self.assertEqual([r["fits_other_constraints"] for r in rows], [True, False, True])
+
+    def test_a_missing_array_is_false_for_every_row(self):
+        _m, _l, rows = self._run(self._resp(...))
+        self.assertEqual([r["fits_other_constraints"] for r in rows], [False] * 3)
+
+    def test_a_short_array_leaves_the_tail_false(self):
+        _m, _l, rows = self._run(self._resp([True]))
+        self.assertEqual([r["fits_other_constraints"] for r in rows], [True, False, False])
+
+    def test_only_a_literal_true_counts(self):
+        _m, _l, rows = self._run(self._resp(["true", 1, None]))
+        self.assertEqual([r["fits_other_constraints"] for r in rows], [False] * 3)
+
+    def test_a_non_list_is_ignored(self):
+        _m, _l, rows = self._run(self._resp("yes"))
+        self.assertEqual([r["fits_other_constraints"] for r in rows], [False] * 3)
+
+    def test_it_never_changes_membership(self):
+        """A matched event the model says breaks the date is still matched — match_indices
+        alone decides membership, exactly as for the scores."""
+        matched, _l, _rows = self._run(self._resp([False, False, False], match_indices=[0]))
+        self.assertEqual([e["id"] for e in matched], ["e0"])
+
+    def test_unjudged_and_unchecked_rows_are_false(self):
+        with patch("app.orchestrator.llm.llm_configured", return_value=False):
+            open_rows = _events()
+            _filter_events_by_query(open_rows, "anything")
+            unchecked_rows = _events()
+            _filter_events_by_query(unchecked_rows, "underwater basket weaving")
+        self.assertEqual([r["fits_other_constraints"] for r in open_rows], [False] * 3)
+        self.assertEqual([r["fits_other_constraints"] for r in unchecked_rows], [False] * 3)
 
 
 class NoMatchLoggingTests(_LLMCase):

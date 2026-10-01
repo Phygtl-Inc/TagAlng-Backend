@@ -558,11 +558,14 @@ class _StretchTurnHarness:
                                            "phone_verified": True}
 
         def _filter(ev, q):
-            # Stamp in place, exactly like the real matcher: every row scored.
+            # Stamp in place, exactly like the real matcher: every row scored. A judged
+            # entry is (score, phrase) or (score, phrase, fits_other); fits defaults True
+            # (the ask named no date/time/host, or the event meets them).
             for row in ev:
-                score, phrase = judged.get(row["id"], (0.0, ""))
+                score, phrase, *rest = judged.get(row["id"], (0.0, ""))
                 row["topic_score"] = score
                 row["topic_mismatch"] = phrase
+                row["fits_other_constraints"] = rest[0] if rest else True
             return [r for r in ev if r["id"] in matched_ids], label
 
         with patch("app.activity_browse._fetch_block_events", return_value=rows), patch(
@@ -596,6 +599,59 @@ class _StretchTurnHarness:
 class StretchOfferTurnTests(_StretchTurnHarness, unittest.TestCase):
     """Rapport Reply at turn level: nothing matched, but a NEARBY event was rated closely
     related — offer it as the one card, ending on the listen offer. Behind the flag."""
+
+    # ── Date/time/host (Asjid's review): a stretch differs in topic ONLY ────────────
+
+    def _badminton(self, *, tennis_fits):
+        rows = [_ev("t1", "Tennis meetup", starts_at="2026-10-07T18:00:00+00:00"),
+                _ev("b1", "Book club")]
+        judged = {"t1": (0.7, "asked for badminton, this is tennis", tennis_fits),
+                  "b1": (0.1, "asked for badminton, this is a book club", tennis_fits)}
+        return self._turn(rows=rows, judged=judged, message="badminton this Saturday",
+                          label="badminton")
+
+    def test_badminton_saturday_never_offers_tennis_next_wednesday(self):
+        """Asjid's case: tennis scores 0.7 but is on the wrong day. Offering it would
+        read as "on Saturday too", since the reply only explains the topic. No stretch:
+        today's path runs — the ring and the far probe, no card."""
+        reply, ctx, widen, far = self._badminton(tennis_fits=False)
+        self.assertNotIn("Tennis meetup", reply)
+        self.assertEqual(ctx["activity_previews"], [])
+        widen.assert_called_once()
+        far.assert_called_once()
+        rec = ctx["browse_no_match"]
+        self.assertFalse(rec["stretch_shown"])
+        self.assertEqual(rec["near_misses"][0]["event_id"], "t1")
+        self.assertFalse(rec["near_misses"][0]["fits"])
+
+    def test_the_same_tennis_meetup_on_saturday_is_offered(self):
+        reply, ctx, widen, far = self._badminton(tennis_fits=True)
+        self.assertIn("Tennis meetup", reply)
+        self.assertIn("asked for badminton, this is tennis", reply)
+        self.assertEqual([p["title"] for p in ctx["activity_previews"]], ["Tennis meetup"])
+        widen.assert_not_called()
+        far.assert_not_called()
+        self.assertTrue(ctx["browse_no_match"]["near_misses"][0]["fits"])
+
+    def test_an_ask_with_no_date_time_or_host_still_stretches(self):
+        """"violin" names no date, time or host, so the matcher reports fits=true for
+        every event and the jam night still qualifies."""
+        rows, judged = self._rows()
+        judged["e2"] = (0.7, self._PHRASE, True)
+        reply, ctx, _w, _f = self._turn(rows=rows, judged=judged, message="violin")
+        self.assertIn("Sunday jam night", reply)
+
+    def test_a_fitting_0_6_beats_a_wrong_day_0_8(self):
+        rows = [_ev("w1", "Squash ladder"), _ev("s1", "Pickleball social")]
+        judged = {"w1": (0.8, "asked for badminton, this is squash", False),
+                  "s1": (0.6, "asked for badminton, this is pickleball", True)}
+        reply, ctx, _w, _f = self._turn(rows=rows, judged=judged,
+                                        message="badminton this Saturday", label="badminton")
+        self.assertIn("Pickleball social", reply)
+        self.assertNotIn("Squash ladder", reply)
+        self.assertEqual(ctx["browse_no_match"]["stretch_event_id"], "s1")
+        self.assertEqual([n["fits"] for n in ctx["browse_no_match"]["near_misses"]][:2],
+                         [False, True])
 
     def test_a_close_stretch_is_offered_as_one_card(self):
         rows, judged = self._rows()
