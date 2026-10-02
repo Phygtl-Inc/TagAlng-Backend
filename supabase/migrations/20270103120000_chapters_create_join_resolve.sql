@@ -12,7 +12,7 @@
 --   looks like it worked.
 --
 --   The original migration said as much about the read half: "the contract the read side
---   must implement (NOT enforced here)". Nobody implemented it.
+--   must implement (NOT enforced here)". Nobody implemented either half.
 --
 -- WHAT A CHAPTER IS (settled 2026-10-02)
 --
@@ -34,10 +34,22 @@
 -- WHY A SEPARATE SLUG RATHER THAN `handle`
 --
 --   `places_handle_needs_verification` requires governance_state = 'operator_verified'
---   for any row carrying a handle, and `handle` is globally unique. A chapter is neither
---   independently verified nor entitled to compete with real communities for the global
---   namespace. So chapters keep `handle` NULL and get `chapter_slug`, unique only within
---   their parent. "lisboa" may exist under twenty different communities.
+--   for any row carrying a handle, and `places_handle_uniq` makes it globally unique. A
+--   chapter is neither independently verified nor entitled to compete with real
+--   communities for the namespace. So chapters keep `handle` NULL and get
+--   `chapter_slug`, unique only within their parent. "lisboa" may exist under twenty
+--   different communities.
+--
+-- SCHEMA FACTS THIS WAS WRITTEN AGAINST (checked, not assumed)
+--
+--   places.google_place_id  NOT NULL, UNIQUE, no default  → a chapter must synthesise one
+--   places.name             NOT NULL, no default
+--   governance_state CHECK  community_started | claim_pending | operator_verified | suspended
+--   place_type CHECK        null allowed; creator/fitness/faith/... — inheriting is safe
+--   extensions installed    postgis ONLY. cube and earthdistance are NOT installed.
+--   circle_affiliations     UNIQUE (user_id, place_ref) WHERE dismissed_at IS NULL
+--                           UNIQUE (user_id, circle_key) WHERE dismissed_at IS NULL
+--   normalize_place_handle  strips accents: 'São Paulo' → 'sao-paulo'
 --
 -- WHAT THIS DELIBERATELY DOES NOT DO
 --
@@ -86,7 +98,7 @@ comment on column public.places.chapter_slug is
 -- ANY confirmed member of the parent may create a chapter. That is deliberately
 -- permissionless and matches the standup ("a group created by users"). The cost is
 -- fragmentation: a 340-member gym could sprout a dozen near-identical chapters. The
--- nearby-duplicate warning below is a nudge, not a block — see the note.
+-- nearby-sibling count below is a nudge returned to the caller, not a block.
 
 create or replace function public.create_chapter(
   p_parent_place_id uuid,
@@ -100,7 +112,7 @@ returns jsonb
 language plpgsql
 volatile
 security definer
-set search_path = pg_catalog, public
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_uid     uuid := auth.uid();
@@ -108,6 +120,7 @@ declare
   v_slug    text;
   v_id      uuid;
   v_near    int;
+  v_gpid    text;
 begin
   if v_uid is null then
     raise exception 'not_authenticated';
@@ -154,8 +167,8 @@ begin
       using hint = 'A chapter is a place-based branch and must have coordinates.';
   end if;
 
-  v_slug := public.normalize_place_handle(coalesce(nullif(btrim(p_slug), ''), p_name));
-  v_slug := left(v_slug, 40);
+  v_slug := left(public.normalize_place_handle(
+              coalesce(nullif(btrim(p_slug), ''), p_name)), 40);
   if v_slug is null or v_slug !~ '^[a-z0-9]+(-[a-z0-9]+)*$' or length(v_slug) < 2 then
     raise exception 'slug_shape';
   end if;
@@ -165,20 +178,29 @@ begin
       using hint = 'That chapter name is already used in this community.';
   end if;
 
+  -- google_place_id is NOT NULL and UNIQUE on places, with no default. A chapter is not
+  -- a Google Place, so it synthesises a stable key, the same way creator places use
+  -- 'creator:<slug>'. Deterministic on (parent, slug), so a retry cannot create a twin.
+  v_gpid := 'chapter:' || p_parent_place_id::text || ':' || v_slug;
+
   -- Advisory only. Fragmentation is the real risk of permissionless creation, but
   -- blocking on proximity would stop two genuinely different chapters in one city.
   -- Returned to the caller so the UI can ask "did you mean X?" before committing.
+  -- PostGIS, because cube/earthdistance are not installed on this database.
   select count(*) into v_near
     from public.places q
    where q.parent_place_ref = p_parent_place_id
      and q.lat is not null and q.lng is not null
-     and earth_distance(ll_to_earth(q.lat, q.lng), ll_to_earth(p_lat, p_lng)) < 2000;
+     and extensions.ST_DWithin(
+           extensions.ST_SetSRID(extensions.ST_MakePoint(q.lng, q.lat), 4326)::extensions.geography,
+           extensions.ST_SetSRID(extensions.ST_MakePoint(p_lng, p_lat), 4326)::extensions.geography,
+           2000);
 
   insert into public.places
-    (name, parent_place_ref, chapter_slug, lat, lng, blurb, place_type,
+    (google_place_id, name, parent_place_ref, chapter_slug, lat, lng, blurb, place_type,
      governance_state, created_at, updated_at)
   values
-    (btrim(p_name), p_parent_place_id, v_slug, p_lat, p_lng,
+    (v_gpid, btrim(p_name), p_parent_place_id, v_slug, p_lat, p_lng,
      nullif(btrim(p_blurb), ''), v_parent.place_type,
      'community_started', now(), now())
   returning id into v_id;
@@ -210,6 +232,10 @@ grant execute on function public.create_chapter(uuid, text, double precision, do
 -- Leaving a chapter does NOT leave the parent. Asymmetric on purpose — joining the
 -- Lisboa chapter means joining Etiqueta do Reino; leaving Lisboa does not mean leaving
 -- Etiqueta do Reino.
+--
+-- ON CONFLICT rather than WHERE NOT EXISTS: circle_affiliations carries two partial
+-- unique indexes — (user_id, place_ref) and (user_id, circle_key), both WHERE
+-- dismissed_at IS NULL. A check-then-insert races; two taps on Join would raise.
 
 create or replace function public.join_chapter(p_chapter_id uuid)
 returns jsonb
@@ -244,27 +270,30 @@ begin
 
   -- Parent first, so a failure cannot leave somebody in a chapter of a community they
   -- are not in — which is the one state the visibility rules cannot describe.
-  if not exists (
-    select 1 from public.circle_affiliations a
-     where a.place_ref = v_parent.id and a.user_id = v_uid and a.dismissed_at is null
-       and a.status = 'confirmed')
-  then
-    insert into public.circle_affiliations
-      (user_id, circle_type, circle_key, place_ref, place_name, status, source, grounded)
-    values (v_uid, coalesce(v_parent.place_type, 'other'),
-            'place:' || v_parent.id::text, v_parent.id, v_parent.name,
-            'confirmed', 'chapter_join', true);
-    v_joined_parent := true;
-  end if;
+  insert into public.circle_affiliations
+    (user_id, circle_type, circle_key, place_ref, place_name, status, source, grounded)
+  values (v_uid, coalesce(v_parent.place_type, 'other'),
+          'place:' || v_parent.id::text, v_parent.id, v_parent.name,
+          'confirmed', 'chapter_join', true)
+  on conflict (user_id, place_ref) where dismissed_at is null do nothing;
+
+  get diagnostics v_joined_parent = row_count;
 
   insert into public.circle_affiliations
     (user_id, circle_type, circle_key, place_ref, place_name, status, source, grounded)
-  select v_uid, coalesce(v_ch.place_type, 'other'),
-         'place:' || v_ch.id::text, v_ch.id, v_ch.name,
-         'confirmed', 'chapter_join', true
-  where not exists (
-    select 1 from public.circle_affiliations a
-     where a.place_ref = v_ch.id and a.user_id = v_uid and a.dismissed_at is null);
+  values (v_uid, coalesce(v_ch.place_type, 'other'),
+          'place:' || v_ch.id::text, v_ch.id, v_ch.name,
+          'confirmed', 'chapter_join', true)
+  on conflict (user_id, place_ref) where dismissed_at is null do nothing;
+
+  -- An existing row may be 'suggested' rather than 'confirmed'. Joining is explicit, so
+  -- promote it either way.
+  update public.circle_affiliations
+     set status = 'confirmed', updated_at = now()
+   where user_id = v_uid
+     and place_ref in (v_ch.id, v_parent.id)
+     and dismissed_at is null
+     and status <> 'confirmed';
 
   return jsonb_build_object(
     'chapterId', v_ch.id,
@@ -379,7 +408,6 @@ as $$
   from public.places c
   where c.parent_place_ref = p_place_id
     and c.governance_state <> 'suspended'
-    and not coalesce(c.is_test, false)
   order by c.name
   limit greatest(1, least(coalesce(p_limit, 50), 200));
 $$;
