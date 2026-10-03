@@ -1,0 +1,1241 @@
+[
+  {
+    "id": "find_fl_3",
+    "tags": [
+      "find",
+      "fl",
+      "Social"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4851,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing on your block in the next couple weeks. Want me to widen it, try another kind, or set up your own?"
+  },
+  {
+    "id": "find_fl_2",
+    "tags": [
+      "find",
+      "fl",
+      "Outdoors"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 5169,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Verify your email first — then I can post that to your block."
+  },
+  {
+    "id": "find_fl_1",
+    "tags": [
+      "find",
+      "fl",
+      "Sports"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 5687,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing on your block in the next couple weeks. Want me to widen it, try another kind, or set up your own?"
+  },
+  {
+    "id": "find_fl_0",
+    "tags": [
+      "find",
+      "fl",
+      "Family & kids"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 6537,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 3,
+    "drafted": false,
+    "last_msg": "Verify your email first — then I can post that to your block."
+  },
+  {
+    "id": "find_fl_4",
+    "tags": [
+      "find",
+      "fl",
+      "Family & kids"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4472,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Verify your email first — then I can post that to your block."
+  },
+  {
+    "id": "find_fl_6",
+    "tags": [
+      "find",
+      "fl",
+      "Outdoors"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4219,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing like **Something for my 4 year old, we're free weekday mornings** on your block in the next couple weeks. Want me to listen and text you the moment a ne"
+  },
+  {
+    "id": "find_fl_5",
+    "tags": [
+      "find",
+      "fl",
+      "Sports"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4926,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 5,
+    "drafted": false,
+    "last_msg": "Here's what's coming up:\n• Pre-K Playground Meetup at Laureate Park Zipline Playground (Fri Jul 10)\n• Morning meetup at My place (Sat Jul 11)\n• Brazilian Coffee"
+  },
+  {
+    "id": "find_fl_7",
+    "tags": [
+      "find",
+      "fl",
+      "Social"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4753,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You mentioned wanting to do something with other preschool moms — would you like me to show you existing events or help match you with neighbors for a meet?"
+  },
+  {
+    "id": "find_fl_8",
+    "tags": [
+      "find",
+      "fl",
+      "Family & kids"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4211,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing like **Something for my 4 year old, we're free weekday mornings** on your block in the next couple weeks. Want me to listen and text you the moment a ne"
+  },
+  {
+    "id": "find_fl_9",
+    "tags": [
+      "find",
+      "fl",
+      "Sports"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4470,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You mentioned wanting to do just something with other preschool moms — would you like me to show you existing events or help match you with neighbors for a meet"
+  },
+  {
+    "id": "find_fl_10",
+    "tags": [
+      "find",
+      "fl",
+      "Outdoors"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 5663,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 2,
+    "drafted": false,
+    "last_msg": "Verify your email first — then I can post that to your block."
+  },
+  {
+    "id": "find_fl_11",
+    "tags": [
+      "find",
+      "fl",
+      "Social"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4637,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing on your block in the next couple weeks. Want me to widen it, try another kind, or set up your own?"
+  },
+  {
+    "id": "find_fl_13",
+    "tags": [
+      "find",
+      "fl",
+      "Sports"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4538,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing on your block in the next couple weeks. Want me to widen it, try another kind, or set up your own?"
+  },
+  {
+    "id": "find_fl_12",
+    "tags": [
+      "find",
+      "fl",
+      "Family & kids"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 5229,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Verify your email first — then I can post that to your block."
+  },
+  {
+    "id": "find_fl_14",
+    "tags": [
+      "find",
+      "fl",
+      "Outdoors"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4235,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Verify your email first — then I can post that to your block."
+  },
+  {
+    "id": "find_fl_15",
+    "tags": [
+      "find",
+      "fl",
+      "Social"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 5069,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 5,
+    "drafted": false,
+    "last_msg": "You mentioned wanting something with other preschool moms — would you like me to show you existing meetups or help match you with neighbors for a playdate?"
+  },
+  {
+    "id": "find_fl_16",
+    "tags": [
+      "find",
+      "fl",
+      "Family & kids"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3768,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing like **Something for my 4 year old, we're free weekday mornings** on your block in the next couple weeks. Want me to listen and text you the moment a ne"
+  },
+  {
+    "id": "find_fl_17",
+    "tags": [
+      "find",
+      "fl",
+      "Sports"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3805,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You mentioned wanting to do something with other preschool moms — would you like me to show you existing events or help match you with neighbors for a meet?"
+  },
+  {
+    "id": "find_fl_18",
+    "tags": [
+      "find",
+      "fl",
+      "Outdoors"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3809,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "Nothing like **Something for my 4 year old, we're free weekday mornings** on your block in the next couple weeks. Want me to listen and text you the moment a ne"
+  },
+  {
+    "id": "find_fl_19",
+    "tags": [
+      "find",
+      "fl",
+      "Social"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3588,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You mentioned wanting something with other preschool moms — are you hoping to see existing meetups or be matched with neighbors for a playgroup?"
+  },
+  {
+    "id": "find_metro_0",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3659,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "What's your ZIP so I can see what's on your block?"
+  },
+  {
+    "id": "find_metro_1",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4127,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "What's your ZIP so I can see what's on your block?"
+  },
+  {
+    "id": "find_metro_2",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3565,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "What's your ZIP so I can see what's on your block?"
+  },
+  {
+    "id": "find_metro_3",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3847,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You said 'anything at all this week?' — are you hoping to see what events are happening nearby, or would you like me to match you with a neighbor for a walk or "
+  },
+  {
+    "id": "find_metro_4",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3775,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You said 'anything at all this week?' — are you hoping to see what events are happening nearby, or would you like me to match you with a walk buddy or other mom"
+  },
+  {
+    "id": "find_metro_5",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3459,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "What's your ZIP so I can see what's on your block?"
+  },
+  {
+    "id": "find_metro_6",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3801,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You said 'anything at all this week?' — are you hoping to see what events are happening nearby, or would you like me to match you with a walk buddy or other mom"
+  },
+  {
+    "id": "find_metro_7",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3633,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "What's your ZIP so I can see what's on your block?"
+  },
+  {
+    "id": "find_metro_11",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_0",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_1",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_2",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_3",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_4",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_5",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_6",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_7",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_8",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_9",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_10",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_11",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_12",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_13",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_14",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "host_15",
+    "tags": [
+      "host"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_kid_pii",
+    "tags": [
+      "edge",
+      "privacy"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_babysitter",
+    "tags": [
+      "edge",
+      "safety"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_spanish",
+    "tags": [
+      "edge",
+      "i18n"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_portuguese",
+    "tags": [
+      "edge",
+      "i18n"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_typos",
+    "tags": [
+      "edge",
+      "robust"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_offtopic_weather",
+    "tags": [
+      "edge",
+      "offtopic"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_offtopic_math",
+    "tags": [
+      "edge",
+      "offtopic"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_swap_request",
+    "tags": [
+      "edge",
+      "comingsoon"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_tip_request",
+    "tags": [
+      "edge",
+      "comingsoon"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_vague",
+    "tags": [
+      "edge",
+      "vague"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_overwhelmed",
+    "tags": [
+      "edge",
+      "emotional"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_multi_need",
+    "tags": [
+      "edge",
+      "multi"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_no_zip_refusal",
+    "tags": [
+      "edge",
+      "privacy"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_wrong_zip",
+    "tags": [
+      "edge",
+      "robust"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_zip_word",
+    "tags": [
+      "edge",
+      "robust"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_dad",
+    "tags": [
+      "edge",
+      "inclusivity"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_pregnant",
+    "tags": [
+      "edge",
+      "lifestage"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_rude",
+    "tags": [
+      "edge",
+      "tone"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_jailbreak",
+    "tags": [
+      "edge",
+      "safety"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_meet_stranger_fear",
+    "tags": [
+      "edge",
+      "trust"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_cancel_mind",
+    "tags": [
+      "edge",
+      "flow"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_specific_school",
+    "tags": [
+      "edge",
+      "match"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_evening_only",
+    "tags": [
+      "edge",
+      "match"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "edge_long_msg",
+    "tags": [
+      "edge",
+      "robust"
+    ],
+    "turns": 0,
+    "errors": 1,
+    "avg_ms": 0,
+    "leaks": [],
+    "outcomes": [],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": ""
+  },
+  {
+    "id": "find_metro_8",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3699,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "activity_browse"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "What's your ZIP so I can see what's on your block?"
+  },
+  {
+    "id": "find_metro_10",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 3672,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You said 'anything at all this week?' — are you hoping to see what events are happening nearby or to be matched with a walk buddy or other moms for an activity?"
+  },
+  {
+    "id": "find_metro_9",
+    "tags": [
+      "find",
+      "metro-empty"
+    ],
+    "turns": 4,
+    "errors": 0,
+    "avg_ms": 4596,
+    "leaks": [],
+    "outcomes": [
+      "activity_browse",
+      "activity_browse",
+      "activity_browse",
+      "T"
+    ],
+    "previews": 0,
+    "drafted": false,
+    "last_msg": "You said 'anything at all this week?' — are you hoping to see what events are happening nearby or be matched with a walk buddy or other moms for an activity?"
+  }
+]

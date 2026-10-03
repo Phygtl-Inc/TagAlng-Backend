@@ -1,0 +1,109 @@
+{
+  "id": "host_3",
+  "tags": [
+    "host"
+  ],
+  "zip": "34786",
+  "turns": [
+    {
+      "sent": "I want to host a meet. stroller walk tomorrow at sunrise, meet at the lake",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 14020,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Sunrise Stroller Walk by the Lake",
+        "starts_at": "2026-07-10T05:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Publishing your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "34786",
+      "hint": null,
+      "status": 200,
+      "ms": 11187,
+      "assistant_message": "Thanks! It looks like you entered '34786'—is that the zip code for the lake or a specific spot? Could you share the exact name or location where you'd like everyone to meet?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Sunrise Stroller Walk by the Lake",
+        "starts_at": "2026-07-10T05:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 11011,
+      "assistant_message": "Great, I'll use 34786 as the meeting spot for your Sunrise Stroller Walk! Just let me know if you want to approve who joins, and if it's okay for attendees to invite others. Then we're all set to post!",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Sunrise Stroller Walk by the Lake",
+        "starts_at": "2026-07-10T05:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:02:48.175Z",
+  "session": "5d266554-9d30-4301-a5ac-a62f770c25d9",
+  "finishedAt": "2026-07-09T01:05:15.746Z"
+}
