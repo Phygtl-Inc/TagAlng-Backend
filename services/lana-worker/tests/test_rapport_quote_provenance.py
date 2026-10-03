@@ -155,7 +155,7 @@ class SynthSendsTheSubject(_Patched):
                    "reco_description": PAUSA_DESCRIPTION, "detail_text": None}])
         seen = {}
 
-        def fake_generate(uncovered, asked, max_new):
+        def fake_generate(uncovered, asked, max_new, known="(nothing yet)"):
             seen["uncovered"] = uncovered
             return {"questions": []}
 

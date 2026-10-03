@@ -177,13 +177,13 @@ from app.vertex_event import lana_event_opening, lana_event_turn
 from app.vertex_event_extract import vertex_extract_event_from_transcript
 from app.claims_persist import (
     extract_and_upsert_claims_from_message,
-    latest_claim_id,
     persist_nickname_if_stated,
     replace_all_claims,
     should_extract_claims_from_message,
     try_upsert_claims_from_message,
     user_needs_display_name,
 )
+from app.rapport_synth import after_answer as rapport_after_answer
 from app.rapport_synth import ensure_gap_buffer as rapport_ensure_gap_buffer
 from app.reply_compose import compose_reply
 from app.profile_photo import upload_profile_photo_bytes
@@ -5207,7 +5207,11 @@ def post_rapport_record_answer(
         elif text:
             note_ungrounded_detail(auth.user_id, affiliation_id, text)
         rapport_mark_answered(body.gap_row_id)
-        background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
+        # Close the queued questions this answer already settles, then refill.
+        background_tasks.add_task(
+            rapport_after_answer, auth.user_id, body.gap_row_id,
+            (gap_row or {}).get("question"), text,
+        )
         amplitude_track(
             "rapport_gap_answered",
             user_id=auth.user_id,
@@ -5253,7 +5257,10 @@ def post_rapport_record_answer(
         # NOT fabricate one — the extractor already declined it (junk like "i dont know", or a
         # privacy case). Trust that judgment rather than storing a non-answer as a claim.
         if saved > 0:
-            claim_id = latest_claim_id(auth.user_id)
+            # The row THIS answer wrote. latest_claim_id (newest claim overall) linked
+            # "which gym do you go to?" to "Speaks Brazilian Portuguese" whenever the answer
+            # merged into an existing thread, so the gym topic never read as covered.
+            claim_id = res.primary_claim_id
             # Circles §4.3: a place-enrichment gap tags the claim its answer produced,
             # so "the Saturday long runs" is attributable to that gym. Best-effort.
             if claim_id:
@@ -5262,13 +5269,17 @@ def post_rapport_record_answer(
 
                 # "Working on posture" + "Practices speaking at work meetings" from one
                 # answer: only the newest was tagged to the community (2026-10-01).
-                for _cid in claim_ids_created_since(auth.user_id, _answer_started) or [claim_id]:
+                for _cid in claim_ids_created_since(auth.user_id, _answer_started) or res.claim_ids:
                     tag_claim_place_from_gap(body.gap_row_id, _cid)
     # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
     rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
-    # Refill the reserve so the "By the way…" tile always has a fresh, non-repeat question queued
-    # ahead. Background so it never delays the reply; synthesizes only the shortfall from claims.
-    background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
+    # Close the OTHER queued questions this answer already settles ("Fitness CF" answers "which
+    # gym?" and "which Fitness CF spot?" alike), then refill the reserve so the tile always has
+    # a fresh, non-repeat question ahead. Background so it never delays the reply.
+    background_tasks.add_task(
+        rapport_after_answer, auth.user_id, body.gap_row_id,
+        (gap_row or {}).get("question"), text, claim_id,
+    )
     amplitude_track(
         "rapport_gap_answered",
         user_id=auth.user_id,

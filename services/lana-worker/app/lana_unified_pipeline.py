@@ -1972,10 +1972,7 @@ def run_lana_unified_pipeline(
                 return _grounding_turn_result(session_ctx, result, timer)
 
     if isinstance(rapport, dict):
-        from app.claims_persist import (
-            latest_claim_id,
-            try_upsert_claims_from_message,
-        )
+        from app.claims_persist import try_upsert_claims_from_message
         from app.rapport_gaps import mark_answered
         from app.rapport_reply import rapport_concierge_reply
 
@@ -2002,7 +1999,9 @@ def run_lana_unified_pipeline(
                 }
             saved_any = res.saved > 0
             if saved_any:
-                claim_id = latest_claim_id(user_id)
+                # The row THIS answer wrote — not the user's newest claim, which is an
+                # unrelated row whenever the answer merges into an existing thread.
+                claim_id = res.primary_claim_id
                 saved_label = res.primary_label
                 saved_bucket = res.primary_bucket
         except Exception:  # noqa: BLE001 — never fail the turn on a persist hiccup
@@ -2012,6 +2011,17 @@ def run_lana_unified_pipeline(
                 mark_answered(gap_row_id, answer_claim_id=claim_id)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("rapport_answer_close_gap_failed")
+            # Close the other queued questions this answer already settles, behind the turn.
+            import threading
+
+            from app.rapport_synth import after_answer
+
+            threading.Thread(
+                target=after_answer,
+                args=(user_id, gap_row_id, question or None, user_message, claim_id),
+                daemon=True,
+                name="rapport-after-answer",
+            ).start()
         # ONE VOICE owns the reply: with the unified policy live, the answer to a
         # rapport-thread turn comes from decide_turn (acknowledge → bridge → offer) —
         # the bookkeeping above (claim saved, gap closed) already happened, so the
