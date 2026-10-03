@@ -122,7 +122,7 @@ class TestCannedStrings(unittest.TestCase):
         # Pinned EN literals (post lingo-v2 scrub: user-facing "block" is banned).
         self.assertEqual(
             t("discovery.ask_zip_peers", "en"),
-            "What's the ZIP code for your neighborhood? That helps me find neighbors near you.",
+            "What's the ZIP code for your neighborhood? That helps me find people near you.",
         )
         self.assertEqual(
             t("meet.ask_kind", "en"), "Love it — what kind of meet would help?"

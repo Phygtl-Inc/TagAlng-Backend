@@ -497,8 +497,8 @@ def tail_steps(tallies: Any = ()) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = [
         {
             "field": "ask_ok",
-            "label": "Neighbours",
-            "question": "Can neighbours ask you more?",
+            "label": "Others",
+            "question": "Can others ask you more?",
             "kind": "toggle",
             "options": ["Let them ask", "Keep it to the card"],
         }

@@ -53,7 +53,7 @@ class TestGroundAndConfirmBridge(unittest.TestCase):
             result = ground_and_confirm("u1", "aff1", "gpid", session_ctx={})
         offer = result["offer"]
         self.assertEqual(offer["kind"], "find_neighbors")
-        self.assertIn("2 of your neighbors", result["reply"])
+        self.assertIn("2 of your peers", result["reply"])
         self.assertIn("want an intro", result["reply"].lower())
 
     def test_offer_once_per_session(self, *_mocks) -> None:
@@ -118,7 +118,7 @@ class TestGroundingTurnResultArmsOffer(unittest.TestCase):
             "offer": {
                 "kind": "find_neighbors",
                 "label": "Yes, look",
-                "send": "connect me with neighbors into table tennis",
+                "send": "connect me with peers into table tennis",
                 "topic": "table tennis",
             },
         }

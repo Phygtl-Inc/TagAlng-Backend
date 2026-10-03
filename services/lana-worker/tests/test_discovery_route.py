@@ -2671,7 +2671,8 @@ class TestDirectSignupEnding(unittest.TestCase):
             block_id="block-1",
         )
         self.assertEqual(ctx.get("signup_origin"), "peers")
-        self.assertIn("neighbor", reply.lower())
+        # The people-search copy (lingo rule 11: "people", never "neighbors").
+        self.assertIn("people nearby", reply.lower())
 
 
 class TestOnboardingWantsPeers(unittest.TestCase):

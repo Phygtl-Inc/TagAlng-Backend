@@ -41,7 +41,7 @@ def test_promises_of_a_text_are_caught(text: str) -> None:
         # The noun stays legal — only the verb sense makes a promise.
         "I kept the text you wrote, word for word.",
         "That text you sent me had the address in it.",
-        "I'll let you know as soon as a neighbor recommends one.",
+        "I'll let you know as soon as someone recommends one.",
     ],
 )
 def test_clean_copy_is_untouched(text: str) -> None:
