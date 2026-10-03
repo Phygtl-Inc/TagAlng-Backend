@@ -200,7 +200,7 @@ class TestColdStartSeeding(_StubBase):
         self._patch(
             rapport_synth,
             "_generate_seeds",
-            lambda supply, asked, max_new: {
+            lambda supply, asked, max_new, known="(nothing yet)": {
                 "questions": [
                     {
                         # Was "Where do you like to run around here?" — which PRESUPPOSES

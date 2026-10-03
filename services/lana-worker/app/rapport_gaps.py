@@ -374,6 +374,117 @@ def reconcile_gaps(user_id: str, message_id: str | None = None) -> None:
                 logger.exception("rapport: failed to close gap %s", gap_id)
 
 
+_SIBLINGS_PROMPT = """Someone in a neighborhood app was just asked one question and answered it. \
+Below are OTHER questions still queued to ask them later. Which of those does their answer ALREADY \
+answer — so that asking it later would make them repeat themselves?
+
+Count a queued question as answered only when the answer gives what that question asks for:
+  asked "Which gym do you go to?", answered "Fitness CF in St. Cloud"
+    → answers "Which Fitness CF spot do you usually go to?" and "Where do you work out?"
+    → does NOT answer "What time do you usually train?" (they said where, not when)
+Same TOPIC is not enough. A non-answer ("not sure", "skip", "why do you ask?", "I never said that") \
+answers nothing.
+
+Output ONLY JSON: {"answered": [<numbers of the queued questions it answers>]} — [] when none."""
+
+
+def _siblings_verdict(question: str, answer: str, queued: list[str]) -> list[int]:
+    """AI judgment of which queued questions ``answer`` already answers (1-based). [] on failure."""
+    lines = "\n".join(f"{i}. {q}" for i, q in enumerate(queued, 1))
+    payload = f"ASKED: {question or '(a question)'}\nTHEY ANSWERED: {answer}\n\nQUEUED QUESTIONS:\n{lines}"
+    data: Any = None
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if llm_configured():
+            data = llm_json(
+                model=router_model(), system=_SIBLINGS_PROMPT, user_payload=payload,
+                max_tokens=120, temperature=0.0,
+            )
+    except Exception:
+        logger.exception("rapport: siblings verdict (primary) failed")
+    if data is None:
+        try:
+            from app.orchestrator.llm import vertex_generate_json
+
+            data = vertex_generate_json(
+                model=os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash"),
+                system=_SIBLINGS_PROMPT, user_payload=payload, max_tokens=120, temperature=0.0,
+            )
+        except Exception:
+            logger.exception("rapport: siblings verdict (fallback) failed")
+            return []
+    raw = data.get("answered") if isinstance(data, dict) else None
+    out: list[int] = []
+    for v in raw if isinstance(raw, list) else []:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= len(queued) and n not in out:
+            out.append(n)
+    return out
+
+
+def close_gaps_answered_by(
+    user_id: str,
+    answered_gap_row_id: str | None,
+    question: str | None,
+    answer: str | None,
+    answer_claim_id: str | None = None,
+) -> int:
+    """Close every OTHER queued question this answer already answers. Returns how many closed.
+
+    One answer often settles several queued questions worded differently — "Fitness CF in St.
+    Cloud" answers "which gym?", "which Fitness CF spot?" and "where do you work out?". Each had
+    its own gap id and a different embedding, so neither the concept match (reconcile_gaps) nor
+    the 0.9 similarity check closed them, and they were asked later, one by one (prod, todiba:
+    8 gym asks since August). The judgment is the model's — same topic is not the same question.
+    Best-effort; never raises.
+    """
+    answer = (answer or "").strip()
+    if not user_id or not answer:
+        return 0
+    try:
+        rows = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id, question")
+            .eq("user_id", user_id)
+            .in_("status", ["open", "asked"])
+            .not_.is_("question", "null")
+            .order("opened_at", desc=True)
+            .limit(30)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("rapport: siblings read failed for %s", user_id)
+        return 0
+    rows = [r for r in rows if r.get("gap_row_id") != answered_gap_row_id and (r.get("question") or "").strip()]
+    if not rows:
+        return 0
+    picked = _siblings_verdict(question or "", answer, [str(r["question"]).strip() for r in rows])
+    closed = 0
+    for n in picked:
+        row = rows[n - 1]
+        patch: dict[str, Any] = {"status": "answered", "answered_at": _now(), "updated_at": _now()}
+        if answer_claim_id:
+            patch["answer_claim_id"] = answer_claim_id
+        try:
+            service_client().table("rapport_gaps").update(patch).eq(
+                "gap_row_id", row["gap_row_id"]
+            ).in_("status", ["open", "asked"]).execute()
+            closed += 1
+        except Exception:
+            logger.exception("rapport: failed to close sibling gap %s", row.get("gap_row_id"))
+    if closed:
+        logger.info(
+            "rapport: answer to %s also closed %d queued question(s) for %s: %s",
+            answered_gap_row_id, closed, user_id, [rows[n - 1]["question"] for n in picked],
+        )
+    return closed
+
+
 def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
     """Fetch a gap row's identifying fields, INCLUDING its question.
 

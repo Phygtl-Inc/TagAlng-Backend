@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.auth import service_client
@@ -260,6 +260,24 @@ class ClaimExtractResult:
     # The richest claim this turn — used to frame the rapport follow-up tile.
     primary_label: str | None = None
     primary_bucket: str | None = None
+    # The rows this message actually wrote — inserted OR merged into — richest first. A
+    # rapport answer links to primary_claim_id. It used to link to the user's newest claim,
+    # which is a different, unrelated row whenever the answer merges into an existing thread
+    # ("which gym?" → "Speaks Brazilian Portuguese"), so the asked topic never read as covered.
+    claim_ids: list[str] = field(default_factory=list)
+
+    @property
+    def primary_claim_id(self) -> str | None:
+        return self.claim_ids[0] if self.claim_ids else None
+
+
+def _richest_first(written: list[tuple[str, float]]) -> list[str]:
+    """Claim ids by confidence, highest first, each once (one row can absorb two claims)."""
+    out: list[str] = []
+    for cid, _conf in sorted(written, key=lambda w: w[1], reverse=True):
+        if cid not in out:
+            out.append(cid)
+    return out
 
 
 def _heritage_root(concept: str, label: str) -> str | None:
@@ -1400,11 +1418,19 @@ def _merge_into_existing(c: ExtractedClaim, existing_row: dict[str, Any]) -> Ext
     return c
 
 
-def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
+def upsert_claims(
+    user_id: str,
+    claims: list[ExtractedClaim],
+    *,
+    written: list[tuple[str, float]] | None = None,
+) -> int:
     """Merge claims by concept; reconcile heritage bucket per batch.
 
     Always writes to user_identity_claims (legacy). When IDENTITY_CONCEPT_LINK_ENABLED
     is set, also resolves each claim to identity_concepts and writes claim_concept_links.
+
+    ``written`` (optional) collects ``(claim_id, confidence)`` for every row this call
+    inserted or merged into, so a caller can name the claim it produced.
     """
     claims = clean_claims_for_persist(claims)
     sb = service_client()
@@ -1476,6 +1502,8 @@ def upsert_claims(user_id: str, claims: list[ExtractedClaim]) -> int:
                 except Exception:
                     logger.exception("claim_id_reselect_failed concept=%s", c.concept)
         saved += 1
+        if written is not None and claim_id:
+            written.append((str(claim_id), float(c.confidence)))
         if _identity_concept_link_enabled() and claim_id:
             _link_claim_to_concept(sb, claim_id, c, embedding)
     reconcile_heritage_claims(user_id, heritage_batch)
@@ -1735,9 +1763,11 @@ def try_upsert_claims_from_message(
         conflict = detect_heritage_conflict(user_id, heritage)
         if conflict:
             from_label, new_claim = conflict
-            saved = upsert_claims(user_id, other) if other else 0
+            written: list[tuple[str, float]] = []
+            saved = upsert_claims(user_id, other, written=written) if other else 0
             return ClaimExtractResult(
                 saved=saved,
+                claim_ids=_richest_first(written),
                 heritage_conflict=pending_heritage_from_claim(from_label, new_claim),
                 nickname=stated_nick,
                 nickname_changed_from=renamed_from,
@@ -1745,7 +1775,8 @@ def try_upsert_claims_from_message(
                 followup_question=followup,
             )
 
-    saved = upsert_claims(user_id, claims)
+    written: list[tuple[str, float]] = []
+    saved = upsert_claims(user_id, claims, written=written)
     # "I like the pool HERE" is two facts and one edge: the interest is the claim above,
     # and THIS is the place↔activity edge (20261010120000 — a claim holds one place_ref,
     # but the same activity happens at two communities, so the edge cannot live on it).
@@ -1781,6 +1812,7 @@ def try_upsert_claims_from_message(
         followup_question=followup,
         primary_label=primary.label if primary else None,
         primary_bucket=primary.bucket if primary else None,
+        claim_ids=_richest_first(written),
     )
 
 

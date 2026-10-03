@@ -94,6 +94,7 @@ Every question must clear THREE bars — drop any that fail even one:
 1. RELEVANT — it sharpens one of the UNCOVERED THREADS listed below, not a generic survey question out of nowhere.
 2. IMPORTANT — the answer meaningfully helps match THEM to nearby neighbors. Apply the test: "would this change who they connect with on the block?" If not, drop it.
 3. FRESH — you have NOT asked it before. Scan ALREADY ASKED and skip anything you've asked or would just be rewording.
+4. NOT ALREADY KNOWN — never ask for a fact WHAT YOU ALREADY KNOW already answers. If it says they belong to Fitness CF St. Cloud, "which gym do you go to?" is a repeat however it is worded; build on it instead ("what time do you usually train at Fitness CF?") or skip the thread.
 
 HARD RULES on shape:
 - NEVER a yes/no question. If it starts with "Do you", "Are you", "Have you", "Would you" — rewrite it to ask for a SPECIFIC thing (a time, a place, a genre, an activity, a cadence) or drop it. Bad: "Do you and your spouse share any hobbies?" Good: "What's a spot nearby you love for a run?"
@@ -303,6 +304,55 @@ def _uncovered_block(claims: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _known_block(user_id: str, limit: int = 40) -> str:
+    """Everything we already know about them, as the question writer reads it: their live
+    claims (with any details they added) and the communities they confirmed, by place name.
+
+    The writer used to see only the threads still to ask about plus past QUESTIONS, never what
+    the user had answered. A thread like "Goes to a gym" therefore read as open even though
+    they had named their gym in a confirmed community, and "which gym do you go to?" came back
+    reworded for two months (prod, todiba, 8 gym asks). Best-effort: a read error yields
+    "(nothing yet)" and the writer behaves exactly as before.
+    """
+    lines: list[str] = []
+    try:
+        sb = service_client()
+        claims = (
+            sb.table("user_identity_claims")
+            .select("label, details")
+            .eq("user_id", user_id)
+            .is_("dismissed_at", "null")
+            .order("confidence", desc=True)
+            .limit(limit)
+            .execute()
+        ).data or []
+        for c in claims:
+            label = str(c.get("label") or "").strip()
+            if not label:
+                continue
+            details = [str(d).strip() for d in (c.get("details") or []) if str(d).strip()]
+            lines.append(f"- {label}" + (f" ({'; '.join(details[:3])})" if details else ""))
+        circles = (
+            sb.table("circle_affiliations")
+            .select("circle_key, place_name, places(name)")
+            .eq("user_id", user_id)
+            .eq("status", "confirmed")
+            .is_("dismissed_at", "null")
+            .limit(limit)
+            .execute()
+        ).data or []
+        for a in circles:
+            place = a.get("places") if isinstance(a.get("places"), dict) else {}
+            name = str(a.get("place_name") or place.get("name") or "").strip()
+            if not name:
+                name = str(a.get("circle_key") or "").replace("_", " ").strip()
+            if name:
+                lines.append(f"- belongs to {name}")
+    except Exception:
+        logger.exception("rapport-synth: known-facts read failed for %s", user_id)
+    return "\n".join(dict.fromkeys(lines)) or "(nothing yet)"
+
+
 def _asked_block(questions: list[str]) -> str:
     if not questions:
         return "(none yet)"
@@ -353,9 +403,12 @@ def _parse_questions(data: Any, max_new: int = _MAX_NEW) -> list[dict[str, str]]
     return out
 
 
-def _generate(uncovered: str, asked: str, max_new: int) -> Any:
+def _generate(uncovered: str, asked: str, max_new: int, known: str = "(nothing yet)") -> Any:
     system = SYNTH_PROMPT.format(max_new=max_new)
-    user_payload = f"THREADS TO ASK ABOUT (uncovered):\n{uncovered}\n\nALREADY ASKED:\n{asked}"
+    user_payload = (
+        f"THREADS TO ASK ABOUT (uncovered):\n{uncovered}\n\n"
+        f"WHAT YOU ALREADY KNOW ABOUT THEM:\n{known}\n\nALREADY ASKED:\n{asked}"
+    )
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
@@ -413,7 +466,7 @@ def synthesize_gaps_from_claims(user_id: str, max_new: int = _MAX_NEW) -> int:
     # from any point in the past, however old.
     asked = recent_gap_questions(user_id, limit=60)
     _attach_reco_subjects(user_id, uncovered)
-    data = _generate(_uncovered_block(uncovered), _asked_block(asked), max_new)
+    data = _generate(_uncovered_block(uncovered), _asked_block(asked), max_new, _known_block(user_id))
     questions = _parse_questions(data, max_new)
     logger.info(
         "rapport-synth[%s]: generated = %s",
@@ -458,6 +511,28 @@ def _open_gap_count(user_id: str) -> int:
     except Exception:
         logger.exception("rapport-synth: open-count failed for %s", user_id)
         return _BUFFER_TARGET  # fail closed — assume full, don't over-synthesize on a read error
+
+
+def after_answer(
+    user_id: str,
+    gap_row_id: str | None,
+    question: str | None,
+    answer: str | None,
+    answer_claim_id: str | None = None,
+) -> None:
+    """Background follow-through for a tile answer: close the queued questions it already
+    answered FIRST, then refill — in that order, so the refill never counts a question the
+    answer just settled as still pending. Never raises."""
+    try:
+        from app.rapport_gaps import close_gaps_answered_by
+
+        close_gaps_answered_by(user_id, gap_row_id, question, answer, answer_claim_id)
+    except Exception:
+        logger.exception("rapport: after-answer sibling close failed for %s", user_id)
+    try:
+        ensure_gap_buffer(user_id)
+    except Exception:
+        logger.exception("rapport: after-answer refill failed for %s", user_id)
 
 
 def ensure_gap_buffer(user_id: str, target: int = _BUFFER_TARGET) -> int:
@@ -518,6 +593,8 @@ neighbors each. Write up to {max_new} opening questions that find out whether an
 theirs too. Because these come from real nearby neighbors, an answer of "yes, that's me" is an \
 immediate introduction — that is the whole point, so stay close to the list and do NOT wander \
 off it into topics nobody nearby mentioned.
+
+If WHAT YOU ALREADY KNOW lists anything, skip every thread it already answers — asking someone who belongs to a gym whether they go to one is a repeat, not an opening.
 
 Every question must clear these bars:
 1. ANSWERABLE COLD — they have told you nothing, so never reference a fact about them. No "you \
@@ -740,7 +817,7 @@ def seed_cold_start(user_id: str, max_new: int = 3) -> int:
     )
     if supply:
         asked = recent_gap_questions(user_id, limit=60)
-        data = _generate_seeds(_supply_block(supply), _asked_block(asked), max_new)
+        data = _generate_seeds(_supply_block(supply), _asked_block(asked), max_new, _known_block(user_id))
         questions = _guard_seed_questions(_parse_questions(data, max_new))
         opened = 0
         for q in questions:
@@ -775,10 +852,13 @@ def seed_cold_start(user_id: str, max_new: int = 3) -> int:
         return 0
 
 
-def _generate_seeds(supply: str, asked: str, max_new: int) -> Any:
+def _generate_seeds(supply: str, asked: str, max_new: int, known: str = "(nothing yet)") -> Any:
     """One Flash-class call for cold-start questions. Mirrors _generate's failover."""
     system = SEED_PROMPT.format(max_new=max_new)
-    user_payload = f"WHAT NEIGHBORS NEAR THEM CLAIM:\n{supply}\n\nALREADY ASKED:\n{asked}"
+    user_payload = (
+        f"WHAT NEIGHBORS NEAR THEM CLAIM:\n{supply}\n\n"
+        f"WHAT YOU ALREADY KNOW ABOUT THEM:\n{known}\n\nALREADY ASKED:\n{asked}"
+    )
     try:
         from app.orchestrator.llm import llm_configured, llm_json, router_model
 
