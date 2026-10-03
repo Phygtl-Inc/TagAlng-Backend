@@ -1,0 +1,9 @@
+# Deliberately small. The runner talks to the worker and to PostgREST over plain
+# HTTP; it does not need the supabase client, and pinning fewer things keeps the
+# nightly job from breaking on an unrelated release.
+httpx>=0.27.0,<1
+
+# SPEC_P1_LANGUAGE.md §CLASSIFIER names this detector specifically, and the
+# version is recorded into every run's model_versions — a classifier verdict is
+# only reproducible against the build that produced it.
+lingua-language-detector>=2.0.0,<3
