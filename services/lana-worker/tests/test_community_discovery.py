@@ -724,9 +724,9 @@ class TestJoinTellsTheMembers(unittest.TestCase):
             [{"user_id": "m1"}], [{"id": "m1", "email": "m1@x.com", "locale": None}]
         )
         self.assertEqual(mail_join_to_members("p1", "Lake Nona YMCA", "u1"), 1)
-        self.assertIn("A new neighbor joined", mail.call_args.kwargs["html"])
+        self.assertIn("Someone new joined", mail.call_args.kwargs["html"])
         self.assertEqual(
-            mail.call_args.kwargs["subject"], "A new neighbor joined Lake Nona YMCA"
+            mail.call_args.kwargs["subject"], "Someone new joined Lake Nona YMCA"
         )
 
     @patch("app.community_discovery.service_client")

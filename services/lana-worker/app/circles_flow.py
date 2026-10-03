@@ -1316,7 +1316,7 @@ def _unpinned_close(
         if session_ctx is not None:
             session_ctx["_grounding_offer_done"] = True
         send = (
-            f"connect me with neighbors into {topic}"
+            f"connect me with peers into {topic}"
             if pending_action == "find_neighbors"
             else f"help me host a {topic} meet"
         )
@@ -1329,7 +1329,7 @@ def _unpinned_close(
         fallback = fallback_head
     elif session_ctx is not None and not session_ctx.get("_grounding_offer_done"):
         goal = (
-            f"{goal_head} Then offer ONE next step: that you look for neighbors who "
+            f"{goal_head} Then offer ONE next step: that you look for peers who "
             f"are into {topic} too. You have NOT looked yet and nobody is confirmed "
             "— so never imply people are waiting, and never promise an intro. End on "
             "the offer question; the chip below is the tap. Never 'on my radar'."
@@ -1337,10 +1337,10 @@ def _unpinned_close(
         offer = {
             "kind": "find_neighbors",
             "label": "Yes, look",
-            "send": f"connect me with neighbors into {topic}",
+            "send": f"connect me with peers into {topic}",
             "topic": topic,
         }
-        fallback = f"{fallback_head} Want me to look for neighbors into {topic} too?"
+        fallback = f"{fallback_head} Want me to look for peers into {topic} too?"
         session_ctx["_grounding_offer_done"] = True
     else:
         goal = f"{goal_head} One sentence, no question."
@@ -1425,7 +1425,7 @@ def ground_and_confirm(
         if session_ctx is not None:
             session_ctx["_grounding_offer_done"] = True
         if pending_action == "find_neighbors":
-            send = f"connect me with neighbors into {topic or place_name}"
+            send = f"connect me with peers into {topic or place_name}"
         else:
             send = f"help me host a {topic or 'get-together'} meet at {place_name}"
         reply = _compose_grounding_reply(
@@ -1459,10 +1459,10 @@ def ground_and_confirm(
             offer = {
                 "kind": "find_neighbors",
                 "label": "Yes, introduce me",
-                "send": f"connect me with neighbors into {topic or place_name}",
+                "send": f"connect me with peers into {topic or place_name}",
                 "topic": topic,
             }
-            noun = "neighbor" if others == 1 else "neighbors"
+            noun = "peer" if others == 1 else "peers"
             goal = (
                 "Tell them their community at this place is saved on their profile "
                 "now — one warm sentence — then offer ONE next step: an "

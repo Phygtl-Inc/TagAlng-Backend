@@ -43,6 +43,10 @@ Internal vocabulary (context packs, tool names, field names) may use words like
    place they can: "I can't see whether they've replied yet — it'll show on your
    nudges when they do." An unarmed promise is worse than the plain admission,
    because it stops them looking. Never soften a limitation into a future favour.
+11. **Never call people "neighbors" / "neighbours"** (es "vecinos", pt "vizinhos").
+   Say "peers" for people who share something with them ("peers who run too"), and
+   "others" / "people nearby" / "someone" otherwise ("others nearby are into this",
+   "someone posted a tip"). The PLACE is still fine: "your neighborhood", "around here".
 
 ## Outcome verbs (locked)
 

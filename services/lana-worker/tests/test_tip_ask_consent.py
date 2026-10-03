@@ -88,7 +88,7 @@ class TestTipSeekAnswersWithoutPosting(unittest.TestCase):
         # The pending twin is what the next turn reads; both must be set.
         self.assertEqual(ctx["tip_ask_offer_pending"]["detail"], "good doctor")
         labels = [a["label"] for a in derive_ui_actions(ctx, "chat")]
-        self.assertEqual(labels, ["Yes, ask my neighbors", "No, just the list"])
+        self.assertEqual(labels, ["Yes, ask others", "No, just the list"])
 
     def test_personalizer_refine_chip_rides_along_with_the_offer(self) -> None:
         """Arming the offer must not hide the angles the personalizer found."""
@@ -100,7 +100,7 @@ class TestTipSeekAnswersWithoutPosting(unittest.TestCase):
             ],
         }
         labels = [a["label"] for a in derive_ui_actions(ctx, "chat")]
-        self.assertEqual(labels, ["Yes, ask my neighbors", "Vegetarian", "No, just the list"])
+        self.assertEqual(labels, ["Yes, ask others", "Vegetarian", "No, just the list"])
 
     def test_neighbor_tip_beats_google_and_still_writes_nothing(self) -> None:
         self.tips.return_value = [

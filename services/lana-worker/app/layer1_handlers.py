@@ -786,7 +786,7 @@ def format_peer_detail_reply(
     label = str(peer.get("matching_peer_label") or "shared interests near you").strip()
     nick = str(peer.get("nickname") or "").strip()
     preview = bool(peer.get("preview", True))
-    idx_label = f"Neighbor {(index or 0) + 1}" if index is not None else "This neighbor"
+    idx_label = f"Peer {(index or 0) + 1}" if index is not None else "This peer"
     who = nick if nick and not preview else idx_label
     pct = ""
     score = peer.get("similarity_score")

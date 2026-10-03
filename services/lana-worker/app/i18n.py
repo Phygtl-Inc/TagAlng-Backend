@@ -401,7 +401,7 @@ def synth_language_directive(lang: str) -> str | None:
     register = _REGISTER.get(lang, "warm, neighborly — natural informal register")
     return (
         f"LANGUAGE: The user speaks {label}. Write assistant_message ENTIRELY in "
-        f"{label} — {register}. Keep event titles, venue names, and neighbor "
+        f"{label} — {register}. Keep event titles, venue names, and people's "
         "nicknames exactly as authored (never translate them). JSON keys, status "
         "values, buckets, and ISO dates stay in English/ISO form — only the text "
         "the user reads is localized."
@@ -415,7 +415,7 @@ def synth_language_directive(lang: str) -> str | None:
 _STRINGS: dict[str, dict[str, str]] = {
     # discovery funnel — ZIP asks
     "discovery.ask_zip_peers": {
-        "en": "What's the ZIP code for your neighborhood? That helps me find neighbors near you.",
+        "en": "What's the ZIP code for your neighborhood? That helps me find people near you.",
         "es": "¿Cuál es el código postal (ZIP) de tu zona? Así puedo encontrar gente cerca de ti.",
         "pt": "Qual é o ZIP code do seu bairro? Assim consigo encontrar pessoas perto de você.",
     },
@@ -425,7 +425,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Qual é o ZIP code do seu bairro? Assim consigo encontrar atividades perto de você.",
     },
     "discovery.ask_zip_both": {
-        "en": "What's the ZIP code for your neighborhood? That helps me find neighbors and activities near you.",
+        "en": "What's the ZIP code for your neighborhood? That helps me find people and activities near you.",
         "es": "¿Cuál es el código postal (ZIP) de tu zona? Así puedo encontrar gente y actividades cerca de ti.",
         "pt": "Qual é o ZIP code do seu bairro? Assim consigo encontrar pessoas e atividades perto de você.",
     },
@@ -447,7 +447,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     # discovery — verify gates
     "discovery.verify_gate_neighbors": {
-        "en": "I can see neighbors nearby — to show names and connect you, verify your email first. What's your email?",
+        "en": "I can see people nearby — to show names and connect you, verify your email first. What's your email?",
         "es": "Veo gente cerca — para mostrarte nombres y conectarte, primero verifica tu correo. ¿Cuál es tu email?",
         "pt": "Estou vendo pessoas por perto — para mostrar nomes e conectar você, primeiro verifique seu e-mail. Qual é o seu e-mail?",
     },
@@ -478,12 +478,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Olha o que vem por aí perto de {where}.",
     },
     "discovery.activities_tail_verified": {
-        "en": "Want to RSVP to one of these, or should I find neighbors like you?",
+        "en": "Want to RSVP to one of these, or should I find peers like you?",
         "es": "¿Quieres apuntarte a alguna, o busco gente como tú?",
         "pt": "Quer confirmar presença em alguma, ou procuro pessoas como você?",
     },
     "discovery.activities_tail_guest": {
-        "en": "Verify your email to RSVP — or ask me to find neighbors like you.",
+        "en": "Verify your email to RSVP — or ask me to find peers like you.",
         "es": "Verifica tu correo para apuntarte — o pídeme que busque gente como tú.",
         "pt": "Verifique seu e-mail para confirmar presença — ou me peça para encontrar pessoas como você.",
     },
@@ -497,12 +497,12 @@ _STRINGS: dict[str, dict[str, str]] = {
               "Me conta um pouco mais sobre você, ou tente um ZIP próximo.",
     },
     "discovery.peers_header_one": {
-        "en": "I found 1 neighbor near {where}:",
+        "en": "I found 1 person near {where}:",
         "es": "Encontré a 1 persona cerca de {where}:",
         "pt": "Encontrei 1 pessoa perto de {where}:",
     },
     "discovery.peers_header_many": {
-        "en": "I found {n} neighbors near {where}:",
+        "en": "I found {n} people near {where}:",
         "es": "Encontré a {n} personas cerca de {where}:",
         "pt": "Encontrei {n} pessoas perto de {where}:",
     },
@@ -781,7 +781,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Adorei — que tipo de encontro ajudaria?",
     },
     "meet.verify_gate": {
-        "en": "Love it — to start listening and text you when a neighbor wants the same, I just need "
+        "en": "Love it — to start listening and text you when someone wants the same, I just need "
               "to verify you. What's your email? (Already have an account? I'll log you right in.)",
         "es": "Me encanta — para quedarme atenta y escribirte cuando alguien busque lo mismo, "
               "solo necesito verificarte. ¿Cuál es tu email? (¿Ya tienes cuenta? Te conecto enseguida.)",
@@ -827,7 +827,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Seu encontro está no ar 🎉",
     },
     "notify.event_live.body": {
-        "en": "“{title}” is posted in your area — I’ll tell you when neighbors ask to join.",
+        "en": "“{title}” is posted in your area — I’ll tell you when people ask to join.",
         "es": "“{title}” ya está publicado en tu zona — te aviso cuando alguien quiera unirse.",
         "pt": "“{title}” já está publicado na sua área — aviso quando alguém pedir para participar.",
     },
@@ -837,7 +837,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Seu encontro “{title}” está no ar",
     },
     "notify.event_live.email_body": {
-        "en": "“{title}” is now posted in your area. I’ll let you know as neighbors ask to join.",
+        "en": "“{title}” is now posted in your area. I’ll let you know as people ask to join.",
         "es": "“{title}” ya está publicado en tu zona. Te aviso cuando la gente pida unirse.",
         "pt": "“{title}” já está publicado na sua área. Aviso quando as pessoas pedirem para participar.",
     },
@@ -1027,7 +1027,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Di algo antes de que se enfríe el momento.",
         "pt": "Diga algo antes que o momento esfrie.",
     },
-    "notify.facts.neighbor": {"en": "Neighbor", "es": "Vecino", "pt": "Vizinho"},
+    "notify.facts.neighbor": {"en": "Peer", "es": "Persona", "pt": "Pessoa"},
 
     # The (label, value) rows in a notification email — "When / Where / Host".
     "notify.facts.when": {"en": "When", "es": "Cuándo", "pt": "Quando"},
@@ -1068,7 +1068,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Open Lana", "es": "Abrir Lana", "pt": "Abrir a Lana",
     },
     "notify.community_join.somebody": {
-        "en": "A new neighbor", "es": "Un vecino nuevo", "pt": "Uma pessoa da vizinhança",
+        "en": "Someone new", "es": "Alguien nuevo", "pt": "Alguém novo",
     },
 
     # One context line on every event notification whose meet was created FOR a community
@@ -1133,22 +1133,22 @@ _STRINGS: dict[str, dict[str, str]] = {
     # ask, so the notification lands as "the thing you wanted" rather than "someone did
     # something" — the body carries the neighbor's own words.
     "notify.signal_match.tip_title": {
-        "en": "A neighbor answered your ask 💬",
+        "en": "Someone answered your ask 💬",
         "es": "Alguien de tu zona respondió a tu pregunta 💬",
         "pt": "Alguém da sua área respondeu ao seu pedido 💬",
     },
     "notify.signal_match.tip_wanted_title": {
-        "en": "A neighbor is looking for your tip",
+        "en": "Someone nearby is looking for your tip",
         "es": "Alguien cerca busca tu recomendación",
         "pt": "Alguém por perto procura sua dica",
     },
     "notify.signal_match.item_title": {
-        "en": "A neighbor has what you were after 📦",
+        "en": "Someone nearby has what you were after 📦",
         "es": "Alguien cerca tiene lo que buscabas 📦",
         "pt": "Alguém por perto tem o que você procurava 📦",
     },
     "notify.signal_match.item_wanted_title": {
-        "en": "A neighbor needs what you offered",
+        "en": "Someone nearby needs what you offered",
         "es": "Alguien cerca necesita lo que ofreciste",
         "pt": "Alguém por perto precisa do que você ofereceu",
     },
@@ -1158,7 +1158,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Alguém por perto está a fim 👋",
     },
     "notify.signal_match.title": {
-        "en": "A neighbor matched your ask",
+        "en": "Someone nearby fits your ask",
         "es": "Alguien cerca coincide con tu petición",
         "pt": "Alguém por perto combina com seu pedido",
     },
@@ -1167,12 +1167,12 @@ _STRINGS: dict[str, dict[str, str]] = {
     # that actually reaches people here (a verified user always has an address; a push
     # subscription is opt-in and rare). Mirrors notify.intro.title vs notify.intro.subject.
     "notify.signal_match.subject": {
-        "en": "A neighbor answered your ask",
+        "en": "Someone answered your ask",
         "es": "Alguien de tu zona respondió a tu pregunta",
         "pt": "Alguém da sua área respondeu ao seu pedido",
     },
     "notify.signal_match.body_generic": {
-        "en": "A neighbor near you posted something that fits what you asked for.",
+        "en": "Someone near you posted something that fits what you asked for.",
         "es": "Alguien cerca de ti publicó algo que encaja con lo que pediste.",
         "pt": "Alguém perto de você publicou algo que combina com o que você pediu.",
     },
@@ -1181,22 +1181,22 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
 
     "notify.intro.title": {
-        "en": "A neighbor wants to connect 🤝",
+        "en": "A peer wants to connect 🤝",
         "es": "Alguien de tu zona quiere conectar 🤝",
         "pt": "Alguém da sua área quer se conectar 🤝",
     },
     "notify.intro.body_generic": {
-        "en": "A neighbor near you wants to connect — take a peek.",
+        "en": "A peer near you wants to connect — take a peek.",
         "es": "Alguien cerca de ti quiere conectar — échale un vistazo.",
         "pt": "Alguém perto de você quer se conectar — dá uma olhada.",
     },
     "notify.intro.subject": {
-        "en": "A neighbor near you wants to connect",
+        "en": "A peer near you wants to connect",
         "es": "Alguien cerca de ti quiere conectar",
         "pt": "Alguém perto de você quer se conectar",
     },
     "notify.intro.heading": {
-        "en": "A neighbor wants to connect",
+        "en": "A peer wants to connect",
         "es": "Alguien de tu zona quiere conectar",
         "pt": "Alguém da sua área quer se conectar",
     },
@@ -1210,7 +1210,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Sua região acabou de ganhar vida",
     },
     "notify.area_open.body": {
-        "en": "Enough neighbors have joined — you can now discover meets, people, and plans near you.",
+        "en": "Enough people have joined — you can now discover meets, people, and plans near you.",
         "es": "Ya se unió suficiente gente — ahora puedes descubrir planes y personas cerca de ti.",
         "pt": "Já entrou gente suficiente — agora você pode descobrir encontros e pessoas perto de você.",
     },

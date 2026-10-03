@@ -163,7 +163,7 @@ class TestSurface(unittest.TestCase):
         assert surface is not None
         self.assertEqual(surface["strong_count"], 2)
         self.assertEqual(surface["partial_count"], 0)
-        self.assertIn("2 neighbor recs", surface["status_label"])
+        self.assertIn("2 peer recs", surface["status_label"])
         self.assertIsNone(surface["weak_peer"])
 
     def test_no_rows_no_surface(self) -> None:

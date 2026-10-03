@@ -186,10 +186,10 @@ def tip_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         "strong_count": n,
         "partial_count": 0,
         "weak_count": 0,
-        "status_label": f"{n} neighbor rec{'s' if n != 1 else ''}",
+        "status_label": f"{n} peer rec{'s' if n != 1 else ''}",
         "weak_peer": None,
         "ranked_summary": " · ".join(
-            str(r.get("nickname") or "Neighbor")[:16] for r in with_rec[:PAGE_SIZE]
+            str(r.get("nickname") or "Someone")[:16] for r in with_rec[:PAGE_SIZE]
         )
         or None,
     }

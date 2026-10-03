@@ -34,8 +34,8 @@ def test_swap_wording_is_caught(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "Want me to find pizza spots near you, or ask neighbors which they swear by?",
-        "I can help you share a tip with neighbors.",
+        "Want me to find pizza spots near you, or ask others which they swear by?",
+        "I can help you share a tip with others.",
         "Want a hand setting up a get-together at Fitness CF - St. Cloud?",
         "Great choice! Mortadella pizza always hits the spot.",
     ],

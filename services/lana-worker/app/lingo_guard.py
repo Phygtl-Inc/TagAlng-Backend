@@ -32,6 +32,9 @@ _BANNED_RE = re.compile(
     r"|blocks?|cuadra|quadra"                              # rule 2
     r"|circles?|c[ií]rculos?|groups?|grupos?"              # rule 3
     r"|leaderboards?|streaks?|level\s*up"                  # rule 6
+    # rule 11 — people are peers/others, never "neighbors". The PLACE stays legal:
+    # \b stops these at "neighborhood", "vecindario" and "vizinhança".
+    r"|neighbou?rs?|vecin[oa]s?|vizinh[oa]s?"
     r")\b",
     re.IGNORECASE,
 )
@@ -86,6 +89,13 @@ _FALSE_CHANNEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+def _keep_case(word: str):
+    """Replacement that keeps a capitalised match capitalised ("A neighbor…" → "Someone…")."""
+    def repl(m: re.Match[str]) -> str:
+        return word[:1].upper() + word[1:] if m.group(0)[:1].isupper() else word
+    return repl
+
+
 # Last-resort substitutions when the LLM rewrite is unavailable or still dirty.
 # Crude but always lexicon-clean — a slightly stiff sentence beats a banned word.
 _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
@@ -104,6 +114,16 @@ _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bgroups?\b", re.I), "community"),
     (re.compile(r"\bgrupos?\b", re.I), "comunidad"),
     (re.compile(r"\bleaderboards?\b", re.I), "neighborhood"),
+    # Rule 11. Article forms first so "a neighbor" reads "someone", not "a others".
+    (re.compile(r"\b(?:a|another|one)\s+neighbou?r\b", re.I), _keep_case("someone")),
+    (re.compile(r"\bneighbou?rs\b", re.I), _keep_case("others")),
+    (re.compile(r"\bneighbou?r\b", re.I), _keep_case("peer")),
+    (re.compile(r"\b(?:un|una|otro|otra)\s+vecin[oa]\b", re.I), _keep_case("alguien")),
+    (re.compile(r"\bvecin[oa]s\b", re.I), _keep_case("otras personas")),
+    (re.compile(r"\bvecin[oa]\b", re.I), _keep_case("alguien")),
+    (re.compile(r"\b(?:um|uma|outro|outra)\s+vizinh[oa]\b", re.I), _keep_case("alguém")),
+    (re.compile(r"\bvizinh[oa]s\b", re.I), _keep_case("outras pessoas")),
+    (re.compile(r"\bvizinh[oa]\b", re.I), _keep_case("alguém")),
     (re.compile(r"\bstreaks?\b", re.I), "progress"),
     (re.compile(r"\blevel\s*up\b", re.I), "grow"),
     # Last-resort only, and deliberately blunt: the real repair for a score frame
@@ -202,7 +222,10 @@ def _rewrite_clean(text: str, chip_labels: list[str], hits: list[str]) -> tuple[
                 "a person a 'match' (say 'someone to meet', 'an intro'); leaderboard/"
                 "streak/level up/points/rank — never adopt a score frame even to "
                 "deny it, say nobody is being scored here; 'text you'/'SMS' — there "
-                "is no texting, say 'email you'. Return JSON "
+                "is no texting, say 'email you'; neighbor(s)/vecino(s)/vizinho(s) for "
+                "PEOPLE (say 'peers' for people who share something with them, else "
+                "'others', 'people nearby', 'someone' — 'neighborhood' the place is fine). "
+                "Return JSON "
                 '{"reply": "...", "chips": ["..."]} with exactly one chip per input '
                 "chip, same order."
             ),

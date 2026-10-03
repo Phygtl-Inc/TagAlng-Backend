@@ -285,7 +285,7 @@ def test_generated_set_drops_what_it_must_not_ask() -> None:
     assert "blurb" not in fields, "a statement is not a question"
     assert fields.count("helped_with") == 1, "one field, one step"
     assert fields.count("ask_ok") == 1, "the consent step is ours, worded the same for all"
-    assert steps[-1]["question"] == "Can neighbours ask you more?"
+    assert steps[-1]["question"] == "Can others ask you more?"
 
 
 def test_a_place_is_never_asked_what_google_already_knows() -> None:

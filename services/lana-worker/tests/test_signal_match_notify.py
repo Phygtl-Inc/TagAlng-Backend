@@ -53,7 +53,7 @@ class TestDelivery(unittest.TestCase):
         # address while a push subscription is opt-in and rare.
         self.assertIn("Dr. Patel", kwargs["email_html"])
         # Its subject is emoji-free (deliverability); the emoji stays on the push title.
-        self.assertEqual(kwargs["email_subject"], "A neighbor answered your ask")
+        self.assertEqual(kwargs["email_subject"], "Someone answered your ask")
         self.assertNotIn("💬", kwargs["email_subject"])
 
     def test_title_follows_the_recipients_own_ask(self) -> None:

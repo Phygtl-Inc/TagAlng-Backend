@@ -469,7 +469,9 @@ def tip_ask_offer_actions(rec_chips: list[dict[str, Any]] | None = None) -> list
     rows = [
         _action(
             action_id="tip_ask_yes",
-            label="Yes, ask my neighbors",
+            # Label says "others" (lingo rule 11); the MESSAGE stays verbatim because
+            # discovery_route._TIP_ASK_ACCEPT_MSG matches this exact payload.
+            label="Yes, ask others",
             message="Yes, ask my neighbors",
             style="primary",
         )
