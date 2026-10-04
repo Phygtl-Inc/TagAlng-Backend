@@ -978,3 +978,42 @@ class BrowseTelemetryPlumbingTests(unittest.TestCase):
                 home_block_id="b1",
             )
         self.assertEqual(ctx.get("browse_no_match"), {"filter": "judged"})
+
+
+class EmptyCommunityBeforeAreaGateTests(unittest.TestCase):
+    """Inside a community, an empty calendar is about the community, not the user's home
+    ZIP. Followers and students can live anywhere, so an unopened home area must not turn
+    a generic "what's going on" into "your area is still coming alive" with no way out."""
+
+    def _turn(self, *, frame):
+        from app.community_scope import CTX_KEY
+
+        # The generic CTA entry: its seed text is dropped, so nothing names an interest
+        # and, inside a community, the interest question is skipped too.
+        ctx = {"activity_browse_active": True, "browse_skip_seed": True,
+               "phone_verified": True, CTX_KEY: {"place_id": "p1", "name": "CF Fitness"}}
+        with patch("app.auth.jwt_user_id", return_value="me"), patch(
+            "app.community_scope.community_events", return_value=[]
+        ), patch("app.activity_browse._attach_host_names"), patch(
+            "app.activity_browse._zip_gate_frame", return_value=frame
+        ), patch("app.activity_browse._compose_area_warming_empty", return_value="warming"), patch(
+            "app.orchestrator.llm.llm_configured", return_value=False
+        ):
+            reply = run_activity_browse_turn(
+                user_message="what's going on", session_ctx=ctx, history=[],
+                user_jwt="jwt", home_block_id="b1",
+            )
+        return reply, ctx
+
+    def test_an_unopened_home_area_still_offers_the_way_out(self):
+        reply, ctx = self._turn(frame={"state": "closed"})
+        self.assertNotEqual(reply, "warming")
+        self.assertEqual(
+            ctx["browse_draft"]["suggestions"], ["Yes, listen for me", "Look beyond CF Fitness"]
+        )
+
+    def test_an_open_home_area_is_unchanged(self):
+        reply, ctx = self._turn(frame=None)
+        self.assertEqual(
+            ctx["browse_draft"]["suggestions"], ["Yes, listen for me", "Look beyond CF Fitness"]
+        )
