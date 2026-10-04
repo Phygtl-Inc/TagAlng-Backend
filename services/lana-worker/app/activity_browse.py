@@ -1835,7 +1835,10 @@ def run_activity_browse_turn(
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
     # isn't open yet: the seed-forward framing instead of a bare "nothing found".
     # Real events always render below — this branch only fires when there are none.
-    if not matched and not interest:
+    # Not inside a community: its calendar is about the place, not her home ZIP (followers
+    # and students can live anywhere), and the empty-community branch below keeps the way
+    # out that this one would drop (Pouya, 2026-10-04).
+    if not matched and not interest and not comm:
         frame = _zip_gate_frame(user_id)
         if frame:
             draft["_seek_offer"] = None
