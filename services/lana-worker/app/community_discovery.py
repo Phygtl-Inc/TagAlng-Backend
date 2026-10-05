@@ -752,6 +752,7 @@ def set_membership(user_id: str, affiliation_id: str, membership: str) -> dict[s
 
 # Nearby communities named in one reply. More than this and the prose stops being
 # readable; the cards carry the rest.
+_MINE_NAMED_MAX = 6
 _CHAT_NEARBY_MAX = 5
 
 # Roster cards one reply can carry — the wire cap in main._peer_matches_from_ctx. Kept in
@@ -1584,7 +1585,20 @@ def communities_chat_turn(
             "in theirs or near them — say that plainly before anything else, and never "
             "add that they are in one by that name (that contradiction shipped 2026-10-04)"
         )
-    if mine:
+    # "Which communities am I in?" is a question about THEIRS. It used to get the nearby
+    # answer — a count, one name, and a pitch for places to join — so SJSU and RCC were
+    # never named to the person in both (QA 2026-10-05). A handful of their own names is
+    # the answer; the roll-call rule below is about the list of strangers' communities.
+    asks_mine = community_ask == "mine" and bool(mine)
+    if asks_mine:
+        names = [str(c["place_name"]) for c in mine[:_MINE_NAMED_MAX]]
+        more = len(mine) - len(names)
+        facts.append(
+            f"The communities they are in ({len(mine)}): " + "; ".join(
+                f"{c['place_name']} ({_members_phrase(c)})" for c in mine[:_MINE_NAMED_MAX]
+            ) + (f"; and {more} more" if more > 0 else "")
+        )
+    elif mine:
         # COUNT + one name, not the roll-call. Handing the model six names and four more
         # made it read every one out, and the cards under the message then repeated all
         # ten: a ten-line wall answering a one-line question (QA 2026-08-18).
@@ -1607,7 +1621,19 @@ def communities_chat_turn(
             "guess at reasons and do NOT say their area is too quiet to have any"
         )
 
-    if nearby:
+    if asks_mine:
+        goal = (
+            "They asked which communities they are in. Answer exactly that: name each of "
+            "their communities from the facts in one sentence (commas, not bullets). "
+            + (
+                "Then, in at most one short clause, mention there are others nearby they "
+                "could join — the cards show them, so name none."
+                if nearby
+                else "Do not pitch anything else."
+            )
+        )
+        fallback = "You're in " + ", ".join(names) + (f", and {more} more." if more > 0 else ".")
+    elif nearby:
         goal = (
             "Answer what they asked: the communities near them. TWO SHORT SENTENCES, and "
             "never a list — the cards under your message carry every name, so a name-by-name "

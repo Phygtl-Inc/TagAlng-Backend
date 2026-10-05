@@ -243,6 +243,13 @@ def open_semantic_gap(
     # in books…"). Fall back to a neutral eyebrow only if the model gave none.
     why_frame = teaser.strip() if teaser and teaser.strip() else "one quick thing…"
     q_text = str(question).strip()
+    # The tile is a reply surface the final-mile guard never sees, so a question the writer
+    # phrased with "neighbors" shipped as written ("…chatting in with neighbors?", QA
+    # 2026-10-05). Same lexicon rewrite as every reply; costs a call only on a leak.
+    from app.lingo_guard import enforce, find_violations
+
+    if find_violations(q_text):
+        q_text = enforce(q_text).text.strip() or q_text
     # Semantic dedup: don't reopen a question that means the same as one we already asked, even
     # when the wording (and thus the slug) differs. Embedding also stored to power coverage steering.
     bad = _question_is_servable(q_text)

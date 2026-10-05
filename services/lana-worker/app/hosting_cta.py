@@ -106,11 +106,11 @@ def handle_hosting_open_turn(
     saved["hosting_opened"] = True
     hosting = saved.get("hosting") if isinstance(saved.get("hosting"), dict) else {}
     hosting = dict(hosting)
-    hosting["status_label"] = "Open to neighbors nearby"
+    hosting["status_label"] = "Open to people nearby"
     hosting["outreach_copy"] = (
-        f"{len(entries)} neighbor{'s' if len(entries) != 1 else ''} may want to join."
+        f"{len(entries)} {'people' if len(entries) != 1 else 'person'} may want to join."
         if entries
-        else "Neighbors nearby can see it — I'll notify you when someone fits."
+        else "People nearby can see it — I'll notify you when someone fits."
     )
     saved["hosting"] = hosting
     ctx["signal_saved"] = saved
@@ -120,31 +120,31 @@ def handle_hosting_open_turn(
         ctx["block_log_entries"] = [normalize_block_log_row(r) for r in entries[:8]]
         reply = compose_reply(
             goal=(
-                "The host just opened their meetup to neighbors nearby and you "
+                "The host just opened their meetup to people nearby and you "
                 "found real potential joiners. Confirm it is open, give the real "
                 "count, and point them to the list shown below the message."
             ),
             facts=[
                 f"Meetup title: {title}",
-                f"Neighbors who might join (shown below the message): {len(entries)}",
+                f"People who might join (shown below the message): {len(entries)}",
             ],
             fallback=(
-                f"Done — **{title}** is open to neighbors nearby. "
-                f"I found {len(entries)} neighbor{'s' if len(entries) != 1 else ''} who might join — see below."
+                f"Done — **{title}** is open to people nearby. "
+                f"I found {len(entries)} {'people' if len(entries) != 1 else 'person'} who might join — see below."
             ),
         )
     else:
         ctx.pop("block_log_entries", None)
         reply = compose_reply(
             goal=(
-                "The host just opened their meetup to neighbors nearby but no "
+                "The host just opened their meetup to people nearby but no "
                 "potential joiners were found yet. Confirm it is open and promise "
-                "to let them know when a neighbor wants to join."
+                "to let them know when someone wants to join."
             ),
             facts=[f"Meetup title: {title}"],
             fallback=(
-                f"Done — **{title}** is open to neighbors nearby. "
-                "I'll let you know when a neighbor wants to join."
+                f"Done — **{title}** is open to people nearby. "
+                "I'll let you know when someone wants to join."
             ),
         )
 
@@ -198,23 +198,23 @@ def handle_hosting_send_mom_turn(
     if peer_rows:
         reply = compose_reply(
             goal=(
-                "The host asked to invite a neighbor to their meetup and cards of "
-                "neighbors they could invite are shown below the message. Tell them "
+                "The host asked to invite someone to their meetup and cards of "
+                "people they could invite are shown below the message. Tell them "
                 "to tap the **Nudge** button (exact button name) on someone who fits."
             ),
             facts=[
                 f"Meetup title: {title}",
-                f"Neighbor cards shown below the message: {len(peer_rows)}",
+                f"People cards shown below the message: {len(peer_rows)}",
             ],
             fallback=(
-                f"Here are neighbors you could invite to **{title}** — "
+                f"Here are people you could invite to **{title}** — "
                 "tap **Nudge** on someone who fits."
             ),
         )
     else:
         reply = compose_reply(
             goal=(
-                "The host asked to invite a neighbor to their meetup but no strong "
+                "The host asked to invite someone to their meetup but no strong "
                 "fits were found near them yet. Say so honestly, and suggest "
                 "broadening who they are hosting for, or saying exactly "
                 "'find people like me' (keep that phrase verbatim)."

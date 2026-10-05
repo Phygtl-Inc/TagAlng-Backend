@@ -76,7 +76,7 @@ def _who_label_from_ctx(ctx: dict[str, Any]) -> str:
                     bits.append(label)
             if bits:
                 return " · ".join(bits[:3])[:80]
-    return "Neighbors near you"
+    return "People near you"
 
 
 def trait_tags_from_hosting(

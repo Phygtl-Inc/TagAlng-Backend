@@ -59,7 +59,7 @@ class TestHostingCta(unittest.TestCase):
                 phone_verified=True,
                 phase="preview",
             )
-        self.assertIn("open to neighbors nearby", reply.lower())
+        self.assertIn("open to people nearby", reply.lower())
         self.assertTrue(ctx["signal_saved"]["hosting_opened"])
-        self.assertEqual(ctx["signal_saved"]["hosting"]["status_label"], "Open to neighbors nearby")
+        self.assertEqual(ctx["signal_saved"]["hosting"]["status_label"], "Open to people nearby")
         self.assertEqual(peers, [])

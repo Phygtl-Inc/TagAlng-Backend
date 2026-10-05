@@ -103,7 +103,7 @@ order to ask them.
   question ending in "?", "placeholder": a short example answer for THIS place,
   "options": [2-4 short taps] when the answer really is a small closed set}.
   The FIRST step is ALWAYS {"field": "subject"} — WHICH place it is, phrased for this kind
-  of place: "Which bakery is it?", "Which gym?", "Where does the group meet?".
+  of place: "Which bakery is it?", "Which gym?", "Where do you all meet up?".
   Then the type's own basics: <<FLOOR>>.
   Then questions specific to THIS place that a neighbour deciding whether to show up would
   FILTER on — the facts that settle it. A bakery: which morning is busiest, is there a

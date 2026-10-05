@@ -149,8 +149,8 @@ def test_card_promises_nothing_when_nobody_was_asked():
 def test_card_states_the_real_number_when_neighbors_were_asked():
     outcome = {"recipients": [{"user_id": "u1"}, {"user_id": "u2"}]}
     card = build_ask_receipt(detail_text="any good coffee shop", outcome=outcome)
-    assert "2 neighbors" in card["outreach_copy"]
-    assert card["status_label"] == "Asking 2 neighbors"
+    assert "2 people" in card["outreach_copy"]
+    assert card["status_label"] == "Asking 2 people"
 
 
 def test_card_never_promises_a_text_message():

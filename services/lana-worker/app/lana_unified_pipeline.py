@@ -1983,6 +1983,9 @@ def run_lana_unified_pipeline(
         saved_any = False
         saved_label: str | None = None
         saved_bucket: str | None = None
+        from datetime import datetime as _dt_now, timezone as _tz
+
+        answer_started = _dt_now.now(_tz.utc).isoformat()
         try:
             # The tile question is what this message is answering — hand it over so a
             # bare answer ("Orlando", "Fitness CF") can't be mistaken for a new name.
@@ -2004,6 +2007,15 @@ def run_lana_unified_pipeline(
                 claim_id = res.primary_claim_id
                 saved_label = res.primary_label
                 saved_bucket = res.primary_bucket
+                # A community's question tags what its answer produced, exactly as a tapped
+                # chip does (/lana/rapport/record-answer). Typed answers come through here,
+                # and were left untagged (QA 2026-10-05).
+                if claim_id and gap_row_id:
+                    from app.circles_flow import tag_claim_place_from_gap
+                    from app.claims_persist import claim_ids_created_since
+
+                    for _cid in claim_ids_created_since(user_id, answer_started) or res.claim_ids:
+                        tag_claim_place_from_gap(gap_row_id, _cid)
         except Exception:  # noqa: BLE001 — never fail the turn on a persist hiccup
             logging.getLogger(__name__).exception("rapport_answer_persist_failed")
         if gap_row_id:
