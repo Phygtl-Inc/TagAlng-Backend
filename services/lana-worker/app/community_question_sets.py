@@ -81,7 +81,7 @@ _SETS: dict[str, list[dict[str, Any]]] = {
         {"field": "good_to_know", "label": "Good to know", "question": "Anything to know before going?"},
     ],
     "neighborhood": [
-        {"field": "draws", "label": "Known for", "question": "What do neighbours come here for?", "required": True},
+        {"field": "draws", "label": "Known for", "question": "What do people come here for?", "required": True},
         {"field": "when", "label": "When", "question": "When does it get busy?", "required": True},
         {"field": "best_for", "label": "Best for", "question": "Who is it best for?",
          "options": ["Families", "Kids", "Dogs", "Quiet time"]},
@@ -89,13 +89,13 @@ _SETS: dict[str, list[dict[str, Any]]] = {
     ],
     "hobby": [
         {"field": "draws", "label": "Known for", "question": "What do people do together here?", "required": True},
-        {"field": "when", "label": "When", "question": "When does the group meet?", "required": True},
+        {"field": "when", "label": "When", "question": "When do you all meet?", "required": True},
         {"field": "level", "label": "Level", "question": "Do you need any experience?"},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything to bring or know first?"},
     ],
     "support": [
         {"field": "draws", "label": "Known for", "question": "What kind of support happens here?", "required": True},
-        {"field": "when", "label": "When", "question": "When does the group meet?", "required": True},
+        {"field": "when", "label": "When", "question": "When do you all meet?", "required": True},
         {"field": "who_leads", "label": "Who leads", "question": "Who runs it?"},
         {"field": "good_to_know", "label": "Good to know", "question": "Anything someone nervous should know?"},
     ],
@@ -177,8 +177,8 @@ _SUBJECT_STEP: dict[str, tuple[str, str]] = {
     "school": ("Which school", "Which school is it?"),
     "kids_activity": ("Which spot", "Where do the kids go?"),
     "neighborhood": ("Which spot", "Which spot is it?"),
-    "hobby": ("Where", "Where does the group meet?"),
-    "support": ("Where", "Where does the group meet?"),
+    "hobby": ("Where", "Where do you all meet up?"),
+    "support": ("Where", "Where do you all meet up?"),
     "heritage": ("Which place", "Which place is it?"),
     "friends": ("Which spot", "Which spot is it?"),
     "other": ("Which place", "Which place is it?"),
@@ -188,7 +188,7 @@ _SUBJECT_STEP: dict[str, tuple[str, str]] = {
 
 
 # Types whose subject is where a GROUP meets, not which venue the community IS.
-_GROUP_TYPES = frozenset({"hobby", "support"})
+GROUP_TYPES = frozenset({"hobby", "support"})
 
 
 def normalize_community_type(raw: Any) -> str | None:
@@ -213,11 +213,12 @@ def community_head_step(
         return None
     dflt_label, dflt_question = _SUBJECT_STEP[ctype]
     written = " ".join(str(question or "").split())
-    if ctype in _GROUP_TYPES:
+    if ctype in GROUP_TYPES:
         # A group's NAME is not its place. The writer phrases this step as "which club is
-        # it?", which re-asked a club named in the opening message (QA 2026-10-05) — and a
-        # typed answer to a map step is never stored. Ask where it meets instead.
+        # it?", which re-asked a club named in the opening message (QA 2026-10-05). Ask
+        # where it meets instead, and label it so ("Which club" was left on the card).
         written = ""
+        label = None
     return {
         "field": COMMUNITY_SUBJECT_FIELD,
         "label": " ".join(str(label or "").split())[:24] or dflt_label,

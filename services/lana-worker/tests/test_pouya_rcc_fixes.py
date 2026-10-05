@@ -126,7 +126,7 @@ def test_an_unsure_read_still_gets_the_clarifier() -> None:
 
 def test_a_club_is_asked_where_it_meets_not_which_club() -> None:
     step = community_head_step("hobby", question="Which club is this for?")
-    assert step["question"] == "Where does the group meet?"
+    assert step["question"] == "Where do you all meet up?"
     # A venue type keeps the question written for it.
     assert community_head_step("friends", question="Which bakery is it?")["question"] == (
         "Which bakery is it?"

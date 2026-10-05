@@ -661,6 +661,13 @@ def _place_suggestions_from_ctx(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _card_lexicon(text: str) -> str:
+    """Lexicon pass for card text the final-mile guard never sees. Regex cost when clean."""
+    from app.lingo_guard import find_violations, naive_clean
+
+    return naive_clean(text) if text and find_violations(text) else text
+
+
 def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRow]:
     rows = [
         row for row in derive_ui_actions(ctx, ui_intent)
@@ -1109,7 +1116,8 @@ def _block_log_from_ctx(ctx: dict[str, Any]) -> list[BlockLogEntryRow]:
                 entry_id=str(row.get("entry_id") or row.get("id") or "") or None,
                 match_type=str(row.get("match_type") or "") or None,
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
-                peer_preview_label=str(row.get("peer_preview_label") or "") or None,
+                # Written by SQL ("A neighbor on your block"), so the lexicon is applied here.
+                peer_preview_label=_card_lexicon(str(row.get("peer_preview_label") or "")) or None,
                 match_badge=str(row.get("match_badge") or "") or None,
                 match_reasons=[str(r) for r in reasons[:6]],
                 match_summary=str(row.get("match_summary") or "") or None,
@@ -2254,8 +2262,17 @@ def _run_lana_message(
                 from app.lingo_guard import find_violations as _lingo_hits
 
                 if _lingo_hits(reply):
+                    # Names the user chose are theirs, not copy: "AI ethics discussion
+                    # circle" was published, then confirmed as "…discussion community".
+                    _names = [
+                        (session_ctx.get("event_draft") or {}).get("title"),
+                        (session_ctx.get("community_draft") or {}).get("name"),
+                        (session_ctx.get("active_community") or {}).get("name")
+                        if isinstance(session_ctx.get("active_community"), dict)
+                        else None,
+                    ]
                     with timer.stage("lingo_guard"):
-                        _guard = _lingo_enforce(reply)
+                        _guard = _lingo_enforce(reply, keep=[n for n in _names if n])
                     reply = _guard.text
                     _LOG.warning(
                         "lingo_guard_final_mile hits=%s rewritten=%s naive=%s",

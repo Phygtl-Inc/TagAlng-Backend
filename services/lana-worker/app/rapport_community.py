@@ -129,13 +129,15 @@ def _personal_pending(user_id: str) -> dict[str, Any] | None:
     return (res.data or [None])[0]
 
 
-def _set_status(gap_row_id: str, status: str) -> bool:
+def _set_status(gap_row_id: str, status: str, *, place_ref: str | None = None) -> bool:
     from app.auth import service_client
     from app.rapport_ranker import _now
 
     patch: dict[str, Any] = {"status": status, "updated_at": _now().isoformat()}
     if status == "asked":
         patch["asked_at"] = _now().isoformat()
+    if place_ref:
+        patch["place_ref"] = place_ref
     try:
         service_client().table("rapport_gaps").update(patch).eq("gap_row_id", gap_row_id).execute()
         return True
@@ -282,7 +284,14 @@ def next_ask_in_community(
             prior = _personal_pending(user_id)
             if prior and prior.get("gap_row_id") != relevant.get("gap_row_id"):
                 _set_status(str(prior["gap_row_id"]), "open")
-            if _set_status(str(relevant["gap_row_id"]), "asked"):
+            # Asked as THIS community's question, so its answer belongs to it: the claim
+            # is tagged from the gap's place_ref, which a personal row never had (QA
+            # 2026-10-05 — "Builds apps in Flutter" answered here, tagged nowhere).
+            if _set_status(
+                str(relevant["gap_row_id"]),
+                "asked",
+                place_ref=None if relevant.get("place_ref") else pid,
+            ):
                 return True, _serve(
                     user_id, relevant, lang=lang, surface=surface, kind="community_relevant"
                 )

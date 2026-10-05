@@ -507,6 +507,10 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
 # reliably comply, and a one-off helper per intent is how the last one was missed.
 POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     "discovery.communities",
+    # Changing the home ZIP is a write. "Can I change my zip code?" got "I can't change
+    # your zip code from here" from the policy on 3 of 5 runs (QA 2026-10-05) — false,
+    # and the change_zip arm that asks for it never ran.
+    "settings.change_zip",
     # An explicit search is the engine's turn. "can u find activites aroung me" came back
     # as "Yep — I can look for activities near you. Want me to find a few good ones?" with
     # a Find activities chip (prod 2026-09-02): a confirmation of a request the user had
@@ -1983,6 +1987,9 @@ def run_lana_unified_pipeline(
         saved_any = False
         saved_label: str | None = None
         saved_bucket: str | None = None
+        from datetime import datetime as _dt_now, timezone as _tz
+
+        answer_started = _dt_now.now(_tz.utc).isoformat()
         try:
             # The tile question is what this message is answering — hand it over so a
             # bare answer ("Orlando", "Fitness CF") can't be mistaken for a new name.
@@ -2004,6 +2011,15 @@ def run_lana_unified_pipeline(
                 claim_id = res.primary_claim_id
                 saved_label = res.primary_label
                 saved_bucket = res.primary_bucket
+                # A community's question tags what its answer produced, exactly as a tapped
+                # chip does (/lana/rapport/record-answer). Typed answers come through here,
+                # and were left untagged (QA 2026-10-05).
+                if claim_id and gap_row_id:
+                    from app.circles_flow import tag_claim_place_from_gap
+                    from app.claims_persist import claim_ids_created_since
+
+                    for _cid in claim_ids_created_since(user_id, answer_started) or res.claim_ids:
+                        tag_claim_place_from_gap(gap_row_id, _cid)
         except Exception:  # noqa: BLE001 — never fail the turn on a persist hiccup
             logging.getLogger(__name__).exception("rapport_answer_persist_failed")
         if gap_row_id:

@@ -67,13 +67,23 @@ def _facts_by_id(card):
 def test_headline_must_carry_the_real_count():
     fb = _facts_by_id(_card())
     ok = rf._valid({"cards": [{"id": "p", "fit_line": "x", "aspects": [
-        {"key": "spanish", "headline": "2 neighbours said they cut in Spanish"}]}]}, fb)
+        {"key": "spanish", "headline": "2 people said they cut in Spanish"}]}]}, fb)
     wrong = rf._valid({"cards": [{"id": "p", "fit_line": "x", "aspects": [
-        {"key": "spanish", "headline": "3 neighbours said they cut in Spanish"}]}]}, fb)
+        {"key": "spanish", "headline": "3 people said they cut in Spanish"}]}]}, fb)
     none = rf._valid({"cards": [{"id": "p", "fit_line": "x", "aspects": [
-        {"key": "spanish", "headline": "Neighbours said they cut in Spanish"}]}]}, fb)
-    assert ok["p"]["headlines"] == {"spanish": "2 neighbours said they cut in Spanish"}
+        {"key": "spanish", "headline": "People said they cut in Spanish"}]}]}, fb)
+    assert ok["p"]["headlines"] == {"spanish": "2 people said they cut in Spanish"}
     assert wrong["p"]["headlines"] == {} and none["p"]["headlines"] == {}
+
+
+def test_card_text_never_says_neighbours():
+    # fit_line and headlines are card fields the final-mile guard never sees (QA 2026-10-05:
+    # "Two neighbours on your block vouch for Dr. Sarah Chen").
+    out = rf._valid({"cards": [{"id": "p", "fit_line": "Two neighbours on your block vouch for it.",
+                                "aspects": [{"key": "spanish", "headline": "2 neighbours said they cut in Spanish"}]}]},
+                    _facts_by_id(_card()))
+    assert "neighbour" not in (out["p"]["fit_line"] or "") and "block" not in (out["p"]["fit_line"] or "")
+    assert out["p"]["headlines"] == {"spanish": "2 others said they cut in Spanish"}
 
 
 def test_headline_for_an_aspect_the_card_does_not_have_is_dropped():

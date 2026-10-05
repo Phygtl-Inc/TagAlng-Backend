@@ -43,11 +43,13 @@ class _Queue:
                           "question": question, "status": "open", "place_ref": place_ref})
         return True
 
-    def set_status(self, row_id, status):
+    def set_status(self, row_id, status, *, place_ref=None):
         self.statuses.append((row_id, status))
         for r in self.rows:
             if r["gap_row_id"] == row_id:
                 r["status"] = status
+                if place_ref:
+                    r["place_ref"] = place_ref
         return True
 
     def personal_open(self, _u):
@@ -128,6 +130,8 @@ class OrderTests(unittest.TestCase):
         q.set_status(q.community("u1", PID)[0]["gap_row_id"], "answered")
         (handled, ask), _ = _run(q, pick=tri)
         self.assertEqual(ask, {"q": "Long course triathlon?", "kind": "community_relevant"})
+        # Asked as this community's question, so its answer is tagged to it.
+        self.assertEqual(tri.get("place_ref"), PID)
         # Asked here instead of later: nothing was added to the personal queue.
         self.assertEqual([r for r in q.rows if not rc.is_community_row(r)], [tri])
 

@@ -32,9 +32,15 @@ def _action(
 def clarify_chip_actions(options: list[str]) -> list[dict[str, Any]]:
     """Tap-able answers for a clarify question (scope / browse-vs-meet). Tapping posts the
     label back as a normal message, which the next turn re-classifies to route the user."""
+    from app.lingo_guard import find_violations, naive_clean
+
     rows: list[dict[str, Any]] = []
     for i, opt in enumerate(options):
         label = str(opt or "").strip()
+        # Model-written, and chips never pass the final-mile guard ("Pizza night with
+        # neighbors", QA 2026-10-05). The label is also what the tap posts.
+        if label and find_violations(label):
+            label = naive_clean(label)
         if not label:
             continue
         rows.append(

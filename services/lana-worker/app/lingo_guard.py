@@ -105,6 +105,9 @@ _NAIVE_SWAPS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bhand[-\s]?me[-\s]?downs?\b", re.I), "shared items"),
     (re.compile(r"\bmoms\b", re.I), "people"),
     (re.compile(r"\b(?:mom|mommy|mama|mum|mamá|mamãe)\b", re.I), "parent"),
+    # The phrase first, so "a neighbor on your block" reads "someone near you", not
+    # "someone on your area".
+    (re.compile(r"\b(?:on|in|around)\s+(?:your|the|my)\s+block\b", re.I), "near you"),
     (re.compile(r"\bblocks?\b", re.I), "area"),
     (re.compile(r"\b(?:cuadra|quadra)\b", re.I), "zona"),
     (re.compile(r"\bcircles?\b", re.I), "community"),
@@ -225,6 +228,7 @@ def _rewrite_clean(text: str, chip_labels: list[str], hits: list[str]) -> tuple[
                 "is no texting, say 'email you'; neighbor(s)/vecino(s)/vizinho(s) for "
                 "PEOPLE (say 'peers' for people who share something with them, else "
                 "'others', 'people nearby', 'someone' — 'neighborhood' the place is fine). "
+                "Keep every ⟦n⟧ placeholder exactly as written — each is a name. "
                 "Return JSON "
                 '{"reply": "...", "chips": ["..."]} with exactly one chip per input '
                 "chip, same order."
@@ -250,14 +254,63 @@ def _rewrite_clean(text: str, chip_labels: list[str], hits: list[str]) -> tuple[
         return None
 
 
-def enforce(text: str, chip_labels: list[str] | None = None) -> GuardResult:
+# A **bold** span is a name Lana is quoting — a meet's title, a community, a place. The
+# host called their meet "AI ethics discussion circle"; the guard rewrote it to
+# "community" in the publish confirmation (QA 2026-10-05). Names are theirs, not copy.
+_BOLD_SPAN_RE = re.compile(r"\*\*[^*\n]{1,120}\*\*")
+
+
+def _mask_names(text: str, keep: list[str] | None = None) -> tuple[str, list[str]]:
+    """Swap each name for a placeholder: **bold** spans, and every exact occurrence of a
+    `keep` name (the meet's title, a community's name) — replies do not always bold them."""
+    spans: list[str] = []
+
+    def _keep(m: "re.Match[str]") -> str:
+        spans.append(m.group(0))
+        return f"⟦{len(spans) - 1}⟧"
+
+    out = _BOLD_SPAN_RE.sub(_keep, text)
+    names = sorted({" ".join(str(n or "").split()) for n in (keep or [])}, key=len, reverse=True)
+    for name in names:
+        if len(name) >= 3 and find_violations(name):
+            out = re.sub(re.escape(name), _keep, out, flags=re.I)
+    return out, spans
+
+
+def _unmask_names(text: str, spans: list[str]) -> str | None:
+    """Put the names back. None when a rewrite dropped or invented a placeholder."""
+    for i in range(len(spans)):
+        if text.count(f"⟦{i}⟧") != 1:
+            return None
+    for i, span in enumerate(spans):
+        text = text.replace(f"⟦{i}⟧", span)
+    return None if "⟦" in text else text
+
+
+def enforce(
+    text: str, chip_labels: list[str] | None = None, *, keep: list[str] | None = None
+) -> GuardResult:
     """Guarantee one reply + its chip labels are lexicon-clean.
 
     Clean input returns unchanged at regex cost. A violation triggers one LLM
     rewrite; if that fails or is still dirty, the naive word-map runs. The
     returned GuardResult.audit_dict() is the real guardrail verdict for
-    lana_audit_log.
+    lana_audit_log. **Bold** names are never rewritten (see _BOLD_SPAN_RE).
     """
+    masked, spans = _mask_names(str(text or ""), keep)
+    if not spans:
+        return _enforce_masked(str(text or ""), chip_labels)
+    res = _enforce_masked(masked, chip_labels)
+    restored = _unmask_names(res.text, spans)
+    if restored is None:
+        # The rewrite mangled a placeholder: use the word map on the masked text, which
+        # never touches one.
+        restored = _unmask_names(naive_clean(masked), spans) or naive_clean(str(text))
+    res.text = restored
+    return res
+
+
+def _enforce_masked(text: str, chip_labels: list[str] | None = None) -> GuardResult:
     chips = [str(c or "") for c in (chip_labels or [])]
     hits = find_violations(text)
     for label in chips:

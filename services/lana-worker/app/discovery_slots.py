@@ -521,8 +521,8 @@ _SYSTEM = (
     "settings.change_zip — that is only the user's OWN home ZIP. 'manage' needs a CHANGE verb "
     "(update, edit, change, move, rename, leave) aimed at a community: asking WHICH "
     "communities they are in or part of ('what community am I a part of?', 'what are my "
-    "communities') is a plain discovery.communities ask with community_ask=null, never "
-    "'manage'. Asking to be "
+    "communities', 'which groups am I in?') is discovery.communities with community_ask='mine' "
+    "and community_name=null, never 'manage'. Asking to be "
     "introduced to PEOPLE stays find_peers; asking what's HAPPENING (events, this weekend) "
     "stays find_activities. "
     "WHO IS IN a NAMED community ('who is in Mizu Sushi', 'who are the members of the Mizu "
@@ -833,7 +833,7 @@ def ai_parse_discovery_turn(
         # community screen renders. Answering the first for both returned a roster refusal
         # to someone asking what kind of place it was (QA 2026-08-21).
         community_ask = str(raw.get("community_ask") or "").strip().lower()
-        community_ask_s = community_ask if community_ask in ("people", "about", "manage") else None
+        community_ask_s = community_ask if community_ask in ("people", "about", "manage", "mine") else None
         intro_direction = raw.get("intro_direction")
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
@@ -1226,7 +1226,8 @@ def _discovery_slot_payload(
         'WHO is there (who is in it, the members, who else goes), "manage" when they want to CHANGE '
         'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '
         'else about the place itself (what kind of place it is, what it has, how big it is, what '
-        'is happening there, where it is, how it is doing). null when no community is named,\n'
+        'is happening there, where it is, how it is doing). "mine" (with community_name null) when '
+        'they ask WHICH communities they themselves are in. Otherwise null when no community is named,\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
         'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'
@@ -1313,7 +1314,7 @@ def slots_community_ask(slots: dict[str, Any] | None) -> str:
     if not slots:
         return "about"
     ask = str(slots.get("community_ask") or "")
-    return ask if ask in ("people", "manage") else "about"
+    return ask if ask in ("people", "manage", "mine") else "about"
 
 
 def slots_community_name(slots: dict[str, Any] | None) -> str | None:

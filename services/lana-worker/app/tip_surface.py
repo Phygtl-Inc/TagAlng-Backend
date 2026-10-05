@@ -83,11 +83,11 @@ def build_tip_draft(
     nearby = max(0, int(matches_created or 0))
     if nearby > 0:
         outreach = (
-            f"I'll listen for {nearby} neighbor{'s' if nearby != 1 else ''} "
+            f"I'll listen for {nearby} {'people' if nearby != 1 else 'person'} "
             "near you who might want this."
         )
     else:
-        outreach = "I'll listen for neighbors near you who need this."
+        outreach = "I'll listen for people near you who need this."
     return {
         "title": title,
         "headline": f"Heard you — {title.rstrip('.')}.",
@@ -129,12 +129,12 @@ def build_ask_receipt(
         "trait_tags": trait_tags_from_tip(title=title, detail=detail, where_label=where_label),
         # Eyebrow. "Asking for a tip" is only true once somebody was actually asked.
         "status_label": (
-            f"Asking {reached} neighbor{'s' if reached != 1 else ''}"
+            f"Asking {reached} {'people' if reached != 1 else 'person'}"
             if reached
             else "Listening nearby"
         ),
         "outreach_copy": (
-            f"Asking {reached} neighbor{'s' if reached != 1 else ''} "
+            f"Asking {reached} {'people' if reached != 1 else 'person'} "
             f"who {'knows' if reached == 1 else 'know'} this — I'll email you what they say."
             if reached
             else None

@@ -103,7 +103,7 @@ order to ask them.
   question ending in "?", "placeholder": a short example answer for THIS place,
   "options": [2-4 short taps] when the answer really is a small closed set}.
   The FIRST step is ALWAYS {"field": "subject"} — WHICH place it is, phrased for this kind
-  of place: "Which bakery is it?", "Which gym?", "Where does the group meet?".
+  of place: "Which bakery is it?", "Which gym?", "Where do you all meet up?".
   Then the type's own basics: <<FLOOR>>.
   Then questions specific to THIS place that a neighbour deciding whether to show up would
   FILTER on — the facts that settle it. A bakery: which morning is busiest, is there a
@@ -485,6 +485,19 @@ def publish_community(
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("community_feature_write_failed key=%s", row.get("field"))
+        if str(draft.get("meets_at") or "").strip():
+            try:
+                upsert_place_feature(
+                    place_id=place_id,
+                    key="meets_at",
+                    value=str(draft["meets_at"])[:200],
+                    label="Where we meet",
+                    confidence=0.9,
+                    source="community_create",
+                    contributed_by=user_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("community_meets_at_write_failed")
         if str(draft.get("blurb") or "").strip():
             try:
                 upsert_place_feature(
@@ -588,6 +601,7 @@ def run_community_capture_turn(
     community_create_active, community_published_now, routing_phase). Returns the reply."""
     from app.community_question_sets import (
         COMMUNITY_SUBJECT_FIELD,
+        GROUP_TYPES,
         normalize_community_type,
         validate_community_steps,
     )
@@ -766,6 +780,15 @@ def run_community_capture_turn(
                     **(draft.get("answers") or {}),
                     COMMUNITY_SUBJECT_FIELD: msg,
                 }
+                session_ctx["community_pending_ask"] = None
+            elif normalize_community_type(draft.get("circle_type")) in GROUP_TYPES:
+                # A club answering "where do you all meet up?" in chat ("the engineering
+                # building on campus") was dropped: chat has no picker and the step is
+                # never re-asked, so the draft went ready with no location (QA
+                # 2026-10-05). It is not the community's pin — a pin renames the
+                # community after the building — so it is kept as where the group
+                # meets, and published as that.
+                draft["meets_at"] = msg[:200]
                 session_ctx["community_pending_ask"] = None
         elif pending == "circle_type":
             resolved = normalize_community_type(msg)

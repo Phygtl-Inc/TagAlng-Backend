@@ -246,9 +246,9 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
     if partial:
         parts.append(f"{partial} partial")
     if unscored:
-        parts.append(f"{unscored} neighbor{'s' if unscored != 1 else ''} near you")
+        parts.append(f"{unscored} {'people' if unscored != 1 else 'person'} near you")
     if not parts:
-        parts.append(f"{len(rows)} neighbor{'s' if len(rows) != 1 else ''}")
+        parts.append(f"{len(rows)} {'people' if len(rows) != 1 else 'person'}")
     status_label = " · ".join(parts)
     weak_peer: dict[str, Any] | None = None
     weak_rows = [r for r in scored if r.get("match_band") == "weak" and r.get("peer_user_id")]
@@ -267,7 +267,7 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
         "status_label": status_label,
         "weak_peer": weak_peer,
         "ranked_summary": " · ".join(
-            f"{str(r.get('nickname') or 'Neighbor')[:12].upper()} {r.get('match_stars')}/5"
+            f"{str(r.get('nickname') or 'Someone')[:12].upper()} {r.get('match_stars')}/5"
             for r in scored[:5]
         )
         or None,
