@@ -848,12 +848,78 @@ def _near_name_candidates(
     return out
 
 
+_ALIAS_PROMPT = """You match what someone called a community to the real community they \
+meant. People shorten names: initials ("SJSU" is San Jose State University), nicknames \
+("the Y" is a YMCA), dropped words ("Stanford" is Stanford University).
+
+Output ONLY JSON: {"match": <index of the community they meant, or null>}
+
+Rules:
+- Pick an index ONLY when what they said is a common way of naming that exact place.
+- Sharing a single generic word ("fitness", "church", "cafe") is NOT a match.
+- If two could fit, or none clearly does, answer null. A wrong guess is worse than null."""
+
+
+def _ai_alias_match(said: str, pools: list[list[dict[str, Any]]]) -> dict[str, Any] | None:
+    """The community an abbreviation or nickname refers to, read by the model.
+
+    "SJSU" shares no word with "San Jose State University", so neither the name match nor
+    the near-miss pass could see it, and the reply said there was no SJSU community while
+    the same message listed San Jose State University as theirs (QA 2026-10-04). Names
+    are judged by meaning here, never by a regex or an initials rule
+    ([[no-new-regex-use-ai-signals]]). None whenever the model is unsure or unavailable,
+    so a miss stays an honest miss."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for pool in pools:
+        for c in pool:
+            pid = str(c.get("place_id") or "")
+            if pid and pid not in seen and str(c.get("place_name") or "").strip():
+                seen.add(pid)
+                rows.append(c)
+    rows = rows[:_MAX_LIMIT]
+    if not rows or not str(said or "").strip():
+        return None
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return None
+        data = llm_json(
+            model=router_model(),
+            system=_ALIAS_PROMPT,
+            user_payload=json.dumps(
+                {
+                    "they_said": str(said)[:80],
+                    "communities": [
+                        {
+                            "index": i,
+                            "name": str(c.get("place_name") or ""),
+                            "address": str(c.get("place_address") or "")[:120],
+                        }
+                        for i, c in enumerate(rows)
+                    ],
+                }
+            ),
+            max_tokens=20,
+            temperature=0.0,
+        )
+    except Exception:
+        logger.exception("community_alias_llm_failed said=%r", said)
+        return None
+    idx = (data or {}).get("match")
+    if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < len(rows):
+        return None
+    return rows[idx]
+
+
 # What a "did you mean" chip should ask on their behalf, per side of the question. The
 # chip re-asks THEIR question about the place they picked — hard-coding the roster ask
 # rewrote "what type of community is this" into "who is in it" (QA 2026-08-21).
 _CHIP_ASK = {
     "people": "who is in {place}",
     "about": "what kind of place is {place}",
+    "manage": "I want to update my {place} community",
 }
 
 
@@ -1272,6 +1338,123 @@ def _roster_chat_turn(
     )
 
 
+# What the PWA's community edit screen (CommunityEditDrawer) can change. Facts, not
+# copy: the reply is authored from these, and anything not listed is not promised.
+_EDITABLE_ON_SCREEN = (
+    "the spot it is pinned to (pick a different place on the map — this is how its "
+    "location changes)",
+    "their own note about when they go",
+    "the activities they do there",
+    "removing it from their communities",
+)
+
+
+def _manage_turn(
+    user_id: str,
+    *,
+    community: dict[str, Any] | None,
+    message: str,
+    session_ctx: dict[str, Any],
+) -> str:
+    """"I want to update my community" — point at the screen that does it.
+
+    Chat cannot edit a community, and the turn used to say only that: "I can't update the
+    San Jose State University community for you", with no way forward, to the person who
+    started it (QA 2026-10-04). The edit screen already exists; this answers with a button
+    that opens it on THEIR row, and names what it can change."""
+    from app.community_scope import active_community
+    from app.reply_compose import compose_reply
+
+    session_ctx["peer_matches"] = None
+    session_ctx["discovery_surface"] = None
+    mine = _my_communities(user_id)
+
+    if community is None:
+        here = active_community(session_ctx)
+        here_id = str((here or {}).get("place_id") or "")
+        community = next((c for c in mine if str(c.get("place_id")) == here_id), None) if here_id else None
+        if community is None and len(mine) == 1:
+            community = mine[0]
+    if community is None:
+        if not mine:
+            return compose_reply(
+                goal=(
+                    "They want to update a community, but they are not in any yet. Say so "
+                    "in one warm line and offer to help them start or join one."
+                ),
+                fallback="You're not in any communities yet — want to start one or join one nearby?",
+                session_ctx=session_ctx,
+                user_message=message,
+                max_sentences=1,
+            )
+        names = [str(c.get("place_name") or "") for c in mine[:3]]
+        session_ctx["policy_chips"] = [
+            {"label": n, "send": _CHIP_ASK["manage"].format(place=n)} for n in names if n
+        ]
+        return compose_reply(
+            goal=(
+                "They want to update one of their communities but did not say which. Ask "
+                "which one in ONE short question — the names are buttons under your message."
+            ),
+            facts=["Their communities (the buttons): " + ", ".join(names)],
+            fallback="Which community do you want to update?",
+            session_ctx=session_ctx,
+            user_message=message,
+            max_sentences=1,
+        )
+
+    place_id = str(community.get("place_id") or "")
+    name = str(community.get("place_name") or "").strip()
+    own = next((c for c in mine if str(c.get("place_id")) == place_id), None)
+    if own is None:
+        _arm_join(session_ctx, place_id, name)
+        return compose_reply(
+            goal=(
+                "They asked to change a community they are not part of. Say plainly that "
+                "it isn't one of theirs, so there is nothing of theirs to edit there, and "
+                "offer to add them — the buttons under your message do that."
+            ),
+            facts=[f"The community: {name}", "They are NOT a member of it"],
+            fallback=f"{name} isn't one of your communities yet — want me to add you?",
+            session_ctx=session_ctx,
+            user_message=message,
+        )
+
+    # open_panel/affiliation_id make the chip open the edit screen on this row; `send` is
+    # what an older client posts instead, which lists their communities — harmless.
+    session_ctx["policy_chips"] = [
+        {
+            "label": f"Edit {name}",
+            "send": "show my communities",
+            "open_panel": "communities",
+            "affiliation_id": str(own.get("id") or ""),
+        }
+    ]
+    return compose_reply(
+        goal=(
+            "They want to change something about their community. You cannot edit it from "
+            "chat, but the button under your message opens its edit screen. In two short "
+            "sentences: say the button opens it, and name what they can change there that "
+            "fits what they asked (a location change is 'change the spot'). If they asked "
+            "for something not on the list, such as renaming it or editing the description "
+            "everyone sees, say plainly that isn't editable yet. Never refuse without "
+            "pointing at the button."
+        ),
+        facts=[
+            f"The community: {name} ({_members_phrase(own)})",
+            "On its edit screen they can change: " + "; ".join(_EDITABLE_ON_SCREEN),
+            "Not editable anywhere in the app yet: the community's name and the description "
+            "everyone sees",
+        ],
+        fallback=(
+            f"Tap Edit {name} below — you can change its spot, your note, and your "
+            "activities there."
+        ),
+        session_ctx=session_ctx,
+        user_message=message,
+    )
+
+
 def communities_chat_turn(
     user_id: str,
     *,
@@ -1297,19 +1480,24 @@ def communities_chat_turn(
     # through to the list below when the name matches nothing we hold, with the miss
     # stated rather than papered over with a list they did not ask for.
     named_miss: str | None = None
+    if community_ask == "manage" and not community_name:
+        # "update the community I created" names none — the manage turn picks theirs.
+        return _manage_turn(user_id, community=None, message=message, session_ctx=session_ctx)
     if community_name:
         said = community_name.strip()[:80]
         hit = _resolve_named_community(user_id, community_name)
         inexact: str | None = None
         if not hit:
-            near = _near_name_candidates(
-                community_name,
-                [
-                    _my_communities(user_id),
-                    discover_communities(user_id, limit=_MAX_LIMIT),
-                ],
-            )
-            if len(near) == 1:
+            pools = [
+                _my_communities(user_id),
+                discover_communities(user_id, limit=_MAX_LIMIT),
+            ]
+            near = _near_name_candidates(community_name, pools)
+            if not near:
+                # No shared word, but maybe a short form of one ("SJSU"). Resolved by
+                # meaning, so it is the exact place, not an inexact guess to flag.
+                hit = _ai_alias_match(said, pools)
+            elif len(near) == 1:
                 # Exactly one place near them shares a word with what they said, so
                 # asking "did you mean X?" only stalls — a typo ("barnes and nobel")
                 # looped that question three times without ever answering (QA
@@ -1328,6 +1516,10 @@ def communities_chat_turn(
                     ask=community_ask,
                 )
         if hit:
+            if community_ask == "manage":
+                return _manage_turn(
+                    user_id, community=hit, message=message, session_ctx=session_ctx
+                )
             if community_ask == "people":
                 return _roster_chat_turn(
                     user_id, community=hit, message=message, session_ctx=session_ctx
@@ -1389,7 +1581,8 @@ def communities_chat_turn(
         # answer is that we do not have it.
         facts.append(
             f'They asked about "{named_miss}" and there is NO community by that name '
-            "in theirs or near them — say that plainly before anything else"
+            "in theirs or near them — say that plainly before anything else, and never "
+            "add that they are in one by that name (that contradiction shipped 2026-10-04)"
         )
     if mine:
         # COUNT + one name, not the roll-call. Handing the model six names and four more

@@ -510,7 +510,19 @@ _SYSTEM = (
     "the school' — they are OFFERING a place for others to find, not asking to be shown "
     "places. Read who is offering and who is asking: 'any communities near me?' browses, "
     "'add Rosetta's Bakery as a community' creates. A named place plus a create/start/add/"
-    "set-up verb is always sharing.community. Asking to be "
+    "set-up verb is always sharing.community. "
+    "CHANGING one they are already in is discovery.communities with community_ask='manage' and "
+    "community_name = the community they named: updating its location / spot / address, "
+    "editing its details or what they do there, renaming it, or leaving it ('can I update "
+    "the location of San Jose State University', 'I want to update some stuff in the SJSU "
+    "community I created', 'change the spot for my gym community'). A follow-up that only "
+    "says they made it or run it ('I was the one who created it', 'it's mine') right after "
+    "such a request keeps the same manage ask and name. A COMMUNITY'S location is never "
+    "settings.change_zip — that is only the user's OWN home ZIP. 'manage' needs a CHANGE verb "
+    "(update, edit, change, move, rename, leave) aimed at a community: asking WHICH "
+    "communities they are in or part of ('what community am I a part of?', 'what are my "
+    "communities') is a plain discovery.communities ask with community_ask=null, never "
+    "'manage'. Asking to be "
     "introduced to PEOPLE stays find_peers; asking what's HAPPENING (events, this weekend) "
     "stays find_activities. "
     "WHO IS IN a NAMED community ('who is in Mizu Sushi', 'who are the members of the Mizu "
@@ -580,7 +592,8 @@ _SYSTEM = (
     "Use discovery.find_in_block for block activity browse (what's on my block, what is happening on my block, "
     "what are people swapping, neighborhood activity) — NOT social.propose_intro even if a prior turn offered an intro. "
     "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
-    "Use settings.change_zip for moved/updated ZIP; settings.change_name for name changes "
+    "Use settings.change_zip for the user's OWN moved/updated home ZIP (never a community's "
+    "location — see community_ask='manage'); settings.change_name for name changes "
     "(change my name, call me X, my name is X). "
     "Use help.what_can_you_do for help/what can you do — INCLUDING skepticism or challenge "
     "about Lana's usefulness, value, or intelligence ('how would I know you're useful', "
@@ -820,7 +833,7 @@ def ai_parse_discovery_turn(
         # community screen renders. Answering the first for both returned a roster refusal
         # to someone asking what kind of place it was (QA 2026-08-21).
         community_ask = str(raw.get("community_ask") or "").strip().lower()
-        community_ask_s = community_ask if community_ask in ("people", "about") else None
+        community_ask_s = community_ask if community_ask in ("people", "about", "manage") else None
         intro_direction = raw.get("intro_direction")
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
@@ -1209,10 +1222,11 @@ def _discovery_slot_payload(
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
         '  "community_name": "the place/community the user named, verbatim as they said it '
         '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community, else null",\n'
-        '  "community_ask": "people"|"about"|null — with community_name: "people" when they want '
-        'WHO is there (who is in it, the members, who else goes), "about" when they want anything '
+        '  "community_ask": "people"|"about"|"manage"|null — with community_name: "people" when they want '
+        'WHO is there (who is in it, the members, who else goes), "manage" when they want to CHANGE '
+        'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '
         'else about the place itself (what kind of place it is, what it has, how big it is, what '
-        'is happening there, where it is). null when no community is named,\n'
+        'is happening there, where it is, how it is doing). null when no community is named,\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
         'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'
@@ -1293,12 +1307,13 @@ def slots_want_propose_intro(slots: dict[str, Any]) -> bool:
 
 
 def slots_community_ask(slots: dict[str, Any] | None) -> str:
-    """"people" (the roster) or "about" (the place itself). Defaults to "about": a
-    question we could not classify is answered from the place's own facts, which is the
-    read that works for a non-member too."""
+    """"people" (the roster), "manage" (change one they are in) or "about" (the place
+    itself). Defaults to "about": a question we could not classify is answered from the
+    place's own facts, which is the read that works for a non-member too."""
     if not slots:
         return "about"
-    return "people" if str(slots.get("community_ask") or "") == "people" else "about"
+    ask = str(slots.get("community_ask") or "")
+    return ask if ask in ("people", "manage") else "about"
 
 
 def slots_community_name(slots: dict[str, Any] | None) -> str | None:
@@ -1307,8 +1322,14 @@ def slots_community_name(slots: dict[str, Any] | None) -> str | None:
     if not slots:
         return None
     name = str(slots.get("community_name") or "").strip()
-    if len(name) < 2 or name.lower() in (
-        "a", "an", "the", "community", "communities", "group", "place", "here", "it", "them",
+    words = name.lower().split()
+    # "my community" / "our group" name nothing either — looked up as a name, it became
+    # "there's no community called 'my community'" (2026-10-05).
+    if len(words) == 2 and words[0] in ("my", "our", "the", "this", "that"):
+        words = words[1:]
+    if len(name) < 2 or " ".join(words) in (
+        "a", "an", "the", "community", "communities", "group", "groups", "place", "here",
+        "it", "them", "club",
     ):
         return None
     return name

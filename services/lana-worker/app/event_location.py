@@ -121,7 +121,7 @@ def resolve_event_location(
     user_id: str,
     venue_name: str | None,
     *,
-    city_hint: str = "Lake Nona, FL",
+    city_hint: str | None = None,
 ) -> tuple[float, float, str | None]:
     """Return (lat, lng, block_id). Never stores street — coarse point only."""
     sb = service_client()
@@ -137,7 +137,9 @@ def resolve_event_location(
     home_zip = _normalize_zip5(user.get("home_zip"))
 
     if venue_name and venue_name.strip():
-        coords = _geocode_venue(venue_name.strip(), city_hint)
+        # Anchored on the host's own area. A fixed "Lake Nona, FL" hint put a San Jose
+        # club's meet in Florida (2026-10-05); Lake Nona stays only for a host with no ZIP.
+        coords = _geocode_venue(venue_name.strip(), city_hint or home_zip or "Lake Nona, FL")
         if coords:
             return coords[0], coords[1], block_id
 

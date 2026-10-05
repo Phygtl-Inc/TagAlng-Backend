@@ -424,6 +424,10 @@ class UiActionRow(BaseModel):
     style: Literal["primary", "secondary", "ghost"] = "primary"
     intro_id: str | None = None
     peer_user_id: str | None = None
+    # Set → the client opens this app panel instead of posting `message` ("communities",
+    # with affiliation_id naming the row whose edit screen to open).
+    open_panel: str | None = None
+    affiliation_id: str | None = None
 
 
 class BlockLogEntryRow(BaseModel):

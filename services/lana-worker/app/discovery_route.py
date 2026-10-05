@@ -2310,8 +2310,44 @@ def _try_layer1_intent_turn(
         return reply, ctx, ctx["last_routing"], peer_rows
 
     if linear == "settings.change_zip":
+        # "I don't want to enter my ZIP right now" mentions a ZIP, so it classifies as
+        # change_zip again — and this arm replayed its line four times with no way out
+        # (QA 2026-10-04). The classifier's declined_slot reads the refusal by meaning;
+        # it lets go here exactly as the need-ZIP gate's off-ramp does.
+        if str(slots.get("declined_slot") or "") == "zip":
+            return (
+                compose_reply(
+                    goal=(
+                        "They decided not to change their ZIP right now. Say that's fine "
+                        "in one short line — nothing changed, and they can update it "
+                        "whenever they like — then ask what they'd like to do instead. "
+                        "Do not ask for the ZIP again."
+                    ),
+                    user_message=msg,
+                    fallback="No problem — your ZIP stays as it is. What would you like to do instead?",
+                    session_ctx=ctx_base,
+                ),
+                _routing_ctx(ctx_base, phase="listening", active_intent="none"),
+                _discovery_routing_stub("listening", "settings_change_zip_declined"),
+                [],
+            )
+        ask = "Sure — what's your new ZIP code?"
+        if phase == PHASE_NEED_ZIP and ctx_base.get("active_intent") == "settings.change_zip":
+            # Already asked, and the reply was neither a ZIP nor a refusal: answer what
+            # they said instead of replaying the same line.
+            ask = compose_reply(
+                goal=(
+                    "You already asked for their new ZIP and they replied with something "
+                    "else. Respond to what they actually said first. If they sound unsure "
+                    "or reluctant, tell them it's fine to leave it for now. Otherwise ask "
+                    "once more for the 5-digit ZIP, worded differently than before."
+                ),
+                user_message=msg,
+                fallback="Whenever you're ready, send me the 5-digit ZIP — or we can leave it as is.",
+                session_ctx=ctx_base,
+            )
         return (
-            "Sure — what's your new ZIP code?",
+            ask,
             _routing_ctx(
                 ctx_base,
                 phase=PHASE_NEED_ZIP,
@@ -7688,6 +7724,17 @@ def _reply_pivots_to_supported(slots: dict[str, Any], msg: str) -> bool:
     # SUPPORTED intent, not a confirmation of the unsupported ask — release it
     # so the language machinery handles it instead of a re-ask/decline loop.
     if _slots_are_language_turn(enriched):
+        return True
+    # A confident read of any real lane is a pivot, whatever its goal. "What community am
+    # I part of?" is discovery.communities with goal=chat, and goal=chat is not in the
+    # list below, so the clarifier caught it: first it re-sent its own question word for
+    # word, then declined the question as an errand (QA 2026-10-05).
+    linear = slots_linear_intent(enriched)
+    if (
+        linear
+        and not linear.startswith("system.")
+        and intent_confidence_met(enriched, linear)
+    ):
         return True
     goal = str(enriched.get("goal") or "")
     if goal not in _SUPPORTED_PIVOT_GOALS:

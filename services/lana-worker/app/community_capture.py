@@ -873,11 +873,17 @@ def run_community_capture_turn(
             session_ctx["community_create_active"] = True
             session_ctx["community_pending_question"] = step["question"]
             session_ctx["routing_phase"] = "listening"
-            answered = sum(1 for s in steps if s.get("answer"))
+            # Position, not "answered + 1": a skipped optional step stays unanswered, and
+            # counting only answers gave the next question the same number (two "3/6"s,
+            # QA 2026-10-05). Everything already asked or answered is behind us.
+            fields = {s["field"] for s in steps}
+            behind = {s["field"] for s in steps if s.get("answer")} | (
+                (asked & fields) - {step["field"]}
+            )
             lead = readback(session_ctx, "community_readback", draft.get("draft_id"), _summary(draft))
             return (
                 f"{lead}{step['question']} "
-                f"({answered + 1}/{len(steps)})"
+                f"({min(len(behind) + 1, len(steps))}/{len(steps)})"
             )
 
     # ── P4: ready → the assembled card + the share CTA (nothing is created until they

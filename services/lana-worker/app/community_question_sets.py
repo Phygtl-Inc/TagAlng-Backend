@@ -187,6 +187,10 @@ _SUBJECT_STEP: dict[str, tuple[str, str]] = {
 }
 
 
+# Types whose subject is where a GROUP meets, not which venue the community IS.
+_GROUP_TYPES = frozenset({"hobby", "support"})
+
+
 def normalize_community_type(raw: Any) -> str | None:
     """A known circle type, or None. Tolerates the plural/spacey shapes an LLM returns."""
     key = str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
@@ -209,6 +213,11 @@ def community_head_step(
         return None
     dflt_label, dflt_question = _SUBJECT_STEP[ctype]
     written = " ".join(str(question or "").split())
+    if ctype in _GROUP_TYPES:
+        # A group's NAME is not its place. The writer phrases this step as "which club is
+        # it?", which re-asked a club named in the opening message (QA 2026-10-05) — and a
+        # typed answer to a map step is never stored. Ask where it meets instead.
+        written = ""
     return {
         "field": COMMUNITY_SUBJECT_FIELD,
         "label": " ".join(str(label or "").split())[:24] or dflt_label,
