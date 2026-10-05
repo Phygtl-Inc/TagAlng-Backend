@@ -111,3 +111,73 @@ def test_a_typed_answer_to_a_community_question_is_tagged() -> None:
     i = src.index("res = try_upsert_claims_from_message(")
     block = src[i:i + 2500]
     assert "tag_claim_place_from_gap(gap_row_id, _cid)" in block
+
+
+# ── second QA pass ────────────────────────────────────────────────────────────────────
+
+
+def test_change_zip_is_the_engines_turn() -> None:
+    from app.lana_unified_pipeline import POLICY_ENGINE_ONLY_INTENTS
+
+    assert "settings.change_zip" in POLICY_ENGINE_ONLY_INTENTS
+
+
+def test_the_guard_never_rewrites_a_bold_name() -> None:
+    from app.lingo_guard import enforce
+
+    with mock.patch("app.lingo_guard._rewrite_clean", return_value=None):
+        out = enforce("**AI ethics discussion circle** is live — your circle can join.").text
+    assert out.startswith("**AI ethics discussion circle** is live")
+    assert "your community can join" in out
+
+
+def test_a_rewrite_that_drops_a_name_falls_back_to_the_word_map() -> None:
+    from app.lingo_guard import enforce
+
+    with mock.patch("app.lingo_guard._rewrite_clean", return_value=("Your meetup is live for others.", [])):
+        out = enforce("**Moms circle** is live for neighbors.").text
+    assert out == "**Moms circle** is live for others."
+
+
+def test_a_typed_meeting_place_for_a_club_is_kept_and_published(monkeypatch: Any) -> None:
+    import app.community_capture as cc
+    from app.community_question_sets import COMMUNITY_SUBJECT_FIELD
+
+    monkeypatch.setattr(cc, "_place_suggestions", lambda *a, **k: [])
+    monkeypatch.setattr("app.reply_compose.compose_reply", lambda *, goal, facts, fallback, **k: fallback)
+    ctx: dict[str, Any] = {}
+    monkeypatch.setattr(cc, "_extract_fields", lambda **_: {"name": "RCC", "circle_type": "hobby"})
+    cc.run_community_capture_turn(user_message="a community for RCC, our club", session_ctx=ctx,
+                                  history=[], user_jwt="j", user_id="u1", home_block_id="b1")
+    monkeypatch.setattr(cc, "_extract_fields", lambda **_: {})
+    ctx["community_pending_ask"] = COMMUNITY_SUBJECT_FIELD
+    cc.run_community_capture_turn(user_message="the engineering building on campus", session_ctx=ctx,
+                                  history=[], user_jwt="j", user_id="u1", home_block_id="b1")
+    draft = ctx["community_draft"]
+    assert draft["meets_at"] == "the engineering building on campus"
+    assert draft["name"] == "RCC"  # never renamed after the building
+
+    written: list[dict] = []
+    monkeypatch.setattr("app.circles_flow.add_circle", lambda *a, **k: {"place_id": "pRCC"})
+    monkeypatch.setattr("app.circles_capture.upsert_place_feature", lambda **kw: written.append(kw))
+    cc.publish_community(draft=draft, user_id="u1")
+    assert any(w["key"] == "meets_at" and w["value"] == "the engineering building on campus" for w in written)
+
+
+def test_model_written_chips_and_sql_card_labels_say_people() -> None:
+    from app.main import _card_lexicon
+    from app.ui_actions import clarify_chip_actions
+
+    chip = clarify_chip_actions(["Pizza night with neighbors"])[0]
+    assert "neighbor" not in chip["label"] and chip["label"] == chip["message"]
+    assert _card_lexicon("A neighbor on your block") == "Someone near you"
+    assert _card_lexicon("Lake Nona Runners") == "Lake Nona Runners"
+
+
+def test_the_guard_keeps_a_named_title_even_unbolded() -> None:
+    from app.lingo_guard import enforce
+
+    with mock.patch("app.lingo_guard._rewrite_clean", return_value=None):
+        out = enforce("Your AI ethics discussion circle is all set — the circle meets weekly.",
+                      keep=["AI ethics discussion circle"]).text
+    assert out == "Your AI ethics discussion circle is all set — the community meets weekly."

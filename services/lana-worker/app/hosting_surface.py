@@ -123,9 +123,9 @@ def build_hosting_draft(
     )
     nearby = max(0, int(matches_created or 0))
     if nearby > 0:
-        outreach = f"I'll text the {nearby} closest fit{'s' if nearby != 1 else ''} near you."
+        outreach = f"I'll email the {nearby} closest fit{'s' if nearby != 1 else ''} near you."
     else:
-        outreach = "I'll let neighbors nearby know when there's a fit."
+        outreach = "I'll let people nearby know when there's a fit."
     return {
         "title": title,
         "headline": f"Heard you — {title.rstrip('.')}.",

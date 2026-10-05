@@ -507,6 +507,10 @@ def _reset_rapport_state(session_ctx: dict[str, Any]) -> None:
 # reliably comply, and a one-off helper per intent is how the last one was missed.
 POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     "discovery.communities",
+    # Changing the home ZIP is a write. "Can I change my zip code?" got "I can't change
+    # your zip code from here" from the policy on 3 of 5 runs (QA 2026-10-05) — false,
+    # and the change_zip arm that asks for it never ran.
+    "settings.change_zip",
     # An explicit search is the engine's turn. "can u find activites aroung me" came back
     # as "Yep — I can look for activities near you. Want me to find a few good ones?" with
     # a Find activities chip (prod 2026-09-02): a confirmation of a request the user had

@@ -60,18 +60,18 @@ Write:
    are in the reader's community than "recommenders_in_your_community" — what of their ask it
    answers, how close it is. Only what DOES fit: never list what is missing or not
    mentioned; if little fits, say the little that does. Never a rating, never "great" /
-   "best" in your own voice — only what the facts show neighbours did or said.
+   "best" in your own voice — only what the facts show people did or said.
 2. "aspects": for each aspect, a "headline": who said what, in one line, STARTING with the
-   exact number of people given ("2 neighbours said …"). Summarise what THEIR quotes say
+   exact number of people given ("2 people said …"). Summarise what THEIR quotes say
    (e.g. "said they cut in Spanish with every customer"), never add anything not in them.
    If "cohort_label" is given for the card you MAY call them that ("2 Spanish-speaking
-   parents said …"); otherwise say "neighbours". Never invent how long anyone has gone
+   parents said …"); otherwise say "people". Never call anyone a neighbour. Never invent how long anyone has gone
    there, their background, or anything else not in the facts.
 
 If a card has "recommended_by", the reader asked for a recommendation from a certain kind
 of person and that many of the recommenders are one — the fit_line SHOULD lead with it:
 exactly "people" of them (never more, never "all" unless people equals "of"), described by
-"trait" and grounded in their "quotes" ("2 neighbours who grew up in Spain recommend him").
+"trait" and grounded in their "quotes" ("2 people who grew up in Spain recommend him").
 Never apply that trait to anyone else, and never to the place itself.
 
 When a card's "write_fit_line" is false, set its "fit_line" to null.
@@ -86,6 +86,13 @@ Output ONLY JSON:
             "for_you": [{"claim": "c1", "evidence": "...", "quotes": ["<exact words>"]}]}]}
 """
 
+
+
+def _lexicon_clean(text: str) -> str:
+    """Deterministic lexicon pass for card text ("Two neighbours on your block vouch…")."""
+    from app.lingo_guard import find_violations, naive_clean
+
+    return naive_clean(text) if text and find_violations(text) else text
 
 def _prompt(has_claims: bool) -> str:
     # NOT str.format: the prompt is full of literal JSON braces.
@@ -247,13 +254,14 @@ def _valid(
         facts = facts_by_id.get(cid)
         if not facts:
             continue
-        line = str(c.get("fit_line") or "").strip()
+        # Card text never passes the final-mile guard, so the lexicon is applied here.
+        line = _lexicon_clean(str(c.get("fit_line") or "").strip())
         people = {a["key"]: a["people"] for a in facts["aspects"]}
         heads: dict[str, str] = {}
         for a in c.get("aspects") or []:
             if not isinstance(a, dict):
                 continue
-            key, text = str(a.get("key") or ""), str(a.get("headline") or "").strip()
+            key, text = str(a.get("key") or ""), _lexicon_clean(str(a.get("headline") or "").strip())
             if key not in people or not text or len(text) > 160:
                 continue
             # The count is the claim. A headline that does not carry the real number of

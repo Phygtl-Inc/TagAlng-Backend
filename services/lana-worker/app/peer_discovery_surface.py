@@ -267,7 +267,7 @@ def build_discovery_surface(rows: list[dict[str, Any]]) -> dict[str, Any] | None
         "status_label": status_label,
         "weak_peer": weak_peer,
         "ranked_summary": " · ".join(
-            f"{str(r.get('nickname') or 'Neighbor')[:12].upper()} {r.get('match_stars')}/5"
+            f"{str(r.get('nickname') or 'Someone')[:12].upper()} {r.get('match_stars')}/5"
             for r in scored[:5]
         )
         or None,
