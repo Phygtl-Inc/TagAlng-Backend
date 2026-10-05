@@ -606,14 +606,18 @@ def derive_ui_actions(ctx: dict[str, Any], ui_intent: str) -> list[dict[str, Any
             if not label:
                 continue
             send = str(c.get("send") or label).strip()
-            rows.append(
-                _action(
-                    action_id=f"policy_{i}",
-                    label=label,
-                    message=send,
-                    style="primary" if i == 0 else "secondary",
-                )
+            row = _action(
+                action_id=f"policy_{i}",
+                label=label,
+                message=send,
+                style="primary" if i == 0 else "secondary",
             )
+            # A chip that opens an app screen instead of posting (the community edit
+            # screen). Clients that don't know open_panel post `message` as before.
+            for key in ("open_panel", "affiliation_id"):
+                if str(c.get(key) or "").strip():
+                    row[key] = str(c[key]).strip()
+            rows.append(row)
         if rows:
             return rows
 

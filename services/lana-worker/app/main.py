@@ -682,6 +682,8 @@ def _ui_actions_from_ctx(ctx: dict[str, Any], ui_intent: str) -> list[UiActionRo
                 style=row.get("style") or "primary",
                 intro_id=str(row.get("intro_id") or "") or None,
                 peer_user_id=str(row.get("peer_user_id") or "") or None,
+                open_panel=str(row.get("open_panel") or "") or None,
+                affiliation_id=str(row.get("affiliation_id") or "") or None,
             )
         )
     return out
@@ -767,6 +769,8 @@ def _ui_action_rows_from_raw(actions_raw: Any) -> list[UiActionRow]:
                 style=act.get("style") or "primary",
                 intro_id=str(act.get("intro_id") or "") or None,
                 peer_user_id=str(act.get("peer_user_id") or "") or None,
+                open_panel=str(act.get("open_panel") or "") or None,
+                affiliation_id=str(act.get("affiliation_id") or "") or None,
             )
         )
     return actions
@@ -2036,6 +2040,9 @@ def _run_lana_message(
                     "circle_place_id",
                 )
             }
+        elif seeded_draft.get("circle_place_id"):
+            # Seeded with the community only (it has no location): keep the tag, ask where.
+            session_ctx_in["event_draft"] = {"circle_place_id": seeded_draft["circle_place_id"]}
         session_ctx_in["event_venue_seeded"] = None
     # Deterministic entry into the in-chat "pass along an item" flow — from the
     # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
@@ -2697,16 +2704,33 @@ def set_event_venue(
     session = get_session_for_user(session_id, auth.user_id)
     ctx = dict(session.get("context") or {})
     draft = dict(ctx.get("event_draft") or {})
+    if body.circle_place_id and body.circle_place_id.strip():
+        draft["circle_place_id"] = body.circle_place_id.strip()
+    from app.circles_flow import CREATOR_PLACE_PREFIX
+
+    if (body.place_id or "").startswith(CREATOR_PLACE_PREFIX) and (
+        body.lat is None or body.lng is None
+    ):
+        # A community with no location (a club made in chat) is not a place to meet. Its
+        # placeholder id counted as a pin, so "where?" was never asked and publish
+        # geocoded the club's NAME — RCC's meets landed in Lake Nona (2026-10-05). Keep
+        # only which community the meet is for; the host flow asks where.
+        ctx["event_draft"] = draft
+        ctx["event_venue_seeded"] = True
+        update_session_context(session_id, ctx)
+        _LOG.info(
+            "event_venue_community_only session=%s community=%s",
+            session_id, draft.get("circle_place_id"),
+        )
+        return {"ok": True}
     draft["venue_name"] = body.name.strip()
     draft["venue_address"] = (body.address or "").strip() or None
     draft["place_id"] = (body.place_id or "").strip() or None
     draft["venue_lat"] = body.lat
     draft["venue_lng"] = body.lng
-    # Hosting started from a community's screen: the meet is FOR that community. Only set
-    # here (never cleared) — this endpoint is a venue write, and the setup card's picker is
-    # where the host says "actually, none".
-    if body.circle_place_id and body.circle_place_id.strip():
-        draft["circle_place_id"] = body.circle_place_id.strip()
+    # circle_place_id (set above): hosting started from a community's screen, so the meet
+    # is FOR that community. Only ever set here (never cleared) — this endpoint is a venue
+    # write, and the setup card's picker is where the host says "actually, none".
     ctx["event_draft"] = draft
     ctx["event_venue"] = {
         "name": draft["venue_name"],
@@ -4541,6 +4565,10 @@ def post_circles_profile(
             if isinstance(e, dict) and str(e.get("event_id") or "").strip()
         ],
         actions=_ui_action_rows_from_raw(data.get("actions")),
+        # Built by community_profile and read by the PWA's "Create an event", but never
+        # copied onto the response — so no meet started from a community's page ever
+        # carried that community (found 2026-10-05).
+        create_event_venue=data.get("create_event_venue") or None,
     )
 
 
