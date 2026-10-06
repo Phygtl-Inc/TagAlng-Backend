@@ -1266,6 +1266,13 @@ class TipSetupRequest(BaseModel):
     # NOT the same thing as circle_place_id above, which is the community the tip is shared
     # INTO. This one is the thing the tip is ABOUT.
     google_place_id: str | None = None
+    # Re-open a recommendation ALREADY POSTED in this session, for correction in the
+    # conversation (§44, C-4-reco-P3-LIVE). Must be the `signal_id` the session's own tip
+    # draft was posted as — anything else is 409 signal_not_in_session (the drawer path,
+    # set_signal_reco, is the out-of-conversation editor). The capture re-arms on the posted
+    # draft; `fix:<field>` then walks that one question, and the post UPDATES this row in
+    # place instead of inserting a second one. `answers` may ride along and stamp as usual.
+    signal_id: str | None = None
 
 
 class NudgeHookRequest(BaseModel):
