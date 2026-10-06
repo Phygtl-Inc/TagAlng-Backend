@@ -336,9 +336,10 @@ def discover_communities_anywhere(
     """Communities found by what they ARE, not where (20270109120000).
 
     The path a community with no location has: a podcasters group made in chat has no
-    lat/lng, so the radius read can never return it. This matches the community's own
-    name and description (English stems: "podcasters" finds "Podcast Club") and what its
-    members say about themselves (public, self-subject claims only).
+    lat/lng, so the radius read can never return it. This matches what the community says
+    about ITSELF — name, description, first action (English stems: "podcasters" finds
+    "Podcast Club"). Never its members' claims: one member's "podcaster" made a gym a
+    podcast community on prod (20270110120000).
 
     `placeless_only=False` is for a NAMED lookup — "SJSU" asked from Orlando should find
     San Jose State. A topic browse keeps the default, so a gym three states away never
@@ -355,17 +356,7 @@ def discover_communities_anywhere(
         "p_query": ask[:120],
         "p_placeless_only": bool(placeless_only),
         "p_limit": max(1, min(int(limit or 5), _TOPIC_MAX_LIMIT)),
-        "p_min_similarity": _TOPIC_MIN_SIMILARITY,
     }
-    try:
-        from app.layer1_handlers import _embed_attr_filter
-        from app.vec_util import to_pgvector
-
-        literal = to_pgvector(_embed_attr_filter(ask))
-        if literal:
-            args["p_query_embedding"] = literal
-    except Exception:  # noqa: BLE001 — the words arm still answers without the vector
-        logger.info("discover_anywhere.no_embedding ask=%r", ask[:60])
     try:
         res = service_client().rpc("discover_communities_anywhere", args).execute()
         rows = res.data if isinstance(res.data, list) else []
@@ -401,7 +392,6 @@ def discover_communities_anywhere(
                 "is_member": mine,
                 "status_line": f"Run from {hq} · {status}" if hq else status,
                 "matched_on": str(r.get("matched_on") or "") or None,
-                "matched_label": str(r.get("matched_label") or "").strip() or None,
             }
         )
     return out
@@ -1798,16 +1788,29 @@ def _topic_communities_turn(
         c for c in discover_communities(user_id, query=topic, limit=_CHAT_NEARBY_MAX * 2)
         if not c.get("is_member") and c["place_id"] not in seen
     ][:_CHAT_NEARBY_MAX]
-    cards = nearby + anywhere
-    session_ctx["community_discovery"] = {"communities": cards, "total": len(cards)}
+    joinable = nearby + anywhere
+    # Theirs come first and are SHOWN, marked as theirs — hiding them made "Podcasters"
+    # vanish for the person who started it (prod 2026-10-06).
+    cards = already[:_CHAT_NEARBY_MAX] + joinable
+    session_ctx["community_discovery"] = {
+        "communities": cards,
+        "total": len(cards),
+        "topic": topic,
+    }
     # Armed for one turn, exactly as the nearby list is, so "Join Podcast Club" works.
+    # Only the ones they are not in: there is nothing to join in their own.
     session_ctx["community_join_pending"] = (
-        {"places": [{"place_id": c["place_id"], "place_name": c["place_name"]} for c in cards]}
-        if cards
+        {"places": [{"place_id": c["place_id"], "place_name": c["place_name"]} for c in joinable]}
+        if joinable
         else None
     )
 
     facts: list[str] = [f'They are looking for communities about "{topic}"']
+    if already:
+        facts.append(
+            f"They are ALREADY IN one about it: {already[0]['place_name']} — say so first, "
+            "plainly (its card is marked as theirs)"
+        )
     if anywhere:
         best = anywhere[0]
         facts.append(
@@ -1817,23 +1820,30 @@ def _topic_communities_turn(
         )
     if nearby:
         facts.append(f"Nearby communities with it in their name: {len(nearby)}")
-    if cards:
+    if joinable:
         facts.append(
             "The cards under your message list every one with real member counts, so your "
             "text must NOT name them one by one"
         )
-    if already:
-        facts.append(f"They are already in one about it: {already[0]['place_name']}")
 
-    if cards:
+    if joinable:
         goal = (
             f"Answer what they asked: communities about {topic}. TWO SHORT SENTENCES, never a "
             "list. Say what turned up (at most ONE name), make clear any that are not local can "
             "be joined from anywhere, and offer to add them — joining is instant and reversible."
         )
         fallback = (
-            f"I found {len(cards)} communit{'y' if len(cards) == 1 else 'ies'} about {topic} — "
-            "they're below. Want me to add you to one?"
+            f"I found {len(joinable)} communit{'y' if len(joinable) == 1 else 'ies'} about "
+            f"{topic} — they're below. Want me to add you to one?"
+        )
+    elif already:
+        goal = (
+            f"They asked for communities about {topic}. The only one is theirs — say so in "
+            "one warm line, naming it, and add that nobody else has started one yet."
+        )
+        fallback = (
+            f"You're already in {already[0]['place_name']} — that's the one about {topic} "
+            "so far."
         )
     else:
         goal = (

@@ -48,15 +48,15 @@ class _Rpc:
 def test_anywhere_search_asks_sql_and_shapes_cards(monkeypatch: Any) -> None:
     client = _Rpc([_POD, dict(_POD, place_id="pAddr", name="12345")])
     monkeypatch.setattr(cd, "service_client", lambda: client)
-    monkeypatch.setattr("app.layer1_handlers._embed_attr_filter", lambda ask: [0.1])
-    monkeypatch.setattr("app.vec_util.to_pgvector", lambda v: "[0.1]")
 
     rows = cd.discover_communities_anywhere("u1", "podcasting", placeless_only=False, limit=3)
 
     fn, args = client.calls[0]
     assert fn == "discover_communities_anywhere"
     assert args["p_query"] == "podcasting" and args["p_placeless_only"] is False
-    assert args["p_query_embedding"] == "[0.1]" and args["p_limit"] == 3
+    assert args["p_limit"] == 3
+    # Own words only: no member-claim vector is sent (20270110120000).
+    assert set(args) == {"p_user_id", "p_query", "p_placeless_only", "p_limit"}
     # A bare ZIP "community" is never offered; the real one is.
     assert [r["place_id"] for r in rows] == ["pPod"]
     card = rows[0]
@@ -66,17 +66,14 @@ def test_anywhere_search_asks_sql_and_shapes_cards(monkeypatch: Any) -> None:
     assert card["matched_on"] == "about"
 
 
-def test_anywhere_search_survives_no_embedding(monkeypatch: Any) -> None:
-    client = _Rpc([_POD])
-    monkeypatch.setattr(cd, "service_client", lambda: client)
-
-    def boom(_: str) -> Any:
-        raise RuntimeError("vertex down")
-
-    monkeypatch.setattr("app.layer1_handlers._embed_attr_filter", boom)
-    rows = cd.discover_communities_anywhere("u1", "podcasting")
-    assert "p_query_embedding" not in client.calls[0][1]
-    assert rows and rows[0]["place_id"] == "pPod"
+def test_anywhere_search_never_embeds(monkeypatch: Any) -> None:
+    """Matching members' claims made a gym a podcast community (prod 2026-10-06); the
+    search no longer reads them, so it no longer pays for an embedding either."""
+    monkeypatch.setattr(cd, "service_client", lambda: _Rpc([_POD]))
+    embed = mock.Mock(side_effect=AssertionError("embedded"))
+    monkeypatch.setattr("app.layer1_handlers._embed_attr_filter", embed)
+    assert cd.discover_communities_anywhere("u1", "podcasting")[0]["place_id"] == "pPod"
+    embed.assert_not_called()
 
 
 def test_anywhere_search_fails_soft(monkeypatch: Any) -> None:
@@ -116,6 +113,8 @@ def test_a_topic_ask_finds_the_placeless_community(monkeypatch: Any) -> None:
                            community_topic="podcasting")
     cards = ctx["community_discovery"]["communities"]
     assert [c["place_id"] for c in cards] == ["pPod"]
+    # The card heading says what this list is, not "near you".
+    assert ctx["community_discovery"]["topic"] == "podcasting"
     # The card can be joined from the next message, exactly like a nearby one.
     assert ctx["community_join_pending"]["places"][0]["place_id"] == "pPod"
     joined = " ".join(seen["facts"])
@@ -130,14 +129,41 @@ def test_a_topic_with_nothing_offers_to_start_one(monkeypatch: Any) -> None:
     assert "start one" in seen["goal"]
 
 
-def test_their_own_topic_community_is_not_offered_to_join(monkeypatch: Any) -> None:
+def test_their_own_topic_community_is_shown_first_but_not_offered_to_join(
+    monkeypatch: Any,
+) -> None:
+    """Hiding it made "Podcasters" vanish for the person who started it (prod 2026-10-06)."""
     out, ctx, seen = _turn(
         monkeypatch,
-        anywhere=[_card("pMine", "My Pod Crew", member=True), _card("pPod", "Podcast Club")],
+        anywhere=[_card("pPod", "Podcast Club"), _card("pMine", "My Pod Crew", member=True)],
         nearby=[], community_topic="podcasting",
     )
-    assert [c["place_id"] for c in ctx["community_discovery"]["communities"]] == ["pPod"]
-    assert any("already in one about it: My Pod Crew" in f for f in seen["facts"])
+    assert [c["place_id"] for c in ctx["community_discovery"]["communities"]] == ["pMine", "pPod"]
+    assert [p["place_id"] for p in ctx["community_join_pending"]["places"]] == ["pPod"]
+    assert any("ALREADY IN one about it: My Pod Crew" in f for f in seen["facts"])
+
+
+def test_when_theirs_is_the_only_one_lana_says_so(monkeypatch: Any) -> None:
+    out, ctx, seen = _turn(
+        monkeypatch, anywhere=[_card("pMine", "Podcasters", member=True)], nearby=[],
+        community_topic="podcasting",
+    )
+    assert "You're already in Podcasters" in out
+    assert ctx["community_join_pending"] is None
+    assert "start one" not in seen["goal"]
+
+
+def test_the_topic_reaches_the_response_card() -> None:
+    from app.main import _community_discovery_from_ctx
+
+    resp = _community_discovery_from_ctx({"community_discovery": {
+        "communities": [{"place_id": "pPod", "place_name": "Podcast Club"}],
+        "topic": "podcasting",
+    }})
+    assert resp is not None and resp.topic == "podcasting"
+    near = _community_discovery_from_ctx({"community_discovery": {
+        "communities": [{"place_id": "pGym", "place_name": "Gym"}]}})
+    assert near is not None and near.topic is None
 
 
 def test_no_topic_keeps_the_nearby_answer(monkeypatch: Any) -> None:
