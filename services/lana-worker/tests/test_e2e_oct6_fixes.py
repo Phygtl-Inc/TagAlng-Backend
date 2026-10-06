@@ -222,5 +222,51 @@ class TestFixChipReaskSpeaksAboutTheContent(unittest.TestCase):
             self.assertNotIn(field.replace("_", " "), part)
 
 
+class TestReadyCardPostIsARenderedControl(unittest.TestCase):
+    """e2e: "find me a dentist" → "I recommend Canvas restaurant" → steps → ready card →
+    "pass the tip along" posted the DENTIST ask: the classifier released the lane on the
+    card's own button and the still-armed ask offer read it as a yes."""
+
+    @staticmethod
+    def _ctx(ready: bool) -> dict:
+        return {
+            "tip_share_active": True,
+            "tip_ready": ready,
+            "tip_draft": {"name": "Canvas restaurant", "reco_type": "restaurant", "ready": ready},
+        }
+
+    def test_the_card_button_holds_the_lane_whatever_the_classifier_says(self) -> None:
+        from app import tip_share as ts
+
+        pivot = {"abandon": True, "goal": "looking.tip", "confidence": 0.95}
+        for msg in ("pass the tip along", "Pass the tip along "):
+            self.assertTrue(ts._is_ready_post(msg, self._ctx(True)), msg)
+            self.assertFalse(ts.tip_share_should_release(msg, self._ctx(True), pivot), msg)
+
+    def test_only_while_the_ready_card_is_showing(self) -> None:
+        from app import tip_share as ts
+
+        self.assertFalse(ts._is_ready_post("pass the tip along", self._ctx(False)))
+        self.assertFalse(ts._is_ready_post("pass the tip along", {"tip_ready": True}))
+        # Free text that merely contains the words is not the button.
+        self.assertFalse(ts._is_ready_post("can you pass the tip along to Sam", self._ctx(True)))
+
+    def test_the_utterance_is_what_the_button_sends(self) -> None:
+        from app import tip_share as ts
+        from app.ui_actions import tip_pass_actions
+
+        sent = {a["message"] for a in tip_pass_actions()}
+        self.assertIn(ts._POST_UTTERANCE, sent)
+
+    def test_a_capture_turn_spends_stale_offers_and_seek_rows(self) -> None:
+        import pathlib
+
+        src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "lana_unified_pipeline.py").read_text()
+        lane = src[src.index("if tip_share_should_release(user_message"):src.index("run_tip_share_turn(\n                    user_message")]
+        for key in ("tip_ask_offer_pending", "posting_manage_pending"):
+            self.assertIn(f'session_ctx["{key}"] = None', lane)
+        self.assertIn('session_ctx["peer_matches"] = []', lane)
+
+
 if __name__ == "__main__":
     unittest.main()

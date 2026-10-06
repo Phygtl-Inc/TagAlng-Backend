@@ -35,6 +35,9 @@ _CANCEL_RE = re.compile(
 # "pass the tip along", which _PASS_RE below matches. Copy that tells someone which button
 # to tap names the label — the one on their screen (§35e).
 _POST_CTA = "Drop the recommendation"
+# What that button SENDS — the canonical English protocol utterance, whatever locale the
+# label renders in (ui_actions.tip_pass_actions sends the same string).
+_POST_UTTERANCE = "pass the tip along"
 # The post button's utterance / any go-ahead to post it.
 _PASS_RE = re.compile(
     r"\b(pass (?:the )?tip|pass it along|post it|share it|list it|that'?s it|"
@@ -1272,6 +1275,22 @@ def _is_fix_chip(
     return m.group(1) in known
 
 
+def _is_ready_post(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """The ready card's own post button. Read statelessly, "pass the tip along" is a
+    go-ahead to post SOMETHING — and after an earlier "find me a dentist" the classifier
+    released the lane on it, so the stale dentist ask got posted instead of the
+    recommendation on screen (e2e 2026-10-06). Only while that card is showing: a draft
+    marked ready. The same words typed with no ready card still reach the classifier."""
+    draft = session_ctx.get("tip_draft")
+    return (
+        isinstance(draft, dict)
+        and bool(session_ctx.get("tip_ready"))
+        and str(message or "").strip().casefold() == _POST_UTTERANCE
+    )
+
+
 def _is_rendered_control(
     message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
 ) -> bool:
@@ -1282,6 +1301,7 @@ def _is_rendered_control(
         or _is_carousel_handoff(message, session_ctx, slots)
         or _is_fork_pick(message, session_ctx, slots)
         or _is_fix_chip(message, session_ctx, slots)
+        or _is_ready_post(message, session_ctx, slots)
     )
 
 

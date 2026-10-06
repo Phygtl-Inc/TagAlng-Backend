@@ -2296,6 +2296,15 @@ def run_lana_unified_pipeline(
             )
             reset_tip_share_state(session_ctx)
         else:
+            # The capture owns this turn, so whatever a PREVIOUS turn left armed is spent:
+            # the one-turn "want me to ask your neighbors?" / manage-posting offers (left
+            # armed, the ready card's "pass the tip along" was later read as a yes to a
+            # dentist ask from three turns back), and that seek's neighbor rows, which
+            # rode under the recommendation card as if they were about it.
+            session_ctx["tip_ask_offer_pending"] = None
+            session_ctx["posting_manage_pending"] = None
+            session_ctx["peer_matches"] = []
+            session_ctx["reco_cards"] = []
             reply = sanitize_assistant_message(
                 run_tip_share_turn(
                     user_message=user_message,
