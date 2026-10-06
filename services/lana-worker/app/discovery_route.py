@@ -1415,8 +1415,10 @@ def _try_upfront_display_name_turn(
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
             ctx["nickname"] = nick
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            # None, not pop — the session merge resurrects popped keys, which re-armed
+            # the gate and swallowed the next real ask ([[ctx-pop-resurrection]]).
+            ctx["awaiting_upfront_name"] = None
+            ctx["upfront_name_attempts"] = None
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
             return (
                 f"Love it — great to meet you, {nick}! Now, how can I help you today?",
@@ -1429,8 +1431,10 @@ def _try_upfront_display_name_turn(
             # Give up gracefully and let them get on with it; we won't re-nag this session.
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            # None, not pop — the session merge resurrects popped keys, which re-armed
+            # the gate and swallowed the next real ask ([[ctx-pop-resurrection]]).
+            ctx["awaiting_upfront_name"] = None
+            ctx["upfront_name_attempts"] = None
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
             return (
                 "No worries — I'll skip that for now. So, how can I help you today?",
