@@ -3766,6 +3766,15 @@ _ASK_DRAFT_TWEAK_MSG = "Let me tweak that"
 # from typed text. Only the fields an ask-draft chip can carry (tip_ask_draft._chip).
 _ASK_DRAFT_FIX_RE = re.compile(r"\s*fix:([a-z_]+)\s*$")
 _ASK_DRAFT_FIX_FIELDS = frozenset({"category", "locality", "qualifier", "recommended_by"})
+# What each chip field IS, in words the composer can reason with. The field name itself
+# is an internal key: handed over raw, the model echoed it back ("change the qualifier
+# 'takes Delta Dental'").
+_ASK_DRAFT_FIX_MEANING = {
+    "category": "what kind of place or person they are looking for",
+    "locality": "where it should be",
+    "qualifier": "a requirement it has to meet",
+    "recommended_by": "who the recommendation should come from",
+}
 _TIP_KEEP_LISTENING_MSG = "Keep listening for me"
 _TIP_FIND_MORE_MSG = "Find more people"
 
@@ -4677,13 +4686,17 @@ def _try_ask_draft_reply_turn(
         facts = [f"The ask as you have it: {_ask_excerpt(detail)}"]
         if fix_field:
             facts.append(
-                f"The part they tapped to change: {fix_field.replace('_', ' ')}"
-                + (f" (currently: {' / '.join(was)})" if was else "")
+                "The part they tapped to change: "
+                + (f"\"{' / '.join(was)}\" — " if was else "")
+                + _ASK_DRAFT_FIX_MEANING.get(fix_field, "one detail of the ask")
             )
             goal = (
                 "The user tapped one part of the ask you read back to them, to change just "
                 "that part. Ask what it should be instead, in one short question about THAT "
-                "part only — keep everything else as it is. Nothing has been posted."
+                "part only — keep everything else as it is. Talk about the part by what it "
+                "says (its own words), the way a person would; never call it by a label or "
+                "category name like 'qualifier', 'locality' or 'field'. Nothing has been "
+                "posted."
             )
         else:
             goal = (

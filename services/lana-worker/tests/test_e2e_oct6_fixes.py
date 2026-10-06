@@ -171,5 +171,56 @@ class TestRecoTypeOtherIsWritable(unittest.TestCase):
             self.assertEqual(seen["set_signal_reco"]["p_reco_type"], "restaurant")
 
 
+class TestFixChipReaskSpeaksAboutTheContent(unittest.TestCase):
+    """§30(e): tapping the "takes Delta Dental" chip got "change the qualifier 'takes
+    Delta Dental'" — the field key was handed to the composer as the part's name."""
+
+    def _reask(self, field: str) -> tuple[str, list[str]]:
+        from app import discovery_route as dr
+
+        seen = {}
+
+        def _compose(**kw):
+            seen.update(kw)
+            return "ok"
+
+        ctx = {
+            "ask_draft_pending": {
+                "title": "Orthodontist who takes Delta Dental",
+                "detail": "orthodontist in lake nona who takes delta dental",
+                "chips": [
+                    {"label": "orthodontist", "field": "category"},
+                    {"label": "Lake Nona", "field": "locality"},
+                    {"label": "takes Delta Dental", "field": "qualifier"},
+                ],
+            }
+        }
+        with patch.object(dr, "compose_reply", side_effect=_compose):
+            out = dr._try_ask_draft_reply_turn(
+                msg=f"fix:{field}", session_ctx=ctx, user_jwt="j", phone_verified=True,
+                home_block_id="b1", phase="listening", user_id="u1",
+            )
+        self.assertIsNotNone(out)
+        return seen["goal"], seen["facts"]
+
+    def test_qualifier_is_described_by_its_words_not_its_key(self) -> None:
+        goal, facts = self._reask("qualifier")
+        part = next(f for f in facts if f.startswith("The part they tapped"))
+        self.assertIn('"takes Delta Dental"', part)
+        self.assertIn("a requirement it has to meet", part)
+        self.assertNotIn("qualifier", part)
+        self.assertIn("never call it by a label", goal)
+
+    def test_every_chip_field_has_plain_words(self) -> None:
+        from app import discovery_route as dr
+
+        self.assertEqual(set(dr._ASK_DRAFT_FIX_MEANING), set(dr._ASK_DRAFT_FIX_FIELDS))
+        for field in dr._ASK_DRAFT_FIX_FIELDS:
+            _goal, facts = self._reask(field)
+            part = next(f for f in facts if f.startswith("The part they tapped"))
+            self.assertNotIn(field, part)
+            self.assertNotIn(field.replace("_", " "), part)
+
+
 if __name__ == "__main__":
     unittest.main()
