@@ -18,10 +18,9 @@ reservation is exactly that handle. Three things stop communities from getting i
 3. **The email claim and admin approval paths fail outright.** `complete_place_claim_by_email`
    and `approve_place_claim` set `governance_state = 'operator_verified'` *before* resolving the
    claim to `verified`. `places_verified_needs_claim_trg` (20261228120005) then raises
-   `operator_verified_requires_verified_claim`, for **every** handle, dashed or not. On top of
-   that, both pick the handle by shape only (`_place_handle_shape_error`), so a one-word
-   reservation never falls back to `suggest_place_handle` and would hit the guard. And the email
-   path labels the claim `domain_email`, which Proof B doesn't accept.
+   `operator_verified_requires_verified_claim`, for **every** handle, dashed or not, unless the
+   place already had some other verified claim. (Tommaso's doc also says a bare reservation
+   passes the shape check here. Per the migrations it doesn't: see 1d.)
 
 ## Decisions (agreed 2026-10-06)
 
@@ -33,6 +32,14 @@ reservation is exactly that handle. Three things stop communities from getting i
   defence for famous names. Accepted knowingly.
 - **Two entry points:** a step at the end of Lana's create-community chat, and a "Claim your
   link" action on the community page for its operator (covers SJSU and existing communities).
+- **Who may claim (2026-10-06):** a community's existing operator, OR, for a name-only
+  community (`google_place_id like 'creator:%'`, `governance_state = 'community_started'`), the
+  user who created it (`places.created_by`). The latter becomes its verified operator on claim,
+  exactly as lana.help self-verifies creators. Members of a community on a real Google place
+  (gym, store) cannot self-verify; that still goes through lana.help's location claim.
+- **Proof B stays `reservation_email` only.** Accepting `domain_email` too would let anyone who
+  claimed a location by email rename it to a bare brand word (`safeway`). Location claims keep
+  locality handles, which is the behaviour Tommaso's own `safeway-foster-city` example describes.
 - **Setting a first handle is free.** `handle_renamed_at` is not stamped; the one rename stays
   available for a later change.
 
@@ -42,9 +49,8 @@ reservation is exactly that handle. Three things stop communities from getting i
 
 **a. `_place_handle_proven(p_place_id uuid, p_handle text) returns boolean`**, the single
 definition of "this place may hold this bare handle": Proof A (verified external identity with
-that username) or Proof B (verified claim with `verification_method in ('reservation_email',
-'domain_email')` whose reservation's `normalized_handle` is the handle). **No place-type
-condition.** Both email methods mean the same evidence: this inbox confirmed this exact string.
+that username) or Proof B (verified `reservation_email` claim whose reservation's `normalized_handle` is the
+handle). **No place-type condition.**
 
 **b. `places_single_token_handle_guard()`** keeps its order and its unconditional checks (compound
 passes; member handle → `handle_taken_by_user`; protected → `handle_protected`) and replaces the
@@ -58,7 +64,8 @@ with the session's user id. In one transaction:
 
 1. Caller: user id not null, `auth.users.is_anonymous` false, `email_confirmed_at` not null →
    else `{status:'sign_in_required'}`.
-2. `is_community_operator(p_place_id, uid)` → else `{status:'not_operator'}`.
+2. Eligibility, `_community_handle_claim_status(uid, place)`: operator, or creator of a
+   name-only `community_started` place → else `{status:'not_eligible'}`.
 3. Place already has a handle → `{status:'already_has_handle', handle}` (changes go through
    `rename_community_handle`).
 4. Normalise; shape check with `_place_handle_shape_error(v, false)` (bare allowed) →
@@ -72,33 +79,40 @@ with the session's user id. In one transaction:
    `requested_by uid`, `review_notes 'In-app handle claim by signed-in, email-confirmed operator.'`).
 7. `update places set handle = v` (the guard now passes). A unique violation from a race →
    `{status:'unavailable', reason:'taken'}`.
-8. Return `{status:'claimed', handle, url}`.
+   The same update sets `governance_state = 'operator_verified'`, `claimed_by`/`claimed_at`
+   (coalesced, so an existing operator is untouched); `places_sync_operator_trg` then writes
+   `place_managers`. The claim row is inserted first, so `places_verified_needs_claim_trg` passes.
+8. Return `{status:'claimed', handle, placeId}`.
+
+**c2. `community_handle_offer_for(uid, place)` / `community_handle_offer(place)`**: eligibility
+plus a suggested handle (the normalised community name, else `suggest_place_handle`, else
+`name-2…9`). Used by the worker after publish and by the PWA to decide whether to show the button.
 
 Dashed handles go through the same function. They don't need the proof, but recording the
 claim keeps one trail for every in-app handle.
 
-**d. `complete_place_claim_by_email` and `approve_place_claim`**, re-emitted with:
-- the claim resolved to `verified` **before** the `places` update (the email path writes
-  `reservation_email`, matching lana.help; approval keeps its reviewer fields);
-- handle choice guard-aware: use the reserved string only if
-  `_place_handle_shape_error(v) is null` **or** (bare and `_place_handle_proven` would hold after
-  this claim, and not a member/protected handle); otherwise `suggest_place_handle`. Since the
-  claim is now written first, a bare reservation that came through email *does* earn its bare
-  handle, and anything refused degrades to `name-city` as the comment always promised.
+**d. `complete_place_claim_by_email` and `approve_place_claim`**, re-emitted with one change:
+the claim is resolved to `verified` **before** the `places` update, so
+`places_verified_needs_claim_trg` stops raising. Handle choice is unchanged. Per the migrations,
+`_place_handle_shape_error(v)` defaults to `p_require_locality = true`, so a bare reservation
+already falls back to `suggest_place_handle` (`safeway` → `safeway-foster-city`). Tommaso's doc
+says live prod lets `sjsu` through the shape check. If prod differs from the migrations, that is
+drift to investigate separately; it could not be checked from here (no prod read access).
 
 ### 2 · Worker · `community_capture.py`
 
-After `publish_community` succeeds and the user is signed in (not a guest), Lana offers a short
-link: the AI-written line plus a chip with the suggested handle (from `check_place_handle` on the
-community's slug), and "Skip". A tapped chip or typed name calls `claim_community_handle_for`
-with the session's user id. `unavailable` → offer the returned suggestions as
-chips; `sign_in_required` → skip silently (guests get the community-page action later). One ask
-only, never re-asked in the same session. All copy is AI-rendered at the final-mile choke point,
-with no canned lines.
+On publish, the worker calls `community_handle_offer_for(user_id, place_id)` (service role). If
+eligible, it attaches `handle_offer = {place_id, suggestion}` to the published `CommunityDraft`.
+No new chat lane and no parsing of the next turn: the offer is a **rendered control**, so the PWA
+shows it as a button and the claim itself always goes through the PWA sheet (one claim path).
+The celebration line gets the fact "they can claim a short link get.lana.help/<suggestion>" so
+the AI-written reply can mention it.
 
 ### 3 · PWA · community page
 
-Operators of a community with `handle is null` see **"Claim your link"**. It opens a small sheet:
+Two entry points, one `ClaimLinkSheet`: the published community card in chat (from
+`handle_offer`), and the community's edit drawer (`CommunityEditDrawer`, which calls
+`community_handle_offer` and shows the section only when eligible). It opens a small sheet:
 `get.lana.help/[____]` prefilled with a suggestion, live availability, Claim button. It calls
 `supabase.rpc('claim_community_handle', …)` and renders each status. A guest sees "Sign in to
 claim" and goes through the existing sign-in. On success the page shows the link with copy/share.
@@ -119,7 +133,7 @@ No hand-written SQL.
 | Status | Meaning | Shown as |
 |---|---|---|
 | `sign_in_required` | guest or unconfirmed email | sign-in prompt |
-| `not_operator` | caller doesn't manage it | hidden (button only shows to operators) |
+| `not_eligible` | not operator / not the name-only creator | hidden (button only shows when eligible) |
 | `already_has_handle` | handle set already | the existing link |
 | `invalid` | bad shape/length | inline hint |
 | `unavailable` | taken / protected / held / member / retired | suggestions |
@@ -128,11 +142,11 @@ No hand-written SQL.
 ## Testing
 
 - **SQL**, in the local validation container: a school place gets `sjsu` via
-  `claim_community_handle`; a guest gets `sign_in_required`; a non-operator gets `not_operator`;
+  `claim_community_handle`; a guest gets `sign_in_required`; a non-operator gets `not_eligible`; a member of a real-place community gets `not_eligible`; the creator of a name-only community gets the handle and becomes operator;
   `nike` (protected) gets `unavailable`; a member's handle gets `unavailable`; a taken name gets
   suggestions; a second call gets `already_has_handle`; a direct `update places set handle='x'`
   with no proof is still refused; `complete_place_claim_by_email` with `safeway` and no proof gets
-  `safeway-<city>`; with a bare reservation it gets the bare handle; `approve_place_claim` succeeds
+  `safeway-<city>`; `approve_place_claim` succeeds
   (it currently raises); creators (`mrbeast`) still pass.
 - **Worker** unit tests for the offer/claim/skip/suggestion turns, plus mutation tests run in a
   copy (never in place: the live `--reload` worker).
