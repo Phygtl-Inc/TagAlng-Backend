@@ -151,14 +151,15 @@ class TestEventFitLine(unittest.TestCase):
     def test_line_is_composed_over_the_matched_threads_only(self) -> None:
         out, calls, store = self._run(
             {"affinity_matched_tags": ["Trail running", "Sourdough"], "fit_score": 0.8},
-            composed=[("You run trails and bake bread, and that's this one.", ["Trail running"])],
+            # The model's own chip ("Trails") is ignored: the pills are the proven threads.
+            composed=[("You run trails and bake bread, and that's this one.", ["Trails"])],
         )
         # The evidence is the intersection and nothing else: no title, no other tags.
         self.assertEqual(calls["basis"], [{"shared": ["Trail running", "Sourdough"]}])
         self.assertIs(calls["system"], event_fit._SYSTEM)
         self.assertEqual(out["rec_line"], "You run trails and bake bread, and that's this one.")
-        self.assertEqual(out["rec_chips"], ["Trail running"])
-        self.assertEqual(out["affinity_matched_tags"], ["Trail running", "Sourdough"])
+        self.assertEqual(out["rec_chips"], ["Trail running", "Sourdough"])
+        self.assertEqual(out["rec_chips"], out["affinity_matched_tags"])
         self.assertEqual(out["fit_score"], 0.8)
         self.assertEqual(out["rec_id"], "line-1")
         store.assert_called_once()
@@ -173,10 +174,12 @@ class TestEventFitLine(unittest.TestCase):
     def test_cache_hit_costs_no_model_call(self) -> None:
         out, calls, _store = self._run(
             {"affinity_matched_tags": ["Sourdough"], "fit_score": 0.6},
-            cached={"id": "c1", "line": "Cached line.", "chips": ["Sourdough"]},
+            cached={"id": "c1", "line": "Cached line.", "chips": ["Bread baking"]},
         )
         self.assertNotIn("basis", calls)
         self.assertEqual((out["rec_line"], out["rec_id"]), ("Cached line.", "c1"))
+        # A row cached under the old prompt carries a paraphrased chip; never served.
+        self.assertEqual(out["rec_chips"], ["Sourdough"])
 
     def test_failed_compose_leaves_no_canned_line(self) -> None:
         out, _calls, store = self._run(
@@ -184,7 +187,35 @@ class TestEventFitLine(unittest.TestCase):
         )
         self.assertIsNone(out["rec_line"])
         self.assertEqual(out["affinity_matched_tags"], ["Sourdough"])
+        # No sentence, but the pills still show the proven thread.
+        self.assertEqual(out["rec_chips"], ["Sourdough"])
         store.assert_not_called()
+
+    def test_prompt_has_no_template_to_copy(self) -> None:
+        # Every e2e line ended "…, and that's what this one is about." — the example frame
+        # the prompt itself quoted. The prompt must not hand the model a sentence to fill.
+        self.assertNotIn("that's what this one is about\",", event_fit._SYSTEM)
+        self.assertNotIn("You're into…", event_fit._SYSTEM)
+        self.assertNotIn("CHIPS", event_fit._SYSTEM)
+        self.assertIn("Name ONLY threads in \"shared\"", event_fit._SYSTEM)
+
+    def test_new_prompt_does_not_reuse_lines_cached_under_the_old_one(self) -> None:
+        from app.peer_rec_line import _basis_sig
+
+        seen = {}
+
+        def _cached(user_id, event_id, lang, sig):
+            seen["sig"] = sig
+            return None
+
+        with (
+            patch.object(event_fit, "fetch_event_fit", return_value={"e1": {"affinity_matched_tags": ["Sourdough"], "fit_score": 0.6}}),
+            patch.object(event_fit, "_cached", side_effect=_cached),
+            patch.object(event_fit, "_compose", return_value=[]),
+            patch("app.lang_pref.get_user_preferred_language", return_value="en"),
+        ):
+            event_fit.event_fit_line("u1", "e1")
+        self.assertNotEqual(seen["sig"], _basis_sig({"shared": ["Sourdough"]}))
 
     def test_unreadable_meet_is_an_empty_block(self) -> None:
         out, calls, _store = self._run(None)

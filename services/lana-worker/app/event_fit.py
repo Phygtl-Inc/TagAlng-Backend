@@ -26,7 +26,7 @@ import logging
 from typing import Any
 
 from app.auth import service_client
-from app.peer_rec_line import _basis_sig, _clean_chips, _compose
+from app.peer_rec_line import _basis_sig, _compose
 
 logger = logging.getLogger("lana.event_fit")
 
@@ -96,6 +96,10 @@ def attach_event_fit(user_id: str, rows: list[dict[str, Any]], *, id_key: str = 
 
 # ── the line ─────────────────────────────────────────────────────────────────
 
+# Bumped whenever _SYSTEM changes what a line reads like, so lines authored under the old
+# prompt are re-authored instead of served from the cache forever.
+_PROMPT_VERSION = 2
+
 _SYSTEM = """You write ONE short line per meet for a neighborhood app where a warm local \
 concierge (Lana) helps someone find meets near them worth turning up to. The reader is \
 looking at one meet a neighbour is hosting. Your line says, in her voice, why this meet \
@@ -104,25 +108,23 @@ fits them.
 Per meet you are given ONLY "shared": the things the reader has said about themselves \
 that this meet is about. That is your entire evidence. Write from it and nothing else.
 
-Output ONLY JSON: {"lines": [{"chips": ["...", "..."], "line": "..."}, ...]} with EXACTLY \
-one entry per input, in the same order.
-
-CHIPS (1-3 per meet) are the reader's at-a-glance reasons, shown as small pills:
-- 1-3 words, under 22 characters, no punctuation, no sentence.
-- Each names a DIFFERENT thread from "shared". Only what "shared" says: one thread means \
-one chip. Never a grade ("Great fit", "Perfect"), never a bare category ("Sports").
-- [] when you cannot name one honestly.
+Output ONLY JSON: {"lines": [{"line": "..."}, ...]} with EXACTLY one entry per input, in \
+the same order. (The card already shows the shared threads as pills; you write only the \
+sentence.)
 
 LINE rules:
 - ONE sentence, under 120 characters. No question mark, no greeting, no meet title.
-- Speak TO the reader: "You're into…, and that's what this one is about", "It's built \
-around…, which you've told me you love".
+- Speak TO the reader, about the specific thread(s) in "shared" — what they said they \
+care about, put in your own words for THIS meet.
+- Write it fresh every time. No stock frame: no fixed closing tag-on that points back at \
+"this one", and never open every line the same way. Two meets with different \
+threads must read like two different sentences, not one template with the words swapped.
 - Name ONLY threads in "shared". Never mention any other topic the meet might have.
 - NEVER invent a fact about the meet — not who is going, how many, a schedule, a price, a \
 vibe, or what happens there. You have not been told any of it.
 - Never say or imply the reader has been before, and never describe any attendee.
 - Never the words "match", "circle", "block", "mom", or "profile".
-- Return "" when you cannot write it honestly from the evidence (chips [] too)."""
+- Return "" when you cannot write it honestly from the evidence."""
 
 
 def _cached(user_id: str, event_id: str, lang: str, sig: str) -> dict[str, Any] | None:
@@ -199,8 +201,13 @@ def event_fit_line(user_id: str, event_id: str) -> dict[str, Any]:
     if not shared:
         return out
 
+    # The chips ARE the proven threads, verbatim — the same strings the radius read and
+    # the preview ship as affinity_matched_tags. A model paraphrase ("Running crew" for
+    # "running") put a pill on the card that names nothing the viewer ever said.
+    chips = list(shared)
+    out["rec_chips"] = chips
     basis = {"shared": shared[:_MAX_BASIS_LABELS]}
-    sig = _basis_sig(basis)
+    sig = _basis_sig({**basis, "prompt": _PROMPT_VERSION})
     try:
         from app.lang_pref import get_user_preferred_language
 
@@ -211,15 +218,13 @@ def event_fit_line(user_id: str, event_id: str) -> dict[str, Any]:
     cached = _cached(user_id, event_id, lang, sig)
     if cached:
         out["rec_line"] = str(cached.get("line"))
-        out["rec_chips"] = _clean_chips(cached.get("chips"))
         out["rec_id"] = str(cached.get("id") or "") or None
         return out
 
     composed = _compose([basis], lang, _SYSTEM)
     if not composed or not composed[0][0]:
         return out
-    line, chips = composed[0]
+    line = composed[0][0]
     out["rec_line"] = line
-    out["rec_chips"] = chips
     out["rec_id"] = _store(user_id, event_id, lang, sig, line, chips)
     return out
