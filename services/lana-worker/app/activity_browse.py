@@ -367,6 +367,7 @@ def _count_upcoming_events_anywhere() -> int | None:
             .table("events")
             .select("id", count="exact")
             .eq("status", "open")
+            .eq("is_private", False)  # §29: an invite-only meet is not supply
             .gte("starts_at", now_iso)
             .limit(1)
             .execute()

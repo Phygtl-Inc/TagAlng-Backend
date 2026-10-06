@@ -7204,6 +7204,8 @@ def fetch_preview_events_on_block(
                 "recurrence, circle_place_ref, description"
             )
             .eq("status", "open")
+            # §29: a private meet travels by its invite link only — never browsed.
+            .eq("is_private", False)
             .gte("starts_at", now_iso)
         )
         # Radius, not ZIP equality. The id pre-filter keeps this select list intact

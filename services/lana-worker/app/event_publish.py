@@ -251,6 +251,9 @@ def build_create_event_fields(
         fields["auto_approve"] = bool(draft.auto_approve)
     if draft.allow_attendee_share is not None:
         fields["allow_attendee_share"] = bool(draft.allow_attendee_share)
+    # §29: absent (legacy draft) = the column default, false.
+    if draft.is_private is not None:
+        fields["is_private"] = bool(draft.is_private)
     from app.lana_ui import is_none_bring_item
 
     bring = [

@@ -35,6 +35,7 @@ _EVENT_DRAFT_FIELDS = {
     "max_attendees",
     "auto_approve",
     "allow_attendee_share",
+    "is_private",
     "bring_items",
     "cover_emoji",
     "circle_place_id",
@@ -1107,6 +1108,8 @@ def _seed_setup_defaults(ed: dict[str, Any]) -> None:
         ed["auto_approve"] = False  # require-approval ON by default
     if ed.get("allow_attendee_share") is None:
         ed["allow_attendee_share"] = True
+    if ed.get("is_private") is None:
+        ed["is_private"] = False  # Privacy card (§29): public unless the host flips it
     if ed.get("bring_items") is None:
         ed["bring_items"] = []
 
@@ -2897,6 +2900,8 @@ def run_lana_unified_pipeline(
                 ed["auto_approve"] = settings["auto_approve"]
             if "allow_attendee_share" in settings:
                 ed["allow_attendee_share"] = settings["allow_attendee_share"]
+            if "is_private" in settings:
+                ed["is_private"] = settings["is_private"]
 
             _title = str(ed.get("title") or "").strip()
             has_venue = bool(str(ed.get("venue_name") or "").strip())

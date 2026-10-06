@@ -2824,6 +2824,9 @@ def set_event_setup(
         draft["auto_approve"] = bool(body.auto_approve)
     if body.allow_attendee_share is not None:
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
+    # Privacy card (§29) — its own key, never folded into allow_attendee_share.
+    if body.is_private is not None:
+        draft["is_private"] = bool(body.is_private)
     # Community card: the carousel is a full submission, so an absent value is the "None"
     # option (just the host's own meet), not "leave what was there".
     # An absent value means the "None" option (just the host's own meet) — UNLESS the
@@ -2853,6 +2856,8 @@ def set_event_setup(
         settings["auto_approve"] = draft["auto_approve"]
     if "allow_attendee_share" in draft:
         settings["allow_attendee_share"] = draft["allow_attendee_share"]
+    if "is_private" in draft:
+        settings["is_private"] = draft["is_private"]
     ctx["event_settings"] = settings
     update_session_context(session_id, ctx)
     return {"ok": True}
