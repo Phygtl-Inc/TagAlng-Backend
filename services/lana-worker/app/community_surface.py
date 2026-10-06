@@ -406,7 +406,9 @@ def _going_rosters(event_ids: list[str]) -> dict[str, list[str]]:
         res = (
             service_client()
             .table("event_requests")
-            .select("event_id, user_id")
+            # The attendee column is requester_id (20260529000000) — there is no user_id,
+            # and PostgREST 400s on it, which the except below turned into "nobody going".
+            .select("event_id, requester_id")
             .in_("event_id", event_ids)
             .in_("status", ["approved", "attended"])
             .eq("rsvp_status", "going")
@@ -420,7 +422,7 @@ def _going_rosters(event_ids: list[str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for r in rows:
         eid = str((r or {}).get("event_id") or "")
-        uid = str((r or {}).get("user_id") or "")
+        uid = str((r or {}).get("requester_id") or "")
         if eid and uid:
             out.setdefault(eid, []).append(uid)
     return out
