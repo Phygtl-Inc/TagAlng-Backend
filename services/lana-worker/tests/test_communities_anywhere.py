@@ -199,7 +199,7 @@ def test_a_named_community_far_away_is_found(monkeypatch: Any) -> None:
 
 
 def _about(monkeypatch: Any, *, far: bool, membership: str = "visitor") -> tuple[str, dict]:
-    seen: dict = {}
+    seen: dict = {"ctx": {}}
 
     def compose(*, goal: str, facts: list, fallback: str, **_: Any) -> str:
         seen.update(goal=goal, facts=facts)
@@ -215,7 +215,7 @@ def _about(monkeypatch: Any, *, far: bool, membership: str = "visitor") -> tuple
         community["far"] = True
     out = cd._community_about_turn("u1", community=community,
                                    message="is there san jose state university",
-                                   session_ctx={})
+                                   session_ctx=seen["ctx"])
     return out, seen
 
 
@@ -331,3 +331,33 @@ def test_a_correction_chip_is_not_read_as_a_city(monkeypatch: Any) -> None:
         user_id="u1", home_block_id=None,
     )
     geo.assert_not_called()
+
+
+def test_the_community_itself_is_a_card_above_its_events(monkeypatch: Any) -> None:
+    """Prod 2026-10-06: "is there SJSU?" showed five events and no way into SJSU itself."""
+    _, seen = _about(monkeypatch, far=True)
+    disc = seen["ctx"]["community_discovery"]
+    assert disc["named"] is True
+    (card,) = disc["communities"]
+    assert card["place_id"] == "pSJSU" and card["place_name"] == "San Jose State University"
+    assert card["is_member"] is False and card["member_count"] == 2
+    # Join lives on the card, so the chips do not offer "Add me" a second time — but the
+    # join is still armed for the card's "Join San Jose State University".
+    labels = [c["label"] for c in seen["ctx"]["policy_chips"]]
+    assert "Add me" not in labels and "Show me others" in labels
+    assert seen["ctx"]["community_join_pending"]["places"][0]["place_id"] == "pSJSU"
+
+
+def test_their_own_community_card_says_they_are_in(monkeypatch: Any) -> None:
+    _, seen = _about(monkeypatch, far=False, membership="member")
+    (card,) = seen["ctx"]["community_discovery"]["communities"]
+    assert card["is_member"] is True
+    assert seen["ctx"].get("community_join_pending") is None
+
+
+def test_named_reaches_the_response() -> None:
+    from app.main import _community_discovery_from_ctx
+
+    resp = _community_discovery_from_ctx({"community_discovery": {
+        "communities": [{"place_id": "pSJSU", "place_name": "SJSU"}], "named": True}})
+    assert resp is not None and resp.named is True

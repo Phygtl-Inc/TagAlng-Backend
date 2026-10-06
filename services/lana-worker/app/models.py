@@ -701,6 +701,9 @@ class CommunityDiscoveryResponse(BaseModel):
     # Set when the list answers "communities about <topic>" rather than "near you", so
     # the card's heading says what it is (20270110120000). Null = the nearby list.
     topic: str | None = None
+    # True when the card is the ONE community the user asked about by name, shown above
+    # its events — headed "Community", not "Communities near you".
+    named: bool = False
 
 
 class TopicCommunityRow(BaseModel):
