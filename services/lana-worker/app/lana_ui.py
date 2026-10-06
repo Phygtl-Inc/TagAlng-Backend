@@ -316,6 +316,11 @@ def merge_event_drafts(
     # writes the session draft directly.
     if new.get("circle_place_id"):
         merged["circle_place_id"] = new["circle_place_id"]
+    # Privacy (§29) is written only by the setup card (event-setup), never by a model's
+    # redraw — so it rides over from the stored draft and nothing in `incoming` touches
+    # it. Dropping it here would publish an invite-only meet into every discovery read.
+    if isinstance((previous or {}).get("is_private"), bool):
+        merged["is_private"] = previous["is_private"]
     # Cover emoji: picked once alongside the setup config, then sticks like a slot value.
     if new.get("cover_emoji"):
         merged["cover_emoji"] = new["cover_emoji"]

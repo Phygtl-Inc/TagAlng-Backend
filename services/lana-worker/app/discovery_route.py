@@ -1415,8 +1415,10 @@ def _try_upfront_display_name_turn(
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
             ctx["nickname"] = nick
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            # None, not pop — the session merge resurrects popped keys, which re-armed
+            # the gate and swallowed the next real ask ([[ctx-pop-resurrection]]).
+            ctx["awaiting_upfront_name"] = None
+            ctx["upfront_name_attempts"] = None
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
             return (
                 f"Love it — great to meet you, {nick}! Now, how can I help you today?",
@@ -1429,8 +1431,10 @@ def _try_upfront_display_name_turn(
             # Give up gracefully and let them get on with it; we won't re-nag this session.
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
             ctx["display_name_saved"] = True
-            ctx.pop("awaiting_upfront_name", None)
-            ctx.pop("upfront_name_attempts", None)
+            # None, not pop — the session merge resurrects popped keys, which re-armed
+            # the gate and swallowed the next real ask ([[ctx-pop-resurrection]]).
+            ctx["awaiting_upfront_name"] = None
+            ctx["upfront_name_attempts"] = None
             ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
             return (
                 "No worries — I'll skip that for now. So, how can I help you today?",
@@ -3775,6 +3779,21 @@ _POSTING_REMOVE_MSG = "Take my posting down"
 # localized, the payload is not. Same contract as the two above.
 _ASK_DRAFT_OK_MSG = "Looks good"
 _ASK_DRAFT_TWEAK_MSG = "Let me tweak that"
+# A tapped ask-draft chip (§30e). A RENDERED control's protocol payload — the chip carries
+# `field` and the client posts `fix:<field>` verbatim, the same contract the share-side
+# lanes (tip_share, look_meet, pass_along) read — so it is matched exactly, never inferred
+# from typed text. Only the fields an ask-draft chip can carry (tip_ask_draft._chip).
+_ASK_DRAFT_FIX_RE = re.compile(r"\s*fix:([a-z_]+)\s*$")
+_ASK_DRAFT_FIX_FIELDS = frozenset({"category", "locality", "qualifier", "recommended_by"})
+# What each chip field IS, in words the composer can reason with. The field name itself
+# is an internal key: handed over raw, the model echoed it back ("change the qualifier
+# 'takes Delta Dental'").
+_ASK_DRAFT_FIX_MEANING = {
+    "category": "what kind of place or person they are looking for",
+    "locality": "where it should be",
+    "qualifier": "a requirement it has to meet",
+    "recommended_by": "who the recommendation should come from",
+}
 _TIP_KEEP_LISTENING_MSG = "Keep listening for me"
 _TIP_FIND_MORE_MSG = "Find more people"
 
@@ -4015,9 +4034,16 @@ def _tip_seek_answer_turn(
     active_intent: str,
     weights: list[str] | None = None,
     widen: bool = False,
+    ask_text: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors."""
+    """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors.
+
+    `ask_text` is the whole ask when this turn's message is only part of it — a
+    correction turn ("one who takes Cigna instead") passes the merged ask, so the kind
+    gate and the aspect/standing reads see "an orthodontist who takes Cigna", not a
+    fragment with no subject. Defaults to the message."""
     ctx_base = dict(session_ctx)
+    _ask = str(ask_text or "").strip() or msg
     # Inside a community the recommendations that matter are the ones SHARED there, and that
     # read needs no location (local_signals.find_neighbor_tips: "the roster is the audience,
     # not the radius"). Asking a creator's follower for their ZIP before looking inside
@@ -4166,11 +4192,11 @@ def _tip_seek_answer_turn(
         # requirement on who recommends (standing). Same model call as before.
         from app.reco_aspects import split_query_full
 
-        _parsed = split_query_full(msg)
+        _parsed = split_query_full(_ask)
         if aspects_enabled():
             neighbor_tips = recall_and_rerank(
                 neighbor_tips,
-                request=msg,
+                request=_ask,
                 user_jwt=user_jwt,
                 fetch=_recall_fetch,
                 parsed=_parsed,
@@ -4189,7 +4215,7 @@ def _tip_seek_answer_turn(
         from app.reco_kind_gate import keep_asked_kind
 
         if _parsed is None:
-            _parsed = split_query_full(msg)
+            _parsed = split_query_full(_ask)
         neighbor_tips = keep_asked_kind(neighbor_tips, (_parsed or {}).get("subject_kind"))
 
     if _comm and not neighbor_tips and block_id:
@@ -4649,7 +4675,11 @@ def _try_ask_draft_reply_turn(
 
     text = str(msg or "").strip().lower()
     verdict: str | None = None
-    if text == _ASK_DRAFT_TWEAK_MSG.lower():
+    fix_field: str | None = None
+    fix = _ASK_DRAFT_FIX_RE.match(text)
+    if fix and fix.group(1) in _ASK_DRAFT_FIX_FIELDS:
+        verdict, fix_field = "tweak", fix.group(1)
+    elif text == _ASK_DRAFT_TWEAK_MSG.lower():
         verdict = "tweak"
     elif text == _ASK_DRAFT_OK_MSG.lower():
         verdict = "confirm"
@@ -4665,14 +4695,44 @@ def _try_ask_draft_reply_turn(
     ctx = _routing_ctx(dict(session_ctx), phase=phase or "listening", active_intent="looking.tip")
     ctx["ask_draft_pending"] = None
     if verdict == "tweak":
-        ctx["tip_tweak_pending"] = {"detail": detail, "category": pending.get("category")}
-        reply = compose_reply(
-            goal=(
+        # The chip(s) she tapped, by field — a qualifier tap can mean any of up to four.
+        was = [
+            str(c.get("label") or "").strip()
+            for c in (pending.get("chips") or [])
+            if isinstance(c, dict)
+            and c.get("field") == fix_field
+            and str(c.get("label") or "").strip()
+        ] if fix_field else []
+        ctx["tip_tweak_pending"] = {
+            "detail": detail,
+            "category": pending.get("category"),
+            "field": fix_field,
+            "was": " / ".join(was) or None,
+        }
+        facts = [f"The ask as you have it: {_ask_excerpt(detail)}"]
+        if fix_field:
+            facts.append(
+                "The part they tapped to change: "
+                + (f"\"{' / '.join(was)}\" — " if was else "")
+                + _ASK_DRAFT_FIX_MEANING.get(fix_field, "one detail of the ask")
+            )
+            goal = (
+                "The user tapped one part of the ask you read back to them, to change just "
+                "that part. Ask what it should be instead, in one short question about THAT "
+                "part only — keep everything else as it is. Talk about the part by what it "
+                "says (its own words), the way a person would; never call it by a label or "
+                "category name like 'qualifier', 'locality' or 'field'. Nothing has been "
+                "posted."
+            )
+        else:
+            goal = (
                 "The user wants to correct the ask you read back to them. Ask what to "
                 "change in one short question — you already have their ask, so you only "
                 "need the fix, not the whole thing again. Nothing has been posted."
-            ),
-            facts=[f"The ask as you have it: {_ask_excerpt(detail)}"],
+            )
+        reply = compose_reply(
+            goal=goal,
+            facts=facts,
             session_ctx=session_ctx,
             fallback=f"Sure — what should I change about {_ask_excerpt(detail)}?",
             max_sentences=1,
@@ -4719,9 +4779,17 @@ def _try_tip_tweak_answer_turn(
 
     from app.tip_ask_draft import merge_ask_correction
 
+    merged = merge_ask_correction(
+        prior_detail=prior,
+        correction=correction,
+        field=str(pending.get("field") or "") or None,
+        was=str(pending.get("was") or "") or None,
+    )
     return _tip_seek_answer_turn(
         msg=msg,
-        detail=merge_ask_correction(prior_detail=prior, correction=correction),
+        detail=merged,
+        # The message is only the fix; the kind gate must read the whole ask.
+        ask_text=merged,
         category=str(pending.get("category") or "") or None,
         session_ctx=session_ctx,
         user_jwt=user_jwt,
@@ -7219,6 +7287,8 @@ def fetch_preview_events_on_block(
                 "recurrence, circle_place_ref, description"
             )
             .eq("status", "open")
+            # §29: a private meet travels by its invite link only — never browsed.
+            .eq("is_private", False)
             .gte("starts_at", now_iso)
         )
         # Radius, not ZIP equality. The id pre-filter keeps this select list intact

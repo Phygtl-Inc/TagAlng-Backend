@@ -312,11 +312,31 @@ class PeerMatchRow(BaseModel):
     # claim-affinity matches, which have no rec behind them.
     tip_text: str | None = None
     tip_signal_id: str | None = None
+    # The same recommendation as the author's card stores it (§35b): the answered steps as
+    # stored ({field, label, question, kind, answer}, plus google_place_id on a place
+    # row) and the taxonomy bucket. `tip_text` is the legacy joined sentence; render these
+    # when present. reco_fields is null — not [] — for a prose-only (pre-carousel) tip.
+    reco_fields: list[dict[str, Any]] | None = None
+    reco_type: str | None = None
     # Honest distance phrase ("a few minutes away", "1.4 mi away") straight from
     # humanize_distance_text. None whenever either side's coarse point is unknown —
     # never a guess, and never confused with matching_peer_label (a shared thread).
     distance_text: str | None = None
-    # ── Circle provenance on a rec (C-FIND-V2) ───────────────────────────────────────
+    # The same distance as a number, in metres, for sorting ("Nearest", C-FIND-V2) —
+    # never for display; `distance_text` is the rendered phrase. Measured between coarse
+    # points (block/ZIP centroids; the caller's pin when /lana/fellows got one), so it is
+    # an ordering key, not a precise position. None exactly when distance_text is.
+    distance_meters: float | None = None
+    # The peer's own home-area label ("Laureate Park"), from their home block's display
+    # name — the "📍 Laureate Park" half of the fellows card. /lana/fellows only, and
+    # None for EVERY row of an unverified caller (gated like nickname/avatar).
+    area_name: str | None = None
+    # A rec row's fit score (find_neighbor_tips.match_strength, 0-1) for the "Best fit"
+    # tab's ORDER (C-FIND-V2). Rec rows only; None on claim-affinity rows (those carry
+    # similarity_score). Not a percentage to render: one shared word scores ~0.76 for
+    # every pair, which is why the worker never prints it.
+    match_strength: float | None = None
+    # ── Circle provenance on a rec (C-FIND-V2)───────────────────────────────────────
     # The places BOTH the viewer and this recommender belong to. The results screen groups
     # by these ("ST MARY'S CHURCH" over the rec, "YOUR BLOCK" over one with no shared
     # place) because the shared circle is WHY the rec is worth trusting — a stranger's
@@ -548,6 +568,10 @@ class CommunityEventRow(BaseModel):
     # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
     # own card. None falls back to the FE's calendar.
     cover_emoji: str | None = None
+    # §54: the viewer's fit with this meet, 0-1 — the same score get_nearby_activities_authed
+    # gives it by radius (public.event_viewer_fit). None = unscored (no public claims, an
+    # untagged meet, or the read failed); never 0 for "unknown".
+    fit_score: float | None = None
 
 
 class MeetGoingPreviewRow(BaseModel):
@@ -672,6 +696,22 @@ class CommunityDiscoveryRow(BaseModel):
     # only when it is there.
     fit_line: str | None = None
     fit_chips: list[str] = Field(default_factory=list)
+    # The profile's one-liner as stored on the place (the creator's words, or the line
+    # authored from its real facts). Null when none is on file — a list never authors one.
+    description: str | None = None
+    # Where it is, as a person names it ("Lake Nona"): the ZIP's named area, or for a
+    # creator community the city it is run from. A label, never a distance or a filter.
+    area_label: str | None = None
+
+
+class CommunityChaptersResponse(BaseModel):
+    """POST /lana/circles/chapters — a community's chapters the caller may see, in the
+    discovery row shape (backend-asks §59(a)). `chapters: []` when it has none; the
+    route 404s only an unknown place."""
+
+    place_id: str
+    place_name: str | None = None
+    chapters: list[CommunityDiscoveryRow] = Field(default_factory=list)
 
 
 class FellowsResponse(BaseModel):
@@ -735,8 +775,18 @@ class TopicCommunityRow(BaseModel):
     # somebody's child and never a mutual-only claim shown to a stranger. No name attached.
     matched_label: str | None = None
     # 0-1. Null means the RPC returned something unreadable, not "no match" — a row with
-    # no match never comes back at all.
+    # no match never comes back at all. Also null on the query-less read: nothing was asked.
     similarity: float | None = None
+    # How well the caller fits it, and the "why Lana sees a fit" block — the same fields,
+    # meaning and null rules as CommunityDiscoveryRow (app/community_affinity.py,
+    # app/community_fit_line.py). The query-less read is ORDERED by `affinity`.
+    affinity: float | None = None
+    fit_line: str | None = None
+    fit_chips: list[str] = Field(default_factory=list)
+    # Same as CommunityDiscoveryRow: the stored one-liner, and the area label (for a
+    # creator community, hq_city).
+    description: str | None = None
+    area_label: str | None = None
 
 
 class TopicCommunityResponse(BaseModel):
@@ -801,6 +851,16 @@ class CommunityMemberPreviewRow(BaseModel):
     me: bool = False
 
 
+class CommunityParentRow(BaseModel):
+    """"This is a chapter of …" on a chapter's profile. The parent's public head only:
+    its name, glyph and confirmed member count — no identities."""
+
+    place_id: str
+    place_name: str | None = None
+    emoji: str | None = None
+    member_count: int = 0
+
+
 class CommunityProfileResponse(BaseModel):
     """One community, for the people who go there (C-CIRCLE-COMM-PROFILE)."""
 
@@ -830,6 +890,14 @@ class CommunityProfileResponse(BaseModel):
     # AI-authored from the real facts below (features / area / member count), never a
     # judgement of the place. Null when there is nothing true to say about it yet.
     description: str | None = None
+    # The place's own recorded point, for any caller this profile answers (backend-asks
+    # §49) — strictly less than `place_address` already discloses. Null for a creator
+    # community, which has no geography by constraint, and for a place we hold no point for.
+    lat: float | None = None
+    lng: float | None = None
+    # The community this place is a CHAPTER of (backend-asks §59(c)); null for an
+    # ordinary community.
+    parent: "CommunityParentRow | None" = None
     features: list[CommunityFeatureRow] = Field(default_factory=list)
     activities: list[CommunityActivityRow] = Field(default_factory=list)
     member_preview: list[CommunityMemberPreviewRow] = Field(default_factory=list)
@@ -947,6 +1015,10 @@ class EventDraft(BaseModel):
     # Join settings captured in the host flow.
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
     allow_attendee_share: bool | None = None
+    # Privacy card (§29): an invite-only meet — kept out of every discovery read and
+    # reachable only by its /meet/{id} link. NOT allow_attendee_share: a private meet's
+    # attendees may still be allowed to forward the invite. None on a legacy draft.
+    is_private: bool | None = None
     # Items attendees should bring (the 4/4 quick-setup card) → the meet's pinned list.
     bring_items: list[str] = Field(default_factory=list)
     # AI-picked emoji cover (☕🎨⚽…) — the card's visual when there's no cover image.
@@ -1020,6 +1092,10 @@ class RecoStep(BaseModel):
     options: list[str] = Field(default_factory=list)
     required: bool = False
     answer: str | None = None
+    # kind == "place" only: the Google place the answer was picked from (§35d) — the
+    # carousel's PlacePick.googlePlaceId, or the chat fork's tapped suggestion. Null when
+    # the answer was typed, which is still a valid answer (a plumber has no listing).
+    google_place_id: str | None = None
 
 
 class TipDraft(BaseModel):
@@ -1125,6 +1201,36 @@ class LookEvent(BaseModel):
     title: str
     starts_at: str | None = None
     venue_name: str | None = None
+    # The community the meet was created for — public.event_community's object
+    # {place_ref, name, emoji, circle_type, detail}, the same one ActivityPreviewRow and
+    # get_event_preview carry. None on a plain neighbourhood meet.
+    community: dict[str, Any] | None = None
+
+
+class EventFitLineBody(BaseModel):
+    event_id: str
+
+
+class EventFitLineResponse(BaseModel):
+    """§50(b): the "why Lana sees a fit" block for one meet, for the caller.
+
+    Everything here is composed over ONE intersection — the caller's public claims against
+    the meet's cohort_tags (public.event_viewer_fit) — so the line can never name a thread
+    the chips do not show."""
+
+    event_id: str
+    # The proven shared threads, label-mapped, in the meet's tag order. Same array as
+    # get_event_preview_authed.affinity_matched_tags.
+    affinity_matched_tags: list[str] = Field(default_factory=list)
+    # 0-1, None = unscored. Same number as get_event_preview_authed.fit_score.
+    fit_score: float | None = None
+    # One AI-authored sentence over affinity_matched_tags only. None when nothing is
+    # shared or the compose failed — there is no templated fallback.
+    rec_line: str | None = None
+    # Up to three short authored facets from the same evidence. [] when none.
+    rec_chips: list[str] = Field(default_factory=list)
+    # event_fit_lines.id of the stored line, when stored (for a future thumb).
+    rec_id: str | None = None
 
 
 class LookDraft(BaseModel):
@@ -1198,6 +1304,8 @@ class EventSetupRequest(BaseModel):
     max_attendees: int | None = None  # None = no limit
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
     allow_attendee_share: bool | None = None
+    # Privacy card (§29). Independent of allow_attendee_share. None = leave as drafted.
+    is_private: bool | None = None
     bring_items: list[str] = Field(default_factory=list)
     # Community card: the place id of the community picked in the dropdown, or None for
     # "None" (just the host's own meet). Members are emailed at publish.
@@ -1272,6 +1380,13 @@ class TipSetupRequest(BaseModel):
     # NOT the same thing as circle_place_id above, which is the community the tip is shared
     # INTO. This one is the thing the tip is ABOUT.
     google_place_id: str | None = None
+    # Re-open a recommendation ALREADY POSTED in this session, for correction in the
+    # conversation (§44, C-4-reco-P3-LIVE). Must be the `signal_id` the session's own tip
+    # draft was posted as — anything else is 409 signal_not_in_session (the drawer path,
+    # set_signal_reco, is the out-of-conversation editor). The capture re-arms on the posted
+    # draft; `fix:<field>` then walks that one question, and the post UPDATES this row in
+    # place instead of inserting a second one. `answers` may ride along and stamp as usual.
+    signal_id: str | None = None
 
 
 class NudgeHookRequest(BaseModel):
@@ -1326,6 +1441,17 @@ class PlaceResult(BaseModel):
     area_label: str | None = None
 
 
+class PlaceSuggestionCommunity(BaseModel):
+    """{place_id, member_count, is_member, activity_labels, matched_label} — facts only;
+    the phrasing ("3 neighbors go here") is the surface's to write and translate."""
+
+    place_id: str | None = None
+    member_count: int = 0
+    is_member: bool = False
+    activity_labels: list[str] = Field(default_factory=list)
+    matched_label: str | None = None
+
+
 class PlaceSuggestionRow(BaseModel):
     """A Google Places fallback shown when no neighbor has recommended one yet — rendered as
     tappable cards (maps_url opens the spot in Google Maps). Clearly NOT a neighbor vouch."""
@@ -1333,6 +1459,11 @@ class PlaceSuggestionRow(BaseModel):
     address: str = ""
     place_id: str | None = None
     maps_url: str | None = None
+    # One of OUR communities at (or matched to) this place — stamped at the fetch by
+    # app/place_local_signal.py and passed through by main._place_suggestions_from_ctx,
+    # but dropped here until §30(d) because the model never declared it. Rows carrying it
+    # render under "From your circles"; the rest under "From Google · not a neighbor vouch".
+    community: PlaceSuggestionCommunity | None = None
 
 
 class PlaceSearchResponse(BaseModel):
@@ -1365,6 +1496,11 @@ class CreateSessionResponse(BaseModel):
     # device-locale seed when nothing is saved) — the FE mirrors its UI locale
     # to it when the code is one it supports (en/es/pt). None = no signal yet.
     preferred_language: str | None = None
+    # Session-open only (§21). resumed: this call returned an existing session rather
+    # than creating one. user_turn_count: how many user messages the session holds —
+    # 0 is a greeting nobody has answered yet; anything else is a thread in progress.
+    resumed: bool = False
+    user_turn_count: int = 0
     phone_verified: bool = False
     home_block_assigned: bool = False
     onboarding_step: str | None = None

@@ -655,13 +655,14 @@ class TestCommunityProfile(unittest.TestCase):
                 [{"key": "has_pool", "value": None, "sub_group": "", "confidence": 0.8}]
             ),
             "events": events,
-            # A going row is a PERSON going — the roster read carries user_id now, so the
-            # all-meets avatar stack and this count come out of one query.
+            # A going row is a PERSON going — the roster read carries the attendee
+            # (event_requests.requester_id; the table has no user_id), so the all-meets
+            # avatar stack and this count come out of one query.
             "event_requests": _chain(
                 [
-                    {"event_id": "e1", "user_id": "u2"},
-                    {"event_id": "e1", "user_id": "u3"},
-                    {"event_id": "e2", "user_id": "u2"},
+                    {"event_id": "e1", "requester_id": "u2"},
+                    {"event_id": "e1", "requester_id": "u3"},
+                    {"event_id": "e2", "requester_id": "u2"},
                 ]
             ),
             "users": _chain([{"id": "u2", "nickname": "mapleluz", "profile_photo_url": None}]),

@@ -35,6 +35,7 @@ _EVENT_DRAFT_FIELDS = {
     "max_attendees",
     "auto_approve",
     "allow_attendee_share",
+    "is_private",
     "bring_items",
     "cover_emoji",
     "circle_place_id",
@@ -1107,6 +1108,8 @@ def _seed_setup_defaults(ed: dict[str, Any]) -> None:
         ed["auto_approve"] = False  # require-approval ON by default
     if ed.get("allow_attendee_share") is None:
         ed["allow_attendee_share"] = True
+    if ed.get("is_private") is None:
+        ed["is_private"] = False  # Privacy card (§29): public unless the host flips it
     if ed.get("bring_items") is None:
         ed["bring_items"] = []
 
@@ -1555,9 +1558,29 @@ def _inject_event_quick_replies(
         draft["suggestions"] = _PLACE_SUGGESTIONS
 
 
+def _host_audience_fact(draft: dict[str, Any] | None) -> str:
+    """Who the meet is for, as a composer fact. An invite-only meet (§29) is never listed
+    for neighbors, so copy that says it goes out "to people nearby" tells the host the
+    opposite of what will happen."""
+    if (draft or {}).get("is_private"):
+        return (
+            "Who can see it: INVITE-ONLY — it is not listed for neighbors or anyone nearby; "
+            "only people the host shares its link with can see it and join. Never say it "
+            "goes out to neighbors or people nearby — say they share the link."
+        )
+    return "Who can see it: public — neighbors nearby who fit can find it and RSVP."
+
+
 def _event_published_reply(reply: str, draft: dict[str, Any], *, cta_driven: bool = False) -> str:
     title = str((draft or {}).get("title") or "your event").strip() or "your event"
-    note = f"🎉 Done — **{title}** is live in your area. Neighbors who match can RSVP now."
+    if (draft or {}).get("is_private"):
+        # §29: invite-only meets never reach discovery — the link is the only way in.
+        note = (
+            f"🎉 Done — **{title}** is live and invite-only. Share its link with the people "
+            "you want there — only they can see it and join."
+        )
+    else:
+        note = f"🎉 Done — **{title}** is live in your area. Neighbors who match can RSVP now."
     base = str(reply or "").strip()
     # A CTA publish ("Drop the meet up") is a button payload, not a sentence the upstream
     # composer understood: it reads "drop" as backing out and writes an abandon line
@@ -2273,6 +2296,15 @@ def run_lana_unified_pipeline(
             )
             reset_tip_share_state(session_ctx)
         else:
+            # The capture owns this turn, so whatever a PREVIOUS turn left armed is spent:
+            # the one-turn "want me to ask your neighbors?" / manage-posting offers (left
+            # armed, the ready card's "pass the tip along" was later read as a yes to a
+            # dentist ask from three turns back), and that seek's neighbor rows, which
+            # rode under the recommendation card as if they were about it.
+            session_ctx["tip_ask_offer_pending"] = None
+            session_ctx["posting_manage_pending"] = None
+            session_ctx["peer_matches"] = []
+            session_ctx["reco_cards"] = []
             reply = sanitize_assistant_message(
                 run_tip_share_turn(
                     user_message=user_message,
@@ -2897,6 +2929,8 @@ def run_lana_unified_pipeline(
                 ed["auto_approve"] = settings["auto_approve"]
             if "allow_attendee_share" in settings:
                 ed["allow_attendee_share"] = settings["allow_attendee_share"]
+            if "is_private" in settings:
+                ed["is_private"] = settings["is_private"]
 
             _title = str(ed.get("title") or "").strip()
             has_venue = bool(str(ed.get("venue_name") or "").strip())
@@ -3082,18 +3116,25 @@ def run_lana_unified_pipeline(
                     _seed_setup_defaults(ed)
                     turn_ctx["host_stage"] = "setup"
                     ed["suggestions"] = []
+                    _private = bool(ed.get("is_private"))
                     reply = compose_reply(
                         goal=(
                             "The host approved their meet's review and a quick-setup "
                             "card is shown below. Tell them to set capacity, sharing, "
-                            "approval, and what to bring there, then drop the meet for "
-                            "their neighbors."
+                            "approval, and what to bring there, then drop the meet — "
+                            "say who it reaches exactly as the facts put it."
                         ),
+                        facts=[_host_audience_fact(ed)],
                         fallback=(
                             "Quick set-up — set capacity, sharing, approval, and what to "
+                            "bring, then drop it and share the link."
+                            if _private
+                            else "Quick set-up — set capacity, sharing, approval, and what to "
                             "bring, then drop it for your neighbors."
                         ),
-                        cache=True,
+                        # The goal text is the cache key's spine; the audience must be
+                        # in it too or a private host gets the public line from cache.
+                        cache=not _private,
                     )
                 else:
                     # A free-text edit was already merged into the draft above; stay in review.
@@ -3141,11 +3182,15 @@ def run_lana_unified_pipeline(
                         goal=(
                             "The host finished their meet's setup and the final confirm "
                             "card is shown. Tell them it's all set — one last look, then "
-                            "they can drop it for their neighbors."
+                            "they can drop it. Say who it reaches exactly as the facts "
+                            "put it."
                         ),
-                        facts=[f"The meet's name: {_title}"],
+                        facts=[f"The meet's name: {_title}", _host_audience_fact(ed)],
                         fallback=(
                             f"It's all set — **{_title}**. One last look, then drop it "
+                            "and share the link with the people you want there."
+                            if ed.get("is_private")
+                            else f"It's all set — **{_title}**. One last look, then drop it "
                             "for your neighbors."
                         ),
                     )

@@ -67,6 +67,56 @@ class TestBrowseRows(unittest.TestCase):
         self.assertEqual(resolve.call_count, 1)
 
 
+class TestLookFlowRows(unittest.TestCase):
+    """§26(a): the look flow's "on your block now" rows name the community a meet is FOR."""
+
+    @patch("app.event_place.event_community")
+    @patch("app.event_place.service_client")
+    def test_batch_lookup_resolves_each_community_once(self, sb, resolve) -> None:
+        from app.event_place import communities_for_events
+
+        resolve.return_value = FITNESS
+        sb.return_value.table.return_value.select.return_value.in_.return_value.execute.return_value = (
+            MagicMock(
+                data=[
+                    {"id": "e1", "circle_place_ref": "p1", "host_id": "h"},
+                    {"id": "e2", "circle_place_ref": "p1", "host_id": "h"},
+                    {"id": "e3", "circle_place_ref": None, "host_id": "h"},
+                ]
+            )
+        )
+        out = communities_for_events(["e1", "e2", "e3"])
+        self.assertEqual(out, {"e1": FITNESS, "e2": FITNESS, "e3": None})
+        self.assertEqual(resolve.call_count, 1)
+
+    @patch("app.event_place.service_client")
+    def test_batch_lookup_failure_leaves_meets_untagged(self, sb) -> None:
+        from app.event_place import communities_for_events
+
+        sb.return_value.table.side_effect = RuntimeError("boom")
+        self.assertEqual(communities_for_events(["e1"]), {})
+        self.assertEqual(communities_for_events([]), {})
+
+    def test_ranked_rows_carry_community_onto_look_event(self) -> None:
+        from app.look_meet import _rank_activities
+        from app.models import LookDraft
+
+        rows = [
+            {"id": "e1", "title": "Morning run club", "cohort_tags": ["running"]},
+            {"id": "e2", "title": "Run and coffee", "cohort_tags": []},
+        ]
+        with patch(
+            "app.event_place.communities_for_events", return_value={"e1": FITNESS}
+        ) as batch:
+            out = _rank_activities(rows, "run", 3)
+        batch.assert_called_once()
+        self.assertEqual({r["event_id"]: r["community"] for r in out}, {"e1": FITNESS, "e2": None})
+        # The session draft round-trips onto the wire model with the object intact.
+        draft = LookDraft(events=out)
+        self.assertEqual(draft.events[0].community, FITNESS)
+        self.assertIsNone(draft.events[1].community)
+
+
 class TestNotificationNote(unittest.TestCase):
     def test_note_only_when_there_is_a_community(self) -> None:
         from app.main import _community_note

@@ -612,7 +612,9 @@ class TestBlurbIsWrittenOnce(unittest.TestCase):
         with patch.object(cs, "service_client", return_value=sb):
             row = cs._place_row("p1")
         self.assertEqual(row["name"], "Fitness CF")  # profile still opens
-        self.assertEqual(len(calls), 2)
+        # full (with parent_place_ref) -> without parent -> without blurb columns
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("blurb", calls[-1])
 
 
 class TestIntroMissNamesNobody(unittest.TestCase):

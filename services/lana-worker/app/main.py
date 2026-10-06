@@ -5,7 +5,7 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterator
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
@@ -88,16 +88,20 @@ from app.models import (
     CommunitiesCardPayload,
     CommunityActivityRow,
     CommunityCardRow,
+    CommunityChaptersResponse,
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
     CommunityDraft,
     CommunityEventRow,
+    EventFitLineBody,
+    EventFitLineResponse,
     CommunityFeatureRow,
     CommunityJoinResponse,
     CommunityMeetsResponse,
     CommunityMemberPreviewRow,
     CommunityMemberRow,
     CommunityMembersResponse,
+    CommunityParentRow,
     CommunityProfileResponse,
     CommunitySetupRequest,
     CompleteSessionRequest,
@@ -891,7 +895,16 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 # (looking.tip) or a resolved distance; None everywhere else.
                 tip_text=str(row.get("tip_text") or "") or None,
                 tip_signal_id=str(row.get("tip_signal_id") or "") or None,
+                reco_fields=(
+                    [f for f in row["reco_fields"] if isinstance(f, dict)] or None
+                    if isinstance(row.get("reco_fields"), list)
+                    else None
+                ),
+                reco_type=str(row.get("reco_type") or "") or None,
                 distance_text=str(row.get("distance_text") or "") or None,
+                # §30(c): the two sort keys behind "Nearest" and "Best fit".
+                distance_meters=_float_or_none(row.get("distance_meters")),
+                match_strength=_float_or_none(row.get("match_strength")),
                 # Circle provenance (C-FIND-V2) — the grouping the results screen renders.
                 shared_circles=_shared_circle_rows(row.get("shared_circles")),
                 same_block=bool(row.get("same_block")),
@@ -901,6 +914,16 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
             )
         )
     return out
+
+
+def _float_or_none(raw: Any) -> float | None:
+    """A number off a ctx row, or None — never 0.0 standing in for "unknown"."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _shared_circle_rows(raw: Any) -> list[SharedCircleRow]:
@@ -1607,6 +1630,8 @@ def create_lana_session(
                 orchestrator=use_orch,
                 is_anonymous=auth.is_anonymous,
                 preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
+                resumed=True,
+                user_turn_count=sum(1 for m in messages if m.get("role") == "user"),
                 **ob,
             )
 
@@ -1898,6 +1923,9 @@ def create_lana_session(
         is_anonymous=auth.is_anonymous,
         preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
         aspect_round=opening_aspect_round,
+        # A brand-new row: nobody has spoken into it yet (§21).
+        resumed=False,
+        user_turn_count=0,
         **ob,
     )
 
@@ -2825,6 +2853,9 @@ def set_event_setup(
         draft["auto_approve"] = bool(body.auto_approve)
     if body.allow_attendee_share is not None:
         draft["allow_attendee_share"] = bool(body.allow_attendee_share)
+    # Privacy card (§29) — its own key, never folded into allow_attendee_share.
+    if body.is_private is not None:
+        draft["is_private"] = bool(body.is_private)
     # Community card: the carousel is a full submission, so an absent value is the "None"
     # option (just the host's own meet), not "leave what was there".
     # An absent value means the "None" option (just the host's own meet) — UNLESS the
@@ -2854,6 +2885,8 @@ def set_event_setup(
         settings["auto_approve"] = draft["auto_approve"]
     if "allow_attendee_share" in draft:
         settings["allow_attendee_share"] = draft["allow_attendee_share"]
+    if "is_private" in draft:
+        settings["is_private"] = draft["is_private"]
     ctx["event_settings"] = settings
     update_session_context(session_id, ctx)
     return {"ok": True}
@@ -2942,7 +2975,15 @@ def set_tip_setup(
         raise HTTPException(status_code=409, detail="no_tip_draft")
 
     from app.reco_question_sets import missing_required
-    from app.tip_share import judge_answers, step_set_of
+    from app.tip_share import judge_answers, rearm_posted_tip, step_set_of
+
+    # §44 — correct a recommendation posted earlier in THIS conversation. Re-arms the
+    # capture on the posted draft, so the next `fix:<field>` is a capture turn and the post
+    # after it updates the same row.
+    if (body.signal_id or "").strip():
+        if not rearm_posted_tip(ctx, str(body.signal_id).strip()):
+            raise HTTPException(status_code=409, detail="signal_not_in_session")
+        draft = dict(ctx.get("tip_draft") or {})
 
     def _community_name_for(place_id: str) -> str | None:
         from app.tip_share import my_communities
@@ -2980,8 +3021,14 @@ def set_tip_setup(
     # here: grounding happens at publish, and a draft that is still being edited must not
     # own a subject row yet. Stored raw and trusted no further than an id — publish hands
     # it to Google's own place lookup, which is what decides whether it is real.
+    #
+    # Pinned to the place step it answered (§35d), so the stored answer row carries the id
+    # too — see tip_share.pin_place_answer for which step that is and when it also grounds
+    # the subject.
     if (body.google_place_id or "").strip():
-        draft["subject_google_place_id"] = str(body.google_place_id).strip()
+        from app.tip_share import pin_place_answer
+
+        pin_place_answer(draft, google_place_id=str(body.google_place_id), answers=answers)
     ctx["tip_draft"] = draft
     # Every step the carousel showed counts as offered, so the turn after this does not
     # re-ask the optionals the user chose to leave blank — it goes to the ready card.
@@ -3866,6 +3913,54 @@ def post_tips_get(
     return {"tip": tip}
 
 
+class TipUpdateBody(_BaseModel):
+    """The author's correction — set_signal_reco's own arguments, by their wire names.
+    Omitted / null / blank = leave it (the RPC's contract; clearing is §47(3), unruled)."""
+
+    signal_id: str
+    reco_name: str | None = None
+    reco_description: str | None = None
+    reco_place: str | None = None
+    reco_type: str | None = None
+    reco_fields: list[dict[str, Any]] | None = None
+
+
+@app.post("/lana/tips/update")
+def post_tips_update(
+    body: TipUpdateBody,
+    authorization: str | None = Header(default=None),
+):
+    """Edit your own recommendation and have it re-embedded and re-matched (§47(2)).
+
+    Calling set_signal_reco straight from the client still works and now re-joins
+    detail_text and re-matches lexically on its own — but the vector is Vertex's, so only
+    this route can write the new one. Without it an edited tip is lexical-only until the
+    backfill runs. Returns the same row /lana/tips/get serves, as it now reads.
+    """
+    auth = verify_auth(authorization)
+    from app.local_signals import update_tip
+    from app.tip_feed import tip_by_id
+
+    before = tip_by_id(body.signal_id, viewer_user_id=auth.user_id)
+    # One answer for "not yours" and "not there": the id must not become an ownership
+    # oracle. The RPC enforces ownership too — this is what makes it a 404, not a no-op.
+    if not before or before.get("peer_user_id") != auth.user_id:
+        raise HTTPException(status_code=404, detail="tip_not_found")
+    edit = body.model_dump(exclude={"signal_id"}, exclude_none=True)
+    try:
+        outcome = update_tip(_bearer_token(authorization), signal_id=body.signal_id, edit=edit)
+    except HTTPException as exc:
+        detail = str(getattr(exc, "detail", "") or "")
+        for code in ("invalid_reco_type", "reco_fields_must_be_array"):
+            if code in detail:
+                raise HTTPException(status_code=422, detail=code) from None
+        raise
+    return {
+        "tip": tip_by_id(body.signal_id, viewer_user_id=auth.user_id),
+        "embedded": bool(outcome.get("embedded")),
+    }
+
+
 @app.post("/lana/tips/vouch")
 def post_tips_vouch(
     body: TipFeedbackBody,
@@ -4109,8 +4204,9 @@ class CommunityDiscoverBody(_BaseModel):
 class CommunityDiscoverTopicBody(_BaseModel):
     # What they are looking for, in their own words — "people who do long-distance
     # triathlon" beats "sports", because the ask is embedded and matched against what
-    # members say about THEMSELVES.
-    query: str
+    # members say about THEMSELVES. Optional (§58(a)): absent or blank reads every creator
+    # community ranked by the caller's fit instead.
+    query: str | None = None
     limit: int = 5
     # False widens the match to every community, not just the ones geography cannot
     # reach — "communities like this one". Default true: this endpoint exists for the
@@ -4140,12 +4236,31 @@ class FellowsBody(_BaseModel):
     # is the caller's own, so this is a filter on a list they could already see — not
     # a new way to read a roster they do not belong to (that gate is enforced below).
     place_id: str | None = None
+    # Where she is standing right now (§36) — the "around me" search scope. Both or
+    # neither; a pin replaces her home point as the radius anchor for this call only and
+    # is never stored. Out-of-range values are a 422, not a silent home search.
+    lat: float | None = _Field(default=None, ge=-90, le=90)
+    lng: float | None = _Field(default=None, ge=-180, le=180)
+
+
+def _fellows_pin(body: FellowsBody | None) -> tuple[float, float] | None:
+    """The (lat, lng) anchor for this call, or None for the home search.
+
+    Half a pin is a client bug, not a request to search home: answering it with the
+    home list would put "around you right now" over a list that was nothing of the
+    kind, so it is refused outright."""
+    if body is None or (body.lat is None and body.lng is None):
+        return None
+    if body.lat is None or body.lng is None:
+        raise HTTPException(status_code=422, detail="pin_requires_lat_and_lng")
+    return float(body.lat), float(body.lng)
 
 
 # exclude_none: PeerMatchRow is the union of every peer-row shape (chat card, rec
 # cascade, community roster, radar), so a fellows row leaves most of it unset —
 # match_stars/match_band (this endpoint never computes a cosine band), the tip_* and
-# group_* recommendation fields, distance_text, membership. Sending ~12 explicit nulls
+# group_* recommendation fields, membership — and distance_text / distance_meters /
+# area_name whenever there is nothing honest to put in them. Sending ~12 explicit nulls
 # per row taught the client nothing. Dropping them on the wire keeps ONE row type and
 # one renderer shared with chat, instead of forking a second shape that can drift.
 #
@@ -4176,13 +4291,21 @@ def post_fellows(
     for it that asks for their area, and an empty list would read as "no neighbours".
     """
     auth = verify_auth(authorization)
-    if not auth.home_block_id:
+    place_id = str((body.place_id if body else None) or "").strip() or None
+    # §36: a pin is the radius anchor for this call. A community filter is its own
+    # scope (the pill is one of: area, a community, around me) — with place_id the
+    # pin is ignored, so a community answer is never re-cut by a second geography.
+    pin = _fellows_pin(body)
+    if place_id:
+        pin = None
+    # A pin is a place to search from, so a caller without a home block can still use
+    # one. Without a pin nothing has changed: no home, no search.
+    if not auth.home_block_id and pin is None:
         raise HTTPException(status_code=400, detail="home_block_missing")
     from app.discovery_route import _fetch_verified_peer_matches
-    from app.layer1_handlers import peers_to_match_rows
+    from app.layer1_handlers import attach_peer_area_names, peers_to_match_rows
 
     limit = max(1, min(int((body.limit if body else 12) or 12), 40))
-    place_id = str((body.place_id if body else None) or "").strip() or None
 
     member_ids: set[str] | None = None
     if place_id:
@@ -4204,12 +4327,30 @@ def post_fellows(
 
     # Filtering happens after the matcher ranked, so ask for a deeper list — a
     # top-12 that is mostly non-members would otherwise return two rows.
-    peers = _fetch_verified_peer_matches(
-        _bearer_token(authorization),
-        user_id=auth.user_id,
-        block_id=auth.home_block_id,
-        limit=min(limit * 4, 40) if member_ids is not None else limit,
-    )
+    if pin is not None:
+        # The radius path around her pin, whatever LANA_PEER_RADIUS_MATCH says (see
+        # fetch_peer_matches_near_point). Deliberately not _fetch_verified_peer_matches:
+        # its onion blend seats same-PLACE peers regardless of distance, which is right
+        # for "my neighbours" and wrong for "around me right now".
+        from app.peer_discovery_surface import stamp_reachability
+        from app.peer_radius import fetch_peer_matches_near_point
+
+        peers = fetch_peer_matches_near_point(
+            auth.user_id, lat=pin[0], lng=pin[1], limit=limit
+        )
+        if peers is None:
+            # Never fall back to the home list here: the client would title it
+            # "around you right now".
+            raise HTTPException(status_code=502, detail="fellows_pin_search_failed")
+        if peers:
+            stamp_reachability(peers, user_id=str(auth.user_id))
+    else:
+        peers = _fetch_verified_peer_matches(
+            _bearer_token(authorization),
+            user_id=auth.user_id,
+            block_id=auth.home_block_id,
+            limit=min(limit * 4, 40) if member_ids is not None else limit,
+        )
     if member_ids is not None:
         peers = [
             p for p in peers if str((p or {}).get("peer_user_id") or "") in member_ids
@@ -4228,6 +4369,8 @@ def post_fellows(
     rows = peers_to_match_rows(
         matched, phone_verified=auth.phone_verified, max_rows=limit
     )
+    # §33(b): "📍 Laureate Park" — the peer's home-area label, verified callers only.
+    attach_peer_area_names(rows, matched, phone_verified=auth.phone_verified)
     # The line the card renders in place of the trait chips. Authored ON the fetch, not in
     # the background: a row that appears with chips and swaps to a sentence a second later
     # reads as a glitch. Cached per shared-claim basis, so only a genuinely new overlap
@@ -4265,7 +4408,11 @@ def post_circles_discover(
     position and the place's point on the same row — that subtraction is the client's."""
     auth = verify_auth(authorization)
     from app.community_affinity import attach_affinity
-    from app.community_discovery import discover_communities, radius_meters
+    from app.community_discovery import (
+        attach_description_and_area,
+        discover_communities,
+        radius_meters,
+    )
     from app.community_fit_line import attach_fit_lines
 
     rows = discover_communities(
@@ -4280,29 +4427,77 @@ def post_circles_discover(
     # and `fit_line` absent, and the panel still lists real communities.
     attach_affinity(auth.user_id, rows)
     attach_fit_lines(auth.user_id, rows)
+    attach_description_and_area(rows)
     return CommunityDiscoveryResponse(
-        communities=[
-            CommunityDiscoveryRow(
-                place_id=str(r.get("place_id") or ""),
-                place_name=r.get("place_name"),
-                place_address=r.get("place_address"),
-                place_type=r.get("place_type"),
-                relation=r.get("relation"),
-                emoji=r.get("emoji"),
-                zip=r.get("zip"),
-                lat=r.get("lat"),
-                lng=r.get("lng"),
-                member_count=int(r.get("member_count") or 0),
-                is_member=bool(r.get("is_member")),
-                status_line=r.get("status_line"),
-                affinity=r.get("affinity"),
-                fit_line=r.get("fit_line"),
-                fit_chips=list(r.get("fit_chips") or []),
-            )
-            for r in rows
-            if str(r.get("place_id") or "").strip()
-        ],
+        communities=_discovery_rows(rows),
         radius_meters=int(radius_meters()),
+    )
+
+
+def _discovery_rows(rows: list[dict]) -> list[CommunityDiscoveryRow]:
+    """The one CommunityDiscoveryRow shaper — /circles/discover and /circles/chapters
+    serve the same row, so they must be built in the same place."""
+    return [
+        CommunityDiscoveryRow(
+            place_id=str(r.get("place_id") or ""),
+            place_name=r.get("place_name"),
+            place_address=r.get("place_address"),
+            place_type=r.get("place_type"),
+            relation=r.get("relation"),
+            emoji=r.get("emoji"),
+            zip=r.get("zip"),
+            lat=r.get("lat"),
+            lng=r.get("lng"),
+            member_count=int(r.get("member_count") or 0),
+            is_member=bool(r.get("is_member")),
+            status_line=r.get("status_line"),
+            affinity=r.get("affinity"),
+            fit_line=r.get("fit_line"),
+            fit_chips=list(r.get("fit_chips") or []),
+            description=r.get("description"),
+            area_label=r.get("area_label"),
+        )
+        for r in rows
+        if str(r.get("place_id") or "").strip()
+    ]
+
+
+class CommunityChaptersBody(_BaseModel):
+    place_id: str
+
+
+@app.post("/lana/circles/chapters", response_model=CommunityChaptersResponse)
+def post_circles_chapters(
+    body: CommunityChaptersBody,
+    authorization: str | None = Header(default=None),
+):
+    """A community's chapters, in the /circles/discover row (backend-asks §59(a)).
+
+    Discovery drops chapters on purpose — a chapter is found from its parent — and this
+    is that read. Visibility follows the 20261214120000 contract (see
+    app/community_discovery.py::community_chapters): a member of the parent sees every
+    chapter, a member of only some chapter sees only her own and never a sibling, the
+    caller's own chapters come back `is_member: true`. No member identities, ever.
+
+    404 `place_not_found` only for an unknown place; a place with no chapters is
+    `chapters: []`."""
+    auth = verify_auth(authorization)
+    from app.community_affinity import attach_affinity
+    from app.community_discovery import attach_description_and_area, community_chapters
+    from app.community_fit_line import attach_fit_lines
+
+    try:
+        data = community_chapters(auth.user_id, (body.place_id or "").strip())
+    except ValueError as exc:
+        raise _community_error(exc) from exc
+    rows = data["chapters"]
+    attach_affinity(auth.user_id, rows)
+    attach_fit_lines(auth.user_id, rows)
+    attach_description_and_area(rows)
+    return CommunityChaptersResponse(
+        place_id=str(data["place_id"]),
+        place_name=data.get("place_name"),
+        chapters=_discovery_rows(rows),
     )
 
 
@@ -4350,16 +4545,37 @@ def post_circles_discover_topic(
     FROM, never a distance from the reader and never a reason a row came back. And
     `matched_label`, the member self-claim that matched, so the card can say why this is
     an answer. No member identities: public, self-subject claims only, with no name on
-    them."""
-    auth = verify_auth(authorization)
-    from app.community_discovery import discover_communities_by_topic
+    them.
 
-    rows = discover_communities_by_topic(
-        auth.user_id,
-        body.query,
-        limit=max(1, min(int(body.limit or 5), 20)),
-        creator_only=bool(body.creator_only),
+    `query` is optional (backend-asks §58(a)). Without one this is the "Digital
+    community" tab: every creator community with members, ranked by how well the caller
+    fits it (`affinity`, highest first) — no city filter, since hq_city is a label and
+    never a predicate. `creator_only` is moot there: the query-less read is creator
+    communities by definition. Every row, either way, carries `affinity`, the fit block,
+    `description` and `area_label`."""
+    auth = verify_auth(authorization)
+    from app.community_affinity import attach_affinity
+    from app.community_discovery import (
+        attach_description_and_area,
+        discover_communities_by_topic,
+        discover_creator_communities_for,
     )
+    from app.community_fit_line import attach_fit_lines
+
+    limit = max(1, min(int(body.limit or 5), 20))
+    if str(body.query or "").strip():
+        rows = discover_communities_by_topic(
+            auth.user_id,
+            str(body.query),
+            limit=limit,
+            creator_only=bool(body.creator_only),
+        )
+        attach_affinity(auth.user_id, rows)
+    else:
+        # Scored (and ordered) inside; only the rows that survive the cut get authored.
+        rows = discover_creator_communities_for(auth.user_id, limit=limit)
+    attach_fit_lines(auth.user_id, rows)
+    attach_description_and_area(rows)
     return TopicCommunityResponse(
         communities=[
             TopicCommunityRow(
@@ -4376,6 +4592,11 @@ def post_circles_discover_topic(
                 status_line=r.get("status_line"),
                 matched_label=r.get("matched_label"),
                 similarity=r.get("similarity"),
+                affinity=r.get("affinity"),
+                fit_line=r.get("fit_line"),
+                fit_chips=list(r.get("fit_chips") or []),
+                description=r.get("description"),
+                area_label=r.get("area_label"),
             )
             for r in rows
             if str(r.get("place_id") or "").strip()
@@ -4564,6 +4785,9 @@ def post_circles_profile(
         active=bool(data.get("active")),
         status_line=data.get("status_line"),
         description=data.get("description"),
+        lat=data.get("lat"),
+        lng=data.get("lng"),
+        parent=CommunityParentRow(**data["parent"]) if data.get("parent") else None,
         features=[
             CommunityFeatureRow(
                 key=str(f.get("key") or ""),
@@ -4605,6 +4829,7 @@ def post_circles_profile(
                 description=e.get("description"),
                 going_count=int(e.get("going_count") or 0),
                 cover_emoji=e.get("cover_emoji"),
+                fit_score=e.get("fit_score"),
             )
             for e in (data.get("upcoming_events") or [])
             if isinstance(e, dict) and str(e.get("event_id") or "").strip()
@@ -4830,6 +5055,9 @@ class InviteSelfConfirmBody(_BaseModel):
     token: str
     circle_type: str
     detail: str | None = None
+    # §23: the joiner's answer to "do you go here?", taken before she has pinned a
+    # place. Omitted = not asked (the row lands as a member when grounded, as before).
+    membership: Literal["member", "curious"] | None = None
 
 
 class AreaProgressBody(_BaseModel):
@@ -4897,6 +5125,7 @@ def post_invites_self_confirm(
             body.token,
             circle_type=(body.circle_type or "").strip().lower(),
             detail=body.detail,
+            membership=body.membership,
         )
     except ValueError as exc:
         detail = str(exc)
@@ -4907,6 +5136,27 @@ def post_invites_self_confirm(
 
 class EventInviteSuggestionsBody(_BaseModel):
     event_id: str
+
+
+@app.post("/lana/events/fit-line", response_model=EventFitLineResponse)
+def post_event_fit_line(
+    body: EventFitLineBody,
+    authorization: str | None = Header(default=None),
+):
+    """§50(b) "Why Lana sees a fit" for one meet: the caller's proven shared threads with
+    it, the 0-1 fit score, and one AI-authored sentence over those threads only (cached
+    per viewer + meet + overlap + language). About the CALLER's own claims against the
+    meet's public tags — it names no attendee. An unknown meet answers with no threads and
+    no line rather than an error: the card just renders without the block."""
+    auth = verify_auth(authorization)
+    eid = (body.event_id or "").strip()
+    try:
+        UUID(eid)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid_event_id") from None
+    from app.event_fit import event_fit_line
+
+    return EventFitLineResponse(**event_fit_line(auth.user_id, eid))
 
 
 @app.post("/lana/events/invite-suggestions")
@@ -5388,8 +5638,9 @@ def post_rapport_mute_fact(
 
 # ── Feedback (👍/👎 on Lana output) ────────────────────────────────────────────
 # One endpoint for every rateable surface: an assistant chat reply (message_id), a
-# rapport tile question (gap_row_id), or the authored reason on a fellows row (rec_id —
-# "Was this rec useful?"). Same thumb again → the FE sends rating='clear'.
+# rapport tile question (gap_row_id), the authored reason on a fellows row (rec_id —
+# "Was this rec useful?"), a meet on the map card (event_id) or a community on the map
+# card (place_id). Same thumb again → the FE sends rating='clear'.
 # Rows land in lana_feedback (service-role only) for the team to review.
 
 
@@ -5399,6 +5650,11 @@ class LanaFeedbackBody(_BaseModel):
     gap_row_id: str | None = None
     # A peer_rec_lines id, as shipped in PeerMatchRow.rec_id by /lana/fellows.
     rec_id: str | None = None
+    # An events id — the meet on MeetPeekCard (and any future surfaced meet).
+    event_id: str | None = None
+    # A places id, as shipped in the /lana/circles/discover row's place_id. The snapshot
+    # (the row's status_line, else the name) is recomputed server-side — not sent.
+    place_id: str | None = None
     # Where the thumb lives in the UI ('chat', 'rapport_tile', …) — stored for triage.
     surface: str | None = None
     # Optional free-text follow-up (the FE offers it on 👎). Tracks the latest rating
@@ -5412,12 +5668,23 @@ def post_lana_feedback(
     authorization: str | None = Header(default=None),
 ):
     auth = verify_auth(authorization)
+    targets = {
+        k: (getattr(body, k) or "").strip() or None
+        for k in ("message_id", "gap_row_id", "rec_id", "event_id", "place_id")
+    }
+    # Every target column is a uuid. A malformed id used to reach PostgREST, come back
+    # as 22P02 and surface as a 500; it is the caller's mistake, so it is a 400.
+    for key, val in targets.items():
+        if val is None:
+            continue
+        try:
+            UUID(val)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=400, detail=f"invalid_{key}") from None
     result = record_lana_feedback(
         auth.user_id,
         rating=body.rating,
-        message_id=(body.message_id or "").strip() or None,
-        gap_row_id=(body.gap_row_id or "").strip() or None,
-        rec_id=(body.rec_id or "").strip() or None,
+        **targets,
         comment=body.comment,
         context={"surface": (body.surface or "").strip() or None},
     )
@@ -5430,6 +5697,8 @@ def post_lana_feedback(
             "message_id": body.message_id,
             "gap_row_id": body.gap_row_id,
             "rec_id": body.rec_id,
+            "event_id": body.event_id,
+            "place_id": body.place_id,
             "surface": body.surface,
             # Comment text stays in the DB — analytics only needs to know one exists.
             "has_comment": bool((body.comment or "").strip()),

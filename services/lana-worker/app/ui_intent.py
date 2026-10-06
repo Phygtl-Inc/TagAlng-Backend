@@ -34,6 +34,9 @@ UI_INTENT_EVENT_CREATED = "event_created"
 UI_INTENT_COLLECT_ITEM_DETAIL = "collect_item_detail"
 UI_INTENT_ITEM_LISTED = "item_listed"
 UI_INTENT_COLLECT_TIP_DETAIL = "collect_tip_detail"
+# C-4-EVENT-P1B-FORK: the turn the question set lands asks "cards or chat?" instead of the
+# first step (LANA_TIP_FORK, §35a). Same draft payload as collect_tip_detail, steps included.
+UI_INTENT_COLLECT_TIP_FORK = "collect_tip_fork"
 UI_INTENT_TIP_LISTED = "tip_listed"
 # Create-a-community capture: the draft card while capturing, the live one once created.
 UI_INTENT_COLLECT_COMMUNITY_DETAIL = "collect_community_detail"
@@ -147,6 +150,8 @@ def derive_ui_intent(
     if ctx.get("tip_listed_now"):
         return UI_INTENT_TIP_LISTED
     if ctx.get("tip_share_active"):
+        if ctx.get("tip_fork_pending"):
+            return UI_INTENT_COLLECT_TIP_FORK
         return UI_INTENT_COLLECT_TIP_DETAIL
 
     # In-chat "create a community" — the draft card while capturing, the created card on

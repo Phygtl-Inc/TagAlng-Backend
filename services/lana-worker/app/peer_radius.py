@@ -147,3 +147,59 @@ def fetch_peer_matches_within_radius(
         user_id, radius, len(peers),
     )
     return peers
+
+
+def fetch_peer_matches_near_point(
+    user_id: str | None,
+    *,
+    lat: float,
+    lng: float,
+    limit: int = 5,
+    locale: str = "en",
+) -> list[dict[str, Any]] | None:
+    """Peers around a supplied point (a device pin) — POST /lana/fellows §36.
+
+    NOT gated on LANA_PEER_RADIUS_MATCH. That flag decides whether the HOME search
+    swaps block equality for a radius; a pin has no block to be equal to, so the
+    only way to honour one is the radius path. Gated, a pin would do nothing at all
+    with the flag off, and the client would label a home-block list "around you
+    right now".
+
+    The radius is the SAME one the home radius path uses (`radius_meters()`, i.e.
+    peer_reach_radius_meters() / LANA_PEER_RADIUS_METERS / ~5 mi): "near" means
+    one thing whichever point it is measured from.
+
+    None means the RPC failed — the caller must not quietly answer with the home
+    list instead. [] is a real answer: searched there, nobody near.
+    """
+    if not user_id:
+        return None
+    radius = radius_meters()
+    try:
+        res = service_client().rpc(
+            "match_peers_near_point",
+            {
+                "p_user_id": user_id,
+                "p_lat": float(lat),
+                "p_lng": float(lng),
+                "p_radius_meters": radius,
+                "p_limit": limit,
+                "p_locale": locale,
+            },
+        ).execute()
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        logger.exception("peer_point_match_failed user=%s", user_id)
+        return None
+    from app.peer_discovery_surface import drop_connected_peers
+
+    peers = drop_connected_peers(
+        [r for r in rows if isinstance(r, dict)], user_id=user_id
+    )
+    # Coordinates deliberately not logged: a device fix is the most precise
+    # location this service ever sees.
+    logger.info(
+        "peer_point_match user=%s radius_m=%.0f matches=%d",
+        user_id, radius, len(peers),
+    )
+    return peers

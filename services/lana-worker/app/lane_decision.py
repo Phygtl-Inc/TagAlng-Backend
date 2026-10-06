@@ -34,6 +34,24 @@ _VAGUE_GOALS = ("", "continue", "none")
 IsValidAnswer = Callable[[str, dict[str, Any], "dict[str, Any] | None"], bool]
 
 
+# The setup carousels' own hand-off. The PWA stamps a whole carousel through
+# /tip-setup or /community-setup and then sends exactly this, as plain chat text, to
+# render the ready card (lana-conversation.tsx onTipSetup / onCommunitySetup). It is a
+# protocol utterance Lana's own UI sends verbatim — a rendered control, never something to
+# classify — so it is matched EXACTLY (case, surrounding space and a trailing full stop
+# aside). A user who types "looks good but actually never mind" is not this message.
+SETUP_HANDOFF = "Looks good"
+
+
+def is_setup_handoff(message: str) -> bool:
+    """The message IS the carousel hand-off (see SETUP_HANDOFF), not merely contains it.
+
+    The caller scopes it to a capture whose carousel was actually stamped (a step set and
+    the lane's `*_ready` flag) — outside that state the same words are ordinary prose."""
+    text = " ".join(str(message or "").split()).rstrip(".!").strip()
+    return bool(text) and text.casefold() == SETUP_HANDOFF.casefold()
+
+
 def is_meta_or_chat(slots: dict[str, Any] | None) -> bool:
     """A question / companionship / meta turn (goal=chat) — e.g. "what's my zip?",
     "who's coming?", "why these?". It is never an ANSWER to a capture step, so a lane that

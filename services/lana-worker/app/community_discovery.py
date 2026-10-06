@@ -169,6 +169,14 @@ def discover_communities(
     except Exception:
         logger.exception("discover_communities_failed user=%s", user_id)
         return []
+    return _near_rows(rows)
+
+
+def _near_rows(rows: list[Any]) -> list[dict[str, Any]]:
+    """discover_communities_near-shaped RPC rows -> CommunityDiscoveryRow dicts.
+
+    Shared with the chapters read (`community_chapters`), whose RPC returns the same
+    columns, so a chapter row and a discovery row cannot drift apart on the wire."""
     out: list[dict[str, Any]] = []
     for r in rows:
         if not isinstance(r, dict) or not r.get("place_id"):
@@ -215,6 +223,140 @@ def discover_communities(
             }
         )
     return out
+
+
+# ── chapters — found from their parent ────────────────────────────────────────
+
+_CHAPTERS_MAX = 40
+
+
+def community_chapters(user_id: str, place_id: str, *, limit: int = _CHAPTERS_MAX) -> dict[str, Any]:
+    """"Chapters in Iron Man Training" (POST /lana/circles/chapters, backend-asks §59(a)).
+
+    Discovery drops every chapter on purpose — a chapter is found from its parent — so
+    this is the read that does the finding. Same row as /lana/circles/discover, the
+    caller's own chapters included with `is_member: true`.
+
+    Visibility is the SQL's (discover_community_chapters, 20270112120000), implementing
+    the 20261214120000 contract for a directory row: a member of the parent sees every
+    chapter, a member of only some chapter sees only her own (never a sibling), and a
+    stranger to the family sees the directory any neighbour gets from discovery.
+
+    Raises ValueError('place_not_found') for an unknown place. "No chapters" is never an
+    error — it is `chapters: []`, and so is a failed read (a panel that cannot load reads
+    as "none yet", never as a 500)."""
+    pid = str(place_id or "").strip()
+    if not user_id or not pid:
+        raise ValueError("place_required")
+    try:
+        res = (
+            service_client()
+            .table("places")
+            .select("id, name")
+            .eq("id", pid)
+            .limit(1)
+            .execute()
+        )
+        parent = (res.data or [None])[0]
+    except Exception:
+        # A malformed uuid lands here too (PostgREST 400s it) — same answer as unknown.
+        logger.exception("community_chapters_parent_read_failed place=%s", pid)
+        parent = None
+    if not isinstance(parent, dict) or not parent.get("id"):
+        raise ValueError("place_not_found")
+    rows: list[Any] = []
+    try:
+        got = service_client().rpc(
+            "discover_community_chapters",
+            {
+                "p_user_id": user_id,
+                "p_place_id": pid,
+                "p_limit": max(1, min(int(limit or _CHAPTERS_MAX), _CHAPTERS_MAX)),
+            },
+        ).execute()
+        rows = got.data if isinstance(got.data, list) else []
+    except Exception:
+        logger.exception("community_chapters_failed user=%s place=%s", user_id, pid)
+        rows = []
+    return {
+        "place_id": str(parent["id"]),
+        "place_name": str(parent.get("name") or "").strip() or None,
+        "chapters": _near_rows(rows),
+    }
+
+
+# ── description + area on a discovery row (§58(b)) ────────────────────────────
+
+
+def attach_description_and_area(rows: list[dict[str, Any]]) -> None:
+    """Set `description` and `area_label` on each row, in place, from two reads total.
+
+    `description` is the profile's one-liner as STORED on the place (places.blurb) — the
+    creator's own words, or the line authored from the place's real facts. A list never
+    authors one: the profile is where that model call is scheduled, and a row with no
+    stored line says nothing rather than a template. Null when nothing is on file.
+
+    `area_label` is the place's area as a person names it ("Lake Nona"): the ZIP's
+    named area for a place that is somewhere, and for a creator community — which is
+    not anywhere, by constraint — the city it is RUN FROM (hq_city). A label only; it is
+    never used to decide what is near anyone (20261214120000).
+
+    Best-effort: a failed read leaves both null and the panel still lists the rows."""
+    for row in rows:
+        row.setdefault("description", None)
+        row.setdefault("area_label", None)
+    ids = list(dict.fromkeys(str(r.get("place_id") or "") for r in rows if r.get("place_id")))
+    if not ids:
+        return
+    places: dict[str, dict[str, Any]] = {}
+    try:
+        res = (
+            service_client()
+            .table("places")
+            .select("id, blurb, zip, place_type, hq_city")
+            .in_("id", ids)
+            .execute()
+        )
+        places = {str(p["id"]): p for p in (res.data or []) if isinstance(p, dict) and p.get("id")}
+    except Exception:
+        logger.exception("discovery_description_read_failed places=%s", len(ids))
+        return
+    zips = sorted(
+        {
+            str(p.get("zip") or "").strip()[:5]
+            for p in places.values()
+            if str(p.get("zip") or "").strip()[:5].isdigit()
+            and len(str(p.get("zip") or "").strip()[:5]) == 5
+        }
+    )
+    areas: dict[str, str] = {}
+    if zips:
+        try:
+            zres = (
+                service_client()
+                .table("zip_centroids")
+                .select("zip5, city")
+                .in_("zip5", zips)
+                .execute()
+            )
+            areas = {
+                str(z.get("zip5")): str(z.get("city") or "").strip()
+                for z in (zres.data or [])
+                if isinstance(z, dict) and str(z.get("city") or "").strip()
+            }
+        except Exception:
+            logger.exception("discovery_area_read_failed zips=%s", len(zips))
+    for row in rows:
+        place = places.get(str(row.get("place_id") or ""))
+        if not place:
+            continue
+        row["description"] = str(place.get("blurb") or "").strip() or None
+        hq = str(place.get("hq_city") or "").strip() or None
+        zip5 = str(place.get("zip") or "").strip()[:5]
+        if place.get("place_type") == "creator":
+            row["area_label"] = hq
+        else:
+            row["area_label"] = areas.get(zip5) or hq
 
 
 # ── discover by topic — the only path a creator community has ─────────────────
@@ -324,6 +466,78 @@ def discover_communities_by_topic(
             }
         )
     return out
+
+
+# The candidate pool the query-less read ranks by fit. Matches community_affinity's own
+# cap on one scoring read, so every candidate is scored rather than a tail left at None.
+_CREATOR_POOL = 40
+
+
+def discover_creator_communities_for(user_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    """Creator communities ranked by how well THIS caller fits them — no query needed
+    (POST /lana/circles/discover-topic without `query`, backend-asks §58(a)).
+
+    The "Digital community" tab has nothing to type into, so the topic read (which
+    embeds an ask) cannot fill it. This reads every creator community with members
+    (discover_creator_communities, 20270112120000), scores the pool with the same
+    `affinity` /discover uses, and keeps the best `limit`: highest affinity first, an
+    unscored row (None — the scoring read failed) after every scored one, then the
+    livelier community, then the name, so the order is stable.
+
+    Not filtered to the caller's city: hq_city is a label and never a predicate
+    (20261214120000), and a creator community is not anywhere. Rows carry
+    `affinity`, `fit_line`/`fit_chips` are added by the route after the cut so only the
+    rows shown are authored. [] on anything going wrong."""
+    if not user_id:
+        return []
+    try:
+        res = service_client().rpc(
+            "discover_creator_communities",
+            {"p_user_id": user_id, "p_limit": _CREATOR_POOL},
+        ).execute()
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        logger.exception("discover_creator_communities_failed user=%s", user_id)
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("place_id"):
+            continue
+        name = str(r.get("name") or "").strip()
+        if not is_joinable_place_name(name):
+            continue
+        ptype = str(r.get("place_type") or "").strip() or None
+        members = int(r.get("member_count") or 0)
+        out.append(
+            {
+                "place_id": str(r["place_id"]),
+                "place_name": name,
+                "place_type": ptype,
+                "relation": place_relation_noun(ptype),
+                "emoji": place_relation_emoji(ptype),
+                "hq_city": str(r.get("hq_city") or "").strip() or None,
+                "hq_lat": _coord(r.get("hq_lat"), 90.0),
+                "hq_lng": _coord(r.get("hq_lng"), 180.0),
+                "member_count": members,
+                "is_member": bool(r.get("is_member")),
+                "status_line": _discovery_status_line(members, bool(r.get("is_member"))),
+                # Nothing was asked, so nothing matched: no proof line and no cosine.
+                "matched_label": None,
+                "similarity": None,
+            }
+        )
+    from app.community_affinity import attach_affinity
+
+    attach_affinity(user_id, out)
+    out.sort(
+        key=lambda r: (
+            r.get("affinity") is None,
+            -(r.get("affinity") or 0.0),
+            -int(r.get("member_count") or 0),
+            str(r.get("place_name") or "").lower(),
+        )
+    )
+    return out[: max(1, min(int(limit or 5), _TOPIC_MAX_LIMIT))]
 
 
 def discover_communities_anywhere(

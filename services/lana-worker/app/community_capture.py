@@ -296,9 +296,18 @@ def _place_suggestions(
 
     The carousel fork has the Places picker; the chat fork has only chips, so without
     these a "which gym?" asked in chat comes back as typed prose that cannot be grounded.
+
+    Only where a tapped name can LAND (§38a). A place is set by `google_place_id` alone,
+    and run_community_capture_turn drops a typed or tapped answer to the subject step by
+    design — so for every pinned type these chips were taps that re-asked the question.
+    They are no longer sent; the client's map picker is the answer control on that step.
+    A group (hobby / support) is the exception: its subject step asks where it meets, and
+    a tapped name is kept as `meets_at`, so the nearby names are real answers there.
     """
+    from app.community_question_sets import GROUP_TYPES, normalize_community_type
+
     ctype = str(draft.get("circle_type") or "")
-    if not ctype:
+    if not ctype or normalize_community_type(ctype) not in GROUP_TYPES:
         return []
     try:
         from app.circles_flow import _TYPE_SEARCH
@@ -575,7 +584,35 @@ def community_capture_should_release(
         return False
 
     return not lane_should_continue(
-        message, session_ctx, slots, is_valid_answer=_is_community_answer
+        message,
+        session_ctx,
+        slots,
+        is_valid_answer=_is_community_answer,
+        is_offered_option=_is_carousel_handoff,
+    )
+
+
+def _is_carousel_handoff(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """The carousel's own "Looks good", sent right after /community-setup stamped the
+    answers and `community_ready` — the only thing that renders the ready card (§38b).
+
+    Nothing else here treats it as in-lane: match_type_label misses it, community_offered
+    holds only the current step's options, and a goal=chat read short-circuits
+    _is_community_answer — so the lane released and reset_community_state threw away a
+    filled-in carousel plus the community_ready the endpoint had just written. The host
+    flow's _is_host_confirm intercepts the same words ahead of any release check; this is
+    that, for this lane. A rendered control: exact match, scoped to the state the client
+    sends it in (a step set and community_ready), and ahead of abandon."""
+    from app.lane_decision import is_setup_handoff
+
+    draft = session_ctx.get("community_draft")
+    return (
+        isinstance(draft, dict)
+        and bool(draft.get("step_set"))
+        and bool(session_ctx.get("community_ready"))
+        and is_setup_handoff(message)
     )
 
 
@@ -895,7 +932,9 @@ def run_community_capture_turn(
             session_ctx["community_pending_ask"] = None
 
     # ── Extract fields (+ the set, once) ──
-    if msg and not tapped_type:
+    # Not on the carousel's hand-off: its answers are already stamped, and "Looks good"
+    # is a control, not content to read for a name or a blurb.
+    if msg and not tapped_type and not _is_carousel_handoff(msg, session_ctx):
         from app.i18n import lang_display_name, session_lang
 
         code = session_lang(session_ctx)

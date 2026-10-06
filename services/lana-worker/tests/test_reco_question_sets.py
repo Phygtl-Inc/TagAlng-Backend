@@ -224,7 +224,7 @@ def test_done_mid_carousel_jumps_to_the_ready_card(monkeypatch: Any) -> None:
     reply, draft = _run(monkeypatch, "that's it", ctx, {})
     assert ctx["tip_ready"] is True, "required steps are in — stop asking optionals"
     assert draft["ready"] is True
-    assert "Pass the tip along" in reply
+    assert "Drop the recommendation" in reply, "name the button the ready card shows (§35e)"
 
 
 def test_done_early_still_blocked_by_a_required_step(monkeypatch: Any) -> None:

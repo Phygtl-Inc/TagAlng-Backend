@@ -512,15 +512,22 @@ def _rank_activities(
         # coffee catch-up because top-N kept zero-relevance events). Nothing on-topic
         # → return empty and let the seek/create path own the turn.
         candidates = [e for e in candidates if relevance(e) > 0]
-    ranked = sorted(candidates, key=relevance, reverse=True)
+    ranked = sorted(candidates, key=relevance, reverse=True)[:limit]
+    # The community each meet is FOR (§26a) — "for the moms at your gym" is what decides
+    # whether a seeker taps. Neither radius RPC projects circle_place_ref, so it is read
+    # for the few rows actually shown; None on a plain neighbourhood meet.
+    from app.event_place import communities_for_events
+
+    communities = communities_for_events([str(e.get("id")) for e in ranked])
     out: list[dict[str, Any]] = []
-    for e in ranked[:limit]:
+    for e in ranked:
         out.append({
             "event_id": str(e.get("id")),
             "title": str(e.get("title") or "A neighbourhood meet"),
             "starts_at": e.get("starts_at"),
             "has_time": e.get("has_time") is not False,
             "venue_name": e.get("venue_name"),
+            "community": communities.get(str(e.get("id"))),
         })
     return out
 

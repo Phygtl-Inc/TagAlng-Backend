@@ -28,6 +28,9 @@ LOGIN_CARRY_KEYS: tuple[str, ...] = (
     "tip_seek_pending",
     "tip_pending_ask",
     "tip_pending_question",
+    # "Cards or chat?" asked on the turn the question set landed (§35a) — the open question
+    # of a recommendation in flight, held with the draft exactly as tip_pending_question is.
+    "tip_fork_pending",
     # A looking/offering ask captured mid-flow.
     "look_pending_ask",
     "pass_along_pending_ask",

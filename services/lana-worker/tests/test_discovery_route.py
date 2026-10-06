@@ -2533,7 +2533,32 @@ class TestUpfrontDisplayNameGate(unittest.TestCase):
         self.assertIn("Maria", reply)
         self.assertEqual(out_ctx["routing_phase"], "listening")
         self.assertTrue(out_ctx["display_name_saved"])
-        self.assertNotIn("awaiting_upfront_name", out_ctx)
+        # Cleared with None, not popped: the turn's ctx is MERGED over the stored one, so
+        # a popped key came back armed and the gate swallowed the next real ask (e2e:
+        # "Tex" → "find me people who like running" got the name ask again).
+        from app.db import merge_session_context
+
+        stored = {**ctx, "upfront_name_attempts": 1}
+        merged = merge_session_context(stored, out_ctx)
+        self.assertFalse(merged.get("awaiting_upfront_name"))
+        self.assertFalse(merged.get("upfront_name_attempts"))
+
+    @patch("app.discovery_route.user_needs_display_name", return_value=True)
+    def test_giving_up_also_disarms_through_the_merge(self, _needs) -> None:
+        from app.db import merge_session_context
+        from app.discovery_route import NAME_CHANGE_MAX_ATTEMPTS
+
+        ctx = {
+            "routing_phase": PHASE_NEED_DISPLAY_NAME,
+            "awaiting_upfront_name": True,
+            "upfront_name_attempts": NAME_CHANGE_MAX_ATTEMPTS,
+        }
+        result = _try_upfront_display_name_turn(
+            msg="skip that for now", session_ctx=ctx, user_id="user-1",
+            phase=PHASE_NEED_DISPLAY_NAME, is_anonymous=False,
+        )
+        merged = merge_session_context(ctx, result[1])
+        self.assertFalse(merged.get("awaiting_upfront_name"))
 
     @patch("app.discovery_route.user_needs_display_name", return_value=True)
     def test_skipped_for_anonymous_guest(self, _needs) -> None:
