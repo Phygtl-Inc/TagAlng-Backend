@@ -487,11 +487,17 @@ def _card_meet(r: dict[str, Any], *, going: int = 0) -> dict[str, Any]:
     }
 
 
-def _event_rows_for_profile(place_id: str) -> tuple[list[dict[str, Any]], int]:
+def _event_rows_for_profile(
+    place_id: str, viewer_id: str | None = None
+) -> tuple[list[dict[str, Any]], int]:
     """Upcoming meets at the place, the best-attended first, plus how many are inside
     the next 7 days. "Popular" is a real going count — never a guess, and never an
     ordering we can't defend. The week count comes from the FULL read, not the few rows
-    the card shows, so the status line stays true when there are more."""
+    the card shows, so the status line stays true when there are more.
+
+    Each shown row carries the viewer's `fit_score` (§54) — the same score the radius read
+    (get_nearby_activities_authed) gives the same meet, from the same SQL intersection, so
+    a community-scoped map marker draws the meter a nearby one would. None = unscored."""
     raw = _events_at_place(place_id, limit=20)
     counts = _going_counts([str(r.get("id")) for r in raw if r.get("id")])
     rows = [
@@ -514,7 +520,11 @@ def _event_rows_for_profile(place_id: str) -> tuple[list[dict[str, Any]], int]:
         if str(r.get("title") or "").strip()
     ]
     rows.sort(key=lambda r: (-int(r["going_count"]), str(r["starts_at"] or "")))
-    return rows[:_MAX_PROFILE_EVENTS], _this_week(rows)
+    shown = rows[:_MAX_PROFILE_EVENTS]
+    from app.event_fit import attach_event_fit
+
+    attach_event_fit(str(viewer_id or ""), shown)
+    return shown, _this_week(rows)
 
 
 # ── features ──────────────────────────────────────────────────────────────────
@@ -1151,7 +1161,7 @@ def community_profile(
         features=lambda: place_features(pid, user_id),
         activities=lambda: activities_at_place(pid, user_id),
         members=lambda: _member_rows(pid),
-        events=lambda: _event_rows_for_profile(pid),
+        events=lambda: _event_rows_for_profile(pid, user_id),
     )
     place = got["place"]
     if not place:

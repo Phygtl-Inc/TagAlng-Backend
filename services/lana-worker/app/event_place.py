@@ -226,6 +226,42 @@ def community_label_for_event(event_id: str | None) -> str | None:
     return community_label(row.get("circle_place_ref"), row.get("host_id"))
 
 
+def communities_for_events(event_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+    """{event_id: community | None} for a few meets — one events read, then one
+    `event_community` per distinct (community, host). For list surfaces whose rows came
+    off an RPC that does not project circle_place_ref (get_activities_near_point,
+    get_nearby_activities). Best-effort: a failed read leaves every meet untagged."""
+    ids = [str(e).strip() for e in event_ids if str(e or "").strip()]
+    if not ids:
+        return {}
+    try:
+        res = (
+            service_client()
+            .table("events")
+            .select("id, circle_place_ref, host_id")
+            .in_("id", ids)
+            .execute()
+        )
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:  # noqa: BLE001 - a missing tag must never break a turn
+        logger.exception("event_community.batch_lookup_failed n=%d", len(ids))
+        return {}
+    resolved: dict[tuple[str, str], dict[str, Any] | None] = {}
+    out: dict[str, dict[str, Any] | None] = {}
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        ref = str(r.get("circle_place_ref") or "").strip()
+        if not ref:
+            out[str(r["id"])] = None
+            continue
+        key = (ref, str(r.get("host_id") or ""))
+        if key not in resolved:
+            resolved[key] = event_community(ref, r.get("host_id"))
+        out[str(r["id"])] = resolved[key]
+    return out
+
+
 def invite_suggestions(user_id: str, event_id: str) -> dict[str, Any]:
     """Confirmed members of the event's place, for "N people already go here —
     invite them?" (§5.2). Host-only. First names only — that is what the ladder

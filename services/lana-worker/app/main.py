@@ -92,6 +92,8 @@ from app.models import (
     CommunityDiscoveryRow,
     CommunityDraft,
     CommunityEventRow,
+    EventFitLineBody,
+    EventFitLineResponse,
     CommunityFeatureRow,
     CommunityJoinResponse,
     CommunityMeetsResponse,
@@ -4577,6 +4579,7 @@ def post_circles_profile(
                 description=e.get("description"),
                 going_count=int(e.get("going_count") or 0),
                 cover_emoji=e.get("cover_emoji"),
+                fit_score=e.get("fit_score"),
             )
             for e in (data.get("upcoming_events") or [])
             if isinstance(e, dict) and str(e.get("event_id") or "").strip()
@@ -4879,6 +4882,27 @@ def post_invites_self_confirm(
 
 class EventInviteSuggestionsBody(_BaseModel):
     event_id: str
+
+
+@app.post("/lana/events/fit-line", response_model=EventFitLineResponse)
+def post_event_fit_line(
+    body: EventFitLineBody,
+    authorization: str | None = Header(default=None),
+):
+    """§50(b) "Why Lana sees a fit" for one meet: the caller's proven shared threads with
+    it, the 0-1 fit score, and one AI-authored sentence over those threads only (cached
+    per viewer + meet + overlap + language). About the CALLER's own claims against the
+    meet's public tags — it names no attendee. An unknown meet answers with no threads and
+    no line rather than an error: the card just renders without the block."""
+    auth = verify_auth(authorization)
+    eid = (body.event_id or "").strip()
+    try:
+        UUID(eid)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid_event_id") from None
+    from app.event_fit import event_fit_line
+
+    return EventFitLineResponse(**event_fit_line(auth.user_id, eid))
 
 
 @app.post("/lana/events/invite-suggestions")

@@ -548,6 +548,10 @@ class CommunityEventRow(BaseModel):
     # The meet's AI-picked cover glyph, so this row wears the same face as the meet's
     # own card. None falls back to the FE's calendar.
     cover_emoji: str | None = None
+    # §54: the viewer's fit with this meet, 0-1 — the same score get_nearby_activities_authed
+    # gives it by radius (public.event_viewer_fit). None = unscored (no public claims, an
+    # untagged meet, or the read failed); never 0 for "unknown".
+    fit_score: float | None = None
 
 
 class MeetGoingPreviewRow(BaseModel):
@@ -1119,6 +1123,36 @@ class LookEvent(BaseModel):
     title: str
     starts_at: str | None = None
     venue_name: str | None = None
+    # The community the meet was created for — public.event_community's object
+    # {place_ref, name, emoji, circle_type, detail}, the same one ActivityPreviewRow and
+    # get_event_preview carry. None on a plain neighbourhood meet.
+    community: dict[str, Any] | None = None
+
+
+class EventFitLineBody(BaseModel):
+    event_id: str
+
+
+class EventFitLineResponse(BaseModel):
+    """§50(b): the "why Lana sees a fit" block for one meet, for the caller.
+
+    Everything here is composed over ONE intersection — the caller's public claims against
+    the meet's cohort_tags (public.event_viewer_fit) — so the line can never name a thread
+    the chips do not show."""
+
+    event_id: str
+    # The proven shared threads, label-mapped, in the meet's tag order. Same array as
+    # get_event_preview_authed.affinity_matched_tags.
+    affinity_matched_tags: list[str] = Field(default_factory=list)
+    # 0-1, None = unscored. Same number as get_event_preview_authed.fit_score.
+    fit_score: float | None = None
+    # One AI-authored sentence over affinity_matched_tags only. None when nothing is
+    # shared or the compose failed — there is no templated fallback.
+    rec_line: str | None = None
+    # Up to three short authored facets from the same evidence. [] when none.
+    rec_chips: list[str] = Field(default_factory=list)
+    # event_fit_lines.id of the stored line, when stored (for a future thumb).
+    rec_id: str | None = None
 
 
 class LookDraft(BaseModel):
