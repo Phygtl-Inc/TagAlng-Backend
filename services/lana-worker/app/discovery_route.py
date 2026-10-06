@@ -4015,9 +4015,16 @@ def _tip_seek_answer_turn(
     active_intent: str,
     weights: list[str] | None = None,
     widen: bool = False,
+    ask_text: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors."""
+    """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors.
+
+    `ask_text` is the whole ask when this turn's message is only part of it — a
+    correction turn ("one who takes Cigna instead") passes the merged ask, so the kind
+    gate and the aspect/standing reads see "an orthodontist who takes Cigna", not a
+    fragment with no subject. Defaults to the message."""
     ctx_base = dict(session_ctx)
+    _ask = str(ask_text or "").strip() or msg
     # Inside a community the recommendations that matter are the ones SHARED there, and that
     # read needs no location (local_signals.find_neighbor_tips: "the roster is the audience,
     # not the radius"). Asking a creator's follower for their ZIP before looking inside
@@ -4166,11 +4173,11 @@ def _tip_seek_answer_turn(
         # requirement on who recommends (standing). Same model call as before.
         from app.reco_aspects import split_query_full
 
-        _parsed = split_query_full(msg)
+        _parsed = split_query_full(_ask)
         if aspects_enabled():
             neighbor_tips = recall_and_rerank(
                 neighbor_tips,
-                request=msg,
+                request=_ask,
                 user_jwt=user_jwt,
                 fetch=_recall_fetch,
                 parsed=_parsed,
@@ -4189,7 +4196,7 @@ def _tip_seek_answer_turn(
         from app.reco_kind_gate import keep_asked_kind
 
         if _parsed is None:
-            _parsed = split_query_full(msg)
+            _parsed = split_query_full(_ask)
         neighbor_tips = keep_asked_kind(neighbor_tips, (_parsed or {}).get("subject_kind"))
 
     if _comm and not neighbor_tips and block_id:
@@ -4753,14 +4760,17 @@ def _try_tip_tweak_answer_turn(
 
     from app.tip_ask_draft import merge_ask_correction
 
+    merged = merge_ask_correction(
+        prior_detail=prior,
+        correction=correction,
+        field=str(pending.get("field") or "") or None,
+        was=str(pending.get("was") or "") or None,
+    )
     return _tip_seek_answer_turn(
         msg=msg,
-        detail=merge_ask_correction(
-            prior_detail=prior,
-            correction=correction,
-            field=str(pending.get("field") or "") or None,
-            was=str(pending.get("was") or "") or None,
-        ),
+        detail=merged,
+        # The message is only the fix; the kind gate must read the whole ask.
+        ask_text=merged,
         category=str(pending.get("category") or "") or None,
         session_ctx=session_ctx,
         user_jwt=user_jwt,

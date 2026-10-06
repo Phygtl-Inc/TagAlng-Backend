@@ -353,6 +353,22 @@ class TestAskDraftChipReask(unittest.TestCase):
         self.assertIn("winter park", self.tips.call_args.kwargs["query"])
         self.save.assert_not_called()
 
+    def test_the_kind_gate_reads_the_merged_ask_not_the_fix_alone(self) -> None:
+        # e2e (capture/e30b): "one who takes Cigna instead" has no subject, so the kind
+        # gate read no kind and let a pediatric dentist through on an orthodontist ask.
+        _r, ctx, _routing, _ = self._turn("fix:qualifier", self._drafted())
+        merged = "gentle orthodontist in lake nona who takes cigna"
+        with patch("app.tip_ask_draft.merge_ask_correction", return_value=merged), \
+             patch("app.reco_aspects.split_query_full",
+                   return_value={"subject_kind": "orthodontist"}) as split, \
+             patch("app.reco_kind_gate.keep_asked_kind",
+                   side_effect=lambda rows, kind: rows) as gate:
+            self._turn("one who takes Cigna instead", {"routing_phase": "listening", **ctx})
+        self.assertTrue(split.called)
+        for call in split.call_args_list:
+            self.assertEqual(call.args[0], merged)
+        self.assertEqual(gate.call_args.args[1], "orthodontist")
+
     def test_unknown_field_is_not_a_chip(self) -> None:
         _reply, _ctx, routing, _ = self._turn("fix:password", self._drafted())
         self.assertNotEqual(routing.get("tool_to_call"), "tip_ask_tweak")
