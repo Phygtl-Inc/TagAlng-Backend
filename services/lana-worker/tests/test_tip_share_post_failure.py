@@ -57,7 +57,8 @@ class TestPostFailureKeepsTheCard(unittest.TestCase):
         self.assertTrue(ctx["tip_ready"])
         self.assertTrue(ctx["tip_share_active"])
         self.assertFalse(ctx.get("tip_listed_now"))
-        self.assertIn("Pass the tip along", reply)
+        self.assertIn("Drop the recommendation", reply)  # the label on screen (§35e)
+        self.assertNotIn("Pass the tip along", reply)
 
     def test_block_required_reassigns_the_home_block_and_retries(self) -> None:
         ctx = self._ctx()

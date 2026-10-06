@@ -7,7 +7,7 @@ Flow (matches the C-4-reco mock):
   P1  "What do you want to recommend?"          (nothing captured yet)
   P2  "Heard you." + colored chips (★ Recommendation / category / trait)
   P3  "Who or where? A name helps me find them" (Places options when place-based)
-  P4  assembled card → "Pass the tip along" / "Send to a mom you know"
+  P4  assembled card → "Drop the recommendation" (sends "pass the tip along")
   →   saved to local_signals (tip_share); matcher pings neighbors asking for that category.
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from typing import Any
@@ -29,7 +30,12 @@ _CANCEL_RE = re.compile(
     r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
     re.IGNORECASE,
 )
-# The "Pass the tip along" CTA / any go-ahead to post it.
+# The ready card's post button. Its LABEL is "Drop the recommendation" (design ruling
+# 2026-09-08, shipped in the PWA 2026-09-09); what it SENDS is still the protocol utterance
+# "pass the tip along", which _PASS_RE below matches. Copy that tells someone which button
+# to tap names the label — the one on their screen (§35e).
+_POST_CTA = "Drop the recommendation"
+# The post button's utterance / any go-ahead to post it.
 _PASS_RE = re.compile(
     r"\b(pass (?:the )?tip|pass it along|post it|share it|list it|that'?s it|"
     r"go ahead|done|send it|share with (?:the |my )?communit(?:y|ies))\b",
@@ -73,6 +79,11 @@ Return ONE compact JSON object with exactly these keys:
                  asking this?", "why should i answer this", "what do you need that for?",
                  "is this necessary?", "who sees this?". A question back at you, not an
                  answer. Read the INTENT, not the wording — there is no list to match.
+    "new_subject" - they are swapping the recommendation in CURRENT TIP DRAFT for a
+                 DIFFERENT place, person or thing: "actually it's Canvas, the restaurant",
+                 "no wait, I meant the bakery on Main". Return the NEW one's name /
+                 category / reco_type. NOT a fuller or corrected name for the same one
+                 ("Dr. Sarah Lee" for "Dr. Sarah", a fixed spelling) — that is "answer".
     "off_topic"- neither: a remark about something else entirely.
   You are the only one who can call this, because you are the only one holding the question
   they were asked. Get it wrong towards "answer" and their question gets stored as their
@@ -237,7 +248,7 @@ def _extract_tip_fields(
                 if isinstance(v, str) and v.strip() and v.strip().lower() != "null"
             }
         role = str(data.get("reply_role") or "").strip().lower()
-        if role in ("answer", "asks_why", "off_topic"):
+        if role in ("answer", "asks_why", "off_topic", "new_subject"):
             out["reply_role"] = role
         weak = data.get("weak")
         if isinstance(weak, dict) and str(weak.get("field") or "").strip():
@@ -882,11 +893,78 @@ def resolve_community(
         draft["circle_name"] = (active_community(session_ctx) or {}).get("name")
 
 
+def rearm_posted_tip(session_ctx: dict[str, Any], signal_id: str) -> bool:
+    """Re-open the recommendation this session posted as `signal_id`, for correction in the
+    conversation (§44). False when the session holds no such posted draft.
+
+    Posting is terminal: it nulls `tip_share_active` / `tip_ready`, so a `fix:<field>` from
+    the live card used to fall out of the lane entirely — and a re-armed lane would have
+    walked the set and `_save_tip`ed a SECOND row. `edit_signal_id` on the draft is what
+    turns the next post into an update of this one (see `_update_posted_tip`). Only the
+    draft this session posted can be re-armed: the id is matched against the draft, never
+    trusted on its own, so this cannot reach someone else's row (and set_signal_reco is
+    owner-scoped regardless)."""
+    draft = session_ctx.get("tip_draft")
+    if not isinstance(draft, dict) or not signal_id:
+        return False
+    posted = str(draft.get("signal_id") or "").strip()
+    if posted != signal_id or not (draft.get("listed") or draft.get("edit_signal_id")):
+        return False
+    draft = dict(draft)
+    draft["edit_signal_id"] = signal_id
+    draft["ready"] = True
+    session_ctx["tip_draft"] = draft
+    session_ctx["tip_share_active"] = True
+    session_ctx["tip_ready"] = True
+    session_ctx["tip_turns"] = 0
+    session_ctx["tip_pending_ask"] = None
+    session_ctx["tip_pending_question"] = None
+    session_ctx["tip_fork_pending"] = None
+    return True
+
+
+def _update_posted_tip(
+    *, draft: dict[str, Any], user_jwt: str, signal_id: str
+) -> tuple[dict[str, Any] | None, str]:
+    """The post of a re-armed recommendation (§44): the card fields written onto the SAME
+    row through the owner-scoped set_signal_reco, never a second save_local_signal.
+
+    What it does not touch: matching (the row already ran it when it posted), the community
+    tag and the subject grounding (both keyed to the row, which has not moved), and
+    `detail_text` — set_signal_reco has no writer for it, and every reader renders
+    `reco_fields` first and keeps detail_text as the legacy fallback."""
+    try:
+        from app.local_signals import reco_subject_key
+        from app.supabase_rpc import call_rpc
+
+        call_rpc(
+            user_jwt,
+            "set_signal_reco",
+            {
+                "p_signal_id": signal_id,
+                "p_reco_type": draft.get("reco_type") or "other",
+                "p_reco_fields": _reco_fields(draft),
+                "p_reco_subject": reco_subject_key(str(draft.get("name") or "").strip() or None),
+                "p_reco_name": str(draft.get("name") or "").strip() or None,
+                "p_reco_place": str(draft.get("locality") or "").strip() or None,
+                "p_reco_description": _description(draft),
+            },
+        )
+        return {"signal_id": signal_id, "matches_created": 0, "updated": True}, ""
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("tip_share_update_failed signal=%s", signal_id)
+        return None, str(getattr(exc, "detail", "") or exc).lower()
+
+
 def _save_tip(
     *, draft: dict[str, Any], user_jwt: str, block_id: str | None, zip_code: str | None
 ) -> tuple[dict[str, Any] | None, str]:
     """(saved_row, error_detail). The reason comes back so the caller can recover from the
     one failure that is fixable in-turn (block_required) instead of just apologising."""
+    edit_id = str(draft.get("edit_signal_id") or "").strip()
+    if edit_id:
+        # A recommendation re-opened from its live card (§44): update it, never re-insert.
+        return _update_posted_tip(draft=draft, user_jwt=user_jwt, signal_id=edit_id)
     try:
         from app.local_signals import save_local_signal, tag_local_signal
         from app.tip_tags import tags_for_tip
@@ -1024,6 +1102,32 @@ def _reply_is_an_offered_option(message: str, session_ctx: dict[str, Any]) -> bo
 # step's "Everyone nearby" opt-out — an offered label, not an intent guess.
 _SKIP_CHIP = "Skip that one"
 
+# C-4-EVENT-P1B-FORK — "How should we take it down?" asked as its OWN turn, the first step
+# held back (§35a). The client's two-card chooser (CaptureFork) answers it: "Flip through
+# cards" opens the carousel locally and sends nothing; "Just chat with me" sends this label
+# verbatim (PWA messages captureFork.chat — protocol, English by rule), and the turn it
+# arrives on asks the set's first question. Anything else she says is taken as answering
+# aloud, which is the chat fork too.
+#
+# OFF BY DEFAULT (LANA_TIP_FORK): the fork turn carries ui_intent `collect_tip_fork`, which
+# the shipped client does not switch on yet — it keys the whole capture on
+# `collect_tip_detail` — so turning this on before the client consumes the intent would
+# blank the capture on the turn the set lands.
+_FORK_CHAT = "Just chat with me"
+
+
+def tip_fork_enabled() -> bool:
+    return os.environ.get("LANA_TIP_FORK", "0").strip().lower() not in {"", "0", "false", "off"}
+
+
+def _is_fork_pick(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """The fork's "Just chat with me", while the fork is the open question. A rendered
+    control sent verbatim — exact match, scoped to the turn after the fork was asked."""
+    msg = " ".join(str(message or "").split()).rstrip(".!")
+    return bool(session_ctx.get("tip_fork_pending")) and msg.casefold() == _FORK_CHAT.casefold()
+
 
 def _is_tip_share_answer(
     message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None"
@@ -1063,6 +1167,36 @@ def _is_tip_share_answer(
     )
 
 
+def _subject_moved(draft: dict[str, Any], found: dict[str, Any]) -> bool:
+    """Did this extraction land a different name or type than the draft holds? Data, not
+    intent: the extractor's reply_role decides that the user swapped subjects, this only
+    says whether the swap changed anything the question set was written for."""
+
+    def _norm(v: Any) -> str:
+        return " ".join(str(v or "").split()).casefold()
+
+    for key in ("name", "reco_type"):
+        new, old = _norm(found.get(key)), _norm(draft.get(key))
+        if new and old and new != old:
+            return True
+    return False
+
+
+# Kept across a subject swap: WHERE the recommendation goes is the user's pick, not a fact
+# about the old subject. Everything else on the draft was written for the old one.
+_SUBJECT_INDEPENDENT_KEYS = ("circle_place_id", "circle_picked", "circle_name")
+
+
+def _fresh_draft_for(draft: dict[str, Any]) -> dict[str, Any]:
+    """A new draft for a new subject (§35h): no question set, no answers, no trait, no
+    details, no pinned place — none of it was about this one. A new draft_id too, so the
+    client treats it as the new recommendation it is (its cards-or-chat pick and the
+    read-back are keyed on the draft, not on the words)."""
+    fresh = {k: draft[k] for k in _SUBJECT_INDEPENDENT_KEYS if k in draft}
+    fresh["draft_id"] = uuid.uuid4().hex[:12]
+    return fresh
+
+
 def _pending_step(session_ctx: dict[str, Any]) -> dict[str, Any] | None:
     """The step whose question the previous turn asked, or None."""
     field = str(session_ctx.get("tip_pending_ask") or "")
@@ -1092,6 +1226,62 @@ def _is_offered_chip(
     return bool(_pending_step(session_ctx)) and msg.casefold() == _SKIP_CHIP.casefold()
 
 
+def _is_carousel_handoff(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """The carousel's own "Looks good", sent by the client right after /tip-setup stamped
+    the answers and `tip_ready` — the only thing that renders the ready card.
+
+    Read statelessly the classifier may call it goal=chat (or even an abandon), and the
+    lane then released and `reset_tip_share_state` threw away a carousel the user had just
+    filled in, `tip_ready` with it. The host flow never had this hole because
+    `_is_host_confirm` intercepts the same words ahead of any release check. Scoped to the
+    one state the client sends it in — a step set on the draft and `tip_ready` stamped —
+    and an exact match, so the same words typed anywhere else still reach the classifier."""
+    from app.lane_decision import is_setup_handoff
+
+    draft = session_ctx.get("tip_draft")
+    return (
+        isinstance(draft, dict)
+        and bool(draft.get("step_set"))
+        and bool(session_ctx.get("tip_ready"))
+        and is_setup_handoff(message)
+    )
+
+
+# The card's own correction chip: `fix:<field>`, a protocol utterance the client sends
+# from a tapped value on the draft / ready / live card (CaptureReadyCard onPick). Parsed,
+# not guessed — the same shape run_tip_share_turn has always parsed it with.
+_FIX_RE = re.compile(r"\s*fix:(\w+)\s*$")
+
+
+def _is_fix_chip(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """`fix:<field>` naming a field this draft actually has. Read statelessly "fix:ages"
+    means nothing to the classifier, and a re-armed correction (§44) has no question on
+    screen to hold the lane — so the tap that re-opens a step must not depend on the read."""
+    m = _FIX_RE.match(str(message or ""))
+    draft = session_ctx.get("tip_draft")
+    if not m or not isinstance(draft, dict):
+        return False
+    known = {s.get("field") for s in step_set_of(draft)} | set(_TIP_VALUE_FIELDS) | {"details"}
+    return m.group(1) in known
+
+
+def _is_rendered_control(
+    message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
+) -> bool:
+    """A control Lana's own UI rendered and sent verbatim — outranks the classifier,
+    abandon included. Each matcher is exact and scoped to the state that renders it."""
+    return (
+        _is_offered_chip(message, session_ctx, slots)
+        or _is_carousel_handoff(message, session_ctx, slots)
+        or _is_fork_pick(message, session_ctx, slots)
+        or _is_fix_chip(message, session_ctx, slots)
+    )
+
+
 def tip_share_should_release(
     message: str, session_ctx: dict[str, Any], slots: "dict[str, Any] | None" = None
 ) -> bool:
@@ -1112,7 +1302,7 @@ def tip_share_should_release(
         session_ctx,
         slots,
         is_valid_answer=_is_tip_share_answer,
-        is_offered_option=_is_offered_chip,
+        is_offered_option=_is_rendered_control,
     )
 
 
@@ -1127,6 +1317,7 @@ def reset_tip_share_state(session_ctx: dict[str, Any]) -> None:
         "tip_pending_question",
         "tip_asked_fields",
         "tip_need_zip",
+        "tip_fork_pending",
     ):
         session_ctx[k] = None
     session_ctx["tip_enrich_count"] = 0
@@ -1168,6 +1359,18 @@ def run_tip_share_turn(
     # cards-or-chat pick does not carry over.
     if not draft.get("draft_id"):
         draft["draft_id"] = uuid.uuid4().hex[:12]
+    # ── The fork (§35a) is answered by whatever comes next ──
+    # "Just chat with me" is a pick, not content: it is consumed here so nothing stamps it
+    # as an answer, and the walk below asks the first question the fork turn held back.
+    # Anything else is her answering aloud — the chat fork as well — and runs as usual.
+    if session_ctx.get("tip_fork_pending"):
+        if _is_fork_pick(msg, session_ctx):
+            msg = ""
+        session_ctx["tip_fork_pending"] = None
+    # The carousel's hand-off after /tip-setup (§35g) is a control, not a statement: the
+    # answers it stands for are already stamped, so the extractor is not asked to read
+    # "Looks good" as content — the turn goes straight to the ready card.
+    handoff = _is_carousel_handoff(msg, session_ctx)
     # Their own words, verbatim — what the "Help Lana learn more" round splits into
     # sections (app/aspect_round.py). The extracted trait keeps one clause ("shop is always
     # tidy") and drops the rest ("pricing is good", "Spanish"), and the card answers are the
@@ -1189,7 +1392,7 @@ def run_tip_share_turn(
     turns = int(session_ctx.get("tip_turns") or 0) + 1
     session_ctx["tip_turns"] = turns
     if _CANCEL_RE.search(msg) or turns > _TIP_TURN_CAP:
-        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_enrich_count", "tip_asked_fields", "tip_need_zip"):
+        for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_enrich_count", "tip_asked_fields", "tip_need_zip", "tip_fork_pending"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["routing_phase"] = "listening"
@@ -1221,7 +1424,7 @@ def run_tip_share_turn(
                 pass
             posting = True
 
-    # ── The "Pass the tip along" CTA on the ready card → save it ──
+    # ── The ready card's post button ("pass the tip along") → save it ──
     if session_ctx.get("tip_ready") and posting:
         saved, err = _save_tip(
             draft=draft, user_jwt=user_jwt, block_id=block_id, zip_code=zip_code
@@ -1261,7 +1464,7 @@ def run_tip_share_turn(
                     "tap anything again."
                     if no_area
                     else "The tip could not be posted. Say so plainly, tell them the card "
-                    "is still here, and ask them to tap **Pass the tip along** to try "
+                    f"is still here, and ask them to tap **{_POST_CTA}** to try "
                     "again (keep that button name verbatim, bolded)."
                 ),
                 facts=[
@@ -1278,10 +1481,10 @@ def run_tip_share_turn(
                     "away."
                     if no_area
                     else "I couldn't post that just now — the card is still here, tap "
-                    "**Pass the tip along** to try again."
+                    f"**{_POST_CTA}** to try again."
                 ),
             )
-        for k in ("tip_share_active", "tip_ready", "tip_pending_ask", "tip_pending_question"):
+        for k in ("tip_share_active", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_fork_pending"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
         session_ctx["tip_enrich_count"] = 0
@@ -1290,8 +1493,24 @@ def run_tip_share_turn(
         draft["signal_id"] = saved.get("signal_id")
         draft["listed"] = True
         draft["chips"] = _build_chips(draft)
+        # A correction of a recommendation already out (§44) ends here: same row, same
+        # signal_id, the card back to live. No new follow-up round — the first post had one.
+        edited = bool(draft.pop("edit_signal_id", None))
         session_ctx["tip_draft"] = draft
         session_ctx["tip_listed_now"] = True
+        if edited:
+            summary = _summary(draft)
+            return compose_reply(
+                goal=(
+                    "Confirm the user's correction is saved on the recommendation they "
+                    "already posted — the same post, now updated. One short line."
+                ),
+                facts=[
+                    f"The recommendation as it now reads: {summary}",
+                    "It was updated in place, not posted again",
+                ],
+                fallback=f"Updated — **{summary}** now reads the way you want it.",
+            )
         # "Help Lana learn more": one follow-up per thing they mentioned. Off unless
         # LANA_ASPECTS; a stale round from an earlier post never survives a new one.
         from app.aspect_round import CTX_KEY as _ASPECT_KEY, aspects_enabled, open_after_post
@@ -1330,7 +1549,7 @@ def run_tip_share_turn(
         )
 
     # ── Correction: chip tap "fix:<field>" → clear + re-ask that field ──
-    fix = re.match(r"\s*fix:(\w+)\s*$", msg)
+    fix = _FIX_RE.match(msg)
     if fix:
         field = fix.group(1)
         if field == "name":
@@ -1392,7 +1611,7 @@ def run_tip_share_turn(
 
     # ── Capture a pending enrichment / name answer into the right place ──
     pending = session_ctx.get("tip_pending_ask")
-    if pending and msg and not _PASS_RE.search(msg):
+    if pending and msg and not handoff and not _PASS_RE.search(msg):
         step_fields = {s["field"] for s in step_set_of(draft)}
         if pending in step_fields:
             draft["answers"] = {**(draft.get("answers") or {}), str(pending): msg}
@@ -1415,7 +1634,9 @@ def run_tip_share_turn(
     # What THIS message answered, kept apart from the running total — the nudge below has
     # to tell "answered nothing" from "answered four other steps".
     new_answers: dict[str, Any] = {}
-    if msg:
+    # Set when this message replaced the subject (§35h) — the set is rewritten below.
+    resubject = False
+    if msg and not handoff:
         # The offer that opened this lane carried its own subject — rapport offers to share
         # "your favorite bakery", the pipeline stamps it into slots["signal_detail"] and
         # calls it authoritative. This side never read it, so a user who had just named the
@@ -1445,6 +1666,31 @@ def run_tip_share_turn(
         merged_answers = {**(draft.get("answers") or {}), **new_answers}
         weak = found.pop("weak_answer", None)
         role = str(found.pop("reply_role", "") or "")
+        # ── A different recommendation altogether (§35h) ──
+        # The set is written once per recommendation, so "actually it's Canvas, the
+        # restaurant" merged onto Dr. Sarah's draft was answered with the dentist's
+        # questions, and the dentist's answers rode along into reco_fields. The extractor
+        # calls it (reply_role=new_subject — a different thing, not a fuller or corrected
+        # name for the same one); the draft says whether anything actually moved. Both,
+        # because a type that flickers between two reads at temperature 0.2 must not wipe
+        # a half-answered set, and a "new subject" that names the same thing is a no-op.
+        if role == "new_subject" and draft.get("step_set") and _subject_moved(draft, found):
+            resubject = True
+            draft = _fresh_draft_for(draft)
+            new_answers = {}
+            merged_answers = {}
+            weak = None
+            for k in (
+                "tip_pending_ask",
+                "tip_pending_question",
+                "tip_asked_fields",
+                "tip_reasked_fields",
+                "tip_ready",
+            ):
+                session_ctx[k] = None
+            session_ctx["tip_enrich_count"] = 0
+            pending_step = None
+            draft["statement"] = msg[:1200]
         for k, v in found.items():
             draft[k] = v
         if merged_answers:
@@ -1501,7 +1747,7 @@ def run_tip_share_turn(
             facts=[
                 f"The question on screen: {pending_step['question']}",
                 f"The recommendation: {_summary(draft)}",
-                "Nothing they say here is shown to anyone until they tap Pass the tip along",
+                f"Nothing they say here is shown to anyone until they tap {_POST_CTA}",
                 ("This question is optional" if skippable else "This question is required"),
             ],
             fallback=(
@@ -1713,9 +1959,22 @@ def run_tip_share_turn(
     #
     # `steps_raw` is whatever the extractor proposed; validate_steps is what makes it
     # askable, and falls back to the type's static set when there is nothing usable. ──
+    # Whether THIS turn wrote the set — the turn the fork question belongs to (§35a).
+    set_written_now = False
     if reco_type and _has(draft, "name") and not draft.get("step_set"):
+        steps_raw = draft.pop("steps_raw", None)
+        if steps_raw is None and resubject and msg:
+            # The extraction that saw the swap ran against the OLD set, so it was not asked
+            # to write one. Ask again now that the draft has none: same message, so the
+            # new set is written about the new subject rather than falling back to the
+            # type's generic table.
+            fresh, _ = _extract_tip_fields(
+                history=history, user_message=msg, prev=draft, lang=lang
+            )
+            steps_raw = fresh.get("steps_raw")
+        set_written_now = True
         built = validate_steps(
-            draft.pop("steps_raw", None),
+            steps_raw,
             reco_type,
             tallies=_reco_tallies(
                 user_jwt=user_jwt, block_id=block_id, name=draft.get("name")
@@ -1777,6 +2036,39 @@ def run_tip_share_turn(
         step = None if done_early else next_question(
             step_set, draft.get("answers"), asked=asked
         )
+        if step and set_written_now and tip_fork_enabled():
+            # ── C-4-EVENT-P1B-FORK: the fork is what Lana asks on the turn the set lands
+            # (§35a). The first step is held back — not stamped as asked, not pending — so
+            # the client can open either fork from this one response (`steps` is already
+            # on the draft) and the screen never carries the fork's title and a "(1/8)"
+            # question at once. The next message answers the fork; see `_is_fork_pick`.
+            fork_q = "How should we take it down?"
+            draft["chips"] = chips
+            draft["suggestions"] = []
+            session_ctx["tip_fork_pending"] = True
+            session_ctx["tip_draft"] = draft
+            session_ctx["tip_share_active"] = True
+            session_ctx["tip_pending_question"] = fork_q
+            session_ctx["routing_phase"] = "listening"
+            summary = _summary(draft)
+            return compose_reply(
+                goal=(
+                    "You have heard the recommendation and written the questions for it. "
+                    "Name it back in a few words, then ask how they would like to go "
+                    "through it: flip through the questions as cards, or just chat it "
+                    "through with you. One or two short lines. Do NOT ask any of the "
+                    "questions yet — the choice is the only question on this turn."
+                ),
+                facts=[
+                    f"The recommendation: {summary}",
+                    f"{len(steps)} short questions are ready",
+                    "Same recommendation either way — it is only how they answer",
+                ],
+                fallback=(
+                    f"Got it — **{summary}**. How should we take it down: flip through "
+                    "cards, or just chat with me?"
+                ),
+            )
         if step:
             asked.add(step["field"])
             session_ctx["tip_asked_fields"] = list(asked)
@@ -1858,7 +2150,7 @@ def run_tip_share_turn(
                 if circle
                 else "a neighbor asks, "
             )
-            + "and prompt them to tap **Pass the tip along** (keep that button "
+            + f"and prompt them to tap **{_POST_CTA}** (keep that button "
             "name verbatim, bolded) to post it, or send it to a neighbor they know."
         ),
         facts=[f"Tip ready: {summary}"]
@@ -1866,9 +2158,9 @@ def run_tip_share_turn(
         fallback=(
             f"Got it — **{summary}**. I'll pass it on when a neighbor asks. "
             + (
-                f"**Pass the tip along** to post it for {circle} — it stays inside {circle}."
+                f"**{_POST_CTA}** to post it for {circle} — it stays inside {circle}."
                 if circle
-                else "**Pass the tip along** to post it for your neighbors, or send it to "
+                else f"**{_POST_CTA}** to post it for your neighbors, or send it to "
                 "a neighbor you know."
             )
         ),

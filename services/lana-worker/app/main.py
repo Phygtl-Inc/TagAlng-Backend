@@ -2970,7 +2970,15 @@ def set_tip_setup(
         raise HTTPException(status_code=409, detail="no_tip_draft")
 
     from app.reco_question_sets import missing_required
-    from app.tip_share import judge_answers, step_set_of
+    from app.tip_share import judge_answers, rearm_posted_tip, step_set_of
+
+    # §44 — correct a recommendation posted earlier in THIS conversation. Re-arms the
+    # capture on the posted draft, so the next `fix:<field>` is a capture turn and the post
+    # after it updates the same row.
+    if (body.signal_id or "").strip():
+        if not rearm_posted_tip(ctx, str(body.signal_id).strip()):
+            raise HTTPException(status_code=409, detail="signal_not_in_session")
+        draft = dict(ctx.get("tip_draft") or {})
 
     def _community_name_for(place_id: str) -> str | None:
         from app.tip_share import my_communities
