@@ -444,7 +444,8 @@ def _events_at_place(place_id: str, *, limit: int) -> list[dict]:
             if two_column
             else q.eq("place_ref", place_id)
         )
-        q = q.eq("status", "open").gte("starts_at", _now_iso())
+        # §29: an invite-only meet is never on a community's screen, cards or meets list.
+        q = q.eq("status", "open").eq("is_private", False).gte("starts_at", _now_iso())
         res = q.order("starts_at").limit(max(limit, 1)).execute()
         rows = res.data if isinstance(res.data, list) else []
     except Exception:

@@ -941,6 +941,10 @@ class EventDraft(BaseModel):
     # Join settings captured in the host flow.
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
     allow_attendee_share: bool | None = None
+    # Privacy card (§29): an invite-only meet — kept out of every discovery read and
+    # reachable only by its /meet/{id} link. NOT allow_attendee_share: a private meet's
+    # attendees may still be allowed to forward the invite. None on a legacy draft.
+    is_private: bool | None = None
     # Items attendees should bring (the 4/4 quick-setup card) → the meet's pinned list.
     bring_items: list[str] = Field(default_factory=list)
     # AI-picked emoji cover (☕🎨⚽…) — the card's visual when there's no cover image.
@@ -1192,6 +1196,8 @@ class EventSetupRequest(BaseModel):
     max_attendees: int | None = None  # None = no limit
     auto_approve: bool | None = None  # True = anyone joins; False = host approves each
     allow_attendee_share: bool | None = None
+    # Privacy card (§29). Independent of allow_attendee_share. None = leave as drafted.
+    is_private: bool | None = None
     bring_items: list[str] = Field(default_factory=list)
     # Community card: the place id of the community picked in the dropdown, or None for
     # "None" (just the host's own meet). Members are emailed at publish.

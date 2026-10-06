@@ -125,6 +125,7 @@ def community_events(
                 "recurrence, circle_place_ref, place_ref, description"
             )
             .eq("status", "open")
+            .eq("is_private", False)  # §29: invite-only meets never list on a community
             .gte("starts_at", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
             .or_(f"circle_place_ref.eq.{place_id},place_ref.eq.{place_id}")
             .order("starts_at")

@@ -109,12 +109,18 @@ def stamp_event_community(
     # just to learn the date is an invite most people never open.
     row = (
         sb.table("events")
-        .select("starts_at,has_time,venue_name,cover_emoji")
+        .select("starts_at,has_time,venue_name,cover_emoji,is_private")
         .eq("id", event_id)
         .limit(1)
         .execute()
     )
     event = (row.data or [{}])[0] or {}
+    # §29: a private meet is still FOR its community (the tag above stays — the host's
+    # own cards name it), but announcing it to every member is exactly the disclosure
+    # the host turned off. The invite link is how it travels.
+    if event.get("is_private"):
+        logger.info("event_community.skip_mail event=%s reason=private", event_id)
+        return 0
     when = _when_line(event.get("starts_at"), bool(event.get("has_time")))
     where = str(event.get("venue_name") or "").strip()
     from app.i18n import t
