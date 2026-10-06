@@ -1052,6 +1052,15 @@ class TipDraft(BaseModel):
     circle_name: str | None = None
 
 
+class HandleOffer(BaseModel):
+    """A short link the creator of a just-published community may claim
+    (get.lana.help/{suggestion}). Eligibility is SQL's call (community_handle_offer_for,
+    20270108120000); the PWA renders this and makes the claim itself."""
+
+    place_id: str
+    suggestion: str
+
+
 class CommunityDraft(BaseModel):
     """In-chat "create a community" draft (the community_capture flow).
 
@@ -1079,6 +1088,8 @@ class CommunityDraft(BaseModel):
     ready: bool = False
     published: bool = False
     community_id: str | None = None
+    # Set once published, only when this user may claim the community's first handle.
+    handle_offer: HandleOffer | None = None
     missing: list[str] = Field(default_factory=list)
     # Which step the chat fork is asking right now — the FE renders that step's `kind`
     # (a `place` step gets the picker). None on the ready card: nothing is open.
