@@ -1014,6 +1014,17 @@ def run_community_capture_turn(
     fix = re.match(r"\s*fix:(\w+)\s*$", msg)
     if fix:
         field = fix.group(1)
+        if field in ("handle", "hq"):
+            # The two closing steps: tapping the link or the city on the ready card reopens
+            # just that step; whatever else is set stays (2026-10-06).
+            if field == "handle":
+                for k in ("handle", "handle_error", "_link_settled"):
+                    draft.pop(k, None)
+            else:
+                for k in ("hq_city", "hq_lat", "hq_lng"):
+                    draft.pop(k, None)
+            draft["ready"] = False
+            return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id)
         if field == "name":
             # The name IS the subject step (a pinned place), same as the tip capture.
             field = COMMUNITY_SUBJECT_FIELD

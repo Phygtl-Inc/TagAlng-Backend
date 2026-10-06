@@ -187,3 +187,27 @@ def test_the_pipeline_runs_the_gate_before_starting_a_capture() -> None:
     gate = src.index("gated = _community_create_verify_gate(")
     start = src.index('session_ctx["community_create_active"] = True', gate)
     assert gate < start
+
+
+def test_tapping_the_link_on_the_ready_card_reopens_only_that_step(monkeypatch: Any) -> None:
+    _patches(monkeypatch, checks=[
+        {"status": "invalid", "reason": "empty", "suggestions": ["rosettasbakery"]},
+    ])
+    ctx: dict[str, Any] = {"community_create_active": True, "community_ready": True,
+                           "community_draft": _draft(hq_city="Orlando, FL",
+                                                     handle="rosettasbakery", ready=True)}
+    _turn("fix:handle", ctx)
+    d = ctx["community_draft"]
+    assert ctx["community_pending_ask"] == "handle" and not ctx.get("community_ready")
+    assert d.get("handle") is None and d["hq_city"] == "Orlando, FL"
+
+
+def test_tapping_the_city_reopens_the_city_and_keeps_the_link(monkeypatch: Any) -> None:
+    _patches(monkeypatch, checks=[])
+    ctx: dict[str, Any] = {"community_create_active": True, "community_ready": True,
+                           "community_draft": _draft(hq_city="Orlando, FL",
+                                                     handle="rosettasbakery", ready=True)}
+    _turn("fix:hq", ctx)
+    d = ctx["community_draft"]
+    assert ctx["community_pending_ask"] == "hq" and d.get("hq_city") is None
+    assert d["handle"] == "rosettasbakery"
