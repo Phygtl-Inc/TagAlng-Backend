@@ -113,7 +113,7 @@ def _resolve_rec_target(user_id: str, rec_id: str) -> dict[str, Any]:
 
 def _viewer_fit_line(user_id: str, event_id: str) -> str:
     """The "why Lana sees a fit" line this viewer was shown for this meet (§50(b)), from
-    event_fit_lines (20270110120001) — newest first, since a new overlap authors a new
+    event_fit_lines (20270110130001) — newest first, since a new overlap authors a new
     row. "" when none was ever authored for them, or the read fails."""
     try:
         res = (

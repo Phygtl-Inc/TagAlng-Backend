@@ -199,7 +199,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_event_preview -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
+-- get_event_preview -- body verbatim from 20270110130000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_event_preview(
   p_event_id uuid,
@@ -330,7 +330,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_event_preview_authed -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
+-- get_event_preview_authed -- body verbatim from 20270110130000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_event_preview_authed(
   p_event_id uuid,
@@ -653,7 +653,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_nearby_activities_authed -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
+-- get_nearby_activities_authed -- body verbatim from 20270110130000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_nearby_activities_authed(
   p_lat double precision default null,
@@ -1307,7 +1307,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_peer_profile -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
+-- get_peer_profile -- body verbatim from 20270110130000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_peer_profile(p_user_id uuid)
 returns jsonb

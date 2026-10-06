@@ -3,7 +3,7 @@
 The map draws a meet's fit three ways and they must never disagree: the marker's meter
 (`fit_score`), the card's chips (`affinity_matched_tags`) and the card's sentence
 (`rec_line`). All three come from ONE intersection — public.event_viewer_fit
-(20270110120000), the viewer's public claims against the meet's cohort_tags — which the
+(20270110130000), the viewer's public claims against the meet's cohort_tags — which the
 radius read (get_nearby_activities_authed) and the preview (get_event_preview_authed)
 call in SQL and this module reads for the meets the worker lists itself
 (/lana/circles/profile's upcoming_events) through score_events_fit_for_user.
