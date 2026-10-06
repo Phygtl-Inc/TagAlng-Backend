@@ -942,7 +942,10 @@ def _update_posted_tip(
             "set_signal_reco",
             {
                 "p_signal_id": signal_id,
-                "p_reco_type": draft.get("reco_type") or "other",
+                # An edit KEEPS the row's type when the draft has none: the RPC reads
+                # null as "leave it" (coalesce), whereas the capture-time 'other' floor
+                # here overwrote a real type ('restaurant') with 'other' on every re-post.
+                "p_reco_type": draft.get("reco_type") or None,
                 "p_reco_fields": _reco_fields(draft),
                 "p_reco_subject": reco_subject_key(str(draft.get("name") or "").strip() or None),
                 "p_reco_name": str(draft.get("name") or "").strip() or None,

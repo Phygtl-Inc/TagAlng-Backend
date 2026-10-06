@@ -126,5 +126,50 @@ class TestGoingRostersReadTheRealColumn(unittest.TestCase):
         self.assertIn(("eq", ("rsvp_status", "going")), q.calls)
 
 
+class TestRecoTypeOtherIsWritable(unittest.TestCase):
+    """reco_type 'other': set_signal_reco accepted it, the table CHECK did not (23514 →
+    /lana/tips/update 502, and a capture silently lost every reco_* field)."""
+
+    @staticmethod
+    def _sets() -> tuple[set[str], set[str]]:
+        import pathlib
+        import re
+
+        mig = pathlib.Path(__file__).resolve().parents[3] / "supabase" / "migrations"
+        table: set[str] = set()
+        rpc: set[str] = set()
+        for f in sorted(mig.glob("*.sql")):
+            sql = f.read_text()
+            for m in re.finditer(r"check \(reco_type is null or reco_type in \((.*?)\)\)", sql, re.S):
+                table = set(re.findall(r"'(\w+)'", m.group(1)))
+            if "function public.set_signal_reco(" in sql:
+                m = re.search(r"p_reco_type not in \((.*?)\)", sql, re.S)
+                if m:
+                    rpc = set(re.findall(r"'(\w+)'", m.group(1)))
+        return table, rpc
+
+    def test_table_check_accepts_everything_the_writer_accepts(self) -> None:
+        table, rpc = self._sets()
+        self.assertIn("other", rpc)
+        self.assertIn("other", table)
+        self.assertEqual(table, rpc)
+
+    def test_chat_edit_keeps_the_rows_type_when_the_draft_has_none(self) -> None:
+        from app import tip_share
+
+        seen = {}
+
+        def _rpc(jwt, name, payload):
+            seen[name] = payload
+
+        with patch("app.supabase_rpc.call_rpc", side_effect=_rpc):
+            tip_share._update_posted_tip(draft={"name": "Canvas"}, user_jwt="j", signal_id="s1")
+            self.assertIsNone(seen["set_signal_reco"]["p_reco_type"])  # null = leave it
+            tip_share._update_posted_tip(
+                draft={"name": "Canvas", "reco_type": "restaurant"}, user_jwt="j", signal_id="s1"
+            )
+            self.assertEqual(seen["set_signal_reco"]["p_reco_type"], "restaurant")
+
+
 if __name__ == "__main__":
     unittest.main()
