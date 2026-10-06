@@ -612,6 +612,7 @@ def _compose_empty_seek_offer(
     area: str | None = None,
     stretch: StretchCandidate | None = None,
     far_lead: dict[str, Any] | None = None,
+    place: str | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -653,6 +654,13 @@ def _compose_empty_seek_offer(
             if interest
             else t("browse.empty_community_generic", lang, community=community)
         )
+    elif place and not far_lead:
+        # They asked about a town that is not where they are: "near you" would be false.
+        fallback = (
+            t("browse.empty_place_interest", lang, interest=interest, place=place)
+            if interest
+            else t("browse.empty_place_generic", lang, place=place)
+        )
     elif far_lead:
         # Real matches farther away, shown as cards; the closest is named with its
         # distance and the only pill is "listen" (Tommaso, 2026-10-06).
@@ -690,6 +698,8 @@ def _compose_empty_seek_offer(
         where = (
             f"{community} (the community filter they have selected)"
             if community
+            else f"{place} (a town they asked about, not where they are)"
+            if place
             else "their area"
         )
         # Did we actually look past `where`? Only the far probe does. Claiming "nothing
@@ -1763,6 +1773,45 @@ def run_activity_browse_turn(
     # asking for one here would gate a question she already scoped herself.
     comm = active_community(session_ctx)
 
+    # Travel: a town they asked to search that is not where they are ("language events in
+    # San Jose"; Tommaso, 2026-10-06). Searched for THIS browse only — never written to their
+    # home or the session's preview area, unlike a ZIP they give as their own.
+    from app.discovery_slots import slots_search_place
+
+    place_ask = None if comm else slots_search_place(slots)
+    if place_ask:
+        from app.search_place import resolve_search_place
+
+        got = resolve_search_place(place_ask)
+        block = None
+        if got and got.get("zip5"):
+            block, _status = resolve_zip_coverage(user_jwt, str(got["zip5"]))
+        if block and block.get("block_id"):
+            draft["_area_block_id"] = str(block["block_id"])
+            draft["_place_name"] = str(got["label"])
+        else:
+            draft["_place_name"] = None
+            session_ctx["browse_draft"] = draft
+            session_ctx["routing_phase"] = "listening"
+            from app.reply_compose import compose_reply
+
+            where = str((got or {}).get("label") or place_ask)
+            return compose_reply(
+                goal=(
+                    f"They asked what is on in {where}. You cannot search there yet — Lana "
+                    "is live in the US only for now (or the place could not be found). Say "
+                    "that plainly in one line, then offer to look near them instead."
+                ),
+                facts=[f"The place they asked about: {where}", f"What they asked: {msg[:120]}"],
+                fallback=(
+                    f"I can't search {where} yet — I'm only in the US for now. Want me to "
+                    "look near you instead?"
+                ),
+                session_ctx=session_ctx,
+                user_message=msg,
+            )
+    place_name = None if comm else (str(draft.get("_place_name") or "").strip() or None)
+
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
     # (session preview_block_id, or a pending out-of-coverage ZIP) counts, not just the
     # persisted profile block. Ask in-flow rather than dead-ending when none is known.
@@ -1918,6 +1967,7 @@ def run_activity_browse_turn(
             community=_community_name(comm),
             area=draft.get("_area_offer_name"),
             far_lead=draft.get("_far_lead") if far_cards else None,
+            place=place_name,
         )
 
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
@@ -2023,6 +2073,9 @@ def run_activity_browse_turn(
     }
     session_ctx["routing_phase"] = "listening"
     return _format_browse_message(
-        matched, label, phone_verified=phone_verified, lang=lang, far_miles=far_miles,
-        community=_community_name(comm) if comm else None,
+        matched, label, phone_verified=phone_verified, lang=lang,
+        # A town they asked about heads its own list ("…in San Jose"), never a distance
+        # from home and never "near you".
+        far_miles=None if place_name else far_miles,
+        community=_community_name(comm) if comm else place_name,
     )

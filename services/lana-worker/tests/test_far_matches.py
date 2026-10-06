@@ -134,3 +134,90 @@ def test_the_far_probe_reads_a_full_page() -> None:
          mock.patch("app.supabase_rpc.call_rpc", return_value=[]) as rpc:
         dr.activities_beyond_radius("jwt", "b-home")
     assert rpc.call_args.args[2]["p_limit"] == 50
+
+
+# ── Travel: search a town that is not where they are ─────────────────────────────────
+
+
+def test_the_place_slot_is_read_from_the_ai() -> None:
+    from app.discovery_slots import slots_search_place
+
+    assert slots_search_place({"search_place": " San Jose "}) == "San Jose"
+    assert slots_search_place({"search_place": None}) is None
+
+
+def test_a_us_city_resolves_to_its_zip_and_abroad_does_not() -> None:
+    from app import search_place as sp
+
+    with mock.patch("app.community_hq.geocode_city",
+                    return_value={"city": "San Jose, CA", "lat": 37.3, "lng": -121.9}), \
+         mock.patch.object(sp, "_postal_code_at", return_value=("95113", "US")):
+        assert sp.resolve_search_place("San Jose") == {"label": "San Jose, CA", "zip5": "95113"}
+    with mock.patch("app.community_hq.geocode_city",
+                    return_value={"city": "Lisbon, Portugal", "lat": 38.7, "lng": -9.1}), \
+         mock.patch.object(sp, "_postal_code_at", return_value=("11000", "PT")):
+        assert sp.resolve_search_place("Lisbon")["zip5"] is None
+    with mock.patch("app.community_hq.geocode_city", return_value=None):
+        assert sp.resolve_search_place("asdfgh") is None
+
+
+def _travel_turn(*, place: dict | None, events: list[dict], block: dict | None = None,
+                 ctx: dict | None = None) -> tuple[str, dict, mock.Mock, mock.Mock]:
+    ctx = ctx if ctx is not None else {"activity_browse_active": True,
+                                       "browse_draft": {"_asked": True},
+                                       "phone_verified": True}
+    fetch = mock.Mock(return_value=list(events))
+    assign = mock.Mock()
+
+    def filt(rows: list[dict], q: str) -> tuple[list[dict], str]:
+        for r in rows:
+            r["topic_score"] = 1.0
+        return list(rows), "language exchange"
+
+    with mock.patch("app.search_place.resolve_search_place", return_value=place), \
+         mock.patch("app.discovery_route.resolve_zip_coverage",
+                    return_value=(block, "covered")), \
+         mock.patch.object(ab, "_fetch_block_events", fetch), \
+         mock.patch.object(ab, "_fetch_admitted_events", return_value=None, create=True), \
+         mock.patch.object(ab, "_filter_events_by_query", side_effect=filt), \
+         mock.patch.object(ab, "_zip_gate_frame", return_value=None), \
+         mock.patch.object(ab, "_far_offer", return_value=([], "", [])), \
+         mock.patch("app.discovery_route._try_assign_home_block", assign), \
+         mock.patch("app.lana_paths.stretch_offer_enabled", return_value=False), \
+         mock.patch("app.orchestrator.llm.llm_configured", return_value=False), \
+         mock.patch("app.reply_compose.compose_reply",
+                    side_effect=lambda *, goal, facts, fallback, **k: fallback):
+        reply = ab.run_activity_browse_turn(
+            user_message="language events in San Jose", session_ctx=ctx, history=[],
+            user_jwt="jwt", home_block_id="b-home", slots={"search_place": "San Jose"},
+        )
+    return reply, ctx, fetch, assign
+
+
+def test_a_town_they_ask_about_is_searched_there_not_at_home() -> None:
+    ev = {"id": "e1", "title": "Language Exchange Club", "distance_meters": 800.0}
+    reply, ctx, fetch, assign = _travel_turn(
+        place={"label": "San Jose, CA", "zip5": "95113"}, events=[ev],
+        block={"block_id": "b-sanjose", "display_name": "San Jose"},
+    )
+    assert fetch.call_args.args[1] == "b-sanjose"
+    assert "in San Jose, CA" in reply and "near you" not in reply
+    # Travel never moves their home, or the session's own area.
+    assign.assert_not_called()
+    assert ctx.get("preview_block_id") is None
+
+
+def test_nothing_there_says_there_not_near_you() -> None:
+    reply, _ctx, _f, _a = _travel_turn(
+        place={"label": "San Jose, CA", "zip5": "95113"}, events=[],
+        block={"block_id": "b-sanjose", "display_name": "San Jose"},
+    )
+    assert "in San Jose, CA" in reply and "near you" not in reply
+
+
+def test_a_place_outside_the_us_is_said_plainly_and_home_is_not_searched() -> None:
+    reply, _ctx, fetch, _a = _travel_turn(
+        place={"label": "Lisbon, Portugal", "zip5": None}, events=[], block=None,
+    )
+    assert "Lisbon, Portugal" in reply and "only in the US" in reply
+    fetch.assert_not_called()
