@@ -1413,6 +1413,11 @@ class CreateSessionResponse(BaseModel):
     # device-locale seed when nothing is saved) — the FE mirrors its UI locale
     # to it when the code is one it supports (en/es/pt). None = no signal yet.
     preferred_language: str | None = None
+    # Session-open only (§21). resumed: this call returned an existing session rather
+    # than creating one. user_turn_count: how many user messages the session holds —
+    # 0 is a greeting nobody has answered yet; anything else is a thread in progress.
+    resumed: bool = False
+    user_turn_count: int = 0
     phone_verified: bool = False
     home_block_assigned: bool = False
     onboarding_step: str | None = None

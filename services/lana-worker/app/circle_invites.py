@@ -182,6 +182,7 @@ def self_confirm(
     *,
     circle_type: str,
     detail: str | None = None,
+    membership: str | None = None,
 ) -> dict[str, Any]:
     """The joiner says yes to "are you part of a <type> community nearby?" —
     writes HER OWN ungrounded affiliation (source='invite_confirmed', invited_by =
@@ -200,6 +201,10 @@ def self_confirm(
         detail=detail,
         source="invite_confirmed",
         invited_by=str(invite["owner_user_id"]),
+        # One candidate per INVITE, not per kind (§28(c)); the membership answer rides
+        # the candidate until she pins a place (§23).
+        invite_id=str(invite.get("id") or "") or None,
+        membership=membership,
     )
 
 
