@@ -1,4 +1,4 @@
--- 20270109120000_communities_anywhere_and_hq · behaviour checks
+-- 20270109120000_communities_anywhere_and_hq + 20270110120000 (own words only) · checks
 --
 -- Local validation container only (never dev/prod); one transaction, rolled back.
 --   psql -h 127.0.0.1 -p 55432 -U supabase_admin -d postgres -v ON_ERROR_STOP=1 \
@@ -28,7 +28,7 @@ values ('00000000-0000-0000-0000-0000000000f3', 'creator:empty-pods', 'Empty Pod
 insert into public.places (id, google_place_id, name, place_type, lat, lng, zip, address)
 values ('00000000-0000-0000-0000-0000000000f4', 'gp-sjsu-2', 'San Jose State University',
         'school', 37.335, -121.881, '95192', '1 Washington Sq, San Jose, CA 95192, USA');
--- Placeless, matched only through what its member says about themselves.
+-- Placeless, NOT about podcasts — but its member calls themselves a podcaster.
 insert into public.places (id, google_place_id, name, created_by)
 values ('00000000-0000-0000-0000-0000000000f5', 'creator:mic-check', 'Mic Check Crew',
         '00000000-0000-0000-0000-0000000000e3');
@@ -40,20 +40,12 @@ values
   ('00000000-0000-0000-0000-0000000000e3', 'school', 'sjsu',         'profile_add', 'confirmed', '00000000-0000-0000-0000-0000000000f4'),
   ('00000000-0000-0000-0000-0000000000e3', 'hobby',  'mic_check',    'profile_add', 'confirmed', '00000000-0000-0000-0000-0000000000f5');
 
--- A one-hot embedding, so the "members" arm has an exact match to find.
-create temp table emb as
-select ('[' || array_to_string(array_fill(0::real, array[767]) || 1::real, ',') || ']')::extensions.vector(768) as v,
-       ('[' || 1::real || ',' || array_to_string(array_fill(0::real, array[767]), ',') || ']')::extensions.vector(768) as other;
-
+-- One member's public claim says "Podcaster". That must never make their communities
+-- podcast communities (prod 2026-10-06: Gym Fans answered "any communities for podcasters?").
 insert into public.user_identity_claims (user_id, concept, label, confidence, disclosure,
-                                         subject_kind, transient, embedding)
-select '00000000-0000-0000-0000-0000000000e3', 'audio_storyteller', 'Records audio stories', 0.9,
-       'public', 'self', false, emb.v from emb;
--- The same person's PRIVATE claim must never be the reason a community answers.
-insert into public.user_identity_claims (user_id, concept, label, confidence, disclosure,
-                                         subject_kind, transient, embedding)
-select '00000000-0000-0000-0000-0000000000e3', 'secret_thing', 'Private thing', 0.9,
-       'mutual', 'self', false, emb.other from emb;
+                                         subject_kind, transient)
+values ('00000000-0000-0000-0000-0000000000e3', 'podcaster', 'Podcaster', 0.9,
+        'public', 'self', false);
 
 do $$
 declare
@@ -65,10 +57,7 @@ declare
   ids    uuid[];
   r      record;
   j      jsonb;
-  v      extensions.vector(768);
-  o      extensions.vector(768);
 begin
-  select emb.v, emb.other into v, o from emb;
 
   -- The podcasters ask finds the placeless community by its own words (stems + prefix).
   select array_agg(place_id) into ids
@@ -93,12 +82,11 @@ begin
                                               p_placeless_only => false);
   assert ids = array[sjsu], 'named lookup reaches SJSU: ' || coalesce(ids::text, 'none');
 
-  -- Members' public self-claims match; a private claim never does.
-  select * into r from public.discover_communities_anywhere(seeker, '', v);
-  assert r.place_id = '00000000-0000-0000-0000-0000000000f5' and r.matched_on = 'members'
-         and r.matched_label = 'Records audio stories', 'member claim match: ' || row_to_json(r)::text;
-  select array_agg(place_id) into ids from public.discover_communities_anywhere(seeker, '', o);
-  assert ids is null, 'private claim leaked a community: ' || coalesce(ids::text, '');
+  -- A member's hobby is not the community's topic: Mic Check Crew (whose member is a
+  -- "Podcaster") is never a podcast community. Podcast Club, about podcasts, is.
+  select array_agg(place_id) into ids
+    from public.discover_communities_anywhere(seeker, 'podcaster', p_placeless_only => false);
+  assert ids = array[club], 'member claim qualified a community: ' || coalesce(ids::text, 'none');
 
   -- is_member is the caller's own view.
   select * into r from public.discover_communities_anywhere(host, 'podcast');

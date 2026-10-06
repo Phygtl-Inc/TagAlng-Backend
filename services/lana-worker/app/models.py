@@ -698,6 +698,9 @@ class CommunityDiscoveryResponse(BaseModel):
     # The radius actually searched, in metres — so an empty list can be explained
     # ("nothing within ~5 miles") rather than looking like a bug.
     radius_meters: int = 0
+    # Set when the list answers "communities about <topic>" rather than "near you", so
+    # the card's heading says what it is (20270110120000). Null = the nearby list.
+    topic: str | None = None
 
 
 class TopicCommunityRow(BaseModel):
