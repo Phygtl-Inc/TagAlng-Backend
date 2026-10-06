@@ -111,18 +111,50 @@ def _resolve_rec_target(user_id: str, rec_id: str) -> dict[str, Any]:
     }
 
 
-def _event_snapshot(row: dict[str, Any]) -> str:
-    """The text a thumb on a meet card is about: its title plus the cohort it is for.
+def _viewer_fit_line(user_id: str, event_id: str) -> str:
+    """The "why Lana sees a fit" line this viewer was shown for this meet (§50(b)), from
+    event_fit_lines (20270110120001) — newest first, since a new overlap authors a new
+    row. "" when none was ever authored for them, or the read fails."""
+    try:
+        res = (
+            service_client()
+            .table("event_fit_lines")
+            .select("line, created_at")
+            .eq("user_id", user_id)
+            .eq("event_id", event_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — the title + tags snapshot still stands
+        logger.warning("feedback: fit-line read failed event=%s", event_id, exc_info=True)
+        return ""
+    row = (res.data or [None])[0] or {}
+    return " ".join(str(row.get("line") or "").split())
 
-    §51 names the meet's fit line (§50) first — but that line is composed per viewer and
-    not stored anywhere the worker can read back, so until it is persisted the honest
-    snapshot is what every viewer sees: the title and its cohort_tags."""
+
+def _event_snapshot(row: dict[str, Any], fit_line: str = "") -> str:
+    """The text a thumb on a meet card is about.
+
+    §51 names the meet's fit line (§50) first: the line the viewer was actually shown,
+    read back from its cache table, never from the client. A viewer who was never shown
+    one (no shared threads, compose failed) rated what every viewer sees: the title and
+    its cohort, by display label rather than taxonomy id."""
     title = str(row.get("title") or "").strip()
+    if fit_line:
+        return fit_line
     tags = [str(t).strip() for t in (row.get("cohort_tags") or []) if str(t or "").strip()]
+    if tags:
+        from app.context import cohort_tag_labels_for
+
+        try:
+            tags = [str(t) for t in cohort_tag_labels_for(tags) if str(t or "").strip()] or tags
+        except Exception:  # noqa: BLE001 — the raw ids are still the truth
+            logger.warning("feedback: cohort label lookup failed", exc_info=True)
     return f"{title} · {', '.join(tags)}" if tags else title
 
 
-def _resolve_event_target(event_id: str) -> dict[str, Any]:
+def _resolve_event_target(user_id: str, event_id: str) -> dict[str, Any]:
     """Load the rated meet. Any meet that exists is rateable: the snapshot is never echoed
     back to the caller, so there is nothing to disclose and no ownership to prove."""
     res = (
@@ -136,10 +168,14 @@ def _resolve_event_target(event_id: str) -> dict[str, Any]:
     row = (res.data or [None])[0]
     if not row:
         raise HTTPException(status_code=404, detail="event_not_found")
+    fit_line = _viewer_fit_line(user_id, event_id)
     return {
         "target_kind": "event",
         "event_id": event_id,
-        "snapshot": _event_snapshot(row)[:2000],
+        "snapshot": _event_snapshot(row, fit_line)[:2000],
+        # The fit line alone does not say WHICH meet; the title rides in context so it
+        # survives the event row being deleted (same as place_name).
+        "event_title": str(row.get("title") or "").strip() or None,
     }
 
 
@@ -210,7 +246,7 @@ def record_feedback(
         target = _resolve_rec_target(user_id, str(rec_id))
         match_col, match_val = "rec_id", str(rec_id)
     elif event_id:
-        target = _resolve_event_target(str(event_id))
+        target = _resolve_event_target(user_id, str(event_id))
         match_col, match_val = "event_id", str(event_id)
     elif place_id:
         target = _resolve_place_target(user_id, str(place_id))
@@ -247,6 +283,8 @@ def record_feedback(
         ctx.setdefault("peer_user_id", target["peer_user_id"])
     if target.get("place_name"):
         ctx.setdefault("place_name", target["place_name"])
+    if target.get("event_title"):
+        ctx.setdefault("event_title", target["event_title"])
     comment = (comment or "").strip()[:2000] or None
 
     if existing_row:

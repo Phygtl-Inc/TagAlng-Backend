@@ -49,6 +49,9 @@ class _Query:
     def limit(self, *a, **k):
         return self
 
+    def order(self, *a, **k):
+        return self
+
     def execute(self):
         if self._op == "select":
             return _Result(list(self.store["selects"].get(self.table, [])))
@@ -79,7 +82,7 @@ class _Supabase:
 
 def _store(
     messages=None, sessions=None, gaps=None, existing=None, recs=None,
-    events=None, places=None, members=None,
+    events=None, places=None, members=None, fit_lines=None,
 ):
     return {
         "selects": {
@@ -88,6 +91,7 @@ def _store(
             "rapport_gaps": gaps or [],
             "peer_rec_lines": recs or [],
             "events": events or [],
+            "event_fit_lines": fit_lines or [],
             "places": places or [],
             "rpc:visible_place_members": members or [],
             "lana_feedback": existing or [],
@@ -114,7 +118,12 @@ _PLACE = {"id": "pl1", "name": "Lake Nona Run Club"}
 
 class TestRecordFeedback(unittest.TestCase):
     def _run(self, store, **kwargs):
-        with patch.object(feedback, "service_client", return_value=_Supabase(store)):
+        with patch.object(feedback, "service_client", return_value=_Supabase(store)), patch(
+            "app.context.cohort_tag_labels_for",
+            side_effect=lambda tags: [
+                {"runners": "Runners", "early_risers": "Early risers"}.get(t, t) for t in tags
+            ],
+        ):
             return feedback.record_feedback("u1", **kwargs)
 
     def test_up_on_assistant_message_inserts_with_db_snapshot(self):
@@ -272,8 +281,22 @@ class TestRecordFeedback(unittest.TestCase):
         self.assertEqual(row["target_kind"], "event")
         self.assertEqual(row["event_id"], "e1")
         self.assertIsNone(row["place_id"])
-        self.assertEqual(row["content_snapshot"], "Saturday run club · runners, early_risers")
+        # Tag LABELS (cohorts.label), never the raw taxonomy ids.
+        self.assertEqual(row["content_snapshot"], "Saturday run club · Runners, Early risers")
         self.assertEqual(row["context"]["surface"], "map_peek_meet")
+        self.assertEqual(row["context"]["event_title"], "Saturday run club")
+
+    def test_thumb_on_meet_snapshots_the_viewers_fit_line_when_one_was_shown(self):
+        # §51 → §50(b): the line the card showed this viewer, read from event_fit_lines.
+        line = "You're into early runs, and this one starts at sunrise by the lake."
+        store = _store(events=[_EVENT], fit_lines=[{"line": line}])
+        self._run(store, rating="up", event_id="e1")
+        (_, row), = store["inserts"]
+        self.assertEqual(row["content_snapshot"], line)
+        self.assertEqual(row["context"]["event_title"], "Saturday run club")
+        # Read for THIS viewer and THIS meet only.
+        self.assertIn(("event_fit_lines", "user_id", "u1"), store["filters"])
+        self.assertIn(("event_fit_lines", "event_id", "e1"), store["filters"])
 
     def test_meet_without_cohort_tags_snapshots_title_alone(self):
         store = _store(events=[{**_EVENT, "cohort_tags": []}])
