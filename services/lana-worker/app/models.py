@@ -672,6 +672,22 @@ class CommunityDiscoveryRow(BaseModel):
     # only when it is there.
     fit_line: str | None = None
     fit_chips: list[str] = Field(default_factory=list)
+    # The profile's one-liner as stored on the place (the creator's words, or the line
+    # authored from its real facts). Null when none is on file — a list never authors one.
+    description: str | None = None
+    # Where it is, as a person names it ("Lake Nona"): the ZIP's named area, or for a
+    # creator community the city it is run from. A label, never a distance or a filter.
+    area_label: str | None = None
+
+
+class CommunityChaptersResponse(BaseModel):
+    """POST /lana/circles/chapters — a community's chapters the caller may see, in the
+    discovery row shape (backend-asks §59(a)). `chapters: []` when it has none; the
+    route 404s only an unknown place."""
+
+    place_id: str
+    place_name: str | None = None
+    chapters: list[CommunityDiscoveryRow] = Field(default_factory=list)
 
 
 class FellowsResponse(BaseModel):
@@ -729,8 +745,18 @@ class TopicCommunityRow(BaseModel):
     # somebody's child and never a mutual-only claim shown to a stranger. No name attached.
     matched_label: str | None = None
     # 0-1. Null means the RPC returned something unreadable, not "no match" — a row with
-    # no match never comes back at all.
+    # no match never comes back at all. Also null on the query-less read: nothing was asked.
     similarity: float | None = None
+    # How well the caller fits it, and the "why Lana sees a fit" block — the same fields,
+    # meaning and null rules as CommunityDiscoveryRow (app/community_affinity.py,
+    # app/community_fit_line.py). The query-less read is ORDERED by `affinity`.
+    affinity: float | None = None
+    fit_line: str | None = None
+    fit_chips: list[str] = Field(default_factory=list)
+    # Same as CommunityDiscoveryRow: the stored one-liner, and the area label (for a
+    # creator community, hq_city).
+    description: str | None = None
+    area_label: str | None = None
 
 
 class TopicCommunityResponse(BaseModel):
@@ -795,6 +821,16 @@ class CommunityMemberPreviewRow(BaseModel):
     me: bool = False
 
 
+class CommunityParentRow(BaseModel):
+    """"This is a chapter of …" on a chapter's profile. The parent's public head only:
+    its name, glyph and confirmed member count — no identities."""
+
+    place_id: str
+    place_name: str | None = None
+    emoji: str | None = None
+    member_count: int = 0
+
+
 class CommunityProfileResponse(BaseModel):
     """One community, for the people who go there (C-CIRCLE-COMM-PROFILE)."""
 
@@ -824,6 +860,14 @@ class CommunityProfileResponse(BaseModel):
     # AI-authored from the real facts below (features / area / member count), never a
     # judgement of the place. Null when there is nothing true to say about it yet.
     description: str | None = None
+    # The place's own recorded point, for any caller this profile answers (backend-asks
+    # §49) — strictly less than `place_address` already discloses. Null for a creator
+    # community, which has no geography by constraint, and for a place we hold no point for.
+    lat: float | None = None
+    lng: float | None = None
+    # The community this place is a CHAPTER of (backend-asks §59(c)); null for an
+    # ordinary community.
+    parent: "CommunityParentRow | None" = None
     features: list[CommunityFeatureRow] = Field(default_factory=list)
     activities: list[CommunityActivityRow] = Field(default_factory=list)
     member_preview: list[CommunityMemberPreviewRow] = Field(default_factory=list)

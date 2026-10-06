@@ -185,6 +185,12 @@ def _resolve_place(
 
 
 _PLACE_FIELDS = (
+    "id, name, address, place_type, zip, google_place_id, lat, lng, blurb, blurb_key, "
+    "parent_place_ref"
+)
+# Pre-20261214 environments have no parent_place_ref; step down to the read that worked
+# before chapters existed rather than lose the profile.
+_PLACE_FIELDS_NO_PARENT = (
     "id, name, address, place_type, zip, google_place_id, lat, lng, blurb, blurb_key"
 )
 # Pre-20261024 environments have no blurb columns; step down rather than fail the whole
@@ -193,7 +199,7 @@ _PLACE_FIELDS_NO_BLURB = "id, name, address, place_type, zip, google_place_id, l
 
 
 def _place_row(place_id: str) -> dict[str, Any]:
-    for fields in (_PLACE_FIELDS, _PLACE_FIELDS_NO_BLURB):
+    for fields in (_PLACE_FIELDS, _PLACE_FIELDS_NO_PARENT, _PLACE_FIELDS_NO_BLURB):
         try:
             res = (
                 service_client()
@@ -544,10 +550,10 @@ def _feature_label(
     return label[:48]
 
 
-_FEATURE_FIELDS = "key, value, sub_group, confidence, source, emoji, label, contributed_by"
+_FEATURE_FIELDS = "id, key, value, sub_group, confidence, source, emoji, label, contributed_by"
 # Pre-20261030 environments have no label column; step down rather than lose every chip
 # on the card (the read would fail whole and the place would render with no features).
-_FEATURE_FIELDS_NO_LABEL = "key, value, sub_group, confidence, source, emoji, contributed_by"
+_FEATURE_FIELDS_NO_LABEL = "id, key, value, sub_group, confidence, source, emoji, contributed_by"
 
 
 def place_features(place_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
@@ -580,6 +586,7 @@ def place_features(place_id: str, user_id: str | None = None) -> list[dict[str, 
         return []
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    bare: list[str] = []
     for r in rows:
         if not isinstance(r, dict):
             continue
@@ -594,6 +601,8 @@ def place_features(place_id: str, user_id: str | None = None) -> list[dict[str, 
         if not label or label.lower() in seen:
             continue
         seen.add(label.lower())
+        if not str(r.get("emoji") or "").strip() and r.get("id"):
+            bare.append(str(r["id"]))
         out.append(
             {
                 "key": key,
@@ -605,6 +614,15 @@ def place_features(place_id: str, user_id: str | None = None) -> list[dict[str, 
         )
         if len(out) >= _MAX_FEATURES:
             break
+    if bare:
+        # The backfill path for rows written before every writer picked a glyph (§24(b)):
+        # served bare this once, picked behind the read, glyphed from the next open on.
+        try:
+            from app.place_activities import schedule_feature_emoji
+
+            schedule_feature_emoji(bare)
+        except Exception:  # noqa: BLE001 — the chips already rendered
+            logger.exception("feature_emoji_heal_failed place=%s", place_id)
     return out
 
 
@@ -1189,11 +1207,21 @@ def community_profile(
         goers,
         phone_verified=(phone_verified and is_member) or _holds_invite_here(user_id, pid),
     )
+    parent_ref = str(place.get("parent_place_ref") or "").strip()
+    parent = parent_heads([parent_ref]).get(parent_ref) if parent_ref else None
     return {
         "place_id": pid,
         "affiliation_id": str(mine.get("id") or ""),
         "place_name": name,
         "place_address": str(place.get("address") or "").strip() or None,
+        # The place's own recorded point, to ANY caller this profile answers (§49): the
+        # address beside it already names the spot precisely, and §F protects the people
+        # at a place, not its coordinates. Null on a creator community (no geography by
+        # constraint) and on a place we hold no point for.
+        "lat": _finite(place.get("lat"), 90.0),
+        "lng": _finite(place.get("lng"), 180.0),
+        # "This is a chapter of …" (§59(c)) — null for an ordinary community.
+        "parent": parent,
         "circle_type": mine.get("circle_type"),
         # The label for a community invite link — POST /lana/invites/mint {circle_key}.
         # "Invite people" on this card is a native FE action (mint + share sheet), so the
@@ -1253,14 +1281,69 @@ def community_profile(
         # places.id), so the post-publish stamp lands on this same place_ref and the
         # meet shows up in this community's upcoming_events. Null = no google id on
         # file, so the FE lets the host flow ask for the venue as usual.
-        "create_event_venue": _create_event_venue(place)
-        if phone_verified and is_member
-        else None,
+        #
+        # Members-only, and no longer phone-verified-only (§49): /map settles its camera
+        # on this block's lat/lng, and an unverified member got null for her own
+        # community, so the client forward-geocoded the name instead. Hosting itself is
+        # still gated where it always was — `actions` below.
+        "create_event_venue": _create_event_venue(place) if is_member else None,
         # Hosting and inviting are things members do here; a curious viewer gets the
         # head and the FE's own Join.
         "actions": community_profile_actions(place_name=name, relation=relation)
         if phone_verified and is_member
         else [],
+    }
+
+
+def _finite(value: Any, limit: float) -> float | None:
+    """A coordinate inside the globe, or None — never a raise and never NaN on the wire.
+    `limit` is 90 for a latitude, 180 for a longitude."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or abs(out) > limit:
+        return None
+    return out
+
+
+def parent_heads(parent_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """{parent place id: {place_id, place_name, emoji, member_count}} for chapters'
+    parents, in two reads however many there are (backend-asks §59(b)(c)).
+
+    The parent's PUBLIC head only — the same name, glyph and confirmed count
+    discovery already names to any neighbour. Chapter → parent is the visible direction
+    of the 20261214120000 contract, so every viewer of a chapter may see its parent.
+    The glyph is the parent's own kind (place_relation_emoji), never a viewer's word.
+    {} on a failed read: the row/profile then simply does not say it is a chapter."""
+    ids = [p for p in dict.fromkeys(str(i or "") for i in parent_ids) if p]
+    if not ids:
+        return {}
+    try:
+        res = (
+            service_client()
+            .table("places")
+            .select("id, name, place_type")
+            .in_("id", ids)
+            .execute()
+        )
+        rows = [r for r in (res.data or []) if isinstance(r, dict) and r.get("id")]
+    except Exception:
+        logger.exception("parent_heads_read_failed parents=%s", len(ids))
+        return {}
+    from app.circles_flow import _member_counts
+
+    counts = _member_counts([str(r["id"]) for r in rows])
+    return {
+        str(r["id"]): {
+            "place_id": str(r["id"]),
+            "place_name": str(r.get("name") or "").strip() or None,
+            "emoji": place_relation_emoji(r.get("place_type")),
+            "member_count": int(counts.get(str(r["id"]), 0)),
+        }
+        for r in rows
     }
 
 

@@ -88,6 +88,7 @@ from app.models import (
     CommunitiesCardPayload,
     CommunityActivityRow,
     CommunityCardRow,
+    CommunityChaptersResponse,
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
     CommunityDraft,
@@ -98,6 +99,7 @@ from app.models import (
     CommunityMemberPreviewRow,
     CommunityMemberRow,
     CommunityMembersResponse,
+    CommunityParentRow,
     CommunityProfileResponse,
     CommunitySetupRequest,
     CompleteSessionRequest,
@@ -4106,8 +4108,9 @@ class CommunityDiscoverBody(_BaseModel):
 class CommunityDiscoverTopicBody(_BaseModel):
     # What they are looking for, in their own words — "people who do long-distance
     # triathlon" beats "sports", because the ask is embedded and matched against what
-    # members say about THEMSELVES.
-    query: str
+    # members say about THEMSELVES. Optional (§58(a)): absent or blank reads every creator
+    # community ranked by the caller's fit instead.
+    query: str | None = None
     limit: int = 5
     # False widens the match to every community, not just the ones geography cannot
     # reach — "communities like this one". Default true: this endpoint exists for the
@@ -4262,7 +4265,11 @@ def post_circles_discover(
     position and the place's point on the same row — that subtraction is the client's."""
     auth = verify_auth(authorization)
     from app.community_affinity import attach_affinity
-    from app.community_discovery import discover_communities, radius_meters
+    from app.community_discovery import (
+        attach_description_and_area,
+        discover_communities,
+        radius_meters,
+    )
     from app.community_fit_line import attach_fit_lines
 
     rows = discover_communities(
@@ -4277,29 +4284,77 @@ def post_circles_discover(
     # and `fit_line` absent, and the panel still lists real communities.
     attach_affinity(auth.user_id, rows)
     attach_fit_lines(auth.user_id, rows)
+    attach_description_and_area(rows)
     return CommunityDiscoveryResponse(
-        communities=[
-            CommunityDiscoveryRow(
-                place_id=str(r.get("place_id") or ""),
-                place_name=r.get("place_name"),
-                place_address=r.get("place_address"),
-                place_type=r.get("place_type"),
-                relation=r.get("relation"),
-                emoji=r.get("emoji"),
-                zip=r.get("zip"),
-                lat=r.get("lat"),
-                lng=r.get("lng"),
-                member_count=int(r.get("member_count") or 0),
-                is_member=bool(r.get("is_member")),
-                status_line=r.get("status_line"),
-                affinity=r.get("affinity"),
-                fit_line=r.get("fit_line"),
-                fit_chips=list(r.get("fit_chips") or []),
-            )
-            for r in rows
-            if str(r.get("place_id") or "").strip()
-        ],
+        communities=_discovery_rows(rows),
         radius_meters=int(radius_meters()),
+    )
+
+
+def _discovery_rows(rows: list[dict]) -> list[CommunityDiscoveryRow]:
+    """The one CommunityDiscoveryRow shaper — /circles/discover and /circles/chapters
+    serve the same row, so they must be built in the same place."""
+    return [
+        CommunityDiscoveryRow(
+            place_id=str(r.get("place_id") or ""),
+            place_name=r.get("place_name"),
+            place_address=r.get("place_address"),
+            place_type=r.get("place_type"),
+            relation=r.get("relation"),
+            emoji=r.get("emoji"),
+            zip=r.get("zip"),
+            lat=r.get("lat"),
+            lng=r.get("lng"),
+            member_count=int(r.get("member_count") or 0),
+            is_member=bool(r.get("is_member")),
+            status_line=r.get("status_line"),
+            affinity=r.get("affinity"),
+            fit_line=r.get("fit_line"),
+            fit_chips=list(r.get("fit_chips") or []),
+            description=r.get("description"),
+            area_label=r.get("area_label"),
+        )
+        for r in rows
+        if str(r.get("place_id") or "").strip()
+    ]
+
+
+class CommunityChaptersBody(_BaseModel):
+    place_id: str
+
+
+@app.post("/lana/circles/chapters", response_model=CommunityChaptersResponse)
+def post_circles_chapters(
+    body: CommunityChaptersBody,
+    authorization: str | None = Header(default=None),
+):
+    """A community's chapters, in the /circles/discover row (backend-asks §59(a)).
+
+    Discovery drops chapters on purpose — a chapter is found from its parent — and this
+    is that read. Visibility follows the 20261214120000 contract (see
+    app/community_discovery.py::community_chapters): a member of the parent sees every
+    chapter, a member of only some chapter sees only her own and never a sibling, the
+    caller's own chapters come back `is_member: true`. No member identities, ever.
+
+    404 `place_not_found` only for an unknown place; a place with no chapters is
+    `chapters: []`."""
+    auth = verify_auth(authorization)
+    from app.community_affinity import attach_affinity
+    from app.community_discovery import attach_description_and_area, community_chapters
+    from app.community_fit_line import attach_fit_lines
+
+    try:
+        data = community_chapters(auth.user_id, (body.place_id or "").strip())
+    except ValueError as exc:
+        raise _community_error(exc) from exc
+    rows = data["chapters"]
+    attach_affinity(auth.user_id, rows)
+    attach_fit_lines(auth.user_id, rows)
+    attach_description_and_area(rows)
+    return CommunityChaptersResponse(
+        place_id=str(data["place_id"]),
+        place_name=data.get("place_name"),
+        chapters=_discovery_rows(rows),
     )
 
 
@@ -4322,16 +4377,37 @@ def post_circles_discover_topic(
     FROM, never a distance from the reader and never a reason a row came back. And
     `matched_label`, the member self-claim that matched, so the card can say why this is
     an answer. No member identities: public, self-subject claims only, with no name on
-    them."""
-    auth = verify_auth(authorization)
-    from app.community_discovery import discover_communities_by_topic
+    them.
 
-    rows = discover_communities_by_topic(
-        auth.user_id,
-        body.query,
-        limit=max(1, min(int(body.limit or 5), 20)),
-        creator_only=bool(body.creator_only),
+    `query` is optional (backend-asks §58(a)). Without one this is the "Digital
+    community" tab: every creator community with members, ranked by how well the caller
+    fits it (`affinity`, highest first) — no city filter, since hq_city is a label and
+    never a predicate. `creator_only` is moot there: the query-less read is creator
+    communities by definition. Every row, either way, carries `affinity`, the fit block,
+    `description` and `area_label`."""
+    auth = verify_auth(authorization)
+    from app.community_affinity import attach_affinity
+    from app.community_discovery import (
+        attach_description_and_area,
+        discover_communities_by_topic,
+        discover_creator_communities_for,
     )
+    from app.community_fit_line import attach_fit_lines
+
+    limit = max(1, min(int(body.limit or 5), 20))
+    if str(body.query or "").strip():
+        rows = discover_communities_by_topic(
+            auth.user_id,
+            str(body.query),
+            limit=limit,
+            creator_only=bool(body.creator_only),
+        )
+        attach_affinity(auth.user_id, rows)
+    else:
+        # Scored (and ordered) inside; only the rows that survive the cut get authored.
+        rows = discover_creator_communities_for(auth.user_id, limit=limit)
+    attach_fit_lines(auth.user_id, rows)
+    attach_description_and_area(rows)
     return TopicCommunityResponse(
         communities=[
             TopicCommunityRow(
@@ -4348,6 +4424,11 @@ def post_circles_discover_topic(
                 status_line=r.get("status_line"),
                 matched_label=r.get("matched_label"),
                 similarity=r.get("similarity"),
+                affinity=r.get("affinity"),
+                fit_line=r.get("fit_line"),
+                fit_chips=list(r.get("fit_chips") or []),
+                description=r.get("description"),
+                area_label=r.get("area_label"),
             )
             for r in rows
             if str(r.get("place_id") or "").strip()
@@ -4536,6 +4617,9 @@ def post_circles_profile(
         active=bool(data.get("active")),
         status_line=data.get("status_line"),
         description=data.get("description"),
+        lat=data.get("lat"),
+        lng=data.get("lng"),
+        parent=CommunityParentRow(**data["parent"]) if data.get("parent") else None,
         features=[
             CommunityFeatureRow(
                 key=str(f.get("key") or ""),

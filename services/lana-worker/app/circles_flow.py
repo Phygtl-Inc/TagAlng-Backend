@@ -1897,27 +1897,37 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
     place_ids = sorted({str(r["place_ref"]) for r in rows if r.get("place_ref")})
     places: dict[str, dict[str, Any]] = {}
     if place_ids:
-        pres = (
-            sb.table("places")
-            # Coords + the GOOGLE id come along so a caller can use the place as a
-            # venue (the host setup card pre-fills the meet's where from the community
-            # picked) without a second read or a re-geocode.
-            #
-            # hq_* rides with them for the one kind of community that has no lat/lng at
-            # all: a creator community is not anywhere (places_creator_has_no_geography),
-            # so without its headquarters there is nothing to draw and the creator cannot
-            # see their own community on the map the day they make it. A LABEL and a pin
-            # position — never a distance, and never a discovery predicate
-            # (20261214120000). place_type comes along so a client can tell which it is
-            # holding without inferring it from which coordinate column is null.
-            .select(
-                "id, name, address, google_place_id, lat, lng, "
-                "place_type, hq_city, hq_lat, hq_lng"
-            )
-            .in_("id", place_ids)
-            .execute()
-        )
-        places = {str(p["id"]): p for p in (pres.data or [])}
+        # Coords + the GOOGLE id come along so a caller can use the place as a
+        # venue (the host setup card pre-fills the meet's where from the community
+        # picked) without a second read or a re-geocode.
+        #
+        # hq_* rides with them for the one kind of community that has no lat/lng at
+        # all: a creator community is not anywhere (places_creator_has_no_geography),
+        # so without its headquarters there is nothing to draw and the creator cannot
+        # see their own community on the map the day they make it. A LABEL and a pin
+        # position — never a distance, and never a discovery predicate
+        # (20261214120000). place_type comes along so a client can tell which it is
+        # holding without inferring it from which coordinate column is null.
+        #
+        # parent_place_ref says the row is a CHAPTER (§59(b)); the read without it is the
+        # one that worked before chapters existed, kept so an older database still lists.
+        base = "id, name, address, google_place_id, lat, lng, place_type, hq_city, hq_lat, hq_lng"
+        pres = None
+        for fields in (base + ", parent_place_ref", base):
+            try:
+                pres = sb.table("places").select(fields).in_("id", place_ids).execute()
+                break
+            except Exception:
+                if fields == base:
+                    raise
+                logger.warning("list_my_circles_parent_read_failed; retrying without it")
+        places = {str(p["id"]): p for p in ((pres.data if pres else None) or [])}
+    # The community each chapter belongs to, two reads for the whole list.
+    from app.community_surface import parent_heads
+
+    parents = parent_heads(
+        [str(p.get("parent_place_ref") or "") for p in places.values() if p.get("parent_place_ref")]
+    )
     # One read for every row's activity chips (app/place_activities.py).
     from app.place_activities import activities_for_places
 
@@ -1931,6 +1941,7 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
         place = places.get(place_ref or "", {})
         count = counts.get(place_ref or "", 0)
         detail = _FEATURE_NOTE_RE.sub("", str(r.get("detail") or "")).strip(" ;") or None
+        parent = parents.get(str(place.get("parent_place_ref") or "")) or {}
         out.append(
             {
                 "id": str(r["id"]),
@@ -1961,6 +1972,11 @@ def list_my_circles(user_id: str) -> list[dict[str, Any]]:
                 "hq_city": place.get("hq_city"),
                 "hq_lat": place.get("hq_lat"),
                 "hq_lng": place.get("hq_lng"),
+                # The community this one is a CHAPTER of (§59(b)) — all three null for an
+                # ordinary community. The parent's public head: its name and its own glyph.
+                "parent_place_id": parent.get("place_id"),
+                "parent_place_name": parent.get("place_name"),
+                "parent_emoji": parent.get("emoji"),
                 "detail": detail,
                 # What people do here, `mine` marking this user's own — the edit
                 # panel's "your activities" chips and its add-more menu in one list.
@@ -2010,6 +2026,11 @@ _PUBLIC_CIRCLE_FIELDS = (
     # because the place-as-venue block is hers.
     "place_type",
     "hq_city",
+    # Which community this one is a chapter of — the parent's public head, which
+    # discovery already names to anyone (§59(b)).
+    "parent_place_id",
+    "parent_place_name",
+    "parent_emoji",
 )
 
 

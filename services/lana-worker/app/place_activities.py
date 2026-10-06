@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.auth import service_client
@@ -332,3 +333,104 @@ def feature_emoji(label: str) -> str:
     except Exception:
         logger.exception("feature_emoji_failed label=%s", text)
         return ""
+
+
+# ── an emoji on EVERY feature row (§24(b)) ────────────────────────────────────
+#
+# The panel's add path above picked a glyph; every other writer (chat-learned features,
+# features parked before grounding, the community-create answers) wrote none, so a real
+# place read "Charging station" bare beside a glyphed chip. Two paths close that, both
+# through feature_emoji — the model picks, nothing here maps a word to a glyph:
+#
+#   * write time — upsert_place_feature schedules a pick for a row it left without one;
+#   * read time  — place_features schedules one for any row it serves without one, which
+#                  is the backfill for rows written before this landed (and for rows other
+#                  services write). scripts/backfill_feature_emoji.py does the same in bulk.
+#
+# Both run on one background thread: a model call never sits inside a chat turn or a
+# profile open, and the chip carries its glyph from the next read on.
+
+_EMOJI_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="feature-emoji")
+# Rows queued or being picked right now, so a burst of opens buys one call per row.
+_EMOJI_INFLIGHT: set[str] = set()
+# Rows the model already declined this process. Retried after a restart, never per open.
+_EMOJI_GAVE_UP: set[str] = set()
+_EMOJI_GAVE_UP_MAX = 2000
+
+
+def _feature_chip_label(row: dict[str, Any]) -> str:
+    """The text the chip shows — the same string the model is asked to depict."""
+    from app.community_surface import _feature_label
+
+    return _feature_label(
+        str(row.get("key") or ""),
+        row.get("value"),
+        str(row.get("sub_group") or ""),
+        row.get("label"),
+    )
+
+
+def fill_feature_emoji(row_id: str) -> str:
+    """Pick and store the emoji for ONE place_features row that has none. Returns the
+    emoji written, or "" (already had one, row gone, model unavailable or declined).
+
+    The write is conditional on the column still being null, so a glyph a member chose in
+    the panel while this was in flight is never overwritten."""
+    rid = str(row_id or "").strip()
+    if not rid:
+        return ""
+    sb = service_client()
+    res = (
+        sb.table("place_features")
+        .select("id, key, value, sub_group, label, emoji")
+        .eq("id", rid)
+        .limit(1)
+        .execute()
+    )
+    row = (res.data or [None])[0]
+    if not isinstance(row, dict) or str(row.get("emoji") or "").strip():
+        return ""
+    label = _feature_chip_label(row)
+    emoji = feature_emoji(label) if label else ""
+    if not emoji:
+        if len(_EMOJI_GAVE_UP) < _EMOJI_GAVE_UP_MAX:
+            _EMOJI_GAVE_UP.add(rid)
+        return ""
+    sb.table("place_features").update({"emoji": emoji}).eq("id", rid).is_(
+        "emoji", "null"
+    ).execute()
+    return emoji
+
+
+def _fill_in_background(row_id: str) -> None:
+    try:
+        fill_feature_emoji(row_id)
+    except Exception:  # noqa: BLE001 — a bare chip is the status quo, never an error
+        logger.exception("feature_emoji_fill_failed row=%s", row_id)
+    finally:
+        _EMOJI_INFLIGHT.discard(row_id)
+
+
+def schedule_feature_emoji(row_ids: list[str]) -> int:
+    """Queue an emoji pick for each row id. Returns how many were queued.
+
+    Nothing is queued when no model is configured (so tests and model-less deploys
+    never spin a thread), for a row already queued, or for one the model already
+    declined in this process."""
+    ids = [
+        r for r in dict.fromkeys(str(i or "").strip() for i in row_ids)
+        if r and r not in _EMOJI_INFLIGHT and r not in _EMOJI_GAVE_UP
+    ]
+    if not ids:
+        return 0
+    try:
+        from app.orchestrator.llm import llm_configured
+
+        if not llm_configured():
+            return 0
+    except Exception:  # noqa: BLE001
+        return 0
+    for rid in ids:
+        _EMOJI_INFLIGHT.add(rid)
+        _EMOJI_POOL.submit(_fill_in_background, rid)
+    return len(ids)
