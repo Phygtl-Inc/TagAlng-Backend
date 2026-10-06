@@ -316,7 +316,21 @@ class PeerMatchRow(BaseModel):
     # humanize_distance_text. None whenever either side's coarse point is unknown —
     # never a guess, and never confused with matching_peer_label (a shared thread).
     distance_text: str | None = None
-    # ── Circle provenance on a rec (C-FIND-V2) ───────────────────────────────────────
+    # The same distance as a number, in metres, for sorting ("Nearest", C-FIND-V2) —
+    # never for display; `distance_text` is the rendered phrase. Measured between coarse
+    # points (block/ZIP centroids; the caller's pin when /lana/fellows got one), so it is
+    # an ordering key, not a precise position. None exactly when distance_text is.
+    distance_meters: float | None = None
+    # The peer's own home-area label ("Laureate Park"), from their home block's display
+    # name — the "📍 Laureate Park" half of the fellows card. /lana/fellows only, and
+    # None for EVERY row of an unverified caller (gated like nickname/avatar).
+    area_name: str | None = None
+    # A rec row's fit score (find_neighbor_tips.match_strength, 0-1) for the "Best fit"
+    # tab's ORDER (C-FIND-V2). Rec rows only; None on claim-affinity rows (those carry
+    # similarity_score). Not a percentage to render: one shared word scores ~0.76 for
+    # every pair, which is why the worker never prints it.
+    match_strength: float | None = None
+    # ── Circle provenance on a rec (C-FIND-V2)───────────────────────────────────────
     # The places BOTH the viewer and this recommender belong to. The results screen groups
     # by these ("ST MARY'S CHURCH" over the rec, "YOUR BLOCK" over one with no shared
     # place) because the shared circle is WHY the rec is worth trusting — a stranger's
