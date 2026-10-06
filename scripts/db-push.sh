@@ -4,6 +4,10 @@
 #   ./scripts/db-push.sh dev            # link dev → list → dry-run → confirm → push
 #   ./scripts/db-push.sh prod           # same, but requires typing "push to prod"
 #   ./scripts/db-push.sh prod --list    # just show applied-vs-pending, no push
+#   ./scripts/db-push.sh dev --include-all
+#                                       # also apply a pending migration OLDER than the
+#                                       # newest applied one (e.g. a prod-only hotfix
+#                                       # committed afterwards). Opt-in, never default.
 #
 # Requirements:
 #   * SUPABASE_ACCESS_TOKEN in the env (or a prior `npx supabase login`)
@@ -41,7 +45,14 @@ case "$TARGET" in
     fi
     REF="$PROD_REF"
     ;;
-  *) echo "usage: $0 dev|prod [--list]" >&2; exit 1 ;;
+  *) echo "usage: $0 dev|prod [--list|--include-all]" >&2; exit 1 ;;
+esac
+
+PUSH_FLAGS=()
+case "$MODE" in
+  ""|--list) ;;
+  --include-all) PUSH_FLAGS=(--include-all) ;;
+  *) echo "usage: $0 dev|prod [--list|--include-all]" >&2; exit 1 ;;
 esac
 
 relink_dev() {
@@ -71,7 +82,7 @@ fi
 
 echo
 echo "── dry run:"
-"${SUPA[@]}" db push --dry-run
+"${SUPA[@]}" db push --dry-run ${PUSH_FLAGS[@]+"${PUSH_FLAGS[@]}"}
 
 echo
 if [[ "$TARGET" == "prod" ]]; then
@@ -84,7 +95,7 @@ else
   [[ "$answer" == "y" || "$answer" == "Y" ]] || { echo "aborted."; exit 1; }
 fi
 
-"${SUPA[@]}" db push
+"${SUPA[@]}" db push ${PUSH_FLAGS[@]+"${PUSH_FLAGS[@]}"}
 
 echo
 echo "── verifying:"
