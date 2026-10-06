@@ -514,6 +514,32 @@ def publish_community(
     return {**result, "place_id": place_id}, ""
 
 
+def _handle_offer(place_id: str, user_id: str | None) -> dict[str, str] | None:
+    """The short link this user may claim for the community they just published, or None.
+
+    Who may claim is the database's call (community_handle_offer_for, 20270108120000): the
+    community's operator, or the creator of a name-only one. A guest has no confirmed email,
+    so is never asked. Best effort — an offer that fails must not cost the community."""
+    if not place_id or not user_id:
+        return None
+    try:
+        from app.auth import service_client
+
+        res = (
+            service_client()
+            .rpc("community_handle_offer_for", {"p_user_id": user_id, "p_place_id": place_id})
+            .execute()
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("community_handle_offer_failed")
+        return None
+    data = res.data if isinstance(res.data, dict) else {}
+    suggestion = str(data.get("suggestion") or "").strip()
+    if not data.get("eligible") or not suggestion:
+        return None
+    return {"place_id": place_id, "suggestion": suggestion}
+
+
 def reset_community_state(session_ctx: dict[str, Any]) -> None:
     """Drop the capture + its half-built draft so the turn falls through to normal
     routing. Keys set to None (not popped) so the {**old, **new} session merge clears
@@ -676,6 +702,10 @@ def run_community_capture_turn(
                 "name": str(draft.get("name") or "").strip(),
             }
         draft["community_id"] = result.get("place_id") or result.get("affiliation_id")
+        # A rendered control, not a question: the PWA shows a "claim this link" button and
+        # makes the claim itself, so nothing here has to parse the next turn.
+        offer = _handle_offer(str(result.get("place_id") or ""), user_id)
+        draft["handle_offer"] = offer
         draft["ready"] = True
         session_ctx["community_draft"] = draft
         session_ctx["community_published_now"] = True
@@ -684,12 +714,18 @@ def run_community_capture_turn(
         session_ctx["community_turns"] = 0
         session_ctx["routing_phase"] = "listening"
         name = str(draft.get("name") or "your community")
+        facts = [f"{name} is now a community neighbours can find and join"]
+        if offer:
+            facts.append(
+                f"They can claim a short link for it, get.lana.help/{offer['suggestion']}, "
+                "with the button below (or pick a different one there)"
+            )
         return compose_reply(
             goal=(
                 "The community is live. Celebrate briefly and warmly, say neighbours can "
                 "now find and join it, and that you'll point people to it when they ask."
             ),
-            facts=[f"{name} is now a community neighbours can find and join"],
+            facts=facts,
             fallback=f"🎉 **{name}** is up — neighbours can find it and ask to join. I'll point people to it.",
         )
 
