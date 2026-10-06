@@ -32,11 +32,12 @@ reservation is exactly that handle. Three things stop communities from getting i
   defence for famous names. Accepted knowingly.
 - **Two entry points:** a step at the end of Lana's create-community chat, and a "Claim your
   link" action on the community page for its operator (covers SJSU and existing communities).
-- **Who may claim (2026-10-06):** a community's existing operator, OR, for a name-only
-  community (`google_place_id like 'creator:%'`, `governance_state = 'community_started'`), the
-  user who created it (`places.created_by`). The latter becomes its verified operator on claim,
-  exactly as lana.help self-verifies creators. Members of a community on a real Google place
-  (gym, store) cannot self-verify; that still goes through lana.help's location claim.
+- **Who may claim (2026-10-06, revised same day):** a community's existing operator, OR the
+  user who started it (`places.created_by`) while it is still `community_started`, on a real
+  place or not. The starter becomes its verified operator on claim, as lana.help self-verifies
+  creators. Accepted knowingly: the community IS the place row, so a gym member who started
+  the gym's community becomes the gym's operator and can take a bare handle like `fitnesscf`.
+  Once a place is verified, only its operator can claim.
 - **Proof B stays `reservation_email` only.** Accepting `domain_email` too would let anyone who
   claimed a location by email rename it to a bare brand word (`safeway`). Location claims keep
   locality handles, which is the behaviour Tommaso's own `safeway-foster-city` example describes.
@@ -64,8 +65,8 @@ with the session's user id. In one transaction:
 
 1. Caller: user id not null, `auth.users.is_anonymous` false, `email_confirmed_at` not null →
    else `{status:'sign_in_required'}`.
-2. Eligibility, `_community_handle_claim_status(uid, place)`: operator, or creator of a
-   name-only `community_started` place → else `{status:'not_eligible'}`.
+2. Eligibility, `_community_handle_claim_status(uid, place)`: operator, or the starter of a
+   `community_started` place → else `{status:'not_eligible'}`.
 3. Place already has a handle → `{status:'already_has_handle', handle}` (changes go through
    `rename_community_handle`).
 4. Normalise; shape check with `_place_handle_shape_error(v, false)` (bare allowed) →
@@ -142,7 +143,7 @@ No hand-written SQL.
 ## Testing
 
 - **SQL**, in the local validation container: a school place gets `sjsu` via
-  `claim_community_handle`; a guest gets `sign_in_required`; a non-operator gets `not_eligible`; a member of a real-place community gets `not_eligible`; the creator of a name-only community gets the handle and becomes operator;
+  `claim_community_handle`; a guest gets `sign_in_required`; a non-operator gets `not_eligible`; a member who didn't start a community gets `not_eligible`; the starter of a name-only or real-place community gets the handle and becomes operator; a verified place's starter gets `not_eligible`;
   `nike` (protected) gets `unavailable`; a member's handle gets `unavailable`; a taken name gets
   suggestions; a second call gets `already_has_handle`; a direct `update places set handle='x'`
   with no proof is still refused; `complete_place_claim_by_email` with `safeway` and no proof gets

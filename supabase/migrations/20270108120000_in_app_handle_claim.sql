@@ -23,10 +23,11 @@
 --      like "safeway" — location claims keep locality handles.)
 --   2. The guard calls it. Member-handle and protected checks stay unconditional.
 --   3. claim_community_handle(_for): a signed-in, email-confirmed user who either operates
---      the community, or created a name-only one (creator:… place, community_started),
---      reserves and holds a handle in one step. The name-only creator becomes its verified
---      operator, exactly as lana.help self-verifies creators. Members of a community on a
---      real place cannot self-verify — that is still lana.help's location claim.
+--      the community, or started it (community_started, created_by = them), reserves and
+--      holds a handle in one step. The starter becomes its verified operator, as lana.help
+--      self-verifies creators. That includes a community on a real place: the community IS
+--      the place row, so its starter becomes the place's operator (product decision
+--      2026-10-06, accepted knowingly; members who did not start it cannot).
 --   4. community_handle_offer(_for): the same eligibility plus a suggested handle, so the
 --      worker and the PWA only offer the claim to someone who can make it.
 --   5. complete_place_claim_by_email / approve_place_claim: the claim is resolved first.
@@ -162,10 +163,10 @@ as $$
     when p.id is null then 'place_not_found'
     when p.handle is not null then 'already_has_handle'
     when public.is_community_operator(p.id, p_user_id) then null
-    -- A name-only community belongs to whoever made it, as on lana.help. A community on a
-    -- real place does not: membership is not ownership of the gym.
+    -- A community nobody has verified yet belongs to whoever started it, as a creator's does
+    -- on lana.help — on a real place too (product decision 2026-10-06, accepted knowingly:
+    -- the community IS the place row, so its starter becomes that place's operator).
     when p.governance_state = 'community_started'
-     and p.google_place_id like 'creator:%'
      and p.created_by = p_user_id then null
     else 'not_eligible'
   end
@@ -397,8 +398,8 @@ grant execute on function public.claim_community_handle(uuid, text) to authentic
 
 comment on function public.claim_community_handle(uuid, text) is
   'Give a community its first handle. Caller must be signed in with a confirmed email and '
-  'either operate the community or have created a name-only one (they become its verified '
-  'operator). Writes a consumed in_app reservation + verified reservation_email claim, which '
+  'either operate the community or have started it while unverified (they become its '
+  'verified operator). Writes a consumed in_app reservation + verified reservation_email claim, which '
   'is the guard''s Proof B. Does not spend the one rename.';
 
 -- ── 6 · complete_place_claim_by_email: resolve the claim before verifying the place ─

@@ -53,6 +53,11 @@ insert into public.places (id, google_place_id, name, place_type, address, creat
 values ('00000000-0000-0000-0000-00000000b003', 'gp-gym', 'Fitness CF', 'fitness',
         '9145 Narcoossee Rd, Orlando, FL 32827, USA', '00000000-0000-0000-0000-0000000000a3');
 
+-- A real store nobody has started or claimed (for the raw guard checks).
+insert into public.places (id, google_place_id, name, place_type, address)
+values ('00000000-0000-0000-0000-00000000b006', 'gp-store', 'Corner Store', 'other',
+        '5 Elm St, Austin, TX 78701, USA');
+
 -- A store mid-way through lana.help's location claim by email: bare reservation "safeway".
 insert into public.places (id, google_place_id, name, address)
 values ('00000000-0000-0000-0000-00000000b004', 'gp-safeway', 'Safeway',
@@ -91,6 +96,7 @@ declare
   sjsu   uuid := '00000000-0000-0000-0000-00000000b001';
   club   uuid := '00000000-0000-0000-0000-00000000b002';
   gym    uuid := '00000000-0000-0000-0000-00000000b003';
+  store  uuid := '00000000-0000-0000-0000-00000000b006';
   r      jsonb;
   ok     boolean;
 begin
@@ -106,10 +112,12 @@ begin
   assert r->>'status' = 'sign_in_required', 'unconfirmed email refused ' || r::text;
   r := public.claim_community_handle_for(member, sjsu, 'sjsu');
   assert r->>'status' = 'not_eligible', 'non-operator refused ' || r::text;
-  r := public.claim_community_handle_for(member, gym, 'fitnesscf');
-  assert r->>'status' = 'not_eligible', 'real-place starter cannot self-verify ' || r::text;
+  r := public.claim_community_handle_for(maya, gym, 'fitnesscf');
+  assert r->>'status' = 'not_eligible', 'someone who did not start it cannot ' || r::text;
+  r := public.community_handle_offer_for(maya, gym);
+  assert not (r->>'eligible')::boolean, 'non-starter gets no offer ' || r::text;
   r := public.community_handle_offer_for(member, gym);
-  assert not (r->>'eligible')::boolean, 'real-place starter gets no offer ' || r::text;
+  assert (r->>'eligible')::boolean, 'real-place starter gets an offer ' || r::text;
 
   -- What may be claimed.
   r := public.claim_community_handle_for(pouya, sjsu, 'a!');
@@ -145,9 +153,16 @@ begin
             from public.places where id = club), 'creator verified';
   assert public.is_community_operator(club, maya), 'creator became operator';
 
+  -- A real-place starter self-verifies and becomes the place's operator (2026-10-06).
+  r := public.claim_community_handle_for(member, gym, 'fitnesscf');
+  assert r->>'status' = 'claimed' and r->>'handle' = 'fitnesscf', 'gym starter claims ' || r::text;
+  assert (select governance_state = 'operator_verified' and claimed_by = member
+            from public.places where id = gym), 'gym starter verified';
+  assert public.is_community_operator(gym, member), 'gym starter became operator';
+
   -- The guard still refuses a bare handle with no proof, for any type.
   begin
-    update public.places set handle = 'fitnesscf' where id = gym;
+    update public.places set handle = 'cornerstore' where id = store;
     ok := false;
   exception when others then
     ok := sqlerrm in ('single_token_handle_requires_matching_identity',
@@ -156,7 +171,7 @@ begin
   assert ok, 'unproven bare handle refused';
   begin
     update public.places set handle = 'tex-2', governance_state = 'operator_verified'
-     where id = gym;
+     where id = store;
     ok := false;
   exception when others then
     ok := sqlerrm = 'operator_verified_requires_verified_claim';
