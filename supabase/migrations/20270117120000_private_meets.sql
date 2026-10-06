@@ -199,7 +199,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_event_preview -- body verbatim from 20261015120000_event_community_surface.sql; only the §29 line(s) differ.
+-- get_event_preview -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_event_preview(
   p_event_id uuid,
@@ -244,7 +244,7 @@ begin
   if p_lat is not null and p_lng is not null then
     v_point := extensions.st_setsrid(extensions.st_makepoint(p_lng, p_lat), 4326)::extensions.geography;
     v_distance := extensions.st_distance(v_event.location, v_point)::double precision;
-    v_distance_text := concat(greatest(1, round(v_distance / 80)::int), ' min walk');
+    v_distance_text := public.humanize_distance_text(v_distance, p_locale);
   else
     v_distance := null;
     v_distance_text := null;
@@ -317,6 +317,10 @@ begin
     'distance_text', v_distance_text,
     'affinity_match_count', v_total,
     'affinity_match_label', case when v_total > 0 then concat(v_total, ' affinities') else null end,
+    -- A signed-out viewer has no claims to intersect: no threads, no score — never the
+    -- event's own tags dressed up as a match (20260901120000).
+    'affinity_matched_tags', '[]'::jsonb,
+    'fit_score', null,
     'is_authenticated', false,
     'participant_count', coalesce((select count(*) from public.event_requests er where er.event_id = p_event_id and er.status in ('approved', 'attended') and er.rsvp_status = 'going'), 0),
     'maybe_count', coalesce((select count(*) from public.event_requests er where er.event_id = p_event_id and er.status in ('approved', 'attended') and er.rsvp_status = 'maybe'), 0),
@@ -326,7 +330,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_event_preview_authed -- body verbatim from 20261015120000_event_community_surface.sql; only the §29 line(s) differ.
+-- get_event_preview_authed -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_event_preview_authed(
   p_event_id uuid,
@@ -348,6 +352,8 @@ declare
   v_participants jsonb;
   v_total int;
   v_matched int;
+  v_matched_tags text[];
+  v_fit numeric;
   v_my_status text;
   v_my_rsvp text;
 begin
@@ -379,7 +385,7 @@ begin
   if p_lat is not null and p_lng is not null then
     v_point := extensions.st_setsrid(extensions.st_makepoint(p_lng, p_lat), 4326)::extensions.geography;
     v_distance := extensions.st_distance(v_event.location, v_point)::double precision;
-    v_distance_text := concat(greatest(1, round(v_distance / 80)::int), ' min walk');
+    v_distance_text := public.humanize_distance_text(v_distance, p_locale);
   else
     v_distance := null;
     v_distance_text := null;
@@ -387,17 +393,12 @@ begin
 
   v_total := cardinality(coalesce(v_event.cohort_tags, '{}'));
 
-  select count(distinct tag)::int
-  into v_matched
-  from unnest(coalesce(v_event.cohort_tags, '{}')) as tag
-  where exists (
-    select 1
-    from public.user_identity_claims c
-    where c.user_id = v_caller
-      and c.dismissed_at is null
-      and c.disclosure = 'public'
-      and (c.concept = tag or tag = any(c.synonyms))
-  );
+  -- One intersection for the count, the chips and the score — the same helper the map's
+  -- get_nearby_activities_authed and /lana/circles/profile read, so the card, the marker
+  -- and the community-scoped marker can never disagree about the same meet.
+  select f.matched_count, f.matched_tags, f.fit_score
+  into v_matched, v_matched_tags, v_fit
+  from public.event_viewer_fit(v_event.cohort_tags, v_caller) f;
 
   select er.status, er.rsvp_status
   into v_my_status, v_my_rsvp
@@ -484,6 +485,9 @@ begin
     'affinity_match_count', v_matched,
     'affinity_total_count', v_total,
     'affinity_match_label', case when v_total = 0 then null else concat(v_matched, '/', v_total, ' affinities match') end,
+    -- The intersection itself, label-mapped like cohort_tags, in the event's tag order.
+    'affinity_matched_tags', to_jsonb(public.cohort_tag_labels(coalesce(v_matched_tags, '{}'))),
+    'fit_score', v_fit,
     'is_authenticated', true,
     'my_request_status', v_my_status,
     'my_rsvp_status', v_my_rsvp,
@@ -649,7 +653,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_nearby_activities_authed -- body verbatim from 20260926120000_honest_distance_labels.sql; only the §29 line(s) differ.
+-- get_nearby_activities_authed -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_nearby_activities_authed(
   p_lat double precision default null,
@@ -679,6 +683,7 @@ returns table (
   affinity_match_count int,
   affinity_total_count int,
   affinity_match_label text,
+  fit_score numeric,
   participant_count int,
   maybe_count int,
   my_request_status text,
@@ -741,12 +746,15 @@ begin
     public.humanize_distance_text(
       extensions.st_distance(e.location, v_point)::double precision, p_locale
     ) as distance_text,
-    am.matched as affinity_match_count,
+    am.matched_count as affinity_match_count,
     cardinality(coalesce(e.cohort_tags, '{}')) as affinity_total_count,
     case
       when cardinality(coalesce(e.cohort_tags, '{}')) = 0 then null
-      else concat(am.matched, '/', cardinality(coalesce(e.cohort_tags, '{}')), ' affinities match')
+      else concat(am.matched_count, '/', cardinality(coalesce(e.cohort_tags, '{}')), ' affinities match')
     end as affinity_match_label,
+    -- 0-1 over the same proven intersection as affinity_match_count; null = unscored
+    -- (no public claims, or an untagged meet). See public.event_viewer_fit.
+    am.fit_score as fit_score,
     coalesce((
       select count(*)::int
       from public.event_requests er
@@ -826,18 +834,7 @@ begin
       ) p
     ), '[]'::jsonb) as participant_preview
   from public.events e
-  left join lateral (
-    select count(distinct tag)::int as matched
-    from unnest(coalesce(e.cohort_tags, '{}')) as tag
-    where exists (
-      select 1
-      from public.user_identity_claims c
-      where c.user_id = v_caller
-        and c.dismissed_at is null
-        and c.disclosure = 'public'
-        and public.cohort_tag_matches_claim(tag, c.concept, c.synonyms)
-    )
-  ) am on true
+  left join lateral public.event_viewer_fit(e.cohort_tags, v_caller) am on true
   where e.status = 'open'
     and not e.is_private  -- §29: a private meet travels by invite link only
     and e.location is not null
@@ -1310,7 +1307,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- get_peer_profile -- body verbatim from 20261102120000_peer_profile_restore_portrait.sql; only the §29 line(s) differ.
+-- get_peer_profile -- body verbatim from 20270110120000_meet_fit_and_preview_fixes.sql; only the §29 line(s) differ.
 -- ---------------------------------------------------------------------------
 create or replace function public.get_peer_profile(p_user_id uuid)
 returns jsonb
@@ -1434,7 +1431,10 @@ begin
       select jsonb_agg(jsonb_build_object(
         'event_id', e.id,
         'title', e.title,
-        'starts_at', e.starts_at
+        'starts_at', e.starts_at,
+        -- The community the meet is FOR, same object as get_event_preview's; null on a
+        -- plain neighbourhood meet. Both people are going, so the place is no news.
+        'community', public.event_community(e.circle_place_ref, e.host_id)
       ) order by e.starts_at asc)
       from public.events e
       where e.status = 'open'
