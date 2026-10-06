@@ -326,6 +326,87 @@ def discover_communities_by_topic(
     return out
 
 
+def discover_communities_anywhere(
+    user_id: str,
+    query: str,
+    *,
+    placeless_only: bool = True,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Communities found by what they ARE, not where (20270109120000).
+
+    The path a community with no location has: a podcasters group made in chat has no
+    lat/lng, so the radius read can never return it. This matches the community's own
+    name and description (English stems: "podcasters" finds "Podcast Club") and what its
+    members say about themselves (public, self-subject claims only).
+
+    `placeless_only=False` is for a NAMED lookup — "SJSU" asked from Orlando should find
+    San Jose State. A topic browse keeps the default, so a gym three states away never
+    answers "any communities for climbers?".
+
+    Rows share the near read's card shape, with no distance (there is none) and the HQ
+    folded into the status line as provenance ("Run from Orlando"). [] on any failure.
+    """
+    ask = str(query or "").strip()
+    if not user_id or not ask:
+        return []
+    args: dict[str, Any] = {
+        "p_user_id": user_id,
+        "p_query": ask[:120],
+        "p_placeless_only": bool(placeless_only),
+        "p_limit": max(1, min(int(limit or 5), _TOPIC_MAX_LIMIT)),
+        "p_min_similarity": _TOPIC_MIN_SIMILARITY,
+    }
+    try:
+        from app.layer1_handlers import _embed_attr_filter
+        from app.vec_util import to_pgvector
+
+        literal = to_pgvector(_embed_attr_filter(ask))
+        if literal:
+            args["p_query_embedding"] = literal
+    except Exception:  # noqa: BLE001 — the words arm still answers without the vector
+        logger.info("discover_anywhere.no_embedding ask=%r", ask[:60])
+    try:
+        res = service_client().rpc("discover_communities_anywhere", args).execute()
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception:
+        logger.exception("discover_anywhere_failed user=%s ask=%r", user_id, ask[:60])
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("place_id"):
+            continue
+        name = str(r.get("name") or "").strip()
+        if not is_joinable_place_name(name):
+            continue
+        ptype = str(r.get("place_type") or "").strip() or None
+        members = int(r.get("member_count") or 0)
+        mine = bool(r.get("is_member"))
+        hq = str(r.get("hq_city") or "").strip() or None
+        status = _discovery_status_line(members, mine)
+        out.append(
+            {
+                "place_id": str(r["place_id"]),
+                "place_name": name,
+                "place_address": None,
+                "place_type": ptype,
+                "relation": place_relation_noun(ptype),
+                "emoji": place_relation_emoji(ptype),
+                "zip": None,
+                # No point: it is not anywhere. The HQ is provenance, not a location.
+                "lat": None,
+                "lng": None,
+                "hq_city": hq,
+                "member_count": members,
+                "is_member": mine,
+                "status_line": f"Run from {hq} · {status}" if hq else status,
+                "matched_on": str(r.get("matched_on") or "") or None,
+                "matched_label": str(r.get("matched_label") or "").strip() or None,
+            }
+        )
+    return out
+
+
 def _first_type(types: Any) -> str:
     if isinstance(types, list):
         for t in types:
@@ -1463,6 +1544,7 @@ def communities_chat_turn(
     session_ctx: dict[str, Any],
     community_name: str | None = None,
     community_ask: str = "about",
+    community_topic: str | None = None,
 ) -> str:
     """Answer a community ask (`discovery.communities`) from real rows.
 
@@ -1488,10 +1570,22 @@ def communities_chat_turn(
         said = community_name.strip()[:80]
         hit = _resolve_named_community(user_id, community_name)
         inexact: str | None = None
+        # Not theirs and not near them: a community with no location, or a named place
+        # far away ("SJSU" from Orlando), is still a real answer (20270109120000).
+        far = [] if hit else discover_communities_anywhere(
+            user_id, said, placeless_only=False, limit=_CHAT_NEARBY_MAX
+        )
+        if not hit:
+            hit = next(
+                (c for c in far
+                 if c.get("matched_on") == "name" and _same_place_name(said, c["place_name"])),
+                None,
+            )
         if not hit:
             pools = [
                 _my_communities(user_id),
                 discover_communities(user_id, limit=_MAX_LIMIT),
+                far,
             ]
             near = _near_name_candidates(community_name, pools)
             if not near:
@@ -1544,6 +1638,11 @@ def communities_chat_turn(
     session_ctx["discovery_surface"] = None
 
     mine = _my_communities(user_id)
+    topic = str(community_topic or "").strip()[:80]
+    if topic and community_ask != "mine" and not named_miss:
+        return _topic_communities_turn(
+            user_id, topic=topic, message=message, session_ctx=session_ctx
+        )
     nearby = [
         c for c in discover_communities(user_id, limit=_CHAT_NEARBY_MAX * 2)
         if not c.get("is_member")
@@ -1674,6 +1773,86 @@ def communities_chat_turn(
         session_ctx=session_ctx,
         user_message=message,
         # Two, not three: the cards are the list, so the text is a summary + an offer.
+        max_sentences=2,
+    )
+
+
+def _topic_communities_turn(
+    user_id: str,
+    *,
+    topic: str,
+    message: str,
+    session_ctx: dict[str, Any],
+) -> str:
+    """"Any communities for podcasters?" — answered by what communities ARE, not where.
+
+    Placeless communities (made without a location, or a creator's) can only ever be found
+    this way. Nearby ones whose NAME carries the subject come along, labelled as nearby;
+    the rest of the neighbourhood list is not what they asked for and is left out.
+    """
+    found = discover_communities_anywhere(user_id, topic, limit=_CHAT_NEARBY_MAX * 2)
+    anywhere = [c for c in found if not c.get("is_member")][:_CHAT_NEARBY_MAX]
+    already = [c for c in found if c.get("is_member")]
+    seen = {c["place_id"] for c in anywhere}
+    nearby = [
+        c for c in discover_communities(user_id, query=topic, limit=_CHAT_NEARBY_MAX * 2)
+        if not c.get("is_member") and c["place_id"] not in seen
+    ][:_CHAT_NEARBY_MAX]
+    cards = nearby + anywhere
+    session_ctx["community_discovery"] = {"communities": cards, "total": len(cards)}
+    # Armed for one turn, exactly as the nearby list is, so "Join Podcast Club" works.
+    session_ctx["community_join_pending"] = (
+        {"places": [{"place_id": c["place_id"], "place_name": c["place_name"]} for c in cards]}
+        if cards
+        else None
+    )
+
+    facts: list[str] = [f'They are looking for communities about "{topic}"']
+    if anywhere:
+        best = anywhere[0]
+        facts.append(
+            f"Communities about it that are not tied to one place, so anyone can join from "
+            f"anywhere: {len(anywhere)} (best match: {best['place_name']} — "
+            f"{best['status_line']}). Never call these near them"
+        )
+    if nearby:
+        facts.append(f"Nearby communities with it in their name: {len(nearby)}")
+    if cards:
+        facts.append(
+            "The cards under your message list every one with real member counts, so your "
+            "text must NOT name them one by one"
+        )
+    if already:
+        facts.append(f"They are already in one about it: {already[0]['place_name']}")
+
+    if cards:
+        goal = (
+            f"Answer what they asked: communities about {topic}. TWO SHORT SENTENCES, never a "
+            "list. Say what turned up (at most ONE name), make clear any that are not local can "
+            "be joined from anywhere, and offer to add them — joining is instant and reversible."
+        )
+        fallback = (
+            f"I found {len(cards)} communit{'y' if len(cards) == 1 else 'ies'} about {topic} — "
+            "they're below. Want me to add you to one?"
+        )
+    else:
+        goal = (
+            f"Say plainly there is no community about {topic} yet. Then offer to start one: "
+            f"anyone who looks for {topic} would find it. Never blame them or their area."
+        )
+        fallback = (
+            f"There's no community about {topic} yet. Want to start one? Anyone looking "
+            f"for {topic} would find it."
+        )
+
+    from app.reply_compose import compose_reply
+
+    return compose_reply(
+        goal=goal,
+        facts=facts,
+        fallback=fallback,
+        session_ctx=session_ctx,
+        user_message=message,
         max_sentences=2,
     )
 

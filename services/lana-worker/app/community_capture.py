@@ -666,8 +666,57 @@ def run_community_capture_turn(
             fallback="No problem — I've let that go. Tell me when you want to start one.",
         )
 
+    # ── HQ: the answer to "where is it run from?" ──
+    # Asked only after they pressed publish on a community with no place, so a city that
+    # resolves goes straight on to publishing — they already said go.
+    publish_now = False
+    if (
+        session_ctx.get("community_pending_ask") == "hq"
+        and session_ctx.get("community_ready")
+        # A tapped correction chip ("fix:name") is a rendered control, not a city.
+        and not re.match(r"\s*fix:\w+\s*$", msg)
+    ):
+        from app.community_hq import geocode_city
+
+        got = geocode_city(msg)
+        if not got:
+            session_ctx["community_draft"] = draft
+            draft["pending_field"] = "hq"
+            return compose_reply(
+                goal=(
+                    "You couldn't place what they gave as the city their community is run "
+                    "from. Ask again in one short line for a town or city (e.g. a city and "
+                    "state), saying it shows on the community's card and map pin."
+                ),
+                facts=[f'They said: "{msg[:80]}"'],
+                fallback="I couldn't place that — which city is it run from?",
+            )
+        draft["hq_city"], draft["hq_lat"], draft["hq_lng"] = got["city"], got["lat"], got["lng"]
+        session_ctx["community_pending_ask"] = None
+        publish_now = True
+
     # ── Publish: the ready card's CTA ──
-    if session_ctx.get("community_ready") and _PUBLISH_RE.search(msg):
+    if session_ctx.get("community_ready") and (publish_now or _PUBLISH_RE.search(msg)):
+        # A community with no place is found by what it is, and its card says where it is
+        # run from — so that is asked once, here, before it goes live (2026-10-06). A
+        # community on a real place already has its location.
+        if not str(draft.get("google_place_id") or "").strip() and not draft.get("hq_city"):
+            session_ctx["community_pending_ask"] = "hq"
+            draft["pending_field"] = "hq"
+            session_ctx["community_draft"] = draft
+            session_ctx["community_create_active"] = True
+            return compose_reply(
+                goal=(
+                    "Before you put their community live, ask in one short line which city "
+                    "it is run from. Say it is just for its card and map pin — anyone, "
+                    "anywhere, can still find and join it."
+                ),
+                facts=[f"The community: {draft.get('name') or 'their community'}"],
+                fallback=(
+                    "One last thing — which city is it run from? It's just for the card; "
+                    "anyone anywhere can still join."
+                ),
+            )
         result, err = publish_community(draft=draft, user_id=str(user_id or ""))
         if not result:
             if err == "place_required":
@@ -702,6 +751,16 @@ def run_community_capture_turn(
                 "name": str(draft.get("name") or "").strip(),
             }
         draft["community_id"] = result.get("place_id") or result.get("affiliation_id")
+        if draft.get("hq_city") and result.get("place_id") and user_id:
+            from app.community_hq import write_community_hq
+
+            # Best effort, and SQL decides: joining an existing same-name community does
+            # not make its HQ theirs to set.
+            write_community_hq(
+                str(user_id),
+                str(result["place_id"]),
+                {"city": draft["hq_city"], "lat": draft.get("hq_lat"), "lng": draft.get("hq_lng")},
+            )
         # A rendered control, not a question: the PWA shows a "claim this link" button and
         # makes the claim itself, so nothing here has to parse the next turn.
         offer = _handle_offer(str(result.get("place_id") or ""), user_id)
