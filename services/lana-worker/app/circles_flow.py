@@ -714,21 +714,30 @@ def ground_affiliation(
         "profile_add": "profile_add",
         "invite_confirmed": "invite_self_confirm",
     }.get(str(affiliation.get("source") or ""), "grounding_ask")
+    # "Just curious", answered on the invite before there was a place (§23), sticks:
+    # the row lands as curious — hers to see, excluded from counts, rosters, matching.
+    curious = (
+        str(affiliation.get("source") or "") == "invite_confirmed"
+        and _membership_intent(str(affiliation["id"])) == "curious"
+    )
+    grounded_status = "curious" if curious else "confirmed"
     service_client().table("circle_affiliations").update(
-        {"place_ref": place_id, "status": "confirmed", "confirmed_via": confirmed_via}
+        {"place_ref": place_id, "status": grounded_status, "confirmed_via": confirmed_via}
     ).eq("id", affiliation["id"]).execute()
 
     # Grounding is how most people become a member — the Join tap is the rarer path — so
     # the "somebody new joined" mail has to fire from HERE too, not only from
-    # join_community. Local import: community_discovery imports this module.
-    from app.community_discovery import notify_members_of_join
+    # join_community. Local import: community_discovery imports this module. Not for a
+    # curious row: she said she does not go there (same rule as join_community).
+    if not curious:
+        from app.community_discovery import notify_members_of_join
 
-    notify_members_of_join(place_id, place_name, user_id)
+        notify_members_of_join(place_id, place_name, user_id)
 
     _flush_parked_features(user_id, affiliation, place_id)
     _close_grounding_gap(affiliation_id)
 
-    if open_enrichment_gap:
+    if open_enrichment_gap and not curious:
         try:
             from app.rapport_gaps import open_semantic_gap
 
@@ -750,7 +759,7 @@ def ground_affiliation(
         "affiliation_id": str(affiliation["id"]),
         "place_id": place_id,
         "place_name": place_name,
-        "status": "confirmed",
+        "status": grounded_status,
     }
 
 
@@ -2084,6 +2093,8 @@ def add_circle(
     google_place_id: str | None = None,
     source: str = "profile_add",
     invited_by: str | None = None,
+    invite_id: str | None = None,
+    membership: str | None = None,
 ) -> dict[str, Any]:
     """Profile 'Add' (§G.2). A community's place is MANDATORY (2026-07-28 product
     decision): a profile add without a google_place_id is rejected — the created
@@ -2100,10 +2111,25 @@ def add_circle(
     from app.circles_capture import _slugify
 
     key = _slugify(detail or "") or circle_type
+    if source == "invite_confirmed" and invite_id:
+        try:
+            return _invite_candidate(
+                user_id,
+                invite_id,
+                circle_type=circle_type,
+                base_key=key,
+                detail=detail,
+                invited_by=invited_by,
+                membership=membership,
+            )
+        except _InviteColumnsAbsent:
+            # Pre-20270113120000 schema: the old per-kind candidate below, still
+            # answering with the row's real grounded/place_id.
+            pass
     sb = service_client()
     existing = (
         sb.table("circle_affiliations")
-        .select("id")
+        .select("id, status, place_ref")
         .eq("user_id", user_id)
         .eq("circle_key", key)
         .is_("dismissed_at", "null")
@@ -2112,6 +2138,10 @@ def add_circle(
     )
     if existing.data:
         affiliation_id = str(existing.data[0]["id"])
+        if source == "invite_confirmed" and existing.data[0].get("place_ref"):
+            # The ack used to say grounded:false for a row that is grounded, and the
+            # client then re-grounded it at a different place (§28(c)).
+            return _candidate_ack(existing.data[0])
     else:
         row = {
             "user_id": user_id,
@@ -2131,6 +2161,152 @@ def add_circle(
     if google_place_id:
         return ground_affiliation(user_id, affiliation_id, google_place_id)
     return {"affiliation_id": affiliation_id, "status": "suggested", "grounded": False}
+
+
+class _InviteColumnsAbsent(Exception):
+    """circle_affiliations has no invite_id / membership_intent yet (20270113120000)."""
+
+
+def _missing_invite_columns(exc: Exception) -> bool:
+    text = str(exc)
+    return "42703" in text or (
+        ("invite_id" in text or "membership_intent" in text) and "column" in text
+    )
+
+
+def _membership_word(value: str | None) -> str | None:
+    word = str(value or "").strip().lower()
+    return word if word in ("member", "curious") else None
+
+
+def _candidate_ack(row: dict[str, Any]) -> dict[str, Any]:
+    """The self-confirm answer, read off the row itself — never assumed (§28(c)).
+
+    `membership` is the row's answer: from status once it has a place, else the
+    parked membership_intent (null when she has not answered)."""
+    place_id = str(row.get("place_ref") or "") or None
+    status = str(row.get("status") or "suggested")
+    if place_id:
+        membership: str | None = "curious" if status == "curious" else (
+            "member" if status == "confirmed" else None
+        )
+    else:
+        membership = _membership_word(row.get("membership_intent"))
+    return {
+        "affiliation_id": str(row["id"]),
+        "status": status,
+        "grounded": bool(place_id),
+        "place_id": place_id,
+        "membership": membership,
+    }
+
+
+def _invite_candidate(
+    user_id: str,
+    invite_id: str,
+    *,
+    circle_type: str,
+    base_key: str,
+    detail: str | None,
+    invited_by: str | None,
+    membership: str | None,
+) -> dict[str, Any]:
+    """The joiner's own candidate for ONE invite (§28(c)), carrying her membership
+    answer until it has a place (§23).
+
+    Deduped on (user, invite) — not on the kind, which handed a second owner's fitness
+    invite the gym she had already pinned for the first. circle_key stays the user's
+    own words: the next free key of the base ("fitness", "fitness_2", …), the same
+    rule the Join path uses, so it always matches ^[a-z][a-z0-9_]{1,63}$ and
+    ground_options never searches an id as if it were a place name.
+
+    Raises _InviteColumnsAbsent on a schema without the 20270113120000 columns."""
+    from app.community_discovery import _unique_key
+
+    sb = service_client()
+    answer = _membership_word(membership)
+
+    def _live_rows() -> list[dict[str, Any]]:
+        try:
+            res = (
+                sb.table("circle_affiliations")
+                .select("id, circle_key, status, place_ref, invite_id, membership_intent")
+                .eq("user_id", user_id)
+                .is_("dismissed_at", "null")
+                .limit(500)
+                .execute()
+            )
+        except Exception as exc:
+            if _missing_invite_columns(exc):
+                raise _InviteColumnsAbsent() from exc
+            raise
+        return [r for r in (res.data or []) if isinstance(r, dict)]
+
+    rows = _live_rows()
+    mine = next((r for r in rows if str(r.get("invite_id") or "") == invite_id), None)
+    if mine is None:
+        taken = {str(r.get("circle_key") or "") for r in rows}
+        row: dict[str, Any] = {
+            "user_id": user_id,
+            "circle_type": circle_type,
+            "circle_key": _unique_key(base_key, taken),
+            "detail": (detail or "").strip()[:200] or None,
+            "status": "suggested",
+            "source": "invite_confirmed",
+            "confidence": 1.0,  # self-stated, not inferred
+            "invite_id": invite_id,
+            "membership_intent": answer,
+        }
+        if invited_by:
+            row["invited_by"] = invited_by
+        try:
+            res = sb.table("circle_affiliations").insert(row).execute()
+        except Exception:
+            # A double-tapped accept lost the (user, invite) race: the other tap's row
+            # is the answer.
+            mine = next(
+                (r for r in _live_rows() if str(r.get("invite_id") or "") == invite_id),
+                None,
+            )
+            if mine is None:
+                raise
+        else:
+            if not res.data:
+                raise ValueError("circle_create_failed")
+            return _candidate_ack(res.data[0])
+
+    if answer:
+        patch: dict[str, Any] = {}
+        if mine.get("place_ref"):
+            # Already pinned: the answer is the row's status, as /circles/membership.
+            status = "curious" if answer == "curious" else "confirmed"
+            if str(mine.get("status") or "") != status:
+                patch["status"] = status
+        elif _membership_word(mine.get("membership_intent")) != answer:
+            patch["membership_intent"] = answer
+        if patch:
+            sb.table("circle_affiliations").update(patch).eq("id", mine["id"]).execute()
+            mine = {**mine, **patch}
+    return _candidate_ack(mine)
+
+
+def _membership_intent(affiliation_id: str) -> str | None:
+    """The membership answer parked on a candidate before it had a place (§23).
+    None when unanswered, and on a schema that predates the column."""
+    try:
+        res = (
+            service_client()
+            .table("circle_affiliations")
+            .select("membership_intent")
+            .eq("id", affiliation_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.warning("membership_intent_read_failed aff=%s", affiliation_id)
+        return None
+    row = (res.data or [None])[0]
+    return _membership_word(row.get("membership_intent")) if isinstance(row, dict) else None
 
 
 def update_circle(user_id: str, affiliation_id: str, *, detail: str | None) -> None:
