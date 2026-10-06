@@ -246,31 +246,16 @@ def save_local_signal(
     # description. Best-effort — a tip that posted must never fail on its vector; it stays
     # findable lexically and the backfill script can pick it up later.
     if signal_id and intent == "tip_share":
-        try:
-            from app.layer1_handlers import _embed_attr_filter
-            from app.tip_embed import tip_embedding_text
-            from app.vec_util import to_pgvector
-
-            literal = to_pgvector(
-                _embed_attr_filter(
-                    tip_embedding_text(
-                        detail_text=detail_text,
-                        category=category,
-                        reco_name=reco_name,
-                        reco_place=reco_place,
-                        reco_description=reco_description,
-                        affinity_tags=affinity_tags,
-                    )
-                )
-            )
-            if literal:
-                call_rpc(
-                    user_jwt,
-                    "set_signal_embedding",
-                    {"p_signal_id": signal_id, "p_embedding": literal},
-                )
-        except Exception:  # noqa: BLE001
-            logger.warning("set_signal_embedding_failed signal_id=%s", signal_id)
+        embed_tip(
+            user_jwt,
+            signal_id=str(signal_id),
+            detail_text=detail_text,
+            category=category,
+            reco_name=reco_name,
+            reco_place=reco_place,
+            reco_description=reco_description,
+            affinity_tags=affinity_tags,
+        )
 
     # The matcher ran inside that insert and found the other side of somebody's open ask —
     # tell them NOW, in this turn. Before this the match rows piled up in
@@ -299,6 +284,112 @@ def save_local_signal(
     except Exception:  # noqa: BLE001
         pass
     return result
+
+
+def embed_tip(
+    user_jwt: str,
+    *,
+    signal_id: str,
+    detail_text: str | None,
+    category: str | None = None,
+    reco_name: str | None = None,
+    reco_place: str | None = None,
+    reco_description: str | None = None,
+    affinity_tags: list[str] | None = None,
+) -> bool:
+    """Write a tip's vector (set_signal_embedding). True when one was written.
+
+    Shared by the capture (save_local_signal) and the edit (update_tip), so an edited
+    recommendation is embedded from exactly the text a fresh one would be. Best-effort: a
+    tip that posted must never fail on its vector — it stays findable lexically and the
+    backfill script can pick it up later."""
+    try:
+        from app.layer1_handlers import _embed_attr_filter
+        from app.tip_embed import tip_embedding_text
+        from app.vec_util import to_pgvector
+
+        literal = to_pgvector(
+            _embed_attr_filter(
+                tip_embedding_text(
+                    detail_text=detail_text,
+                    category=category,
+                    reco_name=reco_name,
+                    reco_place=reco_place,
+                    reco_description=reco_description,
+                    affinity_tags=affinity_tags,
+                )
+            )
+        )
+        if not literal:
+            return False
+        call_rpc(
+            user_jwt,
+            "set_signal_embedding",
+            {"p_signal_id": signal_id, "p_embedding": literal},
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("set_signal_embedding_failed signal_id=%s", signal_id)
+        return False
+
+
+# What an edit may change — the RPC's own arguments, nothing else. The category, the block,
+# the community and the author are not editable here.
+_EDITABLE = ("reco_type", "reco_fields", "reco_name", "reco_place", "reco_description")
+
+
+def update_tip(user_jwt: str, *, signal_id: str, edit: dict[str, Any]) -> dict[str, Any]:
+    """The author corrects her own recommendation, end to end (§47).
+
+    1. set_signal_reco — ownership is the RPC's (a non-author's call changes nothing). On a
+       real change it re-joins detail_text, drops the stale vector and re-matches lexically
+       (20270115120000).
+    2. The vector, re-written from the edited row, through the same embed_tip a capture
+       uses — the one half SQL cannot do.
+    3. refresh_my_signal_matches, so semantic pairs the new vector opens are logged now
+       rather than on her next block-log read.
+
+    Returns {"embedded": bool, "rematched": int}. Raises what the RPC raises (the caller
+    maps it to a status)."""
+    payload: dict[str, Any] = {"p_signal_id": signal_id}
+    for key in _EDITABLE:
+        if key in edit and edit[key] is not None:
+            payload[f"p_{key}"] = edit[key]
+    call_rpc(user_jwt, "set_signal_reco", payload)
+
+    from app.auth import service_client
+
+    row: dict[str, Any] = {}
+    try:
+        got = (
+            service_client()
+            .table("local_signals")
+            .select(
+                "id, user_id, intent, status, detail_text, category, reco_name, reco_place, "
+                "reco_description, affinity_tags"
+            )
+            .eq("id", signal_id)
+            .limit(1)
+            .execute()
+        )
+        row = (got.data or [{}])[0] or {}
+    except Exception:  # noqa: BLE001
+        logger.exception("update_tip_reread_failed signal=%s", signal_id)
+    embedded = False
+    if row.get("intent") == "tip_share":
+        tags = row.get("affinity_tags")
+        embedded = embed_tip(
+            user_jwt,
+            signal_id=signal_id,
+            detail_text=row.get("detail_text"),
+            category=row.get("category"),
+            reco_name=row.get("reco_name"),
+            reco_place=row.get("reco_place"),
+            reco_description=row.get("reco_description"),
+            affinity_tags=[str(t) for t in tags] if isinstance(tags, list) else None,
+        )
+    rematched = refresh_my_signal_matches(user_jwt) if embedded else 0
+    return {"embedded": embedded, "rematched": rematched}
 
 
 def tag_local_signal(user_jwt: str, *, signal_id: str, place_id: str) -> bool:

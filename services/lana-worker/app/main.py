@@ -891,6 +891,12 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 # (looking.tip) or a resolved distance; None everywhere else.
                 tip_text=str(row.get("tip_text") or "") or None,
                 tip_signal_id=str(row.get("tip_signal_id") or "") or None,
+                reco_fields=(
+                    [f for f in row["reco_fields"] if isinstance(f, dict)] or None
+                    if isinstance(row.get("reco_fields"), list)
+                    else None
+                ),
+                reco_type=str(row.get("reco_type") or "") or None,
                 distance_text=str(row.get("distance_text") or "") or None,
                 # Circle provenance (C-FIND-V2) — the grouping the results screen renders.
                 shared_circles=_shared_circle_rows(row.get("shared_circles")),
@@ -2977,8 +2983,14 @@ def set_tip_setup(
     # here: grounding happens at publish, and a draft that is still being edited must not
     # own a subject row yet. Stored raw and trusted no further than an id — publish hands
     # it to Google's own place lookup, which is what decides whether it is real.
+    #
+    # Pinned to the place step it answered (§35d), so the stored answer row carries the id
+    # too — see tip_share.pin_place_answer for which step that is and when it also grounds
+    # the subject.
     if (body.google_place_id or "").strip():
-        draft["subject_google_place_id"] = str(body.google_place_id).strip()
+        from app.tip_share import pin_place_answer
+
+        pin_place_answer(draft, google_place_id=str(body.google_place_id), answers=answers)
     ctx["tip_draft"] = draft
     # Every step the carousel showed counts as offered, so the turn after this does not
     # re-ask the optionals the user chose to leave blank — it goes to the ready card.
@@ -3861,6 +3873,54 @@ def post_tips_get(
         },
     )
     return {"tip": tip}
+
+
+class TipUpdateBody(_BaseModel):
+    """The author's correction — set_signal_reco's own arguments, by their wire names.
+    Omitted / null / blank = leave it (the RPC's contract; clearing is §47(3), unruled)."""
+
+    signal_id: str
+    reco_name: str | None = None
+    reco_description: str | None = None
+    reco_place: str | None = None
+    reco_type: str | None = None
+    reco_fields: list[dict[str, Any]] | None = None
+
+
+@app.post("/lana/tips/update")
+def post_tips_update(
+    body: TipUpdateBody,
+    authorization: str | None = Header(default=None),
+):
+    """Edit your own recommendation and have it re-embedded and re-matched (§47(2)).
+
+    Calling set_signal_reco straight from the client still works and now re-joins
+    detail_text and re-matches lexically on its own — but the vector is Vertex's, so only
+    this route can write the new one. Without it an edited tip is lexical-only until the
+    backfill runs. Returns the same row /lana/tips/get serves, as it now reads.
+    """
+    auth = verify_auth(authorization)
+    from app.local_signals import update_tip
+    from app.tip_feed import tip_by_id
+
+    before = tip_by_id(body.signal_id, viewer_user_id=auth.user_id)
+    # One answer for "not yours" and "not there": the id must not become an ownership
+    # oracle. The RPC enforces ownership too — this is what makes it a 404, not a no-op.
+    if not before or before.get("peer_user_id") != auth.user_id:
+        raise HTTPException(status_code=404, detail="tip_not_found")
+    edit = body.model_dump(exclude={"signal_id"}, exclude_none=True)
+    try:
+        outcome = update_tip(_bearer_token(authorization), signal_id=body.signal_id, edit=edit)
+    except HTTPException as exc:
+        detail = str(getattr(exc, "detail", "") or "")
+        for code in ("invalid_reco_type", "reco_fields_must_be_array"):
+            if code in detail:
+                raise HTTPException(status_code=422, detail=code) from None
+        raise
+    return {
+        "tip": tip_by_id(body.signal_id, viewer_user_id=auth.user_id),
+        "embedded": bool(outcome.get("embedded")),
+    }
 
 
 @app.post("/lana/tips/vouch")

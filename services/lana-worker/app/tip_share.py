@@ -387,6 +387,72 @@ def step_set_of(draft: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
+def pin_place_answer(
+    draft: dict[str, Any], *, google_place_id: str, answers: dict[str, Any] | None = None
+) -> str | None:
+    """Record a map pick against the place step it answered (§35d). Returns that field.
+
+    The carousel posts ONE `google_place_id` beside its answers and does not say which step
+    it belongs to; a generated set carries at most one map step (a place SUBJECT drops the
+    set's own "where is it?" — reco_question_sets._PLACE_SUBJECT_TYPES), so the step is
+    the set's place step. The answer text is kept beside the id: an id is only true while
+    the answer still says what the pick wrote, and a later typed correction must not keep
+    a place she has just rejected.
+
+    The subject step's pick still grounds the subject (subject_google_place_id, read by
+    reco_subject._picked), and so does a pick whose step cannot be told (the old
+    behaviour). A pick on any OTHER place step — Dr Sarah's clinic — no longer does: Dr
+    Sarah is not her clinic, which is the rule the set itself is built on."""
+    from app.reco_question_sets import SUBJECT_FIELD
+
+    gid = str(google_place_id or "").strip()
+    if not gid:
+        return None
+    known = answers if answers is not None else (draft.get("answers") or {})
+    place_steps = [s for s in step_set_of(draft) if s.get("kind") == "place"]
+    field = place_steps[0]["field"] if len(place_steps) == 1 else None
+    if field is None or field == SUBJECT_FIELD:
+        draft["subject_google_place_id"] = gid
+    if field:
+        pins = dict(draft.get("place_pins") or {})
+        pins[field] = {"id": gid, "answer": " ".join(str(known.get(field) or "").split())}
+        draft["place_pins"] = pins
+    return field
+
+
+def place_ids_of(draft: dict[str, Any]) -> dict[str, str]:
+    """{field: google_place_id} for the answered place steps that came off the map.
+
+    Two sources, strongest first: a carousel pick (place_pins, valid only while the answer
+    is unchanged), else the chat fork — an answer that IS one of the nearby places Lana
+    offered, matched back by label exactly as reco_subject._tapped matches the subject.
+    A typed answer nobody offered gets no id: a guessed id is worse than none."""
+    from app.reco_question_sets import SUBJECT_FIELD, carousel
+    from app.reco_subject import normalize_subject_name, place_options_map
+
+    pins = draft.get("place_pins") if isinstance(draft.get("place_pins"), dict) else {}
+    offered = place_options_map(draft.get("subject_place_options"))
+    out: dict[str, str] = {}
+    for step in carousel(step_set_of(draft), draft.get("answers")):
+        answer = " ".join(str(step.get("answer") or "").split())
+        if step.get("kind") != "place" or not answer:
+            continue
+        field = step["field"]
+        pin = pins.get(field) if isinstance(pins.get(field), dict) else None
+        gid = str(pin.get("id") or "") if pin and pin.get("answer") == answer else ""
+        if not gid and field == SUBJECT_FIELD and not pin:
+            gid = str(draft.get("subject_google_place_id") or "")
+        if not gid:
+            head = answer.split(" · ")[0]
+            hit = offered.get(normalize_subject_name(answer)) or offered.get(
+                normalize_subject_name(head)
+            )
+            gid = str((hit or {}).get("place_id") or "")
+        if gid.strip():
+            out[field] = gid.strip()
+    return out
+
+
 def _reco_tallies(*, user_jwt: str, block_id: str | None, name: Any) -> list[dict[str, Any]]:
     """What OTHER neighbours already logged about this same subject, for the closing
     "others also said · tap to agree" step. Best-effort: no tallies, no step."""
@@ -515,6 +581,7 @@ def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
     would have answers with no labels."""
     from app.reco_question_sets import SUBJECT_FIELD, carousel
 
+    pinned = place_ids_of(draft)
     out = [
         {
             "field": s["field"],
@@ -522,6 +589,13 @@ def _reco_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
             "question": s["question"],
             "kind": s.get("kind") or "text",
             "answer": s["answer"],
+            # §35d: a place answer picked off the map keeps its id, so a reader's card can
+            # link to it and measure a real distance. Only on place rows, only when known.
+            **(
+                {"google_place_id": pinned[s["field"]]}
+                if (s.get("kind") == "place" and s["field"] in pinned)
+                else {}
+            ),
         }
         for s in carousel(step_set_of(draft), draft.get("answers"))
         # COMMUNITY out with the subject: where the tip was SENT is not something the card
@@ -1687,6 +1761,10 @@ def run_tip_share_turn(
     resolve_community(draft, user_jwt=user_jwt, session_ctx=session_ctx)
     if step_set:
         steps = carousel(step_set, draft.get("answers"))
+        pinned = place_ids_of(draft)
+        for st in steps:
+            if st.get("kind") == "place" and st["field"] in pinned:
+                st["google_place_id"] = pinned[st["field"]]
         draft["steps"] = steps
         draft["missing"] = missing_required(step_set, draft.get("answers"))
         asked = set(session_ctx.get("tip_asked_fields") or [])

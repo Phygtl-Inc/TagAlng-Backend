@@ -3760,6 +3760,12 @@ _POSTING_REMOVE_MSG = "Take my posting down"
 # localized, the payload is not. Same contract as the two above.
 _ASK_DRAFT_OK_MSG = "Looks good"
 _ASK_DRAFT_TWEAK_MSG = "Let me tweak that"
+# A tapped ask-draft chip (§30e). A RENDERED control's protocol payload — the chip carries
+# `field` and the client posts `fix:<field>` verbatim, the same contract the share-side
+# lanes (tip_share, look_meet, pass_along) read — so it is matched exactly, never inferred
+# from typed text. Only the fields an ask-draft chip can carry (tip_ask_draft._chip).
+_ASK_DRAFT_FIX_RE = re.compile(r"\s*fix:([a-z_]+)\s*$")
+_ASK_DRAFT_FIX_FIELDS = frozenset({"category", "locality", "qualifier", "recommended_by"})
 _TIP_KEEP_LISTENING_MSG = "Keep listening for me"
 _TIP_FIND_MORE_MSG = "Find more people"
 
@@ -4634,7 +4640,11 @@ def _try_ask_draft_reply_turn(
 
     text = str(msg or "").strip().lower()
     verdict: str | None = None
-    if text == _ASK_DRAFT_TWEAK_MSG.lower():
+    fix_field: str | None = None
+    fix = _ASK_DRAFT_FIX_RE.match(text)
+    if fix and fix.group(1) in _ASK_DRAFT_FIX_FIELDS:
+        verdict, fix_field = "tweak", fix.group(1)
+    elif text == _ASK_DRAFT_TWEAK_MSG.lower():
         verdict = "tweak"
     elif text == _ASK_DRAFT_OK_MSG.lower():
         verdict = "confirm"
@@ -4650,14 +4660,40 @@ def _try_ask_draft_reply_turn(
     ctx = _routing_ctx(dict(session_ctx), phase=phase or "listening", active_intent="looking.tip")
     ctx["ask_draft_pending"] = None
     if verdict == "tweak":
-        ctx["tip_tweak_pending"] = {"detail": detail, "category": pending.get("category")}
-        reply = compose_reply(
-            goal=(
+        # The chip(s) she tapped, by field — a qualifier tap can mean any of up to four.
+        was = [
+            str(c.get("label") or "").strip()
+            for c in (pending.get("chips") or [])
+            if isinstance(c, dict)
+            and c.get("field") == fix_field
+            and str(c.get("label") or "").strip()
+        ] if fix_field else []
+        ctx["tip_tweak_pending"] = {
+            "detail": detail,
+            "category": pending.get("category"),
+            "field": fix_field,
+            "was": " / ".join(was) or None,
+        }
+        facts = [f"The ask as you have it: {_ask_excerpt(detail)}"]
+        if fix_field:
+            facts.append(
+                f"The part they tapped to change: {fix_field.replace('_', ' ')}"
+                + (f" (currently: {' / '.join(was)})" if was else "")
+            )
+            goal = (
+                "The user tapped one part of the ask you read back to them, to change just "
+                "that part. Ask what it should be instead, in one short question about THAT "
+                "part only — keep everything else as it is. Nothing has been posted."
+            )
+        else:
+            goal = (
                 "The user wants to correct the ask you read back to them. Ask what to "
                 "change in one short question — you already have their ask, so you only "
                 "need the fix, not the whole thing again. Nothing has been posted."
-            ),
-            facts=[f"The ask as you have it: {_ask_excerpt(detail)}"],
+            )
+        reply = compose_reply(
+            goal=goal,
+            facts=facts,
             session_ctx=session_ctx,
             fallback=f"Sure — what should I change about {_ask_excerpt(detail)}?",
             max_sentences=1,
@@ -4706,7 +4742,12 @@ def _try_tip_tweak_answer_turn(
 
     return _tip_seek_answer_turn(
         msg=msg,
-        detail=merge_ask_correction(prior_detail=prior, correction=correction),
+        detail=merge_ask_correction(
+            prior_detail=prior,
+            correction=correction,
+            field=str(pending.get("field") or "") or None,
+            was=str(pending.get("was") or "") or None,
+        ),
         category=str(pending.get("category") or "") or None,
         session_ctx=session_ctx,
         user_jwt=user_jwt,
