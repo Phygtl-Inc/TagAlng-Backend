@@ -1604,6 +1604,8 @@ def create_lana_session(
                 orchestrator=use_orch,
                 is_anonymous=auth.is_anonymous,
                 preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
+                resumed=True,
+                user_turn_count=sum(1 for m in messages if m.get("role") == "user"),
                 **ob,
             )
 
@@ -1895,6 +1897,9 @@ def create_lana_session(
         is_anonymous=auth.is_anonymous,
         preferred_language=normalize_lang_code(merged_ctx.get("preferred_lang")),
         aspect_round=opening_aspect_round,
+        # A brand-new row: nobody has spoken into it yet (§21).
+        resumed=False,
+        user_turn_count=0,
         **ob,
     )
 
