@@ -176,13 +176,20 @@ _MERGE_SYSTEM = (
     "The correction WINS wherever the two disagree — if they now want an orthodontist, the "
     "ask is about an orthodontist, not a dentist. Keep every qualifier from the original "
     "that the correction did not overrule. Add nothing they did not say. Stay in their "
-    "language. Keep it under 15 words."
+    "language. Keep it under 15 words. When part_being_corrected is given, the "
+    "correction replaces exactly that part of the ask (it was what they tapped to change) "
+    "and everything else stays."
 )
 
 
-def merge_ask_correction(*, prior_detail: str, correction: str) -> str:
+def merge_ask_correction(
+    *, prior_detail: str, correction: str, field: str | None = None, was: str | None = None
+) -> str:
     """The user's tweak folded into the ask. Falls back to joining the two, which reads
-    clumsily but never silently drops what they said."""
+    clumsily but never silently drops what they said.
+
+    `field` / `was` come from a chip tap (`fix:<field>`, §30e): which part of the ask she
+    is correcting and what it said, so the model replaces THAT part rather than guessing."""
     prior = str(prior_detail or "").strip()
     fix = str(correction or "").strip()
     if not fix:
@@ -200,7 +207,15 @@ def merge_ask_correction(*, prior_detail: str, correction: str) -> str:
             model=router_model(),
             system=_MERGE_SYSTEM,
             user_payload=json.dumps(
-                {"original_ask": prior[:300], "their_correction": fix[:300]},
+                {
+                    "original_ask": prior[:300],
+                    "their_correction": fix[:300],
+                    **(
+                        {"part_being_corrected": f"{field} (was: {was})" if was else field}
+                        if field
+                        else {}
+                    ),
+                },
                 ensure_ascii=False,
             ),
             max_tokens=96,
@@ -232,5 +247,11 @@ def stamp_ask_draft(
         "title": draft.get("title"),
         "detail": str(detail or "")[:300],
         "category": category,
+        # The chips as rendered, so a `fix:<field>` tap can name the one being corrected.
+        "chips": [
+            {"label": c.get("label"), "field": c.get("field")}
+            for c in (draft.get("chips") or [])
+            if isinstance(c, dict)
+        ],
     }
     return draft

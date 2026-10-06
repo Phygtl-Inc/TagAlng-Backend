@@ -67,15 +67,19 @@ def _clean_fields(raw: Any) -> list[dict[str, Any]]:
         label = str(f.get("label") or "").strip()
         if not answer or not label:
             continue
-        out.append(
-            {
-                "field": str(f.get("field") or "").strip() or None,
-                "label": label,
-                "question": str(f.get("question") or "").strip() or None,
-                "kind": str(f.get("kind") or "").strip() or "text",
-                "answer": answer,
-            }
-        )
+        row = {
+            "field": str(f.get("field") or "").strip() or None,
+            "label": label,
+            "question": str(f.get("question") or "").strip() or None,
+            "kind": str(f.get("kind") or "").strip() or "text",
+            "answer": answer,
+        }
+        # A place answer picked off the map carries its Google id (§35d), so a reader's
+        # card can link to the place and measure a real distance. Absent when typed.
+        gid = str(f.get("google_place_id") or "").strip()
+        if gid:
+            row["google_place_id"] = gid
+        out.append(row)
     return out
 
 

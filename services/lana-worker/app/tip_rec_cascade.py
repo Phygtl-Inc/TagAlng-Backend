@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.tip_feed import _clean_fields
 from app.ui_actions import peer_card_nudge_action
 
 # One page of rows. Fetch is deliberately wider (see WIDE_FETCH) so a re-rank has somewhere
@@ -126,6 +127,11 @@ def peer_rows_from_neighbor_tips(
             "avatar_url": str(tip.get("avatar_url") or "").strip() or None,
             "tip_text": text,
             "tip_signal_id": str(tip.get("signal_id") or "").strip() or None,
+            # The card as stored, beside the legacy sentence (§35b). None — not [] — for a
+            # prose-only tip, so a reader can tell "no steps were ever asked" from a
+            # client bug. Same cleaning the feed row gets, so the two never disagree.
+            "reco_fields": _clean_fields(tip.get("reco_fields")) or None,
+            "reco_type": str(tip.get("reco_type") or "").strip() or None,
             "distance_text": str(tip.get("distance_text") or "").strip() or None,
             # The numeric twin of distance_text, for the "Nearest" tab's order (§30c).
             "distance_meters": _num_or_none(tip.get("distance_meters")),

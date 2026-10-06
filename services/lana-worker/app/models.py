@@ -312,6 +312,12 @@ class PeerMatchRow(BaseModel):
     # claim-affinity matches, which have no rec behind them.
     tip_text: str | None = None
     tip_signal_id: str | None = None
+    # The same recommendation as the author's card stores it (§35b): the answered steps as
+    # stored ({field, label, question, kind, answer}, plus google_place_id on a place
+    # row) and the taxonomy bucket. `tip_text` is the legacy joined sentence; render these
+    # when present. reco_fields is null — not [] — for a prose-only (pre-carousel) tip.
+    reco_fields: list[dict[str, Any]] | None = None
+    reco_type: str | None = None
     # Honest distance phrase ("a few minutes away", "1.4 mi away") straight from
     # humanize_distance_text. None whenever either side's coarse point is unknown —
     # never a guess, and never confused with matching_peer_label (a shared thread).
@@ -1036,6 +1042,10 @@ class RecoStep(BaseModel):
     options: list[str] = Field(default_factory=list)
     required: bool = False
     answer: str | None = None
+    # kind == "place" only: the Google place the answer was picked from (§35d) — the
+    # carousel's PlacePick.googlePlaceId, or the chat fork's tapped suggestion. Null when
+    # the answer was typed, which is still a valid answer (a plumber has no listing).
+    google_place_id: str | None = None
 
 
 class TipDraft(BaseModel):
@@ -1374,6 +1384,17 @@ class PlaceResult(BaseModel):
     area_label: str | None = None
 
 
+class PlaceSuggestionCommunity(BaseModel):
+    """{place_id, member_count, is_member, activity_labels, matched_label} — facts only;
+    the phrasing ("3 neighbors go here") is the surface's to write and translate."""
+
+    place_id: str | None = None
+    member_count: int = 0
+    is_member: bool = False
+    activity_labels: list[str] = Field(default_factory=list)
+    matched_label: str | None = None
+
+
 class PlaceSuggestionRow(BaseModel):
     """A Google Places fallback shown when no neighbor has recommended one yet — rendered as
     tappable cards (maps_url opens the spot in Google Maps). Clearly NOT a neighbor vouch."""
@@ -1381,6 +1402,11 @@ class PlaceSuggestionRow(BaseModel):
     address: str = ""
     place_id: str | None = None
     maps_url: str | None = None
+    # One of OUR communities at (or matched to) this place — stamped at the fetch by
+    # app/place_local_signal.py and passed through by main._place_suggestions_from_ctx,
+    # but dropped here until §30(d) because the model never declared it. Rows carrying it
+    # render under "From your circles"; the rest under "From Google · not a neighbor vouch".
+    community: PlaceSuggestionCommunity | None = None
 
 
 class PlaceSearchResponse(BaseModel):
