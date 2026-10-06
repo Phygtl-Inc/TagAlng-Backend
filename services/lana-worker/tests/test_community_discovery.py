@@ -1339,7 +1339,9 @@ class TestAboutACommunity(unittest.TestCase):
         )
         facts = " ".join(compose.call_args.kwargs["facts"])
         self.assertIn("bookstore", facts)
-        self.assertIn("NOT in this community", facts)
+        # Still told — but as background for the closing offer, never the opening line
+        # (prod 2026-10-06: "is there SJSU?" opened with "I don't see you in it yet").
+        self.assertIn("They are not in it yet", facts)
         # ...and a "yes" after it means something.
         self.assertEqual(ctx["community_join_pending"]["places"][0]["place_id"], "pBN")
 

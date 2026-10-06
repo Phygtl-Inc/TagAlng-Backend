@@ -1102,7 +1102,16 @@ def _community_about_turn(
         for e in (prof.get("upcoming_events") or [])
         if str((e or {}).get("title") or "").strip()
     ]
-    facts = [f"Community: {place}"]
+    far = bool(community.get("far"))
+    facts = [f"Community: {place} — it exists on Lana"]
+    if far:
+        # Found by name, not by distance: it is nowhere near them, so "near you" — the
+        # fallback's word for every other hit — would be false (prod 2026-10-06, SJSU
+        # asked about from Rawalpindi).
+        facts.append(
+            "It is NOT near them — they found it by name; never say it is near or local. "
+            "Anyone can join it from anywhere"
+        )
     # The community the chat is INSIDE carries what its creator said it is for — the one
     # fact that answers "what do people do here?" on day one, when nobody has added
     # features or meets yet (every creator community today).
@@ -1213,7 +1222,13 @@ def _community_about_turn(
             # was the model narrating this line back to someone who had just joined.
             "member": "They are a member here (background — do not tell them unless asked)",
             "curious": "They joined as curious — they have not said they go here",
-        }.get(membership, "They are NOT in this community")
+        }.get(
+            membership,
+            # Background for the closing offer, never the opening: "I don't see you in the
+            # San Jose State University community yet" answered "is there SJSU?" with a
+            # statement about them (prod 2026-10-06).
+            "They are not in it yet — background for the offer at the END, never the opening",
+        )
     )
     if membership == "visitor":
         # Being let in is a real next step, and a "yes" should mean something.
@@ -1221,8 +1236,10 @@ def _community_about_turn(
     return compose_reply(
         goal=(
             "Answer what they actually asked about this place, using ONLY the facts. If "
-            "the facts do not hold what they asked, say that plainly first and then say "
-            "what you DO know about it — never answer a different question, and never "
+            "they asked whether it exists or is on here, the FIRST words are yes — it is "
+            "here — then what it is. If the facts do not hold what they asked, say that "
+            "plainly first and then say what you DO know about it — never answer a "
+            "different question, never open with whether they are in it, and never "
             "list other communities instead. TWO SHORT SENTENCES."
             + (
                 " They are not in it, so you may end by offering to add them."
@@ -1233,7 +1250,7 @@ def _community_about_turn(
         facts=facts,
         fallback=(
             # A creator community has no geography: "near you" would be false.
-            f"{place} — {'a community' if creator_here else (prof.get('relation') or 'a spot') + ' near you'}"
+            f"{place} — {'a community' if creator_here or far else (prof.get('relation') or 'a spot') + ' near you'}"
             f", with {count} {'person' if count == 1 else 'people'} in it."
         ),
         session_ctx=session_ctx,
@@ -1567,7 +1584,7 @@ def communities_chat_turn(
         )
         if not hit:
             hit = next(
-                (c for c in far
+                (dict(c, far=True) for c in far
                  if c.get("matched_on") == "name" and _same_place_name(said, c["place_name"])),
                 None,
             )

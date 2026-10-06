@@ -194,6 +194,48 @@ def test_a_named_community_far_away_is_found(monkeypatch: Any) -> None:
     assert about.call_args.kwargs["community"]["place_id"] == "pSJSU"
     # Its exact name, so it is the answer — not a guess flagged as "did you mean".
     assert about.call_args.kwargs["inexact"] is None
+    # Marked as found far away, so the answer never calls it "near you".
+    assert about.call_args.kwargs["community"]["far"] is True
+
+
+def _about(monkeypatch: Any, *, far: bool, membership: str = "visitor") -> tuple[str, dict]:
+    seen: dict = {}
+
+    def compose(*, goal: str, facts: list, fallback: str, **_: Any) -> str:
+        seen.update(goal=goal, facts=facts)
+        return fallback
+
+    monkeypatch.setattr("app.reply_compose.compose_reply", compose)
+    monkeypatch.setattr("app.community_surface.community_profile", lambda *a, **k: {
+        "place_name": "San Jose State University", "membership": membership,
+        "member_count": 2, "relation": "university", "upcoming_events": [], "features": [],
+    })
+    community = {"place_id": "pSJSU", "place_name": "San Jose State University"}
+    if far:
+        community["far"] = True
+    out = cd._community_about_turn("u1", community=community,
+                                   message="is there san jose state university",
+                                   session_ctx={})
+    return out, seen
+
+
+def test_is_there_x_answers_yes_first_never_with_membership(monkeypatch: Any) -> None:
+    """Prod 2026-10-06: "is there San Jose State University?" got "I don't see you in the
+    San Jose State University community yet"."""
+    _, seen = _about(monkeypatch, far=False)
+    assert "FIRST words are yes" in seen["goal"]
+    assert "never open with whether they are in it" in seen["goal"]
+    assert any("never the opening" in f for f in seen["facts"])
+    assert any("exists on Lana" in f for f in seen["facts"])
+
+
+def test_a_far_community_is_never_called_near(monkeypatch: Any) -> None:
+    out, seen = _about(monkeypatch, far=True)
+    assert "near you" not in out
+    assert any("NOT near them" in f for f in seen["facts"])
+    out_near, seen_near = _about(monkeypatch, far=False)
+    assert "near you" in out_near
+    assert not any("NOT near them" in f for f in seen_near["facts"])
 
 
 def test_the_topic_slot_is_read_from_the_ai() -> None:
