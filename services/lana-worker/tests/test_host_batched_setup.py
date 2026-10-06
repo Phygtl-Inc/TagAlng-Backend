@@ -205,6 +205,26 @@ class TestApplyHostBrain(unittest.TestCase):
         self.assertIs(ed["auto_approve"], False)
         self.assertIs(ed["allow_attendee_share"], True)
 
+    def test_typed_no_sharing_survives_the_next_turns_redraw(self) -> None:
+        # e2e: "don't let guests share" → allow_share False on the draft only; the next
+        # turn's extractor redraw carries no share/approval keys, the settings mirror
+        # had none either, _seed_setup_defaults put True back, and it published shareable.
+        ed: dict = {"title": "Book club"}
+        _, _, settings = self._apply(
+            {"allow_share": False, "auto_approve": True, "reply": "x"}, ed
+        )
+        self.assertIs(settings["allow_attendee_share"], False)
+        self.assertIs(settings["auto_approve"], True)
+        # Next turn, as the pipeline does it: redraw, re-apply the mirror, seed defaults.
+        nxt = merge_event_drafts(ed, {"title": "Book club"})
+        self.assertNotIn("allow_attendee_share", nxt)  # why the mirror is needed at all
+        for key in ("auto_approve", "allow_attendee_share"):
+            if key in settings:
+                nxt[key] = settings[key]
+        _seed_setup_defaults(nxt)
+        self.assertIs(nxt["allow_attendee_share"], False)
+        self.assertIs(nxt["auto_approve"], True)
+
     def test_corrections_overwrite_title_and_place(self) -> None:
         # "don't call it that — call it Pasta Night, and actually let's do the community
         # center" must not be silently dropped just because the fields were already filled.
