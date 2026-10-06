@@ -501,6 +501,10 @@ _SYSTEM = (
     "belong to — theirs or ones nearby to join ('show me communities around me', 'what "
     "communities am I in', 'any groups near me', 'communities I can join', 'which gyms do "
     "people here go to', 'is there a book club nearby'). goal=chat, in_discovery=false. "
+    "Looking for a community ABOUT something, local or not ('is there a community for "
+    "podcasters?', 'any groups for new moms?', 'find me a book club community') is the same "
+    "intent with community_topic set to the subject — a community does not have to be near "
+    "them, and this is never a search for PEOPLE with that trait. "
     "A community is a PLACE people belong to (a gym, a church, a school, a club) — this is "
     "NEVER discovery.find_by_attrs on the word 'community' and NEVER goal=peers: the user is "
     "asking about places, not about neighbors whose trait is 'community'. "
@@ -684,6 +688,7 @@ def _empty_slots() -> dict[str, Any]:
         "identity_snippet": None,
         "community_name": None,
         "community_ask": None,
+        "community_topic": None,
         "profile_photo_action": "none",
         "signal_intent": None,
         "signal_detail": None,
@@ -832,6 +837,11 @@ def ai_parse_discovery_turn(
         # "what kind of place is it / how big is it / what's there" wants the profile the
         # community screen renders. Answering the first for both returned a roster refusal
         # to someone asking what kind of place it was (QA 2026-08-21).
+        # What kind of community they are LOOKING FOR ("podcasting"), so a community that
+        # is not anywhere can still be found by what it is (20270109120000). The AI's read,
+        # never a keyword list ([[no-new-regex-use-ai-signals]]).
+        community_topic = raw.get("community_topic")
+        community_topic_s = str(community_topic).strip()[:80] if community_topic else None
         community_ask = str(raw.get("community_ask") or "").strip().lower()
         community_ask_s = community_ask if community_ask in ("people", "about", "manage", "mine") else None
         intro_direction = raw.get("intro_direction")
@@ -916,6 +926,7 @@ def ai_parse_discovery_turn(
             "peer_name": peer_name_s,
             "community_name": community_name_s,
             "community_ask": community_ask_s,
+            "community_topic": community_topic_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
             "clarify_options": clarify_options,
@@ -1228,6 +1239,10 @@ def _discovery_slot_payload(
         'else about the place itself (what kind of place it is, what it has, how big it is, what '
         'is happening there, where it is, how it is doing). "mine" (with community_name null) when '
         'they ask WHICH communities they themselves are in. Otherwise null when no community is named,\n'
+        '  "community_topic": "with discovery.communities, when they are LOOKING FOR communities '
+        'about a subject or for a kind of person (any communities for podcasters?, is there a book '
+        'club?, a group for new moms) — the subject in 1-4 plain words (podcasting, book club, new '
+        'moms); null when they name one specific community or just ask what is near them",\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
         'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'
@@ -1315,6 +1330,14 @@ def slots_community_ask(slots: dict[str, Any] | None) -> str:
         return "about"
     ask = str(slots.get("community_ask") or "")
     return ask if ask in ("people", "manage", "mine") else "about"
+
+
+def slots_community_topic(slots: dict[str, Any] | None) -> str | None:
+    """The kind of community they are looking for ("podcasting"), from AI slots."""
+    if not slots:
+        return None
+    topic = str(slots.get("community_topic") or "").strip()
+    return topic[:80] or None
 
 
 def slots_community_name(slots: dict[str, Any] | None) -> str | None:

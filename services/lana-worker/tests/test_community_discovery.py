@@ -1633,7 +1633,7 @@ class TestRoutingKeepsTheTurnsSurfaces(unittest.TestCase):
 
         def _stamp(
             user_id, *, message, session_ctx, locale="en", community_name=None,
-            community_ask="about",
+            community_ask="about", community_topic=None,
         ):
             session_ctx.update(stamped)
             return "composed"

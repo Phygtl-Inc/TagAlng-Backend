@@ -1738,12 +1738,22 @@ def _try_layer1_intent_turn(
                 [],
             )
         if (not phone_verified or not user_id) and not _about_here:
+            from app.discovery_slots import slots_community_topic
+
+            _topic = slots_community_topic(slots)
             return (
                 compose_reply(
                     goal=(
-                        "They asked what communities are around them. Verifying their "
-                        "email is what unlocks seeing neighbours' spots — say that in one "
-                        "warm line and invite them to verify. No guilt, no list."
+                        (
+                            f"They asked for communities about {_topic}. Verifying their email "
+                            "is what unlocks finding communities — say that in one warm line, "
+                            "naming what they are looking for, and invite them to verify."
+                            if _topic
+                            else "They asked what communities are around them. Verifying their "
+                            "email is what unlocks seeing neighbours' spots — say that in one "
+                            "warm line and invite them to verify."
+                        )
+                        + " No guilt, no list."
                         + (
                             # Inside a community the wall must never be the whole answer:
                             # if this was really a question about THIS one that the router
@@ -1770,7 +1780,11 @@ def _try_layer1_intent_turn(
                 [],
             )
         from app.community_discovery import communities_chat_turn
-        from app.discovery_slots import slots_community_ask, slots_community_name
+        from app.discovery_slots import (
+            slots_community_ask,
+            slots_community_name,
+            slots_community_topic,
+        )
 
         reply = communities_chat_turn(
             user_id,
@@ -1780,6 +1794,7 @@ def _try_layer1_intent_turn(
             # and which side of it they asked about (its people, or the place itself).
             community_name=slots_community_name(slots),
             community_ask=slots_community_ask(slots),
+            community_topic=slots_community_topic(slots),
         )
         ctx = _routing_ctx(
             ctx_base, phase=phase or "listening", active_intent="discovery.communities"
