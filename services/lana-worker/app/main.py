@@ -4456,6 +4456,7 @@ def _discovery_rows(rows: list[dict]) -> list[CommunityDiscoveryRow]:
             fit_chips=list(r.get("fit_chips") or []),
             description=r.get("description"),
             area_label=r.get("area_label"),
+            parent=r.get("parent"),
         )
         for r in rows
         if str(r.get("place_id") or "").strip()
