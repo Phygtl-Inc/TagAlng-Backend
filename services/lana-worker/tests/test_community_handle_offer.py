@@ -40,7 +40,10 @@ def _publish(monkeypatch: Any, client: _Rpc, user_id: str | None = "user-1") -> 
     monkeypatch.setattr("app.auth.service_client", lambda: client)
     ctx: dict[str, Any] = {
         "community_ready": True,
-        "community_draft": {"name": "Austin Run Club", "circle_type": "hobby"},
+        # Placeless, so its HQ is already answered — otherwise publish asks for it first
+        # (test_communities_anywhere.py).
+        "community_draft": {"name": "Austin Run Club", "circle_type": "hobby",
+                            "hq_city": "Austin, TX", "hq_lat": 30.27, "hq_lng": -97.74},
     }
     with mock.patch.object(cc, "publish_community",
                            return_value=({"place_id": "place-1"}, "")):
@@ -55,9 +58,10 @@ def test_eligible_creator_gets_an_offer_and_lana_can_mention_it(monkeypatch: Any
     client = _Rpc({"eligible": True, "placeId": "place-1", "suggestion": "austin-run-club"})
     draft, facts = _publish(monkeypatch, client)
 
-    assert client.calls == [
-        ("community_handle_offer_for", {"p_user_id": "user-1", "p_place_id": "place-1"})
-    ]
+    # The HQ write goes first now (placeless community); the offer is asked after it.
+    assert client.calls[-1] == (
+        "community_handle_offer_for", {"p_user_id": "user-1", "p_place_id": "place-1"}
+    )
     assert draft["handle_offer"] == {"place_id": "place-1", "suggestion": "austin-run-club"}
     assert any("get.lana.help/austin-run-club" in f for f in facts), facts
     # The FE model carries it through to the client.

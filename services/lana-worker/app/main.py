@@ -1075,7 +1075,10 @@ def _community_discovery_from_ctx(ctx: dict[str, Any]) -> CommunityDiscoveryResp
     ]
     if not rows:
         return None
-    return CommunityDiscoveryResponse(communities=rows, radius_meters=0)
+    topic = str(raw.get("topic") or "").strip() or None
+    return CommunityDiscoveryResponse(
+        communities=rows, radius_meters=0, topic=topic, named=bool(raw.get("named"))
+    )
 
 
 def _warn_surface_dropped(kind: str, rows: int, *, ui_intent: str, active: str) -> None:
@@ -4496,6 +4499,31 @@ def post_circles_chapters(
         place_name=data.get("place_name"),
         chapters=_discovery_rows(rows),
     )
+
+
+class CommunityHqBody(_BaseModel):
+    # The community (canonical place id) and the city it is run from, as typed — the
+    # worker geocodes it, so the client never sends coordinates it could get wrong.
+    place_id: str
+    city: str
+
+
+@app.post("/lana/circles/hq")
+def post_circles_hq(
+    body: CommunityHqBody,
+    authorization: str | None = Header(default=None),
+):
+    """Record where a community is RUN FROM (its HQ): a label and a map pin, never a
+    location (20270109120000). Its operator, or whoever started it while unverified, may
+    set it; SQL decides. Returns {"status": "saved", "hqCity"} or the refusal, including
+    {"status": "not_found"} when the text is not a town we can place."""
+    auth = verify_auth(authorization)
+    from app.community_hq import save_community_hq
+
+    result = save_community_hq(auth.user_id, body.place_id.strip(), body.city)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=502, detail="hq_save_failed")
+    return result
 
 
 @app.post("/lana/circles/discover-topic", response_model=TopicCommunityResponse)

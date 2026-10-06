@@ -1339,7 +1339,9 @@ class TestAboutACommunity(unittest.TestCase):
         )
         facts = " ".join(compose.call_args.kwargs["facts"])
         self.assertIn("bookstore", facts)
-        self.assertIn("NOT in this community", facts)
+        # Still told — but as background for the closing offer, never the opening line
+        # (prod 2026-10-06: "is there SJSU?" opened with "I don't see you in it yet").
+        self.assertIn("They are not in it yet", facts)
         # ...and a "yes" after it means something.
         self.assertEqual(ctx["community_join_pending"]["places"][0]["place_id"], "pBN")
 
@@ -1445,9 +1447,8 @@ class TestTheClarifierAsksTheirQuestion(unittest.TestCase):
         self.assertIn(
             "What kind of place it is: bookstore", compose.call_args.kwargs["facts"]
         )
-        self.assertEqual(
-            [c["label"] for c in ctx["policy_chips"]], ["Add me", "Show me others"]
-        )
+        # Join is on the community card now; the strip keeps the way out.
+        self.assertEqual([c["label"] for c in ctx["policy_chips"]], ["Show me others"])
 
     @patch("app.community_discovery.discover_communities")
     @patch("app.community_discovery._my_communities", return_value=[])
@@ -1571,9 +1572,11 @@ class TestEveryOfferIsTapable(unittest.TestCase):
             "u1", message="what is Barnes & Noble", session_ctx=ctx,
             community_name="Barnes & Noble", community_ask="about",
         )
-        chips = ctx["policy_chips"]
-        # "Join <name>" is what the join lane already reads, so the tap lands.
-        self.assertEqual(chips[0]["send"], "Join Barnes & Noble")
+        # The offer is tap-able on the community's own card (its Join posts "Join <name>",
+        # which the join lane reads), so the chip strip no longer repeats it (2026-10-06).
+        (card,) = ctx["community_discovery"]["communities"]
+        self.assertEqual((card["place_id"], card["is_member"]), ("pBN", False))
+        self.assertNotIn("Add me", [c["label"] for c in ctx["policy_chips"]])
         self.assertEqual(ctx["community_join_pending"]["places"][0]["place_id"], "pBN")
 
     @patch("app.community_surface.community_members", side_effect=ValueError("not_a_member"))
@@ -1633,7 +1636,7 @@ class TestRoutingKeepsTheTurnsSurfaces(unittest.TestCase):
 
         def _stamp(
             user_id, *, message, session_ctx, locale="en", community_name=None,
-            community_ask="about",
+            community_ask="about", community_topic=None,
         ):
             session_ctx.update(stamped)
             return "composed"
