@@ -1038,7 +1038,9 @@ def _did_you_mean_turn(
     )
 
 
-def _arm_join(session_ctx: dict[str, Any], place_id: str, place_name: str) -> None:
+def _arm_join(
+    session_ctx: dict[str, Any], place_id: str, place_name: str, *, add_chip: bool = True
+) -> None:
     """Offer to add them, and make the offer TAP-ABLE.
 
     Arming the pending state alone left "want me to add you?" with nothing to press —
@@ -1048,10 +1050,9 @@ def _arm_join(session_ctx: dict[str, Any], place_id: str, place_name: str) -> No
     session_ctx["community_join_pending"] = {
         "places": [{"place_id": place_id, "place_name": place_name}]
     }
-    session_ctx["policy_chips"] = [
-        {"label": "Add me", "send": f"Join {place_name}"},
-        {"label": "Show me others", "send": "what communities are near me"},
-    ]
+    session_ctx["policy_chips"] = (
+        [{"label": "Add me", "send": f"Join {place_name}"}] if add_chip else []
+    ) + [{"label": "Show me others", "send": "what communities are near me"}]
 
 
 def _community_about_turn(
@@ -1230,9 +1231,35 @@ def _community_about_turn(
             "They are not in it yet — background for the offer at the END, never the opening",
         )
     )
+    # The community ITSELF, as a card above its events — open it, or join it from the
+    # card. Without it a "is there SJSU?" answer showed five events and no way into the
+    # community they asked about (prod 2026-10-06).
+    is_in = membership in ("member", "curious")
+    session_ctx["community_discovery"] = {
+        "communities": [
+            {
+                "place_id": pid,
+                "place_name": place,
+                "place_address": prof.get("place_address"),
+                "place_type": prof.get("place_type") or prof.get("circle_type"),
+                "relation": prof.get("relation"),
+                "emoji": prof.get("emoji"),
+                "member_count": count,
+                "is_member": is_in,
+                "status_line": _discovery_status_line(count, is_in),
+            }
+        ],
+        "total": 1,
+        # One named community, not a list — the card heads it as "Community".
+        "named": True,
+    }
+    facts.append(
+        "Its own card — open it, or Join from it — is the first thing under your message"
+    )
     if membership == "visitor":
-        # Being let in is a real next step, and a "yes" should mean something.
-        _arm_join(session_ctx, pid, place)
+        # Being let in is a real next step, and a "yes" should mean something. The card
+        # carries the Join, so the chip strip does not offer it a second time.
+        _arm_join(session_ctx, pid, place, add_chip=False)
     return compose_reply(
         goal=(
             "Answer what they actually asked about this place, using ONLY the facts. If "

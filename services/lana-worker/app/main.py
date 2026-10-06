@@ -1053,7 +1053,9 @@ def _community_discovery_from_ctx(ctx: dict[str, Any]) -> CommunityDiscoveryResp
     if not rows:
         return None
     topic = str(raw.get("topic") or "").strip() or None
-    return CommunityDiscoveryResponse(communities=rows, radius_meters=0, topic=topic)
+    return CommunityDiscoveryResponse(
+        communities=rows, radius_meters=0, topic=topic, named=bool(raw.get("named"))
+    )
 
 
 def _warn_surface_dropped(kind: str, rows: int, *, ui_intent: str, active: str) -> None:
