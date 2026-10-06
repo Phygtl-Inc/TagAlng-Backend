@@ -1,8 +1,10 @@
-"""Thumbs up/down on Lana output (chat replies, rapport questions, fellows rec lines).
+"""Thumbs up/down on Lana output (chat replies, rapport questions, fellows rec lines,
+surfaced meets, communities).
 
 The PWA posts a rating against a lana_messages id (an assistant reply), a rapport_gaps
-gap_row_id (a "By the way…" question), or a peer_rec_lines id (the authored "why this
-neighbour" line on a fellows row). One row per (user, target):
+gap_row_id (a "By the way…" question), a peer_rec_lines id (the authored "why this
+neighbour" line on a fellows row), an events id (the map's meet card) or a places id
+(the map's community card). One row per (user, target):
 rating again with the other thumb flips it, `clear` deletes it. The rated text is
 snapshotted from the DB at rating time — never trusted from the client — so the team
 reviews exactly what Lana said, even if the source row is later deleted.
@@ -16,6 +18,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from app.community_discovery import _discovery_status_line
 from app.db import service_client
 
 logger = logging.getLogger("lana.feedback")
@@ -108,6 +111,72 @@ def _resolve_rec_target(user_id: str, rec_id: str) -> dict[str, Any]:
     }
 
 
+def _event_snapshot(row: dict[str, Any]) -> str:
+    """The text a thumb on a meet card is about: its title plus the cohort it is for.
+
+    §51 names the meet's fit line (§50) first — but that line is composed per viewer and
+    not stored anywhere the worker can read back, so until it is persisted the honest
+    snapshot is what every viewer sees: the title and its cohort_tags."""
+    title = str(row.get("title") or "").strip()
+    tags = [str(t).strip() for t in (row.get("cohort_tags") or []) if str(t or "").strip()]
+    return f"{title} · {', '.join(tags)}" if tags else title
+
+
+def _resolve_event_target(event_id: str) -> dict[str, Any]:
+    """Load the rated meet. Any meet that exists is rateable: the snapshot is never echoed
+    back to the caller, so there is nothing to disclose and no ownership to prove."""
+    res = (
+        service_client()
+        .table("events")
+        .select("id, title, cohort_tags")
+        .eq("id", event_id)
+        .limit(1)
+        .execute()
+    )
+    row = (res.data or [None])[0]
+    if not row:
+        raise HTTPException(status_code=404, detail="event_not_found")
+    return {
+        "target_kind": "event",
+        "event_id": event_id,
+        "snapshot": _event_snapshot(row)[:2000],
+    }
+
+
+def _resolve_place_target(user_id: str, place_id: str) -> dict[str, Any]:
+    """Load the rated community and snapshot the status line its discovery row shipped.
+
+    The line is NOT taken from the client (nothing in lana_feedback is): it is recomputed
+    with the same function /lana/circles/discover uses, over the same member view
+    (visible_place_members — confirmed, block-filtered), for this viewer. It only differs
+    from what the card showed if membership changed between the fetch and the tap. A place
+    nobody visible belongs to has no status line, so the snapshot falls back to its name.
+    """
+    sb = service_client()
+    res = sb.table("places").select("id, name").eq("id", place_id).limit(1).execute()
+    row = (res.data or [None])[0]
+    if not row:
+        raise HTTPException(status_code=404, detail="place_not_found")
+    name = str(row.get("name") or "").strip()
+    members_res = (
+        sb.rpc("visible_place_members", {"p_user_id": user_id})
+        .eq("place_ref", place_id)
+        .execute()
+    )
+    member_ids = {str(m.get("user_id")) for m in (members_res.data or []) if m.get("user_id")}
+    status_line = (
+        _discovery_status_line(len(member_ids), str(user_id) in member_ids) if member_ids else ""
+    )
+    return {
+        "target_kind": "place",
+        "place_id": place_id,
+        "snapshot": (status_line or name)[:2000],
+        # The status line alone ("3 people") does not say WHICH community; the name rides
+        # in context so it too survives the place row being deleted.
+        "place_name": name or None,
+    }
+
+
 def record_feedback(
     user_id: str,
     *,
@@ -115,6 +184,8 @@ def record_feedback(
     message_id: str | None = None,
     gap_row_id: str | None = None,
     rec_id: str | None = None,
+    event_id: str | None = None,
+    place_id: str | None = None,
     comment: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -127,7 +198,7 @@ def record_feedback(
     Returns {"rating": <current rating or None>, "target_kind": ...} so the FE can
     render the thumb state straight from the response.
     """
-    if sum(1 for t in (message_id, gap_row_id, rec_id) if t) != 1:
+    if sum(1 for t in (message_id, gap_row_id, rec_id, event_id, place_id) if t) != 1:
         raise HTTPException(status_code=400, detail="exactly_one_target_required")
     if rating not in (*RATINGS, "clear"):
         raise HTTPException(status_code=400, detail="invalid_rating")
@@ -138,6 +209,12 @@ def record_feedback(
     elif rec_id:
         target = _resolve_rec_target(user_id, str(rec_id))
         match_col, match_val = "rec_id", str(rec_id)
+    elif event_id:
+        target = _resolve_event_target(str(event_id))
+        match_col, match_val = "event_id", str(event_id)
+    elif place_id:
+        target = _resolve_place_target(user_id, str(place_id))
+        match_col, match_val = "place_id", str(place_id)
     else:
         target = _resolve_rapport_target(user_id, str(gap_row_id))
         match_col, match_val = "gap_row_id", str(gap_row_id)
@@ -168,6 +245,8 @@ def record_feedback(
         # Who the rated line was about — the team reads "this pairing got a 👎" without a
         # join back into a table whose row may have been re-authored since.
         ctx.setdefault("peer_user_id", target["peer_user_id"])
+    if target.get("place_name"):
+        ctx.setdefault("place_name", target["place_name"])
     comment = (comment or "").strip()[:2000] or None
 
     if existing_row:
@@ -182,6 +261,8 @@ def record_feedback(
                 "message_id": message_id,
                 "gap_row_id": gap_row_id,
                 "rec_id": rec_id,
+                "event_id": event_id,
+                "place_id": place_id,
                 "rating": rating,
                 "comment": comment,
                 "content_snapshot": target["snapshot"],

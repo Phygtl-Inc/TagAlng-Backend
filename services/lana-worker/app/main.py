@@ -5360,8 +5360,9 @@ def post_rapport_mute_fact(
 
 # ── Feedback (👍/👎 on Lana output) ────────────────────────────────────────────
 # One endpoint for every rateable surface: an assistant chat reply (message_id), a
-# rapport tile question (gap_row_id), or the authored reason on a fellows row (rec_id —
-# "Was this rec useful?"). Same thumb again → the FE sends rating='clear'.
+# rapport tile question (gap_row_id), the authored reason on a fellows row (rec_id —
+# "Was this rec useful?"), a meet on the map card (event_id) or a community on the map
+# card (place_id). Same thumb again → the FE sends rating='clear'.
 # Rows land in lana_feedback (service-role only) for the team to review.
 
 
@@ -5371,6 +5372,11 @@ class LanaFeedbackBody(_BaseModel):
     gap_row_id: str | None = None
     # A peer_rec_lines id, as shipped in PeerMatchRow.rec_id by /lana/fellows.
     rec_id: str | None = None
+    # An events id — the meet on MeetPeekCard (and any future surfaced meet).
+    event_id: str | None = None
+    # A places id, as shipped in the /lana/circles/discover row's place_id. The snapshot
+    # (the row's status_line, else the name) is recomputed server-side — not sent.
+    place_id: str | None = None
     # Where the thumb lives in the UI ('chat', 'rapport_tile', …) — stored for triage.
     surface: str | None = None
     # Optional free-text follow-up (the FE offers it on 👎). Tracks the latest rating
@@ -5390,6 +5396,8 @@ def post_lana_feedback(
         message_id=(body.message_id or "").strip() or None,
         gap_row_id=(body.gap_row_id or "").strip() or None,
         rec_id=(body.rec_id or "").strip() or None,
+        event_id=(body.event_id or "").strip() or None,
+        place_id=(body.place_id or "").strip() or None,
         comment=body.comment,
         context={"surface": (body.surface or "").strip() or None},
     )
@@ -5402,6 +5410,8 @@ def post_lana_feedback(
             "message_id": body.message_id,
             "gap_row_id": body.gap_row_id,
             "rec_id": body.rec_id,
+            "event_id": body.event_id,
+            "place_id": body.place_id,
             "surface": body.surface,
             # Comment text stays in the DB — analytics only needs to know one exists.
             "has_comment": bool((body.comment or "").strip()),

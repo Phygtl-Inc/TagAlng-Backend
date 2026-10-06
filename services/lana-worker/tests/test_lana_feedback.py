@@ -42,7 +42,8 @@ class _Query:
         self._op = "delete"
         return self
 
-    def eq(self, *a, **k):
+    def eq(self, col, val):
+        self.store.setdefault("filters", []).append((self.table, col, val))
         return self
 
     def limit(self, *a, **k):
@@ -70,14 +71,25 @@ class _Supabase:
     def table(self, name):
         return _Query(name, self.store)
 
+    def rpc(self, name, params):
+        q = _Query(f"rpc:{name}", self.store)
+        q._op = "select"
+        return q
 
-def _store(messages=None, sessions=None, gaps=None, existing=None, recs=None):
+
+def _store(
+    messages=None, sessions=None, gaps=None, existing=None, recs=None,
+    events=None, places=None, members=None,
+):
     return {
         "selects": {
             "lana_messages": messages or [],
             "lana_sessions": sessions or [],
             "rapport_gaps": gaps or [],
             "peer_rec_lines": recs or [],
+            "events": events or [],
+            "places": places or [],
+            "rpc:visible_place_members": members or [],
             "lana_feedback": existing or [],
         },
         "inserts": [],
@@ -95,6 +107,9 @@ _REC = {
     "peer_user_id": "p1",
     "line": "You're both early risers who'd rather run the lake trail.",
 }
+
+_EVENT = {"id": "e1", "title": "Saturday run club", "cohort_tags": ["runners", "early_risers"]}
+_PLACE = {"id": "pl1", "name": "Lake Nona Run Club"}
 
 
 class TestRecordFeedback(unittest.TestCase):
@@ -246,10 +261,128 @@ class TestRecordFeedback(unittest.TestCase):
                 self._run(_store(), rating="up", **kwargs)
             self.assertEqual(ctx.exception.status_code, 400)
 
+    # ── event target (§51, the map's meet card) ──────────────────────────────
+
+    def test_thumb_on_meet_snapshots_title_and_cohort_tags(self):
+        store = _store(events=[_EVENT])
+        out = self._run(store, rating="up", event_id="e1", context={"surface": "map_peek_meet"})
+        self.assertEqual(out, {"rating": "up", "target_kind": "event"})
+        (table, row), = store["inserts"]
+        self.assertEqual(table, "lana_feedback")
+        self.assertEqual(row["target_kind"], "event")
+        self.assertEqual(row["event_id"], "e1")
+        self.assertIsNone(row["place_id"])
+        self.assertEqual(row["content_snapshot"], "Saturday run club · runners, early_risers")
+        self.assertEqual(row["context"]["surface"], "map_peek_meet")
+
+    def test_meet_without_cohort_tags_snapshots_title_alone(self):
+        store = _store(events=[{**_EVENT, "cohort_tags": []}])
+        self._run(store, rating="down", event_id="e1")
+        (_, row), = store["inserts"]
+        self.assertEqual(row["content_snapshot"], "Saturday run club")
+
+    def test_unknown_meet_is_404(self):
+        store = _store()
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(store, rating="up", event_id="nope")
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(ctx.exception.detail, "event_not_found")
+        self.assertEqual(store["inserts"], [])
+
+    def test_meet_opposite_thumb_flips_and_clear_deletes(self):
+        store = _store(events=[_EVENT], existing=[{"id": "f1", "rating": "up"}])
+        self.assertEqual(self._run(store, rating="down", event_id="e1")["rating"], "down")
+        # The existing row is found by (user, event_id) — the column the unique index keys.
+        self.assertIn(("lana_feedback", "event_id", "e1"), store["filters"])
+        self.assertEqual(store["inserts"], [])
+        (_, row), = store["updates"]
+        self.assertEqual(row["rating"], "down")
+        out = self._run(store, rating="clear", event_id="e1")
+        self.assertEqual(out, {"rating": None, "target_kind": "event"})
+        self.assertEqual(store["deletes"], ["lana_feedback"])
+
+    # ── place target (§55, the map's community card) ─────────────────────────
+
+    def test_thumb_on_community_snapshots_discovery_status_line(self):
+        # Two visible members, neither the caller → the discovery row read "2 people".
+        store = _store(places=[_PLACE], members=[{"user_id": "a"}, {"user_id": "b"}])
+        out = self._run(store, rating="up", place_id="pl1", context={"surface": "map_peek_community"})
+        self.assertEqual(out, {"rating": "up", "target_kind": "place"})
+        (_, row), = store["inserts"]
+        self.assertEqual(row["target_kind"], "place")
+        self.assertEqual(row["place_id"], "pl1")
+        self.assertIsNone(row["event_id"])
+        self.assertEqual(row["content_snapshot"], "2 people")
+        # The status line alone doesn't say which community — the name rides in context.
+        self.assertEqual(row["context"]["place_name"], "Lake Nona Run Club")
+
+    def test_community_status_line_counts_the_caller_as_you(self):
+        store = _store(places=[_PLACE], members=[{"user_id": "u1"}, {"user_id": "b"}])
+        self._run(store, rating="down", place_id="pl1")
+        (_, row), = store["inserts"]
+        self.assertEqual(row["content_snapshot"], "You + 1 others")
+        self.assertIn(("lana_feedback", "place_id", "pl1"), store["filters"])
+        self.assertIn(("rpc:visible_place_members", "place_ref", "pl1"), store["filters"])
+
+    def test_community_with_no_visible_members_snapshots_its_name(self):
+        store = _store(places=[_PLACE], members=[])
+        self._run(store, rating="up", place_id="pl1")
+        (_, row), = store["inserts"]
+        self.assertEqual(row["content_snapshot"], "Lake Nona Run Club")
+
+    def test_unknown_place_is_404(self):
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(_store(), rating="up", place_id="nope")
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(ctx.exception.detail, "place_not_found")
+
+    def test_place_and_event_together_is_400(self):
+        store = _store(events=[_EVENT], places=[_PLACE])
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(store, rating="up", event_id="e1", place_id="pl1")
+        self.assertEqual(ctx.exception.status_code, 400)
+
     def test_invalid_rating_is_400(self):
         with self.assertRaises(HTTPException) as ctx:
             self._run(_store(messages=[_MSG], sessions=[_SES]), rating="meh", message_id="m1")
         self.assertEqual(ctx.exception.status_code, 400)
+
+
+class TestFeedbackRoute(unittest.TestCase):
+    """POST /lana/feedback carries the two new ids through to the writer — the body the
+    PWA sends beside recordRecFeedback: {rating, event_id|place_id, surface}."""
+
+    def _post(self, store, body):
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        from app import main
+
+        with patch.object(feedback, "service_client", return_value=_Supabase(store)), patch.object(
+            main, "verify_auth", return_value=SimpleNamespace(user_id="u1")
+        ), patch.object(main, "amplitude_track") as track:
+            res = TestClient(main.app).post("/lana/feedback", json=body)
+        return res, track
+
+    def test_place_body_writes_place_row(self):
+        store = _store(places=[_PLACE], members=[{"user_id": "a"}])
+        res, track = self._post(
+            store, {"rating": "down", "place_id": "pl1", "surface": "map_peek_community"}
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"ok": True, "rating": "down", "target_kind": "place"})
+        (_, row), = store["inserts"]
+        self.assertEqual((row["place_id"], row["content_snapshot"]), ("pl1", "1 person"))
+        self.assertEqual(row["context"]["surface"], "map_peek_community")
+        self.assertEqual(track.call_args.kwargs["event_properties"]["place_id"], "pl1")
+
+    def test_event_body_writes_event_row(self):
+        store = _store(events=[_EVENT])
+        res, _ = self._post(store, {"rating": "up", "event_id": " e1 ", "surface": "map_peek_meet"})
+        self.assertEqual(res.json()["target_kind"], "event")
+        (_, row), = store["inserts"]
+        self.assertEqual(row["event_id"], "e1")
 
 
 if __name__ == "__main__":
