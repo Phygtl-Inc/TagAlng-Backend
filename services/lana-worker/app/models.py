@@ -702,6 +702,10 @@ class CommunityDiscoveryRow(BaseModel):
     # Where it is, as a person names it ("Lake Nona"): the ZIP's named area, or for a
     # creator community the city it is run from. A label, never a distance or a filter.
     area_label: str | None = None
+    # The community this row is a CHAPTER of ("RCC" -> "San Jose State University").
+    # Discovery lists chapters (20270119120000); without this a chapter reads as a
+    # standalone local community. Null for an ordinary one.
+    parent: "CommunityParentRow | None" = None
 
 
 class CommunityChaptersResponse(BaseModel):
