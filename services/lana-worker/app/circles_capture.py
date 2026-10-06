@@ -439,7 +439,7 @@ def upsert_place_feature(
     sb = service_client()
     res = (
         sb.table("place_features")
-        .select("id, confidence, source")
+        .select("id, confidence, source, emoji")
         .eq("place_id", place_id)
         .eq("key", key)
         .eq("sub_group", sub_group or "")
@@ -469,8 +469,10 @@ def upsert_place_feature(
         if label:
             patch["label"] = label
         sb.table("place_features").update(patch).eq("id", existing["id"]).execute()
+        if not emoji and not str(existing.get("emoji") or "").strip():
+            _schedule_feature_emoji(str(existing["id"]))
         return True
-    sb.table("place_features").insert(
+    ins = sb.table("place_features").insert(
         {
             "place_id": place_id,
             "key": key,
@@ -483,7 +485,24 @@ def upsert_place_feature(
             "label": label or None,
         }
     ).execute()
+    if not emoji:
+        rows = getattr(ins, "data", None)
+        written_id = str((rows[0] or {}).get("id") or "") if isinstance(rows, list) and rows else ""
+        _schedule_feature_emoji(written_id)
     return True
+
+
+def _schedule_feature_emoji(row_id: str) -> None:
+    """Every feature row gets a glyph (§24(b)): the writer that supplied none queues the
+    model's pick (app/place_activities.py) — never inline, never from a word list."""
+    if not row_id:
+        return
+    try:
+        from app.place_activities import schedule_feature_emoji
+
+        schedule_feature_emoji([row_id])
+    except Exception:  # noqa: BLE001 — the feature is written; the glyph is an upgrade
+        logger.exception("feature_emoji_schedule_failed row=%s", row_id)
 
 
 def persist_place_feature_candidates(
