@@ -5640,14 +5640,23 @@ def post_lana_feedback(
     authorization: str | None = Header(default=None),
 ):
     auth = verify_auth(authorization)
+    targets = {
+        k: (getattr(body, k) or "").strip() or None
+        for k in ("message_id", "gap_row_id", "rec_id", "event_id", "place_id")
+    }
+    # Every target column is a uuid. A malformed id used to reach PostgREST, come back
+    # as 22P02 and surface as a 500; it is the caller's mistake, so it is a 400.
+    for key, val in targets.items():
+        if val is None:
+            continue
+        try:
+            UUID(val)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=400, detail=f"invalid_{key}") from None
     result = record_lana_feedback(
         auth.user_id,
         rating=body.rating,
-        message_id=(body.message_id or "").strip() or None,
-        gap_row_id=(body.gap_row_id or "").strip() or None,
-        rec_id=(body.rec_id or "").strip() or None,
-        event_id=(body.event_id or "").strip() or None,
-        place_id=(body.place_id or "").strip() or None,
+        **targets,
         comment=body.comment,
         context={"surface": (body.surface or "").strip() or None},
     )

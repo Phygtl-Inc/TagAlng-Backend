@@ -388,24 +388,41 @@ class TestFeedbackRoute(unittest.TestCase):
             res = TestClient(main.app).post("/lana/feedback", json=body)
         return res, track
 
+    # The route validates ids as uuids (every lana_feedback target column is one), so
+    # the route tests use real-shaped ids; the writer tests above keep their short ones.
+    PL = "6f1d1c3e-2a4b-4c5d-8e9f-0a1b2c3d4e5f"
+    EV = "0b9d5a52-3c1e-4f7a-9b2d-6e8f1a2b3c4d"
+
     def test_place_body_writes_place_row(self):
         store = _store(places=[_PLACE], members=[{"user_id": "a"}])
         res, track = self._post(
-            store, {"rating": "down", "place_id": "pl1", "surface": "map_peek_community"}
+            store, {"rating": "down", "place_id": self.PL, "surface": "map_peek_community"}
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), {"ok": True, "rating": "down", "target_kind": "place"})
         (_, row), = store["inserts"]
-        self.assertEqual((row["place_id"], row["content_snapshot"]), ("pl1", "1 person"))
+        self.assertEqual((row["place_id"], row["content_snapshot"]), (self.PL, "1 person"))
         self.assertEqual(row["context"]["surface"], "map_peek_community")
-        self.assertEqual(track.call_args.kwargs["event_properties"]["place_id"], "pl1")
+        self.assertEqual(track.call_args.kwargs["event_properties"]["place_id"], self.PL)
 
     def test_event_body_writes_event_row(self):
         store = _store(events=[_EVENT])
-        res, _ = self._post(store, {"rating": "up", "event_id": " e1 ", "surface": "map_peek_meet"})
+        res, _ = self._post(
+            store, {"rating": "up", "event_id": f" {self.EV} ", "surface": "map_peek_meet"}
+        )
         self.assertEqual(res.json()["target_kind"], "event")
         (_, row), = store["inserts"]
-        self.assertEqual(row["event_id"], "e1")
+        self.assertEqual(row["event_id"], self.EV)
+
+    def test_malformed_id_is_400_for_every_target_and_never_reaches_the_db(self):
+        # e2e: event_id "not-a-uuid" reached PostgREST, 22P02, surfaced as a 500.
+        for key in ("message_id", "gap_row_id", "rec_id", "event_id", "place_id"):
+            store = _store(events=[_EVENT], places=[_PLACE])
+            res, _ = self._post(store, {"rating": "up", key: "not-a-uuid"})
+            self.assertEqual(res.status_code, 400, key)
+            self.assertEqual(res.json()["detail"], f"invalid_{key}")
+            self.assertEqual(store.get("filters", []), [], key)
+            self.assertEqual(store["inserts"], [], key)
 
 
 if __name__ == "__main__":
