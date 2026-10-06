@@ -1172,6 +1172,13 @@ class CommunityDraft(BaseModel):
     community_id: str | None = None
     # Set once published, only when this user may claim the community's first handle.
     handle_offer: HandleOffer | None = None
+    # The closing steps (2026-10-06): where a community with no place is run from, and its
+    # link — chosen before it exists (pending_field "handle"), claimed when it is published.
+    hq_city: str | None = None
+    handle: str | None = None
+    handle_suggestion: str | None = None
+    handle_suggestions: list[str] = Field(default_factory=list)
+    handle_error: str | None = None
     missing: list[str] = Field(default_factory=list)
     # Which step the chat fork is asking right now — the FE renders that step's `kind`
     # (a `place` step gets the picker). None on the ready card: nothing is open.
