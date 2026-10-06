@@ -1309,19 +1309,10 @@ def _apply_host_brain(
         settings["max_attendees"] = cap
         settings["_cap_set"] = True
         session_ctx["event_settings"] = settings
-    # Approval and sharing go into `settings` too, exactly like capacity above. The draft
-    # alone does not hold them: the extractor's redraw (merge_event_drafts) carries neither
-    # key, so next turn they came back only from `settings` — and a typed "don't let guests
-    # share" that lived on `ed` alone was gone, _seed_setup_defaults put True back, and the
-    # meet published shareable (e2e 2026-10-06).
     if isinstance(brain.get("auto_approve"), bool):
         ed["auto_approve"] = brain["auto_approve"]
-        settings["auto_approve"] = brain["auto_approve"]
-        session_ctx["event_settings"] = settings
     if isinstance(brain.get("allow_share"), bool):
         ed["allow_attendee_share"] = brain["allow_share"]
-        settings["allow_attendee_share"] = brain["allow_share"]
-        session_ctx["event_settings"] = settings
     # "make it a weekly thing" mid-flow. The AI reading this turn owns the cadence; the
     # when-resolver picks it up on the entry turn, this catches every turn after it.
     repeats = brain.get("repeats")
