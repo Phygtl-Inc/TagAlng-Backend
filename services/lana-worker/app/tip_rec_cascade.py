@@ -52,6 +52,15 @@ def _strength(row: dict[str, Any]) -> float:
         return 0.0
 
 
+def _num_or_none(raw: Any) -> float | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _shared_circles(raw: Any, *, limit: int = 3) -> list[dict[str, Any]]:
     """The places both the caller and this recommender belong to (find_neighbor_tips v3)."""
     out: list[dict[str, Any]] = []
@@ -118,8 +127,12 @@ def peer_rows_from_neighbor_tips(
             "tip_text": text,
             "tip_signal_id": str(tip.get("signal_id") or "").strip() or None,
             "distance_text": str(tip.get("distance_text") or "").strip() or None,
+            # The numeric twin of distance_text, for the "Nearest" tab's order (§30c).
+            "distance_meters": _num_or_none(tip.get("distance_meters")),
             "trait_tags": _clean_tags(tip.get("affinity_tags")),
-            "match_strength": _strength(tip),
+            # Ships on PeerMatchRow for the "Best fit" tab's order (§30c). None — not
+            # 0.0 — when the RPC scored nothing, so "unscored" never sorts as "worst".
+            "match_strength": _num_or_none(tip.get("match_strength")),
             # C-FIND-V2 groups results by the circle shared with the recommender, and
             # C-FIND-V2-DETAIL lists those circles on the voucher card. Shared only —
             # never this person's other memberships.

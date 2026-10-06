@@ -894,6 +894,9 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 tip_text=str(row.get("tip_text") or "") or None,
                 tip_signal_id=str(row.get("tip_signal_id") or "") or None,
                 distance_text=str(row.get("distance_text") or "") or None,
+                # §30(c): the two sort keys behind "Nearest" and "Best fit".
+                distance_meters=_float_or_none(row.get("distance_meters")),
+                match_strength=_float_or_none(row.get("match_strength")),
                 # Circle provenance (C-FIND-V2) — the grouping the results screen renders.
                 shared_circles=_shared_circle_rows(row.get("shared_circles")),
                 same_block=bool(row.get("same_block")),
@@ -903,6 +906,16 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
             )
         )
     return out
+
+
+def _float_or_none(raw: Any) -> float | None:
+    """A number off a ctx row, or None — never 0.0 standing in for "unknown"."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _shared_circle_rows(raw: Any) -> list[SharedCircleRow]:
@@ -4144,12 +4157,31 @@ class FellowsBody(_BaseModel):
     # is the caller's own, so this is a filter on a list they could already see — not
     # a new way to read a roster they do not belong to (that gate is enforced below).
     place_id: str | None = None
+    # Where she is standing right now (§36) — the "around me" search scope. Both or
+    # neither; a pin replaces her home point as the radius anchor for this call only and
+    # is never stored. Out-of-range values are a 422, not a silent home search.
+    lat: float | None = _Field(default=None, ge=-90, le=90)
+    lng: float | None = _Field(default=None, ge=-180, le=180)
+
+
+def _fellows_pin(body: FellowsBody | None) -> tuple[float, float] | None:
+    """The (lat, lng) anchor for this call, or None for the home search.
+
+    Half a pin is a client bug, not a request to search home: answering it with the
+    home list would put "around you right now" over a list that was nothing of the
+    kind, so it is refused outright."""
+    if body is None or (body.lat is None and body.lng is None):
+        return None
+    if body.lat is None or body.lng is None:
+        raise HTTPException(status_code=422, detail="pin_requires_lat_and_lng")
+    return float(body.lat), float(body.lng)
 
 
 # exclude_none: PeerMatchRow is the union of every peer-row shape (chat card, rec
 # cascade, community roster, radar), so a fellows row leaves most of it unset —
 # match_stars/match_band (this endpoint never computes a cosine band), the tip_* and
-# group_* recommendation fields, distance_text, membership. Sending ~12 explicit nulls
+# group_* recommendation fields, membership — and distance_text / distance_meters /
+# area_name whenever there is nothing honest to put in them. Sending ~12 explicit nulls
 # per row taught the client nothing. Dropping them on the wire keeps ONE row type and
 # one renderer shared with chat, instead of forking a second shape that can drift.
 #
@@ -4180,13 +4212,21 @@ def post_fellows(
     for it that asks for their area, and an empty list would read as "no neighbours".
     """
     auth = verify_auth(authorization)
-    if not auth.home_block_id:
+    place_id = str((body.place_id if body else None) or "").strip() or None
+    # §36: a pin is the radius anchor for this call. A community filter is its own
+    # scope (the pill is one of: area, a community, around me) — with place_id the
+    # pin is ignored, so a community answer is never re-cut by a second geography.
+    pin = _fellows_pin(body)
+    if place_id:
+        pin = None
+    # A pin is a place to search from, so a caller without a home block can still use
+    # one. Without a pin nothing has changed: no home, no search.
+    if not auth.home_block_id and pin is None:
         raise HTTPException(status_code=400, detail="home_block_missing")
     from app.discovery_route import _fetch_verified_peer_matches
-    from app.layer1_handlers import peers_to_match_rows
+    from app.layer1_handlers import attach_peer_area_names, peers_to_match_rows
 
     limit = max(1, min(int((body.limit if body else 12) or 12), 40))
-    place_id = str((body.place_id if body else None) or "").strip() or None
 
     member_ids: set[str] | None = None
     if place_id:
@@ -4208,12 +4248,30 @@ def post_fellows(
 
     # Filtering happens after the matcher ranked, so ask for a deeper list — a
     # top-12 that is mostly non-members would otherwise return two rows.
-    peers = _fetch_verified_peer_matches(
-        _bearer_token(authorization),
-        user_id=auth.user_id,
-        block_id=auth.home_block_id,
-        limit=min(limit * 4, 40) if member_ids is not None else limit,
-    )
+    if pin is not None:
+        # The radius path around her pin, whatever LANA_PEER_RADIUS_MATCH says (see
+        # fetch_peer_matches_near_point). Deliberately not _fetch_verified_peer_matches:
+        # its onion blend seats same-PLACE peers regardless of distance, which is right
+        # for "my neighbours" and wrong for "around me right now".
+        from app.peer_discovery_surface import stamp_reachability
+        from app.peer_radius import fetch_peer_matches_near_point
+
+        peers = fetch_peer_matches_near_point(
+            auth.user_id, lat=pin[0], lng=pin[1], limit=limit
+        )
+        if peers is None:
+            # Never fall back to the home list here: the client would title it
+            # "around you right now".
+            raise HTTPException(status_code=502, detail="fellows_pin_search_failed")
+        if peers:
+            stamp_reachability(peers, user_id=str(auth.user_id))
+    else:
+        peers = _fetch_verified_peer_matches(
+            _bearer_token(authorization),
+            user_id=auth.user_id,
+            block_id=auth.home_block_id,
+            limit=min(limit * 4, 40) if member_ids is not None else limit,
+        )
     if member_ids is not None:
         peers = [
             p for p in peers if str((p or {}).get("peer_user_id") or "") in member_ids
@@ -4232,6 +4290,8 @@ def post_fellows(
     rows = peers_to_match_rows(
         matched, phone_verified=auth.phone_verified, max_rows=limit
     )
+    # §33(b): "📍 Laureate Park" — the peer's home-area label, verified callers only.
+    attach_peer_area_names(rows, matched, phone_verified=auth.phone_verified)
     # The line the card renders in place of the trait chips. Authored ON the fetch, not in
     # the background: a row that appears with chips and swaps to a sentence a second later
     # reads as a glitch. Cached per shared-claim basis, so only a genuinely new overlap

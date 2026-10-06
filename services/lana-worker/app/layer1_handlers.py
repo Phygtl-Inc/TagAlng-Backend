@@ -643,10 +643,95 @@ def peers_to_match_rows(
                 # and the card needs it to drop the Nudge button on someone the user
                 # already knows.
                 "connection": row.get("connection"),
+                # How far away, exactly as the radius RPC measured it (peer's coarse
+                # point → the caller's home point, or her pin). Forwarded, never
+                # derived: the block-scoped fallback measures nothing, so both stay
+                # None there rather than becoming a guess. Shown to an unverified
+                # caller too — a distance with no name or id attached locates nobody;
+                # the area name is the field the verify gate holds back (see
+                # attach_peer_area_names).
+                "distance_text": str(row.get("distance_text") or "").strip() or None,
+                "distance_meters": _meters_or_none(row.get("distance_meters")),
                 "preview": not phone_verified or not nick,
             }
         )
     return out
+
+
+def _meters_or_none(raw: Any) -> float | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    # Whole metres: the points are block/ZIP centroids, so a decimal would claim a
+    # precision the measurement never had.
+    return float(round(value)) if value >= 0 else None
+
+
+def attach_peer_area_names(
+    rows: list[dict[str, Any]],
+    peers: list[dict[str, Any]],
+    *,
+    phone_verified: bool,
+) -> None:
+    """Stamp `area_name` — the peer's own home-area label — onto shaped fellows rows.
+
+    `rows` and `peers` must line up index-for-index (post_fellows guarantees it): the
+    shaped row has lost the peer id for an unverified caller, the raw row has not.
+
+    Gated like every other identity field on the row: an unverified caller gets None
+    on EVERY row, and no lookup is made, so "which rows show an area" can never leak
+    anything per row. A neighbourhood name next to a distance is a weak but real
+    locator, and the verify promise is "names after verification".
+
+    Same label, same cleaning, the area is shown with everywhere else
+    (blocks.display_name through clean_block_label). A peer with no home block, or a
+    block with no usable name, stays None — never a ZIP or a guess.
+    """
+    for row in rows:
+        row["area_name"] = None
+    if not phone_verified or not rows:
+        return
+    ids = [
+        str((p or {}).get("peer_user_id") or "").strip()
+        for p in peers[: len(rows)]
+    ]
+    wanted = sorted({i for i in ids if i})
+    if not wanted:
+        return
+    try:
+        from app.discovery_route import clean_block_label
+
+        sb = service_client()
+        users = (
+            sb.table("users").select("id, home_block_id").in_("id", wanted).execute()
+        )
+        block_of = {
+            str(u.get("id")): str(u.get("home_block_id") or "")
+            for u in (users.data or [])
+            if isinstance(u, dict)
+        }
+        block_ids = sorted({b for b in block_of.values() if b})
+        label_of: dict[str, str | None] = {}
+        if block_ids:
+            blocks = (
+                sb.table("blocks")
+                .select("id, display_name")
+                .in_("id", block_ids)
+                .execute()
+            )
+            label_of = {
+                str(b.get("id")): clean_block_label(b.get("display_name"))
+                for b in (blocks.data or [])
+                if isinstance(b, dict)
+            }
+    except Exception:  # noqa: BLE001 - a missing label must never cost the list
+        logging.getLogger(__name__).exception("peer_area_names_failed")
+        return
+    for row, pid in zip(rows, ids):
+        row["area_name"] = label_of.get(block_of.get(pid, "")) if pid else None
 
 
 def fetch_peer_profile(user_jwt: str, peer_user_id: str) -> dict[str, Any]:
