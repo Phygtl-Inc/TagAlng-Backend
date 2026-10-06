@@ -7104,7 +7104,10 @@ def activities_beyond_radius(
                 # default this probe could not see the six-week-out meet that browse
                 # would happily have listed had it been nearby.
                 "p_window": activity_window(),
-                "p_limit": 20,
+                # SQL's own ceiling. At 20, twenty unrelated meets a little closer than
+                # the one that matches hid it — the probe ranks by distance, the topic
+                # filter runs after (Tommaso, 2026-10-06).
+                "p_limit": 50,
             },
         )
     except Exception:

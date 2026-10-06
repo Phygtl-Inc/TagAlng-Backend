@@ -527,7 +527,7 @@ class UncheckedRingTests(unittest.TestCase):
         ), patch("app.discovery_route.activity_radius_meters", return_value=40000.0), patch(
             "app.auth.jwt_user_id", return_value="me"
         ), patch("app.activity_browse._attach_host_names"), patch(
-            "app.activity_browse._far_offer", return_value=([], "")
+            "app.activity_browse._far_offer", return_value=([], "", [])
         ), patch("app.activity_browse._zip_gate_frame", return_value=None), patch(
             "app.orchestrator.llm.llm_configured", return_value=False
         ):
@@ -571,7 +571,7 @@ class _StretchTurnHarness:
         with patch("app.activity_browse._fetch_block_events", return_value=rows), patch(
             "app.activity_browse._filter_events_by_query", side_effect=_filter
         ), patch("app.activity_browse._widen_search", return_value=ring) as widen, patch(
-            "app.activity_browse._far_offer", return_value=([], "")
+            "app.activity_browse._far_offer", return_value=([], "", [])
         ) as far, patch("app.activity_browse._zip_gate_frame", return_value=None), patch(
             "app.lana_paths.stretch_offer_enabled", return_value=flag
         ), patch("app.activity_browse._STRETCH_BEFORE_WIDEN", stretch_first), patch(
@@ -868,7 +868,7 @@ class OfferResponseTests(unittest.TestCase):
             patch("app.discovery_route.resolve_block_id", return_value="b1"),
             patch("app.activity_browse._fetch_block_events", return_value=[]),
             patch("app.activity_browse._widen_search", return_value=([], "")),
-            patch("app.activity_browse._far_offer", return_value=([], "")),
+            patch("app.activity_browse._far_offer", return_value=([], "", [])),
             patch("app.activity_browse._zip_gate_frame", return_value=None),
             *extra_patches,
         ]
@@ -927,7 +927,7 @@ class OfferResponseTests(unittest.TestCase):
             with patch("app.orchestrator.llm.llm_configured", return_value=False), patch(
                 "app.activity_browse._fetch_block_events", return_value=[]
             ), patch("app.activity_browse._widen_search", return_value=([], "")), patch(
-                "app.activity_browse._far_offer", return_value=([], "")
+                "app.activity_browse._far_offer", return_value=([], "", [])
             ), patch("app.activity_browse._zip_gate_frame", return_value=None), patch(
                 "app.community_scope.clear_active_community"
             ):

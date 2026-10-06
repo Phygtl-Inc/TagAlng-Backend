@@ -317,7 +317,10 @@ class FarOfferPillTests(unittest.TestCase):
                                               "venue": None}), patch(
             "app.auth.jwt_user_id", return_value=jwt_uid
         ):
-            return _far_offer("jwt", "zip-90001", draft, interest="kayak") + (draft,)
+            # No topic: the single-area pill path. A topic now returns the matches
+            # themselves as cards instead (tests/test_far_matches.py, 2026-10-06).
+            facts, chip, _cards = _far_offer("jwt", "zip-90001", draft, interest="")
+            return facts, chip, draft
 
     def test_far_offer_does_not_arm_the_zip_consumer(self):
         facts, chip, draft = self._offer(matched=list(self._ROWS))
@@ -396,7 +399,7 @@ class UncheckedFarProbeTests(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            facts, chip = _far_offer("jwt", "zip-90001", draft, interest="cricket")
+            facts, chip, _cards = _far_offer("jwt", "zip-90001", draft, interest="cricket")
         finally:
             for p in patches:
                 p.stop()

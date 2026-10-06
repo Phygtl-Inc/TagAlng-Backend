@@ -597,6 +597,28 @@ _STRINGS: dict[str, dict[str, str]] = {
     # The same two, with the far area named. The generic pair above offers to "widen the
     # search", which only drops the topic — when the pill says "Look in <area>" that is a
     # different promise, and with no LLM configured this string is the only thing shipped.
+    "browse.far_matches_interest": {
+        "en": "Nothing on **{interest}** near you right now. The closest is **{title}** in "
+              "{area}, about {miles} miles away — it's below. Want me to keep an ear out "
+              "for one near you?",
+        "es": "No hay nada de **{interest}** cerca de ti ahora mismo. Lo más cercano es "
+              "**{title}** en {area}, a unas {miles} millas; está aquí abajo. ¿Quieres que "
+              "me quede atenta por si surge algo cerca?",
+        "pt": "Nada de **{interest}** perto de você agora. O mais próximo é **{title}** em "
+              "{area}, a umas {miles} milhas — está aqui embaixo. Quer que eu fique de olho "
+              "em algo perto de você?",
+    },
+    "browse.far_matches_generic": {
+        "en": "Nothing coming up near you right now. The closest is **{title}** in {area}, "
+              "about {miles} miles away — it's below. Want me to keep an ear out for "
+              "something near you?",
+        "es": "No hay nada próximo cerca de ti ahora mismo. Lo más cercano es **{title}** "
+              "en {area}, a unas {miles} millas; está aquí abajo. ¿Quieres que me quede "
+              "atenta por si surge algo cerca?",
+        "pt": "Nada acontecendo perto de você agora. O mais próximo é **{title}** em "
+              "{area}, a umas {miles} milhas — está aqui embaixo. Quer que eu fique de olho "
+              "em algo perto de você?",
+    },
     "browse.empty_interest_far": {
         "en": "No **{interest}** activities near you right now — though there are some in "
               "{area}. Want me to keep an ear out here, or look in {area}?",

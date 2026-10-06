@@ -558,6 +558,49 @@ def _far_supply_facts(far: dict[str, Any] | None) -> list[str]:
     ]
 
 
+# Far matches: how many to show, and the topic score that counts as "exactly it". Every
+# matched row already cleared the matcher's bar; within those, an exact match comes
+# before a related one, and the nearer before the farther (Tommaso, 2026-10-06).
+_FAR_CARDS = 3
+_FAR_EXACT = 0.9
+
+
+def _rank_far_matches(matched: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Topic first, then distance: exact matches nearest-first, then the rest."""
+
+    def key(r: dict[str, Any]) -> tuple[int, float]:
+        exact = _coerce_topic_score(r.get("topic_score")) >= _FAR_EXACT
+        try:
+            dist = float(r.get("distance_meters") or 0.0)
+        except (TypeError, ValueError):
+            dist = float("inf")
+        return (0 if exact else 1, dist)
+
+    return sorted(matched, key=key)
+
+
+def _far_matches_facts(found: list[dict[str, Any]]) -> list[str]:
+    """Facts for real matches beyond the radius, shown as cards. `found` is ranked and
+    each item is far_activity_details(...) for one event."""
+    lead = found[0]
+    lines = "; ".join(
+        f'"{f.get("title") or "a meet"}" in {_far_where(f)} (about {f["miles"]:,} miles)'
+        for f in found
+    )
+    return [
+        f"Nothing matched near them. Real matches FARTHER away, best first (closest topic, "
+        f"then nearest): {lines}. No other area was looked at.",
+        f'Name ONLY the first: "{lead.get("title") or "a meet"}" in {_far_where(lead)}, '
+        f"about {lead['miles']:,} miles away — say how far, plainly. "
+        + ("Say the others are below too. " if len(found) > 1 else "")
+        + "They are shown as cards under your message; never list them in the text.",
+        "The ONLY option to offer is listening for one NEAR them (the pill 'Yes, listen "
+        "for me'). There is no 'look in' or 'widen' option — never offer one.",
+        "Keep it to TWO sentences: nothing near them + the closest match and its distance, "
+        "then the listen offer.",
+    ]
+
+
 def _compose_empty_seek_offer(
     interest: str,
     *,
@@ -568,6 +611,7 @@ def _compose_empty_seek_offer(
     community: str | None = None,
     area: str | None = None,
     stretch: StretchCandidate | None = None,
+    far_lead: dict[str, Any] | None = None,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -609,6 +653,16 @@ def _compose_empty_seek_offer(
             if interest
             else t("browse.empty_community_generic", lang, community=community)
         )
+    elif far_lead:
+        # Real matches farther away, shown as cards; the closest is named with its
+        # distance and the only pill is "listen" (Tommaso, 2026-10-06).
+        kw = {"title": far_lead.get("title") or "a meet", "area": _far_where(far_lead),
+              "miles": f"{far_lead['miles']:,}"}
+        fallback = (
+            t("browse.far_matches_interest", lang, interest=interest, **kw)
+            if interest
+            else t("browse.far_matches_generic", lang, **kw)
+        )
     elif area:
         # A far area was found and the pill says "Look in <area>". The generic strings
         # below end with "or widen the search?", which is not what the pill does and not
@@ -645,7 +699,7 @@ def _compose_empty_seek_offer(
         # (see _far_offer). The community and host-your-own shapes reuse far_facts for
         # their own Option B without having looked anywhere wider, so they keep the
         # "nothing outside was looked at" caveat.
-        looked_wider = bool(area)
+        looked_wider = bool(area) or far_lead is not None
         facts = [
             (
                 f"You searched {where} for: {interest}"
@@ -1171,10 +1225,16 @@ def _refine_suggestions(events: list[dict[str, Any]]) -> list[str]:
 
 def _far_offer(
     user_jwt: str, block_id: str | None, draft: dict[str, Any], *, interest: str = ""
-) -> tuple[list[str], str]:
-    """(facts, pill text) for real supply outside the radius — ([], "") when there is
-    none. The offered area is remembered ON THE DRAFT, and the tap is matched against
-    the exact label we offered; the interest carries over untouched.
+) -> tuple[list[str], str, list[dict[str, Any]]]:
+    """(facts, pill text, cards) for real supply outside the radius — ([], "", []) when
+    there is none.
+
+    With a topic (Tommaso, 2026-10-06): the matches themselves come back as cards — the
+    best few, ranked topic first then distance — instead of one "Look in <area>" pill to a
+    single place. Several areas can hold a match, and a pill can only name one of them.
+    Without a topic, the older single-area pill stays: "anything on?" has no best match.
+    The offered area is remembered ON THE DRAFT, and the tap is matched against the exact
+    label we offered; the interest carries over untouched.
 
     The candidate area is only offered when its events survive the SAME filter this
     search just ran (and the caller's own meets are dropped, exactly as browse drops
@@ -1194,12 +1254,30 @@ def _far_offer(
         user_jwt, block_id, exclude_host_id=jwt_user_id(user_jwt)
     )
     if not rows:
-        return [], ""
+        return [], "", []
     matched, _label = _filter_events_by_query(rows, interest)
     if not matched or _filter_unchecked(rows):
         # Nothing judged on topic out there — including when the matcher could not run.
         # "There are some in <area>" over rows nobody checked is an invented claim.
-        return [], ""
+        return [], "", []
+    if str(interest or "").strip():
+        found_rows: list[dict[str, Any]] = []
+        found: list[dict[str, Any]] = []
+        for row in _rank_far_matches(matched):
+            det = far_activity_details(row)
+            if not det or not det.get("miles") or not _far_where(det):
+                continue
+            # The card says where it is: the venue alone ("Student Union") gives no hint
+            # that it is 2,400 miles away.
+            venue = str(row.get("venue_name") or "").strip()
+            row["venue_name"] = f"{venue} · {_far_where(det)}" if venue else _far_where(det)
+            found_rows.append(row)
+            found.append(det)
+            if len(found) >= _FAR_CARDS:
+                break
+        if found:
+            draft["_far_lead"] = found[0]
+            return _far_matches_facts(found), "", found_rows
     # _filter_events_by_query may reorder; the offer must still name the CLOSEST match.
     nearest = min(matched, key=lambda r: float(r.get("distance_meters") or 0))
     far = far_activity_details(nearest)
@@ -1212,7 +1290,7 @@ def _far_offer(
             block_id, nearest.get("id"), (far or {}).get("area_label"),
             (far or {}).get("block_id"),
         )
-        return [], ""
+        return [], "", []
     where = _far_where(far)
     chip = f"Look in {where}"
     # Remembered so the tap is recognised by the exact label we offered, and re-anchored
@@ -1226,7 +1304,7 @@ def _far_offer(
     # Deliberately does NOT set _need_zip. Arming it here made every non-ZIP reply
     # ("Widen the search", a fresh interest, a question) get eaten as a malformed ZIP
     # and answered with "share your 5-digit ZIP code" (QA 2026-08-31).
-    return facts, chip
+    return facts, chip, []
 
 
 def _community_name(comm: dict[str, Any] | None) -> str | None:
@@ -1804,15 +1882,23 @@ def run_activity_browse_turn(
         short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
         draft["interest"] = short or interest
         draft["_seek_offer"] = True
-        far_facts, far_chip = (
-            ([], _arm_community_widen(draft, comm))
+        draft["_far_lead"] = None
+        far_facts, far_chip, far_cards = (
+            ([], _arm_community_widen(draft, comm), [])
             if comm
             else _far_offer(user_jwt, block_id, draft, interest=interest)
         )
-        draft["suggestions"] = ["Yes, listen for me", far_chip or "Widen the search"]
+        # Far matches arrive as cards, so the only move left is to listen for one near.
+        draft["suggestions"] = (
+            ["Yes, listen for me"]
+            if far_cards
+            else ["Yes, listen for me", far_chip or "Widen the search"]
+        )
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
-        session_ctx["activity_previews"] = []
+        session_ctx["activity_previews"] = (
+            activity_previews_from_events(far_cards) if far_cards else []
+        )
         # No cards this turn — scores from an earlier match must not ride along.
         session_ctx["browse_scores"] = None
         _record_no_match(session_ctx, events)
@@ -1831,6 +1917,7 @@ def run_activity_browse_turn(
             far_facts=far_facts,
             community=_community_name(comm),
             area=draft.get("_area_offer_name"),
+            far_lead=draft.get("_far_lead") if far_cards else None,
         )
 
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
@@ -1872,7 +1959,7 @@ def run_activity_browse_turn(
             return _compose_empty_seek_offer(
                 "", user_msg=msg, lang=lang, community=_community_name(comm)
             )
-        far_facts, far_chip = _far_offer(user_jwt, block_id, draft, interest=interest)
+        far_facts, far_chip, _ = _far_offer(user_jwt, block_id, draft, interest=interest)
         if far_facts:
             draft["_seek_offer"] = True
             draft["suggestions"] = ["Yes, listen for me", far_chip]
