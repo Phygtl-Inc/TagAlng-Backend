@@ -1570,6 +1570,11 @@ class SendMessageRequest(BaseModel):
     # None means "the client said nothing", which keeps whatever the session already
     # has; "" is the explicit "no community" pick and restores the ZIP default.
     community_id: str | None = None
+    # The location pill when it is a PLACE ("Rawalpindi, PK", "Around me"): where to search
+    # this turn instead of the home area (2026-10-07). Absent = the home area, as before.
+    search_lat: float | None = Field(default=None, ge=-90, le=90)
+    search_lng: float | None = Field(default=None, ge=-180, le=180)
+    search_label: str | None = Field(default=None, max_length=120)
     # WHICH place a grounding card's pick is, when the user chose it from the card's
     # own Google search. Those places are in no cached candidate list, so matching the
     # posted text ("It's Fitness CF St. Cloud") would only re-search for them.

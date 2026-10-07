@@ -597,6 +597,24 @@ _STRINGS: dict[str, dict[str, str]] = {
     # The same two, with the far area named. The generic pair above offers to "widen the
     # search", which only drops the topic — when the pill says "Look in <area>" that is a
     # different promise, and with no LLM configured this string is the only thing shipped.
+    "browse.related_label": {
+        "en": "things related to {interest}",
+        "es": "cosas relacionadas con {interest}",
+        "pt": "coisas relacionadas a {interest}",
+    },
+    "browse.home_area": {
+        "en": "your home area",
+        "es": "tu zona",
+        "pt": "sua região",
+    },
+    "browse.empty_related_interest": {
+        "en": "Nothing on **{interest}** or anything close to it right now. Want me to keep "
+              "an ear out — or host one yourself?",
+        "es": "No hay nada de **{interest}** ni nada parecido ahora mismo. ¿Quieres que me "
+              "quede atenta, o lo organizas tú?",
+        "pt": "Nada de **{interest}** nem parecido agora. Quer que eu fique de olho — ou "
+              "organizar um você mesmo?",
+    },
     "browse.empty_place_interest": {
         "en": "Nothing on **{interest}** in {place} right now. Want me to keep an ear out?",
         "es": "No hay nada de **{interest}** en {place} ahora mismo. ¿Quieres que me quede "

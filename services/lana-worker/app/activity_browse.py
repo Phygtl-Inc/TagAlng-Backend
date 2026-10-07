@@ -678,7 +678,41 @@ def _far_supply_facts(far: dict[str, Any] | None) -> list[str]:
 # matched row already cleared the matcher's bar; within those, an exact match comes
 # before a related one, and the nearer before the farther (Tommaso, 2026-10-06).
 _FAR_CARDS = 3
+# "Widen the search" accepts RELATED meets, not everything: the matcher already scores every
+# meet it reads for topic closeness (a match clears ~0.8; the stretch band is 0.6-0.8), so
+# widening relaxes that bar to "related" instead of dropping the topic (2026-10-07: a books
+# club answered "AI" after Widen). An unrelated meet scores near 0 and never shows.
+_RELATED_FLOOR = 0.5
+_RELATED_CARDS = 5
 _FAR_EXACT = 0.9
+
+
+def _point_area(user_jwt: str, point: dict[str, Any], session_ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """The browse area for the location pill's point: {"block_id", "label"} for a US point,
+    None outside the US (pilot) or when it cannot be placed. Cached on the session by
+    rounded point, so one pill costs one reverse-geocode, not one per turn."""
+    try:
+        lat, lng = float(point["lat"]), float(point["lng"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    key = f"{round(lat, 2)},{round(lng, 2)}"
+    cached = session_ctx.get("search_point_area")
+    if isinstance(cached, dict) and cached.get("key") == key:
+        return cached.get("area")
+    from app.discovery_route import resolve_zip_coverage
+    from app.search_place import _postal_code_at
+
+    area = None
+    zip5, country = _postal_code_at(lat, lng)
+    if zip5 and country in (None, "US"):
+        block, _status = resolve_zip_coverage(user_jwt, zip5)
+        if block and block.get("block_id"):
+            area = {
+                "block_id": str(block["block_id"]),
+                "label": str(point.get("label") or block.get("display_name") or zip5),
+            }
+    session_ctx["search_point_area"] = {"key": key, "area": area}
+    return area
 
 
 def _rank_far_matches(matched: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -729,6 +763,7 @@ def _compose_empty_seek_offer(
     stretch: StretchCandidate | None = None,
     far_lead: dict[str, Any] | None = None,
     place: str | None = None,
+    widened: bool = False,
 ) -> str:
     """AI-authored "search came up empty" reply (Lana's voice), not a canned template.
 
@@ -769,6 +804,13 @@ def _compose_empty_seek_offer(
             t("browse.empty_community_interest", lang, interest=interest, community=community)
             if interest
             else t("browse.empty_community_generic", lang, community=community)
+        )
+    elif widened:
+        # They already widened to related topics: never offer to widen again.
+        fallback = (
+            t("browse.empty_related_interest", lang, interest=interest)
+            if interest
+            else t("browse.empty_generic_offer", lang)
         )
     elif place and not far_lead:
         # They asked about a town that is not where they are: "near you" would be false.
@@ -1723,14 +1765,17 @@ def run_activity_browse_turn(
             draft["_need_zip"] = True
         elif _WIDEN_RE.search(msg):
             _answered("widen")
-            draft["interest"] = ""  # clear the filter → show everything below
-            draft["_asked"] = True  # widening means show all — never re-ask P1
+            # Widen to RELATED meets, keeping the topic (2026-10-07). It used to clear the
+            # topic and list everything, so "AI" + Widen answered with a books club.
+            draft["_widen_related"] = True
+            draft["_asked"] = True  # never re-ask P1
             draft["_seek_offer"] = None
             msg = ""
         else:
             # Not an accept/widen tap — treat it as a fresh kind to search for.
             _answered("new_search")
             draft["_seek_offer"] = None
+            draft["_widen_related"] = None
 
     # ── P1: ask the interest ONCE (with chips) — only when there's nothing to mine (the
     #    CTA's generic seed was dropped above, leaving msg empty). A natural-language entry
@@ -1882,6 +1927,8 @@ def run_activity_browse_turn(
             if forced_topic:
                 msg = forced_topic
         draft["interest"] = msg[:80]
+        # A new topic is a new search: strict again, whatever the last one widened to.
+        draft["_widen_related"] = None
     interest = str(draft.get("interest") or "")
 
     # The community filter at the top of the screen. It answers the "where" outright:
@@ -1926,6 +1973,18 @@ def run_activity_browse_turn(
                 session_ctx=session_ctx,
                 user_message=msg,
             )
+    # The location pill, when it is a PLACE rather than a community: search where it says
+    # she is (2026-10-07: the pill read "Rawalpindi" and results came from her Orlando home,
+    # headed "near you"). A US point becomes that area; outside the US (pilot) the home
+    # area is searched and SAID to be the home area, never "near you".
+    point = None if (comm or place_ask) else session_ctx.get("search_point")
+    if isinstance(point, dict) and not draft.get("_area_block_id"):
+        here = _point_area(user_jwt, point, session_ctx)
+        if here and here["block_id"] != str(home_block_id or ""):
+            draft["_area_block_id"] = here["block_id"]
+            draft["_place_name"] = here["label"]
+        elif here is None and home_block_id:
+            draft["_place_name"] = t("browse.home_area", lang)
     place_name = None if comm else (str(draft.get("_place_name") or "").strip() or None)
 
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
@@ -2007,6 +2066,16 @@ def run_activity_browse_turn(
         _record_no_match(session_ctx, events)
         return _filter_unavailable_reply(draft, session_ctx, interest, comm, lang)
 
+    # After "Widen the search": related meets, closest topic first — never everything.
+    if not matched and interest and draft.get("_widen_related"):
+        related = sorted(
+            (e for e in events if _coerce_topic_score(e.get("topic_score")) >= _RELATED_FLOOR),
+            key=lambda e: -_coerce_topic_score(e.get("topic_score")),
+        )[:_RELATED_CARDS]
+        if related:
+            matched = related
+            label = t("browse.related_label", lang, interest=(label or interest).strip())
+
     # Stretch offer (Rapport Reply, behind LANA_STRETCH_OFFER): nothing matched, but the
     # matcher rated a NEARBY event closely related. Read only from `events` — the nearby
     # rows this turn's filter just scored in place — never from the ring or far lists.
@@ -2059,11 +2128,19 @@ def run_activity_browse_turn(
             else _far_offer(user_jwt, block_id, draft, interest=interest)
         )
         # Far matches arrive as cards, so the only move left is to listen for one near.
+        widened = bool(draft.get("_widen_related"))
+        # Already widened: offering "Widen" again would loop. Hosting is the move left.
         draft["suggestions"] = (
             ["Yes, listen for me"]
             if far_cards
-            else ["Yes, listen for me", far_chip or "Widen the search"]
+            else ["Yes, listen for me", far_chip or ("Host a meet" if widened else "Widen the search")]
         )
+        if widened and not far_cards and not far_chip and not comm:
+            far_facts = [
+                "They already widened to RELATED topics and nothing related turned up either "
+                "— say that plainly. Option B: they can host a meet about it themselves (the "
+                "pill says 'Host a meet'). Never offer to widen again.",
+            ]
         session_ctx["browse_draft"] = draft
         session_ctx["activity_browse_active"] = True
         session_ctx["activity_previews"] = (
@@ -2089,6 +2166,7 @@ def run_activity_browse_turn(
             area=draft.get("_area_offer_name"),
             far_lead=draft.get("_far_lead") if far_cards else None,
             place=place_name,
+            widened=widened and not far_cards and not far_chip,
         )
 
     # Generic browse ("what's happening?") with a zero-event calendar in an area that
