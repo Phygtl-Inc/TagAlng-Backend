@@ -102,14 +102,29 @@ def clear_active_community(session_ctx: dict[str, Any]) -> None:
 
 
 def community_events(
-    place_id: str, *, limit: int = 30, exclude_host_id: str | None = None
+    place_id: str,
+    *,
+    limit: int = 30,
+    exclude_host_id: str | None = None,
+    viewer_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Upcoming meets of the community: created for it, or held at its place.
 
     A community read, NOT a neighbourhood read intersected with one — the place can
     sit outside the caller's block radius, and a meet of the community she is
     looking at is hers to see wherever it is.
+
+    With `viewer_id`, the community's FAMILY too (20270124120000): a chapter's meets on
+    its parent for a parent member, the parent's meets on a chapter — never a sibling's —
+    each crossing meet labelled with `origin_place_id` / `origin_place_name`.
     """
+    from app.community_chapter_ops import community_family, label_origin
+
+    family = community_family(viewer_id, place_id) if viewer_id else [
+        {"place_id": place_id, "place_name": None, "relation": "self"}
+    ]
+    ids = [f["place_id"] for f in family if _is_uuid(f["place_id"])] or [place_id]
+    in_list = ",".join(ids)
     from app.auth import service_client
     from app.event_publish import roll_recurring_events
 
@@ -127,7 +142,11 @@ def community_events(
             .eq("status", "open")
             .eq("is_private", False)  # §29: invite-only meets never list on a community
             .gte("starts_at", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
-            .or_(f"circle_place_ref.eq.{place_id},place_ref.eq.{place_id}")
+            .or_(
+                f"circle_place_ref.eq.{place_id},place_ref.eq.{place_id}"
+                if len(ids) == 1
+                else f"circle_place_ref.in.({in_list}),place_ref.in.({in_list})"
+            )
             .order("starts_at")
             .limit(max(limit, 1))
             .execute()
@@ -142,8 +161,22 @@ def community_events(
         if isinstance(r, dict)
         and not (exclude_host_id and str(r.get("host_id") or "") == exclude_host_id)
     ]
-    logger.info("community_scope.events place=%s rows=%d", place_id, len(out))
+    label_origin(out, place_id, family)
+    logger.info(
+        "community_scope.events place=%s family=%d rows=%d", place_id, len(ids), len(out)
+    )
     return out
+
+
+def _is_uuid(value: str) -> bool:
+    """or_ takes a formatted string: only real uuids go into it, never caller text."""
+    import uuid
+
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def here_place(session_ctx: dict[str, Any] | None, user_id: str | None) -> dict[str, Any] | None:

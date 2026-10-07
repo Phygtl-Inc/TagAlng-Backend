@@ -2047,8 +2047,9 @@ def run_activity_browse_turn(
         from app.auth import jwt_user_id
         from app.community_scope import community_events
 
+        viewer = jwt_user_id(user_jwt)
         events = community_events(
-            str(comm["place_id"]), exclude_host_id=jwt_user_id(user_jwt)
+            str(comm["place_id"]), exclude_host_id=viewer, viewer_id=viewer
         )
         _attach_host_names(events)
         truncated = False

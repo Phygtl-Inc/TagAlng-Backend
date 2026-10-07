@@ -572,6 +572,11 @@ class CommunityEventRow(BaseModel):
     # gives it by radius (public.event_viewer_fit). None = unscored (no public claims, an
     # untagged meet, or the read failed); never 0 for "unknown".
     fit_score: float | None = None
+    # A meet of ANOTHER community in this one's family — a chapter's meet on its parent's
+    # screen, or the parent's on a chapter's (20270124120000). The card must say where it
+    # is from; null for the community's own meets.
+    origin_place_id: str | None = None
+    origin_place_name: str | None = None
 
 
 class MeetGoingPreviewRow(BaseModel):
@@ -706,6 +711,28 @@ class CommunityDiscoveryRow(BaseModel):
     # Discovery lists chapters (20270119120000); without this a chapter reads as a
     # standalone local community. Null for an ordinary one.
     parent: "CommunityParentRow | None" = None
+
+
+class ChapterAttachBody(BaseModel):
+    """Make `place_id` a chapter of `parent_place_id` (20270124120000)."""
+
+    place_id: str
+    parent_place_id: str
+
+
+class ChapterDetachBody(BaseModel):
+    place_id: str
+
+
+class ChapterChangeResponse(BaseModel):
+    """`ok` false carries the refusal as `reason`, e.g. not_a_member_of_parent,
+    not_your_community, chapter_depth_exceeded, creator_community_cannot_be_chapter,
+    chapter_needs_location, chapter_has_another_parent."""
+
+    ok: bool
+    reason: str | None = None
+    parent_name: str | None = None
+    inherited_location: bool = False
 
 
 class CommunityChaptersResponse(BaseModel):

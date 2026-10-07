@@ -522,7 +522,14 @@ _SYSTEM = (
     "community I created', 'change the spot for my gym community'). A follow-up that only "
     "says they made it or run it ('I was the one who created it', 'it's mine') right after "
     "such a request keeps the same manage ask and name. A COMMUNITY'S location is never "
-    "settings.change_zip — that is only the user's OWN home ZIP. 'manage' needs a CHANGE verb "
+    "settings.change_zip — that is only the user's OWN home ZIP. "
+    "PUTTING one community INSIDE another ('put RCC under SJSU', 'make RCC part of San Jose "
+    "State', 'RCC is a club of SJSU, link them', 'add my club to SJSU as a chapter') is "
+    "community_ask='manage' with community_name = the one being moved (RCC), "
+    "community_parent = the bigger one it goes inside (SJSU) and chapter_action='attach'. "
+    "TAKING it out ('remove RCC from SJSU', 'make RCC standalone', 'RCC is not part of SJSU "
+    "anymore') is the same with chapter_action='detach' (community_parent may be null). "
+    "'manage' needs a CHANGE verb "
     "(update, edit, change, move, rename, leave) aimed at a community: asking WHICH "
     "communities they are in or part of ('what community am I a part of?', 'what are my "
     "communities', 'which groups am I in?') is discovery.communities with community_ask='mine' "
@@ -703,6 +710,8 @@ def _empty_slots() -> dict[str, Any]:
         "identity_snippet": None,
         "community_name": None,
         "community_ask": None,
+        "community_parent": None,
+        "chapter_action": None,
         "community_topic": None,
         "search_place": None,
         "profile_photo_action": "none",
@@ -862,6 +871,10 @@ def ai_parse_discovery_turn(
         # "when I'm in Austin") — travel (2026-10-06). The AI's read, never a keyword list.
         search_place = raw.get("search_place")
         search_place_s = str(search_place).strip()[:80] if search_place else None
+        community_parent = raw.get("community_parent")
+        community_parent_s = str(community_parent).strip()[:80] if community_parent else None
+        chapter_action = str(raw.get("chapter_action") or "").strip().lower()
+        chapter_action_s = chapter_action if chapter_action in ("attach", "detach") else None
         community_ask = str(raw.get("community_ask") or "").strip().lower()
         community_ask_s = (
             community_ask
@@ -950,6 +963,8 @@ def ai_parse_discovery_turn(
             "peer_name": peer_name_s,
             "community_name": community_name_s,
             "community_ask": community_ask_s,
+            "community_parent": community_parent_s,
+            "chapter_action": chapter_action_s,
             "community_topic": community_topic_s,
             "search_place": search_place_s,
             "clarify": clarify,
@@ -1275,6 +1290,11 @@ def _discovery_slot_payload(
         'about a subject or for a kind of person (any communities for podcasters?, is there a book '
         'club?, a group for new moms) — the subject in 1-4 plain words (podcasting, book club, new '
         'moms); null when they name one specific community or just ask what is near them",\n'
+        '  "community_parent": "with community_ask=manage and chapter_action=attach: the bigger '
+        'community they want it put INSIDE (SJSU), verbatim; else null",\n'
+        '  "chapter_action": "attach"|"detach"|null — with community_ask=manage: attach when '
+        'they want the named community put inside another, detach when they want it out of '
+        'the one it is in; else null,\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
         'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'
@@ -1362,6 +1382,18 @@ def slots_community_ask(slots: dict[str, Any] | None) -> str:
         return "about"
     ask = str(slots.get("community_ask") or "")
     return ask if ask in ("people", "manage", "mine", "chapters") else "about"
+
+
+def slots_chapter_change(slots: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    """(chapter_action, community_parent) from AI slots: ("attach", "SJSU"), ("detach",
+    None), or (None, None). Only with community_ask='manage' — the AI's read, never words."""
+    if not slots or str(slots.get("community_ask") or "") != "manage":
+        return None, None
+    action = str(slots.get("chapter_action") or "")
+    if action not in ("attach", "detach"):
+        return None, None
+    parent = str(slots.get("community_parent") or "").strip()[:80] or None
+    return action, parent
 
 
 def slots_search_place(slots: dict[str, Any] | None) -> str | None:
