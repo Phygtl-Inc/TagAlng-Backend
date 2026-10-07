@@ -304,9 +304,12 @@ class Harness:
             r.check("no_off_topic_cards_after_beyond", not t2.get("activity_previews"),
                     f"cards={titles(t2)} reply={t2.get('assistant_message')!r}")
             ok, why = self.judge.yes(
-                "Does this reply report the result of searching BEYOND the community (more widely / "
-                "the wider area), WITHOUT contradicting itself and WITHOUT asking the user again "
-                "whether to look beyond the community?",
+                "The user tapped 'look beyond the community'. Does this reply give the outcome of "
+                "that wider search — results, OR an honest statement that nothing on their topic "
+                "was found more widely (offering a DIFFERENT next step such as related topics or "
+                "being notified is fine) — WITHOUT contradicting itself and WITHOUT asking again "
+                "whether to look beyond the community? Answer no only if it re-offers looking "
+                "beyond the community, contradicts itself, or ignores the tap.",
                 t2.get("assistant_message") or "",
                 f"The user previously asked: {ask!r} while scoped to a community; the assistant offered "
                 f"to look beyond it and the user tapped that offer.")
@@ -366,6 +369,9 @@ class Harness:
         questions = re.findall(r"[^.!?]*\?", last)
         r.check("no_repeat_zip_ask", not any(
             re.search(r"\bzip\b", q, re.I) and re.search(r"(what|which|share|enter|tell me)", q, re.I)
+            # A sentence that states the saved ZIP ("…now set to 12345; what would you
+            # like to find?") is a confirmation, not a re-ask.
+            and target not in q
             for q in questions), last)
         r.transcript = c.turns
 
