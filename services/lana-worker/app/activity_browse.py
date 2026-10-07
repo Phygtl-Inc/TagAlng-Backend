@@ -904,9 +904,12 @@ def _compose_empty_seek_offer(
         facts.extend(
             far_facts
             or [
-                "Option B: they can widen the search to everything nearby, dropping the "
-                "topic (the pill says 'Widen the search'). This does NOT search other "
-                "areas — never offer it as a way to look somewhere else.",
+                # Since #205 the pill searches RELATED topics, never everything — the
+                # old "everything nearby" line outlived it and Lana kept promising it.
+                "Option B: they can widen the search to topics related to what they "
+                "asked for (the pill says 'Widen the search'). It is NOT everything "
+                "nearby — never say 'everything' or 'all events' — and it does NOT search "
+                "other areas; never offer it as a way to look somewhere else.",
             ]
         )
         if user_msg:
