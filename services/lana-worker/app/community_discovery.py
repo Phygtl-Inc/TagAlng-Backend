@@ -1342,10 +1342,10 @@ Rules:
 - If two could fit, or none clearly does, answer null. A wrong guess is worse than null."""
 
 
-_EXPAND_PROMPT = """Someone named a community (a school, gym, church, club, company or \
-other place people belong to) by a short form. Say what full name(s) it commonly stands \
-for, so they can be looked up: initials ("SJSU" is San Jose State University), nicknames \
-("the Y" is YMCA), dropped words ("Stanford" is Stanford University).
+_EXPAND_PROMPT = """Someone named a community (a school, gym, church, club, hospital, \
+company or other place people belong to) by a short form — initials, a nickname, a \
+misspelling, a translation, or the name with words dropped. Say what full name(s) it \
+commonly stands for, so they can be looked up.
 
 Output ONLY JSON: {"names": [<full name>, ...]}
 
@@ -2228,11 +2228,19 @@ def communities_chat_turn(
                 ask=community_ask,
             )
         if hit:
+            topic_s = str(community_topic or "").strip()[:80] or None
+            if community_ask == "about" and topic_s and _has_chapters(user_id, hit):
+                # The AI read a named community AND a subject being looked for ("any clubs
+                # at San Jose State focused on AI ethics?" came back ask=about,
+                # topic='AI ethics'). The subject is a search INSIDE it: answered as the
+                # about card, it said "join SJSU to explore its clubs" and never named
+                # RCC, the club whose whole blurb is AI ethics (prod 2026-10-07).
+                community_ask = "chapters"
             if community_ask == "chapters":
                 return _chapters_turn(
                     user_id,
                     parent=hit,
-                    topic=str(community_topic or "").strip()[:80] or None,
+                    topic=topic_s,
                     message=message,
                     session_ctx=session_ctx,
                 )
@@ -2403,6 +2411,16 @@ def communities_chat_turn(
     )
 
 
+def _has_chapters(user_id: str, community: dict[str, Any]) -> bool:
+    """Does this community have any chapter the caller may see? False on any failure."""
+    try:
+        return bool(
+            community_chapters(user_id, str(community.get("place_id") or "")).get("chapters")
+        )
+    except ValueError:
+        return False
+
+
 def _chapters_turn(
     user_id: str,
     *,
@@ -2486,16 +2504,32 @@ def _chapters_turn(
             "The cards under your message list every one with real member counts, so your "
             "text must NOT name them one by one"
         )
+        best = str(inside[0]["place_name"])
+        # A narrowed ask is answered by NAME: "any clubs at SJSU about AI ethics?" is a
+        # question whose answer is "yes — the Responsible Computing Club", and a count with
+        # the name left to the cards read as "there are clubs, go look" (prod 2026-10-07).
         goal = (
             f"Answer what they asked: the {what} inside {parent_name}. TWO SHORT SENTENCES, "
-            "never a list. Say what turned up (at most ONE name), and offer to add them — "
-            "joining is instant and reversible."
+            "never a list. "
+            + (
+                f"Open by naming the best match, {best}, as the answer — "
+                if topic
+                else "Say what turned up (at most ONE name), "
+            )
+            + "and offer to add them — joining is instant and reversible."
         )
         fallback = (
-            f"{parent_name} has {len(inside)} "
-            f"{'club' if len(inside) == 1 else 'clubs'}"
-            + (f" about {topic}" if topic else "")
-            + " on Lana — they're below. Want me to add you to one?"
+            (
+                f"Yes — {best} at {parent_name} is about {topic}"
+                + (f", plus {len(inside) - 1} more below" if len(inside) > 1 else "")
+                + ". Want me to add you?"
+            )
+            if topic
+            else (
+                f"{parent_name} has {len(inside)} "
+                f"{'club' if len(inside) == 1 else 'clubs'} on Lana — they're below. "
+                "Want me to add you to one?"
+            )
         )
     elif outside:
         facts.append(

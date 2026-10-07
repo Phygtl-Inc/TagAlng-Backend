@@ -1176,7 +1176,7 @@ def browse_turn_metadata(ctx: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _filter_events_by_query(
-    events: list[dict[str, Any]], query: str
+    events: list[dict[str, Any]], query: str, *, at_place: str | None = None
 ) -> tuple[list[dict[str, Any]], str]:
     """Parse + match the user's request against the block's events with ONE LLM call.
 
@@ -1295,7 +1295,11 @@ def _filter_events_by_query(
                     "indices. Empty match_indices if nothing fits."
                 ),
                 user_payload=(
-                    f"Request: {query}\nEvents:\n" + "\n".join(lines)
+                    f"Request: {query}\n"
+                    # A community's own calendar: the rows carry no place, so "at SJSU"
+                    # in the request read as a constraint no event could be seen to meet.
+                    + (f"Every event below is at {at_place}.\n" if at_place else "")
+                    + "Events:\n" + "\n".join(lines)
                     + f"\nReturn match_indices, plus {len(lines)} scores, "
                     f"{len(lines)} mismatches and {len(lines)} fits_other values in "
                     "event order: "
@@ -1506,6 +1510,57 @@ def _far_offer(
 def _community_name(comm: dict[str, Any] | None) -> str | None:
     name = str((comm or {}).get("name") or "").strip()
     return name or None
+
+
+def _topic_from_slots(slots: dict[str, Any] | None, msg: str) -> str:
+    """What this browse is about, by the AI's read — "" for an open ask.
+
+    activity_topic is the browse's own slot; a meet-seek read carries its subject in
+    signal_detail instead. No slots means the classifier never ran, and the message
+    itself stays the topic, as it always was."""
+    if slots is None:
+        return msg
+    from app.discovery_slots import slots_activity_topic
+
+    topic = slots_activity_topic(slots)
+    if not topic and str(slots.get("signal_intent") or "") == "meet_seek":
+        topic = str(slots.get("signal_detail") or "").strip() or None
+    return topic or ""
+
+
+def _scope_named_community(
+    draft: dict[str, Any], slots: dict[str, Any], user_id: str | None
+) -> None:
+    """Set (or clear) `draft["_community"]` from the community this turn NAMED.
+
+    A name that resolves scopes the browse to it ({"place_id", "name"} — the active
+    community's shape, so every community branch below reads it unchanged). A town to
+    search instead replaces it. A name that resolves to nothing drops any earlier one —
+    they named somewhere else — and no place is guessed: the filter still carries what
+    they said."""
+    from app.discovery_slots import slots_community_name, slots_search_place
+
+    said = slots_community_name(slots)
+    if not said:
+        if slots_search_place(slots):
+            draft["_community"] = None
+        return
+    if not user_id:
+        return
+    from app.community_discovery import resolve_community_name
+
+    hit = resolve_community_name(str(user_id), said)["hit"]
+    logging.getLogger(__name__).info(
+        "browse_named_community said=%r hit=%s", said, (hit or {}).get("place_id")
+    )
+    draft["_community"] = (
+        {
+            "place_id": str(hit["place_id"]),
+            "name": str(hit.get("place_name") or "").strip() or said,
+        }
+        if hit and hit.get("place_id")
+        else None
+    )
 
 
 def _arm_community_widen(draft: dict[str, Any], comm: dict[str, Any] | None) -> str:
@@ -1774,6 +1829,8 @@ def run_activity_browse_turn(
             from app.community_scope import clear_active_community
 
             clear_active_community(session_ctx)
+            # A community they named for this browse is looked past the same way.
+            draft["_community"] = None
             draft["_seek_offer"] = None
             draft["_community_chip"] = None
             draft["_asked"] = True
@@ -1965,19 +2022,34 @@ def run_activity_browse_turn(
         # send text that can come out generic ("show me what's happening this weekend") —
         # the offer's structured topic is the committed subject, so it REPLACES the send
         # text outright (filter, weekend pre-narrow, everything downstream).
+        forced_topic = ""
         if str((slots or {}).get("_forced_kind") or "") == "find_activities":
             forced_topic = str((slots or {}).get("signal_detail") or "").strip()
             if forced_topic:
                 msg = forced_topic
-        draft["interest"] = msg[:80]
+        # Two things, kept apart. The REQUEST is every constraint they typed (day, time of
+        # day, host) and goes to the filter as written. The TOPIC is what it is about, the
+        # AI's read: the whole sentence used to be the topic, so "at sjsu what events are
+        # going on this week" was embedded as a subject and the meaning floor admitted
+        # nothing (2026-10-07). An open ask has no topic. No slots at all (the classifier
+        # did not run) keeps the old reading, the message itself.
+        draft["_request"] = msg[:200]
+        draft["interest"] = (forced_topic or _topic_from_slots(slots, msg))[:80]
         # A new topic is a new search: strict again, whatever the last one widened to.
         draft["_widen_related"] = None
     interest = str(draft.get("interest") or "")
 
+    # A community they NAMED in the ask ("what's going on at SJSU this week?") — resolved by
+    # the same resolver the communities turn uses, and held on the browse draft like a
+    # searched town (`_area_block_id`): it scopes THIS browse and dies with it, and never
+    # switches the community filter at the top of the app. Browse used to read only that
+    # filter, so a named community was ignored and her home area searched (2026-10-07).
+    if msg and slots:
+        _scope_named_community(draft, slots, user_id)
     # The community filter at the top of the screen. It answers the "where" outright:
     # a community IS a place, so nothing below needs her ZIP to run this search — and
     # asking for one here would gate a question she already scoped herself.
-    comm = active_community(session_ctx)
+    comm = draft.get("_community") or active_community(session_ctx)
 
     # Travel: a town they asked to search that is not where they are ("language events in
     # San Jose"; Tommaso, 2026-10-06). Searched for THIS browse only — never written to their
@@ -2097,7 +2169,11 @@ def run_activity_browse_turn(
     # created for whatever state the area is in. The QA case that motivated the block
     # (an off-topic event answering "meet other runners") is handled by the relevance
     # floor instead. The gate frame is still read below, for EMPTY results only.
-    matched, label = _filter_events_by_query(events, interest)
+    # The request as typed (day, time, host and topic), not just the topic.
+    request = str(draft.get("_request") or "").strip() or interest
+    matched, label = _filter_events_by_query(
+        events, request, **({"at_place": _community_name(comm)} if comm else {})
+    )
 
     from app.discovery_route import activity_previews_from_events
 

@@ -427,7 +427,7 @@ class _StretchTurnHarness:
                                            "browse_draft": {"_asked": True},
                                            "phone_verified": True}
 
-        def _filter(ev, q):
+        def _filter(ev, q, **_kw):  # at_place: a community browse names its place
             # Stamp in place, exactly like the real matcher: every row scored. A judged
             # entry is (score, phrase) or (score, phrase, fits_other); fits defaults True
             # (the ask named no date/time/host, or the event meets them).

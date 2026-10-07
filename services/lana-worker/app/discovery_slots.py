@@ -550,7 +550,8 @@ _SYSTEM = (
     "groups in this community?') is discovery.communities with community_ask='chapters', "
     "community_name = THAT community (the active community's name when they say here/this), "
     "and community_topic = the subject only when they narrow it ('AI clubs at SJSU' → "
-    "community_topic='AI'). Nothing named and no here/this → it is NOT 'chapters': 'any AI "
+    "community_topic='AI'). "
+    "Nothing named and no here/this → it is NOT 'chapters': 'any AI "
     "clubs?', 'is there a running club near me?', 'communities for climbers' are a search "
     "ACROSS communities — community_topic set, community_name=null, community_ask=null — "
     "even inside an active community, and 'near me' / 'around here' / 'nearby' always points "
@@ -714,6 +715,7 @@ def _empty_slots() -> dict[str, Any]:
         "chapter_action": None,
         "community_topic": None,
         "search_place": None,
+        "activity_topic": None,
         "profile_photo_action": "none",
         "signal_intent": None,
         "signal_detail": None,
@@ -871,6 +873,12 @@ def ai_parse_discovery_turn(
         # "when I'm in Austin") — travel (2026-10-06). The AI's read, never a keyword list.
         search_place = raw.get("search_place")
         search_place_s = str(search_place).strip()[:80] if search_place else None
+        # What an events browse is ABOUT ("badminton"), apart from when and where. The raw
+        # sentence used to be the topic, so "at sjsu what events are going on this week"
+        # was embedded whole and the meaning floor admitted nothing (2026-10-07). The AI's
+        # read; null is an open ask ("what's going on this week?").
+        activity_topic = raw.get("activity_topic")
+        activity_topic_s = str(activity_topic).strip()[:80] if activity_topic else None
         community_parent = raw.get("community_parent")
         community_parent_s = str(community_parent).strip()[:80] if community_parent else None
         chapter_action = str(raw.get("chapter_action") or "").strip().lower()
@@ -967,6 +975,7 @@ def ai_parse_discovery_turn(
             "chapter_action": chapter_action_s,
             "community_topic": community_topic_s,
             "search_place": search_place_s,
+            "activity_topic": activity_topic_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
             "clarify_options": clarify_options,
@@ -1272,7 +1281,9 @@ def _discovery_slot_payload(
         '  "attr_terms": [["lowercase word forms of one required trait"], ...] with attr_filter, else null,\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
         '  "community_name": "the place/community the user named, verbatim as they said it '
-        '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community, else null",\n'
+        '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community — and with '
+        'discovery.find_activities, the community, school, club or venue they want events AT, '
+        'as they called it (short forms included); else null",\n'
         '  "community_ask": "people"|"about"|"manage"|null — with community_name: "people" when they want '
         'WHO is there (who is in it, the members, who else goes), "manage" when they want to CHANGE '
         'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '
@@ -1286,6 +1297,9 @@ def _discovery_slot_payload(
         '(language events in San Jose, anything this weekend in Austin, I am visiting Denver — '
         'what is on?) — the place name only (San Jose, Austin, Denver); null when they mean near '
         'them, give only a ZIP, or name a venue or community rather than a town",\n'
+        '  "activity_topic": "with discovery.find_activities or looking.meet: WHAT the activity is '
+        'about in 1-4 plain words — never the day, time, place or community; null for an open ask '
+        'that names only when or where (anything fun nearby?)",\n'
         '  "community_topic": "with discovery.communities, when they are LOOKING FOR communities '
         'about a subject or for a kind of person (any communities for podcasters?, is there a book '
         'club?, a group for new moms) — the subject in 1-4 plain words (podcasting, book club, new '
@@ -1394,6 +1408,14 @@ def slots_chapter_change(slots: dict[str, Any] | None) -> tuple[str | None, str 
         return None, None
     parent = str(slots.get("community_parent") or "").strip()[:80] or None
     return action, parent
+
+
+def slots_activity_topic(slots: dict[str, Any] | None) -> str | None:
+    """What an events browse is about ("badminton"), from AI slots — None for an open ask."""
+    if not slots:
+        return None
+    topic = str(slots.get("activity_topic") or "").strip()
+    return topic[:80] or None
 
 
 def slots_search_place(slots: dict[str, Any] | None) -> str | None:

@@ -16,6 +16,8 @@ import app.activity_browse as ab
 _BOOKS = {"id": "books", "title": "Books & Neighbors Gathering", "distance_meters": 2000.0}
 _PYTHON = {"id": "python", "title": "Python Study Group", "distance_meters": 3000.0}
 _SCORES = {"books": 0.1, "python": 0.6}
+# The classifier's read of "find a meet about AI": the topic is its own slot.
+_AI = {"activity_topic": "AI"}
 
 
 def _filt(rows: list[dict], q: str) -> tuple[list[dict], str]:
@@ -60,7 +62,7 @@ def _fresh() -> dict:
 
 def test_widen_shows_related_meets_never_unrelated_ones() -> None:
     ctx = _fresh()
-    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON])
+    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON], slots=_AI)
     assert ctx["activity_previews"] == []  # nothing on AI itself
     reply, ctx, _ = _turn("Widen the search", ctx, events=[_BOOKS, _PYTHON])
     titles = [p["title"] for p in ctx["activity_previews"]]
@@ -71,7 +73,7 @@ def test_widen_shows_related_meets_never_unrelated_ones() -> None:
 
 def test_widen_with_nothing_related_says_so_and_offers_hosting_not_widen_again() -> None:
     ctx = _fresh()
-    _turn("find a meet about AI", ctx, events=[_BOOKS])
+    _turn("find a meet about AI", ctx, events=[_BOOKS], slots=_AI)
     reply, ctx, _ = _turn("Widen the search", ctx, events=[_BOOKS])
     assert ctx["activity_previews"] == []
     assert ctx["browse_draft"]["suggestions"] == ["Yes, listen for me", "Host a meet"]
@@ -80,7 +82,7 @@ def test_widen_with_nothing_related_says_so_and_offers_hosting_not_widen_again()
 
 def test_a_new_topic_after_widen_is_strict_again() -> None:
     ctx = _fresh()
-    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON])
+    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON], slots=_AI)
     _turn("Widen the search", ctx, events=[_BOOKS, _PYTHON])
     _turn("pottery", ctx, events=[_BOOKS, _PYTHON])
     assert not ctx["browse_draft"].get("_widen_related")
