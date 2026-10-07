@@ -573,7 +573,7 @@ class CommunityEventRow(BaseModel):
     # untagged meet, or the read failed); never 0 for "unknown".
     fit_score: float | None = None
     # A meet of ANOTHER community in this one's family — a chapter's meet on its parent's
-    # screen, or the parent's on a chapter's (20270124120000). The card must say where it
+    # screen, or the parent's on a chapter's (20270125120000). The card must say where it
     # is from; null for the community's own meets.
     origin_place_id: str | None = None
     origin_place_name: str | None = None
@@ -714,7 +714,7 @@ class CommunityDiscoveryRow(BaseModel):
 
 
 class ChapterAttachBody(BaseModel):
-    """Make `place_id` a chapter of `parent_place_id` (20270124120000)."""
+    """Make `place_id` a chapter of `parent_place_id` (20270125120000)."""
 
     place_id: str
     parent_place_id: str

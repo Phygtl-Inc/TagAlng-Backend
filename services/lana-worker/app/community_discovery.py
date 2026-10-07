@@ -1857,7 +1857,7 @@ def _chapter_change_turn(
 ) -> str:
     """"Put RCC under SJSU" / "make RCC standalone" — done, or why not, in one reply.
 
-    The SQL holds the rule (20270124120000): she must run the community she is moving and
+    The SQL holds the rule (20270125120000): she must run the community she is moving and
     belong to the one it goes inside; the runner of either side may take it out. Every
     refusal is said plainly with the one move that fixes it."""
     from app.community_chapter_ops import attach_chapter, detach_chapter

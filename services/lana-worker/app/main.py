@@ -4486,7 +4486,7 @@ def post_circles_chapter_attach(
     body: ChapterAttachBody,
     authorization: str | None = Header(default=None),
 ):
-    """Make one of the caller's communities a chapter of another (20270124120000).
+    """Make one of the caller's communities a chapter of another (20270125120000).
 
     The SQL decides: she must run the chapter (creator/operator) and belong to the parent;
     a chapter with no point takes the parent's; creator communities never become chapters;

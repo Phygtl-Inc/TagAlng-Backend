@@ -1,6 +1,6 @@
 """Chapters you can make and unmake, and the family a community's content comes from.
 
-The SQL decides everything (20270124120000): who may attach (runs the chapter AND belongs
+The SQL decides everything (20270125120000): who may attach (runs the chapter AND belongs
 to the parent), who may detach (runs either side), depth, and which communities' content a
 viewer sees. This module only calls it, and turns its refusals into reasons a reply can be
 written from — never into an exception a turn has to catch.

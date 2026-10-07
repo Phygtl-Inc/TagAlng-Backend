@@ -114,7 +114,7 @@ def community_events(
     sit outside the caller's block radius, and a meet of the community she is
     looking at is hers to see wherever it is.
 
-    With `viewer_id`, the community's FAMILY too (20270124120000): a chapter's meets on
+    With `viewer_id`, the community's FAMILY too (20270125120000): a chapter's meets on
     its parent for a parent member, the parent's meets on a chapter — never a sibling's —
     each crossing meet labelled with `origin_place_id` / `origin_place_name`.
     """

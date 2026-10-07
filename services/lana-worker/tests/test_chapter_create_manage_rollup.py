@@ -1,4 +1,4 @@
-"""Chapters you can make, unmake, and see content across (20270124120000).
+"""Chapters you can make, unmake, and see content across (20270125120000).
 
 2026-10-07: RCC is a chapter of SJSU only because it was attached by hand in SQL; "create
 RCC as a club inside SJSU" made a standalone community; and a parent's members never saw

@@ -216,7 +216,7 @@ $$;
 comment on function public.community_family(uuid, uuid) is
   'The communities whose CONTENT p_user_id sees when looking at p_place_id: itself, its '
   'parent, and its chapters (all for a parent member, her own otherwise). Never a sibling '
-  'chapter. 20261214120000 contract; 20270124120000.';
+  'chapter. 20261214120000 contract; 20270125120000.';
 
 revoke all on function public.community_family(uuid, uuid) from public, anon, authenticated;
 grant execute on function public.community_family(uuid, uuid) to service_role;

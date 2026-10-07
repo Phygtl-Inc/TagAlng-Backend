@@ -458,7 +458,7 @@ def _events_at_place(
                 "cover_emoji, place_ref, circle_place_ref"
             )
         )
-        # The community's family (its parent, its chapters — 20270124120000) when the
+        # The community's family (its parent, its chapters — 20270125120000) when the
         # caller resolved one; every id came from the database, and is re-checked anyway.
         ids = [place_id] + [
             f for f in (family_ids or []) if f != place_id and _uuid_ok(f)
@@ -532,7 +532,7 @@ def _event_rows_for_profile(
     from app.community_chapter_ops import community_family, label_origin
 
     # The family's meets too — a chapter's on its parent for a parent member, the parent's
-    # on a chapter — each crossing one labelled with where it is from (20270124120000).
+    # on a chapter — each crossing one labelled with where it is from (20270125120000).
     family = community_family(viewer_id, place_id)
     raw = _events_at_place(
         place_id, limit=20, family_ids=[f["place_id"] for f in family]
