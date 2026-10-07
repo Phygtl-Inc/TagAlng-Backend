@@ -201,3 +201,47 @@ def test_far_offer_keeps_the_callers_own_meet_and_marks_it(
     assert [c["id"] for c in cards] == ["own"]
     assert cards[0]["hosted_by_you"] is True
     assert "they host this one themselves" in " ".join(facts)
+
+
+# ── 5. An empty search keeps its TOPIC, not the filter's when-only label ─────────────
+#
+# The filter's short label can be only the when ("this week"). Storing it as the topic
+# lost the subject, so a "Look beyond" tap re-ran on the date and offered every far meet
+# that week as a match (e2e 2026-10-08).
+
+_TOPIC_LABELS = [
+    ("salsa dancing", "this week"),
+    ("chess", "this weekend"),
+    ("pottery class", "Saturday"),
+]
+
+
+@pytest.mark.parametrize("topic,label", _TOPIC_LABELS)
+def test_empty_search_keeps_the_topic_over_a_when_label(topic: str, label: str) -> None:
+    ctx: dict[str, Any] = {"activity_browse_active": True,
+                           "browse_draft": {"_asked": True}, "phone_verified": True}
+    rows = [{"id": "x", "title": "Board games", "distance_meters": 3_000.0,
+             "venue_name": "Library", "topic_score": 1.0}]
+    far_calls: list[str] = []
+
+    def _far(_jwt: Any, _block: Any, _draft: Any, *, interest: str) -> tuple:
+        far_calls.append(interest)
+        return [], "", []
+
+    with mock.patch.object(ab, "_topic_from_slots", return_value=topic), \
+         mock.patch.object(ab, "_fetch_block_events", return_value=rows), \
+         mock.patch.object(ab, "_filter_events_by_query", return_value=([], label)), \
+         mock.patch.object(ab, "_far_offer", side_effect=_far), \
+         mock.patch("app.event_place.event_community", return_value=None):
+        ab.run_activity_browse_turn(
+            user_message=f"any {topic} {label}?", session_ctx=ctx, history=[],
+            user_jwt="jwt", home_block_id="zip-10001", slots={"activity_topic": topic},
+        )
+    assert ctx["browse_draft"]["interest"] == topic
+    assert far_calls == [topic]
+
+
+def test_echo_topic_falls_back_to_the_label_only_for_a_long_interest() -> None:
+    long_ask = "are there any fun things for my six year old to do"
+    assert ab._echo_topic(long_ask, "kids activities") == "kids activities"
+    assert ab._echo_topic("board games", "tonight") == "board games"

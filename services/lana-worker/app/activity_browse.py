@@ -139,6 +139,14 @@ def _is_browse_answer(
     )
 
 
+def _echo_topic(interest: str, label: str | None) -> str:
+    """What an empty or stretch reply echoes and stores as the topic: the interest when
+    it is chip-short (the AI's topic), else the filter's short label for a long one."""
+    if len(interest.split()) <= 4:
+        return interest
+    return (label or "").strip()
+
+
 def _is_offered_browse_chip(
     message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None = None
 ) -> bool:
@@ -1701,8 +1709,8 @@ def _stretch_offer_reply(
     """
     from app.discovery_route import activity_previews_from_events
 
-    # Same echo rule as the empty state: the matcher's label, or the ask if chip-short.
-    short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
+    # Same echo rule as the empty state.
+    short = _echo_topic(interest, label)
     draft["interest"] = short or interest
     draft["_seek_offer"] = True
     # Nothing else was offered this turn — pills from an earlier turn must not stay live.
@@ -2294,7 +2302,10 @@ def run_activity_browse_turn(
         # ("are there any fifa activities for my 6 year old") would otherwise be parroted
         # here and become the saved seek's kind on accept. A zero-event block never reaches
         # the LLM filter (no label), so a raw interest is echoed only when it's chip-short.
-        short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
+        # A chip-short interest IS the AI's topic now and wins over the label, which can be
+        # only the when ("this week"): storing that lost the topic, so "Look beyond" re-ran
+        # on the date and offered every far meet that week as a match (e2e 2026-10-08).
+        short = _echo_topic(interest, label)
         draft["interest"] = short or interest
         draft["_seek_offer"] = True
         draft["_far_lead"] = None
