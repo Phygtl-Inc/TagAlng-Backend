@@ -1123,6 +1123,7 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
                 starts_label=str(row.get("starts_label") or "") or None,
                 venue_name=str(row.get("venue_name") or "") or None,
                 community=row.get("community") if isinstance(row.get("community"), dict) else None,
+                hosted_by_you=bool(row.get("hosted_by_you")),
                 preview=bool(row.get("preview", True)),
             )
         )
