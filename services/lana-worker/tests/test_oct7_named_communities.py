@@ -289,3 +289,23 @@ def test_the_slot_parser_keeps_the_activity_topic() -> None:
         )
     assert slots_activity_topic(slots) == "pottery"
     assert slots["community_name"] == "WSU"
+
+
+def test_naming_somewhere_unknown_drops_the_earlier_community() -> None:
+    _r, ctx, _m = _browse("what's on at WSU?", {"community_name": "WSU"}, resolved=dict(_FULL))
+    _r, ctx, m = _browse("and at Nowhere Club?", {"community_name": "Nowhere Club"},
+                         resolved=None, ctx=ctx)
+    assert ctx["browse_draft"].get("_community") is None
+    m["comm_events"].assert_not_called()
+
+
+def test_looking_beyond_a_named_community_drops_it() -> None:
+    draft = {"_asked": True, "interest": "pottery", "_seek_offer": True,
+             "_community_chip": "Look beyond WSU",
+             "_community": {"place_id": "pFull", "name": "WSU"}}
+    _r, ctx, m = _browse(
+        "Look beyond WSU", {}, resolved=None,
+        ctx={"activity_browse_active": True, "browse_draft": draft, "phone_verified": True},
+    )
+    assert ctx["browse_draft"].get("_community") is None
+    m["comm_events"].assert_not_called()
