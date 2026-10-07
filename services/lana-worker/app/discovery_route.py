@@ -4216,7 +4216,12 @@ def _tip_seek_answer_turn(
 
         if _parsed is None:
             _parsed = split_query_full(_ask)
-        neighbor_tips = keep_asked_kind(neighbor_tips, (_parsed or {}).get("subject_kind"))
+        # No kind parsed is not "anything goes": "gaming laptop" came back kind-less and a
+        # furniture store sailed through (prod QA 2026-10-07). The gate reads the whole ask
+        # instead, and its own generic rule still keeps everything for "somewhere fun".
+        neighbor_tips = keep_asked_kind(
+            neighbor_tips, (_parsed or {}).get("subject_kind") or _ask
+        )
 
     if _comm and not neighbor_tips and block_id:
         # Nothing in the community — ASK before looking past it, the way meets do

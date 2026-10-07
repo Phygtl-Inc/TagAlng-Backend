@@ -23,6 +23,19 @@ def test_a_barbershop_is_not_a_restaurant_even_when_tagged_kid_friendly():
     assert [t["signal_id"] for t in kept] == ["r", "n"]
 
 
+def test_a_furniture_store_does_not_answer_a_gaming_laptop_ask():
+    tips = [_tip("furniture store", "f"), _tip("electronics store", "e")]
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json",
+                       return_value={"fits": {"furniture store": False,
+                                              "electronics store": True}}) as llm:
+        kept = kg.keep_asked_kind(tips, "gaming laptop")
+    assert [t["signal_id"] for t in kept] == ["e"]
+    # The prompt has to cover things you buy, not only places: an electronics store is not
+    # itself "a gaming laptop", and a place-only prompt would reject the right answer too.
+    assert "where you would get it" in llm.call_args.kwargs["system"]
+
+
 def test_answers_are_cached_per_kind_and_category():
     calls = []
 

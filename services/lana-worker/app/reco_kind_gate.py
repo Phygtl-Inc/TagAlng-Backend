@@ -32,13 +32,20 @@ _cache: "OrderedDict[tuple[str, str], bool]" = OrderedDict()
 _lock = threading.Lock()
 
 _PROMPT = """A neighbour asked for a recommendation of a certain KIND of thing. For each
-category below, answer whether something in that category IS that kind — what they would
-accept as an answer.
+category below, answer whether a recommendation in that category answers it — what they
+would accept as an answer.
 
 - "restaurant": "italian restaurant", "trattoria", "pizzeria", "diner", "steakhouse",
   "cafe" (food served) → true; "barbershop", "dentist", "bakery supply", "gym" → false.
 - "dentist": "pediatric dentist", "orthodontist" → true; "pediatrician" → false.
-- If the asked kind is generic ("place", "spot", "somewhere", "anything"), everything → true.
+- When the kind is a THING to get rather than a place ("gaming laptop", "art supplies",
+  "birthday cake"), a category fits when it is that thing or where you would get it:
+  "gaming laptop": "electronics store", "computer shop" → true; "furniture store",
+  "gym" → false. "art supplies": "stationery store" → true.
+- The kind may arrive as the whole request ("a barber who speaks Spanish"): judge only
+  the thing asked for and ignore the qualifiers.
+- If the asked kind is generic ("place", "spot", "somewhere", "anything", "something fun
+  to do"), everything → true.
 - Judge the kind only — never whether it is good, nearby or kid friendly.
 
 Output ONLY JSON: {"fits": {"<category>": true|false}}
