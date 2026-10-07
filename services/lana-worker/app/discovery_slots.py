@@ -536,6 +536,21 @@ _SYSTEM = (
     "answered 'who is in Mizu Sushi' with an unrelated neighbour matched on an interest and "
     "dropped the place name entirely (QA 2026-08-20). 'Introduce me to someone' with no place "
     "named stays find_peers. "
+    "INSIDE vs ACROSS — the words 'club', 'group', 'chapter', 'community' do not decide this; "
+    "WHERE THEY POINT does. CLUBS/GROUPS/CHAPTERS INSIDE ONE COMMUNITY ('what clubs does SJSU "
+    "have?', 'any AI clubs at San Jose State?', 'chapters of Iron Man Training', 'groups "
+    "inside SJSU', 'SJSU's clubs', with an active community: 'what clubs are here?', 'any "
+    "groups in this community?') is discovery.communities with community_ask='chapters', "
+    "community_name = THAT community (the active community's name when they say here/this), "
+    "and community_topic = the subject only when they narrow it ('AI clubs at SJSU' → "
+    "community_topic='AI'). Nothing named and no here/this → it is NOT 'chapters': 'any AI "
+    "clubs?', 'is there a running club near me?', 'communities for climbers' are a search "
+    "ACROSS communities — community_topic set, community_name=null, community_ask=null — "
+    "even inside an active community, and 'near me' / 'around here' / 'nearby' always points "
+    "OUTSIDE it. Asking about ONE named club or chapter itself ('tell me about RCC', 'what is "
+    "the Responsible Computing Club?') is community_ask='about' with that club as "
+    "community_name — never 'chapters'; 'chapters' is only for what sits INSIDE the one they "
+    "name. "
     "ACTIVE COMMUNITY — when the context line active_community is not 'none', the user is "
     "chatting INSIDE that community (they joined it, usually from its creator's link). "
     "'this community', 'this group', 'this place', 'here', 'you guys', and the community's own "
@@ -848,7 +863,11 @@ def ai_parse_discovery_turn(
         search_place = raw.get("search_place")
         search_place_s = str(search_place).strip()[:80] if search_place else None
         community_ask = str(raw.get("community_ask") or "").strip().lower()
-        community_ask_s = community_ask if community_ask in ("people", "about", "manage", "mine") else None
+        community_ask_s = (
+            community_ask
+            if community_ask in ("people", "about", "manage", "mine", "chapters")
+            else None
+        )
         intro_direction = raw.get("intro_direction")
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
@@ -1244,7 +1263,10 @@ def _discovery_slot_payload(
         'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '
         'else about the place itself (what kind of place it is, what it has, how big it is, what '
         'is happening there, where it is, how it is doing). "mine" (with community_name null) when '
-        'they ask WHICH communities they themselves are in. Otherwise null when no community is named,\n'
+        'they ask WHICH communities they themselves are in. "chapters" when they want the clubs, groups, '
+        'chapters or sub-communities INSIDE the community they named or the active community (what clubs '
+        'does SJSU have?, any AI clubs at SJSU?, groups inside this community?) — set community_name to '
+        'that community, and community_topic too when they narrow it to a subject. Otherwise null when no community is named,\n'
         '  "search_place": "the town or city they want searched when it is NOT where they are '
         '(language events in San Jose, anything this weekend in Austin, I am visiting Denver — '
         'what is on?) — the place name only (San Jose, Austin, Denver); null when they mean near '
@@ -1333,13 +1355,13 @@ def slots_want_propose_intro(slots: dict[str, Any]) -> bool:
 
 
 def slots_community_ask(slots: dict[str, Any] | None) -> str:
-    """"people" (the roster), "manage" (change one they are in) or "about" (the place
-    itself). Defaults to "about": a question we could not classify is answered from the
+    """"people" (the roster), "manage" (change one they are in), "chapters" (the clubs or
+    groups INSIDE it) or "about" (the place itself). Defaults to "about": a question we could not classify is answered from the
     place's own facts, which is the read that works for a non-member too."""
     if not slots:
         return "about"
     ask = str(slots.get("community_ask") or "")
-    return ask if ask in ("people", "manage", "mine") else "about"
+    return ask if ask in ("people", "manage", "mine", "chapters") else "about"
 
 
 def slots_search_place(slots: dict[str, Any] | None) -> str | None:

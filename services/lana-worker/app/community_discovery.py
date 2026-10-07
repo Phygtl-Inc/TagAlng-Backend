@@ -1446,6 +1446,22 @@ def _community_about_turn(
             "It is NOT near them — they found it by name; never say it is near or local. "
             "Anyone can join it from anywhere"
         )
+    # Chapters, both directions: "tell me about RCC" says it is part of SJSU, and "tell me
+    # about SJSU" says it has clubs — the only way someone asking about one learns the other
+    # exists. The count is what this caller may see (a chapter-only member: her own).
+    parent = prof.get("parent") if isinstance(prof.get("parent"), dict) else None
+    if parent and parent.get("place_name"):
+        facts.append(f"It is a chapter (a club inside) of {parent['place_name']}")
+    else:
+        try:
+            n_chapters = len(community_chapters(user_id, pid).get("chapters") or [])
+        except ValueError:
+            n_chapters = 0
+        if n_chapters:
+            facts.append(
+                f"It has {n_chapters} club{'s' if n_chapters != 1 else ''} (chapters) inside "
+                "it on Lana — mention it in passing; they can ask to see them"
+            )
     # The community the chat is INSIDE carries what its creator said it is for — the one
     # fact that answers "what do people do here?" on day one, when nobody has added
     # features or meets yet (every creator community today).
@@ -1930,6 +1946,13 @@ def communities_chat_turn(
     # through to the list below when the name matches nothing we hold, with the miss
     # stated rather than papered over with a list they did not ask for.
     named_miss: str | None = None
+    if community_ask == "chapters" and not community_name:
+        # "What clubs are here?" — here is the community they are chatting inside. With no
+        # community at all there is nothing to be inside of: community_name stays None and
+        # the topic/list path below answers it as a search across communities.
+        from app.community_scope import community_name as _active_name
+
+        community_name = _active_name(session_ctx)
     if community_ask == "manage" and not community_name:
         # "update the community I created" names none — the manage turn picks theirs.
         return _manage_turn(user_id, community=None, message=message, session_ctx=session_ctx)
@@ -1939,8 +1962,13 @@ def communities_chat_turn(
         inexact: str | None = None
         # Not theirs and not near them: a community with no location, or a named place
         # far away ("SJSU" from Orlando), is still a real answer (20270109120000).
+        # By meaning too: "SJSU" shares no word with "San Jose State University", so for
+        # someone who is not near it and not in it, the name and stem arms find nothing and
+        # the alias matcher below had no candidate to recognise (2026-10-07). Meaning rows
+        # are only CANDIDATES — the exact-name hit below still needs a name match, and
+        # _ai_alias_match decides whether the short form means one of them.
         far = [] if hit else discover_communities_anywhere(
-            user_id, said, placeless_only=False, limit=_CHAT_NEARBY_MAX
+            user_id, said, placeless_only=False, limit=_CHAT_NEARBY_MAX, by_meaning=True
         )
         if not hit:
             hit = next(
@@ -1978,6 +2006,14 @@ def communities_chat_turn(
                     ask=community_ask,
                 )
         if hit:
+            if community_ask == "chapters":
+                return _chapters_turn(
+                    user_id,
+                    parent=hit,
+                    topic=str(community_topic or "").strip()[:80] or None,
+                    message=message,
+                    session_ctx=session_ctx,
+                )
             if community_ask == "manage":
                 return _manage_turn(
                     user_id, community=hit, message=message, session_ctx=session_ctx
@@ -2140,6 +2176,146 @@ def communities_chat_turn(
         session_ctx=session_ctx,
         user_message=message,
         # Two, not three: the cards are the list, so the text is a summary + an offer.
+        max_sentences=2,
+    )
+
+
+def _chapters_turn(
+    user_id: str,
+    *,
+    parent: dict[str, Any],
+    topic: str | None,
+    message: str,
+    session_ctx: dict[str, Any],
+) -> str:
+    """"What clubs does SJSU have?" / "any AI clubs at SJSU?" — the chapters INSIDE one
+    community, never a search across communities.
+
+    Lists them as the caller may see them (community_chapters: a parent member sees every
+    chapter, a chapter-only member never a sibling). A topic narrows the list by name and
+    meaning — the same match the topic search uses, intersected with this community's
+    chapters. When nothing inside answers, the reply says so about THIS community and any
+    cards shown from outside it are labelled as outside, so a wrong read is visible.
+    """
+    from app.reply_compose import compose_reply
+
+    session_ctx["peer_matches"] = None
+    session_ctx["discovery_surface"] = None
+    pid = str(parent.get("place_id") or "")
+    parent_name = str(parent.get("place_name") or "").strip() or "this community"
+    try:
+        chapters = community_chapters(user_id, pid).get("chapters") or []
+    except ValueError:
+        chapters = []
+    head = {"place_id": pid, "place_name": parent_name}
+    for c in chapters:
+        c["parent"] = head
+
+    inside = chapters
+    outside: list[dict[str, Any]] = []
+    if topic and chapters:
+        ids = {c["place_id"] for c in chapters}
+        matched = discover_communities_anywhere(
+            user_id, topic, placeless_only=False, by_meaning=True, limit=20
+        )
+        order = [m["place_id"] for m in matched if m["place_id"] in ids]
+        by_id = {c["place_id"]: c for c in chapters}
+        inside = [by_id[i] for i in order]
+    if topic and not inside:
+        outside = [
+            c for c in discover_communities_anywhere(
+                user_id, topic, limit=_CHAT_NEARBY_MAX * 3, by_meaning=True,
+                radius_m=radius_meters(),
+            )
+            if not c.get("is_member") and c["place_id"] != pid
+            and (c.get("parent") or {}).get("place_id") != pid
+            and c.get("reach") in (None, "placeless", "nearby")
+        ][:_CHAT_NEARBY_MAX]
+
+    cards = (inside or outside)[:_CHAT_NEARBY_MAX * 2]
+    session_ctx["community_discovery"] = {
+        "communities": cards,
+        "total": len(cards),
+        "topic": topic,
+        # Which community these sit inside — the card heading is "Clubs in SJSU", not
+        # "Communities near you". Absent when the cards are from outside it.
+        "within": head if inside else None,
+    }
+    joinable = [c for c in cards if not c.get("is_member")]
+    session_ctx["community_join_pending"] = (
+        {"places": [{"place_id": c["place_id"], "place_name": c["place_name"]} for c in joinable]}
+        if joinable
+        else None
+    )
+
+    what = f"{topic} clubs" if topic else "clubs or groups"
+    facts = [f"They asked what {what} there are INSIDE {parent_name} (its chapters)"]
+    if inside:
+        mine = [c for c in inside if c.get("is_member")]
+        facts.append(
+            f"{parent_name} has {len(inside)} on Lana"
+            + (f" about {topic}" if topic else "")
+            + f" (best match: {inside[0]['place_name']}, {inside[0]['status_line']})"
+        )
+        if mine:
+            facts.append(f"They are already in {mine[0]['place_name']} — say so")
+        facts.append(
+            "The cards under your message list every one with real member counts, so your "
+            "text must NOT name them one by one"
+        )
+        goal = (
+            f"Answer what they asked: the {what} inside {parent_name}. TWO SHORT SENTENCES, "
+            "never a list. Say what turned up (at most ONE name), and offer to add them — "
+            "joining is instant and reversible."
+        )
+        fallback = (
+            f"{parent_name} has {len(inside)} "
+            f"{'club' if len(inside) == 1 else 'clubs'}"
+            + (f" about {topic}" if topic else "")
+            + " on Lana — they're below. Want me to add you to one?"
+        )
+    elif outside:
+        facts.append(
+            f"None of {parent_name}'s clubs on Lana are about {topic}"
+            if chapters
+            else f"{parent_name} has no clubs listed on Lana yet"
+        )
+        facts.append(
+            f"Communities about {topic} near them, NOT part of {parent_name}: {len(outside)} "
+            f"(best match: {outside[0]['place_name']}). Say plainly they are not part of "
+            f"{parent_name}"
+        )
+        goal = (
+            f"Say in a few words that nothing inside {parent_name} is about {topic}, then "
+            f"offer the {topic} communities below, making clear they are not part of "
+            f"{parent_name}. TWO SHORT SENTENCES, never a list."
+        )
+        fallback = (
+            f"Nothing inside {parent_name} is about {topic} yet, but there "
+            f"{'is one' if len(outside) == 1 else f'are {len(outside)}'} nearby — "
+            "below. Want me to add you?"
+        )
+    else:
+        facts.append(
+            f"None of {parent_name}'s clubs on Lana are about {topic}"
+            if chapters and topic
+            else f"{parent_name} has no clubs listed on Lana yet"
+        )
+        subject = f"a {topic} club" if topic else "a club"
+        goal = (
+            f"Say plainly that {parent_name} has no {what} on Lana yet, then offer to start "
+            f"{subject} as part of {parent_name}. Never blame them. ONE OR TWO SHORT SENTENCES."
+        )
+        fallback = (
+            f"{parent_name} has no {what} on Lana yet. Want to start {subject} there?"
+        )
+
+    return compose_reply(
+        goal=goal,
+        facts=facts,
+        fallback=fallback,
+        session_ctx=session_ctx,
+        user_message=message,
         max_sentences=2,
     )
 
