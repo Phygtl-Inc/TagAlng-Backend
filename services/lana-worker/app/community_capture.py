@@ -92,8 +92,9 @@ own name ("Iron Man Training"). null if not stated.
 everyone ends up there Saturday mornings". null if not stated.
 - parent: the BIGGER community this one sits INSIDE, verbatim as they said it, only when \
 they say it is part of one — a club at a school, a chapter of a group, a team inside a \
-gym ("a club inside SJSU" → "SJSU", "RCC, a sub-community of San Jose State" → "San Jose \
-State", "the Orlando chapter of Iron Man Training" → "Iron Man Training"). null when they \
+gym, initials and nicknames kept as written ("a club inside UMD" → "UMD", "the youth \
+choir, part of St. Brigid's" → "St. Brigid's", "the Orlando chapter of Iron Man Training" \
+→ "Iron Man Training"). null when they \
 only say where it meets or which area it is in ("in Lake Nona", "at the park"): a place \
 or a neighbourhood is never a parent. null when not stated.
 - answers: object mapping any of the CURRENT SET FIELDS listed below to what the user \

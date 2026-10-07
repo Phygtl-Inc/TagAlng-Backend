@@ -518,17 +518,20 @@ _SYSTEM = (
     "CHANGING one they are already in is discovery.communities with community_ask='manage' and "
     "community_name = the community they named: updating its location / spot / address, "
     "editing its details or what they do there, renaming it, or leaving it ('can I update "
-    "the location of San Jose State University', 'I want to update some stuff in the SJSU "
+    "the location of St. Brigid's Parish', 'I want to update some stuff in the UMD "
     "community I created', 'change the spot for my gym community'). A follow-up that only "
     "says they made it or run it ('I was the one who created it', 'it's mine') right after "
     "such a request keeps the same manage ask and name. A COMMUNITY'S location is never "
     "settings.change_zip — that is only the user's OWN home ZIP. "
-    "PUTTING one community INSIDE another ('put RCC under SJSU', 'make RCC part of San Jose "
-    "State', 'RCC is a club of SJSU, link them', 'add my club to SJSU as a chapter') is "
-    "community_ask='manage' with community_name = the one being moved (RCC), "
-    "community_parent = the bigger one it goes inside (SJSU) and chapter_action='attach'. "
-    "TAKING it out ('remove RCC from SJSU', 'make RCC standalone', 'RCC is not part of SJSU "
-    "anymore') is the same with chapter_action='detach' (community_parent may be null). "
+    "PUTTING one community INSIDE another — any wording that makes one a club, chapter, "
+    "team or sub-group of another ('put the robotics team under Westlake High', 'make the "
+    "youth choir part of St. Brigid's', 'MSA is a club of UMD, link them', 'add my club to "
+    "the Rotary as a chapter') — is community_ask='manage' with community_name = the one "
+    "being moved, community_parent = the bigger one it goes inside, both as they wrote "
+    "them (initials stay initials), and chapter_action='attach'. TAKING it out ('remove "
+    "the youth choir from St. Brigid's', 'make the robotics team standalone', 'MSA is not "
+    "part of UMD anymore') is the same with chapter_action='detach' (community_parent may "
+    "be null). "
     "'manage' needs a CHANGE verb "
     "(update, edit, change, move, rename, leave) aimed at a community: asking WHICH "
     "communities they are in or part of ('what community am I a part of?', 'what are my "
@@ -544,19 +547,22 @@ _SYSTEM = (
     "dropped the place name entirely (QA 2026-08-20). 'Introduce me to someone' with no place "
     "named stays find_peers. "
     "INSIDE vs ACROSS — the words 'club', 'group', 'chapter', 'community' do not decide this; "
-    "WHERE THEY POINT does. CLUBS/GROUPS/CHAPTERS INSIDE ONE COMMUNITY ('what clubs does SJSU "
-    "have?', 'any AI clubs at San Jose State?', 'chapters of Iron Man Training', 'groups "
-    "inside SJSU', 'SJSU's clubs', with an active community: 'what clubs are here?', 'any "
-    "groups in this community?') is discovery.communities with community_ask='chapters', "
-    "community_name = THAT community (the active community's name when they say here/this), "
-    "and community_topic = the subject only when they narrow it ('AI clubs at SJSU' → "
-    "community_topic='AI'). "
-    "Nothing named and no here/this → it is NOT 'chapters': 'any AI "
+    "WHERE THEY POINT does. CLUBS/GROUPS/CHAPTERS INSIDE ONE NAMED COMMUNITY — a school, "
+    "church, gym, company or any other place or group, named in full, by initials or by a "
+    "nickname ('what clubs does UMD have?', 'chapters of Iron Man Training', 'groups inside "
+    "St. Brigid's', 'Westlake High's teams', with an active community: 'what clubs are "
+    "here?', 'any groups in this community?') — is discovery.communities with "
+    "community_ask='chapters', community_name = THAT community as they wrote it (the active "
+    "community's name when they say here/this), and community_topic = the subject when they "
+    "narrow it, however it is phrased — a word before 'clubs' or 'about / for / focused on "
+    "/ into …' after it ('chess clubs at UMD' and 'clubs at UMD focused on chess' are both "
+    "community_topic='chess'); null when they do not narrow it. "
+    "Nothing named and no here/this → it is NOT 'chapters': 'any chess "
     "clubs?', 'is there a running club near me?', 'communities for climbers' are a search "
     "ACROSS communities — community_topic set, community_name=null, community_ask=null — "
     "even inside an active community, and 'near me' / 'around here' / 'nearby' always points "
-    "OUTSIDE it. Asking about ONE named club or chapter itself ('tell me about RCC', 'what is "
-    "the Responsible Computing Club?') is community_ask='about' with that club as "
+    "OUTSIDE it. Asking about ONE named club or chapter itself ('tell me about MSA', 'what is "
+    "the Westlake Robotics Team?') is community_ask='about' with that club as "
     "community_name — never 'chapters'; 'chapters' is only for what sits INSIDE the one they "
     "name. "
     "ACTIVE COMMUNITY — when the context line active_community is not 'none', the user is "
@@ -1202,8 +1208,8 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "An answer to it is goal=chat, NOT a fresh intent. DECIDE BY THE SUBJECT: when "
             "the message is about the SAME thing she asked about, it is an ANSWER, however "
             "short or bare, and praising it does not make it a new tip_share — answering "
-            "\"what do you enjoy most about Pausa?\" with \"the fig and gorgonzola is the "
-            "best\" is a fact about Pausa, whose recommendation already exists; filing a "
+            "\"what do you enjoy most about Casa Lupe?\" with \"the mole is the "
+            "best\" is a fact about Casa Lupe, whose recommendation already exists; filing a "
             "second one strands the answer on an empty card. When the message names a "
             "DIFFERENT subject, it is a PIVOT and you classify it fresh — \"oh also I want "
             "to recommend Dr Sarah\" while she asked about a restaurant is a real "
@@ -1291,11 +1297,11 @@ def _discovery_slot_payload(
         'is happening there, where it is, how it is doing). "mine" (with community_name null) when '
         'they ask WHICH communities they themselves are in. "chapters" when they want the clubs, groups, '
         'chapters or sub-communities INSIDE the community they named or the active community (what clubs '
-        'does SJSU have?, any AI clubs at SJSU?, groups inside this community?) — set community_name to '
+        'does UMD have?, any chess clubs at St. Brigid\'s?, groups inside this community?) — set community_name to '
         'that community, and community_topic too when they narrow it to a subject. Otherwise null when no community is named,\n'
         '  "search_place": "the town or city they want searched when it is NOT where they are '
-        '(language events in San Jose, anything this weekend in Austin, I am visiting Denver — '
-        'what is on?) — the place name only (San Jose, Austin, Denver); null when they mean near '
+        '(language events in Tulsa, anything this weekend in Austin, I am visiting Denver — '
+        'what is on?) — the place name only (Tulsa, Austin, Denver); null when they mean near '
         'them, give only a ZIP, or name a venue or community rather than a town",\n'
         '  "activity_topic": "with discovery.find_activities or looking.meet: WHAT the activity is '
         'about in 1-4 plain words — never the day, time, place or community; null for an open ask '
@@ -1305,7 +1311,7 @@ def _discovery_slot_payload(
         'club?, a group for new moms) — the subject in 1-4 plain words (podcasting, book club, new '
         'moms); null when they name one specific community or just ask what is near them",\n'
         '  "community_parent": "with community_ask=manage and chapter_action=attach: the bigger '
-        'community they want it put INSIDE (SJSU), verbatim; else null",\n'
+        'community they want it put INSIDE, verbatim as they wrote it; else null",\n'
         '  "chapter_action": "attach"|"detach"|null — with community_ask=manage: attach when '
         'they want the named community put inside another, detach when they want it out of '
         'the one it is in; else null,\n'

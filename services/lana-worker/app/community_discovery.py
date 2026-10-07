@@ -1331,8 +1331,9 @@ def _near_name_candidates(
 
 
 _ALIAS_PROMPT = """You match what someone called a community to the real community they \
-meant. People shorten names: initials ("SJSU" is San Jose State University), nicknames \
-("the Y" is a YMCA), dropped words ("Stanford" is Stanford University).
+meant. People shorten names: initials ("BMCC" is Borough of Manhattan Community \
+College), nicknames ("Mass General" is Massachusetts General Hospital), dropped words \
+("Stanford" is Stanford University).
 
 Output ONLY JSON: {"match": <index of the community they meant, or null>}
 
@@ -1351,6 +1352,9 @@ Output ONLY JSON: {"names": [<full name>, ...]}
 
 Rules:
 - At most 3 names, most likely first, each the way the place itself would be written.
+- Each name is a community of the kinds above — somewhere people belong to as students, \
+members, congregants, patients or staff — never a sports team, brand, product or person. \
+A leading "the" is part of the nickname, not noise.
 - Only names it is a COMMON way of saying. Never invent one to fill the list.
 - [] when it already is a full name, or you do not know what it stands for."""
 
