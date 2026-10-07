@@ -443,7 +443,9 @@ def update_session_context(
     session_id: str,
     context: dict[str, Any],
     core_block: dict[str, Any] | None = None,
-) -> None:
+    *,
+    if_updated_at: str | None = None,
+) -> str | None:
     """Persist a turn's session state. Retried ONCE on a transport failure.
 
     This write is the last thing a turn does, and losing it loses the whole turn: the reply
@@ -455,6 +457,13 @@ def update_session_context(
 
     # ponytail: one retry, no backoff. If flaky handshakes turn out to be common, the fix
     # is a shared retrying transport on the client, not more retries sprinkled per call.
+
+    Returns the row's stored `updated_at` (set by the table's trigger, not by us).
+    `if_updated_at` makes the write conditional on the row still carrying that value — a
+    write that runs AFTER the response (a background re-persist) must never land on top of
+    the next turn's state. It used to: a late write rolled the session back one turn, so a
+    guest's ZIP vanished right after "Got it — 32827" and the browse forgot the cards it had
+    just shown (QA 2026-10-08). Returns None when the guard skipped the write.
     """
     patch: dict[str, Any] = {
         "context": context,
@@ -464,10 +473,12 @@ def update_session_context(
         patch["core_block"] = core_block
     for attempt in (1, 2):
         try:
-            service_client().table("lana_sessions").update(patch).eq(
-                "id", session_id
-            ).execute()
-            return
+            query = service_client().table("lana_sessions").update(patch).eq("id", session_id)
+            if if_updated_at is not None:
+                query = query.eq("updated_at", if_updated_at)
+            res = query.execute()
+            rows = res.data or []
+            return str(rows[0].get("updated_at") or "") or None if rows else None
         except httpx.TransportError:
             logger.warning(
                 "session_write_transport_error session=%s attempt=%d", session_id, attempt

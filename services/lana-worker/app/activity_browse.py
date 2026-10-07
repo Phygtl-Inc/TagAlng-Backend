@@ -1801,7 +1801,146 @@ def _format_browse_message(
     return f"{head} {tail}"
 
 
+# How far back (in transcript messages) the last browse can be and still count as "the
+# same list again": the previous exchange only. A browse an hour of chat later that lands
+# on the same cards is a fresh look, not a loop.
+_REPEAT_WINDOW = 2
+
+
+def _follows_a_browse(
+    draft: dict[str, Any], session_ctx: dict[str, Any], history: list[dict[str, Any]]
+) -> bool:
+    """Whether this message answers a browse turn Lana just made — an open offer, a search
+    still on the draft, or cards shown in the last exchange (the draft can be reset by a
+    lane release between turns, so the session's record of shown cards counts too)."""
+    if draft.get("_seek_offer") or draft.get("_request"):
+        return True
+    return recent_browse_turn(session_ctx, history)
+
+
+def _last_lana_reply(history: list[dict[str, Any]]) -> str:
+    for row in reversed(history):
+        if isinstance(row, dict) and row.get("role") == "assistant":
+            return str(row.get("content") or "")
+    return ""
+
+
+def _repeat_of_last_browse(
+    session_ctx: dict[str, Any], shown_ids: list[str], history: list[dict[str, Any]]
+) -> int:
+    """How many times running these exact cards have now been shown (0 = not a repeat).
+    Kept on the session, not the browse draft: the lane can release and re-enter between
+    turns, which resets the draft and hid the loop from any draft-held check."""
+    last = session_ctx.get("browse_last_shown")
+    if not shown_ids or not isinstance(last, dict):
+        return 0
+    if [str(i) for i in (last.get("ids") or [])] != shown_ids:
+        return 0
+    if len(history) - int(last.get("at") or 0) > _REPEAT_WINDOW:
+        return 0
+    return int(last.get("repeats") or 0) + 1
+
+
+def _remember_browse(
+    session_ctx: dict[str, Any], shown_ids: list[str], history: list[dict[str, Any]], *, repeats: int
+) -> None:
+    session_ctx["browse_last_shown"] = {"ids": shown_ids, "at": len(history), "repeats": repeats}
+
+
+def _repeat_browse_reply(
+    draft: dict[str, Any],
+    session_ctx: dict[str, Any],
+    matched: list[dict[str, Any]],
+    *,
+    interest: str,
+    place: str | None,
+    msg: str,
+    lang: str | None,
+    repeats: int,
+) -> str:
+    """The list they just saw is all there is: say so (AI-authored), keep the cards up, and
+    offer only what is left — listen for more (when there is a topic to listen for) or
+    host one. Arms the seek offer so "yes" next turn is read as taking it."""
+    from app.discovery_route import activity_previews_from_events
+    from app.reply_compose import compose_reply
+
+    topic = "" if _OPEN_RE.match(interest or "") else str(interest or "").strip()
+    n = len(matched[:5])
+    chips = (["Yes, listen for me"] if topic else []) + ["Host a meet"]
+    draft["_seek_offer"] = bool(topic)
+    draft["suggestions"] = chips
+    session_ctx["browse_draft"] = draft
+    session_ctx["activity_browse_active"] = True
+    session_ctx["activity_previews"] = activity_previews_from_events(matched)
+    session_ctx["routing_phase"] = "listening"
+    where = place or t("browse.home_area", lang)
+    titles = [str(e.get("title") or "").strip() for e in matched[:5] if isinstance(e, dict)]
+    facts = [
+        f"They asked again: {msg[:120]}" if msg else "They asked to see more",
+        f"Every meet there is right now{f' for {topic}' if topic else ''} in {where}: "
+        f"{n} — {', '.join(t_ for t_ in titles if t_)} (already on their screen)",
+        "There are NO other meets to show. Do not list or describe any other event.",
+        "The options, matching the pills: "
+        + (f"Lana can listen and tell them when a new {topic} meet appears, or " if topic else "")
+        + "they can host a meet themselves ('Host a meet').",
+    ]
+    if repeats > 1:
+        facts.append(
+            "You have already told them this is everything. Don't repeat yourself — be "
+            "brief and lead with the option, or ask what else they'd like to do."
+        )
+    if n == 1:
+        fallback = f"That's the only meet in {where} right now. "
+    else:
+        fallback = f"Those {n} are everything in {where} right now. "
+    fallback += (
+        f"Want me to let you know when a new {topic} meet pops up, or host one yourself?"
+        if topic
+        else "Want to host one yourself?"
+    )
+    return compose_reply(
+        goal=(
+            "They asked for more meets, but the ones already on their screen are all there "
+            "are. Say so plainly and kindly, without re-introducing the list, then offer "
+            "the options below. Never claim other meets exist."
+        ),
+        facts=facts,
+        fallback=fallback,
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+
+
+def recent_browse_turn(session_ctx: dict[str, Any], history: list[dict[str, Any]]) -> bool:
+    """Whether Lana's last reply was a browse turn (cards, or an empty-search offer)."""
+    at = session_ctx.get("browse_last_turn_at")
+    return isinstance(at, int) and len(history) - at <= _REPEAT_WINDOW
+
+
 def run_activity_browse_turn(
+    *,
+    user_message: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_jwt: str,
+    home_block_id: str | None,
+    slots: dict[str, Any] | None = None,
+    user_id: str | None = None,
+) -> str:
+    """Drive one browse turn (see _run_browse_turn), and note that Lana's reply was one —
+    the lane can release on a bare "no" / "yes" and re-enter fresh next turn, and the
+    reply must still be read as answering THIS turn (QA 2026-10-08)."""
+    reply = _run_browse_turn(
+        user_message=user_message, session_ctx=session_ctx, history=history,
+        user_jwt=user_jwt, home_block_id=home_block_id, slots=slots, user_id=user_id,
+    )
+    session_ctx["browse_last_turn_at"] = (
+        len(history) if session_ctx.get("activity_browse_active") else None
+    )
+    return reply
+
+
+def _run_browse_turn(
     *,
     user_message: str,
     session_ctx: dict[str, Any],
@@ -1838,6 +1977,58 @@ def run_activity_browse_turn(
     #    it as an interest — drop it so P1 asks fresh (mirrors look_meet_skip_seed). ──
     if session_ctx.get("browse_skip_seed"):
         session_ctx["browse_skip_seed"] = False
+        msg = ""
+
+    # ── A reply to the browse turn before it (cards, or an empty-search offer), read by the
+    #    AI: "no" / "nah" close instead of listing everything, and "what others?" asks for
+    #    more instead of becoming the topic (QA 2026-10-08). None (no model) keeps the old
+    #    reading below. ──
+    followup = None
+    if msg and _follows_a_browse(draft, session_ctx, history):
+        from app.browse_followup_ai import read_browse_followup
+
+        followup = read_browse_followup(
+            lana_said=_last_lana_reply(history),
+            topic=str(draft.get("interest") or ""),
+            msg=msg,
+        )
+    if followup == "decline":
+        if draft.get("_seek_offer"):
+            session_ctx["browse_offer_response"] = {
+                "response": "decline",
+                "offered_stretch_event_id": draft.get("_stretch_event_id"),
+            }
+        from app.reply_compose import compose_reply
+
+        reset_activity_browse_state(session_ctx)
+        session_ctx["routing_phase"] = "listening"
+        return compose_reply(
+            goal=(
+                "They said no to the last offer / are done looking at meets. Accept it "
+                "lightly in one short line, no pressure, and leave the door open for "
+                "anything else. Do not offer the same thing again."
+            ),
+            facts=[f"What they said: {msg[:120]}"],
+            fallback="No problem. I'm here if you want to look for something else.",
+            session_ctx=session_ctx,
+            user_message=msg,
+            max_sentences=1,
+        )
+    if followup == "more":
+        draft["_asked"] = True
+        if draft.get("_seek_offer"):
+            # Nothing matched the topic, and they asked what ELSE is on: everything nearby,
+            # not the same empty search again.
+            session_ctx["browse_offer_response"] = {
+                "response": "more",
+                "offered_stretch_event_id": draft.get("_stretch_event_id"),
+            }
+            draft["_seek_offer"] = None
+            draft["interest"] = ""
+            draft["_request"] = ""
+            draft["_widen_related"] = None
+            draft["_stretch_event_id"] = None
+        # Same search again — the repeat guard below says when that is everything there is.
         msg = ""
 
     # ── Reply to the "want me to listen for you?" seek offer (search came up empty). The
@@ -1890,7 +2081,9 @@ def run_activity_browse_turn(
             draft["_community_chip"] = None
             draft["_asked"] = True
             msg = ""  # same interest, no filter — re-runs the search below
-        elif _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg):
+        elif followup == "accept" or (
+            followup is None and _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg)
+        ):
             _answered("listen")
             from app.discovery_route import resolve_block_id
             from app.look_meet import start_meet_seek_from_interest
@@ -1918,7 +2111,7 @@ def run_activity_browse_turn(
             _answered("zip")
             draft["_seek_offer"] = None
             draft["_need_zip"] = True
-        elif _WIDEN_RE.search(msg):
+        elif followup == "widen" or (followup is None and _WIDEN_RE.search(msg)):
             _answered("widen")
             # Widen to RELATED meets, keeping the topic (2026-10-07). It used to clear the
             # topic and list everything, so "AI" + Widen answered with a books club.
@@ -2455,6 +2648,19 @@ def run_activity_browse_turn(
             # ponytail: with no LLM configured the static fallback still says "or widen
             # the search" while the pill says "Host a meet". Add a browse.empty_*_host
             # string (en/es/pt) if that path ever ships to users.
+        )
+
+    # The same cards as the last browse turn: "any other?" / "no others?" re-ran the same
+    # search and got the same canned header over the same card, three times running
+    # (2026-10-07, Orlando). Say that's all there is instead, and hand over the moves left.
+    shown_ids = [str(e.get("id") or "") for e in matched[:5] if isinstance(e, dict)]
+    repeat = _repeat_of_last_browse(session_ctx, shown_ids, history)
+    _remember_browse(session_ctx, shown_ids, history, repeats=repeat)
+    if repeat:
+        return _repeat_browse_reply(
+            draft, session_ctx, matched,
+            interest=interest, place=_community_name(comm) if comm else place_name,
+            msg=msg, lang=lang, repeats=repeat,
         )
 
     draft["_seek_offer"] = None
