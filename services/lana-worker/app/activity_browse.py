@@ -907,9 +907,9 @@ def _compose_empty_seek_offer(
                 # Since #205 the pill searches RELATED topics, never everything — the
                 # old "everything nearby" line outlived it and Lana kept promising it.
                 "Option B: they can widen the search to topics related to what they "
-                "asked for (the pill says 'Widen the search'). It is NOT everything "
-                "nearby — never say 'everything' or 'all events' — and it does NOT search "
-                "other areas; never offer it as a way to look somewhere else.",
+                "asked for (the pill says 'Widen the search'). It shows RELATED meets "
+                "only, never everything — never say 'everything' or 'all events' — and it "
+                "does NOT search other areas; never offer it as a way to look somewhere else.",
             ]
         )
         if user_msg:
@@ -1723,6 +1723,12 @@ def run_activity_browse_turn(
             # of the label: the seeded pilot areas are H3 cells with no ZIP in them, and
             # requiring one is what made this offer impossible there.
             draft["_area_block_id"] = str(draft.get("_area_offer_block_id") or "")
+            # Name it in the copy: without this, a miss there read "nothing in your area"
+            # and its results "near you" (QA 2026-10-07, Foster City / San Jose).
+            draft["_place_name"] = str(draft.get("_area_offer_name") or "").strip() or None
+            # Reached by our own offer: an empty result here must not offer yet another
+            # area (Foster City -> San Jose -> ... ; acknowledgement spec §6).
+            draft["_area_from_offer"] = True
             draft["_seek_offer"] = None
             draft["_area_offer_chip"] = None
             draft["_area_offer_block_id"] = None
@@ -2130,6 +2136,12 @@ def run_activity_browse_turn(
             if comm
             else _far_offer(user_jwt, block_id, draft, interest=interest)
         )
+        if far_chip and draft.get("_area_from_offer"):
+            # Cards are fine; a second "Look in <area>" pill is the chain.
+            far_facts, far_chip = [], ""
+            draft["_area_offer_chip"] = None
+            draft["_area_offer_block_id"] = None
+            draft["_area_offer_name"] = None
         # Far matches arrive as cards, so the only move left is to listen for one near.
         widened = bool(draft.get("_widen_related"))
         # Already widened: offering "Widen" again would loop. Hosting is the move left.
@@ -2211,7 +2223,13 @@ def run_activity_browse_turn(
             return _compose_empty_seek_offer(
                 "", user_msg=msg, lang=lang, community=_community_name(comm)
             )
-        far_facts, far_chip, _ = _far_offer(user_jwt, block_id, draft, interest=interest)
+        # Already moved here by a "Look in <area>" tap: offering another area from here is
+        # the chain QA hit. Fall through to listen / host.
+        far_facts, far_chip, _ = (
+            ([], "", [])
+            if draft.get("_area_from_offer")
+            else _far_offer(user_jwt, block_id, draft, interest=interest)
+        )
         if far_facts:
             draft["_seek_offer"] = True
             draft["suggestions"] = ["Yes, listen for me", far_chip]
@@ -2249,6 +2267,7 @@ def run_activity_browse_turn(
             "",
             user_msg=msg,
             lang=lang,
+            place=place_name,
             # Widening is not on the menu here: there is no topic left to drop, and the
             # geography was already searched. Hosting is the one real move left.
             far_facts=[
