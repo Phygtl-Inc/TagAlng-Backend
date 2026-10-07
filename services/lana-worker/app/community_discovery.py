@@ -1234,12 +1234,31 @@ def find_named_community(user_id: str, said: str) -> dict[str, Any] | None:
     then near her, then anywhere by name, then the AI alias matcher over those plus
     meaning candidates ("SJSU" → San Jose State University). Ambiguity is a None here;
     the caller asks, it does not guess."""
+    return resolve_community_name(user_id, said)["hit"]
+
+
+def resolve_community_name(user_id: str, said: str) -> dict[str, Any]:
+    """What a free-text community name means, for every caller that has one — the
+    communities turn, a chapter attach, and the events browse ("what's on at SJSU?").
+
+    {"hit": row | None, "inexact": what they said when the hit is the one near-miss
+    (name it back so a wrong guess is correctable) | None, "near": the candidates when
+    it is a genuine "which one?" | []}. Every arm is a real read; `hit` is only ever a
+    row that exists, and None with no `near` is an honest miss.
+
+    The chain: hers, then near her, then anywhere by name and meaning, then one shared
+    word, then a short form. A hit nobody near her or in hers carries `far=True`, so a
+    reply never calls San Jose State "near you" from Orlando."""
+    out: dict[str, Any] = {"hit": None, "inexact": None, "near": []}
     name = str(said or "").strip()[:80]
     if not user_id or not name:
-        return None
+        return out
     hit = _resolve_named_community(user_id, name)
     if hit:
-        return hit
+        out["hit"] = hit
+        return out
+    # Not theirs and not near them: a community with no location, or a named place far
+    # away ("San Jose State" from Orlando), is still a real answer (20270109120000).
     far = discover_communities_anywhere(
         user_id, name, placeless_only=False, limit=_CHAT_NEARBY_MAX, by_meaning=True
     )
@@ -1248,14 +1267,40 @@ def find_named_community(user_id: str, said: str) -> dict[str, Any] | None:
         None,
     )
     if exact:
-        return exact
-    pools = [_my_communities(user_id), discover_communities(user_id, limit=_MAX_LIMIT), far]
+        out["hit"] = dict(exact, far=True)
+        return out
+    mine = _my_communities(user_id)
+    nearby = discover_communities(user_id, limit=_MAX_LIMIT)
+    pools = [mine, nearby, far]
     near = _near_name_candidates(name, pools)
     if len(near) == 1:
-        return near[0]
+        # Exactly one place shares a word with what they said, so asking "did you mean
+        # X?" only stalls — a typo ("barnes and nobel") looped that question three times
+        # without ever answering (QA 2026-08-21). Take it and NAME it.
+        out["hit"], out["inexact"] = near[0], name
+        return out
     if near:
-        return None
-    return _ai_alias_match(name, pools)
+        # Genuinely ambiguous: three Lake Nona gyms are a "which one".
+        out["near"] = near
+        return out
+    # No shared word, but maybe a short form of one ("SJSU"). For someone who is not in it
+    # and not near it, nothing above ever held San Jose State — the name and meaning reads
+    # search the literal "SJSU" — so the matcher below had no candidate to recognise, and
+    # the reply said "yours would be the first" (prod 2026-10-07). The model says what the
+    # short form stands for; those full names are searched everywhere by name.
+    spelled = _alias_expansion_rows(user_id, name)
+    named = [c for c in spelled if c.get("_expanded_exact")]
+    if len(named) > 1:
+        out["near"] = named[:3]
+        return out
+    local = {str(c.get("place_id") or "") for c in mine + nearby}
+    hit = named[0] if named else _ai_alias_match(name, pools + [spelled])
+    if hit:
+        hit = {k: v for k, v in hit.items() if k != "_expanded_exact"}
+        if str(hit.get("place_id") or "") not in local:
+            hit["far"] = True
+        out["hit"] = hit
+    return out
 
 
 def _near_name_candidates(
@@ -1295,6 +1340,69 @@ Rules:
 - Pick an index ONLY when what they said is a common way of naming that exact place.
 - Sharing a single generic word ("fitness", "church", "cafe") is NOT a match.
 - If two could fit, or none clearly does, answer null. A wrong guess is worse than null."""
+
+
+_EXPAND_PROMPT = """Someone named a community (a school, gym, church, club, company or \
+other place people belong to) by a short form. Say what full name(s) it commonly stands \
+for, so they can be looked up: initials ("SJSU" is San Jose State University), nicknames \
+("the Y" is YMCA), dropped words ("Stanford" is Stanford University).
+
+Output ONLY JSON: {"names": [<full name>, ...]}
+
+Rules:
+- At most 3 names, most likely first, each the way the place itself would be written.
+- Only names it is a COMMON way of saying. Never invent one to fill the list.
+- [] when it already is a full name, or you do not know what it stands for."""
+
+_EXPAND_MAX = 3
+
+
+def _alias_expansion_rows(user_id: str, said: str) -> list[dict[str, Any]]:
+    """Communities anywhere whose name is what a short form stands for, by the model.
+
+    The model spells the short form out ("SJSU" → "San Jose State University") and each
+    spelling is looked up with the same anywhere-by-name read a full name takes — so the
+    community does not have to be hers or near her to be found. Rows whose own name IS
+    one of the spellings carry `_expanded_exact`; the rest are candidates for
+    _ai_alias_match. [] when the model is unsure, unavailable, or nothing exists by
+    those names: a miss stays an honest miss ([[no-new-regex-use-ai-signals]])."""
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return []
+        data = llm_json(
+            model=router_model(),
+            system=_EXPAND_PROMPT,
+            user_payload=json.dumps({"they_said": str(said)[:80]}),
+            max_tokens=80,
+            temperature=0.0,
+        )
+    except Exception:
+        logger.exception("community_alias_expand_failed said=%r", said)
+        return []
+    names = (data or {}).get("names")
+    if not isinstance(names, list):
+        return []
+    spelled = [
+        str(n).strip()[:80] for n in names
+        if isinstance(n, str) and str(n).strip()
+        and not _same_place_name(said, str(n))  # the short form itself was already searched
+    ][:_EXPAND_MAX]
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for full in spelled:
+        for c in discover_communities_anywhere(
+            user_id, full, placeless_only=False, limit=_CHAT_NEARBY_MAX
+        ):
+            pid = str(c.get("place_id") or "")
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            exact = c.get("matched_on") == "name" and _same_place_name(full, c["place_name"])
+            out.append(dict(c, _expanded_exact=True) if exact else c)
+    logger.info("community_alias_expand said=%r spelled=%r rows=%d", said, spelled, len(out))
+    return out
 
 
 def _ai_alias_match(said: str, pools: list[list[dict[str, Any]]]) -> dict[str, Any] | None:
@@ -2102,53 +2210,23 @@ def communities_chat_turn(
         )
     if community_name:
         said = community_name.strip()[:80]
-        hit = _resolve_named_community(user_id, community_name)
-        inexact: str | None = None
-        # Not theirs and not near them: a community with no location, or a named place
-        # far away ("SJSU" from Orlando), is still a real answer (20270109120000).
-        # By meaning too: "SJSU" shares no word with "San Jose State University", so for
-        # someone who is not near it and not in it, the name and stem arms find nothing and
-        # the alias matcher below had no candidate to recognise (2026-10-07). Meaning rows
-        # are only CANDIDATES — the exact-name hit below still needs a name match, and
-        # _ai_alias_match decides whether the short form means one of them.
-        far = [] if hit else discover_communities_anywhere(
-            user_id, said, placeless_only=False, limit=_CHAT_NEARBY_MAX, by_meaning=True
-        )
-        if not hit:
-            hit = next(
-                (dict(c, far=True) for c in far
-                 if c.get("matched_on") == "name" and _same_place_name(said, c["place_name"])),
-                None,
+        # One resolver for every named-community caller (resolve_community_name): hers,
+        # near her, anywhere by name and meaning, a one-word near miss, then a short form
+        # the model spells out ("SJSU" asked from far away, 2026-10-07).
+        got = resolve_community_name(user_id, community_name)
+        hit, inexact = got["hit"], got["inexact"]
+        if not hit and got["near"]:
+            # Genuinely ambiguous: three Lake Nona gyms are a "which one", and picking
+            # for them would be a guess.
+            session_ctx["peer_matches"] = None
+            session_ctx["discovery_surface"] = None
+            return _did_you_mean_turn(
+                said=said,
+                candidates=got["near"],
+                message=message,
+                session_ctx=session_ctx,
+                ask=community_ask,
             )
-        if not hit:
-            pools = [
-                _my_communities(user_id),
-                discover_communities(user_id, limit=_MAX_LIMIT),
-                far,
-            ]
-            near = _near_name_candidates(community_name, pools)
-            if not near:
-                # No shared word, but maybe a short form of one ("SJSU"). Resolved by
-                # meaning, so it is the exact place, not an inexact guess to flag.
-                hit = _ai_alias_match(said, pools)
-            elif len(near) == 1:
-                # Exactly one place near them shares a word with what they said, so
-                # asking "did you mean X?" only stalls — a typo ("barnes and nobel")
-                # looped that question three times without ever answering (QA
-                # 2026-08-21). Take it and NAME it, so a wrong guess is correctable.
-                hit, inexact = near[0], said
-            elif near:
-                # Genuinely ambiguous: three Lake Nona gyms are a "which one", and
-                # picking for them would be a guess.
-                session_ctx["peer_matches"] = None
-                session_ctx["discovery_surface"] = None
-                return _did_you_mean_turn(
-                    said=said,
-                    candidates=near,
-                    message=message,
-                    session_ctx=session_ctx,
-                    ask=community_ask,
-                )
         if hit:
             if community_ask == "chapters":
                 return _chapters_turn(
