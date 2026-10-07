@@ -2028,6 +2028,16 @@ def run_activity_browse_turn(
             draft["_place_name"] = here["label"]
         elif here is None and home_block_id:
             draft["_place_name"] = t("browse.home_area", lang)
+    # No pill: the town they said they are in earlier in this chat ("I'm in <town>"). It
+    # outranks the profile home for every search until they name another (app/chat_area.py)
+    # — the area is the search's origin, so distances are measured from it too.
+    if not (comm or place_ask or isinstance(point, dict)):
+        from app.chat_area import chat_area
+
+        stated = chat_area(session_ctx)
+        if stated and stated["block_id"] != str(home_block_id or ""):
+            draft["_area_block_id"] = stated["block_id"]
+            draft["_place_name"] = str(stated.get("label") or "") or None
     place_name = None if comm else (str(draft.get("_place_name") or "").strip() or None)
 
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
