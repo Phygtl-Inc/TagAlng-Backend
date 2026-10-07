@@ -412,7 +412,21 @@ def _fetch_admitted_events(
             log.exception("activity_browse_event_columns_failed")
 
     # 9. Order is the RPC's (similarity desc, unembedded last); _admit only filters.
-    return _admit(rows), truncated
+    #    The distance floor applies BEYOND the local radius only. Inside it every meet still
+    #    reaches the topic matcher, after the admitted ones: a short ask ("language groups")
+    #    against a long description can score under the floor, and the floor then hid the
+    #    Language Exchange Club 13 km away while the far probe — which never applies it —
+    #    had just offered "Look in San Jose" for that very meet (prod 2026-10-07).
+    admitted = _admit(rows)
+    kept = {id(r) for r in admitted}
+    from app.discovery_route import activity_radius_meters
+
+    local_m = float(activity_radius_meters())
+    near_rest = [
+        r for r in rows
+        if id(r) not in kept and float(r.get("distance_meters") or 0.0) <= local_m
+    ]
+    return admitted + near_rest, truncated
 
 
 def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
