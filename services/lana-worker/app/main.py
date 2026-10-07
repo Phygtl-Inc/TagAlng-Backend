@@ -89,6 +89,9 @@ from app.models import (
     CommunityActivityRow,
     CommunityCardRow,
     CommunityChaptersResponse,
+    ChapterAttachBody,
+    ChapterChangeResponse,
+    ChapterDetachBody,
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
     CommunityDraft,
@@ -4478,6 +4481,46 @@ class CommunityChaptersBody(_BaseModel):
     place_id: str
 
 
+@app.post("/lana/circles/chapters/attach", response_model=ChapterChangeResponse)
+def post_circles_chapter_attach(
+    body: ChapterAttachBody,
+    authorization: str | None = Header(default=None),
+):
+    """Make one of the caller's communities a chapter of another (20270125120000).
+
+    The SQL decides: she must run the chapter (creator/operator) and belong to the parent;
+    a chapter with no point takes the parent's; creator communities never become chapters;
+    one level only. A refusal is 200 with `ok: false` and the `reason` — the client words
+    it, nothing here is an error."""
+    auth = verify_auth(authorization)
+    from app.community_chapter_ops import attach_chapter
+
+    got = attach_chapter(
+        auth.user_id, (body.place_id or "").strip(), (body.parent_place_id or "").strip()
+    )
+    return ChapterChangeResponse(
+        ok=bool(got.get("ok")),
+        reason=got.get("reason"),
+        parent_name=got.get("parent_name"),
+        inherited_location=bool(got.get("inherited_location")),
+    )
+
+
+@app.post("/lana/circles/chapters/detach", response_model=ChapterChangeResponse)
+def post_circles_chapter_detach(
+    body: ChapterDetachBody,
+    authorization: str | None = Header(default=None),
+):
+    """Make a chapter standalone again — its runner or its parent's runner may."""
+    auth = verify_auth(authorization)
+    from app.community_chapter_ops import detach_chapter
+
+    got = detach_chapter(auth.user_id, (body.place_id or "").strip())
+    return ChapterChangeResponse(
+        ok=bool(got.get("ok")), reason=got.get("reason"), parent_name=got.get("parent_name")
+    )
+
+
 @app.post("/lana/circles/chapters", response_model=CommunityChaptersResponse)
 def post_circles_chapters(
     body: CommunityChaptersBody,
@@ -4842,6 +4885,8 @@ def post_circles_profile(
                 going_count=int(e.get("going_count") or 0),
                 cover_emoji=e.get("cover_emoji"),
                 fit_score=e.get("fit_score"),
+                origin_place_id=e.get("origin_place_id"),
+                origin_place_name=e.get("origin_place_name"),
             )
             for e in (data.get("upcoming_events") or [])
             if isinstance(e, dict) and str(e.get("event_id") or "").strip()

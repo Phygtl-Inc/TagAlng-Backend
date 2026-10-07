@@ -1785,6 +1785,7 @@ def _try_layer1_intent_turn(
             )
         from app.community_discovery import communities_chat_turn
         from app.discovery_slots import (
+            slots_chapter_change,
             slots_community_ask,
             slots_community_name,
             slots_community_topic,
@@ -1799,6 +1800,7 @@ def _try_layer1_intent_turn(
             community_name=slots_community_name(slots),
             community_ask=slots_community_ask(slots),
             community_topic=slots_community_topic(slots),
+            chapter_change=slots_chapter_change(slots),
         )
         ctx = _routing_ctx(
             ctx_base, phase=phase or "listening", active_intent="discovery.communities"

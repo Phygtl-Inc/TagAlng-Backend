@@ -428,7 +428,17 @@ def _going_rosters(event_ids: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def _events_at_place(place_id: str, *, limit: int) -> list[dict]:
+def _uuid_ok(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _events_at_place(
+    place_id: str, *, limit: int, family_ids: list[str] | None = None
+) -> list[dict]:
     # Held here OR created for this community (setup card 2/5) — a school's picnic in the
     # park belongs on the school's screen even though the venue is the park. or_ takes a
     # formatted string, so the id must be a real uuid before it goes in: a caller-supplied
@@ -444,11 +454,23 @@ def _events_at_place(place_id: str, *, limit: int) -> list[dict]:
             service_client()
             .table("events")
             .select(
-                "id, title, description, starts_at, has_time, venue_name, host_id, cover_emoji"
+                "id, title, description, starts_at, has_time, venue_name, host_id, "
+                "cover_emoji, place_ref, circle_place_ref"
             )
         )
+        # The community's family (its parent, its chapters — 20270125120000) when the
+        # caller resolved one; every id came from the database, and is re-checked anyway.
+        ids = [place_id] + [
+            f for f in (family_ids or []) if f != place_id and _uuid_ok(f)
+        ]
+        in_list = ",".join(ids)
+        both = (
+            f"place_ref.eq.{place_id},circle_place_ref.eq.{place_id}"
+            if len(ids) == 1
+            else f"place_ref.in.({in_list}),circle_place_ref.in.({in_list})"
+        )
         q = (
-            q.or_(f"place_ref.eq.{place_id},circle_place_ref.eq.{place_id}")
+            q.or_(both)
             if two_column
             else q.eq("place_ref", place_id)
         )
@@ -507,7 +529,15 @@ def _event_rows_for_profile(
     Each shown row carries the viewer's `fit_score` (§54) — the same score the radius read
     (get_nearby_activities_authed) gives the same meet, from the same SQL intersection, so
     a community-scoped map marker draws the meter a nearby one would. None = unscored."""
-    raw = _events_at_place(place_id, limit=20)
+    from app.community_chapter_ops import community_family, label_origin
+
+    # The family's meets too — a chapter's on its parent for a parent member, the parent's
+    # on a chapter — each crossing one labelled with where it is from (20270125120000).
+    family = community_family(viewer_id, place_id)
+    raw = _events_at_place(
+        place_id, limit=20, family_ids=[f["place_id"] for f in family]
+    )
+    label_origin(raw, place_id, family)
     counts = _going_counts([str(r.get("id")) for r in raw if r.get("id")])
     rows = [
         {
@@ -524,6 +554,9 @@ def _event_rows_for_profile(
             # FE has rendered this field all along and fell back to a calendar because
             # nothing ever sent it, so one meet wore two faces (2026-08-18).
             "cover_emoji": str(r.get("cover_emoji") or "").strip() or None,
+            # Set only for a meet of ANOTHER community in the family ("from RCC").
+            "origin_place_id": r.get("origin_place_id"),
+            "origin_place_name": r.get("origin_place_name"),
         }
         for r in raw
         if str(r.get("title") or "").strip()

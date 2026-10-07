@@ -2066,8 +2066,9 @@ def run_activity_browse_turn(
         from app.auth import jwt_user_id
         from app.community_scope import community_events
 
-        events = community_events(str(comm["place_id"]))
-        _mark_own(events, jwt_user_id(user_jwt))
+        viewer = jwt_user_id(user_jwt)
+        events = community_events(str(comm["place_id"]), viewer_id=viewer)
+        _mark_own(events, viewer)
         _attach_host_names(events)
         truncated = False
     elif interest and not _OPEN_RE.match(interest):
