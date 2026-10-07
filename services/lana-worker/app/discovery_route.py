@@ -8446,11 +8446,15 @@ def _start_activity_browse_from_discovery(
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Begin the agentic events-browse and return its first turn (asks the interest). The
     sticky flow continues on later turns via the pipeline's activity_browse_active gate."""
-    from app.activity_browse import run_activity_browse_turn
+    from app.activity_browse import recent_browse_turn, run_activity_browse_turn
 
     session_ctx["activity_browse_active"] = True
     session_ctx["browse_turns"] = 0
-    session_ctx["browse_draft"] = None
+    # A reply to the browse Lana JUST made ("no" / "yes" to her offer) re-enters here when
+    # the lane lets go of it. Wiping the draft lost the offer, so "no" listed every meet in
+    # the area (QA 2026-10-08). Keep it; the browse's AI reader decides what the reply means.
+    if not recent_browse_turn(session_ctx, history or []):
+        session_ctx["browse_draft"] = None
     reply = run_activity_browse_turn(
         user_message=msg,
         session_ctx=session_ctx,

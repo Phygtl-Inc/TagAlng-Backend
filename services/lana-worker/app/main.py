@@ -2357,11 +2357,27 @@ def _run_lana_message(
                 embed=False,
             )
 
+        # The stored `updated_at` this turn's write left behind. The chip-pin re-persist
+        # below runs after the response, so it may only land while the row still carries
+        # it — never over the next turn's state (QA 2026-10-08: a late write rolled the
+        # session back one turn, losing a guest's ZIP and the browse's shown cards).
+        _written_at: list[str | None] = [None]
+
         def _persist_session() -> None:
+            _written_at[0] = update_session_context(
+                session_id,
+                merged,
+                core_block=session_ctx.get("core_block"),
+            )
+
+        def _repersist_session() -> None:
+            if _written_at[0] is None:
+                return
             update_session_context(
                 session_id,
                 merged,
                 core_block=session_ctx.get("core_block"),
+                if_updated_at=_written_at[0],
             )
 
         with timer.stage("db_write_assistant_and_session"):
@@ -2500,7 +2516,7 @@ def _run_lana_message(
     _chip_msgs = _offered_chip_messages(ob)
     if (merged.get("_offered_chip_msgs") or []) != _chip_msgs:
         merged["_offered_chip_msgs"] = _chip_msgs
-        background_tasks.add_task(_persist_session)
+        background_tasks.add_task(_repersist_session)
     # Debug + timing stay on the backend (logged) but are no longer sent to the FE —
     # they were noise on the wire and nothing in the client reads them.
     debug = _turn_debug_from_ctx(
