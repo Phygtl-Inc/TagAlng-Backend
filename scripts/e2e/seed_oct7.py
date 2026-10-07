@@ -77,7 +77,7 @@ class Seeder:
     # ── plumbing ────────────────────────────────────────────────────────────────────
     def sql(self, q: str) -> str:
         r = subprocess.run(
-            [self.psql, self.db, "-At", "-v", "ON_ERROR_STOP=1", "-c", q],
+            [self.psql, self.db, "-qAt", "-v", "ON_ERROR_STOP=1", "-c", q],
             capture_output=True, text=True,
         )
         if r.returncode:
@@ -111,15 +111,30 @@ class Seeder:
             self.sql(f"select public.create_block_for_zip({self.lit(z)}, {lat}, {lng}, {self.lit(city)})")
 
     def place(self, key: str, **f) -> str:
+        # places_verified_needs_claim (20261228120005) refuses operator_verified without a
+        # verified place_claims row, so upsert first, record the claim, then promote.
+        verified = f.pop("governance_state", None) == "operator_verified"
         cols = {"google_place_id": key, "source": "import", **f}
         names = ", ".join(cols)
         vals = ", ".join(self.lit(v) if not isinstance(v, (int, float)) or isinstance(v, bool)
                          else str(v) for v in cols.values())
         upd = ", ".join(f"{k}=excluded.{k}" for k in cols if k != "google_place_id")
-        return self.sql(
+        pid = self.sql(
             f"insert into public.places ({names}) values ({vals}) "
             f"on conflict (google_place_id) do update set {upd} returning id"
         )
+        if verified:
+            by = f.get("claimed_by")
+            self.sql(
+                f"""insert into public.place_claims (place_id, requested_by, status,
+                       verification_method, submitted_at, resolved_at)
+                    select {self.lit(pid)}, {self.lit(by)}, 'verified', 'manual_founder', now(), now()
+                    where not exists (select 1 from public.place_claims
+                                      where place_id={self.lit(pid)} and status='verified');
+                    update public.places set governance_state='operator_verified'
+                     where id={self.lit(pid)} and governance_state <> 'operator_verified';"""
+            )
+        return pid
 
     def member(self, uid: str, place_id: str, circle_type: str, name: str) -> None:
         self.sql(
