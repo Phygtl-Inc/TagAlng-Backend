@@ -1447,7 +1447,7 @@ def _try_upfront_display_name_turn(
         ctx["upfront_name_attempts"] = attempts
         ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
         return (
-            "No rush — a first name is all I need. What should neighbors call you?",
+            "No rush — a first name is all I need. What should people call you?",
             ctx,
             ctx["last_routing"],
             [],
@@ -1474,7 +1474,7 @@ def _try_upfront_display_name_turn(
     ctx["upfront_name_attempts"] = 0
     ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
     return (
-        "Before we dive in — what should neighbors call you? A first name's all I need.",
+        "Before we dive in — what should people call you? A first name's all I need.",
         ctx,
         ctx["last_routing"],
         [],
@@ -7543,7 +7543,7 @@ def _apply_display_name_gate(
             ctx_base["display_name_saved"] = True
             return None
         return (
-            "I didn't catch that — what should neighbors call you? First name is fine.",
+            "I didn't catch that — what should people call you? First name is fine.",
             _routing_ctx(
                 ctx_base,
                 phase=PHASE_NEED_DISPLAY_NAME,
@@ -7561,7 +7561,7 @@ def _apply_display_name_gate(
         return None
 
     return (
-        "Love that — what should neighbors call you? First name is fine.",
+        "Love that — what should people call you? First name is fine.",
         _routing_ctx(
             ctx_base,
             phase=PHASE_NEED_DISPLAY_NAME,
@@ -9929,7 +9929,7 @@ def handle_discovery_turn(
                 ctx_base["display_name_saved"] = True
             elif _is_affirmative(msg) or not nick:
                 return (
-                    "What should neighbors call you? First name is fine.",
+                    "What should people call you? First name is fine.",
                     _routing_ctx(
                         ctx_base,
                         phase=PHASE_NEED_DISPLAY_NAME,
