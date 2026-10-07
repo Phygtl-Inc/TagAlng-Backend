@@ -387,6 +387,8 @@ class ActivityPreviewRow(BaseModel):
     # The community this meet was created for, when it has one — same shape as everywhere
     # else, so the browse row names it beside the venue.
     community: dict[str, Any] | None = None
+    # The viewer hosts this meet — render "You're hosting" instead of an RSVP tap.
+    hosted_by_you: bool = False
     preview: bool = True
     # The recommendation_impressions row written when this card was sent (contract v2 §A7).
     # The FE posts it back to /lana/impression on a tap so "shown" becomes "tapped"; a row
