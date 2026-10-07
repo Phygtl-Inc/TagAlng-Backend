@@ -25,7 +25,7 @@
 
 create or replace function public.discover_communities(
   p_user_id uuid default null::uuid,
-  p_query_embedding vector default null::vector,
+  p_query_embedding extensions.vector default null::extensions.vector,
   p_min_similarity real default 0.55,
   p_limit integer default 10,
   p_creator_only boolean default false,
