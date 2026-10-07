@@ -904,11 +904,12 @@ def _compose_empty_seek_offer(
         facts.extend(
             far_facts
             or [
-                # Widen shows RELATED meets, never everything (a153e6f); saying "everything
-                # nearby" here promised the off-topic list QA got (2026-10-07, AI -> books).
-                "Option B: they can widen the search to things RELATED to what they asked "
-                "for nearby (the pill says 'Widen the search'). It never shows everything "
-                "and does NOT search other areas — never describe it either way.",
+                # Since #205 the pill searches RELATED topics, never everything — the
+                # old "everything nearby" line outlived it and Lana kept promising it.
+                "Option B: they can widen the search to topics related to what they "
+                "asked for (the pill says 'Widen the search'). It shows RELATED meets "
+                "only, never everything — never say 'everything' or 'all events' — and it "
+                "does NOT search other areas; never offer it as a way to look somewhere else.",
             ]
         )
         if user_msg:

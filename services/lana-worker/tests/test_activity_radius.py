@@ -606,6 +606,26 @@ class EmptyStateSaysWhatThePillDoesTests(unittest.TestCase):
         msg = self._compose()
         self.assertIn("widen", msg.lower())
 
+    def test_widen_option_promises_related_topics_not_everything(self):
+        """Prod 2026-10-07 (Kyiv, "AI meetups"): Lana offered to "widen the search to see
+        everything nearby" — but since #205 the pill searches RELATED topics. The fact the
+        writer is given must say what the pill does."""
+        from app.activity_browse import _compose_empty_seek_offer
+
+        captured: dict = {}
+
+        def _llm_json(**kw):
+            captured.update(kw)
+            return {"message": "ok"}
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", _llm_json
+        ), patch("app.orchestrator.llm.synthesizer_model", return_value="m"):
+            _compose_empty_seek_offer("AI", lang="en")
+        payload = captured["user_payload"]
+        self.assertIn("topics related to what they asked for", payload)
+        self.assertNotIn("widen the search to everything nearby", payload)
+
     def test_community_fallback_is_unchanged(self):
         msg = self._compose(community="CF Fitness")
         self.assertIn("CF Fitness", msg)
