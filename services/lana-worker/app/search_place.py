@@ -49,7 +49,7 @@ def _postal_code_at(lat: float, lng: float) -> tuple[str | None, str | None]:
 
 
 def resolve_search_place(text: str) -> dict[str, Any] | None:
-    """{"label", "zip5"} for a named town or city; zip5 is None outside the US (or when it
+    """{"label", "zip5", "lat", "lng"} for a named town or city; zip5 is None outside the US (or when it
     cannot be placed to a postal code). None when the text is not a place at all."""
     from app.community_hq import geocode_city
 
@@ -60,4 +60,6 @@ def resolve_search_place(text: str) -> dict[str, Any] | None:
     return {
         "label": str(got["city"]),
         "zip5": zip5 if country in (None, "US") else None,
+        "lat": got["lat"],
+        "lng": got["lng"],
     }

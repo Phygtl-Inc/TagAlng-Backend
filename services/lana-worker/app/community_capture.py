@@ -71,7 +71,7 @@ def looks_like_community_create(message: str) -> bool:
     return bool(_CREATE_COMMUNITY_RE.search(str(message or "").strip()))
 
 
-_VALUE_FIELDS = ("name", "circle_type", "blurb")
+_VALUE_FIELDS = ("name", "circle_type", "blurb", "parent")
 
 _EXTRACT_SYSTEM = """You extract structured fields about a LOCAL COMMUNITY a neighbor \
 wants to create, and write the question set for it.
@@ -82,7 +82,7 @@ a following, which people join from a link rather than by going somewhere. The n
 starting it so others can find and join it.
 
 Return ONE compact JSON object with exactly these keys:
-{"name","circle_type","blurb",<<STEPS_KEY>>"answers"}
+{"name","circle_type","blurb","parent",<<STEPS_KEY>>"answers"}
 
 - name: what is being made into a community, verbatim as they said it — usually a place \
 ("Rosetta's Bakery", "CF Fitness", "Lake Nona Park"), or for a placeless one the community's \
@@ -90,6 +90,13 @@ own name ("Iron Man Training"). null if not stated.
 - circle_type: EXACTLY one of <<TYPES>>, or null if genuinely unclear. <<TYPE_RULES>>
 - blurb: why people gather there, in THEIR words, e.g. "best sourdough on the block, \
 everyone ends up there Saturday mornings". null if not stated.
+- parent: the BIGGER community this one sits INSIDE, verbatim as they said it, only when \
+they say it is part of one — a club at a school, a chapter of a group, a team inside a \
+gym, initials and nicknames kept as written ("a club inside UMD" → "UMD", "the youth \
+choir, part of St. Brigid's" → "St. Brigid's", "the Orlando chapter of Iron Man Training" \
+→ "Iron Man Training"). null when they \
+only say where it meets or which area it is in ("in Lake Nona", "at the park"): a place \
+or a neighbourhood is never a parent. null when not stated.
 - answers: object mapping any of the CURRENT SET FIELDS listed below to what the user \
 ALREADY said, verbatim-ish and short. Omit a field rather than guess it. {{}} when \
 nothing was said. NEVER write the "subject" field here — a place is only ever set by the \
@@ -282,6 +289,10 @@ def _build_chips(draft: dict[str, Any]) -> list[dict[str, str]]:
         chips.append({"label": _TYPE_LABELS[ctype], "tone": "sky", "field": "circle_type"})
     if _has(draft, "blurb"):
         chips.append({"label": str(draft["blurb"])[:40], "tone": "coral", "field": "blurb"})
+    if _has(draft, "parent"):
+        # Tapping it (fix:parent) drops the parent — the community goes up on its own.
+        shown = (draft.get("parent_place") or {}).get("place_name") or draft["parent"]
+        chips.append({"label": f"Part of {shown}"[:40], "tone": "sky", "field": "parent"})
     return chips
 
 
@@ -413,6 +424,81 @@ def _is_bare_control(message: str, pattern: "re.Pattern[str]") -> bool:
     return bool(m) and len(m.group(0)) >= len(text) - 1
 
 
+def _resolve_parent(draft: dict[str, Any], user_id: Any) -> None:
+    """Which community "inside SJSU" means — once per draft, before publish.
+
+    Sets draft["parent_place"] = {place_id, place_name, located} or
+    draft["parent_unresolved"] = True. The AI alias matcher may map a short form; the
+    reply names the community it attached to, and the chip / detach undo a wrong one."""
+    said = str(draft.get("parent") or "").strip()
+    if not said or not user_id or draft.get("parent_place") or draft.get("parent_unresolved"):
+        return
+    from app.community_discovery import find_named_community
+
+    try:
+        hit = find_named_community(str(user_id), said)
+    except Exception:  # noqa: BLE001 — a parent is optional; never block the publish
+        logger.exception("community_parent_resolve_failed said=%r", said[:60])
+        hit = None
+    if not hit or not hit.get("place_id"):
+        draft["parent_unresolved"] = True
+        return
+    located = False
+    try:
+        from app.auth import service_client
+
+        row = (
+            service_client()
+            .table("places")
+            .select("lat, lng")
+            .eq("id", str(hit["place_id"]))
+            .limit(1)
+            .execute()
+        )
+        got = (row.data or [{}])[0] if isinstance(row.data, list) else {}
+        located = got.get("lat") is not None and got.get("lng") is not None
+    except Exception:  # noqa: BLE001
+        logger.exception("community_parent_point_read_failed")
+    draft["parent_place"] = {
+        "place_id": str(hit["place_id"]),
+        "place_name": str(hit.get("place_name") or said).strip(),
+        "located": located,
+    }
+    draft["chips"] = _build_chips(draft)
+
+
+def _attach_to_parent(draft: dict[str, Any], user_id: Any, place_id: str) -> list[str]:
+    """Attach the just-published community to the parent they named; reply facts.
+
+    The community is live either way — a refused attach says why, in words the reply can
+    use, and never undoes the publish."""
+    said = str(draft.get("parent") or "").strip()
+    if not said:
+        return []
+    if draft.get("parent_unresolved") or not draft.get("parent_place"):
+        return [
+            f'They wanted it inside "{said}", but there is no community by that name on Lana '
+            "yet, so it stands on its own for now — say so in a few words"
+        ]
+    parent = draft["parent_place"]
+    pname = str(parent.get("place_name") or said)
+    from app.community_chapter_ops import attach_chapter
+
+    got = attach_chapter(str(user_id or ""), place_id, str(parent["place_id"]))
+    draft["parent_attached"] = bool(got.get("ok"))
+    if got.get("ok"):
+        return [f"It is now a club inside {pname} — people who look at {pname} will see it"]
+    reason = got.get("reason")
+    if reason == "not_a_member_of_parent":
+        return [
+            f"It could NOT be put inside {pname} because they are not a member of {pname}. "
+            f"It is live on its own; they can join {pname} and then ask you to add it"
+        ]
+    if reason in ("chapter_depth_exceeded",):
+        return [f"{pname} is itself a club inside another community, so this one stands on its own"]
+    return [f"It could not be put inside {pname} just now, so it stands on its own"]
+
+
 def publish_community(
     *, draft: dict[str, Any], user_id: str
 ) -> tuple[dict[str, Any] | None, str]:
@@ -520,6 +606,22 @@ def publish_community(
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("community_blurb_write_failed")
+            # The creator's own words become the community's description — only when it
+            # has none, so joining an existing community never overwrites what is there.
+            # No blurb_key: a person wrote it, so the profile never regenerates it. This is
+            # what lets a new community be found by topic from its first minute; before,
+            # places.blurb stayed empty until someone opened the profile (2026-10-07).
+            try:
+                from app.auth import service_client
+
+                service_client().table("places").update(
+                    {"blurb": str(draft["blurb"]).strip()[:300]}
+                ).eq("id", place_id).is_("blurb", "null").execute()
+            except Exception:  # noqa: BLE001
+                logger.exception("community_place_blurb_write_failed")
+        from app.community_embeddings import embed_place_later
+
+        embed_place_later(place_id)
     return {**result, "place_id": place_id}, ""
 
 
@@ -737,7 +839,15 @@ def run_community_capture_turn(
         # A community with no place is found by what it is, and its card says where it is
         # run from — so that is asked once, here, before it goes live (2026-10-06). A
         # community on a real place already has its location.
-        if not str(draft.get("google_place_id") or "").strip() and not draft.get("hq_city"):
+        _resolve_parent(draft, user_id)
+        # A chapter with no spot of its own meets at its parent's (attach_chapter copies the
+        # parent's point), so it is not asked for a city it is not run from.
+        parent_located = bool((draft.get("parent_place") or {}).get("located"))
+        if (
+            not str(draft.get("google_place_id") or "").strip()
+            and not draft.get("hq_city")
+            and not parent_located
+        ):
             session_ctx["community_pending_ask"] = "hq"
             draft["pending_field"] = "hq"
             session_ctx["community_draft"] = draft
@@ -811,6 +921,7 @@ def run_community_capture_turn(
         session_ctx["routing_phase"] = "listening"
         name = str(draft.get("name") or "your community")
         facts = [f"{name} is now a community neighbours can find and join"]
+        facts += _attach_to_parent(draft, user_id, str(result.get("place_id") or ""))
         if offer:
             facts.append(
                 f"They can claim a short link for it, get.lana.help/{offer['suggestion']}, "
@@ -842,6 +953,10 @@ def run_community_capture_turn(
             draft.pop("steps", None)
         elif field == "blurb":
             draft.pop("blurb", None)
+        elif field == "parent":
+            # Not re-asked: "part of" is optional, so removing it is the whole correction.
+            for k in ("parent", "parent_place", "parent_unresolved"):
+                draft.pop(k, None)
         else:
             step = next((s for s in step_set_of(draft) if s["field"] == field), None)
             if step:

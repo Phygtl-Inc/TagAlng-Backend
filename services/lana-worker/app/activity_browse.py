@@ -139,6 +139,35 @@ def _is_browse_answer(
     )
 
 
+def _echo_topic(interest: str, label: str | None) -> str:
+    """What an empty or stretch reply echoes and stores as the topic: the interest when
+    it is chip-short (the AI's topic), else the filter's short label for a long one."""
+    if len(interest.split()) <= 4:
+        return interest
+    return (label or "").strip()
+
+
+def _is_offered_browse_chip(
+    message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None = None
+) -> bool:
+    """A "Look beyond <community>" / "Look in <area>" pill Lana rendered last turn, sent
+    back verbatim. Both labels are remembered on the draft when offered, and the response
+    that carried them recorded its chip payloads (`_offered_chip_msgs`), so this is two
+    exact lookups — no reading of the words. Without it the classifier saw the bare chip
+    label cold, released the lane, and the draft holding the search was wiped.
+    "Host a meet" is deliberately not one: it is a way OUT of browse."""
+    msg = str(message or "").strip()
+    draft = session_ctx.get("browse_draft")
+    if not msg or not isinstance(draft, dict):
+        return False
+    if msg not in (session_ctx.get("_offered_chip_msgs") or []):
+        return False
+    return any(
+        msg.casefold() == str(draft.get(k) or "").strip().casefold()
+        for k in ("_community_chip", "_area_offer_chip")
+    )
+
+
 def activity_browse_should_release(
     message: str,
     session_ctx: dict[str, Any],
@@ -167,6 +196,7 @@ def activity_browse_should_release(
         slots,
         is_valid_answer=_is_browse_answer,
         pivot_re=_PIVOT_OUT_RE,
+        is_offered_option=_is_offered_browse_chip,
     )
 
 
@@ -745,12 +775,36 @@ def _rank_far_matches(matched: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(matched, key=key)
 
 
+def _name_far_areas(events: list[dict[str, Any]]) -> None:
+    """Put the area on the venue line of every shown card beyond the local radius — the
+    same "<venue> · <area>" the far cards carry. A list can be headed "near you" when its
+    closest meet is near (_far_miles), and a 120-mile meet further down must not borrow
+    that header. Rows without a measured distance are the searched area's own."""
+    from app.discovery_route import activity_radius_meters, far_activity_details
+
+    local_m = float(activity_radius_meters())
+    for row in events[:5]:
+        if not isinstance(row, dict):
+            continue
+        try:
+            dist = float(row["distance_meters"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if dist <= local_m:
+            continue
+        where = _far_where(far_activity_details(row))
+        venue = str(row.get("venue_name") or "").strip()
+        if where and where not in venue:
+            row["venue_name"] = f"{venue} · {where}" if venue else where
+
+
 def _far_matches_facts(found: list[dict[str, Any]]) -> list[str]:
     """Facts for real matches beyond the radius, shown as cards. `found` is ranked and
     each item is far_activity_details(...) for one event."""
     lead = found[0]
     lines = "; ".join(
         f'"{f.get("title") or "a meet"}" in {_far_where(f)} (about {f["miles"]:,} miles)'
+        + (" — they host this one themselves" if f.get("hosted_by_you") else "")
         for f in found
     )
     return [
@@ -1176,7 +1230,7 @@ def browse_turn_metadata(ctx: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _filter_events_by_query(
-    events: list[dict[str, Any]], query: str
+    events: list[dict[str, Any]], query: str, *, at_place: str | None = None
 ) -> tuple[list[dict[str, Any]], str]:
     """Parse + match the user's request against the block's events with ONE LLM call.
 
@@ -1295,7 +1349,11 @@ def _filter_events_by_query(
                     "indices. Empty match_indices if nothing fits."
                 ),
                 user_payload=(
-                    f"Request: {query}\nEvents:\n" + "\n".join(lines)
+                    f"Request: {query}\n"
+                    # A community's own calendar: the rows carry no place, so "at SJSU"
+                    # in the request read as a constraint no event could be seen to meet.
+                    + (f"Every event below is at {at_place}.\n" if at_place else "")
+                    + "Events:\n" + "\n".join(lines)
                     + f"\nReturn match_indices, plus {len(lines)} scores, "
                     f"{len(lines)} mismatches and {len(lines)} fits_other values in "
                     "event order: "
@@ -1433,9 +1491,11 @@ def _far_offer(
     label we offered; the interest carries over untouched.
 
     The candidate area is only offered when its events survive the SAME filter this
-    search just ran (and the caller's own meets are dropped, exactly as browse drops
-    them). Offering an area and then landing the user on "nothing here" is a worse
-    dead end than the empty state it was meant to replace.
+    search just ran. Offering an area and then landing the user on "nothing here" is a
+    worse dead end than the empty state it was meant to replace. The caller's own meets
+    count, marked, exactly as browse shows them (496aa78): someone who runs a community,
+    leaves it and searches its topic must not hear "nothing" while their own matching
+    meet sits just past the radius.
     """
     from app.auth import jwt_user_id
     from app.discovery_route import activities_beyond_radius, far_activity_details
@@ -1446,11 +1506,10 @@ def _far_offer(
     draft["_area_offer_block_id"] = None
     draft["_area_offer_name"] = None
 
-    rows = activities_beyond_radius(
-        user_jwt, block_id, exclude_host_id=jwt_user_id(user_jwt)
-    )
+    rows = activities_beyond_radius(user_jwt, block_id)
     if not rows:
         return [], "", []
+    _mark_own(rows, jwt_user_id(user_jwt))
     matched, _label = _filter_events_by_query(rows, interest)
     if not matched or _filter_unchecked(rows):
         # Nothing judged on topic out there — including when the matcher could not run.
@@ -1468,7 +1527,7 @@ def _far_offer(
             venue = str(row.get("venue_name") or "").strip()
             row["venue_name"] = f"{venue} · {_far_where(det)}" if venue else _far_where(det)
             found_rows.append(row)
-            found.append(det)
+            found.append({**det, "hosted_by_you": bool(row.get("hosted_by_you"))})
             if len(found) >= _FAR_CARDS:
                 break
         if found:
@@ -1506,6 +1565,57 @@ def _far_offer(
 def _community_name(comm: dict[str, Any] | None) -> str | None:
     name = str((comm or {}).get("name") or "").strip()
     return name or None
+
+
+def _topic_from_slots(slots: dict[str, Any] | None, msg: str) -> str:
+    """What this browse is about, by the AI's read — "" for an open ask.
+
+    activity_topic is the browse's own slot; a meet-seek read carries its subject in
+    signal_detail instead. No slots means the classifier never ran, and the message
+    itself stays the topic, as it always was."""
+    if slots is None:
+        return msg
+    from app.discovery_slots import slots_activity_topic
+
+    topic = slots_activity_topic(slots)
+    if not topic and str(slots.get("signal_intent") or "") == "meet_seek":
+        topic = str(slots.get("signal_detail") or "").strip() or None
+    return topic or ""
+
+
+def _scope_named_community(
+    draft: dict[str, Any], slots: dict[str, Any], user_id: str | None
+) -> None:
+    """Set (or clear) `draft["_community"]` from the community this turn NAMED.
+
+    A name that resolves scopes the browse to it ({"place_id", "name"} — the active
+    community's shape, so every community branch below reads it unchanged). A town to
+    search instead replaces it. A name that resolves to nothing drops any earlier one —
+    they named somewhere else — and no place is guessed: the filter still carries what
+    they said."""
+    from app.discovery_slots import slots_community_name, slots_search_place
+
+    said = slots_community_name(slots)
+    if not said:
+        if slots_search_place(slots):
+            draft["_community"] = None
+        return
+    if not user_id:
+        return
+    from app.community_discovery import resolve_community_name
+
+    hit = resolve_community_name(str(user_id), said)["hit"]
+    logging.getLogger(__name__).info(
+        "browse_named_community said=%r hit=%s", said, (hit or {}).get("place_id")
+    )
+    draft["_community"] = (
+        {
+            "place_id": str(hit["place_id"]),
+            "name": str(hit.get("place_name") or "").strip() or said,
+        }
+        if hit and hit.get("place_id")
+        else None
+    )
 
 
 def _arm_community_widen(draft: dict[str, Any], comm: dict[str, Any] | None) -> str:
@@ -1599,8 +1709,8 @@ def _stretch_offer_reply(
     """
     from app.discovery_route import activity_previews_from_events
 
-    # Same echo rule as the empty state: the matcher's label, or the ask if chip-short.
-    short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
+    # Same echo rule as the empty state.
+    short = _echo_topic(interest, label)
     draft["interest"] = short or interest
     draft["_seek_offer"] = True
     # Nothing else was offered this turn — pills from an earlier turn must not stay live.
@@ -1774,6 +1884,8 @@ def run_activity_browse_turn(
             from app.community_scope import clear_active_community
 
             clear_active_community(session_ctx)
+            # A community they named for this browse is looked past the same way.
+            draft["_community"] = None
             draft["_seek_offer"] = None
             draft["_community_chip"] = None
             draft["_asked"] = True
@@ -1965,19 +2077,34 @@ def run_activity_browse_turn(
         # send text that can come out generic ("show me what's happening this weekend") —
         # the offer's structured topic is the committed subject, so it REPLACES the send
         # text outright (filter, weekend pre-narrow, everything downstream).
+        forced_topic = ""
         if str((slots or {}).get("_forced_kind") or "") == "find_activities":
             forced_topic = str((slots or {}).get("signal_detail") or "").strip()
             if forced_topic:
                 msg = forced_topic
-        draft["interest"] = msg[:80]
+        # Two things, kept apart. The REQUEST is every constraint they typed (day, time of
+        # day, host) and goes to the filter as written. The TOPIC is what it is about, the
+        # AI's read: the whole sentence used to be the topic, so "at sjsu what events are
+        # going on this week" was embedded as a subject and the meaning floor admitted
+        # nothing (2026-10-07). An open ask has no topic. No slots at all (the classifier
+        # did not run) keeps the old reading, the message itself.
+        draft["_request"] = msg[:200]
+        draft["interest"] = (forced_topic or _topic_from_slots(slots, msg))[:80]
         # A new topic is a new search: strict again, whatever the last one widened to.
         draft["_widen_related"] = None
     interest = str(draft.get("interest") or "")
 
+    # A community they NAMED in the ask ("what's going on at SJSU this week?") — resolved by
+    # the same resolver the communities turn uses, and held on the browse draft like a
+    # searched town (`_area_block_id`): it scopes THIS browse and dies with it, and never
+    # switches the community filter at the top of the app. Browse used to read only that
+    # filter, so a named community was ignored and her home area searched (2026-10-07).
+    if msg and slots:
+        _scope_named_community(draft, slots, user_id)
     # The community filter at the top of the screen. It answers the "where" outright:
     # a community IS a place, so nothing below needs her ZIP to run this search — and
     # asking for one here would gate a question she already scoped herself.
-    comm = active_community(session_ctx)
+    comm = draft.get("_community") or active_community(session_ctx)
 
     # Travel: a town they asked to search that is not where they are ("language events in
     # San Jose"; Tommaso, 2026-10-06). Searched for THIS browse only — never written to their
@@ -2028,6 +2155,16 @@ def run_activity_browse_turn(
             draft["_place_name"] = here["label"]
         elif here is None and home_block_id:
             draft["_place_name"] = t("browse.home_area", lang)
+    # No pill: the town they said they are in earlier in this chat ("I'm in <town>"). It
+    # outranks the profile home for every search until they name another (app/chat_area.py)
+    # — the area is the search's origin, so distances are measured from it too.
+    if not (comm or place_ask or isinstance(point, dict)):
+        from app.chat_area import chat_area
+
+        stated = chat_area(session_ctx)
+        if stated and stated["block_id"] != str(home_block_id or ""):
+            draft["_area_block_id"] = stated["block_id"]
+            draft["_place_name"] = str(stated.get("label") or "") or None
     place_name = None if comm else (str(draft.get("_place_name") or "").strip() or None)
 
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
@@ -2066,8 +2203,9 @@ def run_activity_browse_turn(
         from app.auth import jwt_user_id
         from app.community_scope import community_events
 
-        events = community_events(str(comm["place_id"]))
-        _mark_own(events, jwt_user_id(user_jwt))
+        viewer = jwt_user_id(user_jwt)
+        events = community_events(str(comm["place_id"]), viewer_id=viewer)
+        _mark_own(events, viewer)
         _attach_host_names(events)
         truncated = False
     elif interest and not _OPEN_RE.match(interest):
@@ -2096,7 +2234,11 @@ def run_activity_browse_turn(
     # created for whatever state the area is in. The QA case that motivated the block
     # (an off-topic event answering "meet other runners") is handled by the relevance
     # floor instead. The gate frame is still read below, for EMPTY results only.
-    matched, label = _filter_events_by_query(events, interest)
+    # The request as typed (day, time, host and topic), not just the topic.
+    request = str(draft.get("_request") or "").strip() or interest
+    matched, label = _filter_events_by_query(
+        events, request, **({"at_place": _community_name(comm)} if comm else {})
+    )
 
     from app.discovery_route import activity_previews_from_events
 
@@ -2160,7 +2302,10 @@ def run_activity_browse_turn(
         # ("are there any fifa activities for my 6 year old") would otherwise be parroted
         # here and become the saved seek's kind on accept. A zero-event block never reaches
         # the LLM filter (no label), so a raw interest is echoed only when it's chip-short.
-        short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
+        # A chip-short interest IS the AI's topic now and wins over the label, which can be
+        # only the when ("this week"): storing that lost the topic, so "Look beyond" re-ran
+        # on the date and offered every far meet that week as a match (e2e 2026-10-08).
+        short = _echo_topic(interest, label)
         draft["interest"] = short or interest
         draft["_seek_offer"] = True
         draft["_far_lead"] = None
@@ -2316,6 +2461,8 @@ def run_activity_browse_turn(
     draft["suggestions"] = _refine_suggestions(matched)
     session_ctx["browse_draft"] = draft
     session_ctx["activity_browse_active"] = True
+    if not comm:
+        _name_far_areas(matched)
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     # Telemetry for the impression log (§A7), by event id. Kept in ctx rather than on the
     # preview row: these are internal ranking numbers with nothing to render, and the wire
@@ -2326,6 +2473,10 @@ def run_activity_browse_turn(
         if isinstance(ev, dict) and ev.get("id")
     }
     session_ctx["routing_phase"] = "listening"
+    if not phone_verified:
+        # The tail invites them to verify to RSVP — an email typed next is that answer
+        # (discovery_route.take_offered_verify_email).
+        session_ctx["verify_offer"] = "rsvp"
     return _format_browse_message(
         matched, label, phone_verified=phone_verified, lang=lang,
         # A community heads its own meets, and a town they asked about heads its list

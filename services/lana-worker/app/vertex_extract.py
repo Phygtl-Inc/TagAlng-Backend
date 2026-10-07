@@ -45,7 +45,7 @@ Rules:
 - NEVER emit a claim that is only a bare topic label ("Health", "Wellness", "Lifestyle", "General") or that expresses uncertainty ("Unsure what to call", "Not sure about time"). Skip these entirely — they are not threads.
 - "transient": true for TEMPORARY states that are NOT durable identity — an injury or illness ("sprained ankle"), an upcoming trip/vacation, a passing mood. Durable identity (heritage, life stage, ongoing interests, occupation, faith) is transient=false. When in doubt, false.
 - Capture languages spoken as one claim (bucket "interest", e.g. "Speaks 7 languages")
-- Every claim MUST have source_quote (verbatim or tight paraphrase from user) and bucket. The quote must stand on its own: whole sentence(s), never cut mid-sentence, and it must keep WHAT the words are about — the place, activity or group they name. "So the restaurant Pausa in San Mateo is one of the best for authentic Italian cuisine", never "authentic Italian cuisine. The chef is a Da Vinci" — a fragment with its subject removed gets misread downstream.
+- Every claim MUST have source_quote (verbatim or tight paraphrase from user) and bucket. The quote must stand on its own: whole sentence(s), never cut mid-sentence, and it must keep WHAT the words are about — the place, activity or group they name. "So the restaurant Casa Lupe in Elm Park is one of the best for real Oaxacan food", never "real Oaxacan food. The cook is a Picasso" — a fragment with its subject removed gets misread downstream.
 - synonyms: 3-6 lowercase tags per claim — include broader/related terms, not just the literal word (e.g. "sicilian" → ["sicilian","italian","mediterranean"])
 - spans: 3-8 phrases covering the mapped_summary for frontend color highlights
 - concept must match ^[a-z][a-z0-9_]{1,63}$
@@ -134,7 +134,7 @@ language at display time, so a later language switch re-renders the whole queue.
 - Capture LANGUAGES spoken as one claim, bucket "interest" (e.g. "speak 7 languages" → concept "multilingual", label "Speaks 7 languages")
 - Capture RELATIONSHIP status as a claim, bucket "stage" (e.g. "married 10 years" → concept "long_married", label "Married 10 years")
 - Capture occupation/work as a claim, bucket "activity" or "interest" (e.g. "work in tech" → tech_worker). Mark it "vague": true when it is coarse and a specific would help (e.g. "tech worker", "athlete", "in finance")
-- Every claim MUST have source_quote from this message and bucket. The quote must stand on its own: whole sentence(s), never cut mid-sentence, and it must keep WHAT the words are about — the place, activity or group they name. "So the restaurant Pausa in San Mateo is one of the best for authentic Italian cuisine", never "authentic Italian cuisine. The chef is a Da Vinci" — a fragment with its subject removed gets misread downstream.
+- Every claim MUST have source_quote from this message and bucket. The quote must stand on its own: whole sentence(s), never cut mid-sentence, and it must keep WHAT the words are about — the place, activity or group they name. "So the restaurant Casa Lupe in Elm Park is one of the best for real Oaxacan food", never "real Oaxacan food. The cook is a Picasso" — a fragment with its subject removed gets misread downstream.
 - concept must match ^[a-z][a-z0-9_]{1,63}$
 - synonyms: 3-6 lowercase tags per claim — include BROADER and RELATED terms, not just the literal word (e.g. "sicilian" → ["sicilian","italian","mediterranean","sicily"]; "triathlon" → ["triathlon","endurance","running","cycling","swimming"]). These power match discovery.
 - "vague": true when the claim is coarse enough that a follow-up would sharpen it — e.g. "tech worker", "athlete", "in finance", OR a COUNT without specifics ("speaks 5 languages" → vague until they name them, "plays sports" → which). false when already specific.
@@ -167,7 +167,7 @@ insulting and obvious. You are the only thing that can change it — be strict:
 AFFIRM — never the name they deny, and never the negation word itself: "my name is not Orlando but \
 Tom" → "Tom" (NOT "not", NOT "Orlando"); "it's Tom, not Orlando" → "Tom"; "wrong, I'm Tom" → "Tom".
   · A denial with NO replacement is null, not a name: "I'm not Joe" → null, "that's not my name" → null.
-  · When LANA JUST ASKED what to call them ("what should neighbors call you?", "what's your \
+  · When LANA JUST ASKED what to call them ("what should people call you?", "what's your \
 name?"), a bare word IS the answer to that — "Tommaso" → "Tommaso". Take it.
   · For ANY OTHER question in LANA JUST ASKED, a bare word is an ANSWER to that question, not a \
 name. A city, venue, gym, church, dish, team, or time is never a nickname — asked "which Lagoinha \

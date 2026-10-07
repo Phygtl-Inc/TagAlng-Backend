@@ -443,7 +443,7 @@ def _find_block_events(
     # community's — wherever the place sits. Same relevance floor below either way.
     _comm = active_community(session_ctx)
     if _comm:
-        rows = community_events(str(_comm["place_id"]))
+        rows = community_events(str(_comm["place_id"]), viewer_id=_jwt_sub(user_jwt))
         return _rank_activities(rows, kind, limit)
 
     def _legacy() -> Any:

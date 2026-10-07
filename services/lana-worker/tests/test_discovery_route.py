@@ -834,10 +834,13 @@ class TestDiscoveryRouting(unittest.TestCase):
             # No generic "what kind of thing" re-ask — the message was captured; the
             # only blocker is location, so the ZIP is asked before fetching events.
             self.assertIn("zip", reply.lower())
+            # The request is kept whole for the filter (the weekend constraint); with no
+            # activity_topic from the AI it is an open ask, so there is no topic to embed.
             self.assertEqual(
-                (ctx.get("browse_draft") or {}).get("interest"),
+                (ctx.get("browse_draft") or {}).get("_request"),
                 "what's happening near me this weekend",
             )
+            self.assertEqual((ctx.get("browse_draft") or {}).get("interest"), "")
             mock_events.assert_not_called()
 
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
