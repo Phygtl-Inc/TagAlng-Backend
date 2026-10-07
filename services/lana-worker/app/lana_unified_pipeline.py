@@ -1658,6 +1658,12 @@ def run_lana_unified_pipeline(
     # pass-along / tip gates return before the discovery-path clear would run.
     clear_turn_surfaces(session_ctx)
 
+    # A guest answering "verify your email to RSVP" with their email: arm the signup
+    # handshake before any lane or the policy can read the address as something else.
+    from app.discovery_route import take_offered_verify_email
+
+    take_offered_verify_email(session_ctx, user_message, phone_verified=phone_verified)
+
     # A logout request must escape any sticky capture mode — otherwise "log me out" gets
     # swallowed as an item/tip/meet answer and does nothing. Clear the flags so the turn
     # falls through to discovery's logout handler.

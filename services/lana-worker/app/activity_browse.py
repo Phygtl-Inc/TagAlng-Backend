@@ -2337,6 +2337,10 @@ def run_activity_browse_turn(
         if isinstance(ev, dict) and ev.get("id")
     }
     session_ctx["routing_phase"] = "listening"
+    if not phone_verified:
+        # The tail invites them to verify to RSVP — an email typed next is that answer
+        # (discovery_route.take_offered_verify_email).
+        session_ctx["verify_offer"] = "rsvp"
     return _format_browse_message(
         matched, label, phone_verified=phone_verified, lang=lang,
         # A community heads its own meets, and a town they asked about heads its list

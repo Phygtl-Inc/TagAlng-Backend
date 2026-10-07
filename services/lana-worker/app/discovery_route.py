@@ -6477,6 +6477,9 @@ def _show_activities_preview(
         preview_block_id=block_id,
         active_intent=INTENT_FIND_ACTIVITIES,
     )
+    if events and not phone_verified:
+        # The tail invites them to verify to RSVP — an email typed next is that answer.
+        ctx["verify_offer"] = "rsvp"
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "browse_block_activities")
     ctx["activity_previews"] = activity_previews_from_events(events)
     _clear_peer_surface(ctx)
@@ -7718,6 +7721,32 @@ def _apply_display_name_gate(
         _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
         [],
     )
+
+
+def take_offered_verify_email(
+    session_ctx: dict[str, Any], msg: str, *, phone_verified: bool
+) -> bool:
+    """A guest answering Lana's own "verify your email to RSVP" with their email.
+
+    The browse tail invites verification but armed nothing, so the email typed next fell
+    to the browse lane or the policy and came back as "I can't verify that from here —
+    use the sign-in flow" with no control to tap (prod 2026-10-07). When the invitation
+    is on the session and the reply carries an email address, this arms the same signup
+    handshake the verify gate arms: every gate defers to it and discovery sends the code
+    (the `requires_phone_verification and extract_email` branch). Returns True when armed.
+    """
+    if phone_verified or not session_ctx.get("verify_offer"):
+        return False
+    if not extract_email(msg):
+        return False
+    session_ctx["requires_phone_verification"] = True
+    session_ctx["signup_origin"] = session_ctx.get("signup_origin") or str(
+        session_ctx.get("verify_offer")
+    )
+    # The browse lane would read the address as a search; the handshake owns the turn.
+    session_ctx["activity_browse_active"] = False
+    session_ctx["verify_offer"] = None
+    return True
 
 
 def _handle_signup_phone_message(
