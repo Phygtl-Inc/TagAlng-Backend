@@ -139,6 +139,27 @@ def _is_browse_answer(
     )
 
 
+def _is_offered_browse_chip(
+    message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None = None
+) -> bool:
+    """A "Look beyond <community>" / "Look in <area>" pill Lana rendered last turn, sent
+    back verbatim. Both labels are remembered on the draft when offered, and the response
+    that carried them recorded its chip payloads (`_offered_chip_msgs`), so this is two
+    exact lookups — no reading of the words. Without it the classifier saw "Look beyond
+    SJSU" cold, released the lane, and the draft holding the search was wiped.
+    "Host a meet" is deliberately not one: it is a way OUT of browse."""
+    msg = str(message or "").strip()
+    draft = session_ctx.get("browse_draft")
+    if not msg or not isinstance(draft, dict):
+        return False
+    if msg not in (session_ctx.get("_offered_chip_msgs") or []):
+        return False
+    return any(
+        msg.casefold() == str(draft.get(k) or "").strip().casefold()
+        for k in ("_community_chip", "_area_offer_chip")
+    )
+
+
 def activity_browse_should_release(
     message: str,
     session_ctx: dict[str, Any],
@@ -167,6 +188,7 @@ def activity_browse_should_release(
         slots,
         is_valid_answer=_is_browse_answer,
         pivot_re=_PIVOT_OUT_RE,
+        is_offered_option=_is_offered_browse_chip,
     )
 
 
@@ -745,12 +767,36 @@ def _rank_far_matches(matched: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(matched, key=key)
 
 
+def _name_far_areas(events: list[dict[str, Any]]) -> None:
+    """Put the area on the venue line of every shown card beyond the local radius — the
+    same "<venue> · <area>" the far cards carry. A list can be headed "near you" when its
+    closest meet is near (_far_miles), and a 120-mile meet further down must not borrow
+    that header. Rows without a measured distance are the searched area's own."""
+    from app.discovery_route import activity_radius_meters, far_activity_details
+
+    local_m = float(activity_radius_meters())
+    for row in events[:5]:
+        if not isinstance(row, dict):
+            continue
+        try:
+            dist = float(row["distance_meters"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if dist <= local_m:
+            continue
+        where = _far_where(far_activity_details(row))
+        venue = str(row.get("venue_name") or "").strip()
+        if where and where not in venue:
+            row["venue_name"] = f"{venue} · {where}" if venue else where
+
+
 def _far_matches_facts(found: list[dict[str, Any]]) -> list[str]:
     """Facts for real matches beyond the radius, shown as cards. `found` is ranked and
     each item is far_activity_details(...) for one event."""
     lead = found[0]
     lines = "; ".join(
         f'"{f.get("title") or "a meet"}" in {_far_where(f)} (about {f["miles"]:,} miles)'
+        + (" — they host this one themselves" if f.get("hosted_by_you") else "")
         for f in found
     )
     return [
@@ -1433,9 +1479,11 @@ def _far_offer(
     label we offered; the interest carries over untouched.
 
     The candidate area is only offered when its events survive the SAME filter this
-    search just ran (and the caller's own meets are dropped, exactly as browse drops
-    them). Offering an area and then landing the user on "nothing here" is a worse
-    dead end than the empty state it was meant to replace.
+    search just ran. Offering an area and then landing the user on "nothing here" is a
+    worse dead end than the empty state it was meant to replace. The caller's own meets
+    count, marked, exactly as browse shows them (496aa78): a club runner who taps "Look
+    beyond SJSU" and asks for alumni events must not hear "nothing" while his own
+    alumni meet sits 28 miles off (Pouya, 2026-10-07).
     """
     from app.auth import jwt_user_id
     from app.discovery_route import activities_beyond_radius, far_activity_details
@@ -1446,11 +1494,10 @@ def _far_offer(
     draft["_area_offer_block_id"] = None
     draft["_area_offer_name"] = None
 
-    rows = activities_beyond_radius(
-        user_jwt, block_id, exclude_host_id=jwt_user_id(user_jwt)
-    )
+    rows = activities_beyond_radius(user_jwt, block_id)
     if not rows:
         return [], "", []
+    _mark_own(rows, jwt_user_id(user_jwt))
     matched, _label = _filter_events_by_query(rows, interest)
     if not matched or _filter_unchecked(rows):
         # Nothing judged on topic out there — including when the matcher could not run.
@@ -1468,7 +1515,7 @@ def _far_offer(
             venue = str(row.get("venue_name") or "").strip()
             row["venue_name"] = f"{venue} · {_far_where(det)}" if venue else _far_where(det)
             found_rows.append(row)
-            found.append(det)
+            found.append({**det, "hosted_by_you": bool(row.get("hosted_by_you"))})
             if len(found) >= _FAR_CARDS:
                 break
         if found:
@@ -2317,6 +2364,8 @@ def run_activity_browse_turn(
     draft["suggestions"] = _refine_suggestions(matched)
     session_ctx["browse_draft"] = draft
     session_ctx["activity_browse_active"] = True
+    if not comm:
+        _name_far_areas(matched)
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     # Telemetry for the impression log (§A7), by event id. Kept in ctx rather than on the
     # preview row: these are internal ranking numbers with nothing to render, and the wire
