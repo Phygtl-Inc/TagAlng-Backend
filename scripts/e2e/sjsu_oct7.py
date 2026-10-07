@@ -298,6 +298,11 @@ class Harness:
                     f"chips after tap={chips2}")
             r.check("reply_changed", (t2.get("assistant_message") or "") != (t1.get("assistant_message") or ""),
                     t2.get("assistant_message", ""))
+            # The seed has NO meet on these topics (chess / salsa) anywhere, so any card here
+            # is an off-topic meet passed off as "the closest" — the topic was lost on the
+            # tap (2026-10-08: draft interest became "this weekend").
+            r.check("no_off_topic_cards_after_beyond", not t2.get("activity_previews"),
+                    f"cards={titles(t2)} reply={t2.get('assistant_message')!r}")
             ok, why = self.judge.yes(
                 "Does this reply report the result of searching BEYOND the community (more widely / "
                 "the wider area), WITHOUT contradicting itself and WITHOUT asking the user again "
@@ -356,8 +361,12 @@ class Harness:
         r.check(f"zip_{target}_applied_within_2", applied_at is not None,
                 f"home_zip now={self.home_zip('newbie')!r} last={c.turns[-1].get('assistant_message')!r}")
         last = c.turns[-1].get("assistant_message") or ""
-        r.check("no_repeat_zip_ask", not (re.search(r"\bzip\b", last, re.I) and "?" in last
-                                          and re.search(r"(what|which|share|enter|tell me)", last, re.I)), last)
+        # A re-ask is a QUESTION about the ZIP. "Your ZIP is now 95192. What would you like
+        # to find?" confirms it and asks something else — judge each question on its own.
+        questions = re.findall(r"[^.!?]*\?", last)
+        r.check("no_repeat_zip_ask", not any(
+            re.search(r"\bzip\b", q, re.I) and re.search(r"(what|which|share|enter|tell me)", q, re.I)
+            for q in questions), last)
         r.transcript = c.turns
 
     def s9(self, r): self._zip(r, "95192", "change my zip")
