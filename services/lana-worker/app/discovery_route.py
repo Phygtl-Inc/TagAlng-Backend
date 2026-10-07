@@ -6995,6 +6995,8 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 "starts_label": _format_event_when(ev.get("starts_at")),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
                 "community": communities.get(str(ev.get("circle_place_ref") or "").strip()),
+                # The viewer hosts this one: the FE shows "You're hosting", not RSVP.
+                "hosted_by_you": bool(ev.get("hosted_by_you")),
                 "preview": True,
             }
         )

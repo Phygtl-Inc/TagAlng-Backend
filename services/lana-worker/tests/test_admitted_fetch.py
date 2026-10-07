@@ -1,7 +1,7 @@
 """The admitted fetch: one semantic query, distance as data, the rule decides (C3).
 
 Two properties are load-bearing. `truncated` is read off the RAW page before anything is
-dropped, so a full page that loses rows to the own-host exclusion still says it was cut —
+dropped, so a full page still says it was cut —
 "nothing further out matched" is never concluded from a page that was merely full. And a
 dead embedding model returns None, never ([], False): the caller falls back rather than
 telling the user their area is empty.
@@ -146,12 +146,11 @@ class TruncationTests(_FetchCase):
         )
         self.assertFalse(truncated)
 
-    def test_truncation_is_read_before_own_host_exclusion(self):
-        # A full page that loses rows to the exclusion was still cut by the RPC.
+    def test_a_full_page_with_own_meets_is_still_truncated(self):
         rows = [_ev(f"e{i}", host_id="me" if i % 2 else "host") for i in range(_LIMIT)]
         (admitted, truncated), _sb_, _spy = self._fetch(rows, me="me")
         self.assertTrue(truncated)
-        self.assertLess(len(admitted), _LIMIT)
+        self.assertEqual(len(admitted), _LIMIT)
 
     def test_truncation_follows_an_overridden_limit(self):
         (_rows, truncated), _sb_, _spy = self._fetch([_ev("a"), _ev("b")], limit=2)
@@ -159,11 +158,19 @@ class TruncationTests(_FetchCase):
 
 
 class RowShapeTests(_FetchCase):
-    def test_own_hosted_meets_are_dropped(self):
-        (admitted, _t), _sb_, _spy = self._fetch(
+    def test_own_hosted_meets_are_kept_and_marked(self):
+        # Pouya, 2026-10-07: the SJSU calendar imported under his account vanished for
+        # him alone. Own meets stay in the answer; the card says "you're hosting".
+        (admitted, _t), sb, _spy = self._fetch(
             [_ev("mine", host_id="me"), _ev("theirs", host_id="host")], me="me"
         )
-        self.assertEqual([r["id"] for r in admitted], ["theirs"])
+        self.assertEqual({r["id"]: r["hosted_by_you"] for r in admitted},
+                         {"mine": True, "theirs": False})
+        self.assertIsNone(self._rpc_args(sb).get("p_exclude_host_id"))
+
+    def test_signed_out_marks_nothing_as_yours(self):
+        (admitted, _t), _sb_, _spy = self._fetch([_ev("a", host_id="")], me=None)
+        self.assertFalse(admitted[0]["hosted_by_you"])
 
     def test_distance_and_similarity_are_stamped_as_floats_on_every_row(self):
         (admitted, _t), _sb_, _spy = self._fetch(

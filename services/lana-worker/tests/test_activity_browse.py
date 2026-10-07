@@ -810,5 +810,53 @@ class TestActivityPreviewHasTime(unittest.TestCase):
         self.assertEqual(rows[0]["starts_label"], "Wed Aug 12")
 
 
+
+class TestOwnMeetsShownAndNamed(unittest.TestCase):
+    """The caller's own meets are shown, flagged on the card and named in the lead-in."""
+
+    def _ev(self, eid, mine):
+        return {"id": eid, "title": f"meet {eid}", "starts_at": "2026-10-09T00:00:00Z",
+                "hosted_by_you": mine}
+
+    def test_preview_row_carries_the_flag(self) -> None:
+        from app.discovery_route import activity_previews_from_events
+        from app.models import ActivityPreviewRow
+
+        rows = activity_previews_from_events([self._ev("1", True), self._ev("2", False)])
+        self.assertEqual([r["hosted_by_you"] for r in rows], [True, False])
+        # And the wire model keeps it rather than silently dropping the field.
+        self.assertTrue(ActivityPreviewRow(**rows[0]).hosted_by_you)
+
+    def test_lead_in_names_own_meets(self) -> None:
+        from app.activity_browse import _format_browse_message
+
+        def msg(evs):
+            return _format_browse_message(evs, "alumni", phone_verified=True, lang="en")
+
+        self.assertNotIn("hosting", msg([self._ev("1", False)]))
+        self.assertIn("This one's yours", msg([self._ev("1", True)]))
+        self.assertIn("all yours", msg([self._ev("1", True), self._ev("2", True)]))
+        # All yours: nothing to RSVP to, so the RSVP tail must not contradict the cards.
+        self.assertNotIn("RSVP", msg([self._ev("1", True), self._ev("2", True)]))
+        self.assertIn("RSVP", msg([self._ev("1", True), self._ev("2", False)]))
+        self.assertIn("You're hosting 1 of these",
+                      msg([self._ev("1", True), self._ev("2", False)]))
+        # Only the five rendered cards count: a sixth own meet is never on screen.
+        five_theirs = [self._ev(str(i), False) for i in range(5)]
+        self.assertNotIn("hosting", msg(five_theirs + [self._ev("6", True)]))
+
+    def test_block_fetch_keeps_and_marks_own(self) -> None:
+        from app.activity_browse import _fetch_block_events
+
+        rows = [{"id": "a", "host_id": "me"}, {"id": "b", "host_id": "x"}]
+        with patch("app.discovery_route.fetch_preview_events_on_block",
+                   return_value=rows) as fetch, \
+             patch("app.auth.jwt_user_id", return_value="me"), \
+             patch("app.activity_browse._attach_host_names"):
+            out = _fetch_block_events("jwt", "zip-95138", weekend_only=False)
+        self.assertNotIn("exclude_host_id", fetch.call_args.kwargs)
+        self.assertEqual({r["id"]: r["hosted_by_you"] for r in out}, {"a": True, "b": False})
+
+
 if __name__ == "__main__":
     unittest.main()

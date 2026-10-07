@@ -208,6 +208,18 @@ _STRETCH_BEFORE_WIDEN = True
 # a consumer in hand — not a reconstruction of a rule nobody ever wrote down.
 
 
+def _mark_own(events: list[dict[str, Any]], me: str | None) -> None:
+    """Flag the caller's own meets in place (``hosted_by_you``) instead of dropping them.
+
+    Browse used to hide them because every card reads "tap to RSVP". That hid real
+    supply: a calendar imported under a team member's account vanished for exactly that
+    person (Pouya, 2026-10-07). The card and the lead-in say "you're hosting" instead.
+    """
+    for e in events:
+        if isinstance(e, dict):
+            e["hosted_by_you"] = bool(me) and str(e.get("host_id") or "") == str(me)
+
+
 def _attach_host_names(events: list[dict[str, Any]]) -> None:
     """Stamp each event with `host_name` (the host's nickname) so the filter can match
     'hosted by <name>' queries. Best-effort — leaves host_name absent on any failure."""
@@ -249,8 +261,8 @@ def _fetch_block_events(
             limit=_BROWSE_POOL,
             pool=_BROWSE_POOL,
             weekend_only=weekend_only,
-            exclude_host_id=jwt_user_id(user_jwt),
         )
+        _mark_own(events, jwt_user_id(user_jwt))
         _attach_host_names(events)
         return events
     except Exception:  # noqa: BLE001
@@ -329,8 +341,8 @@ def _fetch_admitted_events(
     # 3. Rank by meaning, distance returned as data. p_min_similarity is the floor at
     #    distance zero — the lowest value the rule can ever admit — so SQL drops what
     #    could never pass while still returning unembedded rows (similarity NULL).
-    # The caller's own meets are excluded in SQL (20261205120000), so they never take a
-    # slot in the page and set the truncation flag on their own; step 6 stays as a backstop.
+    # The caller's own meets stay in (step 6 marks them): an imported calendar hosted
+    # from your account is still what's on, and hiding it read as "nothing there".
     me = jwt_user_id(user_jwt)
     try:
         from app.event_publish import roll_recurring_events
@@ -349,7 +361,6 @@ def _fetch_admitted_events(
                     "p_circle_place_id": None,
                     "p_min_similarity": _admission_floor(0.0),
                     "p_limit": int(limit),
-                    "p_exclude_host_id": str(me) if me else None,
                 },
             )
             .execute()
@@ -379,9 +390,8 @@ def _fetch_admitted_events(
             r["similarity"] = None
         rows.append(r)
 
-    # 6. The caller's own meets — browse offers every card as "tap to RSVP".
-    if me:
-        rows = [r for r in rows if str(r.get("host_id") or "") != str(me)]
+    # 6. The caller's own meets — shown, but marked so the card and copy say so.
+    _mark_own(rows, me)
 
     # 7.
     if weekend_only:
@@ -1669,6 +1679,15 @@ def _format_browse_message(
         if phone_verified
         else t("browse.events_tail_guest", lang)
     )
+    # Only the cards the FE renders (activity_previews_from_events takes five).
+    mine = sum(1 for e in events[:5] if isinstance(e, dict) and e.get("hosted_by_you"))
+    if mine:
+        shown = len([e for e in events[:5] if isinstance(e, dict)])
+        if mine < shown:
+            tail = f"{t('browse.events_yours_some', lang, n=mine)} {tail}"
+        else:
+            # Nothing on screen to RSVP to — the RSVP tail would contradict the cards.
+            tail = t("browse.events_yours_one" if mine == 1 else "browse.events_yours_all", lang)
     return f"{head} {tail}"
 
 
@@ -2047,9 +2066,8 @@ def run_activity_browse_turn(
         from app.auth import jwt_user_id
         from app.community_scope import community_events
 
-        events = community_events(
-            str(comm["place_id"]), exclude_host_id=jwt_user_id(user_jwt)
-        )
+        events = community_events(str(comm["place_id"]))
+        _mark_own(events, jwt_user_id(user_jwt))
         _attach_host_names(events)
         truncated = False
     elif interest and not _OPEN_RE.match(interest):

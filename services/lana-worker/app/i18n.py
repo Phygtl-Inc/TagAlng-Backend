@@ -820,6 +820,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Toca uno para apuntarte, o dime cómo afinar la lista.",
         "pt": "Toque em um para confirmar presença, ou me diga como afinar a lista.",
     },
+    # Some/all of the cards are the viewer's own meets (shown, not hidden — 2026-10-07).
+    "browse.events_yours_some": {
+        "en": "You're hosting {n} of these.",
+        "es": "Tú organizas {n} de estos.",
+        "pt": "Você organiza {n} destes.",
+    },
+    "browse.events_yours_one": {
+        "en": "This one's yours — you're hosting it. Tell me to narrow it or look for something else.",
+        "es": "Este es tuyo: tú lo organizas. Dime cómo afinar la lista o busco otra cosa.",
+        "pt": "Este é seu: você que organiza. Me diga como afinar a lista ou procuro outra coisa.",
+    },
+    "browse.events_yours_all": {
+        "en": "These are all yours — you're hosting them. Tell me to narrow it or look for something else.",
+        "es": "Todos estos son tuyos: tú los organizas. Dime cómo afinar la lista o busco otra cosa.",
+        "pt": "Todos estes são seus: você que organiza. Me diga como afinar a lista ou procuro outra coisa.",
+    },
     "browse.events_tail_guest": {
         "en": "Verify your email to RSVP, or tell me to narrow it.",
         "es": "Verifica tu correo para apuntarte, o dime cómo afinar la lista.",
