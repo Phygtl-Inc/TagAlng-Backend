@@ -238,12 +238,25 @@ class AdmissionOrderTests(_FetchCase):
         self.assertEqual([r["id"] for r in admitted], ["later", "sooner", "fresh"])
 
     def test_the_rule_actually_runs(self):
-        # 0.48 at 2 km is under the clamp; 0.9 at 30 km clears its higher floor.
-        (admitted, _t), _sb_, _spy = self._fetch(
-            [_ev("guitar", similarity=0.48, distance_meters=2000.0),
-             _ev("violin", similarity=0.90, distance_meters=30000.0)]
-        )
-        self.assertEqual([r["id"] for r in admitted], ["violin"])
+        # 0.9 at 30 km clears its floor; 0.40 at 120 km does not and is dropped. 0.48 at
+        # 2 km is under the clamp but INSIDE the local radius, so it still reaches the
+        # topic matcher — ranked after everything the rule admitted (prod 2026-10-07:
+        # the floor hid the Language Exchange Club 13 km away).
+        with patch("app.discovery_route.activity_radius_meters", return_value=40000.0):
+            (admitted, _t), _sb_, _spy = self._fetch(
+                [_ev("guitar", similarity=0.48, distance_meters=2000.0),
+                 _ev("violin", similarity=0.90, distance_meters=30000.0),
+                 _ev("piano", similarity=0.40, distance_meters=120000.0)]
+            )
+        self.assertEqual([r["id"] for r in admitted], ["violin", "guitar"])
+
+    def test_beyond_the_local_radius_the_floor_still_decides(self):
+        with patch("app.discovery_route.activity_radius_meters", return_value=40000.0):
+            (admitted, _t), _sb_, _spy = self._fetch(
+                [_ev("far_weak", similarity=0.50, distance_meters=90000.0),
+                 _ev("far_strong", similarity=0.95, distance_meters=90000.0)]
+            )
+        self.assertEqual([r["id"] for r in admitted], ["far_strong"])
 
 
 if __name__ == "__main__":
