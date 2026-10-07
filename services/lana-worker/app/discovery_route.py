@@ -3537,7 +3537,58 @@ def _tip_seek_fallback_reply(
         )
     except Exception:  # noqa: BLE001 — the plain list is still the answer
         logging.getLogger(__name__).warning("google_reco_cards_stamp_failed", exc_info=True)
+    # The lead-in names Google, so it may only stand when something from Google is on the
+    # page. The cards drop our own community rows, and a pool that was nothing BUT those
+    # (the bare-place "SJSU" search returned the campus, which is our community place)
+    # still got "here's what's nearby (from Google …)" over no Google list (prod
+    # 2026-10-06). Decided from the surfaces as built, not from the search having run.
+    shown = tip_fallback_shown(ctx)
+    if reply and not shown["google"]:
+        logging.getLogger(__name__).info("tip_seek_fallback.no_google_shown shown=%s", shown)
+        if not shown["circles"]:
+            for key in ("google_place_suggestions", "rec_chips", "rec_widen_noun"):
+                ctx[key] = None
+            return ""
+        reply = compose_reply(
+            goal=(
+                "Nobody has recommended one yet for what the user asked. The only places "
+                "under your message are from their own communities — not from Google, and "
+                "not a personal recommendation. Say that in one short sentence. Never call "
+                "them Google results, never list or describe them, never imply anything was "
+                "posted."
+            ),
+            facts=[
+                f"What they asked for: {_ask_excerpt(detail or msg)}",
+                f"Places shown from their communities: {shown['circles']}",
+            ],
+            session_ctx=session_ctx,
+            fallback="No one has recommended one yet — here are places from your communities.",
+            max_sentences=1,
+        )
     return reply
+
+
+def tip_fallback_shown(ctx: dict[str, Any]) -> dict[str, int]:
+    """What the tip fallback actually puts on screen: {"google": n, "circles": n}.
+
+    Mirrors the surface: the Google cards, plus the plain rows the cards do not already
+    cover (community rows are always plain rows, under their own heading). The lead-in and
+    the ask-neighbours offer are both written from this, so neither can describe a list
+    that is not there — or deny one that is."""
+    from app.google_reco_cards import CTX_KEY
+
+    cards = [c for c in (ctx.get(CTX_KEY) or []) if isinstance(c, dict)]
+    covered = {str(c.get("subject_ref") or "").removeprefix("google:") for c in cards}
+    google = len(cards)
+    circles = 0
+    for p in ctx.get("google_place_suggestions") or []:
+        if not isinstance(p, dict) or not str(p.get("name") or "").strip():
+            continue
+        if (p.get("community") or {}).get("member_count"):
+            circles += 1
+        elif not (p.get("place_id") and str(p["place_id"]) in covered):
+            google += 1
+    return {"google": google, "circles": circles}
 
 
 def _tip_seek_fallback_core(
@@ -3851,8 +3902,24 @@ def _read_offer_reply(*, offer: str, detail: str, msg: str) -> str:
     return "other"
 
 
-def _compose_tip_ask_offer_line(detail: str, session_ctx: dict[str, Any]) -> str:
-    """The ONE offer that gates the write. Ends the recommendation answer."""
+def _compose_tip_ask_offer_line(
+    detail: str, session_ctx: dict[str, Any], shown: dict[str, int] | None = None
+) -> str:
+    """The ONE offer that gates the write. Ends the recommendation answer.
+
+    `shown` is what the answer just put on screen (tip_fallback_shown). The line follows
+    the lead-in, so it is told what that lead-in showed: given only "nothing posted yet"
+    the model wrote "I couldn't find any recommendations" straight after a sentence that
+    had just introduced a Google list (prod 2026-10-06)."""
+    facts = [f"What they asked for: {_ask_excerpt(detail)}", "Nothing has been posted yet."]
+    if shown is not None:
+        facts.append(
+            "Already shown under your message: "
+            f"{shown.get('google', 0)} places from Google (not personal recommendations), "
+            f"{shown.get('circles', 0)} places from their own communities. The sentence "
+            "before yours already introduced them — never say you found nothing or "
+            "couldn't find any, and never describe them again."
+        )
     return compose_reply(
         goal=(
             "You just answered the user's recommendation ask with what you could find. "
@@ -3860,7 +3927,7 @@ def _compose_tip_ask_offer_line(detail: str, session_ctx: dict[str, Any]) -> str
             "short question: would they like you to also ask their neighbors nearby for a "
             "recommendation of their own? Make clear it is their call."
         ),
-        facts=[f"What they asked for: {_ask_excerpt(detail)}", "Nothing has been posted yet."],
+        facts=facts,
         session_ctx=session_ctx,
         fallback="Want me to ask your neighbors for their own recommendation too?",
         max_sentences=1,
@@ -4005,21 +4072,68 @@ def _stamp_tip_ask_draft(
     detail: str,
     category: str | None,
     session_ctx: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     """The seek-side receipt of what Lana understood (§12d). Best-effort — an ask that
-    cannot be drafted still gets answered."""
+    cannot be drafted still gets answered. Returns the draft ({} when none)."""
     from app.tip_ask_draft import stamp_ask_draft
 
     try:
-        stamp_ask_draft(
+        return stamp_ask_draft(
             ctx,
             msg=msg,
             detail=detail,
             category=category,
             locality=_tip_ask_locality(session_ctx),
-        )
+        ) or {}
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("ask_draft_stamp_failed")
+        return {}
+
+
+def _tip_kind_ask_turn(
+    ctx: dict[str, Any],
+    *,
+    kinds: list[dict[str, Any]],
+    msg: str,
+    detail: str,
+    session_ctx: dict[str, Any],
+    phase: str,
+    community: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """"What kind of recommendation?" — the answer turn for an ask that named no kind.
+
+    Nothing was searched on Google and nothing is offered for posting: the question IS the
+    turn ([[rapport-ask-stacking-and-tile-context]]). The receipt card stands down too — a
+    "Looks good" under a question would confirm an ask that does not exist yet."""
+    chips = [
+        {"label": str(k["label"]), "message": str(k["ask"]), "style": "secondary"}
+        for k in kinds
+        if isinstance(k, dict) and k.get("label") and k.get("ask")
+    ][:5]
+    ctx["rec_chips"] = chips
+    ctx["ask_draft"] = None
+    ctx["ask_draft_pending"] = None  # None, not pop — [[ctx-pop-resurrection]]
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_seek_kind_ask")
+    facts = [
+        f"What they asked: {_ask_excerpt(msg or detail)}",
+        "The buttons under your message offer: " + ", ".join(c["label"] for c in chips),
+    ]
+    if community:
+        facts.append(f"They are inside the community {community.get('name')}")
+    reply = compose_reply(
+        goal=(
+            "The user asked for recommendations without saying what kind. Nobody has "
+            "shared one that fits yet, and you have not looked anything up. Ask ONE short "
+            "question: what kind of recommendation are they after? You may name two or three "
+            "of the options on the buttons as examples. Never list places, never say you "
+            "found or could not find anything, and never imply anything was posted."
+        ),
+        facts=facts,
+        session_ctx=session_ctx,
+        fallback="What kind of recommendation are you after?",
+        max_sentences=1,
+    )
+    return reply, ctx, ctx["last_routing"], []
 
 
 def _tip_seek_answer_turn(
@@ -4128,7 +4242,7 @@ def _tip_seek_answer_turn(
     if block_id and not resolve_block_id(ctx, home_block_id):
         ctx["preview_block_id"] = block_id
 
-    _stamp_tip_ask_draft(
+    _draft = _stamp_tip_ask_draft(
         ctx, msg=msg, detail=detail, category=category, session_ctx=session_ctx
     )
     # Remembered before the search, not after it: a re-rank or a widen has to work even when
@@ -4223,6 +4337,22 @@ def _tip_seek_answer_turn(
         # instead, and its own generic rule still keeps everything for "somewhere fun".
         neighbor_tips = keep_asked_kind(
             neighbor_tips, (_parsed or {}).get("subject_kind") or _ask
+        )
+
+    # Nobody had one, and the ask never said what KIND of recommendation it is: "do you have
+    # recommendations at SJSU" searched Google for the bare place and answered with the
+    # campus itself under "here's what's nearby" (prod 2026-10-06). Ask what kind first,
+    # with the kinds as chips — each posts the whole ask back, so the next turn is an
+    # ordinary specific ask. The draft model decides (kind_options exists only when it
+    # read the ask as kind-less); a picked category chip, a re-rank or a widen already
+    # carries the kind, so those never stop here.
+    _kinds = (_draft.get("kind_options") if isinstance(_draft, dict) else None) or []
+    if not neighbor_tips and isinstance(_kinds, list) and _kinds and not (
+        weights or widen or _types
+    ):
+        return _tip_kind_ask_turn(
+            ctx, kinds=_kinds, msg=msg, detail=detail, session_ctx=session_ctx, phase=phase,
+            community=_in_comm,
         )
 
     if _comm and not neighbor_tips and block_id:
@@ -4363,7 +4493,10 @@ def _tip_seek_answer_turn(
             ),
         )
     else:
-        reply = f"{rec} {_compose_tip_ask_offer_line(detail, session_ctx)}".strip()
+        reply = (
+            f"{rec} "
+            f"{_compose_tip_ask_offer_line(detail, session_ctx, tip_fallback_shown(ctx))}"
+        ).strip()
     _stamp_tip_ask_offer(ctx, detail=detail, category=category)
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_seek_answered")
     return reply, ctx, ctx["last_routing"], []

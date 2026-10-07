@@ -33,7 +33,7 @@ _SYSTEM = (
     "You turn ONE neighbor's recommendation ask into a compact draft card, in a "
     "neighborhood app. Output only valid JSON: "
     '{"title":"…","detail":"…","category":"…","locality":"…","qualifiers":["…"],'
-    '"recommended_by":"…"}. '
+    '"recommended_by":"…","kind_named":true,"kind_options":[{"label":"…","ask":"…"}]}. '
     "title = the ask as a short noun phrase a person would put on a card, 2-5 words "
     "('Gentle pediatric dentist', 'Weekend dog walker'). NEVER a sentence, never a "
     "question, never 'Looking for…'. "
@@ -50,6 +50,15 @@ _SYSTEM = (
     "short chip label in their words ('recommended by someone from Turkey', 'from a Spanish "
     "speaker', 'from a marathon runner'); empty string if they set none. It is NOT also a "
     "qualifier. 'Turkish restaurant' is about the restaurant — the category, not this. "
+    "kind_named = false ONLY when they never said what KIND of thing, place or person they "
+    "want a recommendation for — 'any recommendations?', 'do you have recommendations at "
+    "SJSU', 'what do people recommend around here'. A place or area alone is not a kind. "
+    "Anything that names a kind is true, however broad or casual: 'good coffee near SJSU', "
+    "'somewhere to eat', 'a dentist', 'something fun to do', 'gaming laptop'. "
+    "kind_options = when kind_named is false, 3-5 kinds of recommendation that make sense "
+    "for where and how they asked (near a campus: food, coffee, study spots…), each as "
+    "label = 1-2 words for a button and ask = the whole ask rewritten with that kind, in "
+    "their words and place ('good coffee near SJSU'). When kind_named is true, []. "
     "Reproduce their language — if they wrote in Spanish, "
     "every field is in Spanish. Anything you are unsure of is an empty string, never a guess."
 )
@@ -157,6 +166,23 @@ def build_ask_draft(
         chips = [c for c in chips if c["label"].lower() != by.lower()][:5]
         chips.append(_chip(by, "recommended_by"))
 
+    # Nothing to search for yet: "do you have recommendations at SJSU" named a place and no
+    # kind, so a Places search ran on the bare place and answered with the campus itself
+    # (prod 2026-10-06). The model reads that, and offers the kinds as chips. Only an
+    # explicit False counts — a missing field, a failed call or the fallback draft all keep
+    # today's straight-through answer.
+    kind_options: list[dict[str, str]] = []
+    if raw.get("kind_named") is False:
+        for opt in raw.get("kind_options") or []:
+            if not isinstance(opt, dict):
+                continue
+            label = str(opt.get("label") or "").strip()[:24]
+            ask = str(opt.get("ask") or "").strip()[:120]
+            if label and ask:
+                kind_options.append({"label": label, "ask": ask})
+            if len(kind_options) == 5:
+                break
+
     return {
         "title": title,
         "detail": _s("detail")[:200],
@@ -167,6 +193,9 @@ def build_ask_draft(
         # mean Lana still needs something before she can look, which this lane handles by
         # asking (ZIP, verification) rather than by shipping a half-draft.
         "ready": True,
+        # Present only when the ask named no kind AND the model offered some — the answer
+        # turn asks "what kind?" with these instead of searching (discovery_route).
+        **({"kind_options": kind_options} if kind_options else {}),
     }
 
 
