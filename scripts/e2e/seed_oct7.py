@@ -169,7 +169,11 @@ class Seeder:
               venue: str, block: str, lat: float, lng: float, community: str | None,
               tags: str) -> str:
         end = start + dt.timedelta(hours=hours)
-        self.sql(f"delete from public.events where host_id={self.lit(host)} and title={self.lit(title)}")
+        # Impressions from earlier runs reference the old row; its FK is ON DELETE SET NULL
+        # but candidate_present forbids an impression with no candidate, so the delete fails.
+        self.sql(f"""delete from public.recommendation_impressions where event_id in
+                       (select id from public.events where host_id={self.lit(host)} and title={self.lit(title)});
+                     delete from public.events where host_id={self.lit(host)} and title={self.lit(title)}""")
         return self.sql(
             f"""insert into public.events (host_id, cluster_id, block_id, title, description,
                    starts_at, ends_at, location, venue_name, cohort_tags, max_attendees,
