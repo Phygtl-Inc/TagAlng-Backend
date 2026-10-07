@@ -19,7 +19,7 @@ LANA_UNIFIED_OPENING_GUEST = (
 # A signed-in mom who hasn't told us her name yet is greeted with the name-ask up front —
 # it's needed anyway, and asking first avoids interrupting a topic mid-chat.
 LANA_UNIFIED_OPENING_NEEDS_NAME = (
-    "Before we dive in — what should neighbors call you? A first name's all I need."
+    "Before we dive in — what should people call you? A first name's all I need."
 )
 
 

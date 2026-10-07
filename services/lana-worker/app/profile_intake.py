@@ -438,7 +438,7 @@ def _parse_profile_turn(
         # asked up front on its own turn, so fall back to a neutral beat instead.
         guest_collects_name = guest_step in ("post_verify", "intro_declined")
         if gaps.get("needs_display_name") and guest_collects_name:
-            assistant_message = "Love that — what should neighbors call you?"
+            assistant_message = "Love that — what should people call you?"
         elif needs_kids_followup(history=history, ui=ui, topics_covered=covered):
             assistant_message = "Little ones at home, or mostly grown?"
         else:

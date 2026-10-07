@@ -152,7 +152,9 @@ def test_a_us_city_resolves_to_its_zip_and_abroad_does_not() -> None:
     with mock.patch("app.community_hq.geocode_city",
                     return_value={"city": "San Jose, CA", "lat": 37.3, "lng": -121.9}), \
          mock.patch.object(sp, "_postal_code_at", return_value=("95113", "US")):
-        assert sp.resolve_search_place("San Jose") == {"label": "San Jose, CA", "zip5": "95113"}
+        assert sp.resolve_search_place("San Jose") == {
+            "label": "San Jose, CA", "zip5": "95113", "lat": 37.3, "lng": -121.9,
+        }
     with mock.patch("app.community_hq.geocode_city",
                     return_value={"city": "Lisbon, Portugal", "lat": 38.7, "lng": -9.1}), \
          mock.patch.object(sp, "_postal_code_at", return_value=("11000", "PT")):

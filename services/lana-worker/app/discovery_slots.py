@@ -626,7 +626,8 @@ _SYSTEM = (
     "what are people swapping, neighborhood activity) — NOT social.propose_intro even if a prior turn offered an intro. "
     "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
     "Use settings.change_zip for the user's OWN moved/updated home ZIP (never a community's "
-    "location — see community_ask='manage'); settings.change_name for name changes "
+    "location — see community_ask='manage'; never a town they say they are in or want this "
+    "chat to use — that is current_place); settings.change_name for name changes "
     "(change my name, call me X, my name is X). "
     "Use help.what_can_you_do for help/what can you do — INCLUDING skepticism or challenge "
     "about Lana's usefulness, value, or intelligence ('how would I know you're useful', "
@@ -722,6 +723,7 @@ def _empty_slots() -> dict[str, Any]:
         "community_topic": None,
         "search_place": None,
         "activity_topic": None,
+        "current_place": None,
         "profile_photo_action": "none",
         "signal_intent": None,
         "signal_detail": None,
@@ -885,6 +887,10 @@ def ai_parse_discovery_turn(
         # read; null is an open ask ("what's going on this week?").
         activity_topic = raw.get("activity_topic")
         activity_topic_s = str(activity_topic).strip()[:80] if activity_topic else None
+        # Where they say they ARE for this conversation — kept for the session's searches
+        # until they name another (app/chat_area.py). The AI's read, never a keyword list.
+        current_place = raw.get("current_place")
+        current_place_s = str(current_place).strip()[:80] if current_place else None
         community_parent = raw.get("community_parent")
         community_parent_s = str(community_parent).strip()[:80] if community_parent else None
         chapter_action = str(raw.get("chapter_action") or "").strip().lower()
@@ -982,6 +988,7 @@ def ai_parse_discovery_turn(
             "community_topic": community_topic_s,
             "search_place": search_place_s,
             "activity_topic": activity_topic_s,
+            "current_place": current_place_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
             "clarify_options": clarify_options,
@@ -1306,6 +1313,12 @@ def _discovery_slot_payload(
         '  "activity_topic": "with discovery.find_activities or looking.meet: WHAT the activity is '
         'about in 1-4 plain words — never the day, time, place or community; null for an open ask '
         'that names only when or where (anything fun nearby?)",\n'
+        '  "current_place": "the town or city the user says they ARE in right now, or asks Lana to '
+        'use or keep using for this conversation (a statement of where they are, or an answer to '
+        'which area to use) — the place name only, in its usual English spelling; null when they '
+        'give only a ZIP, mean their saved home, ask to search somewhere they are NOT (that is '
+        'search_place), or name a venue or community rather than a town. Saying where they are '
+        'is NOT settings.change_zip — that is only an explicit request to change their saved home ZIP",\n'
         '  "community_topic": "with discovery.communities, when they are LOOKING FOR communities '
         'about a subject or for a kind of person (any communities for podcasters?, is there a book '
         'club?, a group for new moms) — the subject in 1-4 plain words (podcasting, book club, new '
@@ -1429,6 +1442,14 @@ def slots_search_place(slots: dict[str, Any] | None) -> str | None:
     if not slots:
         return None
     place = str(slots.get("search_place") or "").strip()
+    return place[:80] or None
+
+
+def slots_current_place(slots: dict[str, Any] | None) -> str | None:
+    """The town/city they say they are in for this conversation, from AI slots."""
+    if not slots:
+        return None
+    place = str(slots.get("current_place") or "").strip()
     return place[:80] or None
 
 

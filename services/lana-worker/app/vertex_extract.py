@@ -167,7 +167,7 @@ insulting and obvious. You are the only thing that can change it — be strict:
 AFFIRM — never the name they deny, and never the negation word itself: "my name is not Orlando but \
 Tom" → "Tom" (NOT "not", NOT "Orlando"); "it's Tom, not Orlando" → "Tom"; "wrong, I'm Tom" → "Tom".
   · A denial with NO replacement is null, not a name: "I'm not Joe" → null, "that's not my name" → null.
-  · When LANA JUST ASKED what to call them ("what should neighbors call you?", "what's your \
+  · When LANA JUST ASKED what to call them ("what should people call you?", "what's your \
 name?"), a bare word IS the answer to that — "Tommaso" → "Tommaso". Take it.
   · For ANY OTHER question in LANA JUST ASKED, a bare word is an ANSWER to that question, not a \
 name. A city, venue, gym, church, dish, team, or time is never a nickname — asked "which Lagoinha \
