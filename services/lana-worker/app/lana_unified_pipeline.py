@@ -2444,6 +2444,23 @@ def run_lana_unified_pipeline(
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
 
+    # A town they say they are in is this conversation's search area from now on — kept
+    # before the browse lane or the policy answers, so a reply that acknowledges it and
+    # the search on the next turn agree (app/chat_area.py). Same cached classifier read.
+    try:
+        from app.chat_area import note_chat_area
+
+        note_chat_area(
+            session_ctx,
+            _tip_share_slots(
+                session_ctx, user_message, history=history, home_block_id=home_block_id,
+                phone_verified=phone_verified, timer=timer,
+            ),
+            user_jwt,
+        )
+    except Exception:  # noqa: BLE001 — never break the turn over a remembered place
+        logging.getLogger(__name__).exception("chat_area_note_failed")
+
     # Sticky agentic "what's happening" browse — ask interest, show the block's real events,
     # re-filter on follow-ups ("show me cricket ones"). A different ACTIVITY stays in-flow as
     # a refine; only a pivot to another intent (find people / a meet / RSVP) or abandon releases.
@@ -2502,23 +2519,6 @@ def run_lana_unified_pipeline(
             return bool(matched)
         except Exception:  # noqa: BLE001 — a broken import must fail SAFE (skip policy)
             return True
-
-    # A town they say they are in is this conversation's search area from now on — kept
-    # before anyone answers, so a policy reply that acknowledges it and the search on the
-    # next turn agree (app/chat_area.py). Same cached classifier read, no extra call.
-    try:
-        from app.chat_area import note_chat_area
-
-        note_chat_area(
-            session_ctx,
-            _tip_share_slots(
-                session_ctx, user_message, history=history, home_block_id=home_block_id,
-                phone_verified=phone_verified, timer=timer,
-            ),
-            user_jwt,
-        )
-    except Exception:  # noqa: BLE001 — never break the turn over a remembered place
-        logging.getLogger(__name__).exception("chat_area_note_failed")
 
     # ── Unified conversational policy (decide_turn, engineering doc §C.1) ──────
     # LANA_DECIDE_TURN: off (default) | shadow | on. Shadow logs the policy's

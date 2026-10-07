@@ -96,3 +96,19 @@ def test_guest_browse_with_cards_offers_verify_and_verified_does_not() -> None:
 
     assert run(False).get("verify_offer") == "rsvp"
     assert not run(True).get("verify_offer")
+
+
+def test_pipeline_hooks_run_before_any_lane_or_the_policy() -> None:
+    """The offered-verify email is armed, and a stated town noted, before the browse lane
+    and decide_turn can read the turn (same structural check as test_nudge_target)."""
+    import inspect
+
+    from app import lana_unified_pipeline as pipe
+
+    src = inspect.getsource(pipe.run_lana_unified_pipeline)
+    arm = src.index("take_offered_verify_email(session_ctx, user_message")
+    note = src.index("note_chat_area(")
+    browse = src.index('if session_ctx.get("activity_browse_active"):')
+    policy = src.index("_decide_mode = decide_turn_mode()")
+    assert arm < browse and arm < policy
+    assert note < browse and note < policy
