@@ -1512,8 +1512,11 @@ class TestCommunityEventsRender(unittest.TestCase):
         self.assertEqual([c["title"] for c in cards], ["Sushi & Social Meetup"])
         # The id is what makes the card openable — without it there is nothing to tap.
         self.assertEqual(cards[0]["activity_id"], "e1")
-        # And the reply must point at it instead of describing it.
-        self.assertIn("right below", " ".join(compose.call_args.kwargs["facts"]))
+        # The cards are background for the model, never a line it reads out ("its card is
+        # right below your message" was the model narrating our own note, 2026-10-08).
+        facts = " ".join(compose.call_args.kwargs["facts"])
+        self.assertIn("Background, not something to say: these meets are shown", facts)
+        self.assertNotIn("right below", facts)
 
     def test_the_response_gate_lets_them_through(self) -> None:
         """main._onboarding_fields drops activity_previews unless the intent is this one."""

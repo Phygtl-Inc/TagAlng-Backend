@@ -1598,13 +1598,22 @@ def _community_about_turn(
         facts.append(f"It is a chapter (a club inside) of {parent['place_name']}")
     else:
         try:
-            n_chapters = len(community_chapters(user_id, pid).get("chapters") or [])
+            chapters = community_chapters(user_id, pid).get("chapters") or []
         except ValueError:
-            n_chapters = 0
-        if n_chapters:
+            chapters = []
+        names = [
+            str((c or {}).get("place_name") or (c or {}).get("name") or "").strip()
+            for c in chapters
+        ]
+        names = [n for n in names if n]
+        if names:
+            # By name: with only a count the model called a meet title "the club inside it"
+            # (prod 2026-10-08, SJSU's Language Exchange Club event named as its club).
+            facts.append("Clubs (chapters) inside it on Lana: " + "; ".join(names[:5]))
+        elif chapters:
             facts.append(
-                f"It has {n_chapters} club{'s' if n_chapters != 1 else ''} (chapters) inside "
-                "it on Lana — mention it in passing; they can ask to see them"
+                f"It has {len(chapters)} club{'s' if len(chapters) != 1 else ''} (chapters) "
+                "inside it on Lana; their names are not known here"
             )
     # The community the chat is INSIDE carries what its creator said it is for — the one
     # fact that answers "what do people do here?" on day one, when nobody has added
@@ -1669,9 +1678,14 @@ def _community_about_turn(
         + (f", plus {curious} curious about it" if curious else "")
     )
     if features:
-        facts.append("What members say it has: " + ", ".join(features[:6]))
+        # Amenity trivia (whiteboards, monitors) led every "what is SJSU?" answer while
+        # its clubs went unmentioned (2026-10-08) — scoped to the one question it answers.
+        facts.append(
+            "Amenities members mentioned — relevant ONLY to a question about what it has "
+            "or offers; leave them out of any other answer: " + ", ".join(features[:6])
+        )
     if events:
-        facts.append("Coming up there: " + "; ".join(events[:3]))
+        facts.append("Meets on its calendar (events, not clubs): " + "; ".join(events[:3]))
         # The meets themselves, as cards — the community screen shows them and chat only
         # described them, so "there's a Sushi & Social Meetup coming up" arrived with
         # nothing to open (QA 2026-08-21). Same rows the browse lane renders.
@@ -1693,8 +1707,8 @@ def _community_about_turn(
             if str((e or {}).get("title") or "").strip()
         ][:5]
         facts.append(
-            "Their cards are under your message — say it is right below rather than "
-            "describing it and leaving them to ask for it"
+            "(Background, not something to say: these meets are shown as cards with your "
+            "reply.)"
         )
     else:
         # An empty calendar is an ANSWER, not a failed read. Without saying so she wrote
@@ -1747,7 +1761,8 @@ def _community_about_turn(
         "named": True,
     }
     facts.append(
-        "Its own card — open it, or Join from it — is the first thing under your message"
+        "(Background, not something to say: a card for it, with Open and Join, is shown "
+        "with your reply.)"
     )
     if membership == "visitor":
         # Being let in is a real next step, and a "yes" should mean something. The card
@@ -1755,12 +1770,13 @@ def _community_about_turn(
         _arm_join(session_ctx, pid, place, add_chip=False)
     return compose_reply(
         goal=(
-            "Answer what they actually asked about this place, using ONLY the facts. If "
-            "they asked whether it exists or is on here, the FIRST words are yes — it is "
-            "here — then what it is. If the facts do not hold what they asked, say that "
-            "plainly first and then say what you DO know about it — never answer a "
-            "different question, never open with whether they are in it, and never "
-            "list other communities instead. TWO SHORT SENTENCES."
+            "Answer the question they actually asked about this place, using ONLY the "
+            "facts. Confirm that it exists on Lana only when existence is what they asked; "
+            "a question about what it is gets what it is. If the facts do not hold what "
+            "they asked, say that plainly first, then what you DO know. Never answer a "
+            "different question, never open with whether they are in it, never list other "
+            "communities, never mention the cards or where things are on screen, and never "
+            "add anything the facts do not say. TWO SHORT SENTENCES."
             + (
                 " They are not in it, so you may end by offering to add them."
                 if membership == "visitor"
