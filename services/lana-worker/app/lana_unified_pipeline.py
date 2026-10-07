@@ -517,6 +517,13 @@ POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     # a Find activities chip (prod 2026-09-02): a confirmation of a request the user had
     # already made, costing them a turn while the browse sat right there.
     "discovery.find_activities",
+    # The SAME search phrased as a meet: "find a meet about AI" is filed looking.meet as
+    # often as find_activities, and the engine treats them alike (Meet ≡ activity,
+    # search-first — discovery_route sends meet_seek into the events browse). Missing from
+    # here, it got "AI meet sounds useful — want me to find people into AI, or help you set
+    # one up?" with two policy chips and no search at all (prod 2026-10-07), while the
+    # identical message filed find_activities searched. Same message, two answers.
+    "looking.meet",
     # Peers, for the same reason and with the same bar (0.75). "find me neighbors
     # nearby" — classified discovery.find_peers at 0.95, with the search's own progress
     # card already written — came back as "Got you … Want me to find neighbors around
