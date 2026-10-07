@@ -689,6 +689,7 @@ def _empty_slots() -> dict[str, Any]:
         "community_name": None,
         "community_ask": None,
         "community_topic": None,
+        "search_place": None,
         "profile_photo_action": "none",
         "signal_intent": None,
         "signal_detail": None,
@@ -842,6 +843,10 @@ def ai_parse_discovery_turn(
         # never a keyword list ([[no-new-regex-use-ai-signals]]).
         community_topic = raw.get("community_topic")
         community_topic_s = str(community_topic).strip()[:80] if community_topic else None
+        # A town or city they want searched that is not where they are ("in San Jose",
+        # "when I'm in Austin") — travel (2026-10-06). The AI's read, never a keyword list.
+        search_place = raw.get("search_place")
+        search_place_s = str(search_place).strip()[:80] if search_place else None
         community_ask = str(raw.get("community_ask") or "").strip().lower()
         community_ask_s = community_ask if community_ask in ("people", "about", "manage", "mine") else None
         intro_direction = raw.get("intro_direction")
@@ -927,6 +932,7 @@ def ai_parse_discovery_turn(
             "community_name": community_name_s,
             "community_ask": community_ask_s,
             "community_topic": community_topic_s,
+            "search_place": search_place_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
             "clarify_options": clarify_options,
@@ -1239,6 +1245,10 @@ def _discovery_slot_payload(
         'else about the place itself (what kind of place it is, what it has, how big it is, what '
         'is happening there, where it is, how it is doing). "mine" (with community_name null) when '
         'they ask WHICH communities they themselves are in. Otherwise null when no community is named,\n'
+        '  "search_place": "the town or city they want searched when it is NOT where they are '
+        '(language events in San Jose, anything this weekend in Austin, I am visiting Denver — '
+        'what is on?) — the place name only (San Jose, Austin, Denver); null when they mean near '
+        'them, give only a ZIP, or name a venue or community rather than a town",\n'
         '  "community_topic": "with discovery.communities, when they are LOOKING FOR communities '
         'about a subject or for a kind of person (any communities for podcasters?, is there a book '
         'club?, a group for new moms) — the subject in 1-4 plain words (podcasting, book club, new '
@@ -1330,6 +1340,14 @@ def slots_community_ask(slots: dict[str, Any] | None) -> str:
         return "about"
     ask = str(slots.get("community_ask") or "")
     return ask if ask in ("people", "manage", "mine") else "about"
+
+
+def slots_search_place(slots: dict[str, Any] | None) -> str | None:
+    """A town/city to search instead of near them ("San Jose"), from AI slots."""
+    if not slots:
+        return None
+    place = str(slots.get("search_place") or "").strip()
+    return place[:80] or None
 
 
 def slots_community_topic(slots: dict[str, Any] | None) -> str | None:

@@ -2008,6 +2008,17 @@ def _run_lana_message(
     from app.community_scope import here_place as community_here
 
     apply_community_selection(session_ctx_in, body.community_id, user_id=auth.user_id)
+    # Where the location pill says she is, for THIS turn's searches (browse reads it). Set
+    # to None (not popped) when absent so a stale point never outlives the pill.
+    session_ctx_in["search_point"] = (
+        {
+            "lat": float(body.search_lat),
+            "lng": float(body.search_lng),
+            "label": str(body.search_label or "").strip()[:80] or None,
+        }
+        if body.search_lat is not None and body.search_lng is not None
+        else None
+    )
     # The category chips on "Find a peer recommendation", stamped the same way and for the
     # same reason: a recommendation read this turn is scoped to the bucket the user tapped
     # (app/reco_question_sets.py). None = the client said nothing, [] = they cleared it.
@@ -4456,6 +4467,7 @@ def _discovery_rows(rows: list[dict]) -> list[CommunityDiscoveryRow]:
             fit_chips=list(r.get("fit_chips") or []),
             description=r.get("description"),
             area_label=r.get("area_label"),
+            parent=r.get("parent"),
         )
         for r in rows
         if str(r.get("place_id") or "").strip()

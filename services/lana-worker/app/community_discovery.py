@@ -169,7 +169,9 @@ def discover_communities(
     except Exception:
         logger.exception("discover_communities_failed user=%s", user_id)
         return []
-    return _near_rows(rows)
+    out = _near_rows(rows)
+    attach_chapter_parents(out)
+    return out
 
 
 def _near_rows(rows: list[Any]) -> list[dict[str, Any]]:
@@ -546,6 +548,8 @@ def discover_communities_anywhere(
     *,
     placeless_only: bool = True,
     limit: int = 5,
+    by_meaning: bool = False,
+    radius_m: float | None = None,
 ) -> list[dict[str, Any]]:
     """Communities found by what they ARE, not where (20270109120000).
 
@@ -559,7 +563,14 @@ def discover_communities_anywhere(
     San Jose State. A topic browse keeps the default, so a gym three states away never
     answers "any communities for climbers?".
 
-    Rows share the near read's card shape, with no distance (there is none) and the HQ
+    `by_meaning` also matches the ask's embedding against each community's own
+    (blurb_embedding, 20270119120000): "a club about AI ethics" finds the Responsible
+    Computing Club, which shares no word with it. `radius_m` lets a LOCATED community answer
+    a topic ask too — on its name or meaning, never on one shared stem — and tags each row
+    `nearby` (inside the radius) or `far` (outside it, or no origin to measure from) so the
+    caller can say which. Chapters come back labelled with their parent (`parent`).
+
+    Rows share the near read's card shape, with no distance on the wire and the HQ
     folded into the status line as provenance ("Run from Orlando"). [] on any failure.
     """
     ask = str(query or "").strip()
@@ -571,12 +582,42 @@ def discover_communities_anywhere(
         "p_placeless_only": bool(placeless_only),
         "p_limit": max(1, min(int(limit or 5), _TOPIC_MAX_LIMIT)),
     }
+    extra: dict[str, Any] = {}
+    if by_meaning:
+        from app.community_embeddings import kick
+
+        # Whatever was written since the last search (any path, any writer) gets its vector.
+        kick()
+        try:
+            from app.vec_util import to_pgvector
+            from app.vertex_extract import vertex_embed
+
+            literal = to_pgvector(vertex_embed(ask[:500]))
+        except Exception:  # noqa: BLE001 — the name and stem arms still answer
+            logger.exception("discover_anywhere_embed_failed ask=%r", ask[:60])
+            literal = None
+        if literal:
+            extra["p_query_embedding"] = literal
+            extra["p_min_similarity"] = _MEANING_MIN_SIMILARITY
+    if radius_m:
+        extra["p_radius_meters"] = float(radius_m)
     try:
-        res = service_client().rpc("discover_communities_anywhere", args).execute()
+        try:
+            res = service_client().rpc(
+                "discover_communities_anywhere", {**args, **extra}
+            ).execute()
+        except Exception:
+            if not extra:
+                raise
+            # A database that has not taken 20270119120000 does not know the new arguments
+            # (PGRST202). The old read still answers by name and stem.
+            logger.warning("discover_anywhere_new_args_rejected; retrying without them")
+            res = service_client().rpc("discover_communities_anywhere", args).execute()
         rows = res.data if isinstance(res.data, list) else []
     except Exception:
         logger.exception("discover_anywhere_failed user=%s ask=%r", user_id, ask[:60])
         return []
+    parents = _parents_of(rows)
     out: list[dict[str, Any]] = []
     for r in rows:
         if not isinstance(r, dict) or not r.get("place_id"):
@@ -589,6 +630,7 @@ def discover_communities_anywhere(
         mine = bool(r.get("is_member"))
         hq = str(r.get("hq_city") or "").strip() or None
         status = _discovery_status_line(members, mine)
+        parent = parents.get(str(r.get("parent_place_ref") or ""))
         out.append(
             {
                 "place_id": str(r["place_id"]),
@@ -606,9 +648,86 @@ def discover_communities_anywhere(
                 "is_member": mine,
                 "status_line": f"Run from {hq} · {status}" if hq else status,
                 "matched_on": str(r.get("matched_on") or "") or None,
+                # Only set when the caller passed a radius: where this one sits relative to
+                # them. Distance itself stays off the wire (see _near_rows).
+                "reach": _reach(r, radius_m),
+                "area": str(r.get("area") or "").strip() or None,
+                "parent": parent,
             }
         )
     return out
+
+
+# A community's own description vs the ask. Measured on prod-shaped rows (2026-10-07):
+# the right community scores 0.61-0.76, unrelated ones 0.24-0.43.
+_MEANING_MIN_SIMILARITY = float(os.environ.get("LANA_COMMUNITY_MEANING_MIN_SIM", "0.50"))
+
+
+def _reach(row: dict[str, Any], radius_m: float | None) -> str | None:
+    """'placeless' | 'nearby' | 'far' for a radius read; None when no radius was asked.
+
+    A located community with no distance (the caller has no origin) is 'far': it cannot be
+    called near anybody, and the reply names its city instead."""
+    if not radius_m:
+        return None
+    if row.get("is_placeless"):
+        return "placeless"
+    meters = row.get("distance_meters")
+    try:
+        return "nearby" if meters is not None and float(meters) <= float(radius_m) else "far"
+    except (TypeError, ValueError):
+        return "far"
+
+
+def _parents_of(rows: list[Any]) -> dict[str, dict[str, Any]]:
+    """Parent heads for any chapter among RPC rows — {} when none is a chapter."""
+    refs = [
+        str(r.get("parent_place_ref"))
+        for r in rows
+        if isinstance(r, dict) and r.get("parent_place_ref")
+    ]
+    if not refs:
+        return {}
+    from app.community_surface import parent_heads
+
+    return parent_heads(refs)
+
+
+def attach_chapter_parents(rows: list[dict[str, Any]]) -> None:
+    """Label chapters in a discovery list with their parent, in place.
+
+    discover_communities_near lists chapters (20270119120000) without saying they are one;
+    an unlabelled chapter reads as a standalone local community. One read for the refs,
+    and parent_heads' two only when some row is a chapter."""
+    ids = [str(r.get("place_id")) for r in rows if r.get("place_id")]
+    if not ids:
+        return
+    try:
+        res = (
+            service_client()
+            .table("places")
+            .select("id, parent_place_ref")
+            .in_("id", ids)
+            .not_.is_("parent_place_ref", "null")
+            .execute()
+        )
+        refs = {
+            str(r["id"]): str(r["parent_place_ref"])
+            for r in (res.data or [])
+            if isinstance(r, dict) and r.get("parent_place_ref")
+        }
+    except Exception:  # noqa: BLE001 — a missing label, not a missing list
+        logger.exception("attach_chapter_parents_failed rows=%s", len(ids))
+        return
+    if not refs:
+        return
+    from app.community_surface import parent_heads
+
+    heads = parent_heads(list(refs.values()))
+    for r in rows:
+        ref = refs.get(str(r.get("place_id")))
+        if ref and ref in heads:
+            r["parent"] = heads[ref]
 
 
 def _first_type(types: Any) -> str:
@@ -2038,15 +2157,32 @@ def _topic_communities_turn(
     this way. Nearby ones whose NAME carries the subject come along, labelled as nearby;
     the rest of the neighbourhood list is not what they asked for and is left out.
     """
-    found = discover_communities_anywhere(user_id, topic, limit=_CHAT_NEARBY_MAX * 2)
-    anywhere = [c for c in found if not c.get("is_member")][:_CHAT_NEARBY_MAX]
+    # By name, own words AND meaning, local communities included: "a club about AI ethics"
+    # must reach the Responsible Computing Club, which has a location, is a chapter of San
+    # Jose State, and shares no word with the ask (prod 2026-10-06).
+    found = discover_communities_anywhere(
+        user_id,
+        topic,
+        limit=_CHAT_NEARBY_MAX * 3,
+        by_meaning=True,
+        radius_m=radius_meters(),
+    )
     already = [c for c in found if c.get("is_member")]
-    seen = {c["place_id"] for c in anywhere}
-    nearby = [
+    others = [c for c in found if not c.get("is_member")]
+    anywhere = [c for c in others if c.get("reach") in (None, "placeless")][:_CHAT_NEARBY_MAX]
+    seen = {c["place_id"] for c in found}
+    nearby = [c for c in others if c.get("reach") == "nearby"]
+    nearby += [
         c for c in discover_communities(user_id, query=topic, limit=_CHAT_NEARBY_MAX * 2)
         if not c.get("is_member") and c["place_id"] not in seen
+    ]
+    nearby = nearby[:_CHAT_NEARBY_MAX]
+    # Beyond the radius: shown only when nothing closer answers, and said to be elsewhere —
+    # "nothing near you, but there's one in San Jose" instead of "there is none".
+    far = [] if (nearby or anywhere) else [
+        c for c in others if c.get("reach") == "far"
     ][:_CHAT_NEARBY_MAX]
-    joinable = nearby + anywhere
+    joinable = nearby + anywhere + far
     # Theirs come first and are SHOWN, marked as theirs — hiding them made "Podcasters"
     # vanish for the person who started it (prod 2026-10-06).
     cards = already[:_CHAT_NEARBY_MAX] + joinable
@@ -2077,14 +2213,42 @@ def _topic_communities_turn(
             f"{best['status_line']}). Never call these near them"
         )
     if nearby:
-        facts.append(f"Nearby communities with it in their name: {len(nearby)}")
+        facts.append(
+            f"Nearby communities about it: {len(nearby)} (best match: "
+            f"{nearby[0]['place_name']})"
+        )
+    if far:
+        best = far[0]
+        where = f" in {best['area']}" if best.get("area") else ""
+        facts.append(
+            f"Nothing near them, but {len(far)} further away (best match: "
+            f"{best['place_name']}{where}). Say plainly it is not near them and name where it "
+            "is — never call it local"
+        )
+    chapters = [c for c in joinable + already if c.get("parent")]
+    for c in chapters[:2]:
+        facts.append(
+            f"{c['place_name']} is a chapter of {c['parent'].get('place_name')} — say so if "
+            "you name it"
+        )
     if joinable:
         facts.append(
             "The cards under your message list every one with real member counts, so your "
             "text must NOT name them one by one"
         )
 
-    if joinable:
+    if far:
+        goal = (
+            f"They asked for communities about {topic}. None is near them — say so in a few "
+            "words, then name the best one further away and where it is, and offer to add "
+            "them. TWO SHORT SENTENCES, never a list."
+        )
+        where = f" in {far[0]['area']}" if far[0].get("area") else ""
+        fallback = (
+            f"Nothing about {topic} near you, but {far[0]['place_name']}{where} is a match — "
+            "it's below. Want me to add you?"
+        )
+    elif joinable:
         goal = (
             f"Answer what they asked: communities about {topic}. TWO SHORT SENTENCES, never a "
             "list. Say what turned up (at most ONE name), make clear any that are not local can "

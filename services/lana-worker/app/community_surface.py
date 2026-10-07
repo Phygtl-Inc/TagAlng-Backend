@@ -747,6 +747,10 @@ def _author_blurb(place_id: str, key: str, facts: dict[str, Any]) -> None:
         service_client().table("places").update(
             {"blurb": text, "blurb_key": key}
         ).eq("id", place_id).execute()
+        # The new words dropped the old vector (trigger); search by meaning needs a new one.
+        from app.community_embeddings import embed_place
+
+        embed_place(place_id)
     except Exception:  # noqa: BLE001 — the template already shipped; this is an upgrade
         logger.exception("community_blurb_author_failed place=%s", place_id)
     finally:
