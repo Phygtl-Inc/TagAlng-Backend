@@ -154,9 +154,9 @@ VENDOR = re.compile(r"(openai|vertex|gemini|anthropic|rate.?limit|traceback|exce
                     r"vertex_not_configured|HTTP \d{3})", re.I)
 NEARBY_CLAIM = re.compile(r"(here(?:'|’)?s what(?:'|’)?s (nearby|coming up|on)|here are (some|a few)|"
                           r"coming up near you|i found (some|a few|these)|take a look at these)", re.I)
-NONE_CLAIM = re.compile(r"(couldn(?:'|’)?t find any|could not find any|no (events|meets|activities|"
+NONE_CLAIM = re.compile(r"(couldn(?:'|’)?t find any|could not find any|(aren(?:'|’)?t|are not) any|no (events|meets|activities|"
                         r"results|matches)\b|nothing (is )?(coming up|on|scheduled|found))", re.I)
-EVENT_CLAIM = re.compile(r"(here(?:'|’)?s|here are|i found|coming up|check out)[^.?!]{0,60}"
+EVENT_CLAIM = re.compile(r"\b(here(?:'|’)?s|here are|there are (?:some|a few|several)|i found|coming up|check out)[^.?!]{0,60}"
                          r"\b(events?|meets?|meetups?|activities|happening)", re.I)
 NAME_ASK = re.compile(r"(your (first )?name|what should i call you|what(?:'|’)?s your name)", re.I)
 
