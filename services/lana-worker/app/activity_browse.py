@@ -716,15 +716,21 @@ def _point_area(user_jwt: str, point: dict[str, Any], session_ctx: dict[str, Any
 
 
 def _rank_far_matches(matched: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Topic first, then distance: exact matches nearest-first, then the rest."""
+    """Topic first, then distance: exact matches nearest-first, then the rest by how
+    close they are on topic, nearest breaking ties.
 
-    def key(r: dict[str, Any]) -> tuple[int, float]:
-        exact = _coerce_topic_score(r.get("topic_score")) >= _FAR_EXACT
+    The rest used to be nearest-first too, so among near-misses the topic counted for
+    nothing: "any informative meet" led with a garden volunteer day over a language
+    exchange a few streets away (prod, 2026-10-07)."""
+
+    def key(r: dict[str, Any]) -> tuple[int, float, float]:
+        score = _coerce_topic_score(r.get("topic_score"))
+        exact = score >= _FAR_EXACT
         try:
             dist = float(r.get("distance_meters") or 0.0)
         except (TypeError, ValueError):
             dist = float("inf")
-        return (0 if exact else 1, dist)
+        return (0 if exact else 1, 0.0 if exact else -score, dist)
 
     return sorted(matched, key=key)
 
@@ -868,6 +874,15 @@ def _compose_empty_seek_offer(
         # their own Option B without having looked anywhere wider, so they keep the
         # "nothing outside was looked at" caveat.
         looked_wider = bool(area) or far_lead is not None
+        if far_lead is not None and place:
+            # The far probe measures from the area searched — her home area when the pill
+            # is outside the pilot. "2,422 miles away" with "nearby" read as a distance
+            # from Islamabad (prod, 2026-10-07); it was from Orlando.
+            far_facts = list(far_facts or []) + [
+                f"Every distance above is measured from {place}, NOT from where they are "
+                f"now — say 'from {place}' with the distance, and never call anything "
+                "'nearby' or 'near you'."
+            ]
         facts = [
             (
                 f"You searched {where} for: {interest}"
