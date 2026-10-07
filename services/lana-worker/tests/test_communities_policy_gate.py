@@ -48,6 +48,13 @@ class TestCommunitiesKeptOffPolicy(unittest.TestCase):
         # neither the policy nor the layer-1 handler.
         self.assertFalse(self._is_engine_action(_slots("discovery.communities", 0.6)))
 
+    def test_finding_a_meet_is_the_search_engines_turn_however_it_is_filed(self) -> None:
+        """Prod 2026-10-07: "find a meet about AI" filed looking.meet got a policy pitch
+        ("find people into AI, or set one up?") and no search; filed find_activities, it
+        searched. Both must reach the engine."""
+        self.assertTrue(self._is_engine_action(_slots("looking.meet", 0.95)))
+        self.assertTrue(self._is_engine_action(_slots("discovery.find_activities", 0.95)))
+
     def test_conversational_turns_still_belong_to_the_policy(self) -> None:
         self.assertFalse(self._is_engine_action({"goal": "chat", "confidence": 0.9}))
 
