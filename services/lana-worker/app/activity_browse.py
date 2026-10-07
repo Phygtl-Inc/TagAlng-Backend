@@ -145,8 +145,8 @@ def _is_offered_browse_chip(
     """A "Look beyond <community>" / "Look in <area>" pill Lana rendered last turn, sent
     back verbatim. Both labels are remembered on the draft when offered, and the response
     that carried them recorded its chip payloads (`_offered_chip_msgs`), so this is two
-    exact lookups — no reading of the words. Without it the classifier saw "Look beyond
-    SJSU" cold, released the lane, and the draft holding the search was wiped.
+    exact lookups — no reading of the words. Without it the classifier saw the bare chip
+    label cold, released the lane, and the draft holding the search was wiped.
     "Host a meet" is deliberately not one: it is a way OUT of browse."""
     msg = str(message or "").strip()
     draft = session_ctx.get("browse_draft")
@@ -1481,9 +1481,9 @@ def _far_offer(
     The candidate area is only offered when its events survive the SAME filter this
     search just ran. Offering an area and then landing the user on "nothing here" is a
     worse dead end than the empty state it was meant to replace. The caller's own meets
-    count, marked, exactly as browse shows them (496aa78): a club runner who taps "Look
-    beyond SJSU" and asks for alumni events must not hear "nothing" while his own
-    alumni meet sits 28 miles off (Pouya, 2026-10-07).
+    count, marked, exactly as browse shows them (496aa78): someone who runs a community,
+    leaves it and searches its topic must not hear "nothing" while their own matching
+    meet sits just past the radius.
     """
     from app.auth import jwt_user_id
     from app.discovery_route import activities_beyond_radius, far_activity_details
