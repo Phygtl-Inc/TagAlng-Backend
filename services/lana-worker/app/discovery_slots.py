@@ -586,7 +586,7 @@ _SYSTEM = (
     "AT, NEAR or AROUND any named place — a campus, school, church, gym, club or neighborhood, "
     "by full name, initials or nickname ('any recommendations around Westlake High?', 'what "
     "do you recommend near the UMD campus?') — is tip_seek (looking.tip); the place says WHERE "
-    "to look, it is not a question about that community. "
+    "to look, it is not a question about that community (community_name still carries it). "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
     "identity.add_claim, goal=chat, in_discovery=false, identity_snippet=null "
@@ -1301,7 +1301,9 @@ def _discovery_slot_payload(
         '  "community_name": "the place/community the user named, verbatim as they said it '
         '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community — and with '
         'discovery.find_activities, the community, school, club or venue they want events AT, '
-        'as they called it (short forms included); else null",\n'
+        'as they called it (short forms included) — and with looking.tip, the community, school, '
+        'club or venue whose recommendations they want or where the thing should be, as they '
+        'called it (short forms included); else null",\n'
         '  "community_ask": "people"|"about"|"manage"|null — with community_name: "people" when they want '
         'WHO is there (who is in it, the members, who else goes), "manage" when they want to CHANGE '
         'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '

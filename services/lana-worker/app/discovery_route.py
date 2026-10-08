@@ -4298,8 +4298,12 @@ def _tip_seek_answer_turn(
     weights: list[str] | None = None,
     widen: bool = False,
     ask_text: str | None = None,
+    community: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors.
+
+    `community` is a community the ask itself named (see named_member_community); it
+    scopes this one search ahead of the chat's active community and is not remembered.
 
     `ask_text` is the whole ask when this turn's message is only part of it — a
     correction turn ("one who takes Cigna instead") passes the merged ask, so the kind
@@ -4311,7 +4315,7 @@ def _tip_seek_answer_turn(
     # read needs no location (local_signals.find_neighbor_tips: "the roster is the audience,
     # not the radius"). Asking a creator's follower for their ZIP before looking inside
     # Founders Table was the neighbourhood gate answering a community question (2026-10-01).
-    _in_comm = active_community(session_ctx)
+    _in_comm = community or active_community(session_ctx)
 
     if not phone_verified:
         # Unchanged auth surface (a signed-out session still can't run block reads or
@@ -4405,7 +4409,7 @@ def _tip_seek_answer_turn(
     # member — those are different questions, and only the first is what the share button
     # asked. The RPC takes it as scope, not as a filter: inside a community distance does
     # not apply, and outside one a community's tips do not show at all.
-    _comm = active_community(session_ctx)
+    _comm = _in_comm
     # The category chips ("Recipes", "Services") are a FILTER, not a flavouring of the
     # prose: scoped on reco_type so the bucket the user tapped is the bucket they get.
     _types = active_reco_types(session_ctx)
@@ -5243,7 +5247,16 @@ def _try_save_signal_turn(
     from app.lana_paths import tip_ask_consent_enabled
 
     if intent == "tip_seek" and tip_ask_consent_enabled():
+        # A community named in the ask scopes the search when they belong to it, whether or
+        # not the chat was opened inside it (prod 2026-10-07: "…at San Jose State" from the
+        # main chat searched a Minneapolis ZIP and answered from Google).
+        from app.community_scope import named_member_community
+        from app.discovery_slots import slots_community_name
+
+        _named = slots_community_name(slots)
+        _named_scope = named_member_community(user_id, _named) if _named else None
         return _tip_seek_answer_turn(
+            community=_named_scope,
             msg=msg,
             detail=detail,
             category=category,
