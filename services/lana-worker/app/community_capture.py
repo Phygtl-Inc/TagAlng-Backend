@@ -470,6 +470,367 @@ def _resolve_parent(draft: dict[str, Any], user_id: Any) -> None:
     draft["chips"] = _build_chips(draft)
 
 
+# ── Asking for a parent the creator did not name ────────────────────────────────────────
+# Creators rarely say "inside SJSU", so a club made by an SJSU member went up standalone
+# (that is how RCC did). Lana asks ONCE per draft — only when one of the creator's own
+# communities could really hold it, which is the AI's call, never a keyword list.
+
+_PARENT_ASK = "parent"
+_PARENT_MAX = 3
+
+_UMBRELLA_SYSTEM = """You decide whether a community a person is creating could sit INSIDE \
+one of the bigger communities they already belong to, as one of its clubs, teams, chapters \
+or groups — so that people looking at the bigger community see it there.
+
+A candidate is a plausible home ONLY when both hold:
+1. The candidate is an umbrella: an institution or organisation that has its own members \
+and commonly has groups forming under it — a school, university or campus, a company or \
+workplace, a congregation, an organisation with local branches. A single venue people \
+simply go to (a cafe, a shop, a gym, a park), a neighbourhood or area, and an ordinary \
+hobby group or club are NOT umbrellas for some other group.
+2. The new community plausibly belongs to THAT umbrella: it is the kind of group that \
+forms among that organisation's own people (its students, staff, members), and nothing \
+about it ties it somewhere else instead — a group defined by a neighbourhood or street, \
+by a different institution, or open to the general public of an area is not inside it.
+
+When in doubt, leave it out: a wrong question costs the person a tap, a missing one costs \
+nothing they cannot fix later.
+
+Return ONE JSON object: {"umbrellas": [numbers]} — the numbers of the plausible \
+candidates, most plausible first, at most 3. {"umbrellas": []} when none is plausible."""
+
+_PARENT_ANSWER_SYSTEM = """Lana asked a person who is creating a community whether it \
+belongs inside one of the bigger communities they are in (the numbered OPTIONS), or stands \
+on its own. Read their reply and return ONE JSON object:
+{"choice": "candidate" | "standalone" | "other" | "unclear" | "none", "n": number or null, \
+"name": string or null}
+
+- candidate: they pick one of the OPTIONS. n is its number. A plain agreement when there \
+is exactly one option is that option.
+- standalone: it is not part of any of them / it stands on its own / a plain refusal.
+- other: it IS part of a bigger community, but one that is not among the OPTIONS. name is \
+that community's name exactly as they wrote it.
+- unclear: they agree it is part of one but there are several OPTIONS and they did not say \
+which.
+- none: the reply does not answer the question at all — they moved on, pressed a different \
+button, changed something else about the community, or asked something.
+The reply may be in any language."""
+
+
+def _parent_ask_due(draft: dict[str, Any]) -> bool:
+    """Whether the "is it part of something bigger?" question may still be asked.
+
+    Never when they named a parent themselves (resolved or not), never twice in one draft
+    (asked, declined, or the chip removed), and never for a creator community, which the
+    SQL refuses to make a chapter anyway (creator_community_cannot_be_chapter)."""
+    from app.circles_flow import CREATOR_PLACE_PREFIX
+    from app.community_question_sets import normalize_community_type
+
+    if draft.get("parent_asked") or draft.get("parent_declined"):
+        return False
+    if _has(draft, "parent") or draft.get("parent_place") or draft.get("parent_unresolved"):
+        return False
+    if normalize_community_type(draft.get("circle_type")) == "creator":
+        return False
+    return not str(draft.get("google_place_id") or "").startswith(CREATOR_PLACE_PREFIX)
+
+
+def _parent_candidates(draft: dict[str, Any], user_id: Any) -> list[dict[str, Any]]:
+    """The creator's own communities that attach_chapter would accept as this one's parent.
+
+    Confirmed membership (what the SQL checks), not a creator community, not itself a
+    chapter (depth is one level), and not the very place being published. Best effort:
+    a failed read means no question, never a failed turn."""
+    if not user_id:
+        return []
+    from app.circles_flow import CREATOR_PLACE_PREFIX, list_my_circles
+
+    try:
+        rows = list_my_circles(str(user_id))
+    except Exception:  # noqa: BLE001
+        logger.exception("community_parent_candidates_failed")
+        return []
+    own_gpid = str(draft.get("google_place_id") or "").strip()
+    out: list[dict[str, Any]] = []
+    for r in rows or []:
+        if str(r.get("status") or "") != "confirmed" or not r.get("place_id"):
+            continue
+        if not str(r.get("place_name") or "").strip():
+            continue
+        gpid = str(r.get("google_place_id") or "")
+        if (
+            r.get("place_type") == "creator"
+            or str(r.get("circle_type") or "") == "creator"
+            or gpid.startswith(CREATOR_PLACE_PREFIX)
+        ):
+            continue
+        if r.get("parent_place_id"):
+            continue
+        if own_gpid and gpid == own_gpid:
+            continue
+        out.append(
+            {
+                "place_id": str(r["place_id"]),
+                "place_name": str(r["place_name"]).strip(),
+                "circle_type": r.get("circle_type"),
+                "relation": r.get("relation"),
+                "detail": r.get("detail"),
+                "located": r.get("lat") is not None and r.get("lng") is not None,
+            }
+        )
+    if not out:
+        return out
+    # Each candidate's own description, so the judge reads what it IS, not just its name,
+    # and its link.
+    try:
+        from app.auth import service_client
+
+        res = (
+            service_client()
+            .table("places")
+            .select("id, blurb, handle")
+            .in_("id", [c["place_id"] for c in out])
+            .execute()
+        )
+        rows_by_id = {
+            str(p.get("id")): p for p in (res.data or []) if isinstance(p, dict)
+        }
+        for c in out:
+            got = rows_by_id.get(c["place_id"]) or {}
+            c["blurb"] = str(got.get("blurb") or "").strip() or None
+            # A linked parent gives its chapters get.lana.help/{parent}/{chapter}, so the
+            # link question is skipped for one picked here, as for one they named.
+            c["handle"] = str(got.get("handle") or "").strip() or None
+    except Exception:  # noqa: BLE001
+        logger.exception("community_parent_blurb_read_failed")
+    return out
+
+
+def _judge_umbrellas(
+    draft: dict[str, Any], candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The candidates the AI reads as a plausible home for this community, best first.
+
+    [] on any failure or an unconfigured model: no judgement, no question."""
+    if not candidates:
+        return []
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, synthesizer_model
+
+        if not llm_configured():
+            return []
+        answers = {
+            k: v for k, v in (draft.get("answers") or {}).items() if isinstance(v, str) and v
+        }
+        new = {
+            "name": draft.get("name"),
+            "type": draft.get("circle_type"),
+            "description": draft.get("blurb"),
+            "where_it_meets": draft.get("meets_at"),
+            "address": draft.get("place_address"),
+            "answers": answers or None,
+        }
+        listed = [
+            {
+                "n": i + 1,
+                "name": c["place_name"],
+                "type": c.get("circle_type"),
+                "kind": c.get("relation"),
+                "description": c.get("blurb"),
+                "their_note": c.get("detail"),
+            }
+            for i, c in enumerate(candidates)
+        ]
+        data = llm_json(
+            model=synthesizer_model(),
+            system=_UMBRELLA_SYSTEM,
+            user_payload=(
+                "NEW COMMUNITY:\n"
+                + json.dumps({k: v for k, v in new.items() if v}, ensure_ascii=False)
+                + "\n\nCOMMUNITIES THEY BELONG TO:\n"
+                + json.dumps(listed, ensure_ascii=False)
+            ),
+            max_tokens=120,
+            temperature=0.0,
+        )
+        picked = data.get("umbrellas") if isinstance(data, dict) else None
+        out: list[dict[str, Any]] = []
+        for n in picked if isinstance(picked, list) else []:
+            try:
+                i = int(n) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(candidates) and candidates[i] not in out:
+                out.append(candidates[i])
+        return out[:_PARENT_MAX]
+    except Exception:  # noqa: BLE001 — a parent is optional; never cost the turn
+        logger.exception("community_umbrella_judge_failed")
+        return []
+
+
+def _interpret_parent_answer(message: str, offer: list[dict[str, Any]]) -> dict[str, Any]:
+    """The AI's read of a typed answer to the parent question. {"choice": "none"} on failure."""
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return {"choice": "none"}
+        options = "\n".join(f"{i + 1}. {o['place_name']}" for i, o in enumerate(offer))
+        data = llm_json(
+            model=router_model(),
+            system=_PARENT_ANSWER_SYSTEM,
+            user_payload=f"OPTIONS:\n{options}\n\nTHEIR REPLY:\n{message.strip()[:300]}",
+            max_tokens=80,
+            temperature=0.0,
+        )
+        return data if isinstance(data, dict) else {"choice": "none"}
+    except Exception:  # noqa: BLE001
+        logger.exception("community_parent_answer_read_failed")
+        return {"choice": "none"}
+
+
+def _norm_label(text: Any) -> str:
+    return " ".join(str(text or "").strip().lower().split())
+
+
+def _apply_parent_answer(
+    draft: dict[str, Any], message: str, user_id: Any
+) -> str:
+    """Apply their answer to the parent question to the draft. Returns what it was:
+    chosen | other | standalone | unclear | none.
+
+    A tapped chip is a rendered control and is matched exactly; anything typed is the AI's
+    read. A pick sets the same state `_resolve_parent` sets, so the chip, the attach and the
+    inherited location all run unchanged; a different name goes through `_resolve_parent`."""
+    offer = [o for o in (draft.get("parent_offer") or []) if isinstance(o, dict)]
+    norm = _norm_label(message)
+
+    def choose(o: dict[str, Any]) -> str:
+        draft["parent"] = o["place_name"]
+        draft["parent_place"] = {
+            "place_id": o["place_id"],
+            "place_name": o["place_name"],
+            "located": bool(o.get("located")),
+            "handle": o.get("handle"),
+        }
+        draft.pop("parent_unresolved", None)
+        draft["chips"] = _build_chips(draft)  # the card shows the "Part of" chip
+        return "chosen"
+
+    tapped = next((o for o in offer if _norm_label(o.get("label")) == norm), None)
+    if tapped:
+        return choose(tapped)
+    if norm and norm == _norm_label(draft.get("parent_standalone_label")):
+        draft["parent_declined"] = True
+        return "standalone"
+
+    read = _interpret_parent_answer(message, offer)
+    choice = str(read.get("choice") or "none")
+    if choice == "candidate":
+        try:
+            i = int(read.get("n")) - 1
+        except (TypeError, ValueError):
+            i = -1
+        if 0 <= i < len(offer):
+            return choose(offer[i])
+        if len(offer) == 1:
+            return choose(offer[0])
+        return "unclear"
+    if choice == "other" and str(read.get("name") or "").strip():
+        draft["parent"] = str(read["name"]).strip()[:80]
+        draft.pop("parent_place", None)
+        draft.pop("parent_unresolved", None)
+        _resolve_parent(draft, user_id)
+        return "other"
+    if choice == "standalone":
+        draft["parent_declined"] = True
+        return "standalone"
+    if choice == "unclear":
+        return "unclear"
+    # Not an answer: the question was asked once, so it is not asked again.
+    draft["parent_declined"] = True
+    return "none"
+
+
+def _ask_parent(
+    session_ctx: dict[str, Any], draft: dict[str, Any], *, again: bool = False
+) -> str:
+    """Put the parent question on the ready card: one chip per candidate + standalone."""
+    from app.i18n import localize_labels, session_lang
+
+    offer = [o for o in (draft.get("parent_offer") or []) if isinstance(o, dict)]
+    names = [o["place_name"] for o in offer]
+    lang = session_lang(session_ctx)
+    raw = [f"Part of {n}"[:40] for n in names] + ["On its own"]
+    labels = localize_labels(raw, lang) if lang else raw
+    for o, label in zip(offer, labels):
+        o["label"] = label
+    draft["parent_offer"] = offer
+    draft["parent_standalone_label"] = labels[-1]
+    # The first of the closing questions (_after_questions): asked with the card not yet
+    # ready, the same state the city and link steps are asked in; the PWA renders
+    # `suggestions` as quick replies under the message.
+    draft["chips"] = _build_chips(draft)
+    draft["pending_field"] = _PARENT_ASK
+    draft["suggestions"] = labels
+    session_ctx["community_ready"] = None
+    session_ctx["community_pending_ask"] = _PARENT_ASK
+    session_ctx["community_offered"] = labels
+    session_ctx["community_pending_question"] = (
+        "Whether this new community is part of one of the bigger communities they belong "
+        f"to ({', '.join(names)}), or stands on its own"
+    )
+    session_ctx["community_draft"] = draft
+    session_ctx["community_create_active"] = True
+    session_ctx["routing_phase"] = "listening"
+    name = str(draft.get("name") or "their community")
+    joined = " or ".join(f"**{n}**" for n in names)
+    return compose_reply(
+        goal=(
+            "Ask in one short line whether their new community is part of one of the bigger "
+            "communities listed in the facts, or stands on its own. Name them. "
+            + (
+                "You already asked once and they did not say which one, so ask them to pick "
+                "one. "
+                if again
+                else ""
+            )
+            + "They answer with the buttons below or in their own words."
+        ),
+        facts=[
+            f"The new community: {name}",
+            "Bigger communities they belong to that it could sit inside: " + ", ".join(names),
+            "Inside one, people looking at that community see it as one of its clubs; it "
+            "can still be found and joined on its own",
+        ],
+        fallback=f"Is **{name}** part of {joined}, or does it stand on its own?",
+    )
+
+
+def _maybe_ask_parent(
+    session_ctx: dict[str, Any], draft: dict[str, Any], user_id: Any
+) -> str | None:
+    """Ask the parent question if it is due and someone could hold this community; the
+    reply, or None to carry on. Marks the draft asked either way, so the membership read
+    and the judgement run once per draft."""
+    if not _parent_ask_due(draft):
+        return None
+    draft["parent_asked"] = True
+    plausible = _judge_umbrellas(draft, _parent_candidates(draft, user_id))
+    if not plausible:
+        return None
+    draft["parent_offer"] = [
+        {
+            "place_id": c["place_id"],
+            "place_name": c["place_name"],
+            "located": bool(c.get("located")),
+            "handle": c.get("handle"),
+        }
+        for c in plausible
+    ]
+    return _ask_parent(session_ctx, draft)
+
+
 def _attach_to_parent(draft: dict[str, Any], user_id: Any, place_id: str) -> list[str]:
     """Attach the just-published community to the parent they named; reply facts.
 
@@ -791,6 +1152,11 @@ def _after_questions(
     # of its own meets at its parent's (attach_chapter copies the parent's point), and its
     # link is get.lana.help/{parent}/{chapter}, given on attach — so neither is asked.
     _resolve_parent(draft, user_id)
+    # The one question the creator rarely answers unprompted — is it inside one of their
+    # bigger communities? — goes first: the answer can make the city and link unnecessary.
+    asked = _maybe_ask_parent(session_ctx, draft, user_id)
+    if asked:
+        return asked
     parent = draft.get("parent_place") or {}
     parent_located = bool(parent.get("located"))
     if parent.get("handle") and not draft.get("handle"):
@@ -1048,6 +1414,27 @@ def run_community_capture_turn(
             fallback="No problem — I've let that go. Tell me when you want to start one.",
         )
 
+    # ── The answer to "is it part of something bigger?" ──
+    # Read before anything else: a tapped "Part of SJSU" is not a name, a blurb or a
+    # publish. A correction chip is a rendered control of its own and goes to its branch.
+    if session_ctx.get("community_pending_ask") == _PARENT_ASK and not re.match(
+        r"\s*fix:\w+\s*$", msg
+    ):
+        session_ctx["community_pending_ask"] = None
+        session_ctx["community_offered"] = []
+        outcome = _apply_parent_answer(draft, msg, user_id)
+        if outcome == "unclear" and not draft.get("parent_reasked"):
+            draft["parent_reasked"] = True
+            return _ask_parent(session_ctx, draft, again=True)
+        if outcome == "unclear":
+            draft["parent_declined"] = True
+        if outcome != "none":
+            # On to whatever closing question is left (a chapter of a located parent
+            # skips the city; one of a linked parent skips the link), then the ready card.
+            return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id)
+        # "none": not an answer — the turn carries on as whatever it is (an edit, a
+        # question), and the parent question is not asked again.
+
     # ── The answers to the two closing questions: where it is run from, and its link ──
     # Both are asked by _after_questions once every question is in, so an answer goes
     # straight on to whatever is left — they already did the rest.
@@ -1117,6 +1504,12 @@ def run_community_capture_turn(
         # Which community "inside X" means is settled before the ready card
         # (_after_questions); this is a no-op then, and a safety net for older drafts.
         _resolve_parent(draft, user_id)
+        # Normally asked before the ready card (_after_questions); a draft that reached
+        # share without passing through it (the carousel stamps community_ready itself) is
+        # asked here, ahead of the city — a located parent makes that question unnecessary.
+        asked = _maybe_ask_parent(session_ctx, draft, user_id)
+        if asked:
+            return asked
         # A ready card from before the closing steps moved ahead of it (no city for a
         # placeless community) goes back through them rather than publishing unplaced.
         if (
@@ -1239,9 +1632,11 @@ def run_community_capture_turn(
         elif field == "blurb":
             draft.pop("blurb", None)
         elif field == "parent":
-            # Not re-asked: "part of" is optional, so removing it is the whole correction.
+            # Not re-asked: "part of" is optional, so removing it is the whole correction —
+            # and Lana's own "is it part of…?" never comes back for this draft.
             for k in ("parent", "parent_place", "parent_unresolved", "_link_settled"):
                 draft.pop(k, None)
+            draft["parent_declined"] = True
         else:
             step = next((s for s in step_set_of(draft) if s["field"] == field), None)
             if step:
