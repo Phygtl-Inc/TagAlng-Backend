@@ -82,6 +82,11 @@ class RecoContributorRow(BaseModel):
     # Their own words on why they meet the ask's requirement on the recommender ("I grew
     # up in Madrid") — strong standing only; see RecoStandingRow.
     standing_quote: str | None = None
+    # This contribution was shared in ANOTHER community of the one being read — its
+    # parent or a chapter (20270129120000). None on the community's own tips and on
+    # every area read.
+    origin_place_id: str | None = None
+    origin_place_name: str | None = None
     actions: list["UiActionRow"] = Field(default_factory=list)
 
 
@@ -350,6 +355,10 @@ class PeerMatchRow(BaseModel):
     group_key: str | None = None
     group_label: str | None = None
     group_kind: str | None = None
+    # A rec row shared in ANOTHER community of the one being read — its parent or a
+    # chapter (20270129120000) — so the card can say where it is from. None otherwise.
+    origin_place_id: str | None = None
+    origin_place_name: str | None = None
 
 
 class SharedCircleRow(BaseModel):

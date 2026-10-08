@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.tip_feed import origin_fields
 from app.ui_actions import peer_card_nudge_action
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,9 @@ def _contributor(row: dict[str, Any], *, phone_verified: bool) -> dict[str, Any]
         "same_block": bool(row.get("same_block")),
         "helpful_count": int(row.get("helpful_count") or 0),
         "created_at": row.get("created_at"),
+        # Shared in ANOTHER community of the one being read — its parent or a chapter
+        # (20270129120000). None on the community's own tips and on every area read.
+        **origin_fields(row),
     }
     if phone_verified:
         out["actions"] = [peer_card_nudge_action(nickname=nickname, peer_user_id=peer_id)]
