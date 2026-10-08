@@ -433,7 +433,7 @@ class RecommendationLookBeyondTests(unittest.TestCase):
         with patch.object(dr, "stamp_tip_peer_surface", return_value=[tip]), patch.object(
             dr, "_compose_neighbor_tip_reply", return_value="TIPS"
         ), patch("app.reco_fit.finish_fit"), patch(
-            "app.reco_kind_gate.keep_asked_kind", side_effect=lambda rows, _k: rows
+            "app.reco_kind_gate.keep_asked_kind", side_effect=lambda rows, *_a, **_k: rows
         ), patch("app.reco_aspects.split_query_full", return_value={}):
             (reply, ctx, routing, _p), find, google = self._ask(ctx=_ctx(), tips=[tip])
         self.assertEqual(reply, "TIPS")

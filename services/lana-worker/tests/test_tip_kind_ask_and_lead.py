@@ -73,7 +73,7 @@ class KindAskTurnTests(unittest.TestCase):
             dr, "_compose_neighbor_tip_reply", return_value="TIPS"
         ), patch("app.reco_fit.finish_fit"), patch(
             "app.reco_aspects.split_query_full", return_value={}
-        ), patch("app.reco_kind_gate.keep_asked_kind", side_effect=lambda rows, _k: rows), patch(
+        ), patch("app.reco_kind_gate.keep_asked_kind", side_effect=lambda rows, *_a, **_k: rows), patch(
             "app.aspect_round.aspects_enabled", return_value=False
         ), patch("app.reco_authority.authority_enabled", return_value=False):
             out = dr._tip_seek_answer_turn(

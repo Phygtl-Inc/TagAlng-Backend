@@ -4482,8 +4482,11 @@ def _tip_seek_answer_turn(
         # No kind parsed is not "anything goes": "gaming laptop" came back kind-less and a
         # furniture store sailed through (prod QA 2026-10-07). The gate reads the whole ask
         # instead, and its own generic rule still keeps everything for "somewhere fun".
+        # The whole ask rides along: the parsed kind can be cut too short ("programs" out of
+        # "beginner-friendly project programs"), and the gate then rejected a tip whose
+        # category was "project program" (prod 2026-10-07).
         neighbor_tips = keep_asked_kind(
-            neighbor_tips, (_parsed or {}).get("subject_kind") or _ask
+            neighbor_tips, (_parsed or {}).get("subject_kind") or _ask, _ask
         )
 
     # Nobody had one, and the ask never said what KIND of recommendation it is: "do you have
