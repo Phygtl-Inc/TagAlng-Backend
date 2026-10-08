@@ -15,6 +15,7 @@ Flow (ask-first):
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -404,6 +405,42 @@ def _fetch_admitted_events(
     #    survives the filters below.
     truncated = len(raw) >= int(limit)
 
+    # 4b. Every NEARBY meet reaches the topic matcher, whatever its similarity. The floor
+    #     above is right for far meets, but inside the local radius it cut meets before
+    #     anything could judge them: "jazz" scored 0.42 against a guitar jam 12 km away,
+    #     the read came back empty, and "Widen the search" had nothing related to offer
+    #     (prod 2026-10-08). A second, floor-free read of the local radius only — capped
+    #     at the matcher's pool, and never counted toward `truncated`, which describes the
+    #     wide read.
+    from app.discovery_route import activity_radius_meters
+
+    local_m = min(float(activity_radius_meters()), float(radius_m))
+    try:
+        near_res = (
+            service_client()
+            .rpc(
+                "search_events_semantic",
+                {
+                    "p_query_embedding": literal,
+                    "p_lat": loc[0],
+                    "p_lng": loc[1],
+                    "p_radius_meters": local_m,
+                    "p_window": activity_window(),
+                    "p_circle_place_id": None,
+                    "p_min_similarity": 0.0,
+                    "p_limit": _BROWSE_POOL,
+                },
+            )
+            .execute()
+        )
+        seen = {str(r.get("id")) for r in raw}
+        raw += [
+            r for r in (near_res.data if isinstance(near_res.data, list) else [])
+            if isinstance(r, dict) and r.get("id") and str(r["id"]) not in seen
+        ]
+    except Exception:  # noqa: BLE001 — the wide read still stands on its own
+        log.exception("activity_browse_near_read_failed block=%s", block_id)
+
     # 5. Stamp — the RPC returns both, but as JSON they may arrive as int or None.
     rows: list[dict[str, Any]] = []
     for r in raw:
@@ -459,9 +496,6 @@ def _fetch_admitted_events(
     #    had just offered "Look in San Jose" for that very meet (prod 2026-10-07).
     admitted = _admit(rows)
     kept = {id(r) for r in admitted}
-    from app.discovery_route import activity_radius_meters
-
-    local_m = float(activity_radius_meters())
     near_rest = [
         r for r in rows
         if id(r) not in kept and float(r.get("distance_meters") or 0.0) <= local_m
@@ -1227,6 +1261,65 @@ def browse_turn_metadata(ctx: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(val, dict) and val:
             out[key] = val
     return out
+
+
+_RELATED_SYSTEM = (
+    "A resident asked for a kind of event and nothing matched it exactly, so they asked to "
+    "widen the search to related events. From the numbered events, pick the ones that are a "
+    "different activity in the same broad area as what they asked for, or that serve the same "
+    "main purpose: something a person who wanted that would plausibly enjoy instead. Leave "
+    "out events whose only link is the audience, the place, the time, or simply being a "
+    "social get-together. Judge each event on what it is, not on its date. Order the picks "
+    "from closest to furthest. Output ONLY JSON: {\"related_indices\": [ints]}"
+)
+
+
+def _related_alternatives(
+    events: list[dict[str, Any]], request: str
+) -> list[dict[str, Any]] | None:
+    """The meets "Widen the search" may offer for `request`, closest first — one model call
+    that asks exactly that question.
+
+    The matcher's topic_score answers it only as a side output of a call that is told the
+    topic is a hard constraint, and it drifted to 0.0 for anything that did not match: a
+    guitar jam 12 km away scored 0.0 for "jazz" and Widen showed nothing (prod 2026-10-08).
+    None when the call could not run, so the caller falls back to the score rule."""
+    request = str(request or "").strip()
+    rows = [e for e in events if isinstance(e, dict)]
+    if not rows or not request:
+        return [] if not rows else None
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return None
+        lines = []
+        for i, ev in enumerate(rows):
+            tags = ev.get("cohort_tags")
+            tagstr = ", ".join(tags) if isinstance(tags, list) else str(tags or "")
+            desc = str(ev.get("description") or "").strip()[:200]
+            lines.append(f"{i}: {ev.get('title', '')} | tags: {tagstr} | about: {desc}")
+        data = llm_json(
+            model=router_model(),
+            system=_RELATED_SYSTEM,
+            user_payload=json.dumps(
+                {"request": request, "events": lines}, ensure_ascii=False
+            ),
+            max_tokens=40 + 4 * len(lines),
+            temperature=0.0,
+        )
+    except Exception:  # noqa: BLE001 — fall back to the score rule
+        logging.getLogger(__name__).warning("browse_related_failed", exc_info=True)
+        return None
+    idx = (data or {}).get("related_indices") if isinstance(data, dict) else None
+    if not isinstance(idx, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for i in idx:
+        if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(rows):
+            if rows[i] not in out:
+                out.append(rows[i])
+    return out[:_RELATED_CARDS]
 
 
 def _filter_events_by_query(
@@ -2454,10 +2547,12 @@ def _run_browse_turn(
 
     # After "Widen the search": related meets, closest topic first — never everything.
     if not matched and interest and draft.get("_widen_related"):
-        related = sorted(
-            (e for e in events if _coerce_topic_score(e.get("topic_score")) >= _RELATED_FLOOR),
-            key=lambda e: -_coerce_topic_score(e.get("topic_score")),
-        )[:_RELATED_CARDS]
+        related = _related_alternatives(events, request)
+        if related is None:
+            related = sorted(
+                (e for e in events if _coerce_topic_score(e.get("topic_score")) >= _RELATED_FLOOR),
+                key=lambda e: -_coerce_topic_score(e.get("topic_score")),
+            )[:_RELATED_CARDS]
         if related:
             matched = related
             label = t("browse.related_label", lang, interest=(label or interest).strip())

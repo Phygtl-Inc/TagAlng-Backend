@@ -73,7 +73,13 @@ class _FetchCase(unittest.TestCase):
         return result, sb, embed_spy
 
     def _rpc_args(self, sb):
-        name, args = sb.rpc.call_args[0]
+        """The WIDE read — the first search. A floor-free local read follows it (4b)."""
+        name, args = sb.rpc.call_args_list[0][0]
+        self.assertEqual(name, "search_events_semantic")
+        return args
+
+    def _near_args(self, sb):
+        name, args = sb.rpc.call_args_list[1][0]
         self.assertEqual(name, "search_events_semantic")
         return args
 
@@ -268,3 +274,50 @@ class AdmissionOrderTests(_FetchCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NearbyReachesTheMatcherTests(_FetchCase):
+    """Prod 2026-10-08: "jazz" scored 0.42 against a guitar jam 12 km away, under the 0.495
+    floor, so the wide read came back empty and Widen had nothing related to offer."""
+
+    def test_a_floor_free_read_of_the_local_radius_follows_the_wide_one(self):
+        from app.activity_browse import _BROWSE_POOL
+        from app.discovery_route import activity_radius_meters
+
+        _result, sb, _e = self._fetch([_ev("a")])
+        near = self._near_args(sb)
+        self.assertEqual(near["p_min_similarity"], 0.0)
+        self.assertEqual(near["p_radius_meters"], float(activity_radius_meters()))
+        self.assertEqual(near["p_limit"], _BROWSE_POOL)
+        self.assertEqual(near["p_query_embedding"], _LITERAL)
+
+    def test_a_nearby_meet_under_the_floor_is_handed_to_the_matcher(self):
+        wide = []  # the floor cut everything
+        near = [_ev("guitar", similarity=0.42, distance_meters=12_000.0)]
+        sb = _sb()
+        calls = iter([MagicMock(data=wide), MagicMock(data=near)])
+        sb.rpc.return_value.execute.side_effect = lambda: next(calls)
+        with patch("app.layer1_handlers._embed_attr_filter", return_value=[0.1, 0.2, 0.3]), patch(
+            "app.auth.service_client", return_value=sb
+        ), patch("app.auth.jwt_user_id", return_value="me"), patch(
+            "app.discovery_route.block_centroid", return_value=_CENTROID
+        ), patch("app.event_publish.roll_recurring_events"):
+            rows, truncated = _fetch_admitted_events("jwt", "zip-32827", interest="jazz")
+        self.assertEqual([r["id"] for r in rows], ["guitar"])
+        # The local read never makes the wide page look cut.
+        self.assertFalse(truncated)
+
+    def test_a_failed_local_read_leaves_the_wide_result_standing(self):
+        sb = _sb()
+        def _exec_side_effects():
+            yield MagicMock(data=[_ev("a")])
+            raise RuntimeError("near read down")
+        gen = _exec_side_effects()
+        sb.rpc.return_value.execute.side_effect = lambda: next(gen)
+        with patch("app.layer1_handlers._embed_attr_filter", return_value=[0.1, 0.2, 0.3]), patch(
+            "app.auth.service_client", return_value=sb
+        ), patch("app.auth.jwt_user_id", return_value="me"), patch(
+            "app.discovery_route.block_centroid", return_value=_CENTROID
+        ), patch("app.event_publish.roll_recurring_events"):
+            rows, _t = _fetch_admitted_events("jwt", "zip-32827", interest="cricket")
+        self.assertEqual([r["id"] for r in rows], ["a"])
