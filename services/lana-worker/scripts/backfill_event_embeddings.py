@@ -15,6 +15,8 @@ Usage (from services/lana-worker, with the worker's env loaded):
     python -m scripts.backfill_event_embeddings            # only NULL embeddings
     python -m scripts.backfill_event_embeddings --stale    # + meets edited since embedding
     python -m scripts.backfill_event_embeddings --all      # re-embed every open meet
+                                                           # (required once after 20270127120000:
+                                                           #  meets are now RETRIEVAL_DOCUMENT vectors)
     python -m scripts.backfill_event_embeddings --probe "outdoor thing with kids"
 
 Only status='open' meets are touched: they are the only rows search_events_semantic reads,
@@ -32,12 +34,12 @@ import sys
 from datetime import datetime, timezone
 
 from app.auth import service_client
-from app.event_embed import event_embedding_text
+from app.event_embed import EVENT_DOC_TASK, EVENT_QUERY_TASK, event_embedding_text
 
 _FIELDS = "id, title, description, venue_name, cohort_tags, updated_at, embedding_updated_at"
 
 
-def _vertex_embed(text: str, dim: int = 768) -> list[float]:
+def _vertex_embed(text: str, dim: int = 768, task_type: str | None = None) -> list[float]:
     """Embed via Vertex text-embedding-005, inline.
 
     Deliberately does NOT import app.vertex_extract — same reason as
@@ -52,7 +54,14 @@ def _vertex_embed(text: str, dim: int = 768) -> list[float]:
         raise RuntimeError("GCP_VERTEX_PROJECT not set")
     model = os.environ.get("VERTEX_EMBED_MODEL", "text-embedding-005")
     client = genai.Client(vertexai=True, project=project, location=location)
-    result = client.models.embed_content(model=model, contents=text)
+    if task_type:
+        from google.genai import types
+
+        result = client.models.embed_content(
+            model=model, contents=text, config=types.EmbedContentConfig(task_type=task_type)
+        )
+    else:
+        result = client.models.embed_content(model=model, contents=text)
     values = list(result.embeddings[0].values)
     if len(values) != dim:
         raise ValueError(f"expected_{dim}_dims_got_{len(values)}")
@@ -105,7 +114,7 @@ def _backfill(sb, do_all: bool, do_stale: bool) -> tuple[int, int]:
             print(f"  meet SKIPPED {row['id']}: nothing to embed", file=sys.stderr)
             continue
         try:
-            vec = _vertex_embed(text)
+            vec = _vertex_embed(text, task_type=EVENT_DOC_TASK)
         except Exception as exc:  # noqa: BLE001 — report and continue
             print(f"  meet FAILED {row['id']}: {exc}", file=sys.stderr)
             continue
@@ -127,7 +136,7 @@ def _probe(sb, ask: str) -> int:
     similarity, and picking 0.55 without ever seeing the real distribution of meet scores
     is how a threshold ends up either admitting everything or nothing.
     """
-    vec = _vertex_embed(ask)
+    vec = _vertex_embed(ask, task_type=EVENT_QUERY_TASK)
     rows = (
         sb.table("events")
         .select("id, title, venue_name")

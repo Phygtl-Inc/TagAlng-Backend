@@ -15,6 +15,7 @@ Flow (ask-first):
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -205,6 +206,13 @@ def activity_browse_should_release(
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
 
+# Browse ranks meets by meaning less a log-distance penalty (search_events_semantic
+# p_distance_k / p_distance_base_m, 20270127120000): within the base a meet loses nothing;
+# beyond it, k per e-fold of distance. The same curve app/distance_admission.py used to CUT
+# with (floor_base + k * ln(d / base)); here it only ORDERS — the topic matcher decides.
+_RANK_DISTANCE_K = 0.08
+_RANK_DISTANCE_BASE_M = 8000.0
+
 # Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
 # retuned without reading around prose. These are what make a 0.7 mean the same thing on
 # Tuesday as on Friday: the model is told to score each event against the REQUEST, never
@@ -331,27 +339,37 @@ def _fetch_admitted_events(
     limit: int = 200,
     radius_m: float = 200_000.0,
 ) -> tuple[list[dict[str, Any]], bool] | None:
-    """Meets ranked by meaning within `radius_m`, admitted by distance (C3).
+    """The meets the topic matcher should judge for `interest`: ranked, never cut.
 
-    Returns (admitted_rows, truncated). `truncated` is true when the RPC filled its
-    page, in which case nothing downstream may conclude that nothing further out
-    matched. Returns None — not ([], False) — when the search could not run at all
-    (no embedding, no centroid, RPC failure): the caller falls back to the
-    distance-only read on None, and a dead model never reads as an empty area.
+    Returns (rows, truncated). `rows` is at most _BROWSE_POOL meets, best first by
+    rank_score — meaning less a log-distance penalty, so a farther meet must be more on
+    topic to outrank a nearer one — then meets not yet embedded inside the local radius
+    (never hidden). `truncated` is true when the RPC filled its page, in which case nothing
+    downstream may conclude that nothing further out matched. Returns None — not
+    ([], False) — when the search could not run at all (no embedding, no centroid, RPC
+    failure): the caller falls back to the distance-only read on None, and a dead model
+    never reads as an empty area.
 
-    `limit` is the RPC page size (SQL caps it at 200). `radius_m` is the outer bound
-    the rule scores inside, not a cut — SQL clamps it to 200 km.
+    No similarity floor (2026-10-08). A one-word ask scores low against every meet — a word
+    against a paragraph — so the old floor (0.495) cut exact matches before anything judged
+    them: "music" vs a Latin Jazz Concert 0.41, "jazz" vs a guitar jam 12 km away 0.42. On
+    38 real prod meets and 20 short asks it let through 13% of the right meets; ranking let
+    through 58-63%. Which of these is a match, related or unrelated is the matcher's call.
+
+    `limit` is the RPC page size (SQL caps it at 200). `radius_m` is the outer bound,
+    clamped to 200 km in SQL.
     """
     interest = str(interest or "").strip()
     if not block_id or not interest:
         return None
     log = logging.getLogger(__name__)
 
-    # 1-2. The query vector, from the same helper that embedded the rows.
-    from app.layer1_handlers import _embed_attr_filter
+    # 1-2. The query vector — RETRIEVAL_QUERY mode, the pair of the RETRIEVAL_DOCUMENT
+    #      vectors meets are stored with (app/event_embed.py).
+    from app.event_embed import embed_event_query
     from app.vec_util import to_pgvector
 
-    literal = to_pgvector(_embed_attr_filter(interest))
+    literal = to_pgvector(embed_event_query(interest))
     if not literal:
         log.warning(
             "activity_browse_embed_unavailable interest=%r — distance-only fallback",
@@ -361,18 +379,14 @@ def _fetch_admitted_events(
 
     from app.auth import jwt_user_id, service_client
     from app.discovery_route import activity_window, block_centroid
-    from app.distance_admission import _admission_floor, _admit
 
     loc = block_centroid(block_id)
     if not loc:
         log.warning("activity_browse_block_unplaceable block=%s", block_id)
         return None
 
-    # 3. Rank by meaning, distance returned as data. p_min_similarity is the floor at
-    #    distance zero — the lowest value the rule can ever admit — so SQL drops what
-    #    could never pass while still returning unembedded rows (similarity NULL).
-    # The caller's own meets stay in (step 6 marks them): an imported calendar hosted
-    # from your account is still what's on, and hiding it read as "nothing there".
+    # 3. Ranked by meaning less distance, no floor. The caller's own meets stay in (step 6
+    #    marks them): an imported calendar hosted from your account is still what's on.
     me = jwt_user_id(user_jwt)
     try:
         from app.event_publish import roll_recurring_events
@@ -389,8 +403,10 @@ def _fetch_admitted_events(
                     "p_radius_meters": float(radius_m),
                     "p_window": activity_window(),
                     "p_circle_place_id": None,
-                    "p_min_similarity": _admission_floor(0.0),
+                    "p_min_similarity": 0.0,
                     "p_limit": int(limit),
+                    "p_distance_k": _RANK_DISTANCE_K,
+                    "p_distance_base_m": _RANK_DISTANCE_BASE_M,
                 },
             )
             .execute()
@@ -401,7 +417,7 @@ def _fetch_admitted_events(
     raw = [r for r in (res.data if isinstance(res.data, list) else []) if isinstance(r, dict)]
 
     # 4. Before anything is dropped: a full page means the set was cut, whatever
-    #    survives the filters below.
+    #    survives below.
     truncated = len(raw) >= int(limit)
 
     # 5. Stamp — the RPC returns both, but as JSON they may arrive as int or None.
@@ -427,15 +443,25 @@ def _fetch_admitted_events(
     if weekend_only:
         rows = _weekend_rows(rows)
 
-    # 8. The RPC returns neither column and the cards need both (community badge,
+    # 8. The pool the matcher reads: the best-ranked embedded meets, then meets with no
+    #    vector yet, nearest first (a meet posted a minute ago is not hidden for that — the
+    #    floor never hid them either). SQL already ordered by rank_score, unembedded last.
+    embedded = [r for r in rows if r.get("similarity") is not None][:_BROWSE_POOL]
+    fresh = sorted(
+        (r for r in rows if r.get("similarity") is None),
+        key=lambda r: float(r.get("distance_meters") or 0.0),
+    )
+    pool = embedded + fresh[: max(0, _BROWSE_POOL - len(embedded))]
+
+    # 9. The RPC returns neither column and the cards need both (community badge,
     #    recurrence). A lookup by id, best-effort: a miss leaves them absent.
-    if rows:
+    if pool:
         try:
             extra = (
                 service_client()
                 .table("events")
                 .select("id, recurrence, circle_place_ref")
-                .in_("id", [str(r["id"]) for r in rows])
+                .in_("id", [str(r["id"]) for r in pool])
                 .execute()
             )
             by_id = {
@@ -443,30 +469,14 @@ def _fetch_admitted_events(
                 for e in (extra.data or [])
                 if isinstance(e, dict) and e.get("id")
             }
-            for r in rows:
-                e = by_id.get(str(r["id"]))
-                if e:
-                    r["recurrence"] = e.get("recurrence")
-                    r["circle_place_ref"] = e.get("circle_place_ref")
+            for r in pool:
+                ex = by_id.get(str(r["id"]))
+                if ex:
+                    r["recurrence"] = ex.get("recurrence")
+                    r["circle_place_ref"] = ex.get("circle_place_ref")
         except Exception:  # noqa: BLE001
             log.exception("activity_browse_event_columns_failed")
-
-    # 9. Order is the RPC's (similarity desc, unembedded last); _admit only filters.
-    #    The distance floor applies BEYOND the local radius only. Inside it every meet still
-    #    reaches the topic matcher, after the admitted ones: a short ask ("language groups")
-    #    against a long description can score under the floor, and the floor then hid the
-    #    Language Exchange Club 13 km away while the far probe — which never applies it —
-    #    had just offered "Look in San Jose" for that very meet (prod 2026-10-07).
-    admitted = _admit(rows)
-    kept = {id(r) for r in admitted}
-    from app.discovery_route import activity_radius_meters
-
-    local_m = float(activity_radius_meters())
-    near_rest = [
-        r for r in rows
-        if id(r) not in kept and float(r.get("distance_meters") or 0.0) <= local_m
-    ]
-    return admitted + near_rest, truncated
+    return pool, truncated
 
 
 def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
@@ -1227,6 +1237,65 @@ def browse_turn_metadata(ctx: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(val, dict) and val:
             out[key] = val
     return out
+
+
+_RELATED_SYSTEM = (
+    "A resident asked for a kind of event and nothing matched it exactly, so they asked to "
+    "widen the search to related events. From the numbered events, pick the ones that are a "
+    "different activity in the same broad area as what they asked for, or that serve the same "
+    "main purpose: something a person who wanted that would plausibly enjoy instead. Leave "
+    "out events whose only link is the audience, the place, the time, or simply being a "
+    "social get-together. Judge each event on what it is, not on its date. Order the picks "
+    "from closest to furthest. Output ONLY JSON: {\"related_indices\": [ints]}"
+)
+
+
+def _related_alternatives(
+    events: list[dict[str, Any]], request: str
+) -> list[dict[str, Any]] | None:
+    """The meets "Widen the search" may offer for `request`, closest first — one model call
+    that asks exactly that question.
+
+    The matcher's topic_score answers it only as a side output of a call that is told the
+    topic is a hard constraint, and it drifted to 0.0 for anything that did not match: a
+    guitar jam 12 km away scored 0.0 for "jazz" and Widen showed nothing (prod 2026-10-08).
+    None when the call could not run, so the caller falls back to the score rule."""
+    request = str(request or "").strip()
+    rows = [e for e in events if isinstance(e, dict)]
+    if not rows or not request:
+        return [] if not rows else None
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return None
+        lines = []
+        for i, ev in enumerate(rows):
+            tags = ev.get("cohort_tags")
+            tagstr = ", ".join(tags) if isinstance(tags, list) else str(tags or "")
+            desc = str(ev.get("description") or "").strip()[:200]
+            lines.append(f"{i}: {ev.get('title', '')} | tags: {tagstr} | about: {desc}")
+        data = llm_json(
+            model=router_model(),
+            system=_RELATED_SYSTEM,
+            user_payload=json.dumps(
+                {"request": request, "events": lines}, ensure_ascii=False
+            ),
+            max_tokens=40 + 4 * len(lines),
+            temperature=0.0,
+        )
+    except Exception:  # noqa: BLE001 — fall back to the score rule
+        logging.getLogger(__name__).warning("browse_related_failed", exc_info=True)
+        return None
+    idx = (data or {}).get("related_indices") if isinstance(data, dict) else None
+    if not isinstance(idx, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for i in idx:
+        if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(rows):
+            if rows[i] not in out:
+                out.append(rows[i])
+    return out[:_RELATED_CARDS]
 
 
 def _filter_events_by_query(
@@ -2454,10 +2523,12 @@ def _run_browse_turn(
 
     # After "Widen the search": related meets, closest topic first — never everything.
     if not matched and interest and draft.get("_widen_related"):
-        related = sorted(
-            (e for e in events if _coerce_topic_score(e.get("topic_score")) >= _RELATED_FLOOR),
-            key=lambda e: -_coerce_topic_score(e.get("topic_score")),
-        )[:_RELATED_CARDS]
+        related = _related_alternatives(events, request)
+        if related is None:
+            related = sorted(
+                (e for e in events if _coerce_topic_score(e.get("topic_score")) >= _RELATED_FLOOR),
+                key=lambda e: -_coerce_topic_score(e.get("topic_score")),
+            )[:_RELATED_CARDS]
         if related:
             matched = related
             label = t("browse.related_label", lang, interest=(label or interest).strip())

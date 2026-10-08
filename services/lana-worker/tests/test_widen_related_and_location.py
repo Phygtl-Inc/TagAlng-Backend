@@ -136,3 +136,56 @@ def test_the_message_model_takes_the_pill_point() -> None:
                            search_label="Rawalpindi, PK")
     assert (m.search_lat, m.search_lng, m.search_label) == (33.6, 73.0, "Rawalpindi, PK")
     assert SendMessageRequest(message="hi").search_lat is None
+
+
+# ── Widen asks the model directly which meets are related (prod 2026-10-08) ──────────────
+# The matcher's topic_score rated a guitar jam 0.0 for "jazz" (it is told the topic is a
+# hard constraint), so Widen showed nothing though the jam was 12 km away.
+
+_GUITAR = {"id": "guitar", "title": "Neighborhood Guitar Meetup", "distance_meters": 12000.0}
+
+
+def _widen_ctx(interest: str = "jazz") -> dict:
+    ctx = _fresh()
+    ctx["browse_draft"].update({"interest": interest, "_request": f"any {interest} events",
+                                "_widen_related": True})
+    return ctx
+
+
+def test_widen_shows_what_the_related_call_picks_even_at_a_zero_score() -> None:
+    with mock.patch.object(ab, "_related_alternatives",
+                           side_effect=lambda evs, req: [e for e in evs if e["id"] == "guitar"]) as rel:
+        _r, ctx, _f = _turn("", _widen_ctx(), events=[_GUITAR, _BOOKS])
+    assert rel.call_args.args[1] == "any jazz events"
+    assert [p.get("activity_id") for p in ctx.get("activity_previews") or []] == ["guitar"]
+
+
+def test_widen_shows_nothing_when_the_model_finds_nothing_related() -> None:
+    # An empty pick is an answer, not a failure: the score rule must not overrule it.
+    # python scores 0.6 here: the old score rule WOULD show it.
+    with mock.patch.object(ab, "_related_alternatives", return_value=[]):
+        _r, ctx, _f = _turn("", _widen_ctx("AI"), events=[_BOOKS, _PYTHON])
+    assert not ctx.get("activity_previews")
+
+
+def test_a_failed_related_call_falls_back_to_the_score_rule() -> None:
+    with mock.patch.object(ab, "_related_alternatives", return_value=None):
+        _r, ctx, _f = _turn("", _widen_ctx("AI"), events=[_BOOKS, _PYTHON])
+    assert [p.get("activity_id") for p in ctx.get("activity_previews") or []] == ["python"]
+
+
+def test_related_alternatives_reads_the_models_indices_defensively() -> None:
+    evs = [{"id": str(i), "title": f"meet {i}"} for i in range(8)]
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json",
+                       return_value={"related_indices": [2, 2, 99, -1, True, "3", 0, 1, 4, 5, 6]}) as llm:
+        out = ab._related_alternatives(evs, "any jazz events")
+    # duplicates, out-of-range, bools and strings dropped; capped at _RELATED_CARDS
+    assert [e["id"] for e in out] == ["2", "0", "1", "4", "5"][: ab._RELATED_CARDS]
+    assert '"request": "any jazz events"' in llm.call_args.kwargs["user_payload"]
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json", return_value={"nope": 1}):
+        assert ab._related_alternatives(evs, "jazz") is None
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json", side_effect=RuntimeError("down")):
+        assert ab._related_alternatives(evs, "jazz") is None

@@ -16,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from app.activity_browse import _fetch_admitted_events
-from app.distance_admission import _admission_floor
 
 _LITERAL = "[0.1,0.2,0.3]"
 _CENTROID = (28.36, -81.25)
@@ -62,7 +61,7 @@ class _FetchCase(unittest.TestCase):
                interest="cricket", weekend_only=False, rpc_exc=None, **kw):
         sb = _sb(rows, extra_rows, rpc_exc)
         embed_spy = MagicMock(return_value=list(embed) if embed is not None else None)
-        with patch("app.layer1_handlers._embed_attr_filter", embed_spy), patch(
+        with patch("app.event_embed.embed_event_query", embed_spy), patch(
             "app.auth.service_client", return_value=sb
         ), patch("app.auth.jwt_user_id", return_value=me), patch(
             "app.discovery_route.block_centroid", return_value=_CENTROID
@@ -73,7 +72,8 @@ class _FetchCase(unittest.TestCase):
         return result, sb, embed_spy
 
     def _rpc_args(self, sb):
-        name, args = sb.rpc.call_args[0]
+        """The WIDE read — the first search. A floor-free local read follows it (4b)."""
+        name, args = sb.rpc.call_args_list[0][0]
         self.assertEqual(name, "search_events_semantic")
         return args
 
@@ -93,9 +93,12 @@ class QueryEmbeddingTests(_FetchCase):
         self.assertIsNone(args["p_circle_place_id"])
         self.assertEqual(args["p_lat"], _CENTROID[0])
         self.assertEqual(args["p_lng"], _CENTROID[1])
-        # The lowest value the rule can ever admit is the floor at distance zero.
-        self.assertAlmostEqual(args["p_min_similarity"], 0.55 * 0.9, places=9)
-        self.assertAlmostEqual(args["p_min_similarity"], _admission_floor(0.0), places=9)
+        # Ranked, never cut (20270127120000): no floor, and the distance trade-off is an ORDER.
+        from app.activity_browse import _RANK_DISTANCE_BASE_M, _RANK_DISTANCE_K
+
+        self.assertEqual(args["p_min_similarity"], 0.0)
+        self.assertEqual(args["p_distance_k"], _RANK_DISTANCE_K)
+        self.assertEqual(args["p_distance_base_m"], _RANK_DISTANCE_BASE_M)
 
     def test_the_page_size_is_the_keyword_default_and_overridable(self):
         _result, sb, _spy = self._fetch([_ev("a")])
@@ -118,13 +121,13 @@ class FallbackSignalTests(_FetchCase):
 
     def test_no_block_or_no_interest_is_none_without_embedding(self):
         embed_spy = MagicMock(return_value=[0.1])
-        with patch("app.layer1_handlers._embed_attr_filter", embed_spy):
+        with patch("app.event_embed.embed_event_query", embed_spy):
             self.assertIsNone(_fetch_admitted_events("jwt", None, interest="cricket"))
             self.assertIsNone(_fetch_admitted_events("jwt", "zip-32827", interest="  "))
         embed_spy.assert_not_called()
 
     def test_an_unplaceable_block_is_none(self):
-        with patch("app.layer1_handlers._embed_attr_filter", return_value=[0.1]), patch(
+        with patch("app.event_embed.embed_event_query", return_value=[0.1]), patch(
             "app.discovery_route.block_centroid", return_value=None
         ), patch("app.auth.service_client", return_value=_sb([_ev("a")])) as sc:
             self.assertIsNone(_fetch_admitted_events("jwt", "zip-99999", interest="cricket"))
@@ -148,9 +151,12 @@ class TruncationTests(_FetchCase):
 
     def test_a_full_page_with_own_meets_is_still_truncated(self):
         rows = [_ev(f"e{i}", host_id="me" if i % 2 else "host") for i in range(_LIMIT)]
-        (admitted, truncated), _sb_, _spy = self._fetch(rows, me="me")
+        (pool, truncated), _sb_, _spy = self._fetch(rows, me="me")
         self.assertTrue(truncated)
-        self.assertEqual(len(admitted), _LIMIT)
+        # The page says how much there was; the matcher still reads only its pool.
+        from app.activity_browse import _BROWSE_POOL
+
+        self.assertEqual(len(pool), _BROWSE_POOL)
 
     def test_truncation_follows_an_overridden_limit(self):
         (_rows, truncated), _sb_, _spy = self._fetch([_ev("a"), _ev("b")], limit=2)
@@ -203,7 +209,7 @@ class RowShapeTests(_FetchCase):
     def test_a_failed_column_lookup_leaves_the_rows_rather_than_dropping_them(self):
         sb = _sb([_ev("a")])
         sb.table.return_value.execute.side_effect = RuntimeError("boom")
-        with patch("app.layer1_handlers._embed_attr_filter", return_value=[0.1]), patch(
+        with patch("app.event_embed.embed_event_query", return_value=[0.1]), patch(
             "app.auth.service_client", return_value=sb
         ), patch("app.auth.jwt_user_id", return_value="me"), patch(
             "app.discovery_route.block_centroid", return_value=_CENTROID
@@ -225,46 +231,38 @@ class RowShapeTests(_FetchCase):
         self.assertEqual([r["id"] for r in admitted], ["sat"])
 
 
-class AdmissionOrderTests(_FetchCase):
-    def test_rows_reach_admit_in_rpc_order(self):
-        rows = [
-            _ev("later", similarity=0.6, distance_meters=90000.0, starts_at="2026-10-01T18:00:00+00:00"),
-            _ev("sooner", similarity=0.5, distance_meters=1000.0, starts_at="2026-09-15T18:00:00+00:00"),
-            _ev("fresh", similarity=None, distance_meters=500.0, starts_at="2026-09-14T18:00:00+00:00"),
-        ]
-        seen = {}
+class RankedPoolTests(_FetchCase):
+    """No similarity floor: SQL orders by meaning less distance, the matcher judges the top
+    of that list. Prod 2026-10-08: "music" vs a Latin Jazz Concert scored 0.41 and the old
+    0.495 floor removed an exact match before anything could judge it."""
 
-        def _spy_admit(candidates, **_kw):
-            seen["order"] = [r["id"] for r in candidates]
-            return list(candidates)
+    def test_a_low_scoring_exact_match_reaches_the_matcher(self):
+        (pool, _t), _sb_, _spy = self._fetch(
+            [_ev("concert", similarity=0.41, distance_meters=5000.0)]
+        )
+        self.assertEqual([r["id"] for r in pool], ["concert"])
 
-        with patch("app.distance_admission._admit", side_effect=_spy_admit):
-            (admitted, _t), _sb_, _spy = self._fetch(rows)
-        # Not re-sorted by start date — the RPC's meaning-first order is the ranking.
-        self.assertEqual(seen["order"], ["later", "sooner", "fresh"])
-        self.assertEqual([r["id"] for r in admitted], ["later", "sooner", "fresh"])
+    def test_the_pool_keeps_the_rpc_rank_order(self):
+        rows = [_ev("near-ok", similarity=0.45, distance_meters=2000.0),
+                _ev("far-great", similarity=0.8, distance_meters=150_000.0),
+                _ev("near-weak", similarity=0.30, distance_meters=1000.0)]
+        (pool, _t), _sb_, _spy = self._fetch(rows)
+        self.assertEqual([r["id"] for r in pool], ["near-ok", "far-great", "near-weak"])
 
-    def test_the_rule_actually_runs(self):
-        # 0.9 at 30 km clears its floor; 0.40 at 120 km does not and is dropped. 0.48 at
-        # 2 km is under the clamp but INSIDE the local radius, so it still reaches the
-        # topic matcher — ranked after everything the rule admitted (prod 2026-10-07:
-        # the floor hid the Language Exchange Club 13 km away).
-        with patch("app.discovery_route.activity_radius_meters", return_value=40000.0):
-            (admitted, _t), _sb_, _spy = self._fetch(
-                [_ev("guitar", similarity=0.48, distance_meters=2000.0),
-                 _ev("violin", similarity=0.90, distance_meters=30000.0),
-                 _ev("piano", similarity=0.40, distance_meters=120000.0)]
-            )
-        self.assertEqual([r["id"] for r in admitted], ["violin", "guitar"])
+    def test_the_matcher_reads_at_most_its_pool_of_ranked_meets(self):
+        from app.activity_browse import _BROWSE_POOL
 
-    def test_beyond_the_local_radius_the_floor_still_decides(self):
-        with patch("app.discovery_route.activity_radius_meters", return_value=40000.0):
-            (admitted, _t), _sb_, _spy = self._fetch(
-                [_ev("far_weak", similarity=0.50, distance_meters=90000.0),
-                 _ev("far_strong", similarity=0.95, distance_meters=90000.0)]
-            )
-        self.assertEqual([r["id"] for r in admitted], ["far_strong"])
+        rows = [_ev(f"e{i}", similarity=0.9 - i * 0.001) for i in range(_BROWSE_POOL + 10)]
+        (pool, _t), _sb_, _spy = self._fetch(rows)
+        self.assertEqual([r["id"] for r in pool], [f"e{i}" for i in range(_BROWSE_POOL)])
 
+    def test_meets_without_a_vector_follow_nearest_first_and_are_never_hidden(self):
+        rows = [_ev("ranked", similarity=0.5),
+                _ev("fresh-far", similarity=None, distance_meters=90_000.0),
+                _ev("fresh-near", similarity=None, distance_meters=800.0)]
+        (pool, _t), _sb_, _spy = self._fetch(rows)
+        self.assertEqual([r["id"] for r in pool], ["ranked", "fresh-near", "fresh-far"])
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_a_single_search_runs(self):
+        _r, sb, _spy = self._fetch([_ev("a")])
+        self.assertEqual(sb.rpc.call_count, 1)
