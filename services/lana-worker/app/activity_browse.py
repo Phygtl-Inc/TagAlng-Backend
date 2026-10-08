@@ -831,6 +831,30 @@ def _far_matches_facts(found: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _far_related_facts(found: list[dict[str, Any]], interest: str) -> list[str]:
+    """Facts for RELATED meets beyond the radius, after Widen. They are not what was asked
+    for, and the reply must not present them as if they were."""
+    lead = found[0]
+    lines = "; ".join(
+        f'"{f.get("title") or "a meet"}" in {_far_where(f)} (about {f["miles"]:,} miles)'
+        + (" — they host this one themselves" if f.get("hosted_by_you") else "")
+        for f in found
+    )
+    return [
+        f"They widened the search. Nothing on {interest} or anything related is near them. "
+        f"RELATED meets FARTHER away — a different activity in the same broad area, NOT "
+        f"{interest} itself — closest first: {lines}. No other area was looked at.",
+        f'Name ONLY the first: "{lead.get("title") or "a meet"}" in {_far_where(lead)}, '
+        f"about {lead['miles']:,} miles away — say plainly it is related rather than "
+        f"{interest}, and how far. "
+        + ("Say the others are below too. " if len(found) > 1 else "")
+        + "They are shown as cards under your message; never list them in the text.",
+        "The ONLY option to offer is listening for one NEAR them (the pill 'Yes, listen "
+        "for me'). Never offer to widen again.",
+        "Keep it to TWO sentences.",
+    ]
+
+
 def _compose_empty_seek_offer(
     interest: str,
     *,
@@ -905,7 +929,11 @@ def _compose_empty_seek_offer(
         kw = {"title": far_lead.get("title") or "a meet", "area": _far_where(far_lead),
               "miles": f"{far_lead['miles']:,}"}
         fallback = (
-            t("browse.far_matches_interest", lang, interest=interest, **kw)
+            t(
+                "browse.far_related_interest" if far_lead.get("related")
+                else "browse.far_matches_interest",
+                lang, interest=interest, **kw,
+            )
             if interest
             else t("browse.far_matches_generic", lang, **kw)
         )
@@ -977,6 +1005,9 @@ def _compose_empty_seek_offer(
                 "Never invent or promise events other than the one closest event named "
                 "below, and never claim anything else is happening nearby"
                 if stretch is not None
+                else "Never invent events: the ONLY events you may name are the farther-away "
+                "ones listed below, and never call them nearby"
+                if far_lead is not None
                 else "Never invent or promise events, and never claim something is happening nearby"
             ),
         ]
@@ -1039,6 +1070,18 @@ def _compose_empty_seek_offer(
                 "what they can tap. Do not ask whether they want to see the event; it is "
                 "already on a card. Ground it ONLY in the facts given. "
             )
+        elif far_lead is not None:
+            # A real meet farther away is on a card under the message. The old instruction
+            # only said "nothing matched", and the reply dropped the meet 2 runs in 3 — the
+            # user saw a card the sentence never mentioned (prod 2026-10-08).
+            system = (
+                "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
+                f"(max 2 sentences): say nothing matched in {where} right now, name the one "
+                "farther-away meet the facts tell you to name, with its distance, then offer "
+                "EXACTLY the options named in the facts below — every one of them, and no "
+                "others. The facts describe what is shown under your message, so a meet or "
+                "option you invent or omit contradicts it. Ground it ONLY in the facts given. "
+            )
         else:
             system = (
                 "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
@@ -1066,6 +1109,12 @@ def _compose_empty_seek_offer(
             logging.getLogger(__name__).info(
                 "stretch_offer_post_check_fallback event=%s", stretch.event_id
             )
+            return fallback
+        lead_title = str((far_lead or {}).get("title") or "").strip()
+        if far_lead is not None and msg_out and lead_title and lead_title.lower() not in msg_out.lower():
+            # Same honesty check for a far meet: a reply that never names the card it sits
+            # above reads as "nothing anywhere". The template names it with its distance.
+            logging.getLogger(__name__).info("far_lead_post_check_fallback title=%r", lead_title)
             return fallback
         return msg_out or fallback
     except Exception:  # noqa: BLE001
@@ -1547,7 +1596,13 @@ def _refine_suggestions(events: list[dict[str, Any]]) -> list[str]:
 
 
 def _far_offer(
-    user_jwt: str, block_id: str | None, draft: dict[str, Any], *, interest: str = ""
+    user_jwt: str,
+    block_id: str | None,
+    draft: dict[str, Any],
+    *,
+    interest: str = "",
+    related: bool = False,
+    request: str = "",
 ) -> tuple[list[str], str, list[dict[str, Any]]]:
     """(facts, pill text, cards) for real supply outside the radius — ([], "", []) when
     there is none.
@@ -1580,14 +1635,25 @@ def _far_offer(
         return [], "", []
     _mark_own(rows, jwt_user_id(user_jwt))
     matched, _label = _filter_events_by_query(rows, interest)
-    if not matched or _filter_unchecked(rows):
-        # Nothing judged on topic out there — including when the matcher could not run.
-        # "There are some in <area>" over rows nobody checked is an invented claim.
+    if _filter_unchecked(rows):
+        # The matcher could not run. "There are some in <area>" over rows nobody checked
+        # is an invented claim.
+        return [], "", []
+    is_related = False
+    if not matched and related and str(interest or "").strip():
+        # They tapped "Widen the search": nothing related was near, so look for RELATED
+        # meets out there too — the same question Widen asks nearby. Without this, a
+        # widen from New York could never reach a guitar jam in Orlando for "jazz": the far
+        # probe only ever accepted exact matches (prod 2026-10-08).
+        matched = _related_alternatives(rows, request or interest) or []
+        is_related = bool(matched)
+    if not matched:
         return [], "", []
     if str(interest or "").strip():
         found_rows: list[dict[str, Any]] = []
         found: list[dict[str, Any]] = []
-        for row in _rank_far_matches(matched):
+        # Related picks keep the model's order (closest first); exact ones rank as before.
+        for row in (matched if is_related else _rank_far_matches(matched)):
             det = far_activity_details(row)
             if not det or not det.get("miles") or not _far_where(det):
                 continue
@@ -1596,12 +1662,16 @@ def _far_offer(
             venue = str(row.get("venue_name") or "").strip()
             row["venue_name"] = f"{venue} · {_far_where(det)}" if venue else _far_where(det)
             found_rows.append(row)
-            found.append({**det, "hosted_by_you": bool(row.get("hosted_by_you"))})
+            found.append({**det, "hosted_by_you": bool(row.get("hosted_by_you")),
+                          **({"related": True} if is_related else {})})
             if len(found) >= _FAR_CARDS:
                 break
         if found:
             draft["_far_lead"] = found[0]
-            return _far_matches_facts(found), "", found_rows
+            facts = (
+                _far_related_facts(found, interest) if is_related else _far_matches_facts(found)
+            )
+            return facts, "", found_rows
     # _filter_events_by_query may reorder; the offer must still name the CLOSEST match.
     nearest = min(matched, key=lambda r: float(r.get("distance_meters") or 0))
     far = far_activity_details(nearest)
@@ -2585,7 +2655,10 @@ def _run_browse_turn(
         far_facts, far_chip, far_cards = (
             ([], _arm_community_widen(draft, comm), [])
             if comm
-            else _far_offer(user_jwt, block_id, draft, interest=interest)
+            else _far_offer(
+                user_jwt, block_id, draft, interest=interest,
+                related=bool(draft.get("_widen_related")), request=request,
+            )
         )
         if far_chip and draft.get("_area_from_offer"):
             # Cards are fine; a second "Look in <area>" pill is the chain.

@@ -189,3 +189,31 @@ def test_related_alternatives_reads_the_models_indices_defensively() -> None:
     with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
             mock.patch("app.orchestrator.llm.llm_json", side_effect=RuntimeError("down")):
         assert ab._related_alternatives(evs, "jazz") is None
+
+
+def test_a_widen_turn_with_nothing_near_asks_the_far_probe_for_related_meets() -> None:
+    # Prod 2026-10-08, Bronx account: nothing within the radius at all; Widen must carry
+    # into the far probe, or a related meet 1,500 km away can never be offered.
+    far = mock.Mock(return_value=([], "", []))
+    ctx = _widen_ctx("jazz")
+    patches = [
+        mock.patch.object(ab, "_fetch_block_events", return_value=[]),
+        mock.patch.object(ab, "_fetch_admitted_events", return_value=None, create=True),
+        mock.patch.object(ab, "_filter_events_by_query", side_effect=_filt),
+        mock.patch.object(ab, "_zip_gate_frame", return_value=None),
+        mock.patch.object(ab, "_far_offer", far),
+        mock.patch("app.lana_paths.stretch_offer_enabled", return_value=False),
+        mock.patch("app.orchestrator.llm.llm_configured", return_value=False),
+        mock.patch("app.discovery_route._try_assign_home_block"),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        ab.run_activity_browse_turn(user_message="", session_ctx=ctx, history=[],
+                                    user_jwt="jwt", home_block_id="zip-10451", slots={})
+    finally:
+        for p in patches:
+            p.stop()
+    assert far.called
+    assert far.call_args.kwargs["related"] is True
+    assert far.call_args.kwargs["request"] == "any jazz events"

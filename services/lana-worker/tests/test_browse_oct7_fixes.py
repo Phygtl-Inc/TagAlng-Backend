@@ -224,7 +224,7 @@ def test_empty_search_keeps_the_topic_over_a_when_label(topic: str, label: str) 
              "venue_name": "Library", "topic_score": 1.0}]
     far_calls: list[str] = []
 
-    def _far(_jwt: Any, _block: Any, _draft: Any, *, interest: str) -> tuple:
+    def _far(_jwt: Any, _block: Any, _draft: Any, *, interest: str, **_kw: Any) -> tuple:
         far_calls.append(interest)
         return [], "", []
 
