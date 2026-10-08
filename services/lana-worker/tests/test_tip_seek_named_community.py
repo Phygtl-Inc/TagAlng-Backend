@@ -2,8 +2,7 @@
 
 Prod 2026-10-07 (Pouya, SJSU): "any recommendations for a beginner friendly project program
 at San Jose State University?" from the main chat (no active community) searched the asker's
-Minneapolis ZIP — where a community's tips never appear — and answered from Google, though
-the asker was a confirmed SJSU member and a member had shared exactly that.
+Minneapolis ZIP and answered from Google, though a member had shared exactly that.
 """
 
 import unittest
@@ -12,43 +11,38 @@ from unittest.mock import patch
 SJSU = "95c614e8-749b-484e-bd33-9bf9bc005908"
 
 
-class NamedMemberCommunityTests(unittest.TestCase):
-    def _named(self, *, hit, member, said="San Jose State"):
-        from app.community_scope import named_member_community
+class NamedCommunityScopeTests(unittest.TestCase):
+    def _named(self, *, hit, said="San Jose State"):
+        from app.community_scope import named_community_scope
 
         with patch(
             "app.community_discovery.resolve_community_name", return_value={"hit": hit}
-        ) as resolve, patch(
-            "app.community_surface.caller_affiliation_at",
-            return_value={"id": "a"} if member else None,
-        ) as aff:
-            out = named_member_community("u1", said)
-        return out, resolve, aff
+        ) as resolve:
+            out = named_community_scope("u1", said)
+        return out, resolve
 
-    def test_a_confirmed_member_gets_the_named_community_as_scope(self) -> None:
-        out, resolve, aff = self._named(
-            hit={"place_id": SJSU, "place_name": "San Jose State University"}, member=True
-        )
+    def test_the_named_community_becomes_the_scope(self) -> None:
+        out, resolve = self._named(hit={"place_id": SJSU, "place_name": "San Jose State University"})
         self.assertEqual(out, {"place_id": SJSU, "name": "San Jose State University"})
         resolve.assert_called_once_with("u1", "San Jose State")
-        # Confirmed only: that is who find_neighbor_tips lets read a community's tips.
-        self.assertEqual(aff.call_args.kwargs["statuses"], ("confirmed",))
 
-    def test_a_non_member_is_not_scoped_there(self) -> None:
-        out, _r, _a = self._named(
-            hit={"place_id": SJSU, "place_name": "San Jose State University"}, member=False
-        )
-        self.assertIsNone(out)
+    def test_membership_is_not_required(self) -> None:
+        # Community recommendations are open to anyone (20270126120000): the scope is
+        # granted without ever asking whether the caller belongs there.
+        with patch("app.community_surface.caller_affiliation_at", return_value=None) as aff:
+            out, _r = self._named(hit={"place_id": SJSU, "place_name": "San Jose State University"})
+        self.assertEqual(out["place_id"], SJSU)
+        aff.assert_not_called()
 
     def test_an_unresolved_name_or_a_failure_is_no_scope(self) -> None:
-        self.assertIsNone(self._named(hit=None, member=True)[0])
-        from app.community_scope import named_member_community
+        self.assertIsNone(self._named(hit=None)[0])
+        from app.community_scope import named_community_scope
 
         with patch(
             "app.community_discovery.resolve_community_name", side_effect=RuntimeError("db")
         ):
-            self.assertIsNone(named_member_community("u1", "San Jose State"))
-        self.assertIsNone(named_member_community("u1", None))
+            self.assertIsNone(named_community_scope("u1", "San Jose State"))
+        self.assertIsNone(named_community_scope("u1", None))
 
 
 class SaveSignalPassesTheNamedScopeTests(unittest.TestCase):
@@ -56,7 +50,7 @@ class SaveSignalPassesTheNamedScopeTests(unittest.TestCase):
         from app import discovery_route as dr
 
         with patch("app.lana_paths.tip_ask_consent_enabled", return_value=True), patch(
-            "app.community_scope.named_member_community", return_value=scope
+            "app.community_scope.named_community_scope", return_value=scope
         ) as named, patch.object(
             dr, "_tip_seek_answer_turn", return_value=("R", {}, {}, [])
         ) as ans:

@@ -89,31 +89,26 @@ def apply_community_selection(
     return comm
 
 
-def named_member_community(user_id: str | None, said: str | None) -> dict[str, Any] | None:
-    """The community this turn NAMED, as a scope ({"place_id", "name"}), when the caller
-    is a confirmed member of it — else None.
+def named_community_scope(user_id: str | None, said: str | None) -> dict[str, Any] | None:
+    """The community this turn NAMED, as a scope ({"place_id", "name"}) — else None.
 
-    A recommendation ask that names a community ("…at San Jose State") must be read
-    inside it even when the chat was not opened there: without this the tip search
-    looked in the asker's home ZIP, where a community's tips never appear, and answered
-    from Google (prod 2026-10-07). Confirmed only, because that is who find_neighbor_tips
-    lets read a community's tips — scoping a non-member there would report it empty."""
+    A recommendation ask that names a community ("…at San Jose State") is read inside it
+    even when the chat was not opened there: without this the tip search looked in the
+    asker's home ZIP and answered from Google (prod 2026-10-07). Membership is not
+    required: a community's recommendations are open to anyone (20270126120000)."""
     name = str(said or "").strip()
     if not (user_id and name):
         return None
     try:
         from app.community_discovery import resolve_community_name
-        from app.community_surface import caller_affiliation_at
 
         hit = resolve_community_name(str(user_id), name)["hit"]
-        place_id = str((hit or {}).get("place_id") or "").strip()
-        if not place_id or not caller_affiliation_at(
-            str(user_id), place_id, statuses=("confirmed",)
-        ):
-            logger.info("community_scope.named_not_member said=%r place=%s", name, place_id)
-            return None
     except Exception:  # noqa: BLE001 — no scope is the old behaviour, never a failed turn
         logger.warning("community_scope.named_resolve_failed said=%r", name, exc_info=True)
+        return None
+    place_id = str((hit or {}).get("place_id") or "").strip()
+    if not place_id:
+        logger.info("community_scope.named_unresolved said=%r", name)
         return None
     return {"place_id": place_id, "name": str(hit.get("place_name") or "").strip() or name}
 
