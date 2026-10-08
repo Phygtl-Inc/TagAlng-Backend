@@ -93,6 +93,7 @@ from app.models import (
     ChapterChangeResponse,
     ChapterDetachBody,
     CommunityDiscoveryResponse,
+    CommunityWithinRow,
     CommunityDiscoveryRow,
     CommunityDraft,
     CommunityEventRow,
@@ -1035,6 +1036,8 @@ def _communities_from_ctx(ctx: dict[str, Any]) -> CommunitiesCardPayload | None:
                         venue_name=str(m.get("venue_name") or "") or None,
                         cover_emoji=str(m.get("cover_emoji") or "") or None,
                         going_count=int(m.get("going_count") or 0),
+                        origin_place_id=str(m.get("origin_place_id") or "") or None,
+                        origin_place_name=str(m.get("origin_place_name") or "") or None,
                     )
                     for m in (row.get("meets") if isinstance(row.get("meets"), list) else [])
                     if isinstance(m, dict) and str(m.get("event_id") or "").strip()
@@ -1059,31 +1062,31 @@ def _community_discovery_from_ctx(ctx: dict[str, Any]) -> CommunityDiscoveryResp
     if not isinstance(raw, dict):
         return None
     rows_raw = raw.get("communities")
-    rows = [
-        CommunityDiscoveryRow(
-            place_id=str(r.get("place_id") or ""),
-            place_name=r.get("place_name"),
-            place_address=r.get("place_address"),
-            place_type=r.get("place_type"),
-            relation=r.get("relation"),
-            emoji=r.get("emoji"),
-            zip=r.get("zip"),
-            member_count=int(r.get("member_count") or 0),
-            is_member=bool(r.get("is_member")),
-            status_line=r.get("status_line"),
-            # Scored on the chat path too (one RPC), so the same card cannot mean two
-            # things. The authored fit line is NOT: it costs an LLM call, and a chat turn
-            # is already waiting on one.
-            affinity=r.get("affinity"),
-        )
-        for r in (rows_raw if isinstance(rows_raw, list) else [])
-        if isinstance(r, dict) and str(r.get("place_id") or "").strip()
-    ]
+    # The ONE row shaper /circles/discover and /circles/chapters use, so a field added to
+    # the row (a chapter's `parent`, its point, its description) cannot reach the routes
+    # and be dropped on the chat card. The authored fit line is not computed on the chat
+    # path (an LLM call on a turn already waiting on one), so it is simply absent.
+    rows = _discovery_rows(
+        [r for r in (rows_raw if isinstance(rows_raw, list) else []) if isinstance(r, dict)]
+    )
     if not rows:
         return None
     topic = str(raw.get("topic") or "").strip() or None
+    within_raw = raw.get("within")
+    within = (
+        CommunityWithinRow(
+            place_id=str(within_raw["place_id"]),
+            place_name=str(within_raw.get("place_name") or "").strip() or None,
+        )
+        if isinstance(within_raw, dict) and str(within_raw.get("place_id") or "").strip()
+        else None
+    )
     return CommunityDiscoveryResponse(
-        communities=rows, radius_meters=0, topic=topic, named=bool(raw.get("named"))
+        communities=rows,
+        radius_meters=0,
+        topic=topic,
+        named=bool(raw.get("named")),
+        within=within,
     )
 
 
@@ -1128,6 +1131,8 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
                 community=row.get("community") if isinstance(row.get("community"), dict) else None,
                 hosted_by_you=bool(row.get("hosted_by_you")),
                 preview=bool(row.get("preview", True)),
+                origin_place_id=str(row.get("origin_place_id") or "") or None,
+                origin_place_name=str(row.get("origin_place_name") or "") or None,
             )
         )
     return out

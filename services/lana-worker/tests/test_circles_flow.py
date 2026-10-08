@@ -503,10 +503,14 @@ class TestListCirclesForViewer(unittest.TestCase):
         }
     ]
 
+    @patch("app.circles_flow._managed_place_ids", return_value=set())
     @patch("app.circles_flow.list_my_circles")
-    def test_own_list_is_untouched(self, rows) -> None:
+    def test_own_list_is_untouched(self, rows, _managed) -> None:
+        # Untouched but for `can_manage` (does she run it — tests/test_chapters_passthrough).
         rows.return_value = self.OWN
-        self.assertEqual(list_circles("u1", "u1"), self.OWN)
+        self.assertEqual(
+            list_circles("u1", "u1"), [dict(r, can_manage=False) for r in self.OWN]
+        )
 
     @patch("app.circles_flow._my_place_refs", return_value=set())
     @patch("app.community_surface._blocked_ids", return_value=set())

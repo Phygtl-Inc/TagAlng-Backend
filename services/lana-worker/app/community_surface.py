@@ -515,6 +515,10 @@ def _card_meet(r: dict[str, Any], *, going: int = 0) -> dict[str, Any]:
         "venue_name": str(r.get("venue_name") or "").strip() or None,
         "cover_emoji": str(r.get("cover_emoji") or "").strip() or None,
         "going_count": int(going),
+        # Set only when the read labelled the row as ANOTHER community's in the family
+        # (label_origin); passed through, never derived here.
+        "origin_place_id": str(r.get("origin_place_id") or "").strip() or None,
+        "origin_place_name": str(r.get("origin_place_name") or "").strip() or None,
     }
 
 

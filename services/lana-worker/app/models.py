@@ -399,6 +399,11 @@ class ActivityPreviewRow(BaseModel):
     # The viewer hosts this meet — render "You're hosting" instead of an RSVP tap.
     hosted_by_you: bool = False
     preview: bool = True
+    # A meet of ANOTHER community in the selected one's family (a chapter's meet while
+    # browsing its parent, or the parent's on a chapter — 20270125120000). Same pair as
+    # CommunityEventRow; null for the community's own meets and outside a community.
+    origin_place_id: str | None = None
+    origin_place_name: str | None = None
     # The recommendation_impressions row written when this card was sent (contract v2 §A7).
     # The FE posts it back to /lana/impression on a tap so "shown" becomes "tapped"; a row
     # we failed to log is simply absent, and the card still renders.
@@ -775,6 +780,14 @@ class FellowsResponse(BaseModel):
     requires_phone_verification: bool = False
 
 
+class CommunityWithinRow(BaseModel):
+    """The community a chat card's rows sit INSIDE ("Clubs in SJSU") — set by
+    _chapters_turn when the cards are that community's chapters."""
+
+    place_id: str
+    place_name: str | None = None
+
+
 class CommunityDiscoveryResponse(BaseModel):
     communities: list[CommunityDiscoveryRow] = Field(default_factory=list)
     # The radius actually searched, in metres — so an empty list can be explained
@@ -786,6 +799,9 @@ class CommunityDiscoveryResponse(BaseModel):
     # True when the card is the ONE community the user asked about by name, shown above
     # its events — headed "Community", not "Communities near you".
     named: bool = False
+    # The parent whose chapters these rows are ("Clubs in SJSU"). Null on every other
+    # list, including chapters-from-outside when nothing inside answered.
+    within: CommunityWithinRow | None = None
 
 
 class TopicCommunityRow(BaseModel):
@@ -1257,6 +1273,10 @@ class LookEvent(BaseModel):
     # {place_ref, name, emoji, circle_type, detail}, the same one ActivityPreviewRow and
     # get_event_preview carry. None on a plain neighbourhood meet.
     community: dict[str, Any] | None = None
+    # Set only when a community is selected and this meet belongs to ANOTHER community in
+    # its family ("from RCC") — same pair as CommunityEventRow.
+    origin_place_id: str | None = None
+    origin_place_name: str | None = None
 
 
 class EventFitLineBody(BaseModel):

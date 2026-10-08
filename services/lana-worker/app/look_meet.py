@@ -528,6 +528,9 @@ def _rank_activities(
             "has_time": e.get("has_time") is not False,
             "venue_name": e.get("venue_name"),
             "community": communities.get(str(e.get("id"))),
+            # A family meet on a selected community's read (community_events labels it).
+            "origin_place_id": str(e.get("origin_place_id") or "").strip() or None,
+            "origin_place_name": str(e.get("origin_place_name") or "").strip() or None,
         })
     return out
 

@@ -1685,9 +1685,12 @@ def _community_about_turn(
                 "has_time": e.get("has_time") is not False,
                 "starts_label": _format_event_when(e.get("starts_at")),
                 "venue_name": str(e.get("venue_name") or "").strip() or place,
-                # They are all at THIS place, which the reply already named.
+                # They are all at THIS place, which the reply already named — except a
+                # family meet (a chapter's on its parent), which says where it is from.
                 "community": None,
                 "preview": True,
+                "origin_place_id": str(e.get("origin_place_id") or "").strip() or None,
+                "origin_place_name": str(e.get("origin_place_name") or "").strip() or None,
             }
             for e in (prof.get("upcoming_events") or [])
             if str((e or {}).get("title") or "").strip()
@@ -1740,6 +1743,8 @@ def _community_about_turn(
                 "member_count": count,
                 "is_member": is_in,
                 "status_line": _discovery_status_line(count, is_in),
+                # "tell me about RCC": the card says it is SJSU's, same as the profile.
+                "parent": parent,
             }
         ],
         "total": 1,

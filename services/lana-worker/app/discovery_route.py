@@ -7318,6 +7318,10 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 # The viewer hosts this one: the FE shows "You're hosting", not RSVP.
                 "hosted_by_you": bool(ev.get("hosted_by_you")),
                 "preview": True,
+                # A family meet inside a selected community (community_events' label_origin):
+                # "from RCC" on SJSU's browse. Absent everywhere else.
+                "origin_place_id": str(ev.get("origin_place_id") or "").strip() or None,
+                "origin_place_name": str(ev.get("origin_place_name") or "").strip() or None,
             }
         )
     return out
