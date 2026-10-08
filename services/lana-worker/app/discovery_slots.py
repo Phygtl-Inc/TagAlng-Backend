@@ -586,7 +586,7 @@ _SYSTEM = (
     "AT, NEAR or AROUND any named place — a campus, school, church, gym, club or neighborhood, "
     "by full name, initials or nickname ('any recommendations around Westlake High?', 'what "
     "do you recommend near the UMD campus?') — is tip_seek (looking.tip); the place says WHERE "
-    "to look, it is not a question about that community. "
+    "to look, it is not a question about that community (community_name still carries it). "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
     "identity.add_claim, goal=chat, in_discovery=false, identity_snippet=null "
@@ -1086,19 +1086,19 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
         return (
             "offer_reply — "
             + offered
-            + " The latest message is most likely their ANSWER to that offer: an accept "
-            "('yes', 'yes please', 'go ahead', 'ask them'), a decline ('no thanks', 'not "
-            "now', 'maybe later', 'I didn't want anything posted'), or a request to take it "
-            "down. Classify it as goal=continue and let the engine act on it. "
-            "*** It is NEVER tip_share / sharing.tip. *** The user ASKED for a "
-            "recommendation; they do not have one to give, so reading their 'yes' as them "
-            "SHARING a recommendation records the exact opposite of what they said — no "
-            "matter how often the words 'recommend' or 'tip' appear in the recent turns. "
-            "Only a NAMED provider or place in THEIR OWN words is a share. A genuinely new "
-            "request (a different search, a refinement like 'kid-friendly ones' or 'show me "
-            "all of them', an unrelated question) is classified fresh as normal; and a "
-            "message about how they FEEL, a symptom, distress or danger is ALWAYS its own "
-            "safety lane, never an offer reply"
+            + " The latest message either answers that offer or is a new request. It answers "
+            "the offer only when all it does is respond to it — accept it, decline it, or ask "
+            "for the posting to be taken down — and then it is goal=continue. A message that "
+            "itself ASKS for something (a recommendation, a place, people, events) is a NEW "
+            "request even when it repeats or refines the one just answered: classify it "
+            "exactly as you would with no offer pending — a request for a recommendation is "
+            "looking.tip with goal=save_signal, never goal=continue and never a people search. "
+            "*** An answer to the offer is NEVER tip_share / sharing.tip. *** The user ASKED "
+            "for a recommendation; they do not have one to give, so reading their acceptance "
+            "as SHARING one records the opposite of what they said, however often the words "
+            "recommend or tip appear in the recent turns. Only a provider or place they NAME "
+            "in their own words is a share. A message about how they feel, a symptom, "
+            "distress or danger is ALWAYS its own safety lane, never an offer reply"
         )
     # An empty peers search arms a notify/widen offer, then reported active_capture=none:
     # "find me people who like pizza" came back empty, the follow-up fragment ("a pizza
@@ -1301,7 +1301,9 @@ def _discovery_slot_payload(
         '  "community_name": "the place/community the user named, verbatim as they said it '
         '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community — and with '
         'discovery.find_activities, the community, school, club or venue they want events AT, '
-        'as they called it (short forms included); else null",\n'
+        'as they called it (short forms included) — and with looking.tip, the community, school, '
+        'club or venue whose recommendations they want or where the thing should be, as they '
+        'called it (short forms included); else null",\n'
         '  "community_ask": "people"|"about"|"manage"|null — with community_name: "people" when they want '
         'WHO is there (who is in it, the members, who else goes), "manage" when they want to CHANGE '
         'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '
