@@ -1400,7 +1400,12 @@ def run_community_capture_turn(
     # ── Loop safety ──
     turns = int(session_ctx.get("community_turns") or 0) + 1
     session_ctx["community_turns"] = turns
-    cancelled = (
+    # A tapped "Part of …" chip is a rendered control; a community whose name happens to
+    # hold a cancel word ("Stop the Stigma") must not throw the draft away.
+    tapped_parent_chip = session_ctx.get("community_pending_ask") == _PARENT_ASK and _norm_label(
+        msg
+    ) in {_norm_label(o) for o in (draft.get("suggestions") or [])}
+    cancelled = False if tapped_parent_chip else (
         _is_bare_control(msg, _CANCEL_RE)
         if _awaiting_text_subject(session_ctx, draft)
         else bool(_CANCEL_RE.search(msg))

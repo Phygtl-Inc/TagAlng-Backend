@@ -391,3 +391,11 @@ def test_picking_a_linked_parent_skips_the_link_step(env: dict, monkeypatch: Any
     assert ctx["community_draft"]["parent_place"]["handle"] == "sjsu"
     assert ctx.get("community_pending_ask") is None and ctx["community_ready"] is True
     assert link_checks == []
+
+
+def test_a_tapped_parent_whose_name_holds_a_cancel_word_is_not_a_cancel(env: dict) -> None:
+    env["rows"] = [_row(SJSU, "Stop the Stigma")]
+    ctx = _asked(env)
+    _turn(ctx, "Part of Stop the Stigma")
+    assert ctx["community_draft"]["parent_place"]["place_id"] == SJSU
+    assert ctx["community_create_active"] is True
