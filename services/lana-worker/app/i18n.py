@@ -626,6 +626,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "No hay nada próximo en {place} ahora mismo. ¿Quieres que me quede atenta?",
         "pt": "Nada acontecendo em {place} agora. Quer que eu fique de olho?",
     },
+    # After "Widen the search": nothing related near them, but a RELATED meet farther away
+    # (a different thing in the same area — never presented as what they asked for).
+    "browse.far_related_interest": {
+        "en": "Nothing on **{interest}** or anything close to it near you right now. The "
+              "nearest related meet is **{title}** in {area}, about {miles} miles away — "
+              "it's below. Want me to keep an ear out for one near you?",
+        "es": "No hay nada de **{interest}** ni parecido cerca de ti ahora mismo. Lo "
+              "relacionado más cercano es **{title}** en {area}, a unas {miles} millas; "
+              "está aquí abajo. ¿Quieres que esté atenta por si aparece uno cerca de ti?",
+        "pt": "Não há nada de **{interest}** nem parecido perto de você agora. O mais "
+              "próximo relacionado é **{title}** em {area}, a cerca de {miles} milhas; está "
+              "aqui embaixo. Quer que eu fique de olho em um perto de você?",
+    },
     "browse.far_matches_interest": {
         "en": "Nothing on **{interest}** near you right now. The closest is **{title}** in "
               "{area}, about {miles} miles away — it's below. Want me to keep an ear out "
