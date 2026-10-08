@@ -22,7 +22,14 @@ _log = logging.getLogger(__name__)
 _SYSTEM = (
     "You read ONE reply a user sent right after Lana (a neighborhood app) showed them meets "
     "or told them none matched. Say what the reply means. Output only valid JSON: "
-    '{"verdict":"accept"|"widen"|"decline"|"more"|"new"|"other"}. '
+    '{"verdict":"accept"|"widen"|"decline"|"more"|"new"|"other", '
+    '"different_subject": <string or null>}. '
+    "different_subject is a kind of thing the reply asks for that is a DIFFERENT subject from "
+    "the topic being searched — broader or narrower — in the reply's own words. It is null "
+    "when the reply names nothing, names only the searched topic, or only asks to loosen or "
+    "broaden the searched topic, even when it repeats the topic's own word. Words that only "
+    "point back at the searched topic (similar, related, close to it, like that) are never a "
+    "subject. "
     "UNDERSTAND, DO NOT PATTERN-MATCH — any language, any phrasing. "
     "accept = yes to what Lana just offered: keep an ear out / email or notify them when "
     "one appears (yes, sure, please do, go ahead, let me know). "
@@ -66,7 +73,7 @@ def read_browse_followup(*, lana_said: str, topic: str, msg: str) -> str | None:
             model=router_model(),
             system=_SYSTEM,
             user_payload=payload,
-            max_tokens=64,
+            max_tokens=120,
             temperature=0.0,
         )
     except Exception as exc:  # noqa: BLE001 — a follow-up read must never break the turn
@@ -75,4 +82,14 @@ def read_browse_followup(*, lana_said: str, topic: str, msg: str) -> str | None:
     if not isinstance(raw, dict):
         return None
     verdict = str(raw.get("verdict") or "").strip().lower()
-    return verdict if verdict in _VALID else None
+    if verdict not in _VALID:
+        return None
+    # "Widen" means loosen the SAME topic. The verdict alone read a fresh subject that is
+    # broad ("any informative event" after jazz) as widen, 5/5, and re-ran the jazz search
+    # (prod 2026-10-08). The model also names any subject the reply asks for that is not
+    # the searched topic; a widen that asks for a different subject is a new search.
+    other = str(raw.get("different_subject") or "").strip()
+    if verdict == "widen" and other and other.lower() not in ("null", "none"):
+        _log.info("browse_followup widen->new subject=%r topic=%r", other[:60], topic[:40])
+        return "new"
+    return verdict
