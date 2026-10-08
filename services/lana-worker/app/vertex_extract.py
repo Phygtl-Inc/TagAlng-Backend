@@ -674,10 +674,22 @@ def vertex_extract_from_transcript(
     return parse_profile_extract_data(data)
 
 
-def vertex_embed(text: str, dim: int = 768) -> list[float]:
+def vertex_embed(text: str, dim: int = 768, task_type: str | None = None) -> list[float]:
+    """`task_type` is Vertex's embedding mode. RETRIEVAL_QUERY for a short search and
+    RETRIEVAL_DOCUMENT for the thing searched line a two-word ask up with a paragraph far
+    better than the default mode does — but only when BOTH sides use them, so a caller
+    switching one side re-embeds the other to get the gain (see app/event_embed.py). None keeps the
+    default mode every other vector in the database was made with."""
     client = _vertex_client()
     model = os.environ.get("VERTEX_EMBED_MODEL", "text-embedding-005")
-    result = client.models.embed_content(model=model, contents=text)
+    if task_type:
+        from google.genai import types
+
+        result = client.models.embed_content(
+            model=model, contents=text, config=types.EmbedContentConfig(task_type=task_type)
+        )
+    else:
+        result = client.models.embed_content(model=model, contents=text)
     values = result.embeddings[0].values
     if len(values) != dim:
         raise ValueError(f"expected_{dim}_dims_got_{len(values)}")

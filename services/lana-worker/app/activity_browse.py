@@ -206,6 +206,13 @@ def activity_browse_should_release(
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
 
+# Browse ranks meets by meaning less a log-distance penalty (search_events_semantic
+# p_distance_k / p_distance_base_m, 20270127120000): within the base a meet loses nothing;
+# beyond it, k per e-fold of distance. The same curve app/distance_admission.py used to CUT
+# with (floor_base + k * ln(d / base)); here it only ORDERS — the topic matcher decides.
+_RANK_DISTANCE_K = 0.08
+_RANK_DISTANCE_BASE_M = 8000.0
+
 # Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
 # retuned without reading around prose. These are what make a 0.7 mean the same thing on
 # Tuesday as on Friday: the model is told to score each event against the REQUEST, never
@@ -332,27 +339,37 @@ def _fetch_admitted_events(
     limit: int = 200,
     radius_m: float = 200_000.0,
 ) -> tuple[list[dict[str, Any]], bool] | None:
-    """Meets ranked by meaning within `radius_m`, admitted by distance (C3).
+    """The meets the topic matcher should judge for `interest`: ranked, never cut.
 
-    Returns (admitted_rows, truncated). `truncated` is true when the RPC filled its
-    page, in which case nothing downstream may conclude that nothing further out
-    matched. Returns None — not ([], False) — when the search could not run at all
-    (no embedding, no centroid, RPC failure): the caller falls back to the
-    distance-only read on None, and a dead model never reads as an empty area.
+    Returns (rows, truncated). `rows` is at most _BROWSE_POOL meets, best first by
+    rank_score — meaning less a log-distance penalty, so a farther meet must be more on
+    topic to outrank a nearer one — then meets not yet embedded inside the local radius
+    (never hidden). `truncated` is true when the RPC filled its page, in which case nothing
+    downstream may conclude that nothing further out matched. Returns None — not
+    ([], False) — when the search could not run at all (no embedding, no centroid, RPC
+    failure): the caller falls back to the distance-only read on None, and a dead model
+    never reads as an empty area.
 
-    `limit` is the RPC page size (SQL caps it at 200). `radius_m` is the outer bound
-    the rule scores inside, not a cut — SQL clamps it to 200 km.
+    No similarity floor (2026-10-08). A one-word ask scores low against every meet — a word
+    against a paragraph — so the old floor (0.495) cut exact matches before anything judged
+    them: "music" vs a Latin Jazz Concert 0.41, "jazz" vs a guitar jam 12 km away 0.42. On
+    38 real prod meets and 20 short asks it let through 13% of the right meets; ranking let
+    through 58-63%. Which of these is a match, related or unrelated is the matcher's call.
+
+    `limit` is the RPC page size (SQL caps it at 200). `radius_m` is the outer bound,
+    clamped to 200 km in SQL.
     """
     interest = str(interest or "").strip()
     if not block_id or not interest:
         return None
     log = logging.getLogger(__name__)
 
-    # 1-2. The query vector, from the same helper that embedded the rows.
-    from app.layer1_handlers import _embed_attr_filter
+    # 1-2. The query vector — RETRIEVAL_QUERY mode, the pair of the RETRIEVAL_DOCUMENT
+    #      vectors meets are stored with (app/event_embed.py).
+    from app.event_embed import embed_event_query
     from app.vec_util import to_pgvector
 
-    literal = to_pgvector(_embed_attr_filter(interest))
+    literal = to_pgvector(embed_event_query(interest))
     if not literal:
         log.warning(
             "activity_browse_embed_unavailable interest=%r — distance-only fallback",
@@ -362,18 +379,14 @@ def _fetch_admitted_events(
 
     from app.auth import jwt_user_id, service_client
     from app.discovery_route import activity_window, block_centroid
-    from app.distance_admission import _admission_floor, _admit
 
     loc = block_centroid(block_id)
     if not loc:
         log.warning("activity_browse_block_unplaceable block=%s", block_id)
         return None
 
-    # 3. Rank by meaning, distance returned as data. p_min_similarity is the floor at
-    #    distance zero — the lowest value the rule can ever admit — so SQL drops what
-    #    could never pass while still returning unembedded rows (similarity NULL).
-    # The caller's own meets stay in (step 6 marks them): an imported calendar hosted
-    # from your account is still what's on, and hiding it read as "nothing there".
+    # 3. Ranked by meaning less distance, no floor. The caller's own meets stay in (step 6
+    #    marks them): an imported calendar hosted from your account is still what's on.
     me = jwt_user_id(user_jwt)
     try:
         from app.event_publish import roll_recurring_events
@@ -390,8 +403,10 @@ def _fetch_admitted_events(
                     "p_radius_meters": float(radius_m),
                     "p_window": activity_window(),
                     "p_circle_place_id": None,
-                    "p_min_similarity": _admission_floor(0.0),
+                    "p_min_similarity": 0.0,
                     "p_limit": int(limit),
+                    "p_distance_k": _RANK_DISTANCE_K,
+                    "p_distance_base_m": _RANK_DISTANCE_BASE_M,
                 },
             )
             .execute()
@@ -402,44 +417,8 @@ def _fetch_admitted_events(
     raw = [r for r in (res.data if isinstance(res.data, list) else []) if isinstance(r, dict)]
 
     # 4. Before anything is dropped: a full page means the set was cut, whatever
-    #    survives the filters below.
+    #    survives below.
     truncated = len(raw) >= int(limit)
-
-    # 4b. Every NEARBY meet reaches the topic matcher, whatever its similarity. The floor
-    #     above is right for far meets, but inside the local radius it cut meets before
-    #     anything could judge them: "jazz" scored 0.42 against a guitar jam 12 km away,
-    #     the read came back empty, and "Widen the search" had nothing related to offer
-    #     (prod 2026-10-08). A second, floor-free read of the local radius only — capped
-    #     at the matcher's pool, and never counted toward `truncated`, which describes the
-    #     wide read.
-    from app.discovery_route import activity_radius_meters
-
-    local_m = min(float(activity_radius_meters()), float(radius_m))
-    try:
-        near_res = (
-            service_client()
-            .rpc(
-                "search_events_semantic",
-                {
-                    "p_query_embedding": literal,
-                    "p_lat": loc[0],
-                    "p_lng": loc[1],
-                    "p_radius_meters": local_m,
-                    "p_window": activity_window(),
-                    "p_circle_place_id": None,
-                    "p_min_similarity": 0.0,
-                    "p_limit": _BROWSE_POOL,
-                },
-            )
-            .execute()
-        )
-        seen = {str(r.get("id")) for r in raw}
-        raw += [
-            r for r in (near_res.data if isinstance(near_res.data, list) else [])
-            if isinstance(r, dict) and r.get("id") and str(r["id"]) not in seen
-        ]
-    except Exception:  # noqa: BLE001 — the wide read still stands on its own
-        log.exception("activity_browse_near_read_failed block=%s", block_id)
 
     # 5. Stamp — the RPC returns both, but as JSON they may arrive as int or None.
     rows: list[dict[str, Any]] = []
@@ -464,15 +443,25 @@ def _fetch_admitted_events(
     if weekend_only:
         rows = _weekend_rows(rows)
 
-    # 8. The RPC returns neither column and the cards need both (community badge,
+    # 8. The pool the matcher reads: the best-ranked embedded meets, then meets with no
+    #    vector yet, nearest first (a meet posted a minute ago is not hidden for that — the
+    #    floor never hid them either). SQL already ordered by rank_score, unembedded last.
+    embedded = [r for r in rows if r.get("similarity") is not None][:_BROWSE_POOL]
+    fresh = sorted(
+        (r for r in rows if r.get("similarity") is None),
+        key=lambda r: float(r.get("distance_meters") or 0.0),
+    )
+    pool = embedded + fresh[: max(0, _BROWSE_POOL - len(embedded))]
+
+    # 9. The RPC returns neither column and the cards need both (community badge,
     #    recurrence). A lookup by id, best-effort: a miss leaves them absent.
-    if rows:
+    if pool:
         try:
             extra = (
                 service_client()
                 .table("events")
                 .select("id, recurrence, circle_place_ref")
-                .in_("id", [str(r["id"]) for r in rows])
+                .in_("id", [str(r["id"]) for r in pool])
                 .execute()
             )
             by_id = {
@@ -480,27 +469,14 @@ def _fetch_admitted_events(
                 for e in (extra.data or [])
                 if isinstance(e, dict) and e.get("id")
             }
-            for r in rows:
-                e = by_id.get(str(r["id"]))
-                if e:
-                    r["recurrence"] = e.get("recurrence")
-                    r["circle_place_ref"] = e.get("circle_place_ref")
+            for r in pool:
+                ex = by_id.get(str(r["id"]))
+                if ex:
+                    r["recurrence"] = ex.get("recurrence")
+                    r["circle_place_ref"] = ex.get("circle_place_ref")
         except Exception:  # noqa: BLE001
             log.exception("activity_browse_event_columns_failed")
-
-    # 9. Order is the RPC's (similarity desc, unembedded last); _admit only filters.
-    #    The distance floor applies BEYOND the local radius only. Inside it every meet still
-    #    reaches the topic matcher, after the admitted ones: a short ask ("language groups")
-    #    against a long description can score under the floor, and the floor then hid the
-    #    Language Exchange Club 13 km away while the far probe — which never applies it —
-    #    had just offered "Look in San Jose" for that very meet (prod 2026-10-07).
-    admitted = _admit(rows)
-    kept = {id(r) for r in admitted}
-    near_rest = [
-        r for r in rows
-        if id(r) not in kept and float(r.get("distance_meters") or 0.0) <= local_m
-    ]
-    return admitted + near_rest, truncated
+    return pool, truncated
 
 
 def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
