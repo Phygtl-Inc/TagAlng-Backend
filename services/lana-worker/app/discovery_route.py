@@ -4302,7 +4302,7 @@ def _tip_seek_answer_turn(
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors.
 
-    `community` is a community the ask itself named (see named_member_community); it
+    `community` is a community the ask itself named (see named_community_scope); it
     scopes this one search ahead of the chat's active community and is not remembered.
 
     `ask_text` is the whole ask when this turn's message is only part of it — a
@@ -5247,14 +5247,14 @@ def _try_save_signal_turn(
     from app.lana_paths import tip_ask_consent_enabled
 
     if intent == "tip_seek" and tip_ask_consent_enabled():
-        # A community named in the ask scopes the search when they belong to it, whether or
-        # not the chat was opened inside it (prod 2026-10-07: "…at San Jose State" from the
+        # A community named in the ask scopes the search, whether or not the chat was opened
+        # inside it or they belong to it (prod 2026-10-07: "…at San Jose State" from the
         # main chat searched a Minneapolis ZIP and answered from Google).
-        from app.community_scope import named_member_community
+        from app.community_scope import named_community_scope
         from app.discovery_slots import slots_community_name
 
         _named = slots_community_name(slots)
-        _named_scope = named_member_community(user_id, _named) if _named else None
+        _named_scope = named_community_scope(user_id, _named) if _named else None
         return _tip_seek_answer_turn(
             community=_named_scope,
             msg=msg,
@@ -6614,9 +6614,13 @@ def _show_activities_preview(
     from app.i18n import session_lang as _session_lang
 
     weekend_only = bool(re.search(r"\bweekend\b", str(msg or ""), re.I))
-    events = fetch_preview_events_on_block(
-        block_id, weekend_only=weekend_only, exclude_host_id=user_id
-    )
+    # The caller's own meets are shown and marked, never dropped — the same rule browse
+    # follows since 2026-10-07 (activity_browse._mark_own): a host who asks what's on
+    # nearby must see the meet they are running, not a list with it silently missing.
+    from app.activity_browse import _mark_own
+
+    events = fetch_preview_events_on_block(block_id, weekend_only=weekend_only)
+    _mark_own(events, user_id)
     reply = format_activities_message(
         events, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
     )
@@ -7703,6 +7707,15 @@ def format_activities_message(
         if phone_verified
         else t("discovery.activities_tail_guest", lang)
     )
+    # Same lead-in browse gives its own cards: only what the FE renders (five), and no
+    # RSVP invitation when every card on screen is one they host.
+    mine = sum(1 for e in events[:5] if isinstance(e, dict) and e.get("hosted_by_you"))
+    if mine:
+        shown = len([e for e in events[:5] if isinstance(e, dict)])
+        if mine < shown:
+            tail = f"{t('browse.events_yours_some', lang, n=mine)} {tail}"
+        else:
+            tail = t("browse.events_yours_one" if mine == 1 else "browse.events_yours_all", lang)
     return f"{head} {tail}"
 
 

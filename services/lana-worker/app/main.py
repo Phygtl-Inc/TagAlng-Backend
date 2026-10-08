@@ -3808,18 +3808,12 @@ def post_tips_recent(
     tab = (body.tab if body else "recent") or "recent"
     place_id = str((body.place_id if body else None) or "").strip() or None
     limit = (body.limit if body else 20) or 20
-    if place_id:
-        from app.community_surface import caller_affiliation_at
-
-        # Same authorization the roster uses: who is at a place stays members-only (§F),
-        # so this can never become a membership oracle for an arbitrary place id. The RPC
-        # re-checks it too — this one is here to answer 403 rather than an empty list.
-        if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
-            raise HTTPException(status_code=403, detail="not_a_member")
     # Scope, not post-filter: with a community selected this is that community's own
     # recommendations, whatever the distance, and the Recent / My community tabs do not
-    # apply (there is one list). Without one, community-scoped tips stay out of the area
-    # feed — they were shared with the community, not the neighbourhood.
+    # apply (there is one list). A community's recommendations are open to anyone signed
+    # in, member or not (20270126120000) — a visitor on its page sees what was shared
+    # there; WHO is in it stays members-only on the roster. Without one, the area feed
+    # carries community tips too, by the same distance rule as any other.
     tips = recent_tips(
         _bearer_token(authorization),
         tab=tab,
