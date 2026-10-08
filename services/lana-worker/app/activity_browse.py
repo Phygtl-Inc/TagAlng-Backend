@@ -2069,6 +2069,11 @@ def _run_browse_turn(
             draft["_area_offer_block_id"] = None
             draft["_area_offer_name"] = None
             draft["_asked"] = True
+            # The request they typed named the OLD place ("or in newyork"), and the filter
+            # reads it whole: every meet in the offered area was rejected as "asked for New
+            # York, this is Orlando", so the area we offered came back empty (prod
+            # 2026-10-08). The offer was checked against the topic alone; search the same.
+            draft["_request"] = str(draft.get("interest") or "")
             msg = ""  # same interest, new area — re-runs the search below
         elif chip and msg.strip().lower() == chip.lower():
             _answered("community")
@@ -2080,6 +2085,10 @@ def _run_browse_turn(
             draft["_seek_offer"] = None
             draft["_community_chip"] = None
             draft["_asked"] = True
+            # Same trap as the area pill: "at sjsu what events…" still names the community
+            # they asked to look past, so the filter rejected everything outside it and the
+            # widen looped back to "nothing" (Pouya, 2026-10-07 #3).
+            draft["_request"] = str(draft.get("interest") or "")
             msg = ""  # same interest, no filter — re-runs the search below
         elif followup == "accept" or (
             followup is None and _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg)
