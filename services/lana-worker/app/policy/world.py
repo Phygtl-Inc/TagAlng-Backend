@@ -108,7 +108,7 @@ def world_state(user_id: str) -> dict[str, Any]:
 
     {user: {...}, area: {state, count, threshold},
      circles: [{key, type, grounded, confirmed, place}],
-     states: ["verified", "zip_open", ...]}
+     states: ["verified", "zip_warming", "zip_open", ...]}
 
     `place` is the pinned place's real name (None until grounded) — the policy
     needs it to offer something concrete rather than gesture at "somewhere".
@@ -127,8 +127,23 @@ def world_state(user_id: str) -> dict[str, Any]:
         states.append("verified")
     if user.get("home_zip"):
         states.append("has_home_zip")
-    if str(area.get("state") or "") == "open":
+
+    # Three-state area model — LANA_CIRCLES_ZIP_MASTER_v1 §D.2.
+    #
+    # `warming` (1 <= verified_active_count < threshold) is a real state that
+    # returns thin-but-real results; `open` additionally promises reliable
+    # same-block matches. Emitting only `zip_open` collapsed the two, so a
+    # warming area behaved exactly like an empty one and every people-question
+    # fell through to the host pitch.
+    #
+    # `open` implies `warming`: both tokens are emitted at open so that any
+    # capability gated on `zip_warming` stays satisfied once the area opens.
+    _area_state = str(area.get("state") or "")
+    if _area_state in ("warming", "open"):
+        states.append("zip_warming")
+    if _area_state == "open":
         states.append("zip_open")
+
     if any(
         str(c.get("status") or "") == "confirmed" for c in circles
     ):
