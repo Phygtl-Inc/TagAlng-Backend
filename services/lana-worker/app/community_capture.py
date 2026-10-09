@@ -1133,8 +1133,16 @@ def run_community_capture_turn(
         # If that could not happen (it was someone else's place after all, or the claim
         # failed), the old offer — a "claim this link" button — is the way back to it.
         place_id = str(result.get("place_id") or "")
+        name = str(draft.get("name") or "your community")
+        facts = [f"{name} is now a community neighbours can find and join"]
+        # Inside a parent first: a chapter of a linked parent shares
+        # get.lana.help/{parent}/{chapter}, assigned on attach — no link of its own to claim.
+        facts += _attach_to_parent(draft, user_id, place_id)
+        link = _chapter_link(draft, place_id) if draft.get("parent_attached") else None
         claimed = None
-        if draft.get("handle") and place_id and user_id and not draft.get("_link_settled"):
+        if link:
+            draft["handle"] = link
+        elif draft.get("handle") and place_id and user_id and not draft.get("_link_settled"):
             claimed = _claim_link(str(user_id), place_id, str(draft["handle"]))
             draft["handle"] = claimed
         offer = None if (claimed or draft.get("handle")) else _handle_offer(place_id, user_id)
@@ -1146,15 +1154,7 @@ def run_community_capture_turn(
         session_ctx["community_create_active"] = None
         session_ctx["community_turns"] = 0
         session_ctx["routing_phase"] = "listening"
-        name = str(draft.get("name") or "your community")
-        facts = [f"{name} is now a community neighbours can find and join"]
-        facts += _attach_to_parent(draft, user_id, place_id)
-        link = _chapter_link(draft, place_id) if draft.get("parent_attached") else None
-        if link:
-            draft["handle"] = link
-            draft["handle_offer"] = offer = None
-            facts.append(f"Its link, to share anywhere: get.lana.help/{link}")
-        elif draft.get("handle"):
+        if draft.get("handle"):
             facts.append(f"Its link, to share anywhere: get.lana.help/{draft['handle']}")
         elif offer:
             facts.append(

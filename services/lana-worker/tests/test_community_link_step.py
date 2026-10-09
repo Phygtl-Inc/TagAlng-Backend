@@ -211,3 +211,100 @@ def test_tapping_the_city_reopens_the_city_and_keeps_the_link(monkeypatch: Any) 
     d = ctx["community_draft"]
     assert ctx["community_pending_ask"] == "hq" and d.get("hq_city") is None
     assert d["handle"] == "rosettasbakery"
+
+
+# ── A chapter: its link is get.lana.help/{parent}/{chapter} (20270131120000) ──────────────
+
+
+class _Places:
+    """service_client().table("places")…execute() → the one row given."""
+
+    def __init__(self, row: dict) -> None:
+        self.row = row
+        self.eq_calls: list[tuple] = []
+
+    def __getattr__(self, n: str) -> Any:
+        return lambda *a, **k: self
+
+    def eq(self, *a: Any) -> "_Places":
+        self.eq_calls.append(a)
+        return self
+
+    def execute(self) -> Any:
+        return mock.Mock(data=[self.row])
+
+
+def _parent(handle: str | None, located: bool = True) -> dict:
+    return {"place_id": "pSJSU", "place_name": "SJSU", "located": located, "handle": handle}
+
+
+def test_a_chapter_of_a_linked_parent_skips_the_link_step_and_shares_the_nested_link(
+    monkeypatch: Any,
+) -> None:
+    m = _patches(monkeypatch, checks=[])  # the global link is never checked
+    attach = mock.Mock(return_value={"ok": True})
+    monkeypatch.setattr("app.community_chapter_ops.attach_chapter", attach)
+    places = _Places({"chapter_handle": "rcc"})
+    monkeypatch.setattr("app.auth.service_client", lambda: places)
+    ctx: dict[str, Any] = {"community_create_active": True, "community_draft": _draft(
+        parent="SJSU", parent_place=_parent("sjsu-campus"))}
+
+    cc._after_questions(draft=ctx["community_draft"], session_ctx=ctx, user_id="u1")
+    # Located parent → no city; linked parent → no global link step.
+    assert ctx["community_ready"] is True and ctx["community_pending_ask"] is None
+    m["check"].assert_not_called()
+
+    _turn("Share with the community", ctx)
+    attach.assert_called_once_with("u1", "pNew", "pSJSU")
+    m["claim"].assert_not_called()
+    m["offer"].assert_not_called()
+    assert ("id", "pNew") in places.eq_calls
+    d = ctx["community_draft"]
+    assert d["handle"] == "sjsu-campus/rcc" and d["handle_offer"] is None
+
+
+def test_a_chapter_whose_attach_fails_falls_back_to_a_link_of_its_own(monkeypatch: Any) -> None:
+    m = _patches(monkeypatch, checks=[])
+    monkeypatch.setattr("app.community_chapter_ops.attach_chapter",
+                        lambda *a: {"ok": False, "reason": "not_a_member_of_parent"})
+    m["offer"].return_value = {"place_id": "pNew", "suggestion": "rcc-club"}
+    ctx: dict[str, Any] = {"community_ready": True, "community_create_active": True,
+                           "community_draft": _draft(
+                               parent="SJSU", parent_place=_parent("sjsu-campus"),
+                               _link_settled=True, ready=True)}
+    _turn("Share with the community", ctx)
+    d = ctx["community_draft"]
+    assert d.get("parent_attached") is False
+    assert not d.get("handle")
+    assert d["handle_offer"] == {"place_id": "pNew", "suggestion": "rcc-club"}
+
+
+def test_a_chapter_of_an_unlinked_parent_still_chooses_its_own_link(monkeypatch: Any) -> None:
+    m = _patches(monkeypatch, checks=[
+        {"status": "invalid", "reason": "empty", "suggestions": ["rcc"]},
+    ])
+    ctx: dict[str, Any] = {"community_create_active": True, "community_draft": _draft(
+        parent="SJSU", parent_place=_parent(None))}
+    cc._after_questions(draft=ctx["community_draft"], session_ctx=ctx, user_id="u1")
+    m["check"].assert_called_once()
+    assert ctx["community_pending_ask"] == "handle"
+
+
+def test_chapter_link_needs_the_parent_link_and_the_chapter_word(monkeypatch: Any) -> None:
+    monkeypatch.setattr("app.auth.service_client", lambda: _Places({"chapter_handle": "rcc"}))
+    assert cc._chapter_link({"parent_place": _parent("sjsu-campus")}, "pNew") == "sjsu-campus/rcc"
+    assert cc._chapter_link({"parent_place": _parent(None)}, "pNew") is None
+    monkeypatch.setattr("app.auth.service_client", lambda: _Places({"chapter_handle": None}))
+    assert cc._chapter_link({"parent_place": _parent("sjsu-campus")}, "pNew") is None
+
+
+def test_removing_the_parent_reopens_the_link_step(monkeypatch: Any) -> None:
+    _patches(monkeypatch, checks=[
+        {"status": "invalid", "reason": "empty", "suggestions": ["rcc"]},
+    ])
+    ctx: dict[str, Any] = {"community_create_active": True, "community_ready": True,
+                           "community_draft": _draft(
+                               parent="SJSU", parent_place=_parent("sjsu-campus"),
+                               hq_city="San Jose, CA", _link_settled=True, ready=True)}
+    _turn("fix:parent", ctx)
+    assert "_link_settled" not in ctx["community_draft"]
