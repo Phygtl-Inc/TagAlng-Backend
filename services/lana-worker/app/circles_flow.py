@@ -2049,14 +2049,23 @@ def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
     Own list → the full profile row. Someone else's → the public head of each place,
     carrying `place_id` so the row opens /lana/circles/profile — which is where the
     tier gating for the PEOPLE lives (§F protects the people, not the place). Empty
-    when either has blocked the other."""
-    rows = list_my_circles(user_id)
-    if user_id == viewer_id:
-        return rows
-    from app.community_surface import _blocked_ids
+    when either has blocked the other.
 
-    if _blocked_ids(viewer_id, [user_id]):
-        return []
+    Every row carries `can_manage`: whether the VIEWER runs that place (see
+    _managed_place_ids) — on her own list and on someone else's alike."""
+    rows = list_my_circles(user_id)
+    if user_id != viewer_id:
+        from app.community_surface import _blocked_ids
+
+        if _blocked_ids(viewer_id, [user_id]):
+            return []
+    managed = _managed_place_ids(viewer_id, [str(r.get("place_id") or "") for r in rows])
+
+    def _can_manage(r: dict[str, Any]) -> bool | None:
+        return None if managed is None else str(r.get("place_id") or "") in managed
+
+    if user_id == viewer_id:
+        return [{**r, "can_manage": _can_manage(r)} for r in rows]
     also_mine = _my_place_refs(viewer_id, [str(r.get("place_id") or "") for r in rows])
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -2064,6 +2073,7 @@ def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
         # Does the VIEWER go here too — the "you both go here" pill, and the reason
         # these rows lead the list.
         row["shared"] = str(r.get("place_id") or "") in also_mine
+        row["can_manage"] = _can_manage(r)
         # `mine` on an activity means the LIST OWNER does it, which on the viewer's
         # screen would read as her own. Same flag, honest name: `theirs` is "what this
         # person does here", the rest is what anyone here does.
@@ -2080,6 +2090,42 @@ def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
     # Stable: shared places first, newest-first within each group (the order
     # get_peer_profile.communities used before this endpoint took that field over).
     out.sort(key=lambda r: not r["shared"])
+    return out
+
+
+def _managed_place_ids(user_id: str, place_ids: list[str]) -> set[str] | None:
+    """Which of these places the user RUNS: she created it (places.created_by) or is its
+    live operator (place_managers role='operator', not removed). The same standing
+    attach_chapter / detach_chapter demand (20270125120000) via is_community_operator, so
+    the PWA never offers "Make this a chapter" to someone the SQL will refuse.
+
+    None when either read fails — unknown, which a client must not render as "no"."""
+    ids = [p for p in dict.fromkeys(place_ids) if p]
+    if not user_id or not ids:
+        return set()
+    try:
+        sb = service_client()
+        created = (
+            sb.table("places").select("id").in_("id", ids).eq("created_by", user_id).execute()
+        )
+        operated = (
+            sb.table("place_managers")
+            .select("place_id")
+            .eq("user_id", user_id)
+            .in_("place_id", ids)
+            .eq("role", "operator")
+            .is_("removed_at", "null")
+            .execute()
+        )
+    except Exception:
+        logger.exception("managed_place_ids_failed user=%s places=%s", user_id, len(ids))
+        return None
+    out = {str(r["id"]) for r in (created.data or []) if isinstance(r, dict) and r.get("id")}
+    out |= {
+        str(r["place_id"])
+        for r in (operated.data or [])
+        if isinstance(r, dict) and r.get("place_id")
+    }
     return out
 
 

@@ -140,7 +140,20 @@ def _row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "unhelpful_count": int(raw.get("unhelpful_count") or 0),
         "i_marked_helpful": bool(raw.get("i_marked_helpful")),
         "i_marked_unhelpful": bool(raw.get("i_marked_unhelpful")),
+        # Set only on a community read, for a tip shared in ANOTHER community of its family
+        # (its parent or a chapter, 20270203120000) — the card says where it is from. Null
+        # on the community's own tips and on every area read.
+        **origin_fields(raw),
     }
+
+
+def origin_fields(raw: dict[str, Any]) -> dict[str, str | None]:
+    """{origin_place_id, origin_place_name} off a tip RPC row, both None when the tip was
+    shared in the community being read (or the read was not a community read). A name
+    without an id is dropped: a label nothing can link to is not provenance."""
+    oid = str(raw.get("origin_place_id") or "").strip() or None
+    name = str(raw.get("origin_place_name") or "").strip() or None
+    return {"origin_place_id": oid, "origin_place_name": name if oid else None}
 
 
 def recent_tips(
@@ -154,8 +167,9 @@ def recent_tips(
     """One page of the feed. [] on any failure — a browse surface must not error out.
 
     With `circle_place_id` this is ONE community's recommendations: no distance bound and
-    no tabs (the tabs belong to the area screen). Without it, tips shared into a community
-    are excluded — they were meant for that community, not for the neighbourhood.
+    no tabs (the tabs belong to the area screen). It covers the community's family too —
+    its parent, and the chapters the reader may see (20270203120000) — each such row
+    labelled with `origin_place_id` / `origin_place_name`.
     """
     wanted = str(tab or "recent").strip().lower()
     if wanted not in FILTERS:

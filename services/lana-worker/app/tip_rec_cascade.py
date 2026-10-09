@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.tip_feed import _clean_fields
+from app.tip_feed import _clean_fields, origin_fields
 from app.ui_actions import peer_card_nudge_action
 
 # One page of rows. Fetch is deliberately wider (see WIDE_FETCH) so a re-rank has somewhere
@@ -144,6 +144,9 @@ def peer_rows_from_neighbor_tips(
             # never this person's other memberships.
             "shared_circles": circles,
             "same_block": bool(tip.get("same_block")),
+            # Shared in ANOTHER community of the one being read — its parent or a chapter
+            # (20270203120000). None on the community's own tips and on every area read.
+            **origin_fields(tip),
             # Marks this as a rec row for the peer-surface enricher and the FE.
             "tip_rec": True,
             "preview": False,

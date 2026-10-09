@@ -4128,7 +4128,19 @@ def _compose_neighbor_tip_reply(
             "anything matching yet, so these are from the wider neighbourhood. Say that first."
         )
     elif _scope:
-        facts.append(f"Every recommender below is at {_scope}, the community they are filtered to")
+        # A community read covers its family (20270203120000): a row shared in its parent or
+        # in one of its chapters says so on its own line below, as data.
+        if any(str(r.get("origin_place_id") or "").strip() for r in tips[:3]):
+            facts.append(
+                f"These recommendations were shared in {_scope}, the community they are "
+                "filtered to, or in a community related to it (its parent or one of its "
+                "chapters). A line that names where it was shared came from that related "
+                "community; say which community each such recommendation came from."
+            )
+        else:
+            facts.append(
+                f"Every recommender below is at {_scope}, the community they are filtered to"
+            )
     lines: list[str] = []
     approximate = False
     for row in tips[:3]:
@@ -4146,6 +4158,9 @@ def _compose_neighbor_tip_reply(
             # way to say WHY a stationery store answers an art-supplies ask, and an
             # unexplained near-match reads as Lana misunderstanding the question.
             line += f" — they tag it: {', '.join(tags[:5])}"
+        _origin = str(row.get("origin_place_name") or "").strip()
+        if _origin and str(row.get("origin_place_id") or "").strip():
+            line += f" — shared in: {_origin}"
         lines.append(line)
         if not _ask_is_covered(detail, tags, text):
             approximate = True
@@ -7303,6 +7318,10 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 # The viewer hosts this one: the FE shows "You're hosting", not RSVP.
                 "hosted_by_you": bool(ev.get("hosted_by_you")),
                 "preview": True,
+                # A family meet inside a selected community (community_events' label_origin):
+                # "from RCC" on SJSU's browse. Absent everywhere else.
+                "origin_place_id": str(ev.get("origin_place_id") or "").strip() or None,
+                "origin_place_name": str(ev.get("origin_place_name") or "").strip() or None,
             }
         )
     return out
