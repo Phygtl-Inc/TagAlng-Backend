@@ -184,9 +184,10 @@ begin
   assert j->>'status' = 'unavailable' and j->>'reason' = 'taken', 'community taken ' || j::text;
   j := public.check_community_link('00000000-0000-0000-0000-0000000dd001', 'nike-runners');
   assert j->>'status' = 'unavailable' and j->>'reason' = 'protected', 'protected ' || j::text;
+  -- A bare word: the rename mints its proof for an operator with a confirmed email
+  -- (20270202120000), so it is available. supabase/tests/rename_mints_bare_word_proof.sql.
   j := public.check_community_link('00000000-0000-0000-0000-0000000dd001', 'spartans');
-  assert j->>'status' = 'invalid' and j->>'reason' = 'single_token_requires_identity',
-    'bare word without proof ' || j::text;
+  assert j->>'status' = 'available', 'bare word, confirmed operator ' || j::text;
   -- A chapter whose parent has no link is checked as a community.
   perform set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000cc002', true);
   j := public.check_community_link('00000000-0000-0000-0000-0000000ee021', 'plain-walkers');
