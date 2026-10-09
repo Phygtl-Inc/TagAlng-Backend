@@ -4128,7 +4128,7 @@ def _compose_neighbor_tip_reply(
             "anything matching yet, so these are from the wider neighbourhood. Say that first."
         )
     elif _scope:
-        # A community read covers its family (20270129120000): a row shared in its parent or
+        # A community read covers its family (20270203120000): a row shared in its parent or
         # in one of its chapters says so on its own line below, as data.
         if any(str(r.get("origin_place_id") or "").strip() for r in tips[:3]):
             facts.append(

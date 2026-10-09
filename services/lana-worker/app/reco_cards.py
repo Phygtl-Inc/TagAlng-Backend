@@ -105,7 +105,7 @@ def _contributor(row: dict[str, Any], *, phone_verified: bool) -> dict[str, Any]
         "helpful_count": int(row.get("helpful_count") or 0),
         "created_at": row.get("created_at"),
         # Shared in ANOTHER community of the one being read — its parent or a chapter
-        # (20270129120000). None on the community's own tips and on every area read.
+        # (20270203120000). None on the community's own tips and on every area read.
         **origin_fields(row),
     }
     if phone_verified:

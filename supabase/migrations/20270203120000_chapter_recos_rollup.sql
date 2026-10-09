@@ -304,7 +304,7 @@ comment on function public.find_neighbor_tips(text, text, text, int, text, doubl
   'SUBJECT each tip is about (ref, name, locality, coordinates, merge_mode), with a '
   'vouch count computed across every visible live contribution rather than this page, and '
   'i_contributed so the caller''s own voice is counted without being miscredited. v9 '
-  '(20270129120000): a community read covers the community''s family (community_family), '
+  '(20270203120000): a community read covers the community''s family (community_family), '
   'and rows from another community of the family carry origin_place_id/origin_place_name.';
 
 revoke all on function public.find_neighbor_tips(text, text, text, int, text, double precision, uuid, extensions.vector, real, text[])
@@ -499,7 +499,7 @@ $$;
 comment on function public.recent_neighbor_tips(text, double precision, int, text, uuid, text[]) is
   'Recent neighbour recommendations, newest / circles / nearest. p_reco_types filters on '
   'the Find-a-rec category toggle (local_signals.reco_type); NULL/{} = every type. A '
-  'community read covers the community''s family (community_family, 20270129120000); rows '
+  'community read covers the community''s family (community_family, 20270203120000); rows '
   'from another community of the family carry origin_place_id/origin_place_name.';
 
 revoke all on function public.recent_neighbor_tips(text, double precision, int, text, uuid, text[])

@@ -1,4 +1,4 @@
-"""Chapters: a community's recommendations roll up across its family (20270129120000).
+"""Chapters: a community's recommendations roll up across its family (20270203120000).
 
 The family scope itself lives in SQL (find_neighbor_tips / recent_neighbor_tips /
 neighbor_tip_type_counts read `community_family`); the worker's job is to carry the
@@ -23,7 +23,7 @@ _MIGRATION = (
     Path(__file__).resolve().parents[3]
     / "supabase"
     / "migrations"
-    / "20270129120000_chapter_recos_rollup.sql"
+    / "20270203120000_chapter_recos_rollup.sql"
 )
 
 

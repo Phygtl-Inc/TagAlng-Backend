@@ -83,7 +83,7 @@ class RecoContributorRow(BaseModel):
     # up in Madrid") — strong standing only; see RecoStandingRow.
     standing_quote: str | None = None
     # This contribution was shared in ANOTHER community of the one being read — its
-    # parent or a chapter (20270129120000). None on the community's own tips and on
+    # parent or a chapter (20270203120000). None on the community's own tips and on
     # every area read.
     origin_place_id: str | None = None
     origin_place_name: str | None = None
@@ -356,7 +356,7 @@ class PeerMatchRow(BaseModel):
     group_label: str | None = None
     group_kind: str | None = None
     # A rec row shared in ANOTHER community of the one being read — its parent or a
-    # chapter (20270129120000) — so the card can say where it is from. None otherwise.
+    # chapter (20270203120000) — so the card can say where it is from. None otherwise.
     origin_place_id: str | None = None
     origin_place_name: str | None = None
 

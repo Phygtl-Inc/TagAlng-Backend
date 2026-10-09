@@ -145,7 +145,7 @@ def peer_rows_from_neighbor_tips(
             "shared_circles": circles,
             "same_block": bool(tip.get("same_block")),
             # Shared in ANOTHER community of the one being read — its parent or a chapter
-            # (20270129120000). None on the community's own tips and on every area read.
+            # (20270203120000). None on the community's own tips and on every area read.
             **origin_fields(tip),
             # Marks this as a rec row for the peer-surface enricher and the FE.
             "tip_rec": True,

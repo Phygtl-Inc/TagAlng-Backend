@@ -141,7 +141,7 @@ def _row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "i_marked_helpful": bool(raw.get("i_marked_helpful")),
         "i_marked_unhelpful": bool(raw.get("i_marked_unhelpful")),
         # Set only on a community read, for a tip shared in ANOTHER community of its family
-        # (its parent or a chapter, 20270129120000) — the card says where it is from. Null
+        # (its parent or a chapter, 20270203120000) — the card says where it is from. Null
         # on the community's own tips and on every area read.
         **origin_fields(raw),
     }
@@ -168,7 +168,7 @@ def recent_tips(
 
     With `circle_place_id` this is ONE community's recommendations: no distance bound and
     no tabs (the tabs belong to the area screen). It covers the community's family too —
-    its parent, and the chapters the reader may see (20270129120000) — each such row
+    its parent, and the chapters the reader may see (20270203120000) — each such row
     labelled with `origin_place_id` / `origin_place_name`.
     """
     wanted = str(tab or "recent").strip().lower()

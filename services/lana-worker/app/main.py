@@ -915,7 +915,7 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 group_key=str(row.get("group_key") or "") or None,
                 group_label=str(row.get("group_label") or "") or None,
                 group_kind=str(row.get("group_kind") or "") or None,
-                # A rec from another community of the family (20270129120000).
+                # A rec from another community of the family (20270203120000).
                 origin_place_id=str(row.get("origin_place_id") or "") or None,
                 origin_place_name=str(row.get("origin_place_name") or "") or None,
             )
