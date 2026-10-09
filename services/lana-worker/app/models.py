@@ -854,6 +854,13 @@ class TopicCommunityResponse(BaseModel):
     query: str = ""
 
 
+class CommunityJoinedParent(BaseModel):
+    """The parent community a chapter join also joined."""
+
+    place_id: str
+    place_name: str | None = None
+
+
 class CommunityJoinResponse(BaseModel):
     """The result of joining. `source` is where the community first came from and is
     NOT overwritten by joining: a place the user mentioned in chat and later joined
@@ -876,6 +883,9 @@ class CommunityJoinResponse(BaseModel):
     # True when this join was credited to the invite_token it carried
     # (circle_invite_redemptions.joined_at). Additive.
     attributed: bool = False
+    # Joining a chapter makes her a member of its parent too; set when THIS join added
+    # (or promoted) that parent membership, so the client can say so. Additive.
+    parent_joined: CommunityJoinedParent | None = None
 
 
 class CommunityFeatureRow(BaseModel):

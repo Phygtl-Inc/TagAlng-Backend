@@ -4743,6 +4743,7 @@ def post_circles_join(
                 if str(result.get("status") or "") == "curious"
                 else "member",
                 "via_invite": attributed,
+                "joined_parent": bool(result.get("parent_joined")),
             },
         )
     return CommunityJoinResponse(
@@ -4758,6 +4759,7 @@ def post_circles_join(
             result.get("confirmed_via"), result.get("source")
         ),
         promoted_from_candidate=bool(result.get("promoted_from_candidate")),
+        parent_joined=result.get("parent_joined"),
         attributed=attributed,
     )
 
