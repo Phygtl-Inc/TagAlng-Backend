@@ -2533,6 +2533,13 @@ def _run_browse_turn(
         if not block_id and not comm:
             return _ask_zip(_compose_zip_ask(interest, lang=lang))
 
+    # The search runs now, so it counts toward what Lana learns they are into. An open ask
+    # has no topic to learn.
+    if interest and not _OPEN_RE.match(interest):
+        from app import learned_interests
+
+        learned_interests.record_turn(session_ctx, user_id, interest, "event_search")
+
     # "weekend" is handled by the LLM date matcher too, but keep the SQL-side weekend
     # filter as a cheap pre-narrow when the word appears verbatim.
     weekend_only = bool(re.search(r"\bweekend\b", interest, re.I) or re.search(r"\bweekend\b", msg, re.I))

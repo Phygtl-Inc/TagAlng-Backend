@@ -2463,6 +2463,7 @@ def _try_layer1_intent_turn(
         ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
         ctx["skip_claims_background_extract"] = True
         ctx.pop("activity_previews", None)
+        _record_people_search(ctx, user_jwt, display_filter, slots)
         if _attr_search_is_spent(peers):
             _stamp_peer_seek_offer(ctx, display_filter)
         return reply, ctx, ctx["last_routing"], peer_rows
@@ -3425,9 +3426,24 @@ def _try_attr_refine_turn(
     ctx["peer_matches"] = peer_rows
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "find_peers_by_attr_filter")
     ctx.pop("activity_previews", None)
+    _record_people_search(ctx, user_jwt, display_filter, slots)
     if _attr_search_is_spent(peers):
         _stamp_peer_seek_offer(ctx, display_filter)
     return reply, ctx, ctx["last_routing"], peer_rows
+
+
+def _record_people_search(
+    ctx: dict[str, Any], user_jwt: str, topic: str, slots: dict[str, Any] | None
+) -> None:
+    """A people search teaches Lana the topic too (app/learned_interests.py) — but only
+    when the classifier read every trait as an interest: looking for Brazilian moms says
+    nothing about what the searcher is into."""
+    if (slots or {}).get("attr_is_interest") is not True:
+        return
+    from app import learned_interests
+    from app.auth import jwt_user_id
+
+    learned_interests.record_turn(ctx, jwt_user_id(user_jwt), topic, "people_search")
 
 
 def _try_peer_detail_turn(

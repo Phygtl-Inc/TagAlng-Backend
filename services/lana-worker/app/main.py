@@ -893,6 +893,8 @@ def _peer_matches_from_ctx(ctx: dict[str, Any]) -> list[PeerMatchRow]:
                 connection=str(row.get("connection") or "") or None,
                 # Roster rows only — see PeerMatchRow.membership.
                 membership=str(row.get("membership") or "") or None,
+                # Learned from their searches, not said — see PeerMatchRow.learned.
+                learned=bool(row.get("learned")),
                 actions=_ui_action_rows_from_raw(row.get("actions")),
                 # Cascade fields — present only when the row came with a neighbor's rec
                 # (looking.tip) or a resolved distance; None everywhere else.
@@ -2285,6 +2287,12 @@ def _run_lana_message(
             )
             timing_ms = timer.to_dict()
             orch_used = False
+
+        # A search this turn taught Lana an interest: one line after the answer, before
+        # localization so it renders in the session language like the rest.
+        from app.learned_interests import append_mention
+
+        reply = append_mention(reply, session_ctx)
 
         # Final-mile localization: EVERY reply renders into the session
         # language at this one choke point — composer opt-outs are gone. The
@@ -3752,6 +3760,10 @@ class CircleRemoveBody(_BaseModel):
     affiliation_id: str
 
 
+class LearnedInterestRemoveBody(_BaseModel):
+    interest_id: str
+
+
 class CircleGroundOptionsBody(_BaseModel):
     affiliation_id: str
     # "search for another" free text; defaults to the user's own captured phrase.
@@ -4139,6 +4151,34 @@ def post_circles_remove(
         user_id=auth.user_id,
         event_properties={"affiliation_id": body.affiliation_id},
     )
+    return {"ok": True}
+
+
+@app.post("/lana/learned-interests/list")
+def post_learned_interests_list(authorization: str | None = Header(default=None)):
+    """What Lana has learned the caller is into from their searches — their own only."""
+    auth = verify_auth(authorization)
+    from app.learned_interests import list_for_user
+
+    return {"interests": list_for_user(auth.user_id)}
+
+
+@app.post("/lana/learned-interests/remove")
+def post_learned_interests_remove(
+    body: LearnedInterestRemoveBody,
+    authorization: str | None = Header(default=None),
+):
+    """Remove one for good: the topic is never learned again."""
+    auth = verify_auth(authorization)
+    from app.learned_interests import remove
+
+    try:
+        UUID(body.interest_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid_interest_id") from None
+    if not remove(auth.user_id, body.interest_id):
+        raise HTTPException(status_code=404, detail="learned_interest_not_found")
+    amplitude_track("learned_interest_removed", user_id=auth.user_id)
     return {"ok": True}
 
 

@@ -564,6 +564,26 @@ def fetch_peers_by_attr_filter(
     limit: int = 5,
     slots: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    """People who SAID they match, then — only in the room left — people whose searches
+    taught Lana they are into it (app/learned_interests.py), each saying what they did."""
+    stated = _fetch_peers_stated(user_jwt, filter_text, limit=limit, slots=slots)
+    room = limit - len(stated)
+    if room <= 0:
+        return stated[:limit]
+    from app.learned_interests import fetch_learned_peers
+
+    terms = attr_filter_tokens(filter_text)
+    seen = {str(p.get("peer_user_id") or "") for p in stated}
+    return stated + fetch_learned_peers(user_jwt, terms, limit=room, exclude=seen)
+
+
+def _fetch_peers_stated(
+    user_jwt: str,
+    filter_text: str,
+    *,
+    limit: int = 5,
+    slots: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     filters = parse_claim_filters(filter_text, slots)
     if filters:
         structured = _fetch_peers_by_claim_filters_rpc(user_jwt, filters, limit=limit)
@@ -596,7 +616,10 @@ def peers_to_match_rows(
             continue
         # One enrichment per row: the badge, the truthful composed label and the
         # per-claim tags all come out of the same pass.
-        enriched = enrich_peer_match_row(row)
+        # A learned match is not a stated claim: no badge, and its sentence says what they
+        # did ("Has been checking out AI meetups") — enrich would recompose it as a claim.
+        learned = bool(row.get("learned"))
+        enriched = {} if learned else enrich_peer_match_row(row)
         nick = str(row.get("nickname") or "").strip() or None
         # THE verify gate for peer identity, enforced once here so all nine call
         # sites inherit it. `preview: True` was only ever a hint, and the card reads
@@ -639,6 +662,7 @@ def peers_to_match_rows(
                 "matching_peer_concept": row.get("matching_peer_concept"),
                 "has_exact_concept_match": bool(row.get("has_exact_concept_match")),
                 "semantic_match": bool(row.get("semantic_match")),
+                "learned": learned,
                 # Carried, not re-derived: the dispatch already paid for the tier lookup,
                 # and the card needs it to drop the Nudge button on someone the user
                 # already knows.
@@ -972,7 +996,7 @@ def format_attr_peers_reply(
             ),
             facts=[
                 f'What they searched for: "{filter_text}"',
-                f"Neighbors whose own claims match that search: {n}",
+                f"People matching that search: {n}",
                 f"Already connected with the user: {n} of {n}",
             ],
             fallback=(
@@ -998,7 +1022,7 @@ def format_attr_peers_reply(
             ),
             facts=[
                 f'What they searched for: "{filter_text}"',
-                f"Neighbors whose own claims match that search: {n}",
+                f"People matching that search: {n}",
                 f"Intros already sent and awaiting a reply: {n} of {n}",
             ],
             fallback=(
@@ -1006,6 +1030,36 @@ def format_attr_peers_reply(
                 f"\"{filter_text}\" already {'has' if n == 1 else 'have'} an intro from me "
                 "waiting — I'll tell you the moment there's a reply. I can notify you when "
                 "someone new matches, or show everyone nearby instead."
+            ),
+        )
+    # Learned matches (app/learned_interests.py) never said this about themselves — their
+    # searches did. Lana must not call them people who "mention" or "share" it.
+    learned_n = sum(1 for p in peers if isinstance(p, dict) and p.get("learned"))
+    if learned_n:
+        stated_n = n - learned_n
+        return compose_reply(
+            goal=(
+                "Tell the user who you found. Be exact about why each group is here: "
+                "people in the first group said it about themselves; the others never "
+                "said it — they have been searching for it lately, and the cards say what "
+                "they have been doing. Never describe that second group as having the "
+                "trait or as sharing anything with the user. Then offer an intro."
+            ),
+            facts=[
+                f'What they searched for: "{filter_text}"',
+                f"People who said it about themselves: {stated_n}",
+                f"People who have been searching for it lately: {learned_n}",
+            ],
+            fallback=(
+                f"{learned_n} {'people' if learned_n != 1 else 'person'} near you "
+                f"{'have' if learned_n != 1 else 'has'} been looking into \"{filter_text}\" "
+                "lately"
+                + (
+                    f", and {stated_n} {'say' if stated_n != 1 else 'says'} so in their own words"
+                    if stated_n
+                    else ""
+                )
+                + " — the cards show which. Want me to introduce you?"
             ),
         )
     if all(p.get("semantic_match") for p in peers if isinstance(p, dict)):
