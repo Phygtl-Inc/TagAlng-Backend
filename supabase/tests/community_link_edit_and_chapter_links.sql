@@ -43,7 +43,9 @@ update public.places set claimed_by = '00000000-0000-0000-0000-0000000cc002'
 insert into public.circle_affiliations (user_id, circle_type, circle_key, place_ref, status, source) values
   ('00000000-0000-0000-0000-0000000cc001', 'school', 'sjsu_campus', '00000000-0000-0000-0000-0000000dd001', 'confirmed', 'profile_add'),
   ('00000000-0000-0000-0000-0000000cc004', 'school', 'sjsu_campus', '00000000-0000-0000-0000-0000000dd001', 'confirmed', 'profile_add'),
-  ('00000000-0000-0000-0000-0000000cc003', 'school', 'sjsu_campus', '00000000-0000-0000-0000-0000000dd001', 'suggested', 'profile_add');
+  ('00000000-0000-0000-0000-0000000cc003', 'school', 'sjsu_campus', '00000000-0000-0000-0000-0000000dd001', 'suggested', 'profile_add'),
+  -- A member of another community, who must not count toward SJSU.
+  ('00000000-0000-0000-0000-0000000cc002', 'other', 'moms_orlando', '00000000-0000-0000-0000-0000000dd002', 'confirmed', 'profile_add');
 
 -- ── 1 · backfill + automatic assignment ──────────────────────────────────────
 
@@ -316,6 +318,20 @@ begin
    where id = '00000000-0000-0000-0000-0000000ee001';
   assert (select chapter_handle from public.places where id = '00000000-0000-0000-0000-0000000ee001') = 'night-walkers',
     're-attached under the same parent keeps its renamed word';
+
+  -- Moving a chapter that already HAS a word to a parent where that word is taken (or
+  -- retired): it gets the next free one there, never a duplicate or a retired link.
+  update public.places set parent_place_ref = null
+   where id = '00000000-0000-0000-0000-0000000ee011';
+  update public.places set parent_place_ref = '00000000-0000-0000-0000-0000000dd001'
+   where id = '00000000-0000-0000-0000-0000000ee011';
+  assert (select chapter_handle from public.places where id = '00000000-0000-0000-0000-0000000ee011') = 'strollerwalk4',
+    'moved chapter re-assigned: ' ||
+    coalesce((select chapter_handle from public.places where id = '00000000-0000-0000-0000-0000000ee011'), 'null');
+  update public.places set parent_place_ref = '00000000-0000-0000-0000-0000000dd002'
+   where id = '00000000-0000-0000-0000-0000000ee011';
+  assert (select chapter_handle from public.places where id = '00000000-0000-0000-0000-0000000ee011') = 'strollerwalk4',
+    'moved where its word is free: kept';
 end;
 $$;
 
