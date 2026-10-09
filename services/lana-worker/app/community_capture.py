@@ -482,16 +482,19 @@ _UMBRELLA_SYSTEM = """You decide whether a community a person is creating could 
 one of the bigger communities they already belong to, as one of its clubs, teams, chapters \
 or groups — so that people looking at the bigger community see it there.
 
-A candidate is a plausible home ONLY when both hold:
-1. The candidate is an umbrella: an institution or organisation that has its own members \
-and commonly has groups forming under it — a school, university or campus, a company or \
-workplace, a congregation, an organisation with local branches. A single venue people \
-simply go to (a cafe, a shop, a gym, a park), a neighbourhood or area, and an ordinary \
-hobby group or club are NOT umbrellas for some other group.
-2. The new community plausibly belongs to THAT umbrella: it is the kind of group that \
-forms among that organisation's own people (its students, staff, members), and nothing \
-about it ties it somewhere else instead — a group defined by a neighbourhood or street, \
-by a different institution, or open to the general public of an area is not inside it.
+A candidate is a plausible home ONLY when one of these holds:
+1. INSTITUTION: the candidate is an institution or organisation with its own members that \
+commonly has groups forming under it — a school, university or campus, a company or \
+workplace, a congregation, an organisation with local branches — and the new community is \
+the kind of group that forms among THAT organisation's own people (its students, staff, \
+members). A group defined by a neighbourhood or street, or by a different institution, is \
+not inside it.
+2. TOPIC WITH LOCAL BRANCHES: the candidate is a community about a topic or interest whose \
+members are not tied to one spot (spread_out is true), and the new community is a local \
+branch of THAT SAME topic — the same interest, gathering in one city, area or venue. A \
+new community about a different subject is not inside it.
+A single venue people simply go to (a cafe, a shop, a gym, a park) and a neighbourhood or \
+area are never homes for another group, and neither is an ordinary local club.
 
 When in doubt, leave it out: a wrong question costs the person a tap, a missing one costs \
 nothing they cannot fix later.
@@ -538,12 +541,14 @@ def _parent_ask_due(draft: dict[str, Any]) -> bool:
 def _parent_candidates(draft: dict[str, Any], user_id: Any) -> list[dict[str, Any]]:
     """The creator's own communities that attach_chapter would accept as this one's parent.
 
-    Confirmed membership (what the SQL checks), not a creator community, not itself a
-    chapter (depth is one level), and not the very place being published. Best effort:
-    a failed read means no question, never a failed turn."""
+    Confirmed membership (what the SQL checks), not itself a chapter (depth is one level),
+    and not the very place being published. A creator community IS eligible: attach_chapter
+    only refuses one as the CHAPTER (creator_community_cannot_be_chapter) — a topic like
+    Podcasters can hold local branches. Best effort: a failed read means no question,
+    never a failed turn."""
     if not user_id:
         return []
-    from app.circles_flow import CREATOR_PLACE_PREFIX, list_my_circles
+    from app.circles_flow import list_my_circles
 
     try:
         rows = list_my_circles(str(user_id))
@@ -558,12 +563,6 @@ def _parent_candidates(draft: dict[str, Any], user_id: Any) -> list[dict[str, An
         if not str(r.get("place_name") or "").strip():
             continue
         gpid = str(r.get("google_place_id") or "")
-        if (
-            r.get("place_type") == "creator"
-            or str(r.get("circle_type") or "") == "creator"
-            or gpid.startswith(CREATOR_PLACE_PREFIX)
-        ):
-            continue
         if r.get("parent_place_id"):
             continue
         if own_gpid and gpid == own_gpid:
@@ -638,6 +637,8 @@ def _judge_umbrellas(
                 "kind": c.get("relation"),
                 "description": c.get("blurb"),
                 "their_note": c.get("detail"),
+                # A creator / placeless community: a topic whose members are anywhere.
+                "spread_out": not c.get("located"),
             }
             for i, c in enumerate(candidates)
         ]
@@ -712,6 +713,7 @@ def _apply_parent_answer(
             "place_name": o["place_name"],
             "located": bool(o.get("located")),
             "handle": o.get("handle"),
+            "join_first": bool(o.get("join_first")),
         }
         draft.pop("parent_unresolved", None)
         draft["chips"] = _build_chips(draft)  # the card shows the "Part of" chip
@@ -777,8 +779,8 @@ def _ask_parent(
     session_ctx["community_pending_ask"] = _PARENT_ASK
     session_ctx["community_offered"] = labels
     session_ctx["community_pending_question"] = (
-        "Whether this new community is part of one of the bigger communities they belong "
-        f"to ({', '.join(names)}), or stands on its own"
+        "Whether this new community is part of one of these bigger communities "
+        f"({', '.join(names)}), or stands on its own"
     )
     session_ctx["community_draft"] = draft
     session_ctx["community_create_active"] = True
@@ -799,7 +801,14 @@ def _ask_parent(
         ),
         facts=[
             f"The new community: {name}",
-            "Bigger communities they belong to that it could sit inside: " + ", ".join(names),
+            "Bigger communities it could sit inside: " + ", ".join(names),
+        ]
+        + [
+            f"They are not a member of {o['place_name']} yet; choosing it also makes them one"
+            for o in offer
+            if o.get("join_first")
+        ]
+        + [
             "Inside one, people looking at that community see it as one of its clubs; it "
             "can still be found and joined on its own",
         ],
@@ -816,7 +825,14 @@ def _maybe_ask_parent(
     if not _parent_ask_due(draft):
         return None
     draft["parent_asked"] = True
-    plausible = _judge_umbrellas(draft, _parent_candidates(draft, user_id))
+    candidates = _parent_candidates(draft, user_id)
+    # The community picked at the top of the app is where they are standing: it is offered
+    # first, without the umbrella judgement — choosing it is their own signal. Still a
+    # question, never an assumption: browsing inside Podcasters does not make every new
+    # community a branch of it.
+    scoped = _scoped_parent(session_ctx, draft, candidates)
+    others = [c for c in candidates if not scoped or c["place_id"] != scoped["place_id"]]
+    plausible = ([scoped] if scoped else []) + _judge_umbrellas(draft, others)
     if not plausible:
         return None
     draft["parent_offer"] = [
@@ -825,10 +841,61 @@ def _maybe_ask_parent(
             "place_name": c["place_name"],
             "located": bool(c.get("located")),
             "handle": c.get("handle"),
+            # Not a member yet: picking it joins them first (attach_chapter needs that).
+            "join_first": bool(c.get("join_first")),
         }
-        for c in plausible
+        for c in plausible[:_PARENT_MAX]
     ]
     return _ask_parent(session_ctx, draft)
+
+
+def _scoped_parent(
+    session_ctx: dict[str, Any], draft: dict[str, Any], candidates: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The community selected at the top of the app, as a parent candidate, or None.
+
+    Theirs already → that candidate row. Not theirs yet → read the place and mark it
+    join_first. None when it could not hold a chapter: itself a chapter (one level only),
+    paused, or the very place being created."""
+    from app.community_scope import active_community
+
+    comm = active_community(session_ctx)
+    if not comm:
+        return None
+    pid = str(comm["place_id"])
+    mine = next((c for c in candidates if c["place_id"] == pid), None)
+    if mine:
+        return mine
+    try:
+        from app.auth import service_client
+
+        res = (
+            service_client()
+            .table("places")
+            .select("id, name, lat, lng, handle, parent_place_ref, governance_state, google_place_id")
+            .eq("id", pid)
+            .limit(1)
+            .execute()
+        )
+        row = (res.data or [{}])[0] if isinstance(res.data, list) and res.data else {}
+    except Exception:  # noqa: BLE001 — no read, no offer; the judged ones still go
+        logger.exception("community_scoped_parent_read_failed place=%s", pid)
+        return None
+    if not row or row.get("parent_place_ref") or row.get("governance_state") == "suspended":
+        return None
+    own_gpid = str(draft.get("google_place_id") or "").strip()
+    if own_gpid and str(row.get("google_place_id") or "") == own_gpid:
+        return None
+    name = str(row.get("name") or comm.get("name") or "").strip()
+    if not name:
+        return None
+    return {
+        "place_id": pid,
+        "place_name": name,
+        "located": row.get("lat") is not None and row.get("lng") is not None,
+        "handle": str(row.get("handle") or "").strip() or None,
+        "join_first": True,
+    }
 
 
 def _attach_to_parent(draft: dict[str, Any], user_id: Any, place_id: str) -> list[str]:
@@ -849,9 +916,25 @@ def _attach_to_parent(draft: dict[str, Any], user_id: Any, place_id: str) -> lis
     from app.community_chapter_ops import attach_chapter
 
     got = attach_chapter(str(user_id or ""), place_id, str(parent["place_id"]))
+    joined: list[str] = []
+    if got.get("reason") == "not_a_member_of_parent":
+        # They put it inside X themselves (named it, or tapped "Part of X"), and the SQL
+        # needs them to belong to X — so they join X, the same self-claim as its Join
+        # button, and the attach runs once more. Said in the reply, never silent.
+        from app.community_discovery import join_community
+
+        try:
+            join_community(str(user_id or ""), str(parent["place_id"]))
+        except ValueError:
+            logger.exception("community_parent_join_failed parent=%s", parent.get("place_id"))
+        else:
+            joined = [f"They were not in {pname}, so they are now a member of it too"]
+            got = attach_chapter(str(user_id or ""), place_id, str(parent["place_id"]))
     draft["parent_attached"] = bool(got.get("ok"))
     if got.get("ok"):
-        return [f"It is now a club inside {pname} — people who look at {pname} will see it"]
+        return joined + [
+            f"It is now a club inside {pname} — people who look at {pname} will see it"
+        ]
     reason = got.get("reason")
     if reason == "not_a_member_of_parent":
         return [

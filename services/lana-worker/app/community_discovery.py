@@ -2284,6 +2284,17 @@ def communities_chat_turn(
         # the model spells out ("SJSU" asked from far away, 2026-10-07).
         got = resolve_community_name(user_id, community_name)
         hit, inexact = got["hit"], got["inexact"]
+        if not hit and got["near"] and community_ask == "manage":
+            # Only theirs can be changed: a "did you mean" whose buttons say "update my
+            # Orlando Public Library community" for a place they are not in offered an
+            # edit they could not make (prod 2026-10-09).
+            own = {str(c.get("place_id") or "") for c in _my_communities(user_id)}
+            got["near"] = [c for c in got["near"] if str(c.get("place_id") or "") in own]
+            if not got["near"]:
+                return _manage_turn(
+                    user_id, community=None, message=message, session_ctx=session_ctx,
+                    chapter_change=chapter_change,
+                )
         if not hit and got["near"]:
             # Genuinely ambiguous: three Lake Nona gyms are a "which one", and picking
             # for them would be a guess.

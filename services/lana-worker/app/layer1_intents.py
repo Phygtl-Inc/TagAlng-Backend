@@ -393,6 +393,9 @@ def _apply_discovery_linear_slots(out: dict[str, Any], linear: str, *, msg: str)
         out["goal"] = "create_community"
         out["in_discovery"] = False
         out.pop("attr_filter", None)
+        # A community is not a posted signal: a stray legacy host_meet beside this pick is
+        # what the hosting reconciler read as "host a meet".
+        out.pop("signal_intent", None)
     elif linear == "identity.add_claim":
         out["goal"] = "chat"
         out["in_discovery"] = False
@@ -558,7 +561,14 @@ def slots_indicate_hosting_signal(slots: dict[str, Any]) -> bool:
 
 # Intents the model owns outright — a regex signal reconciler must NEVER reclassify
 # these as a swap/tip/host. ("I am a teacher" = identity, not a request for a teacher.)
-_AI_OWNED_PREFIXES = ("identity.", "settings.", "help.", "social.", "tier.", "auth.", "system.")
+# sharing.community: starting a community or a chapter of one. The hosting regex fires on
+# any "we meet at …", and the model often sets the legacy signal_intent=host_meet beside its
+# own sharing.community pick — together they rewrote "I want to start a community:
+# Podcasters Orlando … who meet at the library" into a host-a-meet (prod 2026-10-09).
+_AI_OWNED_PREFIXES = (
+    "identity.", "settings.", "help.", "social.", "tier.", "auth.", "system.",
+    "sharing.community",
+)
 
 
 def _reconcile_defer_to_llm(
