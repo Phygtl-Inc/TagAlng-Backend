@@ -597,6 +597,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     # The same two, with the far area named. The generic pair above offers to "widen the
     # search", which only drops the topic — when the pill says "Look in <area>" that is a
     # different promise, and with no LLM configured this string is the only thing shipped.
+    "learned.mention": {
+        "en": "I've noticed you're into {label} — it'll help others who share it find "
+              "you. You can see it on your profile and remove it anytime.",
+        "es": "Veo que te interesa {label}: así te encontrarán otras personas con el "
+              "mismo interés. Lo verás en tu perfil y puedes quitarlo cuando quieras.",
+        "pt": "Percebi que você curte {label} — isso ajuda outras pessoas com o mesmo "
+              "interesse a te encontrar. Está no seu perfil e dá para remover quando quiser.",
+    },
     "browse.related_label": {
         "en": "things related to {interest}",
         "es": "cosas relacionadas con {interest}",

@@ -309,6 +309,10 @@ class PeerMatchRow(BaseModel):
     # watcher rendered identically to someone who actually goes there. None on every
     # other kind of row — nothing outside a roster has a membership to state.
     membership: str | None = None
+    # True when Lana learned this from their searches, not from anything they said
+    # (app/learned_interests.py): matching_peer_label then says what they DID, and the
+    # card must not present it as a trait they claimed.
+    learned: bool = False
     actions: list["UiActionRow"] = Field(default_factory=list)
     # ── The recommendation cascade (§12a/b) ──────────────────────────────────────────
     # What this neighbor actually recommended, in their own words, and the tip_share row

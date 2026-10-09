@@ -405,7 +405,8 @@ _SYSTEM = (
     "by MEANING: "
     "discovery.find_activities (goal=activities) = the user wants to SEE/BROWSE events that ALREADY "
     "exist on the block ('what's happening this weekend', 'any events near me', 'show me what's going "
-    "on', 'anything fun nearby') — they want to be shown a list and pick. "
+    "on', 'anything fun nearby') — they want to be shown a list and pick. Whenever such an ask also "
+    "names what the events are about, set activity_topic to that subject. "
     "meet_seek (looking.meet, goal=save_signal) = the user wants a NEIGHBOR or group to do an activity "
     "WITH them and to be MATCHED ('I want a tennis partner', 'looking for a stroller-walk buddy', 'find "
     "me moms to hang out with', 'set me up with people for a fifa night') — they broadcast a want to be "
@@ -985,6 +986,9 @@ def ai_parse_discovery_turn(
             "signal_when": signal_when_s,
             "attr_filter": attr_filter_s,
             "attr_terms": attr_terms_s,
+            # Only an interest search teaches Lana what the SEARCHER is into; looking for
+            # neighbors of a heritage or life stage says nothing about them.
+            "attr_is_interest": raw.get("attr_is_interest") is True,
             "peer_name": peer_name_s,
             "community_name": community_name_s,
             "community_ask": community_ask_s,
@@ -1297,6 +1301,9 @@ def _discovery_slot_payload(
         '  "signal_when": "string or null",\n'
         '  "attr_filter": "string or null",\n'
         '  "attr_terms": [["lowercase word forms of one required trait"], ...] with attr_filter, else null,\n'
+        '  "attr_is_interest": true with attr_filter only when EVERY required trait is something a '
+        'person can be into (an interest, activity, hobby, sport or topic); false when any trait is '
+        'who the neighbor is (heritage, nationality, life stage, language, age, gender, job); else null,\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
         '  "community_name": "the place/community the user named, verbatim as they said it '
         '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community — and with '
@@ -1319,7 +1326,9 @@ def _discovery_slot_payload(
         'them, give only a ZIP, or name a venue or community rather than a town",\n'
         '  "activity_topic": "with discovery.find_activities or looking.meet: WHAT the activity is '
         'about in 1-4 plain words — never the day, time, place or community; null for an open ask '
-        'that names only when or where (anything fun nearby?)",\n'
+        'that names only when or where (anything fun nearby?). REQUIRED whenever the ask names a '
+        'subject at all, however it is phrased. The subject only: leave out words that name the '
+        'kind of gathering rather than what it is about",\n'
         '  "current_place": "the town or city the user says they ARE in right now, or asks Lana to '
         'use or keep using for this conversation (a statement of where they are, or an answer to '
         'which area to use) — the place name only, in its usual English spelling; null when they '
