@@ -1,0 +1,109 @@
+{
+  "id": "host_12",
+  "tags": [
+    "host"
+  ],
+  "zip": "32812",
+  "turns": [
+    {
+      "sent": "I want to host a meet. playdate at the McDonalds playplace tuesday 3pm",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 12984,
+      "assistant_message": "Here's your meet — **McDonald's Playplace Playdate**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "McDonald's Playplace Playdate",
+        "starts_at": "2026-07-14T15:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32812",
+      "hint": null,
+      "status": 200,
+      "ms": 10268,
+      "assistant_message": "Updated **Swim Morning at the YMCA Pool** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Swim Morning at the YMCA Pool",
+        "starts_at": "2026-07-14T15:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 11652,
+      "assistant_message": "Updated **Swim Morning at the YMCA Pool** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Swim Morning at the YMCA Pool",
+        "starts_at": "2026-07-14T15:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Publishing your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:09:20.017Z",
+  "session": "502e7110-eb33-4ae3-b3d2-2c95180485e7",
+  "finishedAt": "2026-07-09T01:09:55.492Z"
+}
