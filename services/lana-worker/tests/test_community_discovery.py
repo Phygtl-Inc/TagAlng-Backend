@@ -639,7 +639,10 @@ class TestMembershipIntent(unittest.TestCase):
         sb.return_value = _sb({"circle_affiliations": affs})
         out = set_membership("u1", "a1", "member")
         self.assertEqual(affs.update.call_args[0][0], {"status": "confirmed"})
-        self.assertEqual(out, {"affiliation_id": "a1", "place_id": "p1", "membership": "member"})
+        self.assertEqual(
+            out,
+            {"affiliation_id": "a1", "place_id": "p1", "membership": "member", "parent_joined": None},
+        )
 
     @patch("app.community_discovery.service_client")
     def test_repeating_the_same_answer_writes_nothing(self, sb) -> None:

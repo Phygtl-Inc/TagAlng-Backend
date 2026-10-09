@@ -780,7 +780,10 @@ def is_joinable_place_name(name: str) -> bool:
 def _place_row(place_id: str) -> dict[str, Any]:
     # blurb first (the noun model needs it for creator communities); step down without it
     # rather than fail the join on an environment that predates the column.
-    for fields in ("id, name, address, place_type, blurb", "id, name, address, place_type"):
+    for fields in (
+        "id, name, address, place_type, blurb, parent_place_ref",
+        "id, name, address, place_type, parent_place_ref",
+    ):
         try:
             res = (
                 service_client()
@@ -958,6 +961,52 @@ def _unique_key(base: str, taken: set[str]) -> str:
     return f"{key}_x"[:64]
 
 
+def _join_parent_first(user_id: str, place: dict[str, Any], joined_status: str) -> dict[str, Any] | None:
+    """A chapter's member is a member of its parent too: joining RCC joins SJSU.
+
+    Every count, roster and visibility read works off circle_affiliations directly, so the
+    parent membership is a real row, not something derived from the hierarchy. Written
+    BEFORE the chapter's row, so a failure can never leave someone in a chapter of a
+    community they are not in. Never downgrades: a confirmed member of the parent who joins
+    a chapter as curious stays a member of the parent. Leaving a chapter does not leave the
+    parent. Returns {place_id, place_name} when this join added (or promoted) the parent
+    membership, else None. Raises ValueError('join_failed') when the parent write fails."""
+    parent_id = str(place.get("parent_place_ref") or "").strip()
+    if not parent_id or parent_id == str(place.get("id") or ""):
+        return None
+    mine = next(
+        (r for r in _existing_rows(user_id) if str(r.get("place_ref") or "") == parent_id),
+        None,
+    )
+    held = str((mine or {}).get("status") or "")
+    if held == "confirmed" or (mine and held == joined_status):
+        return None
+    try:
+        got = (
+            service_client()
+            .table("places")
+            .select("governance_state")
+            .eq("id", parent_id)
+            .limit(1)
+            .execute()
+        )
+        parent = (got.data or [{}])[0] if isinstance(got.data, list) else {}
+    except Exception:  # noqa: BLE001 — unreadable parent: the chapter join still goes ahead
+        logger.exception("community_join_parent_read_failed parent=%s", parent_id)
+        return None
+    # A paused parent is out of every family read (community_family); nothing to join.
+    if not parent or parent.get("governance_state") == "suspended":
+        return None
+    result = join_community(
+        user_id,
+        parent_id,
+        membership="member" if joined_status == "confirmed" else "curious",
+    )
+    if result.get("already_member"):
+        return None
+    return {"place_id": parent_id, "place_name": result.get("place_name")}
+
+
 def join_community(
     user_id: str,
     place_id: str,
@@ -992,11 +1041,16 @@ def join_community(
 
     joined_status = "curious" if str(membership or "").strip().lower() == "curious" else "confirmed"
 
+    # Parent first (a chapter's member is the parent's member too). Also run for someone
+    # already in the chapter, so a membership from before this rule heals on the next tap.
+    parent_joined = _join_parent_first(user_id, place, joined_status)
+
     sb = service_client()
     rows = _existing_rows(user_id)
     mine_here = next((r for r in rows if str(r.get("place_ref") or "") == place_id), None)
     if mine_here and str(mine_here.get("status") or "") == joined_status:
         return {
+            "parent_joined": parent_joined,
             "affiliation_id": str(mine_here["id"]),
             "place_id": place_id,
             "place_name": place.get("name"),
@@ -1099,6 +1153,7 @@ def join_community(
         "source": origin_source,
         "confirmed_via": CONFIRMED_VIA_JOIN,
         "promoted_from_candidate": promoted_from_candidate,
+        "parent_joined": parent_joined,
     }
 
 
@@ -1134,7 +1189,11 @@ def set_membership(user_id: str, affiliation_id: str, membership: str) -> dict[s
     if not place_id:
         # An ungrounded candidate is not a community yet — nothing to be a member of.
         raise ValueError("place_required")
+    parent_joined = None
     if str(row.get("status") or "") != status:
+        if status == "confirmed":
+            # Curious → member of a chapter makes her a member of its parent (parent first).
+            parent_joined = _join_parent_first(user_id, _place_row(place_id), status)
         try:
             sb.table("circle_affiliations").update({"status": status}).eq(
                 "id", affiliation_id
@@ -1149,6 +1208,7 @@ def set_membership(user_id: str, affiliation_id: str, membership: str) -> dict[s
         "affiliation_id": affiliation_id,
         "place_id": place_id,
         "membership": "member" if status == "confirmed" else "curious",
+        "parent_joined": parent_joined,
     }
 
 
@@ -2829,10 +2889,34 @@ def join_confirm_reply(
             "next step: seeing who else is there."
         )
         fallback = f"You're already in {name}. Want to see who else is there?"
+        parent = result.get("parent_joined") or {}
+        if parent.get("place_name"):
+            # Already in the chapter, but its parent membership was missing (a join from
+            # before the rule): that part DID change.
+            facts.append(
+                f"{name} is a chapter of {parent['place_name']}; they are now a member of "
+                f"{parent['place_name']} too"
+            )
+            facts[0] = f"They were already in {name}"
+            fallback = (
+                f"You were already in {name}, and now you're in {parent['place_name']} too. "
+                "Want to see who else is there?"
+            )
+            goal = (
+                "Tell them they were already in this one, and that they are now also a "
+                "member of the bigger community it belongs to (in the facts). Then offer the "
+                "real next step: seeing who else is there."
+            )
     else:
         facts = [f"They just joined {name}"]
         if member_count and member_count > 1:
             facts.append(f"{member_count} people are in it now, including them")
+        parent = result.get("parent_joined") or {}
+        if parent.get("place_name"):
+            facts.append(
+                f"{name} is a chapter of {parent['place_name']}, so joining it made them a "
+                f"member of {parent['place_name']} too"
+            )
         if result.get("promoted_from_candidate"):
             facts.append(
                 "This is the same place they had mentioned to you before — now it's "
@@ -2843,7 +2927,16 @@ def join_confirm_reply(
             "offer the one real next step: seeing who else is there. Never promise "
             "anyone is waiting for them."
         )
-        fallback = f"Done — you're in {name}. Want to see who else is there?"
+        if parent.get("place_name"):
+            goal += (
+                " Say in the same line that it also made them a member of the bigger "
+                "community it belongs to (in the facts)."
+            )
+        fallback = (
+            f"Done — you're in {name} and {parent['place_name']}. Want to see who else is there?"
+            if parent.get("place_name")
+            else f"Done — you're in {name}. Want to see who else is there?"
+        )
 
     from app.reply_compose import compose_reply
 
