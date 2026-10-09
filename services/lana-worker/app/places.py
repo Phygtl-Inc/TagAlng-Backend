@@ -121,6 +121,59 @@ def _places_search_text(
         return []
 
 
+_PLACES_AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete"
+
+
+def search_cities(
+    *, query: str, block_id: str | None = None, user_id: str | None = None, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Towns and cities matching `query`, as [{name, address, place_id}] — the picker for
+    "which city is your community run from?". Places Autocomplete restricted to its
+    `(cities)` collection: the free-text search returned the bakeries and gyms of a typed
+    city before the city itself. Biased, never restricted, to the caller's area, so a
+    community run from Lisbon is still one tap away. `address` is the full label
+    ("New York, NY, USA"), which is what the city step geocodes. [] on any failure."""
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    q = str(query or "").strip()
+    if not api_key or len(q) < 2:
+        return []
+    body: dict[str, Any] = {"input": q[:120], "includedPrimaryTypes": ["(cities)"]}
+    loc = _centroid(None, block_id, user_id)
+    if loc:
+        body["locationBias"] = {
+            "circle": {"center": {"latitude": loc[0], "longitude": loc[1]}, "radius": 50000.0}
+        }
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            res = client.post(
+                _PLACES_AUTOCOMPLETE_URL,
+                headers={"Content-Type": "application/json", "X-Goog-Api-Key": api_key},
+                json=body,
+            )
+        data = res.json()
+    except Exception:  # noqa: BLE001 - best-effort
+        _log.exception("city_search.request_failed query=%r", q)
+        return []
+    out: list[dict[str, Any]] = []
+    for s in (data.get("suggestions") or []) if isinstance(data, dict) else []:
+        pred = (s or {}).get("placePrediction") or {}
+        fmt = pred.get("structuredFormat") or {}
+        name = str(((fmt.get("mainText") or {}).get("text")) or "").strip()
+        full = str(((pred.get("text") or {}).get("text")) or "").strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "address": full or name,
+            "place_id": str(pred.get("placeId") or "").strip() or None,
+        })
+        if len(out) >= limit:
+            break
+    if not out and isinstance(data, dict) and data.get("error"):
+        _log.info("city_search.api_error query=%r error=%r", q, data.get("error"))
+    return out
+
+
 def _display_name(place: dict[str, Any]) -> str:
     return str(((place or {}).get("displayName") or {}).get("text") or "").strip()
 
