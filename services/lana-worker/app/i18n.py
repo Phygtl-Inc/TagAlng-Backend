@@ -626,6 +626,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "No hay nada próximo en {place} ahora mismo. ¿Quieres que me quede atenta?",
         "pt": "Nada acontecendo em {place} agora. Quer que eu fique de olho?",
     },
+    # After "Widen the search": nothing related near them, but a RELATED meet farther away
+    # (a different thing in the same area — never presented as what they asked for).
+    "browse.far_related_interest": {
+        "en": "Nothing on **{interest}** or anything close to it near you right now. The "
+              "nearest related meet is **{title}** in {area}, about {miles} miles away — "
+              "it's below. Want me to keep an ear out for one near you?",
+        "es": "No hay nada de **{interest}** ni parecido cerca de ti ahora mismo. Lo "
+              "relacionado más cercano es **{title}** en {area}, a unas {miles} millas; "
+              "está aquí abajo. ¿Quieres que esté atenta por si aparece uno cerca de ti?",
+        "pt": "Não há nada de **{interest}** nem parecido perto de você agora. O mais "
+              "próximo relacionado é **{title}** em {area}, a cerca de {miles} milhas; está "
+              "aqui embaixo. Quer que eu fique de olho em um perto de você?",
+    },
     "browse.far_matches_interest": {
         "en": "Nothing on **{interest}** near you right now. The closest is **{title}** in "
               "{area}, about {miles} miles away — it's below. Want me to keep an ear out "
@@ -819,6 +832,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Tap one to RSVP, or tell me to narrow it.",
         "es": "Toca uno para apuntarte, o dime cómo afinar la lista.",
         "pt": "Toque em um para confirmar presença, ou me diga como afinar a lista.",
+    },
+    # Some/all of the cards are the viewer's own meets (shown, not hidden — 2026-10-07).
+    "browse.events_yours_some": {
+        "en": "You're hosting {n} of these.",
+        "es": "Tú organizas {n} de estos.",
+        "pt": "Você organiza {n} destes.",
+    },
+    "browse.events_yours_one": {
+        "en": "This one's yours — you're hosting it. Tell me to narrow it or look for something else.",
+        "es": "Este es tuyo: tú lo organizas. Dime cómo afinar la lista o busco otra cosa.",
+        "pt": "Este é seu: você que organiza. Me diga como afinar a lista ou procuro outra coisa.",
+    },
+    "browse.events_yours_all": {
+        "en": "These are all yours — you're hosting them. Tell me to narrow it or look for something else.",
+        "es": "Todos estos son tuyos: tú los organizas. Dime cómo afinar la lista o busco otra cosa.",
+        "pt": "Todos estes são seus: você que organiza. Me diga como afinar a lista ou procuro outra coisa.",
     },
     "browse.events_tail_guest": {
         "en": "Verify your email to RSVP, or tell me to narrow it.",

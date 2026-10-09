@@ -179,6 +179,10 @@ LANA_RECO_AUTHORITY: "${LANA_RECO_AUTHORITY:-0}"
 # Google fallback places as recommendation cards with review evidence
 # (app/google_reco_cards.py). On by default; 0 = the plain Google list only.
 LANA_GOOGLE_RECO_CARDS: "${LANA_GOOGLE_RECO_CARDS:-1}"
+# Stretch offer on an empty browse (app/stretch_offer.py): "no yoga nearby, but there's a
+# Sunday stretch session". On by default (2026-10-07); 0 turns it off. Zero extra model
+# calls: it reads the scores the topic filter already returned.
+LANA_STRETCH_OFFER: "${LANA_STRETCH_OFFER:-1}"
 EOF
 
 # Warm-instance policy, chosen by the caller — this script's own defaults are exactly

@@ -523,6 +523,64 @@ class AreaChipRoundTripTests(unittest.TestCase):
         _block_id, ctx = self._tap("actually, what about badminton?")
         self.assertNotEqual(ctx["browse_draft"].get("_area_block_id"), "8a2a1072b59ffff")
 
+    def test_the_tapped_area_is_named_not_called_your_area(self):
+        """QA 2026-10-07: after "Look in Foster City" the miss read "nothing in your
+        area" and the results "near you"."""
+        _block_id, ctx = self._tap("Look in Lake Nona — Area A")
+        self.assertEqual(ctx["browse_draft"]["_place_name"], "Lake Nona — Area A")
+
+
+class AreaOfferDoesNotChainTests(unittest.TestCase):
+    """QA 2026-10-07 (Tommaso, 1:38): "Look in Foster City" came up empty there and
+    offered San Jose, and so on — a loop. A miss in an area we sent them to stops at
+    listen / host (acknowledgement spec §6)."""
+
+    _CHIP = "Look in Foster City (94404)"
+
+    def _tap_into_empty_area(self, *, interest, far_result):
+        from app.activity_browse import run_activity_browse_turn
+
+        draft = {
+            "_seek_offer": True,
+            "interest": interest,
+            "_asked": True,
+            "_area_offer_chip": self._CHIP,
+            "_area_offer_block_id": "zip-94404",
+            "_area_offer_name": "Foster City (94404)",
+            "suggestions": ["Yes, listen for me", self._CHIP],
+        }
+        ctx: dict = {"activity_browse_active": True, "browse_draft": draft}
+        far = MagicMock(return_value=far_result)
+        with patch("app.activity_browse._fetch_block_events", return_value=[]), patch(
+            "app.activity_browse._fetch_admitted_events", return_value=None
+        ), patch("app.activity_browse._far_offer", far), patch(
+            "app.orchestrator.llm.llm_configured", return_value=False
+        ):
+            reply = run_activity_browse_turn(
+                user_message=self._CHIP,
+                session_ctx=ctx,
+                history=[],
+                user_jwt="jwt",
+                home_block_id="zip-90001",
+                slots={},
+            )
+        return reply, ctx, far
+
+    def test_open_browse_does_not_probe_for_another_area(self):
+        reply, ctx, far = self._tap_into_empty_area(
+            interest="", far_result=(["x"], "Look in San Jose (95138)", [])
+        )
+        far.assert_not_called()
+        self.assertNotIn("Look in San Jose (95138)", ctx["browse_draft"]["suggestions"])
+        self.assertIn("Foster City", reply)
+
+    def test_topic_browse_drops_a_second_area_pill(self):
+        _reply, ctx, _far = self._tap_into_empty_area(
+            interest="kayak", far_result=(["x"], "Look in San Jose (95138)", [])
+        )
+        self.assertNotIn("Look in San Jose (95138)", ctx["browse_draft"]["suggestions"])
+        self.assertIsNone(ctx["browse_draft"].get("_area_offer_chip"))
+
 
 class EmptyStateSaysWhatThePillDoesTests(unittest.TestCase):
     """The bug this pins: the facts offered the far area, the system prompt hardcoded
@@ -547,6 +605,26 @@ class EmptyStateSaysWhatThePillDoesTests(unittest.TestCase):
         still say so. The fix is agreement, not deleting the word."""
         msg = self._compose()
         self.assertIn("widen", msg.lower())
+
+    def test_widen_option_promises_related_topics_not_everything(self):
+        """Prod 2026-10-07 (Kyiv, "AI meetups"): Lana offered to "widen the search to see
+        everything nearby" — but since #205 the pill searches RELATED topics. The fact the
+        writer is given must say what the pill does."""
+        from app.activity_browse import _compose_empty_seek_offer
+
+        captured: dict = {}
+
+        def _llm_json(**kw):
+            captured.update(kw)
+            return {"message": "ok"}
+
+        with patch("app.orchestrator.llm.llm_configured", return_value=True), patch(
+            "app.orchestrator.llm.llm_json", _llm_json
+        ), patch("app.orchestrator.llm.synthesizer_model", return_value="m"):
+            _compose_empty_seek_offer("AI", lang="en")
+        payload = captured["user_payload"]
+        self.assertIn("topics related to what they asked for", payload)
+        self.assertNotIn("widen the search to everything nearby", payload)
 
     def test_community_fallback_is_unchanged(self):
         msg = self._compose(community="CF Fitness")
@@ -589,6 +667,13 @@ class EmptyStateSaysWhatThePillDoesTests(unittest.TestCase):
         ), patch("app.orchestrator.llm.synthesizer_model", return_value="m"):
             _compose_empty_seek_offer("kayak", lang="en", **kw)
         return cap["system"], cap["user_payload"]
+
+    def test_widen_is_described_as_related_not_everything(self):
+        """QA 2026-10-07: "widen the search to everything nearby" for an AI ask, then a
+        books gathering. Widen shows related meets only (a153e6f); the copy must agree."""
+        _sys, payload = self._facts_for()
+        self.assertIn("RELATED", payload)
+        self.assertNotIn("everything nearby", payload)
 
     def test_facts_do_not_claim_nothing_outside_was_looked_at_when_it_was(self):
         """Found by dumping the real payload: the far-supply fact names an area that WAS

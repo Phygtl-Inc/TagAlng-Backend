@@ -1696,6 +1696,12 @@ def run_lana_unified_pipeline(
     # pass-along / tip gates return before the discovery-path clear would run.
     clear_turn_surfaces(session_ctx)
 
+    # A guest answering "verify your email to RSVP" with their email: arm the signup
+    # handshake before any lane or the policy can read the address as something else.
+    from app.discovery_route import take_offered_verify_email
+
+    take_offered_verify_email(session_ctx, user_message, phone_verified=phone_verified)
+
     # A logout request must escape any sticky capture mode — otherwise "log me out" gets
     # swallowed as an item/tip/meet answer and does nothing. Clear the flags so the turn
     # falls through to discovery's logout handler.
@@ -2480,6 +2486,23 @@ def run_lana_unified_pipeline(
             }
             ui = {"bucket": None, "focus_phrase": None, "highlights": []}
             return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+    # A town they say they are in is this conversation's search area from now on — kept
+    # before the browse lane or the policy answers, so a reply that acknowledges it and
+    # the search on the next turn agree (app/chat_area.py). Same cached classifier read.
+    try:
+        from app.chat_area import note_chat_area
+
+        note_chat_area(
+            session_ctx,
+            _tip_share_slots(
+                session_ctx, user_message, history=history, home_block_id=home_block_id,
+                phone_verified=phone_verified, timer=timer,
+            ),
+            user_jwt,
+        )
+    except Exception:  # noqa: BLE001 — never break the turn over a remembered place
+        logging.getLogger(__name__).exception("chat_area_note_failed")
 
     # Sticky agentic "what's happening" browse — ask interest, show the block's real events,
     # re-filter on follow-ups ("show me cricket ones"). A different ACTIVITY stays in-flow as

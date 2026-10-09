@@ -518,11 +518,21 @@ _SYSTEM = (
     "CHANGING one they are already in is discovery.communities with community_ask='manage' and "
     "community_name = the community they named: updating its location / spot / address, "
     "editing its details or what they do there, renaming it, or leaving it ('can I update "
-    "the location of San Jose State University', 'I want to update some stuff in the SJSU "
+    "the location of St. Brigid's Parish', 'I want to update some stuff in the UMD "
     "community I created', 'change the spot for my gym community'). A follow-up that only "
     "says they made it or run it ('I was the one who created it', 'it's mine') right after "
     "such a request keeps the same manage ask and name. A COMMUNITY'S location is never "
-    "settings.change_zip — that is only the user's OWN home ZIP. 'manage' needs a CHANGE verb "
+    "settings.change_zip — that is only the user's OWN home ZIP. "
+    "PUTTING one community INSIDE another — any wording that makes one a club, chapter, "
+    "team or sub-group of another ('put the robotics team under Westlake High', 'make the "
+    "youth choir part of St. Brigid's', 'MSA is a club of UMD, link them', 'add my club to "
+    "the Rotary as a chapter') — is community_ask='manage' with community_name = the one "
+    "being moved, community_parent = the bigger one it goes inside, both as they wrote "
+    "them (initials stay initials), and chapter_action='attach'. TAKING it out ('remove "
+    "the youth choir from St. Brigid's', 'make the robotics team standalone', 'MSA is not "
+    "part of UMD anymore') is the same with chapter_action='detach' (community_parent may "
+    "be null). "
+    "'manage' needs a CHANGE verb "
     "(update, edit, change, move, rename, leave) aimed at a community: asking WHICH "
     "communities they are in or part of ('what community am I a part of?', 'what are my "
     "communities', 'which groups am I in?') is discovery.communities with community_ask='mine' "
@@ -536,6 +546,25 @@ _SYSTEM = (
     "answered 'who is in Mizu Sushi' with an unrelated neighbour matched on an interest and "
     "dropped the place name entirely (QA 2026-08-20). 'Introduce me to someone' with no place "
     "named stays find_peers. "
+    "INSIDE vs ACROSS — the words 'club', 'group', 'chapter', 'community' do not decide this; "
+    "WHERE THEY POINT does. CLUBS/GROUPS/CHAPTERS INSIDE ONE NAMED COMMUNITY — a school, "
+    "church, gym, company or any other place or group, named in full, by initials or by a "
+    "nickname ('what clubs does UMD have?', 'chapters of Iron Man Training', 'groups inside "
+    "St. Brigid's', 'Westlake High's teams', with an active community: 'what clubs are "
+    "here?', 'any groups in this community?') — is discovery.communities with "
+    "community_ask='chapters', community_name = THAT community as they wrote it (the active "
+    "community's name when they say here/this), and community_topic = the subject when they "
+    "narrow it, however it is phrased — a word before 'clubs' or 'about / for / focused on "
+    "/ into …' after it ('chess clubs at UMD' and 'clubs at UMD focused on chess' are both "
+    "community_topic='chess'); null when they do not narrow it. "
+    "Nothing named and no here/this → it is NOT 'chapters': 'any chess "
+    "clubs?', 'is there a running club near me?', 'communities for climbers' are a search "
+    "ACROSS communities — community_topic set, community_name=null, community_ask=null — "
+    "even inside an active community, and 'near me' / 'around here' / 'nearby' always points "
+    "OUTSIDE it. Asking about ONE named club or chapter itself ('tell me about MSA', 'what is "
+    "the Westlake Robotics Team?') is community_ask='about' with that club as "
+    "community_name — never 'chapters'; 'chapters' is only for what sits INSIDE the one they "
+    "name. "
     "ACTIVE COMMUNITY — when the context line active_community is not 'none', the user is "
     "chatting INSIDE that community (they joined it, usually from its creator's link). "
     "'this community', 'this group', 'this place', 'here', 'you guys', and the community's own "
@@ -553,6 +582,11 @@ _SYSTEM = (
     "else keeps its normal intent: finding people, events, recommendations or hosting a meet "
     "inside it route exactly as they would anywhere (the app already scopes those reads to "
     "the community). 'Other communities', 'communities near me' still browse. "
+    "The same holds with NO active community: asking for recommendations, tips or suggestions "
+    "AT, NEAR or AROUND any named place — a campus, school, church, gym, club or neighborhood, "
+    "by full name, initials or nickname ('any recommendations around Westlake High?', 'what "
+    "do you recommend near the UMD campus?') — is tip_seek (looking.tip); the place says WHERE "
+    "to look, it is not a question about that community (community_name still carries it). "
     "When the user describes THEMSELVES at ANY phase "
     "(I am american, I have a young child, I'm a teacher, I am a doctor, I am a mom) → "
     "identity.add_claim, goal=chat, in_discovery=false, identity_snippet=null "
@@ -597,7 +631,8 @@ _SYSTEM = (
     "what are people swapping, neighborhood activity) — NOT social.propose_intro even if a prior turn offered an intro. "
     "Use looking.swap/meet/tip for seeks; sharing.swap/host/tip for offers. "
     "Use settings.change_zip for the user's OWN moved/updated home ZIP (never a community's "
-    "location — see community_ask='manage'); settings.change_name for name changes "
+    "location — see community_ask='manage'; never a town they say they are in or want this "
+    "chat to use — that is current_place); settings.change_name for name changes "
     "(change my name, call me X, my name is X). "
     "Use help.what_can_you_do for help/what can you do — INCLUDING skepticism or challenge "
     "about Lana's usefulness, value, or intelligence ('how would I know you're useful', "
@@ -688,8 +723,12 @@ def _empty_slots() -> dict[str, Any]:
         "identity_snippet": None,
         "community_name": None,
         "community_ask": None,
+        "community_parent": None,
+        "chapter_action": None,
         "community_topic": None,
         "search_place": None,
+        "activity_topic": None,
+        "current_place": None,
         "profile_photo_action": "none",
         "signal_intent": None,
         "signal_detail": None,
@@ -847,8 +886,26 @@ def ai_parse_discovery_turn(
         # "when I'm in Austin") — travel (2026-10-06). The AI's read, never a keyword list.
         search_place = raw.get("search_place")
         search_place_s = str(search_place).strip()[:80] if search_place else None
+        # What an events browse is ABOUT ("badminton"), apart from when and where. The raw
+        # sentence used to be the topic, so "at sjsu what events are going on this week"
+        # was embedded whole and the meaning floor admitted nothing (2026-10-07). The AI's
+        # read; null is an open ask ("what's going on this week?").
+        activity_topic = raw.get("activity_topic")
+        activity_topic_s = str(activity_topic).strip()[:80] if activity_topic else None
+        # Where they say they ARE for this conversation — kept for the session's searches
+        # until they name another (app/chat_area.py). The AI's read, never a keyword list.
+        current_place = raw.get("current_place")
+        current_place_s = str(current_place).strip()[:80] if current_place else None
+        community_parent = raw.get("community_parent")
+        community_parent_s = str(community_parent).strip()[:80] if community_parent else None
+        chapter_action = str(raw.get("chapter_action") or "").strip().lower()
+        chapter_action_s = chapter_action if chapter_action in ("attach", "detach") else None
         community_ask = str(raw.get("community_ask") or "").strip().lower()
-        community_ask_s = community_ask if community_ask in ("people", "about", "manage", "mine") else None
+        community_ask_s = (
+            community_ask
+            if community_ask in ("people", "about", "manage", "mine", "chapters")
+            else None
+        )
         intro_direction = raw.get("intro_direction")
         intro_direction_s = str(intro_direction).strip().lower() if intro_direction else None
         if intro_direction_s not in ("sent", "received", "all"):
@@ -931,8 +988,12 @@ def ai_parse_discovery_turn(
             "peer_name": peer_name_s,
             "community_name": community_name_s,
             "community_ask": community_ask_s,
+            "community_parent": community_parent_s,
+            "chapter_action": chapter_action_s,
             "community_topic": community_topic_s,
             "search_place": search_place_s,
+            "activity_topic": activity_topic_s,
+            "current_place": current_place_s,
             "clarify": clarify,
             "clarify_question": clarify_question,
             "clarify_options": clarify_options,
@@ -1025,19 +1086,19 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
         return (
             "offer_reply — "
             + offered
-            + " The latest message is most likely their ANSWER to that offer: an accept "
-            "('yes', 'yes please', 'go ahead', 'ask them'), a decline ('no thanks', 'not "
-            "now', 'maybe later', 'I didn't want anything posted'), or a request to take it "
-            "down. Classify it as goal=continue and let the engine act on it. "
-            "*** It is NEVER tip_share / sharing.tip. *** The user ASKED for a "
-            "recommendation; they do not have one to give, so reading their 'yes' as them "
-            "SHARING a recommendation records the exact opposite of what they said — no "
-            "matter how often the words 'recommend' or 'tip' appear in the recent turns. "
-            "Only a NAMED provider or place in THEIR OWN words is a share. A genuinely new "
-            "request (a different search, a refinement like 'kid-friendly ones' or 'show me "
-            "all of them', an unrelated question) is classified fresh as normal; and a "
-            "message about how they FEEL, a symptom, distress or danger is ALWAYS its own "
-            "safety lane, never an offer reply"
+            + " The latest message either answers that offer or is a new request. It answers "
+            "the offer only when all it does is respond to it — accept it, decline it, or ask "
+            "for the posting to be taken down — and then it is goal=continue. A message that "
+            "itself ASKS for something (a recommendation, a place, people, events) is a NEW "
+            "request even when it repeats or refines the one just answered: classify it "
+            "exactly as you would with no offer pending — a request for a recommendation is "
+            "looking.tip with goal=save_signal, never goal=continue and never a people search. "
+            "*** An answer to the offer is NEVER tip_share / sharing.tip. *** The user ASKED "
+            "for a recommendation; they do not have one to give, so reading their acceptance "
+            "as SHARING one records the opposite of what they said, however often the words "
+            "recommend or tip appear in the recent turns. Only a provider or place they NAME "
+            "in their own words is a share. A message about how they feel, a symptom, "
+            "distress or danger is ALWAYS its own safety lane, never an offer reply"
         )
     # An empty peers search arms a notify/widen offer, then reported active_capture=none:
     # "find me people who like pizza" came back empty, the follow-up fragment ("a pizza
@@ -1159,8 +1220,8 @@ def _active_capture_context(session_ctx: dict[str, Any]) -> str:
             "An answer to it is goal=chat, NOT a fresh intent. DECIDE BY THE SUBJECT: when "
             "the message is about the SAME thing she asked about, it is an ANSWER, however "
             "short or bare, and praising it does not make it a new tip_share — answering "
-            "\"what do you enjoy most about Pausa?\" with \"the fig and gorgonzola is the "
-            "best\" is a fact about Pausa, whose recommendation already exists; filing a "
+            "\"what do you enjoy most about Casa Lupe?\" with \"the mole is the "
+            "best\" is a fact about Casa Lupe, whose recommendation already exists; filing a "
             "second one strands the answer on an empty card. When the message names a "
             "DIFFERENT subject, it is a PIVOT and you classify it fresh — \"oh also I want "
             "to recommend Dr Sarah\" while she asked about a restaurant is a real "
@@ -1238,21 +1299,42 @@ def _discovery_slot_payload(
         '  "attr_terms": [["lowercase word forms of one required trait"], ...] with attr_filter, else null,\n'
         '  "peer_name": "neighbor name if asking about one person, else null",\n'
         '  "community_name": "the place/community the user named, verbatim as they said it '
-        '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community, else null",\n'
+        '(Mizu Sushi, the gym, Trinity Church) when the ask is ABOUT one community — and with '
+        'discovery.find_activities, the community, school, club or venue they want events AT, '
+        'as they called it (short forms included) — and with looking.tip, the community, school, '
+        'club or venue whose recommendations they want or where the thing should be, as they '
+        'called it (short forms included); else null",\n'
         '  "community_ask": "people"|"about"|"manage"|null — with community_name: "people" when they want '
         'WHO is there (who is in it, the members, who else goes), "manage" when they want to CHANGE '
         'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '
         'else about the place itself (what kind of place it is, what it has, how big it is, what '
         'is happening there, where it is, how it is doing). "mine" (with community_name null) when '
-        'they ask WHICH communities they themselves are in. Otherwise null when no community is named,\n'
+        'they ask WHICH communities they themselves are in. "chapters" when they want the clubs, groups, '
+        'chapters or sub-communities INSIDE the community they named or the active community (what clubs '
+        'does UMD have?, any chess clubs at St. Brigid\'s?, groups inside this community?) — set community_name to '
+        'that community, and community_topic too when they narrow it to a subject. Otherwise null when no community is named,\n'
         '  "search_place": "the town or city they want searched when it is NOT where they are '
-        '(language events in San Jose, anything this weekend in Austin, I am visiting Denver — '
-        'what is on?) — the place name only (San Jose, Austin, Denver); null when they mean near '
+        '(language events in Tulsa, anything this weekend in Austin, I am visiting Denver — '
+        'what is on?) — the place name only (Tulsa, Austin, Denver); null when they mean near '
         'them, give only a ZIP, or name a venue or community rather than a town",\n'
+        '  "activity_topic": "with discovery.find_activities or looking.meet: WHAT the activity is '
+        'about in 1-4 plain words — never the day, time, place or community; null for an open ask '
+        'that names only when or where (anything fun nearby?)",\n'
+        '  "current_place": "the town or city the user says they ARE in right now, or asks Lana to '
+        'use or keep using for this conversation (a statement of where they are, or an answer to '
+        'which area to use) — the place name only, in its usual English spelling; null when they '
+        'give only a ZIP, mean their saved home, ask to search somewhere they are NOT (that is '
+        'search_place), or name a venue or community rather than a town. Saying where they are '
+        'is NOT settings.change_zip — that is only an explicit request to change their saved home ZIP",\n'
         '  "community_topic": "with discovery.communities, when they are LOOKING FOR communities '
         'about a subject or for a kind of person (any communities for podcasters?, is there a book '
         'club?, a group for new moms) — the subject in 1-4 plain words (podcasting, book club, new '
         'moms); null when they name one specific community or just ask what is near them",\n'
+        '  "community_parent": "with community_ask=manage and chapter_action=attach: the bigger '
+        'community they want it put INSIDE, verbatim as they wrote it; else null",\n'
+        '  "chapter_action": "attach"|"detach"|null — with community_ask=manage: attach when '
+        'they want the named community put inside another, detach when they want it out of '
+        'the one it is in; else null,\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
         'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'
@@ -1333,13 +1415,33 @@ def slots_want_propose_intro(slots: dict[str, Any]) -> bool:
 
 
 def slots_community_ask(slots: dict[str, Any] | None) -> str:
-    """"people" (the roster), "manage" (change one they are in) or "about" (the place
-    itself). Defaults to "about": a question we could not classify is answered from the
+    """"people" (the roster), "manage" (change one they are in), "chapters" (the clubs or
+    groups INSIDE it) or "about" (the place itself). Defaults to "about": a question we could not classify is answered from the
     place's own facts, which is the read that works for a non-member too."""
     if not slots:
         return "about"
     ask = str(slots.get("community_ask") or "")
-    return ask if ask in ("people", "manage", "mine") else "about"
+    return ask if ask in ("people", "manage", "mine", "chapters") else "about"
+
+
+def slots_chapter_change(slots: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    """(chapter_action, community_parent) from AI slots: ("attach", "SJSU"), ("detach",
+    None), or (None, None). Only with community_ask='manage' — the AI's read, never words."""
+    if not slots or str(slots.get("community_ask") or "") != "manage":
+        return None, None
+    action = str(slots.get("chapter_action") or "")
+    if action not in ("attach", "detach"):
+        return None, None
+    parent = str(slots.get("community_parent") or "").strip()[:80] or None
+    return action, parent
+
+
+def slots_activity_topic(slots: dict[str, Any] | None) -> str | None:
+    """What an events browse is about ("badminton"), from AI slots — None for an open ask."""
+    if not slots:
+        return None
+    topic = str(slots.get("activity_topic") or "").strip()
+    return topic[:80] or None
 
 
 def slots_search_place(slots: dict[str, Any] | None) -> str | None:
@@ -1347,6 +1449,14 @@ def slots_search_place(slots: dict[str, Any] | None) -> str | None:
     if not slots:
         return None
     place = str(slots.get("search_place") or "").strip()
+    return place[:80] or None
+
+
+def slots_current_place(slots: dict[str, Any] | None) -> str | None:
+    """The town/city they say they are in for this conversation, from AI slots."""
+    if not slots:
+        return None
+    place = str(slots.get("current_place") or "").strip()
     return place[:80] or None
 
 

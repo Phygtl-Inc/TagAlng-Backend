@@ -16,6 +16,8 @@ import app.activity_browse as ab
 _BOOKS = {"id": "books", "title": "Books & Neighbors Gathering", "distance_meters": 2000.0}
 _PYTHON = {"id": "python", "title": "Python Study Group", "distance_meters": 3000.0}
 _SCORES = {"books": 0.1, "python": 0.6}
+# The classifier's read of "find a meet about AI": the topic is its own slot.
+_AI = {"activity_topic": "AI"}
 
 
 def _filt(rows: list[dict], q: str) -> tuple[list[dict], str]:
@@ -60,7 +62,7 @@ def _fresh() -> dict:
 
 def test_widen_shows_related_meets_never_unrelated_ones() -> None:
     ctx = _fresh()
-    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON])
+    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON], slots=_AI)
     assert ctx["activity_previews"] == []  # nothing on AI itself
     reply, ctx, _ = _turn("Widen the search", ctx, events=[_BOOKS, _PYTHON])
     titles = [p["title"] for p in ctx["activity_previews"]]
@@ -71,7 +73,7 @@ def test_widen_shows_related_meets_never_unrelated_ones() -> None:
 
 def test_widen_with_nothing_related_says_so_and_offers_hosting_not_widen_again() -> None:
     ctx = _fresh()
-    _turn("find a meet about AI", ctx, events=[_BOOKS])
+    _turn("find a meet about AI", ctx, events=[_BOOKS], slots=_AI)
     reply, ctx, _ = _turn("Widen the search", ctx, events=[_BOOKS])
     assert ctx["activity_previews"] == []
     assert ctx["browse_draft"]["suggestions"] == ["Yes, listen for me", "Host a meet"]
@@ -80,7 +82,7 @@ def test_widen_with_nothing_related_says_so_and_offers_hosting_not_widen_again()
 
 def test_a_new_topic_after_widen_is_strict_again() -> None:
     ctx = _fresh()
-    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON])
+    _turn("find a meet about AI", ctx, events=[_BOOKS, _PYTHON], slots=_AI)
     _turn("Widen the search", ctx, events=[_BOOKS, _PYTHON])
     _turn("pottery", ctx, events=[_BOOKS, _PYTHON])
     assert not ctx["browse_draft"].get("_widen_related")
@@ -134,3 +136,84 @@ def test_the_message_model_takes_the_pill_point() -> None:
                            search_label="Rawalpindi, PK")
     assert (m.search_lat, m.search_lng, m.search_label) == (33.6, 73.0, "Rawalpindi, PK")
     assert SendMessageRequest(message="hi").search_lat is None
+
+
+# ── Widen asks the model directly which meets are related (prod 2026-10-08) ──────────────
+# The matcher's topic_score rated a guitar jam 0.0 for "jazz" (it is told the topic is a
+# hard constraint), so Widen showed nothing though the jam was 12 km away.
+
+_GUITAR = {"id": "guitar", "title": "Neighborhood Guitar Meetup", "distance_meters": 12000.0}
+
+
+def _widen_ctx(interest: str = "jazz") -> dict:
+    ctx = _fresh()
+    ctx["browse_draft"].update({"interest": interest, "_request": f"any {interest} events",
+                                "_widen_related": True})
+    return ctx
+
+
+def test_widen_shows_what_the_related_call_picks_even_at_a_zero_score() -> None:
+    with mock.patch.object(ab, "_related_alternatives",
+                           side_effect=lambda evs, req: [e for e in evs if e["id"] == "guitar"]) as rel:
+        _r, ctx, _f = _turn("", _widen_ctx(), events=[_GUITAR, _BOOKS])
+    assert rel.call_args.args[1] == "any jazz events"
+    assert [p.get("activity_id") for p in ctx.get("activity_previews") or []] == ["guitar"]
+
+
+def test_widen_shows_nothing_when_the_model_finds_nothing_related() -> None:
+    # An empty pick is an answer, not a failure: the score rule must not overrule it.
+    # python scores 0.6 here: the old score rule WOULD show it.
+    with mock.patch.object(ab, "_related_alternatives", return_value=[]):
+        _r, ctx, _f = _turn("", _widen_ctx("AI"), events=[_BOOKS, _PYTHON])
+    assert not ctx.get("activity_previews")
+
+
+def test_a_failed_related_call_falls_back_to_the_score_rule() -> None:
+    with mock.patch.object(ab, "_related_alternatives", return_value=None):
+        _r, ctx, _f = _turn("", _widen_ctx("AI"), events=[_BOOKS, _PYTHON])
+    assert [p.get("activity_id") for p in ctx.get("activity_previews") or []] == ["python"]
+
+
+def test_related_alternatives_reads_the_models_indices_defensively() -> None:
+    evs = [{"id": str(i), "title": f"meet {i}"} for i in range(8)]
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json",
+                       return_value={"related_indices": [2, 2, 99, -1, True, "3", 0, 1, 4, 5, 6]}) as llm:
+        out = ab._related_alternatives(evs, "any jazz events")
+    # duplicates, out-of-range, bools and strings dropped; capped at _RELATED_CARDS
+    assert [e["id"] for e in out] == ["2", "0", "1", "4", "5"][: ab._RELATED_CARDS]
+    assert '"request": "any jazz events"' in llm.call_args.kwargs["user_payload"]
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json", return_value={"nope": 1}):
+        assert ab._related_alternatives(evs, "jazz") is None
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json", side_effect=RuntimeError("down")):
+        assert ab._related_alternatives(evs, "jazz") is None
+
+
+def test_a_widen_turn_with_nothing_near_asks_the_far_probe_for_related_meets() -> None:
+    # Prod 2026-10-08, Bronx account: nothing within the radius at all; Widen must carry
+    # into the far probe, or a related meet 1,500 km away can never be offered.
+    far = mock.Mock(return_value=([], "", []))
+    ctx = _widen_ctx("jazz")
+    patches = [
+        mock.patch.object(ab, "_fetch_block_events", return_value=[]),
+        mock.patch.object(ab, "_fetch_admitted_events", return_value=None, create=True),
+        mock.patch.object(ab, "_filter_events_by_query", side_effect=_filt),
+        mock.patch.object(ab, "_zip_gate_frame", return_value=None),
+        mock.patch.object(ab, "_far_offer", far),
+        mock.patch("app.lana_paths.stretch_offer_enabled", return_value=False),
+        mock.patch("app.orchestrator.llm.llm_configured", return_value=False),
+        mock.patch("app.discovery_route._try_assign_home_block"),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        ab.run_activity_browse_turn(user_message="", session_ctx=ctx, history=[],
+                                    user_jwt="jwt", home_block_id="zip-10451", slots={})
+    finally:
+        for p in patches:
+            p.stop()
+    assert far.called
+    assert far.call_args.kwargs["related"] is True
+    assert far.call_args.kwargs["request"] == "any jazz events"

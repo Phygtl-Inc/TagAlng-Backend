@@ -385,10 +385,9 @@ def _embed_event_async(event_id: str, fields: dict[str, Any]) -> None:
 
     def _run() -> None:
         try:
-            from app.event_embed import event_embedding_text
-            from app.layer1_handlers import _embed_attr_filter
+            from app.event_embed import embed_event_document, event_embedding_text
 
-            vec = _embed_attr_filter(
+            vec = embed_event_document(
                 event_embedding_text(
                     title=fields.get("title"),
                     description=fields.get("description"),

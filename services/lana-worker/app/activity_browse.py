@@ -15,6 +15,7 @@ Flow (ask-first):
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -139,6 +140,35 @@ def _is_browse_answer(
     )
 
 
+def _echo_topic(interest: str, label: str | None) -> str:
+    """What an empty or stretch reply echoes and stores as the topic: the interest when
+    it is chip-short (the AI's topic), else the filter's short label for a long one."""
+    if len(interest.split()) <= 4:
+        return interest
+    return (label or "").strip()
+
+
+def _is_offered_browse_chip(
+    message: str, session_ctx: dict[str, Any], slots: dict[str, Any] | None = None
+) -> bool:
+    """A "Look beyond <community>" / "Look in <area>" pill Lana rendered last turn, sent
+    back verbatim. Both labels are remembered on the draft when offered, and the response
+    that carried them recorded its chip payloads (`_offered_chip_msgs`), so this is two
+    exact lookups — no reading of the words. Without it the classifier saw the bare chip
+    label cold, released the lane, and the draft holding the search was wiped.
+    "Host a meet" is deliberately not one: it is a way OUT of browse."""
+    msg = str(message or "").strip()
+    draft = session_ctx.get("browse_draft")
+    if not msg or not isinstance(draft, dict):
+        return False
+    if msg not in (session_ctx.get("_offered_chip_msgs") or []):
+        return False
+    return any(
+        msg.casefold() == str(draft.get(k) or "").strip().casefold()
+        for k in ("_community_chip", "_area_offer_chip")
+    )
+
+
 def activity_browse_should_release(
     message: str,
     session_ctx: dict[str, Any],
@@ -167,6 +197,7 @@ def activity_browse_should_release(
         slots,
         is_valid_answer=_is_browse_answer,
         pivot_re=_PIVOT_OUT_RE,
+        is_offered_option=_is_offered_browse_chip,
     )
 
 
@@ -174,6 +205,13 @@ def activity_browse_should_release(
 # the 5 we ultimately show, so a date/host query ("on July 5", "hosted by Asjid") can
 # reach events that aren't among the soonest few.
 _BROWSE_POOL = 40
+
+# Browse ranks meets by meaning less a log-distance penalty (search_events_semantic
+# p_distance_k / p_distance_base_m, 20270127120000): within the base a meet loses nothing;
+# beyond it, k per e-fold of distance. The same curve app/distance_admission.py used to CUT
+# with (floor_base + k * ln(d / base)); here it only ORDERS — the topic matcher decides.
+_RANK_DISTANCE_K = 0.08
+_RANK_DISTANCE_BASE_M = 8000.0
 
 # Closeness bands for the topic matcher, kept OUT of the prompt string so they can be
 # retuned without reading around prose. These are what make a 0.7 mean the same thing on
@@ -206,6 +244,18 @@ _STRETCH_BEFORE_WIDEN = True
 # it rates 0.6 ("Sunday jam night" for "violin", eval 2026-09-06) while a 1.0 elsewhere
 # had previously been rejected. Any future gate is the widening work's call to make, with
 # a consumer in hand — not a reconstruction of a rule nobody ever wrote down.
+
+
+def _mark_own(events: list[dict[str, Any]], me: str | None) -> None:
+    """Flag the caller's own meets in place (``hosted_by_you``) instead of dropping them.
+
+    Browse used to hide them because every card reads "tap to RSVP". That hid real
+    supply: a calendar imported under a team member's account vanished for exactly that
+    person (Pouya, 2026-10-07). The card and the lead-in say "you're hosting" instead.
+    """
+    for e in events:
+        if isinstance(e, dict):
+            e["hosted_by_you"] = bool(me) and str(e.get("host_id") or "") == str(me)
 
 
 def _attach_host_names(events: list[dict[str, Any]]) -> None:
@@ -249,8 +299,8 @@ def _fetch_block_events(
             limit=_BROWSE_POOL,
             pool=_BROWSE_POOL,
             weekend_only=weekend_only,
-            exclude_host_id=jwt_user_id(user_jwt),
         )
+        _mark_own(events, jwt_user_id(user_jwt))
         _attach_host_names(events)
         return events
     except Exception:  # noqa: BLE001
@@ -289,27 +339,37 @@ def _fetch_admitted_events(
     limit: int = 200,
     radius_m: float = 200_000.0,
 ) -> tuple[list[dict[str, Any]], bool] | None:
-    """Meets ranked by meaning within `radius_m`, admitted by distance (C3).
+    """The meets the topic matcher should judge for `interest`: ranked, never cut.
 
-    Returns (admitted_rows, truncated). `truncated` is true when the RPC filled its
-    page, in which case nothing downstream may conclude that nothing further out
-    matched. Returns None — not ([], False) — when the search could not run at all
-    (no embedding, no centroid, RPC failure): the caller falls back to the
-    distance-only read on None, and a dead model never reads as an empty area.
+    Returns (rows, truncated). `rows` is at most _BROWSE_POOL meets, best first by
+    rank_score — meaning less a log-distance penalty, so a farther meet must be more on
+    topic to outrank a nearer one — then meets not yet embedded inside the local radius
+    (never hidden). `truncated` is true when the RPC filled its page, in which case nothing
+    downstream may conclude that nothing further out matched. Returns None — not
+    ([], False) — when the search could not run at all (no embedding, no centroid, RPC
+    failure): the caller falls back to the distance-only read on None, and a dead model
+    never reads as an empty area.
 
-    `limit` is the RPC page size (SQL caps it at 200). `radius_m` is the outer bound
-    the rule scores inside, not a cut — SQL clamps it to 200 km.
+    No similarity floor (2026-10-08). A one-word ask scores low against every meet — a word
+    against a paragraph — so the old floor (0.495) cut exact matches before anything judged
+    them: "music" vs a Latin Jazz Concert 0.41, "jazz" vs a guitar jam 12 km away 0.42. On
+    38 real prod meets and 20 short asks it let through 13% of the right meets; ranking let
+    through 58-63%. Which of these is a match, related or unrelated is the matcher's call.
+
+    `limit` is the RPC page size (SQL caps it at 200). `radius_m` is the outer bound,
+    clamped to 200 km in SQL.
     """
     interest = str(interest or "").strip()
     if not block_id or not interest:
         return None
     log = logging.getLogger(__name__)
 
-    # 1-2. The query vector, from the same helper that embedded the rows.
-    from app.layer1_handlers import _embed_attr_filter
+    # 1-2. The query vector — RETRIEVAL_QUERY mode, the pair of the RETRIEVAL_DOCUMENT
+    #      vectors meets are stored with (app/event_embed.py).
+    from app.event_embed import embed_event_query
     from app.vec_util import to_pgvector
 
-    literal = to_pgvector(_embed_attr_filter(interest))
+    literal = to_pgvector(embed_event_query(interest))
     if not literal:
         log.warning(
             "activity_browse_embed_unavailable interest=%r — distance-only fallback",
@@ -319,18 +379,14 @@ def _fetch_admitted_events(
 
     from app.auth import jwt_user_id, service_client
     from app.discovery_route import activity_window, block_centroid
-    from app.distance_admission import _admission_floor, _admit
 
     loc = block_centroid(block_id)
     if not loc:
         log.warning("activity_browse_block_unplaceable block=%s", block_id)
         return None
 
-    # 3. Rank by meaning, distance returned as data. p_min_similarity is the floor at
-    #    distance zero — the lowest value the rule can ever admit — so SQL drops what
-    #    could never pass while still returning unembedded rows (similarity NULL).
-    # The caller's own meets are excluded in SQL (20261205120000), so they never take a
-    # slot in the page and set the truncation flag on their own; step 6 stays as a backstop.
+    # 3. Ranked by meaning less distance, no floor. The caller's own meets stay in (step 6
+    #    marks them): an imported calendar hosted from your account is still what's on.
     me = jwt_user_id(user_jwt)
     try:
         from app.event_publish import roll_recurring_events
@@ -347,9 +403,10 @@ def _fetch_admitted_events(
                     "p_radius_meters": float(radius_m),
                     "p_window": activity_window(),
                     "p_circle_place_id": None,
-                    "p_min_similarity": _admission_floor(0.0),
+                    "p_min_similarity": 0.0,
                     "p_limit": int(limit),
-                    "p_exclude_host_id": str(me) if me else None,
+                    "p_distance_k": _RANK_DISTANCE_K,
+                    "p_distance_base_m": _RANK_DISTANCE_BASE_M,
                 },
             )
             .execute()
@@ -360,7 +417,7 @@ def _fetch_admitted_events(
     raw = [r for r in (res.data if isinstance(res.data, list) else []) if isinstance(r, dict)]
 
     # 4. Before anything is dropped: a full page means the set was cut, whatever
-    #    survives the filters below.
+    #    survives below.
     truncated = len(raw) >= int(limit)
 
     # 5. Stamp — the RPC returns both, but as JSON they may arrive as int or None.
@@ -379,23 +436,32 @@ def _fetch_admitted_events(
             r["similarity"] = None
         rows.append(r)
 
-    # 6. The caller's own meets — browse offers every card as "tap to RSVP".
-    if me:
-        rows = [r for r in rows if str(r.get("host_id") or "") != str(me)]
+    # 6. The caller's own meets — shown, but marked so the card and copy say so.
+    _mark_own(rows, me)
 
     # 7.
     if weekend_only:
         rows = _weekend_rows(rows)
 
-    # 8. The RPC returns neither column and the cards need both (community badge,
+    # 8. The pool the matcher reads: the best-ranked embedded meets, then meets with no
+    #    vector yet, nearest first (a meet posted a minute ago is not hidden for that — the
+    #    floor never hid them either). SQL already ordered by rank_score, unembedded last.
+    embedded = [r for r in rows if r.get("similarity") is not None][:_BROWSE_POOL]
+    fresh = sorted(
+        (r for r in rows if r.get("similarity") is None),
+        key=lambda r: float(r.get("distance_meters") or 0.0),
+    )
+    pool = embedded + fresh[: max(0, _BROWSE_POOL - len(embedded))]
+
+    # 9. The RPC returns neither column and the cards need both (community badge,
     #    recurrence). A lookup by id, best-effort: a miss leaves them absent.
-    if rows:
+    if pool:
         try:
             extra = (
                 service_client()
                 .table("events")
                 .select("id, recurrence, circle_place_ref")
-                .in_("id", [str(r["id"]) for r in rows])
+                .in_("id", [str(r["id"]) for r in pool])
                 .execute()
             )
             by_id = {
@@ -403,30 +469,14 @@ def _fetch_admitted_events(
                 for e in (extra.data or [])
                 if isinstance(e, dict) and e.get("id")
             }
-            for r in rows:
-                e = by_id.get(str(r["id"]))
-                if e:
-                    r["recurrence"] = e.get("recurrence")
-                    r["circle_place_ref"] = e.get("circle_place_ref")
+            for r in pool:
+                ex = by_id.get(str(r["id"]))
+                if ex:
+                    r["recurrence"] = ex.get("recurrence")
+                    r["circle_place_ref"] = ex.get("circle_place_ref")
         except Exception:  # noqa: BLE001
             log.exception("activity_browse_event_columns_failed")
-
-    # 9. Order is the RPC's (similarity desc, unembedded last); _admit only filters.
-    #    The distance floor applies BEYOND the local radius only. Inside it every meet still
-    #    reaches the topic matcher, after the admitted ones: a short ask ("language groups")
-    #    against a long description can score under the floor, and the floor then hid the
-    #    Language Exchange Club 13 km away while the far probe — which never applies it —
-    #    had just offered "Look in San Jose" for that very meet (prod 2026-10-07).
-    admitted = _admit(rows)
-    kept = {id(r) for r in admitted}
-    from app.discovery_route import activity_radius_meters
-
-    local_m = float(activity_radius_meters())
-    near_rest = [
-        r for r in rows
-        if id(r) not in kept and float(r.get("distance_meters") or 0.0) <= local_m
-    ]
-    return admitted + near_rest, truncated
+    return pool, truncated
 
 
 def _nearest_miles(events: list[dict[str, Any]]) -> int | None:
@@ -716,17 +766,46 @@ def _point_area(user_jwt: str, point: dict[str, Any], session_ctx: dict[str, Any
 
 
 def _rank_far_matches(matched: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Topic first, then distance: exact matches nearest-first, then the rest."""
+    """Topic first, then distance: exact matches nearest-first, then the rest by how
+    close they are on topic, nearest breaking ties.
 
-    def key(r: dict[str, Any]) -> tuple[int, float]:
-        exact = _coerce_topic_score(r.get("topic_score")) >= _FAR_EXACT
+    The rest used to be nearest-first too, so among near-misses the topic counted for
+    nothing: "any informative meet" led with a garden volunteer day over a language
+    exchange a few streets away (prod, 2026-10-07)."""
+
+    def key(r: dict[str, Any]) -> tuple[int, float, float]:
+        score = _coerce_topic_score(r.get("topic_score"))
+        exact = score >= _FAR_EXACT
         try:
             dist = float(r.get("distance_meters") or 0.0)
         except (TypeError, ValueError):
             dist = float("inf")
-        return (0 if exact else 1, dist)
+        return (0 if exact else 1, 0.0 if exact else -score, dist)
 
     return sorted(matched, key=key)
+
+
+def _name_far_areas(events: list[dict[str, Any]]) -> None:
+    """Put the area on the venue line of every shown card beyond the local radius — the
+    same "<venue> · <area>" the far cards carry. A list can be headed "near you" when its
+    closest meet is near (_far_miles), and a 120-mile meet further down must not borrow
+    that header. Rows without a measured distance are the searched area's own."""
+    from app.discovery_route import activity_radius_meters, far_activity_details
+
+    local_m = float(activity_radius_meters())
+    for row in events[:5]:
+        if not isinstance(row, dict):
+            continue
+        try:
+            dist = float(row["distance_meters"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if dist <= local_m:
+            continue
+        where = _far_where(far_activity_details(row))
+        venue = str(row.get("venue_name") or "").strip()
+        if where and where not in venue:
+            row["venue_name"] = f"{venue} · {where}" if venue else where
 
 
 def _far_matches_facts(found: list[dict[str, Any]]) -> list[str]:
@@ -735,6 +814,7 @@ def _far_matches_facts(found: list[dict[str, Any]]) -> list[str]:
     lead = found[0]
     lines = "; ".join(
         f'"{f.get("title") or "a meet"}" in {_far_where(f)} (about {f["miles"]:,} miles)'
+        + (" — they host this one themselves" if f.get("hosted_by_you") else "")
         for f in found
     )
     return [
@@ -748,6 +828,30 @@ def _far_matches_facts(found: list[dict[str, Any]]) -> list[str]:
         "for me'). There is no 'look in' or 'widen' option — never offer one.",
         "Keep it to TWO sentences: nothing near them + the closest match and its distance, "
         "then the listen offer.",
+    ]
+
+
+def _far_related_facts(found: list[dict[str, Any]], interest: str) -> list[str]:
+    """Facts for RELATED meets beyond the radius, after Widen. They are not what was asked
+    for, and the reply must not present them as if they were."""
+    lead = found[0]
+    lines = "; ".join(
+        f'"{f.get("title") or "a meet"}" in {_far_where(f)} (about {f["miles"]:,} miles)'
+        + (" — they host this one themselves" if f.get("hosted_by_you") else "")
+        for f in found
+    )
+    return [
+        f"They widened the search. Nothing on {interest} or anything related is near them. "
+        f"RELATED meets FARTHER away — a different activity in the same broad area, NOT "
+        f"{interest} itself — closest first: {lines}. No other area was looked at.",
+        f'Name ONLY the first: "{lead.get("title") or "a meet"}" in {_far_where(lead)}, '
+        f"about {lead['miles']:,} miles away — say plainly it is related rather than "
+        f"{interest}, and how far. "
+        + ("Say the others are below too. " if len(found) > 1 else "")
+        + "They are shown as cards under your message; never list them in the text.",
+        "The ONLY option to offer is listening for one NEAR them (the pill 'Yes, listen "
+        "for me'). Never offer to widen again.",
+        "Keep it to TWO sentences.",
     ]
 
 
@@ -825,7 +929,11 @@ def _compose_empty_seek_offer(
         kw = {"title": far_lead.get("title") or "a meet", "area": _far_where(far_lead),
               "miles": f"{far_lead['miles']:,}"}
         fallback = (
-            t("browse.far_matches_interest", lang, interest=interest, **kw)
+            t(
+                "browse.far_related_interest" if far_lead.get("related")
+                else "browse.far_matches_interest",
+                lang, interest=interest, **kw,
+            )
             if interest
             else t("browse.far_matches_generic", lang, **kw)
         )
@@ -868,6 +976,15 @@ def _compose_empty_seek_offer(
         # their own Option B without having looked anywhere wider, so they keep the
         # "nothing outside was looked at" caveat.
         looked_wider = bool(area) or far_lead is not None
+        if far_lead is not None and place:
+            # The far probe measures from the area searched — her home area when the pill
+            # is outside the pilot. "2,422 miles away" with "nearby" read as a distance
+            # from Islamabad (prod, 2026-10-07); it was from Orlando.
+            far_facts = list(far_facts or []) + [
+                f"Every distance above is measured from {place}, NOT from where they are "
+                f"now — say 'from {place}' with the distance, and never call anything "
+                "'nearby' or 'near you'."
+            ]
         facts = [
             (
                 f"You searched {where} for: {interest}"
@@ -888,6 +1005,9 @@ def _compose_empty_seek_offer(
                 "Never invent or promise events other than the one closest event named "
                 "below, and never claim anything else is happening nearby"
                 if stretch is not None
+                else "Never invent events: the ONLY events you may name are the farther-away "
+                "ones listed below, and never call them nearby"
+                if far_lead is not None
                 else "Never invent or promise events, and never claim something is happening nearby"
             ),
         ]
@@ -904,9 +1024,12 @@ def _compose_empty_seek_offer(
         facts.extend(
             far_facts
             or [
-                "Option B: they can widen the search to everything nearby, dropping the "
-                "topic (the pill says 'Widen the search'). This does NOT search other "
-                "areas — never offer it as a way to look somewhere else.",
+                # Since #205 the pill searches RELATED topics, never everything — the
+                # old "everything nearby" line outlived it and Lana kept promising it.
+                "Option B: they can widen the search to topics related to what they "
+                "asked for (the pill says 'Widen the search'). It shows RELATED meets "
+                "only, never everything — never say 'everything' or 'all events' — and it "
+                "does NOT search other areas; never offer it as a way to look somewhere else.",
             ]
         )
         if user_msg:
@@ -947,6 +1070,18 @@ def _compose_empty_seek_offer(
                 "what they can tap. Do not ask whether they want to see the event; it is "
                 "already on a card. Ground it ONLY in the facts given. "
             )
+        elif far_lead is not None:
+            # A real meet farther away is on a card under the message. The old instruction
+            # only said "nothing matched", and the reply dropped the meet 2 runs in 3 — the
+            # user saw a card the sentence never mentioned (prod 2026-10-08).
+            system = (
+                "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
+                f"(max 2 sentences): say nothing matched in {where} right now, name the one "
+                "farther-away meet the facts tell you to name, with its distance, then offer "
+                "EXACTLY the options named in the facts below — every one of them, and no "
+                "others. The facts describe what is shown under your message, so a meet or "
+                "option you invent or omit contradicts it. Ground it ONLY in the facts given. "
+            )
         else:
             system = (
                 "You are Lana, a warm neighborhood concierge. Write ONE short chat message "
@@ -974,6 +1109,12 @@ def _compose_empty_seek_offer(
             logging.getLogger(__name__).info(
                 "stretch_offer_post_check_fallback event=%s", stretch.event_id
             )
+            return fallback
+        lead_title = str((far_lead or {}).get("title") or "").strip()
+        if far_lead is not None and msg_out and lead_title and lead_title.lower() not in msg_out.lower():
+            # Same honesty check for a far meet: a reply that never names the card it sits
+            # above reads as "nothing anywhere". The template names it with its distance.
+            logging.getLogger(__name__).info("far_lead_post_check_fallback title=%r", lead_title)
             return fallback
         return msg_out or fallback
     except Exception:  # noqa: BLE001
@@ -1147,8 +1288,67 @@ def browse_turn_metadata(ctx: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+_RELATED_SYSTEM = (
+    "A resident asked for a kind of event and nothing matched it exactly, so they asked to "
+    "widen the search to related events. From the numbered events, pick the ones that are a "
+    "different activity in the same broad area as what they asked for, or that serve the same "
+    "main purpose: something a person who wanted that would plausibly enjoy instead. Leave "
+    "out events whose only link is the audience, the place, the time, or simply being a "
+    "social get-together. Judge each event on what it is, not on its date. Order the picks "
+    "from closest to furthest. Output ONLY JSON: {\"related_indices\": [ints]}"
+)
+
+
+def _related_alternatives(
+    events: list[dict[str, Any]], request: str
+) -> list[dict[str, Any]] | None:
+    """The meets "Widen the search" may offer for `request`, closest first — one model call
+    that asks exactly that question.
+
+    The matcher's topic_score answers it only as a side output of a call that is told the
+    topic is a hard constraint, and it drifted to 0.0 for anything that did not match: a
+    guitar jam 12 km away scored 0.0 for "jazz" and Widen showed nothing (prod 2026-10-08).
+    None when the call could not run, so the caller falls back to the score rule."""
+    request = str(request or "").strip()
+    rows = [e for e in events if isinstance(e, dict)]
+    if not rows or not request:
+        return [] if not rows else None
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json, router_model
+
+        if not llm_configured():
+            return None
+        lines = []
+        for i, ev in enumerate(rows):
+            tags = ev.get("cohort_tags")
+            tagstr = ", ".join(tags) if isinstance(tags, list) else str(tags or "")
+            desc = str(ev.get("description") or "").strip()[:200]
+            lines.append(f"{i}: {ev.get('title', '')} | tags: {tagstr} | about: {desc}")
+        data = llm_json(
+            model=router_model(),
+            system=_RELATED_SYSTEM,
+            user_payload=json.dumps(
+                {"request": request, "events": lines}, ensure_ascii=False
+            ),
+            max_tokens=40 + 4 * len(lines),
+            temperature=0.0,
+        )
+    except Exception:  # noqa: BLE001 — fall back to the score rule
+        logging.getLogger(__name__).warning("browse_related_failed", exc_info=True)
+        return None
+    idx = (data or {}).get("related_indices") if isinstance(data, dict) else None
+    if not isinstance(idx, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for i in idx:
+        if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(rows):
+            if rows[i] not in out:
+                out.append(rows[i])
+    return out[:_RELATED_CARDS]
+
+
 def _filter_events_by_query(
-    events: list[dict[str, Any]], query: str
+    events: list[dict[str, Any]], query: str, *, at_place: str | None = None
 ) -> tuple[list[dict[str, Any]], str]:
     """Parse + match the user's request against the block's events with ONE LLM call.
 
@@ -1267,7 +1467,11 @@ def _filter_events_by_query(
                     "indices. Empty match_indices if nothing fits."
                 ),
                 user_payload=(
-                    f"Request: {query}\nEvents:\n" + "\n".join(lines)
+                    f"Request: {query}\n"
+                    # A community's own calendar: the rows carry no place, so "at SJSU"
+                    # in the request read as a constraint no event could be seen to meet.
+                    + (f"Every event below is at {at_place}.\n" if at_place else "")
+                    + "Events:\n" + "\n".join(lines)
                     + f"\nReturn match_indices, plus {len(lines)} scores, "
                     f"{len(lines)} mismatches and {len(lines)} fits_other values in "
                     "event order: "
@@ -1392,7 +1596,13 @@ def _refine_suggestions(events: list[dict[str, Any]]) -> list[str]:
 
 
 def _far_offer(
-    user_jwt: str, block_id: str | None, draft: dict[str, Any], *, interest: str = ""
+    user_jwt: str,
+    block_id: str | None,
+    draft: dict[str, Any],
+    *,
+    interest: str = "",
+    related: bool = False,
+    request: str = "",
 ) -> tuple[list[str], str, list[dict[str, Any]]]:
     """(facts, pill text, cards) for real supply outside the radius — ([], "", []) when
     there is none.
@@ -1405,9 +1615,11 @@ def _far_offer(
     label we offered; the interest carries over untouched.
 
     The candidate area is only offered when its events survive the SAME filter this
-    search just ran (and the caller's own meets are dropped, exactly as browse drops
-    them). Offering an area and then landing the user on "nothing here" is a worse
-    dead end than the empty state it was meant to replace.
+    search just ran. Offering an area and then landing the user on "nothing here" is a
+    worse dead end than the empty state it was meant to replace. The caller's own meets
+    count, marked, exactly as browse shows them (496aa78): someone who runs a community,
+    leaves it and searches its topic must not hear "nothing" while their own matching
+    meet sits just past the radius.
     """
     from app.auth import jwt_user_id
     from app.discovery_route import activities_beyond_radius, far_activity_details
@@ -1418,20 +1630,30 @@ def _far_offer(
     draft["_area_offer_block_id"] = None
     draft["_area_offer_name"] = None
 
-    rows = activities_beyond_radius(
-        user_jwt, block_id, exclude_host_id=jwt_user_id(user_jwt)
-    )
+    rows = activities_beyond_radius(user_jwt, block_id)
     if not rows:
         return [], "", []
+    _mark_own(rows, jwt_user_id(user_jwt))
     matched, _label = _filter_events_by_query(rows, interest)
-    if not matched or _filter_unchecked(rows):
-        # Nothing judged on topic out there — including when the matcher could not run.
-        # "There are some in <area>" over rows nobody checked is an invented claim.
+    if _filter_unchecked(rows):
+        # The matcher could not run. "There are some in <area>" over rows nobody checked
+        # is an invented claim.
+        return [], "", []
+    is_related = False
+    if not matched and related and str(interest or "").strip():
+        # They tapped "Widen the search": nothing related was near, so look for RELATED
+        # meets out there too — the same question Widen asks nearby. Without this, a
+        # widen from New York could never reach a guitar jam in Orlando for "jazz": the far
+        # probe only ever accepted exact matches (prod 2026-10-08).
+        matched = _related_alternatives(rows, request or interest) or []
+        is_related = bool(matched)
+    if not matched:
         return [], "", []
     if str(interest or "").strip():
         found_rows: list[dict[str, Any]] = []
         found: list[dict[str, Any]] = []
-        for row in _rank_far_matches(matched):
+        # Related picks keep the model's order (closest first); exact ones rank as before.
+        for row in (matched if is_related else _rank_far_matches(matched)):
             det = far_activity_details(row)
             if not det or not det.get("miles") or not _far_where(det):
                 continue
@@ -1440,12 +1662,16 @@ def _far_offer(
             venue = str(row.get("venue_name") or "").strip()
             row["venue_name"] = f"{venue} · {_far_where(det)}" if venue else _far_where(det)
             found_rows.append(row)
-            found.append(det)
+            found.append({**det, "hosted_by_you": bool(row.get("hosted_by_you")),
+                          **({"related": True} if is_related else {})})
             if len(found) >= _FAR_CARDS:
                 break
         if found:
             draft["_far_lead"] = found[0]
-            return _far_matches_facts(found), "", found_rows
+            facts = (
+                _far_related_facts(found, interest) if is_related else _far_matches_facts(found)
+            )
+            return facts, "", found_rows
     # _filter_events_by_query may reorder; the offer must still name the CLOSEST match.
     nearest = min(matched, key=lambda r: float(r.get("distance_meters") or 0))
     far = far_activity_details(nearest)
@@ -1478,6 +1704,57 @@ def _far_offer(
 def _community_name(comm: dict[str, Any] | None) -> str | None:
     name = str((comm or {}).get("name") or "").strip()
     return name or None
+
+
+def _topic_from_slots(slots: dict[str, Any] | None, msg: str) -> str:
+    """What this browse is about, by the AI's read — "" for an open ask.
+
+    activity_topic is the browse's own slot; a meet-seek read carries its subject in
+    signal_detail instead. No slots means the classifier never ran, and the message
+    itself stays the topic, as it always was."""
+    if slots is None:
+        return msg
+    from app.discovery_slots import slots_activity_topic
+
+    topic = slots_activity_topic(slots)
+    if not topic and str(slots.get("signal_intent") or "") == "meet_seek":
+        topic = str(slots.get("signal_detail") or "").strip() or None
+    return topic or ""
+
+
+def _scope_named_community(
+    draft: dict[str, Any], slots: dict[str, Any], user_id: str | None
+) -> None:
+    """Set (or clear) `draft["_community"]` from the community this turn NAMED.
+
+    A name that resolves scopes the browse to it ({"place_id", "name"} — the active
+    community's shape, so every community branch below reads it unchanged). A town to
+    search instead replaces it. A name that resolves to nothing drops any earlier one —
+    they named somewhere else — and no place is guessed: the filter still carries what
+    they said."""
+    from app.discovery_slots import slots_community_name, slots_search_place
+
+    said = slots_community_name(slots)
+    if not said:
+        if slots_search_place(slots):
+            draft["_community"] = None
+        return
+    if not user_id:
+        return
+    from app.community_discovery import resolve_community_name
+
+    hit = resolve_community_name(str(user_id), said)["hit"]
+    logging.getLogger(__name__).info(
+        "browse_named_community said=%r hit=%s", said, (hit or {}).get("place_id")
+    )
+    draft["_community"] = (
+        {
+            "place_id": str(hit["place_id"]),
+            "name": str(hit.get("place_name") or "").strip() or said,
+        }
+        if hit and hit.get("place_id")
+        else None
+    )
 
 
 def _arm_community_widen(draft: dict[str, Any], comm: dict[str, Any] | None) -> str:
@@ -1571,8 +1848,8 @@ def _stretch_offer_reply(
     """
     from app.discovery_route import activity_previews_from_events
 
-    # Same echo rule as the empty state: the matcher's label, or the ask if chip-short.
-    short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
+    # Same echo rule as the empty state.
+    short = _echo_topic(interest, label)
     draft["interest"] = short or interest
     draft["_seek_offer"] = True
     # Nothing else was offered this turn — pills from an earlier turn must not stay live.
@@ -1651,10 +1928,158 @@ def _format_browse_message(
         if phone_verified
         else t("browse.events_tail_guest", lang)
     )
+    # Only the cards the FE renders (activity_previews_from_events takes five).
+    mine = sum(1 for e in events[:5] if isinstance(e, dict) and e.get("hosted_by_you"))
+    if mine:
+        shown = len([e for e in events[:5] if isinstance(e, dict)])
+        if mine < shown:
+            tail = f"{t('browse.events_yours_some', lang, n=mine)} {tail}"
+        else:
+            # Nothing on screen to RSVP to — the RSVP tail would contradict the cards.
+            tail = t("browse.events_yours_one" if mine == 1 else "browse.events_yours_all", lang)
     return f"{head} {tail}"
 
 
+# How far back (in transcript messages) the last browse can be and still count as "the
+# same list again": the previous exchange only. A browse an hour of chat later that lands
+# on the same cards is a fresh look, not a loop.
+_REPEAT_WINDOW = 2
+
+
+def _follows_a_browse(
+    draft: dict[str, Any], session_ctx: dict[str, Any], history: list[dict[str, Any]]
+) -> bool:
+    """Whether this message answers a browse turn Lana just made — an open offer, a search
+    still on the draft, or cards shown in the last exchange (the draft can be reset by a
+    lane release between turns, so the session's record of shown cards counts too)."""
+    if draft.get("_seek_offer") or draft.get("_request"):
+        return True
+    return recent_browse_turn(session_ctx, history)
+
+
+def _last_lana_reply(history: list[dict[str, Any]]) -> str:
+    for row in reversed(history):
+        if isinstance(row, dict) and row.get("role") == "assistant":
+            return str(row.get("content") or "")
+    return ""
+
+
+def _repeat_of_last_browse(
+    session_ctx: dict[str, Any], shown_ids: list[str], history: list[dict[str, Any]]
+) -> int:
+    """How many times running these exact cards have now been shown (0 = not a repeat).
+    Kept on the session, not the browse draft: the lane can release and re-enter between
+    turns, which resets the draft and hid the loop from any draft-held check."""
+    last = session_ctx.get("browse_last_shown")
+    if not shown_ids or not isinstance(last, dict):
+        return 0
+    if [str(i) for i in (last.get("ids") or [])] != shown_ids:
+        return 0
+    if len(history) - int(last.get("at") or 0) > _REPEAT_WINDOW:
+        return 0
+    return int(last.get("repeats") or 0) + 1
+
+
+def _remember_browse(
+    session_ctx: dict[str, Any], shown_ids: list[str], history: list[dict[str, Any]], *, repeats: int
+) -> None:
+    session_ctx["browse_last_shown"] = {"ids": shown_ids, "at": len(history), "repeats": repeats}
+
+
+def _repeat_browse_reply(
+    draft: dict[str, Any],
+    session_ctx: dict[str, Any],
+    matched: list[dict[str, Any]],
+    *,
+    interest: str,
+    place: str | None,
+    msg: str,
+    lang: str | None,
+    repeats: int,
+) -> str:
+    """The list they just saw is all there is: say so (AI-authored), keep the cards up, and
+    offer only what is left — listen for more (when there is a topic to listen for) or
+    host one. Arms the seek offer so "yes" next turn is read as taking it."""
+    from app.discovery_route import activity_previews_from_events
+    from app.reply_compose import compose_reply
+
+    topic = "" if _OPEN_RE.match(interest or "") else str(interest or "").strip()
+    n = len(matched[:5])
+    chips = (["Yes, listen for me"] if topic else []) + ["Host a meet"]
+    draft["_seek_offer"] = bool(topic)
+    draft["suggestions"] = chips
+    session_ctx["browse_draft"] = draft
+    session_ctx["activity_browse_active"] = True
+    session_ctx["activity_previews"] = activity_previews_from_events(matched)
+    session_ctx["routing_phase"] = "listening"
+    where = place or t("browse.home_area", lang)
+    titles = [str(e.get("title") or "").strip() for e in matched[:5] if isinstance(e, dict)]
+    facts = [
+        f"They asked again: {msg[:120]}" if msg else "They asked to see more",
+        f"Every meet there is right now{f' for {topic}' if topic else ''} in {where}: "
+        f"{n} — {', '.join(t_ for t_ in titles if t_)} (already on their screen)",
+        "There are NO other meets to show. Do not list or describe any other event.",
+        "The options, matching the pills: "
+        + (f"Lana can listen and tell them when a new {topic} meet appears, or " if topic else "")
+        + "they can host a meet themselves ('Host a meet').",
+    ]
+    if repeats > 1:
+        facts.append(
+            "You have already told them this is everything. Don't repeat yourself — be "
+            "brief and lead with the option, or ask what else they'd like to do."
+        )
+    if n == 1:
+        fallback = f"That's the only meet in {where} right now. "
+    else:
+        fallback = f"Those {n} are everything in {where} right now. "
+    fallback += (
+        f"Want me to let you know when a new {topic} meet pops up, or host one yourself?"
+        if topic
+        else "Want to host one yourself?"
+    )
+    return compose_reply(
+        goal=(
+            "They asked for more meets, but the ones already on their screen are all there "
+            "are. Say so plainly and kindly, without re-introducing the list, then offer "
+            "the options below. Never claim other meets exist."
+        ),
+        facts=facts,
+        fallback=fallback,
+        session_ctx=session_ctx,
+        user_message=msg,
+    )
+
+
+def recent_browse_turn(session_ctx: dict[str, Any], history: list[dict[str, Any]]) -> bool:
+    """Whether Lana's last reply was a browse turn (cards, or an empty-search offer)."""
+    at = session_ctx.get("browse_last_turn_at")
+    return isinstance(at, int) and len(history) - at <= _REPEAT_WINDOW
+
+
 def run_activity_browse_turn(
+    *,
+    user_message: str,
+    session_ctx: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_jwt: str,
+    home_block_id: str | None,
+    slots: dict[str, Any] | None = None,
+    user_id: str | None = None,
+) -> str:
+    """Drive one browse turn (see _run_browse_turn), and note that Lana's reply was one —
+    the lane can release on a bare "no" / "yes" and re-enter fresh next turn, and the
+    reply must still be read as answering THIS turn (QA 2026-10-08)."""
+    reply = _run_browse_turn(
+        user_message=user_message, session_ctx=session_ctx, history=history,
+        user_jwt=user_jwt, home_block_id=home_block_id, slots=slots, user_id=user_id,
+    )
+    session_ctx["browse_last_turn_at"] = (
+        len(history) if session_ctx.get("activity_browse_active") else None
+    )
+    return reply
+
+
+def _run_browse_turn(
     *,
     user_message: str,
     session_ctx: dict[str, Any],
@@ -1693,6 +2118,58 @@ def run_activity_browse_turn(
         session_ctx["browse_skip_seed"] = False
         msg = ""
 
+    # ── A reply to the browse turn before it (cards, or an empty-search offer), read by the
+    #    AI: "no" / "nah" close instead of listing everything, and "what others?" asks for
+    #    more instead of becoming the topic (QA 2026-10-08). None (no model) keeps the old
+    #    reading below. ──
+    followup = None
+    if msg and _follows_a_browse(draft, session_ctx, history):
+        from app.browse_followup_ai import read_browse_followup
+
+        followup = read_browse_followup(
+            lana_said=_last_lana_reply(history),
+            topic=str(draft.get("interest") or ""),
+            msg=msg,
+        )
+    if followup == "decline":
+        if draft.get("_seek_offer"):
+            session_ctx["browse_offer_response"] = {
+                "response": "decline",
+                "offered_stretch_event_id": draft.get("_stretch_event_id"),
+            }
+        from app.reply_compose import compose_reply
+
+        reset_activity_browse_state(session_ctx)
+        session_ctx["routing_phase"] = "listening"
+        return compose_reply(
+            goal=(
+                "They said no to the last offer / are done looking at meets. Accept it "
+                "lightly in one short line, no pressure, and leave the door open for "
+                "anything else. Do not offer the same thing again."
+            ),
+            facts=[f"What they said: {msg[:120]}"],
+            fallback="No problem. I'm here if you want to look for something else.",
+            session_ctx=session_ctx,
+            user_message=msg,
+            max_sentences=1,
+        )
+    if followup == "more":
+        draft["_asked"] = True
+        if draft.get("_seek_offer"):
+            # Nothing matched the topic, and they asked what ELSE is on: everything nearby,
+            # not the same empty search again.
+            session_ctx["browse_offer_response"] = {
+                "response": "more",
+                "offered_stretch_event_id": draft.get("_stretch_event_id"),
+            }
+            draft["_seek_offer"] = None
+            draft["interest"] = ""
+            draft["_request"] = ""
+            draft["_widen_related"] = None
+            draft["_stretch_event_id"] = None
+        # Same search again — the repeat guard below says when that is everything there is.
+        msg = ""
+
     # ── Reply to the "want me to listen for you?" seek offer (search came up empty). The
     #    reply is a tap on a known pill, so read it by label; the lane release already went
     #    through the AI classifier. Accept → save a minimal seek; widen → drop the filter and
@@ -1720,22 +2197,41 @@ def run_activity_browse_turn(
             # of the label: the seeded pilot areas are H3 cells with no ZIP in them, and
             # requiring one is what made this offer impossible there.
             draft["_area_block_id"] = str(draft.get("_area_offer_block_id") or "")
+            # Name it in the copy: without this, a miss there read "nothing in your area"
+            # and its results "near you" (QA 2026-10-07, Foster City / San Jose).
+            draft["_place_name"] = str(draft.get("_area_offer_name") or "").strip() or None
+            # Reached by our own offer: an empty result here must not offer yet another
+            # area (Foster City -> San Jose -> ... ; acknowledgement spec §6).
+            draft["_area_from_offer"] = True
             draft["_seek_offer"] = None
             draft["_area_offer_chip"] = None
             draft["_area_offer_block_id"] = None
             draft["_area_offer_name"] = None
             draft["_asked"] = True
+            # The request they typed named the OLD place ("or in newyork"), and the filter
+            # reads it whole: every meet in the offered area was rejected as "asked for New
+            # York, this is Orlando", so the area we offered came back empty (prod
+            # 2026-10-08). The offer was checked against the topic alone; search the same.
+            draft["_request"] = str(draft.get("interest") or "")
             msg = ""  # same interest, new area — re-runs the search below
         elif chip and msg.strip().lower() == chip.lower():
             _answered("community")
             from app.community_scope import clear_active_community
 
             clear_active_community(session_ctx)
+            # A community they named for this browse is looked past the same way.
+            draft["_community"] = None
             draft["_seek_offer"] = None
             draft["_community_chip"] = None
             draft["_asked"] = True
+            # Same trap as the area pill: "at sjsu what events…" still names the community
+            # they asked to look past, so the filter rejected everything outside it and the
+            # widen looped back to "nothing" (Pouya, 2026-10-07 #3).
+            draft["_request"] = str(draft.get("interest") or "")
             msg = ""  # same interest, no filter — re-runs the search below
-        elif _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg):
+        elif followup == "accept" or (
+            followup is None and _ACCEPT_SEEK_RE.search(msg) and not _WIDEN_RE.search(msg)
+        ):
             _answered("listen")
             from app.discovery_route import resolve_block_id
             from app.look_meet import start_meet_seek_from_interest
@@ -1763,7 +2259,7 @@ def run_activity_browse_turn(
             _answered("zip")
             draft["_seek_offer"] = None
             draft["_need_zip"] = True
-        elif _WIDEN_RE.search(msg):
+        elif followup == "widen" or (followup is None and _WIDEN_RE.search(msg)):
             _answered("widen")
             # Widen to RELATED meets, keeping the topic (2026-10-07). It used to clear the
             # topic and list everything, so "AI" + Widen answered with a books club.
@@ -1922,19 +2418,34 @@ def run_activity_browse_turn(
         # send text that can come out generic ("show me what's happening this weekend") —
         # the offer's structured topic is the committed subject, so it REPLACES the send
         # text outright (filter, weekend pre-narrow, everything downstream).
+        forced_topic = ""
         if str((slots or {}).get("_forced_kind") or "") == "find_activities":
             forced_topic = str((slots or {}).get("signal_detail") or "").strip()
             if forced_topic:
                 msg = forced_topic
-        draft["interest"] = msg[:80]
+        # Two things, kept apart. The REQUEST is every constraint they typed (day, time of
+        # day, host) and goes to the filter as written. The TOPIC is what it is about, the
+        # AI's read: the whole sentence used to be the topic, so "at sjsu what events are
+        # going on this week" was embedded as a subject and the meaning floor admitted
+        # nothing (2026-10-07). An open ask has no topic. No slots at all (the classifier
+        # did not run) keeps the old reading, the message itself.
+        draft["_request"] = msg[:200]
+        draft["interest"] = (forced_topic or _topic_from_slots(slots, msg))[:80]
         # A new topic is a new search: strict again, whatever the last one widened to.
         draft["_widen_related"] = None
     interest = str(draft.get("interest") or "")
 
+    # A community they NAMED in the ask ("what's going on at SJSU this week?") — resolved by
+    # the same resolver the communities turn uses, and held on the browse draft like a
+    # searched town (`_area_block_id`): it scopes THIS browse and dies with it, and never
+    # switches the community filter at the top of the app. Browse used to read only that
+    # filter, so a named community was ignored and her home area searched (2026-10-07).
+    if msg and slots:
+        _scope_named_community(draft, slots, user_id)
     # The community filter at the top of the screen. It answers the "where" outright:
     # a community IS a place, so nothing below needs her ZIP to run this search — and
     # asking for one here would gate a question she already scoped herself.
-    comm = active_community(session_ctx)
+    comm = draft.get("_community") or active_community(session_ctx)
 
     # Travel: a town they asked to search that is not where they are ("language events in
     # San Jose"; Tommaso, 2026-10-06). Searched for THIS browse only — never written to their
@@ -1985,6 +2496,16 @@ def run_activity_browse_turn(
             draft["_place_name"] = here["label"]
         elif here is None and home_block_id:
             draft["_place_name"] = t("browse.home_area", lang)
+    # No pill: the town they said they are in earlier in this chat ("I'm in <town>"). It
+    # outranks the profile home for every search until they name another (app/chat_area.py)
+    # — the area is the search's origin, so distances are measured from it too.
+    if not (comm or place_ask or isinstance(point, dict)):
+        from app.chat_area import chat_area
+
+        stated = chat_area(session_ctx)
+        if stated and stated["block_id"] != str(home_block_id or ""):
+            draft["_area_block_id"] = stated["block_id"]
+            draft["_place_name"] = str(stated.get("label") or "") or None
     place_name = None if comm else (str(draft.get("_place_name") or "").strip() or None)
 
     # Resolve the block to read events from — a ZIP given anywhere in this conversation
@@ -2023,9 +2544,9 @@ def run_activity_browse_turn(
         from app.auth import jwt_user_id
         from app.community_scope import community_events
 
-        events = community_events(
-            str(comm["place_id"]), exclude_host_id=jwt_user_id(user_jwt)
-        )
+        viewer = jwt_user_id(user_jwt)
+        events = community_events(str(comm["place_id"]), viewer_id=viewer)
+        _mark_own(events, viewer)
         _attach_host_names(events)
         truncated = False
     elif interest and not _OPEN_RE.match(interest):
@@ -2054,7 +2575,11 @@ def run_activity_browse_turn(
     # created for whatever state the area is in. The QA case that motivated the block
     # (an off-topic event answering "meet other runners") is handled by the relevance
     # floor instead. The gate frame is still read below, for EMPTY results only.
-    matched, label = _filter_events_by_query(events, interest)
+    # The request as typed (day, time, host and topic), not just the topic.
+    request = str(draft.get("_request") or "").strip() or interest
+    matched, label = _filter_events_by_query(
+        events, request, **({"at_place": _community_name(comm)} if comm else {})
+    )
 
     from app.discovery_route import activity_previews_from_events
 
@@ -2068,10 +2593,12 @@ def run_activity_browse_turn(
 
     # After "Widen the search": related meets, closest topic first — never everything.
     if not matched and interest and draft.get("_widen_related"):
-        related = sorted(
-            (e for e in events if _coerce_topic_score(e.get("topic_score")) >= _RELATED_FLOOR),
-            key=lambda e: -_coerce_topic_score(e.get("topic_score")),
-        )[:_RELATED_CARDS]
+        related = _related_alternatives(events, request)
+        if related is None:
+            related = sorted(
+                (e for e in events if _coerce_topic_score(e.get("topic_score")) >= _RELATED_FLOOR),
+                key=lambda e: -_coerce_topic_score(e.get("topic_score")),
+            )[:_RELATED_CARDS]
         if related:
             matched = related
             label = t("browse.related_label", lang, interest=(label or interest).strip())
@@ -2118,15 +2645,27 @@ def run_activity_browse_turn(
         # ("are there any fifa activities for my 6 year old") would otherwise be parroted
         # here and become the saved seek's kind on accept. A zero-event block never reaches
         # the LLM filter (no label), so a raw interest is echoed only when it's chip-short.
-        short = (label or "").strip() or (interest if len(interest.split()) <= 4 else "")
+        # A chip-short interest IS the AI's topic now and wins over the label, which can be
+        # only the when ("this week"): storing that lost the topic, so "Look beyond" re-ran
+        # on the date and offered every far meet that week as a match (e2e 2026-10-08).
+        short = _echo_topic(interest, label)
         draft["interest"] = short or interest
         draft["_seek_offer"] = True
         draft["_far_lead"] = None
         far_facts, far_chip, far_cards = (
             ([], _arm_community_widen(draft, comm), [])
             if comm
-            else _far_offer(user_jwt, block_id, draft, interest=interest)
+            else _far_offer(
+                user_jwt, block_id, draft, interest=interest,
+                related=bool(draft.get("_widen_related")), request=request,
+            )
         )
+        if far_chip and draft.get("_area_from_offer"):
+            # Cards are fine; a second "Look in <area>" pill is the chain.
+            far_facts, far_chip = [], ""
+            draft["_area_offer_chip"] = None
+            draft["_area_offer_block_id"] = None
+            draft["_area_offer_name"] = None
         # Far matches arrive as cards, so the only move left is to listen for one near.
         widened = bool(draft.get("_widen_related"))
         # Already widened: offering "Widen" again would loop. Hosting is the move left.
@@ -2208,7 +2747,13 @@ def run_activity_browse_turn(
             return _compose_empty_seek_offer(
                 "", user_msg=msg, lang=lang, community=_community_name(comm)
             )
-        far_facts, far_chip, _ = _far_offer(user_jwt, block_id, draft, interest=interest)
+        # Already moved here by a "Look in <area>" tap: offering another area from here is
+        # the chain QA hit. Fall through to listen / host.
+        far_facts, far_chip, _ = (
+            ([], "", [])
+            if draft.get("_area_from_offer")
+            else _far_offer(user_jwt, block_id, draft, interest=interest)
+        )
         if far_facts:
             draft["_seek_offer"] = True
             draft["suggestions"] = ["Yes, listen for me", far_chip]
@@ -2246,6 +2791,7 @@ def run_activity_browse_turn(
             "",
             user_msg=msg,
             lang=lang,
+            place=place_name,
             # Widening is not on the menu here: there is no topic left to drop, and the
             # geography was already searched. Hosting is the one real move left.
             far_facts=[
@@ -2257,10 +2803,25 @@ def run_activity_browse_turn(
             # string (en/es/pt) if that path ever ships to users.
         )
 
+    # The same cards as the last browse turn: "any other?" / "no others?" re-ran the same
+    # search and got the same canned header over the same card, three times running
+    # (2026-10-07, Orlando). Say that's all there is instead, and hand over the moves left.
+    shown_ids = [str(e.get("id") or "") for e in matched[:5] if isinstance(e, dict)]
+    repeat = _repeat_of_last_browse(session_ctx, shown_ids, history)
+    _remember_browse(session_ctx, shown_ids, history, repeats=repeat)
+    if repeat:
+        return _repeat_browse_reply(
+            draft, session_ctx, matched,
+            interest=interest, place=_community_name(comm) if comm else place_name,
+            msg=msg, lang=lang, repeats=repeat,
+        )
+
     draft["_seek_offer"] = None
     draft["suggestions"] = _refine_suggestions(matched)
     session_ctx["browse_draft"] = draft
     session_ctx["activity_browse_active"] = True
+    if not comm:
+        _name_far_areas(matched)
     session_ctx["activity_previews"] = activity_previews_from_events(matched)
     # Telemetry for the impression log (§A7), by event id. Kept in ctx rather than on the
     # preview row: these are internal ranking numbers with nothing to render, and the wire
@@ -2271,6 +2832,10 @@ def run_activity_browse_turn(
         if isinstance(ev, dict) and ev.get("id")
     }
     session_ctx["routing_phase"] = "listening"
+    if not phone_verified:
+        # The tail invites them to verify to RSVP — an email typed next is that answer
+        # (discovery_route.take_offered_verify_email).
+        session_ctx["verify_offer"] = "rsvp"
     return _format_browse_message(
         matched, label, phone_verified=phone_verified, lang=lang,
         # A community heads its own meets, and a town they asked about heads its list

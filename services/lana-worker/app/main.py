@@ -89,6 +89,9 @@ from app.models import (
     CommunityActivityRow,
     CommunityCardRow,
     CommunityChaptersResponse,
+    ChapterAttachBody,
+    ChapterChangeResponse,
+    ChapterDetachBody,
     CommunityDiscoveryResponse,
     CommunityDiscoveryRow,
     CommunityDraft,
@@ -1120,6 +1123,7 @@ def _activity_previews_from_ctx(ctx: dict[str, Any]) -> list[ActivityPreviewRow]
                 starts_label=str(row.get("starts_label") or "") or None,
                 venue_name=str(row.get("venue_name") or "") or None,
                 community=row.get("community") if isinstance(row.get("community"), dict) else None,
+                hosted_by_you=bool(row.get("hosted_by_you")),
                 preview=bool(row.get("preview", True)),
             )
         )
@@ -2353,11 +2357,27 @@ def _run_lana_message(
                 embed=False,
             )
 
+        # The stored `updated_at` this turn's write left behind. The chip-pin re-persist
+        # below runs after the response, so it may only land while the row still carries
+        # it — never over the next turn's state (QA 2026-10-08: a late write rolled the
+        # session back one turn, losing a guest's ZIP and the browse's shown cards).
+        _written_at: list[str | None] = [None]
+
         def _persist_session() -> None:
+            _written_at[0] = update_session_context(
+                session_id,
+                merged,
+                core_block=session_ctx.get("core_block"),
+            )
+
+        def _repersist_session() -> None:
+            if _written_at[0] is None:
+                return
             update_session_context(
                 session_id,
                 merged,
                 core_block=session_ctx.get("core_block"),
+                if_updated_at=_written_at[0],
             )
 
         with timer.stage("db_write_assistant_and_session"):
@@ -2496,7 +2516,7 @@ def _run_lana_message(
     _chip_msgs = _offered_chip_messages(ob)
     if (merged.get("_offered_chip_msgs") or []) != _chip_msgs:
         merged["_offered_chip_msgs"] = _chip_msgs
-        background_tasks.add_task(_persist_session)
+        background_tasks.add_task(_repersist_session)
     # Debug + timing stay on the backend (logged) but are no longer sent to the FE —
     # they were noise on the wire and nothing in the client reads them.
     debug = _turn_debug_from_ctx(
@@ -3788,18 +3808,12 @@ def post_tips_recent(
     tab = (body.tab if body else "recent") or "recent"
     place_id = str((body.place_id if body else None) or "").strip() or None
     limit = (body.limit if body else 20) or 20
-    if place_id:
-        from app.community_surface import caller_affiliation_at
-
-        # Same authorization the roster uses: who is at a place stays members-only (§F),
-        # so this can never become a membership oracle for an arbitrary place id. The RPC
-        # re-checks it too — this one is here to answer 403 rather than an empty list.
-        if not caller_affiliation_at(auth.user_id, place_id, statuses=("confirmed", "curious")):
-            raise HTTPException(status_code=403, detail="not_a_member")
     # Scope, not post-filter: with a community selected this is that community's own
     # recommendations, whatever the distance, and the Recent / My community tabs do not
-    # apply (there is one list). Without one, community-scoped tips stay out of the area
-    # feed — they were shared with the community, not the neighbourhood.
+    # apply (there is one list). A community's recommendations are open to anyone signed
+    # in, member or not (20270126120000) — a visitor on its page sees what was shared
+    # there; WHO is in it stays members-only on the roster. Without one, the area feed
+    # carries community tips too, by the same distance rule as any other.
     tips = recent_tips(
         _bearer_token(authorization),
         tab=tab,
@@ -4478,6 +4492,46 @@ class CommunityChaptersBody(_BaseModel):
     place_id: str
 
 
+@app.post("/lana/circles/chapters/attach", response_model=ChapterChangeResponse)
+def post_circles_chapter_attach(
+    body: ChapterAttachBody,
+    authorization: str | None = Header(default=None),
+):
+    """Make one of the caller's communities a chapter of another (20270125120000).
+
+    The SQL decides: she must run the chapter (creator/operator) and belong to the parent;
+    a chapter with no point takes the parent's; creator communities never become chapters;
+    one level only. A refusal is 200 with `ok: false` and the `reason` — the client words
+    it, nothing here is an error."""
+    auth = verify_auth(authorization)
+    from app.community_chapter_ops import attach_chapter
+
+    got = attach_chapter(
+        auth.user_id, (body.place_id or "").strip(), (body.parent_place_id or "").strip()
+    )
+    return ChapterChangeResponse(
+        ok=bool(got.get("ok")),
+        reason=got.get("reason"),
+        parent_name=got.get("parent_name"),
+        inherited_location=bool(got.get("inherited_location")),
+    )
+
+
+@app.post("/lana/circles/chapters/detach", response_model=ChapterChangeResponse)
+def post_circles_chapter_detach(
+    body: ChapterDetachBody,
+    authorization: str | None = Header(default=None),
+):
+    """Make a chapter standalone again — its runner or its parent's runner may."""
+    auth = verify_auth(authorization)
+    from app.community_chapter_ops import detach_chapter
+
+    got = detach_chapter(auth.user_id, (body.place_id or "").strip())
+    return ChapterChangeResponse(
+        ok=bool(got.get("ok")), reason=got.get("reason"), parent_name=got.get("parent_name")
+    )
+
+
 @app.post("/lana/circles/chapters", response_model=CommunityChaptersResponse)
 def post_circles_chapters(
     body: CommunityChaptersBody,
@@ -4842,6 +4896,8 @@ def post_circles_profile(
                 going_count=int(e.get("going_count") or 0),
                 cover_emoji=e.get("cover_emoji"),
                 fit_score=e.get("fit_score"),
+                origin_place_id=e.get("origin_place_id"),
+                origin_place_name=e.get("origin_place_name"),
             )
             for e in (data.get("upcoming_events") or [])
             if isinstance(e, dict) and str(e.get("event_id") or "").strip()

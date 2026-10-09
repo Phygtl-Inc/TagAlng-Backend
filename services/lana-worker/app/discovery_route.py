@@ -558,7 +558,20 @@ def _fetch_verified_peer_matches_unstamped(
     # Radius beats block equality when LANA_PEER_RADIUS_MATCH is on — an
     # adjacent-block neighbour 0.7 km away is a neighbour. None means the radius
     # path declined (flag off / no user / RPC error); [] is a real "nobody near".
-    peers = fetch_peer_matches_within_radius(user_id, limit=limit)
+    # A town they said they are in this chat is where "near" is measured from — not the
+    # profile home they are away from (app/chat_area.py; prod 2026-10-07).
+    from app.chat_area import chat_area
+
+    peers = None
+    stated = chat_area(session_ctx)
+    if stated and user_id and stated.get("lat") is not None and stated.get("lng") is not None:
+        from app.peer_radius import fetch_peer_matches_near_point
+
+        peers = fetch_peer_matches_near_point(
+            user_id, lat=float(stated["lat"]), lng=float(stated["lng"]), limit=limit
+        )
+    if peers is None:
+        peers = fetch_peer_matches_within_radius(user_id, limit=limit)
     if peers is None:
         peers = fetch_peer_matches(user_jwt, limit=limit)
     # Circles §C: fold onion-scored circle overlap into the list — proven
@@ -1447,7 +1460,7 @@ def _try_upfront_display_name_turn(
         ctx["upfront_name_attempts"] = attempts
         ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
         return (
-            "No rush — a first name is all I need. What should neighbors call you?",
+            "No rush — a first name is all I need. What should people call you?",
             ctx,
             ctx["last_routing"],
             [],
@@ -1474,7 +1487,7 @@ def _try_upfront_display_name_turn(
     ctx["upfront_name_attempts"] = 0
     ctx["last_routing"] = _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME, "update_user_name")
     return (
-        "Before we dive in — what should neighbors call you? A first name's all I need.",
+        "Before we dive in — what should people call you? A first name's all I need.",
         ctx,
         ctx["last_routing"],
         [],
@@ -1663,6 +1676,120 @@ def _claim_concierge_reply(
     return reply
 
 
+def _change_zip_answer(slots: dict[str, Any] | None, msg: str, *, armed: bool) -> str | None:
+    """The new home ZIP this turn supplies, or None.
+
+    The classifier's `zip` slot is the verdict ("change my zip to 94404", or digits sent
+    right after the ask). The digits in the message count only while the change-ZIP ask
+    is armed — the same reading the need-ZIP gate gives a reply to its own ask."""
+    z = str((slots or {}).get("zip") or "").strip()
+    if z:
+        return z
+    return extract_zip(msg) if armed else None
+
+
+def _apply_home_zip_change(
+    *,
+    zip5: str,
+    msg: str,
+    ctx_base: dict[str, Any],
+    user_jwt: str,
+    user_id: str | None,
+    phone_verified: bool,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Make `zip5` the user's home area — the write the change-ZIP arm never had.
+
+    The arm used to ask for the ZIP and then, given one, ask again: nothing anywhere wrote
+    a new ZIP for someone who already had a home block (`_try_assign_home_block` returns
+    early once one exists), so the model composing the re-ask ended up telling the tester
+    it "can't update the ZIP from here" (prod 2026-10-07). One answer per ZIP now: saved,
+    not a real ZIP, or real but not placeable yet — never the same ask again."""
+    from app.i18n import session_lang, t
+
+    lang = session_lang(ctx_base)
+    try:
+        blk, status = resolve_zip_coverage(user_jwt, zip5)
+    except HTTPException:
+        blk, status = None, ZIP_UNCOVERED
+    if status == ZIP_INVALID:
+        # Real digits, no such ZIP: say so once and leave the ask open for a corrected one.
+        return (
+            t("discovery.zip_unplaceable", lang, zip=zip5),
+            _routing_ctx(ctx_base, phase=PHASE_NEED_ZIP, active_intent="settings.change_zip"),
+            _discovery_routing_stub(PHASE_NEED_ZIP, "settings_change_zip_invalid"),
+            [],
+        )
+    saved = False
+    if blk and blk.get("block_id"):
+        block_id = str(blk["block_id"])
+        if phone_verified and user_id:
+            try:
+                call_rpc(
+                    user_jwt,
+                    "assign_home_block",
+                    {"p_block_id": block_id, "p_home_zip": zip5},
+                )
+                saved = True
+            except HTTPException:
+                logging.getLogger(__name__).exception("change_zip_assign_failed zip=%s", zip5)
+        label = str(blk.get("display_name") or blk.get("label") or zip5)
+        if saved or not phone_verified:
+            ctx = _routing_ctx(ctx_base, phase="listening", active_intent="none")
+            # The new area is this session's area from this turn on; a town stated in
+            # chat earlier yields to the home they just set.
+            ctx["preview_block_id"] = block_id
+            ctx["preview_zip"] = zip5
+            ctx["preview_block_label"] = label
+            ctx["pending_zip"] = None
+            ctx["chat_area"] = None
+            facts = [f"New home ZIP: {zip5}", f"Area: {label}"]
+            if saved:
+                goal = (
+                    "You just changed their home ZIP — it is saved. Confirm it in one short "
+                    "line naming the ZIP and the area, then ask what they'd like to find there."
+                )
+            else:
+                goal = (
+                    "They gave a new ZIP and you will use it for this chat. Confirm it in one "
+                    "short line naming the ZIP and the area; it is kept on their profile once "
+                    "they verify their email. Then ask what they'd like to find there."
+                )
+            return (
+                compose_reply(
+                    goal=goal,
+                    facts=facts,
+                    user_message=msg,
+                    fallback=f"Done — you're set to {label} now. What would you like to find there?",
+                    session_ctx=ctx_base,
+                ),
+                ctx,
+                _discovery_routing_stub("listening", "settings_change_zip_saved"),
+                [],
+            )
+    # A real-looking ZIP we cannot place (geocoder down, block create failed, or the save
+    # itself failed): one honest answer, demand captured, and the ask released.
+    note_zip_out_of_coverage(zip5=zip5, session_ctx=ctx_base, user_id=user_id, user_message=msg)
+    return (
+        compose_reply(
+            goal=(
+                "They asked to change their home ZIP. You could not set that ZIP right now — "
+                "nothing on their profile changed. Say that plainly in one line, say you noted "
+                "the ZIP, and ask what they'd like to do meanwhile. Do not ask for the ZIP again."
+            ),
+            facts=[f"The ZIP they gave: {zip5}"],
+            user_message=msg,
+            fallback=(
+                f"I couldn't set {zip5} as your ZIP just now — I've noted it. "
+                "What would you like to do meanwhile?"
+            ),
+            session_ctx=ctx_base,
+        ),
+        _routing_ctx(ctx_base, phase="listening", active_intent="none"),
+        _discovery_routing_stub("listening", "settings_change_zip_unplaced"),
+        [],
+    )
+
+
 def _try_layer1_intent_turn(
     *,
     msg: str,
@@ -1686,7 +1813,17 @@ def _try_layer1_intent_turn(
     ):
         return None
     linear = slots_linear_intent(slots)
-    if not linear or not intent_confidence_met(slots, linear):
+    # The change-ZIP ask is armed and this reply carries the ZIP — it is the answer to that
+    # ask, whatever label the classifier gives a bare "95192" (continue, none, change_zip).
+    # Without this the answer fell to the find-peers funnel, which keeps the profile block
+    # and ignores the digits, or back into the arm, which only knew how to ask (prod
+    # 2026-10-07: 95192 x4, then 94404 — every valid ZIP re-asked, never saved).
+    change_zip_armed = (
+        phase == PHASE_NEED_ZIP and session_ctx.get("active_intent") == "settings.change_zip"
+    )
+    if change_zip_armed and _change_zip_answer(slots, msg, armed=True):
+        linear = "settings.change_zip"
+    elif not linear or not intent_confidence_met(slots, linear):
         return None
 
     ctx_base = dict(session_ctx)
@@ -1785,6 +1922,7 @@ def _try_layer1_intent_turn(
             )
         from app.community_discovery import communities_chat_turn
         from app.discovery_slots import (
+            slots_chapter_change,
             slots_community_ask,
             slots_community_name,
             slots_community_topic,
@@ -1799,6 +1937,7 @@ def _try_layer1_intent_turn(
             community_name=slots_community_name(slots),
             community_ask=slots_community_ask(slots),
             community_topic=slots_community_topic(slots),
+            chapter_change=slots_chapter_change(slots),
         )
         ctx = _routing_ctx(
             ctx_base, phase=phase or "listening", active_intent="discovery.communities"
@@ -2349,6 +2488,16 @@ def _try_layer1_intent_turn(
                 _routing_ctx(ctx_base, phase="listening", active_intent="none"),
                 _discovery_routing_stub("listening", "settings_change_zip_declined"),
                 [],
+            )
+        new_zip = _change_zip_answer(slots, msg, armed=change_zip_armed)
+        if new_zip:
+            return _apply_home_zip_change(
+                zip5=new_zip,
+                msg=msg,
+                ctx_base=ctx_base,
+                user_jwt=user_jwt,
+                user_id=user_id,
+                phone_verified=phone_verified,
             )
         ask = "Sure — what's your new ZIP code?"
         if phase == PHASE_NEED_ZIP and ctx_base.get("active_intent") == "settings.change_zip":
@@ -3535,7 +3684,58 @@ def _tip_seek_fallback_reply(
         )
     except Exception:  # noqa: BLE001 — the plain list is still the answer
         logging.getLogger(__name__).warning("google_reco_cards_stamp_failed", exc_info=True)
+    # The lead-in names Google, so it may only stand when something from Google is on the
+    # page. The cards drop our own community rows, and a pool that was nothing BUT those
+    # (the bare-place "SJSU" search returned the campus, which is our community place)
+    # still got "here's what's nearby (from Google …)" over no Google list (prod
+    # 2026-10-06). Decided from the surfaces as built, not from the search having run.
+    shown = tip_fallback_shown(ctx)
+    if reply and not shown["google"]:
+        logging.getLogger(__name__).info("tip_seek_fallback.no_google_shown shown=%s", shown)
+        if not shown["circles"]:
+            for key in ("google_place_suggestions", "rec_chips", "rec_widen_noun"):
+                ctx[key] = None
+            return ""
+        reply = compose_reply(
+            goal=(
+                "Nobody has recommended one yet for what the user asked. The only places "
+                "under your message are from their own communities — not from Google, and "
+                "not a personal recommendation. Say that in one short sentence. Never call "
+                "them Google results, never list or describe them, never imply anything was "
+                "posted."
+            ),
+            facts=[
+                f"What they asked for: {_ask_excerpt(detail or msg)}",
+                f"Places shown from their communities: {shown['circles']}",
+            ],
+            session_ctx=session_ctx,
+            fallback="No one has recommended one yet — here are places from your communities.",
+            max_sentences=1,
+        )
     return reply
+
+
+def tip_fallback_shown(ctx: dict[str, Any]) -> dict[str, int]:
+    """What the tip fallback actually puts on screen: {"google": n, "circles": n}.
+
+    Mirrors the surface: the Google cards, plus the plain rows the cards do not already
+    cover (community rows are always plain rows, under their own heading). The lead-in and
+    the ask-neighbours offer are both written from this, so neither can describe a list
+    that is not there — or deny one that is."""
+    from app.google_reco_cards import CTX_KEY
+
+    cards = [c for c in (ctx.get(CTX_KEY) or []) if isinstance(c, dict)]
+    covered = {str(c.get("subject_ref") or "").removeprefix("google:") for c in cards}
+    google = len(cards)
+    circles = 0
+    for p in ctx.get("google_place_suggestions") or []:
+        if not isinstance(p, dict) or not str(p.get("name") or "").strip():
+            continue
+        if (p.get("community") or {}).get("member_count"):
+            circles += 1
+        elif not (p.get("place_id") and str(p["place_id"]) in covered):
+            google += 1
+    return {"google": google, "circles": circles}
 
 
 def _tip_seek_fallback_core(
@@ -3849,8 +4049,24 @@ def _read_offer_reply(*, offer: str, detail: str, msg: str) -> str:
     return "other"
 
 
-def _compose_tip_ask_offer_line(detail: str, session_ctx: dict[str, Any]) -> str:
-    """The ONE offer that gates the write. Ends the recommendation answer."""
+def _compose_tip_ask_offer_line(
+    detail: str, session_ctx: dict[str, Any], shown: dict[str, int] | None = None
+) -> str:
+    """The ONE offer that gates the write. Ends the recommendation answer.
+
+    `shown` is what the answer just put on screen (tip_fallback_shown). The line follows
+    the lead-in, so it is told what that lead-in showed: given only "nothing posted yet"
+    the model wrote "I couldn't find any recommendations" straight after a sentence that
+    had just introduced a Google list (prod 2026-10-06)."""
+    facts = [f"What they asked for: {_ask_excerpt(detail)}", "Nothing has been posted yet."]
+    if shown is not None:
+        facts.append(
+            "Already shown under your message: "
+            f"{shown.get('google', 0)} places from Google (not personal recommendations), "
+            f"{shown.get('circles', 0)} places from their own communities. The sentence "
+            "before yours already introduced them — never say you found nothing or "
+            "couldn't find any, and never describe them again."
+        )
     return compose_reply(
         goal=(
             "You just answered the user's recommendation ask with what you could find. "
@@ -3858,7 +4074,7 @@ def _compose_tip_ask_offer_line(detail: str, session_ctx: dict[str, Any]) -> str
             "short question: would they like you to also ask their neighbors nearby for a "
             "recommendation of their own? Make clear it is their call."
         ),
-        facts=[f"What they asked for: {_ask_excerpt(detail)}", "Nothing has been posted yet."],
+        facts=facts,
         session_ctx=session_ctx,
         fallback="Want me to ask your neighbors for their own recommendation too?",
         max_sentences=1,
@@ -4003,21 +4219,68 @@ def _stamp_tip_ask_draft(
     detail: str,
     category: str | None,
     session_ctx: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     """The seek-side receipt of what Lana understood (§12d). Best-effort — an ask that
-    cannot be drafted still gets answered."""
+    cannot be drafted still gets answered. Returns the draft ({} when none)."""
     from app.tip_ask_draft import stamp_ask_draft
 
     try:
-        stamp_ask_draft(
+        return stamp_ask_draft(
             ctx,
             msg=msg,
             detail=detail,
             category=category,
             locality=_tip_ask_locality(session_ctx),
-        )
+        ) or {}
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("ask_draft_stamp_failed")
+        return {}
+
+
+def _tip_kind_ask_turn(
+    ctx: dict[str, Any],
+    *,
+    kinds: list[dict[str, Any]],
+    msg: str,
+    detail: str,
+    session_ctx: dict[str, Any],
+    phase: str,
+    community: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """"What kind of recommendation?" — the answer turn for an ask that named no kind.
+
+    Nothing was searched on Google and nothing is offered for posting: the question IS the
+    turn ([[rapport-ask-stacking-and-tile-context]]). The receipt card stands down too — a
+    "Looks good" under a question would confirm an ask that does not exist yet."""
+    chips = [
+        {"label": str(k["label"]), "message": str(k["ask"]), "style": "secondary"}
+        for k in kinds
+        if isinstance(k, dict) and k.get("label") and k.get("ask")
+    ][:5]
+    ctx["rec_chips"] = chips
+    ctx["ask_draft"] = None
+    ctx["ask_draft_pending"] = None  # None, not pop — [[ctx-pop-resurrection]]
+    ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_seek_kind_ask")
+    facts = [
+        f"What they asked: {_ask_excerpt(msg or detail)}",
+        "The buttons under your message offer: " + ", ".join(c["label"] for c in chips),
+    ]
+    if community:
+        facts.append(f"They are inside the community {community.get('name')}")
+    reply = compose_reply(
+        goal=(
+            "The user asked for recommendations without saying what kind. Nobody has "
+            "shared one that fits yet, and you have not looked anything up. Ask ONE short "
+            "question: what kind of recommendation are they after? You may name two or three "
+            "of the options on the buttons as examples. Never list places, never say you "
+            "found or could not find anything, and never imply anything was posted."
+        ),
+        facts=facts,
+        session_ctx=session_ctx,
+        fallback="What kind of recommendation are you after?",
+        max_sentences=1,
+    )
+    return reply, ctx, ctx["last_routing"], []
 
 
 def _tip_seek_answer_turn(
@@ -4035,8 +4298,12 @@ def _tip_seek_answer_turn(
     weights: list[str] | None = None,
     widen: bool = False,
     ask_text: str | None = None,
+    community: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Answer a recommendation ask WITHOUT writing a posting, then offer to ask neighbors.
+
+    `community` is a community the ask itself named (see named_community_scope); it
+    scopes this one search ahead of the chat's active community and is not remembered.
 
     `ask_text` is the whole ask when this turn's message is only part of it — a
     correction turn ("one who takes Cigna instead") passes the merged ask, so the kind
@@ -4048,7 +4315,7 @@ def _tip_seek_answer_turn(
     # read needs no location (local_signals.find_neighbor_tips: "the roster is the audience,
     # not the radius"). Asking a creator's follower for their ZIP before looking inside
     # Founders Table was the neighbourhood gate answering a community question (2026-10-01).
-    _in_comm = active_community(session_ctx)
+    _in_comm = community or active_community(session_ctx)
 
     if not phone_verified:
         # Unchanged auth surface (a signed-out session still can't run block reads or
@@ -4126,7 +4393,7 @@ def _tip_seek_answer_turn(
     if block_id and not resolve_block_id(ctx, home_block_id):
         ctx["preview_block_id"] = block_id
 
-    _stamp_tip_ask_draft(
+    _draft = _stamp_tip_ask_draft(
         ctx, msg=msg, detail=detail, category=category, session_ctx=session_ctx
     )
     # Remembered before the search, not after it: a re-rank or a widen has to work even when
@@ -4142,7 +4409,7 @@ def _tip_seek_answer_turn(
     # member — those are different questions, and only the first is what the share button
     # asked. The RPC takes it as scope, not as a filter: inside a community distance does
     # not apply, and outside one a community's tips do not show at all.
-    _comm = active_community(session_ctx)
+    _comm = _in_comm
     # The category chips ("Recipes", "Services") are a FILTER, not a flavouring of the
     # prose: scoped on reco_type so the bucket the user tapped is the bucket they get.
     _types = active_reco_types(session_ctx)
@@ -4216,7 +4483,31 @@ def _tip_seek_answer_turn(
 
         if _parsed is None:
             _parsed = split_query_full(_ask)
-        neighbor_tips = keep_asked_kind(neighbor_tips, (_parsed or {}).get("subject_kind"))
+        # No kind parsed is not "anything goes": "gaming laptop" came back kind-less and a
+        # furniture store sailed through (prod QA 2026-10-07). The gate reads the whole ask
+        # instead, and its own generic rule still keeps everything for "somewhere fun".
+        # The whole ask rides along: the parsed kind can be cut too short ("programs" out of
+        # "beginner-friendly project programs"), and the gate then rejected a tip whose
+        # category was "project program" (prod 2026-10-07).
+        neighbor_tips = keep_asked_kind(
+            neighbor_tips, (_parsed or {}).get("subject_kind") or _ask, _ask
+        )
+
+    # Nobody had one, and the ask never said what KIND of recommendation it is: "do you have
+    # recommendations at SJSU" searched Google for the bare place and answered with the
+    # campus itself under "here's what's nearby" (prod 2026-10-06). Ask what kind first,
+    # with the kinds as chips — each posts the whole ask back, so the next turn is an
+    # ordinary specific ask. The draft model decides (kind_options exists only when it
+    # read the ask as kind-less); a picked category chip, a re-rank or a widen already
+    # carries the kind, so those never stop here.
+    _kinds = (_draft.get("kind_options") if isinstance(_draft, dict) else None) or []
+    if not neighbor_tips and isinstance(_kinds, list) and _kinds and not (
+        weights or widen or _types
+    ):
+        return _tip_kind_ask_turn(
+            ctx, kinds=_kinds, msg=msg, detail=detail, session_ctx=session_ctx, phase=phase,
+            community=_in_comm,
+        )
 
     if _comm and not neighbor_tips and block_id:
         # Nothing in the community — ASK before looking past it, the way meets do
@@ -4356,7 +4647,10 @@ def _tip_seek_answer_turn(
             ),
         )
     else:
-        reply = f"{rec} {_compose_tip_ask_offer_line(detail, session_ctx)}".strip()
+        reply = (
+            f"{rec} "
+            f"{_compose_tip_ask_offer_line(detail, session_ctx, tip_fallback_shown(ctx))}"
+        ).strip()
     _stamp_tip_ask_offer(ctx, detail=detail, category=category)
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "tip_seek_answered")
     return reply, ctx, ctx["last_routing"], []
@@ -4953,7 +5247,16 @@ def _try_save_signal_turn(
     from app.lana_paths import tip_ask_consent_enabled
 
     if intent == "tip_seek" and tip_ask_consent_enabled():
+        # A community named in the ask scopes the search, whether or not the chat was opened
+        # inside it or they belong to it (prod 2026-10-07: "…at San Jose State" from the
+        # main chat searched a Minneapolis ZIP and answered from Google).
+        from app.community_scope import named_community_scope
+        from app.discovery_slots import slots_community_name
+
+        _named = slots_community_name(slots)
+        _named_scope = named_community_scope(user_id, _named) if _named else None
         return _tip_seek_answer_turn(
+            community=_named_scope,
             msg=msg,
             detail=detail,
             category=category,
@@ -6311,9 +6614,13 @@ def _show_activities_preview(
     from app.i18n import session_lang as _session_lang
 
     weekend_only = bool(re.search(r"\bweekend\b", str(msg or ""), re.I))
-    events = fetch_preview_events_on_block(
-        block_id, weekend_only=weekend_only, exclude_host_id=user_id
-    )
+    # The caller's own meets are shown and marked, never dropped — the same rule browse
+    # follows since 2026-10-07 (activity_browse._mark_own): a host who asks what's on
+    # nearby must see the meet they are running, not a list with it silently missing.
+    from app.activity_browse import _mark_own
+
+    events = fetch_preview_events_on_block(block_id, weekend_only=weekend_only)
+    _mark_own(events, user_id)
     reply = format_activities_message(
         events, block_label, phone_verified=phone_verified, lang=_session_lang(ctx_base)
     )
@@ -6323,6 +6630,9 @@ def _show_activities_preview(
         preview_block_id=block_id,
         active_intent=INTENT_FIND_ACTIVITIES,
     )
+    if events and not phone_verified:
+        # The tail invites them to verify to RSVP — an email typed next is that answer.
+        ctx["verify_offer"] = "rsvp"
     ctx["last_routing"] = _discovery_routing_stub(PHASE_PREVIEW, "browse_block_activities")
     ctx["activity_previews"] = activity_previews_from_events(events)
     _clear_peer_surface(ctx)
@@ -6990,6 +7300,8 @@ def activity_previews_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 "starts_label": _format_event_when(ev.get("starts_at")),
                 "venue_name": str(ev.get("venue_name") or "").strip() or None,
                 "community": communities.get(str(ev.get("circle_place_ref") or "").strip()),
+                # The viewer hosts this one: the FE shows "You're hosting", not RSVP.
+                "hosted_by_you": bool(ev.get("hosted_by_you")),
                 "preview": True,
             }
         )
@@ -7395,6 +7707,15 @@ def format_activities_message(
         if phone_verified
         else t("discovery.activities_tail_guest", lang)
     )
+    # Same lead-in browse gives its own cards: only what the FE renders (five), and no
+    # RSVP invitation when every card on screen is one they host.
+    mine = sum(1 for e in events[:5] if isinstance(e, dict) and e.get("hosted_by_you"))
+    if mine:
+        shown = len([e for e in events[:5] if isinstance(e, dict)])
+        if mine < shown:
+            tail = f"{t('browse.events_yours_some', lang, n=mine)} {tail}"
+        else:
+            tail = t("browse.events_yours_one" if mine == 1 else "browse.events_yours_all", lang)
     return f"{head} {tail}"
 
 
@@ -7534,7 +7855,7 @@ def _apply_display_name_gate(
             ctx_base["display_name_saved"] = True
             return None
         return (
-            "I didn't catch that — what should neighbors call you? First name is fine.",
+            "I didn't catch that — what should people call you? First name is fine.",
             _routing_ctx(
                 ctx_base,
                 phase=PHASE_NEED_DISPLAY_NAME,
@@ -7552,7 +7873,7 @@ def _apply_display_name_gate(
         return None
 
     return (
-        "Love that — what should neighbors call you? First name is fine.",
+        "Love that — what should people call you? First name is fine.",
         _routing_ctx(
             ctx_base,
             phase=PHASE_NEED_DISPLAY_NAME,
@@ -7562,6 +7883,32 @@ def _apply_display_name_gate(
         _discovery_routing_stub(PHASE_NEED_DISPLAY_NAME),
         [],
     )
+
+
+def take_offered_verify_email(
+    session_ctx: dict[str, Any], msg: str, *, phone_verified: bool
+) -> bool:
+    """A guest answering Lana's own "verify your email to RSVP" with their email.
+
+    The browse tail invites verification but armed nothing, so the email typed next fell
+    to the browse lane or the policy and came back as "I can't verify that from here —
+    use the sign-in flow" with no control to tap (prod 2026-10-07). When the invitation
+    is on the session and the reply carries an email address, this arms the same signup
+    handshake the verify gate arms: every gate defers to it and discovery sends the code
+    (the `requires_phone_verification and extract_email` branch). Returns True when armed.
+    """
+    if phone_verified or not session_ctx.get("verify_offer"):
+        return False
+    if not extract_email(msg):
+        return False
+    session_ctx["requires_phone_verification"] = True
+    session_ctx["signup_origin"] = session_ctx.get("signup_origin") or str(
+        session_ctx.get("verify_offer")
+    )
+    # The browse lane would read the address as a search; the handshake owns the turn.
+    session_ctx["activity_browse_active"] = False
+    session_ctx["verify_offer"] = None
+    return True
 
 
 def _handle_signup_phone_message(
@@ -8128,11 +8475,15 @@ def _start_activity_browse_from_discovery(
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Begin the agentic events-browse and return its first turn (asks the interest). The
     sticky flow continues on later turns via the pipeline's activity_browse_active gate."""
-    from app.activity_browse import run_activity_browse_turn
+    from app.activity_browse import recent_browse_turn, run_activity_browse_turn
 
     session_ctx["activity_browse_active"] = True
     session_ctx["browse_turns"] = 0
-    session_ctx["browse_draft"] = None
+    # A reply to the browse Lana JUST made ("no" / "yes" to her offer) re-enters here when
+    # the lane lets go of it. Wiping the draft lost the offer, so "no" listed every meet in
+    # the area (QA 2026-10-08). Keep it; the browse's AI reader decides what the reply means.
+    if not recent_browse_turn(session_ctx, history or []):
+        session_ctx["browse_draft"] = None
     reply = run_activity_browse_turn(
         user_message=msg,
         session_ctx=session_ctx,
@@ -9574,6 +9925,13 @@ def handle_discovery_turn(
     # Slot: ZIP / block — a ZIP said earlier this session (even one Lana can't serve yet,
     # pending_zip) is remembered; never re-ask for what the user already said.
     block_id = resolve_block_id(session_ctx, home_block_id)
+    # A town they said they are in this chat is the area searched until they name another
+    # (app/chat_area.py) — the profile home is where they are NOT right now.
+    from app.chat_area import chat_area as _chat_area
+
+    _stated_area = _chat_area(session_ctx)
+    if _stated_area:
+        block_id = str(_stated_area["block_id"])
     zip_from_msg = extract_zip(msg) or slots.get("zip") or session_ctx.get("pending_zip")
     zip_status: str | None = None
     if zip_from_msg and not block_id:
@@ -9724,6 +10082,8 @@ def handle_discovery_turn(
         or session_ctx.get("preview_block_label")
         or "your area"
     )
+    if _stated_area and _stated_area.get("label"):
+        block_label = str(_stated_area["label"])
 
     if goal == "activities":
         return _show_activities_preview(
@@ -9920,7 +10280,7 @@ def handle_discovery_turn(
                 ctx_base["display_name_saved"] = True
             elif _is_affirmative(msg) or not nick:
                 return (
-                    "What should neighbors call you? First name is fine.",
+                    "What should people call you? First name is fine.",
                     _routing_ctx(
                         ctx_base,
                         phase=PHASE_NEED_DISPLAY_NAME,

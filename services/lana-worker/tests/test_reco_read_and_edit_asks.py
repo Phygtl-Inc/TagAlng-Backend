@@ -362,12 +362,27 @@ class TestAskDraftChipReask(unittest.TestCase):
              patch("app.reco_aspects.split_query_full",
                    return_value={"subject_kind": "orthodontist"}) as split, \
              patch("app.reco_kind_gate.keep_asked_kind",
-                   side_effect=lambda rows, kind: rows) as gate:
+                   side_effect=lambda rows, *_a, **_k: rows) as gate:
             self._turn("one who takes Cigna instead", {"routing_phase": "listening", **ctx})
         self.assertTrue(split.called)
         for call in split.call_args_list:
             self.assertEqual(call.args[0], merged)
         self.assertEqual(gate.call_args.args[1], "orthodontist")
+        # The whole merged ask rides along, so a kind cut too short cannot reject the answer.
+        self.assertEqual(gate.call_args.args[2], merged)
+
+    def test_a_kindless_ask_is_still_gated_on_the_ask_itself(self) -> None:
+        # Prod QA 2026-10-07: "gaming laptop" parsed with no subject_kind, the gate got
+        # None, failed open, and a furniture store was offered as the answer.
+        _r, ctx, _routing, _ = self._turn("fix:qualifier", self._drafted())
+        merged = "gaming laptop"
+        with patch("app.tip_ask_draft.merge_ask_correction", return_value=merged), \
+             patch("app.reco_aspects.split_query_full",
+                   return_value={"subject_kind": None}), \
+             patch("app.reco_kind_gate.keep_asked_kind",
+                   side_effect=lambda rows, *_a, **_k: rows) as gate:
+            self._turn("a gaming one", {"routing_phase": "listening", **ctx})
+        self.assertEqual(gate.call_args.args[1], merged)
 
     def test_unknown_field_is_not_a_chip(self) -> None:
         _reply, _ctx, routing, _ = self._turn("fix:password", self._drafted())

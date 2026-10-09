@@ -1353,6 +1353,44 @@ def posting_cta(msg: str) -> bool:
     return bool(_PASS_RE.search(low)) or low.startswith("fix:") or low in {"looks good", "yes", "no"}
 
 
+def _tip_ready_reply(summary: str, circle: str) -> str:
+    """The ready-card confirmation. A tagged tip is filed under its community and open to
+    anyone looking (20270126120000) — never promised as private."""
+    # Naming the destination still matters: the tip is filed under CF Fitness, so it is what
+    # someone asking about CF Fitness finds. It is not private to it — a community's
+    # recommendations are open to anyone looking (20270126120000), so the reply must never
+    # promise it stays inside. Untagged keeps the old wording.
+    return compose_reply(
+        goal=(
+            "The tip draft is complete and shown as a card. Tell the user you'll pass it on when "
+            + (
+                f"someone asks about {circle} or looks for this kind of recommendation — it is "
+                f"shared with {circle}, and anyone looking can find it, not only members. "
+                if circle
+                else "a neighbor asks, "
+            )
+            + f"and prompt them to tap **{_POST_CTA}** (keep that button "
+            "name verbatim, bolded) to post it, or send it to a neighbor they know. Never "
+            "say it stays private or is only for members."
+        ),
+        facts=[f"Tip ready: {summary}"]
+        + (
+            [f"Shared with the community: {circle}; visible to anyone looking, members or not"]
+            if circle
+            else []
+        ),
+        fallback=(
+            f"Got it — **{summary}**. I'll pass it on when someone asks. "
+            + (
+                f"**{_POST_CTA}** to share it with {circle} — anyone looking for one can find it."
+                if circle
+                else f"**{_POST_CTA}** to post it for your neighbors, or send it to "
+                "a neighbor you know."
+            )
+        ),
+    )
+
+
 def run_tip_share_turn(
     *,
     user_message: str,
@@ -2160,31 +2198,5 @@ def run_tip_share_turn(
     session_ctx["tip_pending_question"] = None  # nothing outstanding on the ready card
     session_ctx["routing_phase"] = "listening"
     summary = _summary(draft)
-    # Naming the destination is not decoration: a tagged tip is invisible to the area, so
-    # "shared with CF Fitness" is the difference between the neighbourhood seeing it and
-    # not. Untagged keeps the old wording.
     circle = str(draft.get("circle_name") or "").strip()
-    return compose_reply(
-        goal=(
-            "The tip draft is complete and shown as a card. Tell the user you'll pass it on when "
-            + (
-                f"someone at {circle} asks — and that it goes to {circle} only, not to the "
-                "wider neighborhood. "
-                if circle
-                else "a neighbor asks, "
-            )
-            + f"and prompt them to tap **{_POST_CTA}** (keep that button "
-            "name verbatim, bolded) to post it, or send it to a neighbor they know."
-        ),
-        facts=[f"Tip ready: {summary}"]
-        + ([f"Shared with the community: {circle} (and only there)"] if circle else []),
-        fallback=(
-            f"Got it — **{summary}**. I'll pass it on when a neighbor asks. "
-            + (
-                f"**{_POST_CTA}** to post it for {circle} — it stays inside {circle}."
-                if circle
-                else f"**{_POST_CTA}** to post it for your neighbors, or send it to "
-                "a neighbor you know."
-            )
-        ),
-    )
+    return _tip_ready_reply(summary, circle)

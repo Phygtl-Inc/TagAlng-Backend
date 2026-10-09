@@ -152,7 +152,9 @@ def test_a_us_city_resolves_to_its_zip_and_abroad_does_not() -> None:
     with mock.patch("app.community_hq.geocode_city",
                     return_value={"city": "San Jose, CA", "lat": 37.3, "lng": -121.9}), \
          mock.patch.object(sp, "_postal_code_at", return_value=("95113", "US")):
-        assert sp.resolve_search_place("San Jose") == {"label": "San Jose, CA", "zip5": "95113"}
+        assert sp.resolve_search_place("San Jose") == {
+            "label": "San Jose, CA", "zip5": "95113", "lat": 37.3, "lng": -121.9,
+        }
     with mock.patch("app.community_hq.geocode_city",
                     return_value={"city": "Lisbon, Portugal", "lat": 38.7, "lng": -9.1}), \
          mock.patch.object(sp, "_postal_code_at", return_value=("11000", "PT")):
@@ -221,3 +223,124 @@ def test_a_place_outside_the_us_is_said_plainly_and_home_is_not_searched() -> No
     )
     assert "Lisbon, Portugal" in reply and "only in the US" in reply
     fetch.assert_not_called()
+
+
+# ── After "Widen the search", far meets are judged for RELATED too (prod 2026-10-08) ─────
+# From a Bronx account nothing was near at all, and the far probe only accepted exact
+# matches, so "jazz" -> Widen could never reach a guitar jam in Orlando.
+
+_FAR = [
+    {"id": "guitar", "title": "Neighborhood Guitar Meetup", "distance_meters": 1_500_000.0,
+     "venue_name": "Guitar Center", "hosted_by_you": False},
+    {"id": "books", "title": "Books & Neighbors Gathering", "distance_meters": 1_510_000.0,
+     "venue_name": "Library"},
+]
+
+
+def _far_widen(*, related: bool, picks: list[str] | None, exact: list[str] = ()):
+    draft: dict = {}
+
+    def stamp(rows, _q):
+        for r in rows:
+            r["topic_score"] = 1.0 if r["id"] in exact else 0.0
+        return [r for r in rows if r["id"] in exact], "jazz"
+
+    rel = mock.Mock(side_effect=lambda rows, req: (
+        None if picks is None else [r for r in rows if r["id"] in picks]))
+    with mock.patch("app.discovery_route.activities_beyond_radius",
+                    return_value=[dict(r) for r in _FAR]), \
+         mock.patch.object(ab, "_filter_events_by_query", side_effect=stamp), \
+         mock.patch.object(ab, "_related_alternatives", rel), \
+         mock.patch("app.discovery_route.far_activity_details",
+                    side_effect=lambda row: {"title": row["title"], "venue": row.get("venue_name"),
+                                             "miles": int(row["distance_meters"] / 1609.34),
+                                             "area_label": "Orlando", "zip5": None,
+                                             "block_id": "b-orl"}), \
+         mock.patch("app.auth.jwt_user_id", return_value="me"):
+        facts, chip, cards = ab._far_offer("jwt", "zip-10451", draft, interest="jazz",
+                                           related=related, request="any jazz related events")
+    return facts, chip, cards, draft, rel
+
+
+def test_widened_far_probe_offers_related_meets_as_related() -> None:
+    facts, chip, cards, draft, rel = _far_widen(related=True, picks=["guitar"])
+    assert rel.call_args.args[1] == "any jazz related events"
+    assert [c["id"] for c in cards] == ["guitar"]
+    assert draft["_far_lead"]["related"] is True
+    text = " ".join(facts)
+    assert "RELATED" in text and "NOT jazz itself" in text and "Never offer to widen again" in text
+    assert chip == ""
+
+
+def test_without_widen_the_far_probe_still_accepts_only_exact_matches() -> None:
+    facts, chip, cards, draft, rel = _far_widen(related=False, picks=["guitar"])
+    rel.assert_not_called()
+    assert (facts, chip, cards) == ([], "", [])
+
+
+def test_an_exact_far_match_wins_and_is_never_called_related() -> None:
+    facts, _chip, cards, draft, rel = _far_widen(related=True, picks=["guitar"], exact=["books"])
+    rel.assert_not_called()
+    assert [c["id"] for c in cards] == ["books"]
+    assert "related" not in draft["_far_lead"]
+
+
+def test_a_failed_related_call_offers_nothing_rather_than_guessing() -> None:
+    facts, chip, cards, _d, _rel = _far_widen(related=True, picks=None)
+    assert (facts, chip, cards) == ([], "", [])
+
+
+def test_the_no_model_fallback_says_related_not_match() -> None:
+    lead = {"title": "Neighborhood Guitar Meetup", "area_label": "Orlando", "miles": 932,
+            "related": True}
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=False), \
+         mock.patch.object(ab, "_far_where", return_value="Orlando"):
+        out = ab._compose_empty_seek_offer("jazz", far_lead=lead, far_facts=["x"])
+    assert "related" in out.lower() and "Neighborhood Guitar Meetup" in out
+
+
+# ── The reply names the far meet it sits above (prod 2026-10-08) ─────────────────────────
+_LEAD = {"title": "Neighborhood Guitar Meetup", "area_label": "Orlando", "miles": 956,
+         "related": True}
+
+
+def _compose(model_message: str):
+    seen = {}
+
+    def llm(**kw):
+        seen.update(kw)
+        return {"message": model_message}
+
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json", side_effect=llm), \
+            mock.patch.object(ab, "_far_where", return_value="Orlando"):
+        out = ab._compose_empty_seek_offer("jazz", far_lead=_LEAD, far_facts=["far fact"])
+    return out, seen
+
+
+def test_a_reply_that_drops_the_far_meet_falls_back_to_one_that_names_it() -> None:
+    out, _ = _compose("Nothing on jazz near you right now — want me to listen for one?")
+    assert "Neighborhood Guitar Meetup" in out and "956" in out
+
+
+def test_a_reply_that_names_the_far_meet_is_kept() -> None:
+    msg = "No jazz near you; the closest related meet is the Neighborhood Guitar Meetup, 956 miles away."
+    out, seen = _compose(msg)
+    assert out == msg
+    assert "name the one farther-away meet" in seen["system"]
+    assert "the ONLY events you may name are the farther-away ones" in seen["user_payload"]
+
+
+def test_without_a_far_meet_the_old_instruction_and_rule_stand() -> None:
+    seen = {}
+
+    def llm(**kw):
+        seen.update(kw)
+        return {"message": "Nothing near you — want me to listen?"}
+
+    with mock.patch("app.orchestrator.llm.llm_configured", return_value=True), \
+            mock.patch("app.orchestrator.llm.llm_json", side_effect=llm):
+        out = ab._compose_empty_seek_offer("jazz", far_facts=["x"])
+    assert out == "Nothing near you — want me to listen?"
+    assert "farther-away" not in seen["system"]
+    assert "Never invent or promise events, and never claim" in seen["user_payload"]

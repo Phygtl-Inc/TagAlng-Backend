@@ -60,3 +60,36 @@ def event_embedding_text(
     add(str(description or "").strip()[:_MAX_DESCRIPTION])
 
     return " — ".join(parts)[:2000]
+
+
+# Meets are searched asymmetrically: a short ask against a paragraph. Vertex embeds the two
+# sides differently when told which is which, and "jazz" vs a Latin Jazz Concert went from
+# 0.571 to 0.617 (prod events, 2026-10-08). The gain needs BOTH sides: a query-mode ask
+# against default-mode rows measured no better and no worse than today (58% vs 58% of the
+# right meets in a top 10; 63% once the rows are documents too). Existing rows are
+# re-embedded with scripts/backfill_event_embeddings.py --all.
+EVENT_DOC_TASK = "RETRIEVAL_DOCUMENT"
+EVENT_QUERY_TASK = "RETRIEVAL_QUERY"
+
+
+def embed_event_document(text: str) -> list[float] | None:
+    """The stored vector for a meet (see event_embedding_text). None on any failure."""
+    try:
+        from app.vertex_extract import vertex_embed
+
+        return vertex_embed(str(text or "").strip()[:2000], task_type=EVENT_DOC_TASK)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def embed_event_query(text: str) -> list[float] | None:
+    """The vector for an ask searched against meets. None on any failure."""
+    q = str(text or "").strip()
+    if not q:
+        return None
+    try:
+        from app.vertex_extract import vertex_embed
+
+        return vertex_embed(q[:2000], task_type=EVENT_QUERY_TASK)
+    except Exception:  # noqa: BLE001
+        return None
