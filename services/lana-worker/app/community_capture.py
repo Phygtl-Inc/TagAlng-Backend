@@ -673,7 +673,7 @@ def _planned_place_key(draft: dict[str, Any]) -> str:
 
 
 def _link_check(user_id: str | None, handle: str, draft: dict[str, Any]) -> dict[str, Any]:
-    """check_community_handle_for (20270119120000) — may they have this link for the
+    """check_community_handle_for (20270130120000) — may they have this link for the
     community they are about to create. {"status": "error"} when the read fails."""
     if not user_id:
         return {"status": "sign_in_required"}

@@ -1,4 +1,4 @@
--- 20270123120000_community_link_step · behaviour checks (local validation container only)
+-- 20270130120000_community_link_step · behaviour checks (local validation container only)
 --   psql -h 127.0.0.1 -p 55432 -U supabase_admin -d postgres -v ON_ERROR_STOP=1 \
 --        -f supabase/tests/community_link_step.sql
 
