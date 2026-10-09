@@ -848,6 +848,9 @@ class CommunityJoinResponse(BaseModel):
     # True when the join confirmed an existing candidate of theirs rather than
     # creating a new row (they had mentioned the place before).
     promoted_from_candidate: bool = False
+    # True when this join was credited to the invite_token it carried
+    # (circle_invite_redemptions.joined_at). Additive.
+    attributed: bool = False
 
 
 class CommunityFeatureRow(BaseModel):
