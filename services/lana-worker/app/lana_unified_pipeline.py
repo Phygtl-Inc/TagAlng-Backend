@@ -556,6 +556,44 @@ EXPLICIT_REQUEST_REQUIRED: frozenset[str] = frozenset({
 })
 
 
+def _community_create_verify_gate(
+    session_ctx: dict[str, Any], *, phone_verified: bool, user_message: str, timer: Any
+) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None] | None:
+    """A guest verifies their email before creating a community (Asjid, 2026-10-06): it
+    gets its own public link that has to be someone's, and its creator runs it. Only on
+    the turn that would START a capture — nothing is collected yet, so nothing is lost.
+    Returns the pipeline's turn tuple when gated, else None."""
+    if session_ctx.get("community_create_active") or phone_verified:
+        return None
+    from app.reply_compose import compose_reply
+
+    session_ctx["requires_phone_verification"] = True
+    session_ctx["routing_phase"] = "await_signup_phone"
+    session_ctx["_orchestrator_turn"] = False
+    session_ctx["timing_ms"] = timer.to_dict()
+    session_ctx["last_routing"] = {
+        "outcome": "community_create_needs_verify",
+        "intent_class": "discovery",
+        "tool_called": None,
+    }
+    reply = compose_reply(
+        goal=(
+            "They want to create a community. Creating one needs a verified email — it gets "
+            "its own public link, and it has to be theirs. Ask them warmly, in one line, to "
+            "verify their email first, and say you'll set it up together right after."
+        ),
+        facts=[],
+        fallback=(
+            "Let's verify your email first — your community gets its own link, and it needs "
+            "to be yours. Then we'll set it up together."
+        ),
+        session_ctx=session_ctx,
+        user_message=user_message,
+    )
+    ui = {"bucket": None, "focus_phrase": None, "highlights": []}
+    return reply, "continue", session_ctx, ui, session_ctx.get("event_draft")
+
+
 def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
     """Is this turn CREATING a community (the community_capture flow)?
 
@@ -2358,6 +2396,11 @@ def run_lana_unified_pipeline(
         )
         from app.discovery_slots import discovery_slots_for_turn
 
+        gated = _community_create_verify_gate(
+            session_ctx, phone_verified=phone_verified, user_message=user_message, timer=timer
+        )
+        if gated is not None:
+            return gated
         if not session_ctx.get("community_create_active"):
             session_ctx["community_create_active"] = True
             session_ctx["community_turns"] = 0

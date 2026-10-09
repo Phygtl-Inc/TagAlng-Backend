@@ -450,19 +450,22 @@ def _resolve_parent(draft: dict[str, Any], user_id: Any) -> None:
         row = (
             service_client()
             .table("places")
-            .select("lat, lng")
+            .select("lat, lng, handle")
             .eq("id", str(hit["place_id"]))
             .limit(1)
             .execute()
         )
         got = (row.data or [{}])[0] if isinstance(row.data, list) else {}
         located = got.get("lat") is not None and got.get("lng") is not None
+        parent_handle = str(got.get("handle") or "").strip() or None
     except Exception:  # noqa: BLE001
         logger.exception("community_parent_point_read_failed")
+        parent_handle = None
     draft["parent_place"] = {
         "place_id": str(hit["place_id"]),
         "place_name": str(hit.get("place_name") or said).strip(),
         "located": located,
+        "handle": parent_handle,
     }
     draft["chips"] = _build_chips(draft)
 
@@ -651,6 +654,217 @@ def _handle_offer(place_id: str, user_id: str | None) -> dict[str, str] | None:
     return {"place_id": place_id, "suggestion": suggestion}
 
 
+def _planned_place_key(draft: dict[str, Any]) -> str:
+    """The google_place_id publish_community will use — the picked place, or for a
+    community with no place the creator:<slug> its NAME maps to (same rule as publish)."""
+    gpid = str(draft.get("google_place_id") or "").strip()
+    if gpid:
+        return gpid
+    from app.circles_capture import _slugify
+    from app.circles_flow import CREATOR_PLACE_PREFIX
+    from app.community_question_sets import COMMUNITY_SUBJECT_FIELD
+
+    answers = draft.get("answers") or {}
+    name = str(answers.get(COMMUNITY_SUBJECT_FIELD) or "").strip() or str(
+        draft.get("name") or ""
+    ).strip()
+    slug = _slugify(name)
+    return CREATOR_PLACE_PREFIX + slug if slug else ""
+
+
+def _link_check(user_id: str | None, handle: str, draft: dict[str, Any]) -> dict[str, Any]:
+    """check_community_handle_for (20270130120000) — may they have this link for the
+    community they are about to create. {"status": "error"} when the read fails."""
+    if not user_id:
+        return {"status": "sign_in_required"}
+    try:
+        from app.auth import service_client
+
+        res = (
+            service_client()
+            .rpc(
+                "check_community_handle_for",
+                {
+                    "p_user_id": user_id,
+                    "p_handle": handle,
+                    "p_name": str(draft.get("name") or ""),
+                    "p_google_place_id": _planned_place_key(draft) or None,
+                },
+            )
+            .execute()
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("community_link_check_failed")
+        return {"status": "error"}
+    return res.data if isinstance(res.data, dict) else {"status": "error"}
+
+
+def _claim_link(user_id: str, place_id: str, handle: str) -> str | None:
+    """Claim the reserved link once the community exists; on a race, the first suggestion
+    the database offers. Returns the handle it now has, or None."""
+    from app.auth import service_client
+
+    for attempt in range(2):
+        try:
+            res = (
+                service_client()
+                .rpc(
+                    "claim_community_handle_for",
+                    {"p_user_id": user_id, "p_place_id": place_id, "p_handle": handle},
+                )
+                .execute()
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("community_link_claim_failed place=%s", place_id)
+            return None
+        data = res.data if isinstance(res.data, dict) else {}
+        status = data.get("status")
+        if status == "claimed":
+            return str(data.get("handle") or handle)
+        suggestions = [s for s in (data.get("suggestions") or []) if isinstance(s, str)]
+        if status == "unavailable" and suggestions and attempt == 0:
+            # Taken between the check and the publish — take the next free one rather
+            # than publish without the link they were told they would get.
+            handle = suggestions[0]
+            continue
+        logger.info("community_link_not_claimed place=%s status=%s", place_id, status)
+        return None
+    return None
+
+
+def _chapter_link(draft: dict[str, Any], place_id: str) -> str | None:
+    """get.lana.help/{parent}/{chapter} for a community just attached as a chapter — the
+    chapter part is assigned on attach (20270131120000). None when the parent has no link
+    or the read fails; the caller then falls back to the community's own link."""
+    parent_handle = str((draft.get("parent_place") or {}).get("handle") or "").strip()
+    if not parent_handle or not place_id:
+        return None
+    try:
+        from app.auth import service_client
+
+        row = (
+            service_client()
+            .table("places")
+            .select("chapter_handle")
+            .eq("id", place_id)
+            .limit(1)
+            .execute()
+        )
+        got = (row.data or [{}])[0] if isinstance(row.data, list) else {}
+    except Exception:  # noqa: BLE001
+        logger.exception("community_chapter_link_read_failed place=%s", place_id)
+        return None
+    chapter = str(got.get("chapter_handle") or "").strip()
+    return f"{parent_handle}/{chapter}" if chapter else None
+
+
+def _after_questions(
+    *, draft: dict[str, Any], session_ctx: dict[str, Any], user_id: str | None,
+    chips: list[dict[str, Any]] | None = None,
+) -> str:
+    """Every question is answered. What is left before the ready card, in order: where a
+    community with no place is run from, then its link (required, prefilled). Then the
+    ready card — nothing is created until they press Share."""
+    session_ctx["community_create_active"] = True
+    session_ctx["routing_phase"] = "listening"
+    name = str(draft.get("name") or "your community")
+    # "Inside SJSU" is settled here, before the closing questions: a chapter with no spot
+    # of its own meets at its parent's (attach_chapter copies the parent's point), and its
+    # link is get.lana.help/{parent}/{chapter}, given on attach — so neither is asked.
+    _resolve_parent(draft, user_id)
+    parent = draft.get("parent_place") or {}
+    parent_located = bool(parent.get("located"))
+    if parent.get("handle") and not draft.get("handle"):
+        draft["_link_settled"] = True
+
+    if (
+        not str(draft.get("google_place_id") or "").strip()
+        and not draft.get("hq_city")
+        and not parent_located
+    ):
+        session_ctx["community_pending_ask"] = "hq"
+        session_ctx["community_ready"] = None
+        draft["pending_field"] = "hq"
+        draft["suggestions"] = []
+        session_ctx["community_draft"] = draft
+        return compose_reply(
+            goal=(
+                "Before their community is ready, ask in one short line which city it is "
+                "run from. Say it is just for its card and map pin — anyone, anywhere, can "
+                "still find and join it."
+            ),
+            facts=[f"The community: {name}"],
+            fallback=(
+                "One more thing — which city is it run from? It's just for the card; anyone "
+                "anywhere can still join."
+            ),
+        )
+
+    if not draft.get("handle") and not draft.get("_link_settled"):
+        res = _link_check(user_id, "", draft)
+        status = res.get("status")
+        if status == "already_has_handle":
+            # Publishing joins a community that already has its link: show that one.
+            draft["handle"] = str(res.get("handle") or "") or None
+            draft["_link_settled"] = True
+        elif status in ("not_eligible", "sign_in_required", "error"):
+            # Not theirs to link (someone else's place), or we cannot check: no step that
+            # would fail at publish. Claiming stays possible later from its edit screen.
+            draft["_link_settled"] = True
+        else:
+            suggestions = [s for s in (res.get("suggestions") or []) if isinstance(s, str)]
+            session_ctx["community_pending_ask"] = "handle"
+            session_ctx["community_ready"] = None
+            draft["pending_field"] = "handle"
+            draft["handle_suggestion"] = suggestions[0] if suggestions else None
+            draft["handle_suggestions"] = suggestions
+            draft["suggestions"] = suggestions[:3]
+            session_ctx["community_offered"] = suggestions[:3]
+            session_ctx["community_draft"] = draft
+            return compose_reply(
+                goal=(
+                    "Last step before their community is ready: they choose its link, "
+                    "get.lana.help/<name>, so people can find and join it. One short line; "
+                    "the link box under your message is already filled in with a suggestion "
+                    "they can keep or change."
+                ),
+                facts=[f"The community: {name}"]
+                + (
+                    [f"The suggested link: get.lana.help/{suggestions[0]}"]
+                    if suggestions
+                    else []
+                ),
+                fallback="Last step — choose your community's link so people can find it.",
+            )
+
+    # ── Ready card + the share CTA (nothing is created until they confirm: a community is
+    # shared state other people join). ──
+    if chips is not None:
+        draft["chips"] = chips
+    draft["suggestions"] = []
+    draft["pending_field"] = None
+    draft["ready"] = True
+    session_ctx["community_draft"] = draft
+    session_ctx["community_ready"] = True
+    session_ctx["community_pending_ask"] = None
+    session_ctx["community_pending_question"] = None  # nothing outstanding on the card
+    facts = [f"Community ready: {name}"]
+    if draft.get("handle"):
+        facts.append(f"Its link: get.lana.help/{draft['handle']}")
+    return compose_reply(
+        goal=(
+            "The community draft is complete and shown as a card. Tell the user it's ready "
+            "and prompt them to tap **Share with the community** (keep that button name "
+            "verbatim, bolded) so neighbours can find and join it."
+        ),
+        facts=facts,
+        fallback=(
+            f"It's ready to share — **{name}**. One last look, then "
+            "**Share with the community** and neighbours can find and join it."
+        ),
+    )
+
+
 def reset_community_state(session_ctx: dict[str, Any]) -> None:
     """Drop the capture + its half-built draft so the turn falls through to normal
     routing. Keys set to None (not popped) so the {**old, **new} session merge clears
@@ -805,65 +1019,72 @@ def run_community_capture_turn(
             fallback="No problem — I've let that go. Tell me when you want to start one.",
         )
 
-    # ── HQ: the answer to "where is it run from?" ──
-    # Asked only after they pressed publish on a community with no place, so a city that
-    # resolves goes straight on to publishing — they already said go.
-    publish_now = False
-    if (
-        session_ctx.get("community_pending_ask") == "hq"
-        and session_ctx.get("community_ready")
-        # A tapped correction chip ("fix:name") is a rendered control, not a city.
-        and not re.match(r"\s*fix:\w+\s*$", msg)
-    ):
-        from app.community_hq import geocode_city
+    # ── The answers to the two closing questions: where it is run from, and its link ──
+    # Both are asked by _after_questions once every question is in, so an answer goes
+    # straight on to whatever is left — they already did the rest.
+    pending = session_ctx.get("community_pending_ask")
+    # A tapped correction chip ("fix:name") is a rendered control, not an answer.
+    if pending in ("hq", "handle") and not re.match(r"\s*fix:\w+\s*$", msg):
+        if pending == "hq":
+            from app.community_hq import geocode_city
 
-        got = geocode_city(msg)
-        if not got:
-            session_ctx["community_draft"] = draft
-            draft["pending_field"] = "hq"
-            return compose_reply(
-                goal=(
-                    "You couldn't place what they gave as the city their community is run "
-                    "from. Ask again in one short line for a town or city (e.g. a city and "
-                    "state), saying it shows on the community's card and map pin."
-                ),
-                facts=[f'They said: "{msg[:80]}"'],
-                fallback="I couldn't place that — which city is it run from?",
+            got = geocode_city(msg)
+            if not got:
+                draft["pending_field"] = "hq"
+                session_ctx["community_draft"] = draft
+                return compose_reply(
+                    goal=(
+                        "You couldn't place what they gave as the city their community is "
+                        "run from. Ask again in one short line for a town or city (e.g. a "
+                        "city and state), saying it shows on the community's card and map pin."
+                    ),
+                    facts=[f'They said: "{msg[:80]}"'],
+                    fallback="I couldn't place that — which city is it run from?",
+                )
+            draft["hq_city"], draft["hq_lat"], draft["hq_lng"] = (
+                got["city"], got["lat"], got["lng"],
             )
-        draft["hq_city"], draft["hq_lat"], draft["hq_lng"] = got["city"], got["lat"], got["lng"]
+        else:
+            res = _link_check(user_id, msg, draft)
+            if res.get("status") != "available":
+                suggestions = [s for s in (res.get("suggestions") or []) if isinstance(s, str)]
+                if suggestions:
+                    draft["handle_suggestions"] = suggestions
+                    draft["suggestions"] = suggestions[:3]
+                    session_ctx["community_offered"] = suggestions[:3]
+                draft["handle_error"] = str(res.get("reason") or res.get("status") or "")
+                draft["pending_field"] = "handle"
+                session_ctx["community_draft"] = draft
+                return compose_reply(
+                    goal=(
+                        "The link they chose for their community can't be used. Say so in "
+                        "one short line and point them to the suggestions under your message "
+                        "— they can tap one or type another."
+                    ),
+                    facts=[
+                        f'They asked for: get.lana.help/{res.get("normalizedHandle") or msg[:40]}',
+                        f'Why not: {res.get("reason") or res.get("status")}',
+                    ],
+                    fallback="That link isn't available — pick one below or try another.",
+                )
+            draft["handle"] = str(res.get("normalizedHandle") or "")
+            draft["handle_error"] = None
         session_ctx["community_pending_ask"] = None
-        publish_now = True
+        return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id)
 
     # ── Publish: the ready card's CTA ──
-    if session_ctx.get("community_ready") and (publish_now or _PUBLISH_RE.search(msg)):
-        # A community with no place is found by what it is, and its card says where it is
-        # run from — so that is asked once, here, before it goes live (2026-10-06). A
-        # community on a real place already has its location.
+    if session_ctx.get("community_ready") and _PUBLISH_RE.search(msg):
+        # Which community "inside X" means is settled before the ready card
+        # (_after_questions); this is a no-op then, and a safety net for older drafts.
         _resolve_parent(draft, user_id)
-        # A chapter with no spot of its own meets at its parent's (attach_chapter copies the
-        # parent's point), so it is not asked for a city it is not run from.
-        parent_located = bool((draft.get("parent_place") or {}).get("located"))
+        # A ready card from before the closing steps moved ahead of it (no city for a
+        # placeless community) goes back through them rather than publishing unplaced.
         if (
             not str(draft.get("google_place_id") or "").strip()
             and not draft.get("hq_city")
-            and not parent_located
+            and not (draft.get("parent_place") or {}).get("located")
         ):
-            session_ctx["community_pending_ask"] = "hq"
-            draft["pending_field"] = "hq"
-            session_ctx["community_draft"] = draft
-            session_ctx["community_create_active"] = True
-            return compose_reply(
-                goal=(
-                    "Before you put their community live, ask in one short line which city "
-                    "it is run from. Say it is just for its card and map pin — anyone, "
-                    "anywhere, can still find and join it."
-                ),
-                facts=[f"The community: {draft.get('name') or 'their community'}"],
-                fallback=(
-                    "One last thing — which city is it run from? It's just for the card; "
-                    "anyone anywhere can still join."
-                ),
-            )
+            return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id)
         result, err = publish_community(draft=draft, user_id=str(user_id or ""))
         if not result:
             if err == "place_required":
@@ -908,9 +1129,23 @@ def run_community_capture_turn(
                 str(result["place_id"]),
                 {"city": draft["hq_city"], "lat": draft.get("hq_lat"), "lng": draft.get("hq_lng")},
             )
-        # A rendered control, not a question: the PWA shows a "claim this link" button and
-        # makes the claim itself, so nothing here has to parse the next turn.
-        offer = _handle_offer(str(result.get("place_id") or ""), user_id)
+        # The link they chose on the last step is claimed now that the community exists.
+        # If that could not happen (it was someone else's place after all, or the claim
+        # failed), the old offer — a "claim this link" button — is the way back to it.
+        place_id = str(result.get("place_id") or "")
+        name = str(draft.get("name") or "your community")
+        facts = [f"{name} is now a community neighbours can find and join"]
+        # Inside a parent first: a chapter of a linked parent shares
+        # get.lana.help/{parent}/{chapter}, assigned on attach — no link of its own to claim.
+        facts += _attach_to_parent(draft, user_id, place_id)
+        link = _chapter_link(draft, place_id) if draft.get("parent_attached") else None
+        claimed = None
+        if link:
+            draft["handle"] = link
+        elif draft.get("handle") and place_id and user_id and not draft.get("_link_settled"):
+            claimed = _claim_link(str(user_id), place_id, str(draft["handle"]))
+            draft["handle"] = claimed
+        offer = None if (claimed or draft.get("handle")) else _handle_offer(place_id, user_id)
         draft["handle_offer"] = offer
         draft["ready"] = True
         session_ctx["community_draft"] = draft
@@ -919,10 +1154,9 @@ def run_community_capture_turn(
         session_ctx["community_create_active"] = None
         session_ctx["community_turns"] = 0
         session_ctx["routing_phase"] = "listening"
-        name = str(draft.get("name") or "your community")
-        facts = [f"{name} is now a community neighbours can find and join"]
-        facts += _attach_to_parent(draft, user_id, str(result.get("place_id") or ""))
-        if offer:
+        if draft.get("handle"):
+            facts.append(f"Its link, to share anywhere: get.lana.help/{draft['handle']}")
+        elif offer:
             facts.append(
                 f"They can claim a short link for it, get.lana.help/{offer['suggestion']}, "
                 "with the button below (or pick a different one there)"
@@ -940,6 +1174,17 @@ def run_community_capture_turn(
     fix = re.match(r"\s*fix:(\w+)\s*$", msg)
     if fix:
         field = fix.group(1)
+        if field in ("handle", "hq"):
+            # The two closing steps: tapping the link or the city on the ready card reopens
+            # just that step; whatever else is set stays (2026-10-06).
+            if field == "handle":
+                for k in ("handle", "handle_error", "_link_settled"):
+                    draft.pop(k, None)
+            else:
+                for k in ("hq_city", "hq_lat", "hq_lng"):
+                    draft.pop(k, None)
+            draft["ready"] = False
+            return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id)
         if field == "name":
             # The name IS the subject step (a pinned place), same as the tip capture.
             field = COMMUNITY_SUBJECT_FIELD
@@ -955,7 +1200,7 @@ def run_community_capture_turn(
             draft.pop("blurb", None)
         elif field == "parent":
             # Not re-asked: "part of" is optional, so removing it is the whole correction.
-            for k in ("parent", "parent_place", "parent_unresolved"):
+            for k in ("parent", "parent_place", "parent_unresolved", "_link_settled"):
                 draft.pop(k, None)
         else:
             step = next((s for s in step_set_of(draft) if s["field"] == field), None)
@@ -1158,26 +1403,5 @@ def run_community_capture_turn(
                 f"({min(len(behind) + 1, len(steps))}/{len(steps)})"
             )
 
-    # ── P4: ready → the assembled card + the share CTA (nothing is created until they
-    # confirm: a community is shared state other people join). ──
-    draft["chips"] = chips
-    draft["suggestions"] = []
-    draft["ready"] = True
-    session_ctx["community_draft"] = draft
-    session_ctx["community_create_active"] = True
-    session_ctx["community_ready"] = True
-    session_ctx["community_pending_question"] = None  # nothing outstanding on the card
-    session_ctx["routing_phase"] = "listening"
-    name = str(draft.get("name") or "your community")
-    return compose_reply(
-        goal=(
-            "The community draft is complete and shown as a card. Tell the user it's ready "
-            "and prompt them to tap **Share with the community** (keep that button name "
-            "verbatim, bolded) so neighbours can find and join it."
-        ),
-        facts=[f"Community ready: {name}"],
-        fallback=(
-            f"It's ready to share — **{name}**. One last look, then "
-            "**Share with the community** and neighbours can find and join it."
-        ),
-    )
+    # ── P4: every question is in → the closing questions, then the ready card ──
+    return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id, chips=chips)

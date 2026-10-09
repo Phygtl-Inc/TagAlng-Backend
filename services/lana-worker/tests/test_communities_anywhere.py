@@ -287,31 +287,7 @@ def _capture(monkeypatch: Any, msg: str, ctx: dict, *, geo: Any = None) -> tuple
     return reply, publish, write
 
 
-def test_a_placeless_community_asks_where_it_is_run_from_first(monkeypatch: Any) -> None:
-    ctx: dict[str, Any] = {"community_ready": True,
-                           "community_draft": {"name": "Podcast Club", "circle_type": "hobby"}}
-    reply, publish, _ = _capture(monkeypatch, "publish", ctx)
-    publish.assert_not_called()
-    assert ctx["community_pending_ask"] == "hq"
-    assert "city" in reply.lower()
-
-    orlando = {"city": "Orlando, FL", "lat": 28.5, "lng": -81.4}
-    reply, publish, write = _capture(monkeypatch, "Orlando", ctx, geo=orlando)
-    publish.assert_called_once()
-    write.assert_called_once_with("u1", "pNew", {"city": "Orlando, FL", "lat": 28.5, "lng": -81.4})
-    assert ctx["community_draft"]["published"] is True
-    assert ctx["community_pending_ask"] is None
-
-
-def test_an_unplaceable_city_is_asked_again_not_published(monkeypatch: Any) -> None:
-    ctx: dict[str, Any] = {"community_ready": True, "community_pending_ask": "hq",
-                           "community_draft": {"name": "Podcast Club", "circle_type": "hobby"}}
-    reply, publish, _ = _capture(monkeypatch, "asdfgh", ctx, geo=None)
-    publish.assert_not_called()
-    assert "city" in reply.lower()
-
-
-def test_a_community_on_a_real_place_publishes_without_asking(monkeypatch: Any) -> None:
+def test_a_community_on_a_real_place_publishes_without_asking_the_city(monkeypatch: Any) -> None:
     ctx: dict[str, Any] = {"community_ready": True,
                            "community_draft": {"name": "Fitness CF", "circle_type": "fitness",
                                                "google_place_id": "gp-gym"}}

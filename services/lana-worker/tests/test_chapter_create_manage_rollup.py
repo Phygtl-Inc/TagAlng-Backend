@@ -158,7 +158,9 @@ def test_parent_resolves_once_and_records_its_point(monkeypatch: Any) -> None:
     cc._resolve_parent(draft, "u1")
     cc._resolve_parent(draft, "u1")
     assert calls == ["SJSU"]
-    assert draft["parent_place"] == {"place_id": SJSU, "place_name": "San Jose State University", "located": True}
+    assert draft["parent_place"] == {
+        "place_id": SJSU, "place_name": "San Jose State University", "located": True, "handle": None,
+    }
     assert {"label": "Part of San Jose State University", "tone": "sky", "field": "parent"} in draft["chips"]
 
 
