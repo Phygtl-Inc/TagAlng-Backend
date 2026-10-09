@@ -3701,8 +3701,11 @@ def search_places_endpoint(
     reaches the browser. POST (not GET) so the PWA service worker doesn't intercept it.
     Returns [] when the key isn't configured."""
     auth = verify_auth(authorization)
-    from app.places import search_places
+    from app.places import search_cities, search_places
 
+    if body.kind == "city":
+        rows = search_cities(query=body.q, block_id=auth.home_block_id, user_id=auth.user_id)
+        return PlaceSearchResponse(results=[PlaceResult(**r) for r in rows])
     rows = search_places(query=body.q, block_id=auth.home_block_id, user_id=auth.user_id)
     return PlaceSearchResponse(results=[PlaceResult(**r) for r in rows])
 

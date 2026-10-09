@@ -758,6 +758,25 @@ def _chapter_link(draft: dict[str, Any], place_id: str) -> str | None:
     return f"{parent_handle}/{chapter}" if chapter else None
 
 
+def _hq_offer(session_ctx: dict[str, Any], draft: dict[str, Any]) -> dict[str, Any] | None:
+    """{"city", "lat", "lng"} for the user's own ZIP — the run-from city they most likely
+    mean, offered as a chip. Geocoded once per draft and kept on it, so a tap on the chip
+    is placed from these coordinates rather than geocoded a second time."""
+    kept = draft.get("hq_offer")
+    if isinstance(kept, dict) and kept.get("city"):
+        return kept
+    zip5 = str(session_ctx.get("zip_code") or session_ctx.get("zip") or "").strip()[:5]
+    if not (len(zip5) == 5 and zip5.isdigit()):
+        return None
+    from app.community_hq import geocode_city
+
+    got = geocode_city(f"{zip5}, USA")
+    if not got:
+        return None
+    draft["hq_offer"] = got
+    return got
+
+
 def _after_questions(
     *, draft: dict[str, Any], session_ctx: dict[str, Any], user_id: str | None,
     chips: list[dict[str, Any]] | None = None,
@@ -785,15 +804,25 @@ def _after_questions(
         session_ctx["community_pending_ask"] = "hq"
         session_ctx["community_ready"] = None
         draft["pending_field"] = "hq"
-        draft["suggestions"] = []
+        # Their own area as a one-tap answer: the question had no control at all, so a
+        # neighbour in a known ZIP still had to type the city they are standing in.
+        offer = _hq_offer(session_ctx, draft)
+        draft["suggestions"] = [offer["city"]] if offer else []
+        session_ctx["community_offered"] = list(draft["suggestions"])
         session_ctx["community_draft"] = draft
+        facts = [f"The community: {name}"]
+        if offer:
+            facts.append(
+                f"Their own area, offered as a tap under your message: {offer['city']}. "
+                "A search box for any other city sits there too."
+            )
         return compose_reply(
             goal=(
                 "Before their community is ready, ask in one short line which city it is "
                 "run from. Say it is just for its card and map pin — anyone, anywhere, can "
                 "still find and join it."
             ),
-            facts=[f"The community: {name}"],
+            facts=facts,
             fallback=(
                 "One more thing — which city is it run from? It's just for the card; anyone "
                 "anywhere can still join."
@@ -1028,7 +1057,15 @@ def run_community_capture_turn(
         if pending == "hq":
             from app.community_hq import geocode_city
 
-            got = geocode_city(msg)
+            offer = draft.get("hq_offer")
+            if (
+                isinstance(offer, dict)
+                and offer.get("city")
+                and msg.strip().casefold() == str(offer["city"]).casefold()
+            ):
+                got = offer
+            else:
+                got = geocode_city(msg)
             if not got:
                 draft["pending_field"] = "hq"
                 session_ctx["community_draft"] = draft
@@ -1044,6 +1081,9 @@ def run_community_capture_turn(
             draft["hq_city"], draft["hq_lat"], draft["hq_lng"] = (
                 got["city"], got["lat"], got["lng"],
             )
+            # The area chip answered its question; it must not ride on to the next card.
+            draft["suggestions"] = []
+            session_ctx["community_offered"] = []
         else:
             res = _link_check(user_id, msg, draft)
             if res.get("status") != "available":

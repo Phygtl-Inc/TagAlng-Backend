@@ -1301,6 +1301,8 @@ class SignalPhotoUploadResponse(BaseModel):
 
 class PlaceSearchRequest(BaseModel):
     q: str
+    # "city": towns and cities only — the community "run from" picker. Default: any place.
+    kind: Literal["place", "city"] = "place"
 
 
 class ReverseGeocodeRequest(BaseModel):
