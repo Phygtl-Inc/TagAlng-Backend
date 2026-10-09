@@ -4251,6 +4251,10 @@ class CommunityJoinBody(_BaseModel):
     # "I'm a member — I go here" (default) vs "Not yet — just curious for now". Curious
     # is NOT membership: see /lana/circles/membership below.
     membership: str = "member"
+    # The invite link (/i/<token>) the joiner arrived through, if any. A join of THAT
+    # invite's community is credited to it (circle_invites.attribute_join); a token for
+    # another community, a revoked or own invite is ignored. Never fails the join.
+    invite_token: str | None = None
 
 
 class CommunityMembershipBody(_BaseModel):
@@ -4700,6 +4704,22 @@ def post_circles_join(
         detail = str(exc)
         status = 400 if detail in ("place_required", "join_failed") else 404
         raise HTTPException(status_code=status, detail=detail) from exc
+    # Invite attribution: only a join that created or changed membership (a fresh row,
+    # a promoted candidate, curious → member). An already-member who taps Join from an
+    # invite was not brought in by it, so nothing is credited.
+    attributed = False
+    if body.invite_token and not result.get("already_member"):
+        from app.circle_invites import attribute_join
+
+        attributed = (
+            attribute_join(
+                auth.user_id,
+                body.invite_token,
+                str(result.get("place_id") or ""),
+                affiliation_id=str(result.get("affiliation_id") or "") or None,
+            )
+            is not None
+        )
     if not result.get("already_member"):
         amplitude_track(
             "circle_joined",
@@ -4714,6 +4734,7 @@ def post_circles_join(
                 "membership": "curious"
                 if str(result.get("status") or "") == "curious"
                 else "member",
+                "via_invite": attributed,
             },
         )
     return CommunityJoinResponse(
@@ -4729,6 +4750,7 @@ def post_circles_join(
             result.get("confirmed_via"), result.get("source")
         ),
         promoted_from_candidate=bool(result.get("promoted_from_candidate")),
+        attributed=attributed,
     )
 
 
