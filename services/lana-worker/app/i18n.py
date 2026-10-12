@@ -1038,6 +1038,62 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "O anfitrião não conseguiu encaixar você desta vez.",
     },
 
+    # A reviewer decided her claim on a community (app/community_claims.py). {place} is
+    # the community's name. The declined mail carries the reviewer's note as a fact row.
+    "notify.claim_approved.title": {
+        "en": "{place} is yours on Lana",
+        "es": "{place} ya es tuya en Lana",
+        "pt": "{place} agora é sua no Lana",
+    },
+    "notify.claim_approved.body": {
+        "en": "Your claim was approved. You'll find it under your communities.",
+        "es": "Tu solicitud fue aprobada. La encontrarás en tus comunidades.",
+        "pt": "Sua solicitação foi aprovada. Você a encontra nas suas comunidades.",
+    },
+    "notify.claim_approved.subject": {
+        "en": "Your claim on {place} was approved",
+        "es": "Tu solicitud sobre {place} fue aprobada",
+        "pt": "Sua solicitação sobre {place} foi aprovada",
+    },
+    "notify.claim_approved.email": {
+        "en": "A reviewer approved your claim. {place} is now under your communities on your profile, where you can edit it and share its link.",
+        "es": "Un revisor aprobó tu solicitud. {place} ya está en tus comunidades, en tu perfil, donde puedes editarla y compartir su enlace.",
+        "pt": "Um revisor aprovou sua solicitação. {place} já está nas suas comunidades, no seu perfil, onde você pode editá-la e compartilhar o link.",
+    },
+    "notify.claim_declined.title": {
+        "en": "Update on your claim for {place}",
+        "es": "Novedad sobre tu solicitud de {place}",
+        "pt": "Atualização sobre sua solicitação de {place}",
+    },
+    "notify.claim_declined.body": {
+        "en": "It wasn't approved this time. Open your profile to see the reviewer's note.",
+        "es": "Esta vez no fue aprobada. Abre tu perfil para ver la nota del revisor.",
+        "pt": "Desta vez não foi aprovada. Abra seu perfil para ver a nota do revisor.",
+    },
+    "notify.claim_declined.subject": {
+        "en": "Your claim on {place} wasn't approved",
+        "es": "Tu solicitud sobre {place} no fue aprobada",
+        "pt": "Sua solicitação sobre {place} não foi aprovada",
+    },
+    "notify.claim_declined.email": {
+        "en": "A reviewer looked at your claim on {place} and couldn't approve it this time. Their note is below. You can close the claim from your profile and send a new one.",
+        "es": "Un revisor vio tu solicitud sobre {place} y esta vez no pudo aprobarla. Su nota está abajo. Puedes cerrar la solicitud desde tu perfil y enviar una nueva.",
+        "pt": "Um revisor analisou sua solicitação sobre {place} e não pôde aprová-la desta vez. A nota está abaixo. Você pode encerrar a solicitação no seu perfil e enviar uma nova.",
+    },
+    "notify.claim.reference": {"en": "Claim", "es": "Solicitud", "pt": "Solicitação"},
+    "notify.claim.reviewer_note": {
+        "en": "Reviewer's note", "es": "Nota del revisor", "pt": "Nota do revisor",
+    },
+    "notify.claim.cta": {"en": "Open Lana", "es": "Abrir Lana", "pt": "Abrir o Lana"},
+    "notify.claim.place_fallback": {
+        "en": "your community", "es": "tu comunidad", "pt": "sua comunidade",
+    },
+    "notify.claim.footer": {
+        "en": "You're getting this because you asked to claim a community on Lana.",
+        "es": "Recibes esto porque pediste reclamar una comunidad en Lana.",
+        "pt": "Você está recebendo isto porque pediu para reivindicar uma comunidade no Lana.",
+    },
+
     # A meet posted for a community the recipient belongs to. {place} is the community's
     # own place name ("Lake Nona YMCA") — the only thing that makes this mail welcome
     # rather than noise, so it leads.
