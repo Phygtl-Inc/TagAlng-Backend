@@ -4856,6 +4856,138 @@ def post_profile_portrait(authorization: str | None = Header(default=None)):
     return {"portrait": dashboard.get("mapped_summary") or None}
 
 
+class CommunityClaimBody(_BaseModel):
+    place_id: str
+    contact_email: str
+    contact_phone: str | None = None
+    note: str | None = None
+    # The path /lana/circles/claims/proof returned. Only her own upload is accepted.
+    proof_path: str | None = None
+
+
+class CommunityClaimCloseBody(_BaseModel):
+    claim_id: str
+
+
+class ClaimDecisionHookBody(_BaseModel):
+    claim_id: str
+
+
+def _claim_user(authorization: str | None) -> str:
+    """A claim is signed-in work: it names her to a reviewer and may grant her a place."""
+    auth = verify_auth(authorization)
+    if auth.is_anonymous and not auth.phone_verified:
+        raise HTTPException(status_code=403, detail="sign_in_required")
+    return auth.user_id
+
+
+@app.post("/lana/circles/claims/proof")
+async def post_circles_claim_proof(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+):
+    """One proof photo for a community claim → {proof_path}. Private bucket
+    (community-claim-proofs), 5 MB, images only; the path is passed back on submit."""
+    from app.community_claims import ClaimError, upload_proof
+
+    user_id = _claim_user(authorization)
+    raw = await file.read()
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    try:
+        return {"proof_path": upload_proof(user_id, raw, content_type)}
+    except ClaimError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from exc
+
+
+@app.post("/lana/circles/claims")
+def post_circles_claim(
+    body: CommunityClaimBody,
+    authorization: str | None = Header(default=None),
+):
+    """Ask for a community already on Lana that she really runs (backend-asks §62). Goes
+    to the admin portal's review queue as an ordinary place_claims row. 409 detail
+    already_claimed (someone governs it) / already_yours (she already runs it) /
+    claim_open (an open claim on it, or one of her own still open)."""
+    from app.community_claims import ClaimError, submit_claim
+
+    user_id = _claim_user(authorization)
+    try:
+        row = submit_claim(
+            user_id,
+            place_id=body.place_id,
+            contact_email=body.contact_email,
+            contact_phone=body.contact_phone,
+            note=body.note,
+            proof_path=body.proof_path,
+        )
+    except ClaimError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from exc
+    amplitude_track(
+        "community_claim_submitted",
+        user_id=user_id,
+        event_properties={"place_id": row.get("place_id"), "with_proof": bool(body.proof_path)},
+    )
+    return row
+
+
+@app.post("/lana/circles/claims/mine")
+def post_circles_claims_mine(authorization: str | None = Header(default=None)):
+    """Her claims that are pending, or decided and not yet closed — newest first."""
+    from app.community_claims import ClaimError, my_claims
+
+    user_id = _claim_user(authorization)
+    try:
+        return {"claims": my_claims(user_id)}
+    except ClaimError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from exc
+
+
+@app.post("/lana/circles/claims/close")
+def post_circles_claims_close(
+    body: CommunityClaimCloseBody,
+    authorization: str | None = Header(default=None),
+):
+    """Retire one of her decided claims. 409 not_decided while it is still pending."""
+    from app.community_claims import ClaimError, close_claim
+
+    user_id = _claim_user(authorization)
+    try:
+        close_claim(user_id, body.claim_id)
+    except ClaimError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from exc
+    return {"ok": True}
+
+
+@app.post("/hooks/claim-decision")
+def hook_claim_decision(
+    body: ClaimDecisionHookBody | None = None,
+    authorization: str | None = Header(default=None),
+    x_sweep_token: str | None = Header(default=None),
+):
+    """Deliver a reviewer's decision on an in-app community claim: an approval makes the
+    claimant a member (so it lists under her communities), and either way she gets a
+    push + an email to the address on the claim.
+
+    Two callers, both idempotent (place_claims.decision_notified_at):
+      · the admin portal, right after approve_place_claim / reject_place_claim — the
+        reviewer's JWT authorizes, same standing the RPCs demand;
+      · a sweep with SIGNAL_SWEEP_TOKEN and no body — every decision still owed.
+    """
+    from app.community_claims import deliver_decision, deliver_owed_decisions, is_reviewer
+
+    expected = os.environ.get("SIGNAL_SWEEP_TOKEN", "").strip()
+    if expected and str(x_sweep_token or "").strip() == expected:
+        if body and body.claim_id:
+            return {"ok": True, "delivered": int(deliver_decision(body.claim_id))}
+        return {"ok": True, "delivered": deliver_owed_decisions()}
+    auth = verify_auth(authorization)
+    if not is_reviewer(auth.user_id):
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not body or not body.claim_id:
+        raise HTTPException(status_code=400, detail="claim_id_required")
+    return {"ok": True, "delivered": int(deliver_decision(body.claim_id))}
+
+
 @app.post("/lana/circles/meets", response_model=CommunityMeetsResponse)
 def post_circles_meets(
     body: CommunityMeetsBody | None = None,
