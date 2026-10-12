@@ -95,6 +95,13 @@ def require_home_block(user_id: str) -> str:
     return str(block_id)
 
 
+def require_verified_member(auth: AuthSession) -> None:
+    """Joining a community is for verified accounts only — `verify_required` tells the
+    client to send the person through email verification and try again."""
+    if not auth.phone_verified:
+        raise HTTPException(status_code=403, detail="verify_required")
+
+
 def require_verified_neighbor_comms(auth: AuthSession) -> None:
     if auth.is_anonymous:
         raise HTTPException(status_code=403, detail="anonymous_user_comms_blocked")

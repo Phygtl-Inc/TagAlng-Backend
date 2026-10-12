@@ -288,13 +288,14 @@ class TestInviteLink(unittest.TestCase):
 
 
 class TestJoinEndpoint(unittest.TestCase):
-    def _post(self, body, result):
+    def _post(self, body, result, *, verified=True):
         from fastapi.testclient import TestClient
 
         from app import main
 
+        auth = SimpleNamespace(user_id="u2", is_anonymous=not verified, phone_verified=verified)
         with (
-            patch.object(main, "verify_auth", return_value=SimpleNamespace(user_id="u2")),
+            patch.object(main, "verify_auth", return_value=auth),
             patch("app.community_discovery.join_community", return_value=result) as join,
             patch("app.circle_invites.attribute_join", return_value={"invite_id": "inv1"}) as attr,
             patch.object(main, "amplitude_track"),
@@ -321,6 +322,16 @@ class TestJoinEndpoint(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         attr.assert_called_once_with("u2", "tok", "p1", affiliation_id="aff1")
         self.assertTrue(res.json()["attributed"])
+
+    def test_guest_cannot_join(self) -> None:
+        """A guest membership has no name — members were mailed "Someone new joined"."""
+        res, join, attr = self._post(
+            {"place_id": "p1", "invite_token": "tok"}, dict(self._JOINED), verified=False
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.json()["detail"], "verify_required")
+        join.assert_not_called()
+        attr.assert_not_called()
 
     def test_no_token_no_attribution(self) -> None:
         res, _join, attr = self._post({"place_id": "p1"}, dict(self._JOINED))

@@ -3225,19 +3225,57 @@ def _try_community_join_reply_turn(
     session_ctx: dict[str, Any],
     user_id: str | None,
     phase: str | None = None,
+    phone_verified: bool,
+    block_id: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Join a community the previous turn listed. One-turn offer: whatever comes next
     consumes it, and anything that isn't a join falls through to normal routing.
+
+    A guest's accept is held, not written: membership needs a verified account, or
+    members are told "Someone new joined" about a person with no name. The verify
+    gate asks for their email and the held join completes once they are verified and
+    named (`_try_join_held_after_verify_turn`, and the post-verify funnel's ending).
 
     The membership write is idempotent (join_community returns already_member rather
     than inserting twice), so a double tap is harmless."""
     if not user_id or not session_ctx.get("community_join_pending"):
         return None
-    from app.community_discovery import join_confirm_reply, read_join_reply
+    from app.community_discovery import (
+        hold_join_for_verify,
+        match_join_reply,
+        read_join_reply,
+    )
+
+    if not phone_verified:
+        named = match_join_reply(msg, session_ctx)
+        if named is None:
+            return None
+        hold_join_for_verify(session_ctx, named)
+        place_name = str(named.get("place_name") or "").strip()
+        return _verify_gate_reply(
+            session_ctx=session_ctx,
+            ctx_base=session_ctx,
+            block_id=block_id or "",
+            event_label=f"**{place_name}**" if place_name else "this community",
+            origin="community",
+        )
 
     result = read_join_reply(user_id, msg, session_ctx)
     if not result:
         return None
+    return _community_joined_turn(result, msg=msg, session_ctx=session_ctx, phase=phase)
+
+
+def _community_joined_turn(
+    result: dict[str, Any],
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    phase: str | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """The "you're in <community>" turn for a membership just written."""
+    from app.community_discovery import join_confirm_reply
+
     member_count: int | None = None
     try:
         from app.community_surface import member_count as _count
@@ -3253,6 +3291,22 @@ def _try_community_join_reply_turn(
     )
     ctx["last_routing"] = _discovery_routing_stub(phase or "listening", "community_joined")
     return reply, ctx, ctx["last_routing"], []
+
+
+def _try_join_held_after_verify_turn(
+    *,
+    msg: str,
+    session_ctx: dict[str, Any],
+    user_id: str | None,
+) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
+    """Complete the join a guest accepted before verifying (see
+    `_try_community_join_reply_turn`). None when nothing was held or it failed."""
+    from app.community_discovery import join_held_after_verify
+
+    result = join_held_after_verify(user_id, session_ctx)
+    if not result:
+        return None
+    return _community_joined_turn(result, msg=msg, session_ctx=session_ctx, phase="listening")
 
 
 def _try_peer_seek_offer_reply_turn(
@@ -8705,6 +8759,21 @@ def handle_discovery_turn(
                 [],
             )
 
+    # A community join a guest accepted before verifying: write it the first turn they
+    # are verified AND named (a guest who logged into an existing account, carried over
+    # by login_carry). A fresh signup with no name yet goes through the post-verify
+    # funnel instead, which asks the name and completes the join at its ending.
+    if (
+        phone_verified
+        and session_ctx.get("community_join_verify_pending")
+        and not session_ctx.get("pending_post_verify")
+        and phase not in (PHASE_AWAIT_SIGNUP_PHONE, PHASE_AWAIT_SIGNUP_OTP, PHASE_NEED_DISPLAY_NAME)
+        and not user_needs_display_name(user_id, session_ctx)
+    ):
+        held_turn = _try_join_held_after_verify_turn(msg=msg, session_ctx=session_ctx, user_id=user_id)
+        if held_turn is not None:
+            return held_turn
+
     # Sticky event-host mode: once hosting starts, the orchestrator owns the WHOLE
     # conversation so an event line ("weekday playground meet with kids") isn't hijacked
     # into a neighbour search. Release on a semantic back-out (the AI's `abandon` read,
@@ -9634,7 +9703,12 @@ def handle_discovery_turn(
         # Tap (or typed answer) on "want to join one of these?" — read before the signal
         # lane for the same reason: "Join Lp Fit" must not be captured as a fresh signal.
         join_turn = _try_community_join_reply_turn(
-            msg=msg, session_ctx=session_ctx, user_id=user_id, phase=phase
+            msg=msg,
+            session_ctx=session_ctx,
+            user_id=user_id,
+            phase=phase,
+            phone_verified=phone_verified,
+            block_id=resolve_block_id(session_ctx, home_block_id),
         )
         if join_turn is not None:
             reply, ctx, routing, peers = join_turn
@@ -10386,6 +10460,17 @@ def handle_discovery_turn(
                 [],
             )
         _try_assign_home_block(user_jwt, session_ctx=ctx_base, home_block_id=home_block_id)
+        # They verified to join a community: verified and named now, so the join they
+        # asked for is the ending — not a generic welcome.
+        if ctx_base.get("community_join_verify_pending"):
+            held_turn = _try_join_held_after_verify_turn(
+                msg=msg, session_ctx=ctx_base, user_id=user_id
+            )
+            if held_turn is not None:
+                reply, ctx, routing, peers = held_turn
+                ctx["pending_post_verify"] = None
+                ctx["signup_origin"] = None
+                return reply, ctx, routing, peers
         if not peers_requested:
             # They came here for an account, not for matches — end at a neutral welcome
             # (the FE home state), never an unrequested neighbors list. Intent gets

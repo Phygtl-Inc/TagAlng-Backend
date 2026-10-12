@@ -2799,11 +2799,29 @@ _JOIN_REPLY_MAX_LEN = 120
 
 
 def read_join_reply(user_id: str, message: str, session_ctx: dict[str, Any]) -> dict[str, Any] | None:
-    """Read a reply to the "want to join one of these?" offer.
+    """Read a reply to the "want to join one of these?" offer and join.
 
     Returns the join result plus the matched place, or None to fall through to normal
-    routing (the offer is consumed either way — an unrelated next message must not stay
-    armed, per [[ctx-pop-resurrection]] this clears with None, never pop).
+    routing. Matching is `match_join_reply`; this only adds the membership write."""
+    named = match_join_reply(message, session_ctx)
+    if named is None:
+        return None
+    try:
+        result = join_community(user_id, str(named.get("place_id") or ""))
+    except ValueError as exc:
+        logger.warning("community_join_reply_failed place=%s err=%s", named.get("place_id"), exc)
+        return None
+    result["place_name"] = result.get("place_name") or named.get("place_name")
+    return result
+
+
+def match_join_reply(message: str, session_ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """The offered place ({place_id, place_name}) a reply to the join offer accepts, or
+    None to fall through to normal routing. Separate from the join so a guest's accept
+    can be held until they verify instead of writing a nameless membership.
+
+    The offer is consumed either way — an unrelated next message must not stay
+    armed, per [[ctx-pop-resurrection]] this clears with None, never pop.
 
     Matching is deterministic NAME matching, not intent classification: the chips post
     "Join <place>" verbatim, and a typed "join lp fit" names the place too. A bare "yes"
@@ -2831,13 +2849,43 @@ def read_join_reply(user_id: str, message: str, session_ctx: dict[str, Any]) -> 
             return None
     if not wants_join and not _looks_like_only_a_name(text, named):
         return None
+    return named
 
-    try:
-        result = join_community(user_id, str(named.get("place_id") or ""))
-    except ValueError as exc:
-        logger.warning("community_join_reply_failed place=%s err=%s", named.get("place_id"), exc)
+
+# A guest's accept of the join offer, held until they verify (session_ctx key). A
+# nameless guest membership is what mailed members "Someone new joined", so the
+# membership is only written once the account is verified and named.
+JOIN_VERIFY_PENDING = "community_join_verify_pending"
+
+
+def hold_join_for_verify(session_ctx: dict[str, Any], place: dict[str, Any]) -> None:
+    """Park the place a guest accepted; `join_held_after_verify` completes it."""
+    name = str(place.get("place_name") or "").strip()
+    session_ctx[JOIN_VERIFY_PENDING] = {
+        "place_id": str(place.get("place_id") or ""),
+        "place_name": name,
+        # Read by login_carry.describe for the "I still have …" greeting after a login.
+        "label": f"joining {name}" if name else "joining a community",
+    }
+
+
+def join_held_after_verify(user_id: str | None, session_ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """Write the membership a guest accepted before verifying. Consumes the hold (None,
+    never pop — [[ctx-pop-resurrection]]); returns the join result, or None when nothing
+    was held or the place is gone."""
+    held = session_ctx.get(JOIN_VERIFY_PENDING)
+    if not isinstance(held, dict) or not user_id:
         return None
-    result["place_name"] = result.get("place_name") or named.get("place_name")
+    session_ctx[JOIN_VERIFY_PENDING] = None
+    place_id = str(held.get("place_id") or "").strip()
+    if not place_id:
+        return None
+    try:
+        result = join_community(user_id, place_id)
+    except ValueError as exc:
+        logger.warning("community_join_after_verify_failed place=%s err=%s", place_id, exc)
+        return None
+    result["place_name"] = result.get("place_name") or held.get("place_name")
     return result
 
 
@@ -3003,6 +3051,23 @@ def _confirmed_member_count(place_id: str) -> int:
         return 0
 
 
+def _first_name(user_id: str) -> str | None:
+    """First word of users.full_name — the name a joiner gave when nickname is unset."""
+    try:
+        res = (
+            service_client()
+            .table("users")
+            .select("full_name")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        full = str(((res.data or [{}])[0] or {}).get("full_name") or "").strip()
+        return full.split()[0] if full else None
+    except Exception:  # noqa: BLE001 — the mail falls back to its neutral word
+        return None
+
+
 def mail_join_to_members(place_id: str, place_name: str, joiner_id: str) -> int:
     """Email the community's existing confirmed members that somebody new joined.
     Same roster the community's meets mail. Returns how many were mailed."""
@@ -3010,6 +3075,7 @@ def mail_join_to_members(place_id: str, place_name: str, joiner_id: str) -> int:
     from app.notifications import _user_contact, email_html, mail_community_members
 
     _, nickname = _user_contact(joiner_id)
+    nickname = nickname or _first_name(joiner_id)
     members = _confirmed_member_count(place_id)
 
     def render(lang: str | None) -> tuple[str, str]:
