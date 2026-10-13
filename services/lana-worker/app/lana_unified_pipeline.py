@@ -597,29 +597,55 @@ def _community_create_verify_gate(
 def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
     """Is this turn CREATING a community (the community_capture flow)?
 
-    Signal-or-utterance, the same shape `_turn_is_tip_share` uses and for the same
-    reason: the classifier reads every phrasing but one correctly, and the one it misses
-    ("I want to create a community" → sharing.host, 4/4 on dev) is the flow's own front
-    door. The utterance half is narrow enough that no browse can match it — see
-    `looks_like_community_create`.
+    The classifier decides. It was once a keyword-first rescue: "I want to create a
+    community" came back sharing.host 4/4 on dev (2026-09-04), so the matcher was allowed
+    to overrule a confident host pick. Live re-check 2026-10-14: 20/20 create phrasings
+    read sharing.community at ≥0.95, and the rescue had become the bug — it overruled a
+    CORRECT host pick ("create an event for our community"), and the matcher armed the
+    capture on "startup community".
+
+    The utterance half now only speaks when the model did not: no read, an unsure read,
+    or no label. A confident pick of any lane wins, and a model that is asking a
+    clarifying question is never overruled.
     """
     from app.community_capture import looks_like_community_create
 
     text = str(msg or "").strip()
     if not text:
         return False
+    ai_linear: str | None = None
+    ai_conf = 0.0
     if isinstance(slots, dict):
         from app.layer1_intents import (
             enrich_slots,
             intent_confidence_met,
+            normalize_linear_intent,
             slots_linear_intent,
         )
 
+        # The model's OWN read, before any reconciler rewrote or bumped it. Checked
+        # first: a hosting reconciler must not be able to talk a confident create out of it.
+        ai_linear = normalize_linear_intent(slots.get("linear_intent"))
+        ai_conf = float(slots.get("confidence") or 0.0)
+        if ai_linear == "sharing.community" and intent_confidence_met(slots, ai_linear):
+            return True
         enriched = enrich_slots(dict(slots), msg=text)
         linear = slots_linear_intent(enriched)
         if linear == "sharing.community" and intent_confidence_met(enriched, linear):
             return True
-    return looks_like_community_create(text)
+        if str(slots.get("clarify") or "").strip():
+            return False  # the model is asking — a keyword must not force a lane
+        if ai_linear and ai_conf >= 0.6:
+            return False
+    if not looks_like_community_create(text):
+        return False
+    from app.intent_audit import record_override
+
+    record_override(
+        "community_create_keyword",
+        from_label=ai_linear, from_conf=ai_conf, to_label="sharing.community", to_conf=ai_conf,
+    )
+    return True
 
 
 def _tip_share_slots(
@@ -655,15 +681,43 @@ def _tip_share_slots(
 def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     """Is this turn SHARING a recommendation (the typed capture, C-4-RECO)?
 
-    The same condition discovery_route uses — signal-or-utterance, no confidence bar. Two
-    callers need it and they must agree: the policy gate (to let the turn through) and the
-    capture's own entry (to pick it up). They disagreed once and the turn reached neither.
-    """
-    from app.layer1_intents import enrich_slots, slots_indicate_tip_share_signal, utterance_indicates_tip_share
+    Signal-or-utterance. Two callers need it and they must agree: the policy gate (to let
+    the turn through) and the capture's own entry (to pick it up). They disagreed once and
+    the turn reached neither.
 
-    if isinstance(slots, dict) and slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg)):
-        return True
-    return utterance_indicates_tip_share(msg)
+    The utterance half only speaks when the model did not (no read, unsure, no label) —
+    the same rule `_turn_is_community_create` follows — with ONE kept rescue: a confident
+    looking.tip. Seek-vs-share is the documented unstable call ("I know a really reliable
+    plumber" read as a seek, dev 2026-09-04; see TestFirstPersonOfferIsAShare), and the
+    share matcher is first-person and negation-aware. Live 2026-10-14 the model got it
+    right 24/24, so this rescue is the next to retire once the intent audit shows it idle.
+    """
+    from app.layer1_intents import (
+        enrich_slots,
+        normalize_linear_intent,
+        slots_indicate_tip_share_signal,
+        utterance_indicates_tip_share,
+    )
+
+    if isinstance(slots, dict):
+        if slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg)):
+            return True
+        if str(slots.get("clarify") or "").strip():
+            return False  # the model is asking — a keyword must not force a lane
+        ai_linear = normalize_linear_intent(slots.get("linear_intent"))
+        if ai_linear and ai_linear != "looking.tip" and float(slots.get("confidence") or 0.0) >= 0.6:
+            return False
+    if not utterance_indicates_tip_share(msg):
+        return False
+    from app.intent_audit import record_override
+
+    slots = slots if isinstance(slots, dict) else {}
+    record_override(
+        "tip_share_keyword",
+        from_label=slots.get("linear_intent"), from_conf=slots.get("confidence"),
+        to_label="sharing.tip", to_conf=slots.get("confidence"),
+    )
+    return True
 
 
 def _turn_is_engine_action(
@@ -1644,6 +1698,78 @@ def _event_published_reply(reply: str, draft: dict[str, Any], *, cta_driven: boo
 
 
 def run_lana_unified_pipeline(
+    *,
+    user_id: str,
+    session_id: str,
+    history: list[dict[str, Any]],
+    user_message: str,
+    session_ctx: dict[str, Any],
+    user_jwt: str,
+    phone_verified: bool,
+    home_block_id: str | None,
+    is_anonymous: bool,
+    persisted_core: dict[str, Any] | None = None,
+    timer: TurnTimer | None = None,
+    use_orchestrator: bool = True,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Every Lana turn, plus one `intent_decision` audit row when LANA_INTENT_AUDIT is on.
+
+    Logged HERE rather than at each return: the pipeline has dozens of early returns, and
+    the ones that never logged are exactly the turns the accuracy baseline was missing."""
+    kwargs = dict(
+        user_id=user_id,
+        session_id=session_id,
+        history=history,
+        user_message=user_message,
+        session_ctx=session_ctx,
+        user_jwt=user_jwt,
+        phone_verified=phone_verified,
+        home_block_id=home_block_id,
+        is_anonymous=is_anonymous,
+        persisted_core=persisted_core,
+        timer=timer,
+        use_orchestrator=use_orchestrator,
+    )
+    from app import intent_audit
+
+    if not intent_audit.intent_audit_enabled():
+        return _run_lana_unified_pipeline(**kwargs)
+
+    import time
+
+    routing_phase_in = str(session_ctx.get("routing_phase") or "")
+    started = time.monotonic()
+    token = intent_audit.begin_turn()
+    result = None
+    error: str | None = None
+    try:
+        result = _run_lana_unified_pipeline(**kwargs)
+        return result
+    except Exception as exc:
+        error = type(exc).__name__
+        raise
+    finally:
+        overrides = intent_audit.end_turn(token)
+        try:
+            ctx_out = result[2] if result and isinstance(result[2], dict) else session_ctx
+            intent_audit.log_intent_decision(
+                session_id=session_id,
+                user_id=user_id,
+                user_message=user_message,
+                record=intent_audit.build_record(
+                    session_ctx=ctx_out,
+                    user_message=user_message,
+                    routing_phase_in=routing_phase_in,
+                    overrides=overrides,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    error=error,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — observability never breaks a turn
+            logging.getLogger(__name__).exception("intent_audit_failed")
+
+
+def _run_lana_unified_pipeline(
     *,
     user_id: str,
     session_id: str,

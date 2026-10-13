@@ -467,7 +467,7 @@ class TestNudgeBeatsAPendingOffer(unittest.TestCase):
 
         from app import lana_unified_pipeline as pipe
 
-        src = inspect.getsource(pipe.run_lana_unified_pipeline)
+        src = inspect.getsource(pipe._run_lana_unified_pipeline)
         guard = src.index('if session_ctx.get("nudge_peer_user_id")')
         read = src.index('rapport = session_ctx.get("rapport_answer")')
         self.assertLess(guard, read)

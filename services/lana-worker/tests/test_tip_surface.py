@@ -16,8 +16,10 @@ class TestTipSurface(unittest.TestCase):
         self.assertTrue(utterance_indicates_tip_share("dr smith is a great doctor"))
 
     def test_enrich_slots_doctor_becomes_tip_share(self) -> None:
+        # Unsure host read (0.5): the share matcher fills in. A CONFIDENT host read now wins
+        # (AI-first, 2026-10-14) — live, the model reads this sentence as sharing.tip itself.
         slots = enrich_slots(
-            {"goal": "save_signal", "signal_intent": "host_meet", "confidence": 0.9},
+            {"goal": "save_signal", "signal_intent": "host_meet", "confidence": 0.5},
             msg="dr smith is a great doctor",
         )
         self.assertEqual(slots.get("signal_intent"), "tip_share")

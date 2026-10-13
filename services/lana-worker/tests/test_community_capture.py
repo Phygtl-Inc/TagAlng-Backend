@@ -351,20 +351,13 @@ def test_cancel_drops_the_draft(monkeypatch: Any) -> None:
     assert not ctx.get("community_create_active")
 
 
-def test_create_is_not_swallowed_by_the_hosting_lane() -> None:
-    """dev 2026-09-04: every create utterance came back sharing.host — the hosting rule
-    claims a bare create by name ("a bare 'I want to create an event' is STILL
-    host_meet"). The prompt was fixed for the phrasings that carry a place; the bare one
-    still misroutes 4/4, so the structural matcher is what makes the front door
-    deterministic."""
+def test_the_classifier_owns_the_create_front_door() -> None:
+    """dev 2026-09-04 every create utterance came back sharing.host, and a keyword rescue
+    overruled it. Live re-check 2026-10-14: 20/20 create phrasings read sharing.community
+    at >=0.95 — so the model's pick arms it, and the matcher no longer overrules a host."""
     from app.lana_unified_pipeline import _turn_is_community_create
 
-    host_misread = {
-        "linear_intent": "sharing.host",
-        "signal_intent": "host_meet",
-        "goal": "save_signal",
-        "confidence": 0.9,
-    }
+    create = {"linear_intent": "sharing.community", "goal": "create_community", "confidence": 0.95}
     for text in (
         "i want to create a community",
         "start a community for our bakery",
@@ -373,7 +366,25 @@ def test_create_is_not_swallowed_by_the_hosting_lane() -> None:
         "launch a community",
     ):
         assert cc.looks_like_community_create(text), text
-        assert _turn_is_community_create(host_misread, text), text
+        assert _turn_is_community_create(create, text), text
+
+
+def test_a_confident_host_pick_is_not_overruled() -> None:
+    """The retired rescue's own bug: the words match a create, the model correctly read
+    a hosted gathering (live 2026-10-14: sharing.host 0.92)."""
+    from app.lana_unified_pipeline import _turn_is_community_create
+
+    host = {"linear_intent": "sharing.host", "goal": "save_signal", "confidence": 0.92}
+    text = "create an event for our community"
+    assert cc.looks_like_community_create(text)
+    assert not _turn_is_community_create(host, text)
+
+
+def test_a_reconciler_cannot_talk_a_confident_create_out_of_it() -> None:
+    from app.lana_unified_pipeline import _turn_is_community_create
+
+    create = {"linear_intent": "sharing.community", "goal": "create_community", "confidence": 0.95}
+    assert _turn_is_community_create(create, "I want to host a community for our picnic group saturday")
 
 
 def test_browsing_communities_is_never_a_create() -> None:
@@ -397,6 +408,49 @@ def test_browsing_communities_is_never_a_create() -> None:
     ):
         assert not cc.looks_like_community_create(text), text
         assert not _turn_is_community_create(browse, text), text
+
+
+def test_a_word_that_only_starts_with_a_create_verb_is_not_one() -> None:
+    """dev 2026-10-13: "any recommendations for a startup community?" armed the capture —
+    `start\\w*` matched "startup". Same for "creative"."""
+    for text in (
+        "any recommendations for a startup community?",
+        "any creative communities near me?",
+    ):
+        assert not cc.looks_like_community_create(text), text
+    for text in ("starting a community for runners", "we started a community", "creating a community"):
+        assert cc.looks_like_community_create(text), text
+
+
+def test_a_confident_other_lane_beats_the_keyword() -> None:
+    """The keyword rescues the one known misread (sharing.host); it never overrides a
+    confident pick of any other lane, even when its words match."""
+    from app.lana_unified_pipeline import _turn_is_community_create
+
+    for text, linear in (
+        ("are there open communities I can join?", "discovery.communities"),
+        ("how do I make friends in my community", "discovery.find_peers"),
+        ("can you recommend how to start a community garden plot", "looking.tip"),
+    ):
+        assert cc.looks_like_community_create(text), text  # the words alone still match
+        slots = {"linear_intent": linear, "confidence": 0.9}
+        assert not _turn_is_community_create(slots, text), text
+
+
+def test_the_keyword_still_rescues_when_the_model_is_unsure() -> None:
+    from app.lana_unified_pipeline import _turn_is_community_create
+
+    unsure = {"linear_intent": "discovery.communities", "confidence": 0.4}
+    assert _turn_is_community_create(unsure, "i want to create a community")
+    # No classifier read at all (it failed) — the keyword is the only signal left.
+    assert _turn_is_community_create(None, "i want to create a community")
+
+
+def test_a_clarifying_model_is_not_overruled() -> None:
+    from app.lana_unified_pipeline import _turn_is_community_create
+
+    asking = {"linear_intent": "", "confidence": 0.3, "clarify": "Start one, or join one?"}
+    assert not _turn_is_community_create(asking, "start a community thing?")
 
 
 def test_the_classifier_alone_can_arm_it() -> None:
