@@ -556,6 +556,45 @@ def slots_indicate_hosting_signal(slots: dict[str, Any]) -> bool:
     return linear == "sharing.host"
 
 
+# At or above this the model has picked a lane, and no keyword match may change it.
+AI_CONFIDENT = 0.6
+
+
+def ai_verdict(slots: dict[str, Any]) -> tuple[str | None, float]:
+    """The model's own (linear_intent, confidence), before any reconciler touched them.
+
+    discovery_slots freezes these as ai_linear_intent / ai_confidence; slots built
+    elsewhere (tests, stubs) fall back to the live fields."""
+    if "ai_confidence" in slots:
+        return (
+            normalize_linear_intent(slots.get("ai_linear_intent")),
+            float(slots.get("ai_confidence") or 0.0),
+        )
+    return normalize_linear_intent(slots.get("linear_intent")), float(slots.get("confidence", 0.0))
+
+
+def keyword_may_decide(slots: dict[str, Any] | None) -> bool:
+    """May a keyword match pick this turn's lane? Only when the model did not: no
+    confident label and no clarifying question. Every keyword-routed decision goes
+    through here — tests/test_routing_keyword_gate.py fails on a new caller that skips it."""
+    if not isinstance(slots, dict):
+        return True
+    if str(slots.get("clarify") or "").strip():
+        return False
+    linear, conf = ai_verdict(slots)
+    return not (linear and conf >= AI_CONFIDENT)
+
+
+def _mark_rescued(out: dict[str, Any], prev_linear: str | None, *, by_keyword: bool) -> None:
+    """Record who rewrote the lane — only when the label actually changed, so a later
+    pass that sees the label an earlier one wrote leaves the mark alone. The confidence
+    is left as the model reported it: a keyword match is not evidence the model was
+    sure, and a faked score would carry the turn past the clarify threshold."""
+    if prev_linear == out.get("linear_intent"):
+        return
+    out["decided_by"] = "keyword" if by_keyword else "ai_signal"
+
+
 # Intents the model owns outright — a regex signal reconciler must NEVER reclassify
 # these as a swap/tip/host. ("I am a teacher" = identity, not a request for a teacher.)
 _AI_OWNED_PREFIXES = ("identity.", "settings.", "help.", "social.", "tier.", "auth.", "system.")
@@ -577,6 +616,14 @@ def _reconcile_defer_to_llm(
     """
     linear = normalize_linear_intent(out.get("linear_intent"))
     conf = float(out.get("confidence", 0.0))
+
+    # A match on the words alone never outranks the model: it may only fill in a turn
+    # the model left unclassified (or classified as this very lane). "any recommendations
+    # for a startup community?" style misfires come from exactly this override.
+    if utterance_match:
+        ai_linear, _ = ai_verdict(out)
+        if ai_linear != target_linear and not keyword_may_decide(out):
+            return True
 
     # A confident pick of an AI-owned intent (identity/settings/help/social/tier/auth)
     # always wins — even over a "high-precision" regex utterance match. This is the
@@ -632,25 +679,32 @@ def _reconcile_defer_to_llm(
         "activities",
     ):
         return False
-    return linear in LOOKING_SHARING_INTENTS
+    # Any other confident pick stands. This used to be `linear in LOOKING_SHARING_INTENTS`,
+    # which left every label added later unprotected: sharing.community at 0.95 ("i want
+    # to create a community") was rewritten to sharing.host by the model's own stray
+    # host_meet signal — the "4/4 hosting misread" that looks_like_community_create was
+    # then added to paper over.
+    return True
 
 
 def reconcile_tip_share_signal(out: dict[str, Any], *, msg: str) -> None:
     """Recommendation share — wins over misclassified hosting or peer discovery."""
     tip_utterance = utterance_indicates_tip_share(msg)
-    tip = tip_utterance or slots_indicate_tip_share_signal(out)
-    if not tip:
+    tip_slots = slots_indicate_tip_share_signal(out)
+    if not (tip_utterance or tip_slots):
         return
-    if _reconcile_defer_to_llm(out, "sharing.tip", utterance_match=tip_utterance):
+    by_keyword = tip_utterance and not tip_slots
+    if _reconcile_defer_to_llm(out, "sharing.tip", utterance_match=by_keyword):
         return
     if utterance_indicates_hosting_plan(msg) and not utterance_indicates_tip_share(msg):
         return
+    prev_linear = normalize_linear_intent(out.get("linear_intent"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "tip_share"
     out["linear_intent"] = "sharing.tip"
-    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _mark_rescued(out, prev_linear, by_keyword=by_keyword)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -661,17 +715,19 @@ def reconcile_tip_seek_signal(out: dict[str, Any], *, msg: str) -> None:
     if utterance_indicates_tip_share(msg):
         return
     tip_utterance = utterance_indicates_tip_seek(msg)
-    tip = tip_utterance or slots_indicate_tip_seek_signal(out)
-    if not tip:
+    tip_slots = slots_indicate_tip_seek_signal(out)
+    if not (tip_utterance or tip_slots):
         return
-    if _reconcile_defer_to_llm(out, "looking.tip", utterance_match=tip_utterance):
+    by_keyword = tip_utterance and not tip_slots
+    if _reconcile_defer_to_llm(out, "looking.tip", utterance_match=by_keyword):
         return
+    prev_linear = normalize_linear_intent(out.get("linear_intent"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "tip_seek"
     out["linear_intent"] = "looking.tip"
-    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _mark_rescued(out, prev_linear, by_keyword=by_keyword)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -700,18 +756,21 @@ def reconcile_swap_seek_signal(out: dict[str, Any], *, msg: str) -> None:
         return
     # "looking for stroller walk buddies" is a MEET, not a swap — the swap-seek
     # utterance pattern (verb + any item noun) is too blunt to override a
-    # confident different-lane LLM pick, so defer without the utterance bypass.
-    if _reconcile_defer_to_llm(out, "looking.swap"):
+    # confident different-lane LLM pick.
+    swap_utterance = utterance_indicates_swap_seek(msg)
+    swap_slots = slots_indicate_swap_seek_signal(out)
+    if not (swap_utterance or swap_slots):
         return
-    swap = utterance_indicates_swap_seek(msg) or slots_indicate_swap_seek_signal(out)
-    if not swap:
+    by_keyword = swap_utterance and not swap_slots
+    if _reconcile_defer_to_llm(out, "looking.swap", utterance_match=by_keyword):
         return
+    prev_linear = normalize_linear_intent(out.get("linear_intent"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "swap_seek"
     out["linear_intent"] = "looking.swap"
-    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _mark_rescued(out, prev_linear, by_keyword=by_keyword)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -722,19 +781,21 @@ def reconcile_hosting_peer_slot_conflict(out: dict[str, Any], *, msg: str) -> No
     if utterance_indicates_tip_share(msg) or slots_indicate_tip_share_signal(out):
         return
     hosting_utterance = utterance_indicates_hosting_plan(msg)
-    hosting = slots_indicate_hosting_signal(out) or hosting_utterance
-    if not hosting:
+    hosting_slots = slots_indicate_hosting_signal(out)
+    if not (hosting_slots or hosting_utterance):
         return
+    by_keyword = hosting_utterance and not hosting_slots
     if _reconcile_defer_to_llm(
-        out, "sharing.host", utterance_match=hosting_utterance, protect_discovery=True
+        out, "sharing.host", utterance_match=by_keyword, protect_discovery=True
     ):
         return
+    prev_linear = normalize_linear_intent(out.get("linear_intent"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "host_meet"
     out["linear_intent"] = "sharing.host"
-    out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _mark_rescued(out, prev_linear, by_keyword=by_keyword)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -770,7 +831,7 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
         _apply_discovery_linear_slots(out, ai_linear, msg=msg)
     elif phrase:
         out["linear_intent"] = phrase
-        out["confidence"] = max(ai_conf, 0.85)
+        out["decided_by"] = "keyword"
         _apply_discovery_linear_slots(out, phrase, msg=msg)
     elif ai_linear:
         out["linear_intent"] = ai_linear

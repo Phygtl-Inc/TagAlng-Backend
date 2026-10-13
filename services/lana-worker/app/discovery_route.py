@@ -184,7 +184,6 @@ from app.layer1_intents import (
     slots_indicate_hosting_signal,
     slots_indicate_tip_share_signal,
     slots_linear_intent,
-    utterance_indicates_tip_share,
     utterance_indicates_tip_seek,
     utterance_indicates_swap_seek,
 )
@@ -5999,7 +5998,7 @@ def _try_signal_seek_early_turn(
     seek_slots = enrich_slots(dict(slots), msg=msg)
     if _wants_block_log(msg, seek_slots):
         return None
-    if slots_indicate_tip_share_signal(seek_slots) or utterance_indicates_tip_share(msg):
+    if slots_indicate_tip_share_signal(seek_slots):
         return None
     if slots_indicate_hosting_signal(seek_slots):
         return None
@@ -9076,7 +9075,9 @@ def handle_discovery_turn(
 
     if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
         tip_slots = enrich_slots(dict(slots), msg=msg)
-        if slots_indicate_tip_share_signal(tip_slots) or utterance_indicates_tip_share(msg):
+        # enrich_slots already folded in the tip-share keyword rule, gated on the model
+        # being unsure — OR-ing the raw match here would let it outrank a confident model.
+        if slots_indicate_tip_share_signal(tip_slots):
             tip_turn = _try_signal_lane_turn(
                 msg=msg,
                 slots=tip_slots,

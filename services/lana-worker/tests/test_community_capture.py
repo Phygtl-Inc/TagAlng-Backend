@@ -352,18 +352,17 @@ def test_cancel_drops_the_draft(monkeypatch: Any) -> None:
 
 
 def test_create_is_not_swallowed_by_the_hosting_lane() -> None:
-    """dev 2026-09-04: every create utterance came back sharing.host — the hosting rule
-    claims a bare create by name ("a bare 'I want to create an event' is STILL
-    host_meet"). The prompt was fixed for the phrasings that carry a place; the bare one
-    still misroutes 4/4, so the structural matcher is what makes the front door
-    deterministic."""
+    """dev 2026-09-04: every create utterance came back sharing.host. It was never the
+    model — gpt-4.1 answers sharing.community at 0.92-0.98 for all five (2026-10-13). Its
+    stray host_meet signal field let reconcile_hosting_peer_slot_conflict rewrite the
+    label, because sharing.community was missing from the reconciler's protected set."""
+    from app.layer1_intents import enrich_slots
     from app.lana_unified_pipeline import _turn_is_community_create
 
-    host_misread = {
-        "linear_intent": "sharing.host",
+    model_read = {
+        "linear_intent": "sharing.community",
         "signal_intent": "host_meet",
-        "goal": "save_signal",
-        "confidence": 0.9,
+        "confidence": 0.95,
     }
     for text in (
         "i want to create a community",
@@ -372,8 +371,8 @@ def test_create_is_not_swallowed_by_the_hosting_lane() -> None:
         "can we make it a community?",
         "launch a community",
     ):
-        assert cc.looks_like_community_create(text), text
-        assert _turn_is_community_create(host_misread, text), text
+        assert enrich_slots(dict(model_read), msg=text)["linear_intent"] == "sharing.community", text
+        assert _turn_is_community_create(dict(model_read), text), text
 
 
 def test_browsing_communities_is_never_a_create() -> None:

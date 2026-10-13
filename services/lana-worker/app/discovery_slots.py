@@ -1012,6 +1012,10 @@ def ai_parse_discovery_turn(
             # that omits it leaves the turn exactly where it is today.
             "explicit_request": bool(raw.get("explicit_request")),
             "confidence": float(raw.get("confidence", 0.0)),
+            # The model's own verdict, frozen before enrich_slots can rewrite linear_intent
+            # or confidence — the per-turn routing log reads these to show who decided.
+            "ai_linear_intent": linear_intent,
+            "ai_confidence": float(raw.get("confidence", 0.0)),
             # AI-authored thinking-status stage, streamed live to the client.
             "progress": normalize_progress(raw.get("progress"), max_stages=1),
         }, msg=text)

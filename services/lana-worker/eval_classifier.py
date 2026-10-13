@@ -1,7 +1,10 @@
 """Lana discovery-classifier accuracy eval.
 
 Runs a curated set of messages through the LIVE classifier (the same call the app
-makes on every turn) and scores the resolved lane against an expected answer. This is
+makes on every turn) and scores the lane Lana actually takes — the classifier's read AFTER
+the keyword rules and the pipeline's own capture checks (tip share, create community) —
+against an expected answer. Each row also shows the model's raw lane, so a case the model
+got right and code then overrode is visible as such. This is
 the measurement tool for tuning the classifier prompt / few-shots / model tier — NOT a
 unit test (it needs a configured LLM provider and makes real API calls).
 
@@ -43,6 +46,14 @@ def resolve_lane(s: dict) -> str:
     sig = str(s.get("signal_intent") or "")
     if goal == "unsafe" or linear == "system.unsafe":
         return "unsafe"
+    if goal == "crisis" or linear == "system.crisis":
+        return "crisis"
+    if goal == "medical" or linear == "system.medical":
+        return "medical"
+    if linear == "sharing.community":
+        return "create_community"
+    if linear == "discovery.communities":
+        return "communities"
     if goal == "out_of_scope" or linear == "system.out_of_scope":
         return "out_of_scope"
     if sig == "host_meet" or linear == "sharing.host":
@@ -66,6 +77,33 @@ def resolve_lane(s: dict) -> str:
     if goal == "chat":
         return "chat"
     return goal or "none"
+
+
+def final_lane(slots: dict, msg: str) -> str:
+    """The lane Lana takes: the pipeline's capture checks run before the route layer, in
+    this order (lana_unified_pipeline: tip-share capture, then create-community)."""
+    from app.lana_unified_pipeline import _turn_is_community_create, _turn_is_tip_share
+
+    if resolve_lane(slots) in ("unsafe", "crisis", "medical", "out_of_scope", "clarify"):
+        return resolve_lane(slots)
+    if _turn_is_tip_share(dict(slots), msg):
+        return "tip_share"
+    if _turn_is_community_create(dict(slots), msg):
+        return "create_community"
+    return resolve_lane(slots)
+
+
+def ai_lane(slots: dict) -> str:
+    """The model's own lane, from the verdict frozen before any reconciler ran (falls back
+    to the live fields on a build that does not freeze it)."""
+    if "ai_confidence" not in slots:
+        return resolve_lane(slots)
+    raw = {
+        "linear_intent": slots.get("ai_linear_intent"),
+        "clarify": slots.get("clarify"),
+        "goal": None if slots.get("ai_linear_intent") else slots.get("goal"),
+    }
+    return resolve_lane(raw)
 
 
 # ---- The eval set ----------------------------------------------------------------------
@@ -182,6 +220,25 @@ CASES: list[tuple[str, str, set | str, str]] = [
     ("no_clarify", "find me a jogging partner", {"seek_meet"}, "clear -> act, NOT clarify"),
     ("no_clarify", "show me events near me", {"find_activities"}, "clear -> act, NOT clarify"),
     ("no_clarify", "order me a pizza", {"out_of_scope"}, "clear errand -> decline, NOT clarify"),
+
+    # ── regressions: past bugs where a keyword (or a reconciler) overrode the model ──
+    ("regression", "any recommendations for a startup community?", {"tip_seek", "communities", "clarify"}, "'start' in 'startup' opened community creation"),
+    ("regression", "i want to create a community", {"create_community"}, "hosting reconciler rewrote a 0.95 sharing.community"),
+    ("regression", "start a community for our bakery", {"create_community"}, "create, with a place"),
+    ("regression", "I want to recommend Bella Vita, the fig and gorgonzola pizza is incredible", {"tip_share"}, "seek regex turned a share into a Google search"),
+    ("regression", "I know a really reliable plumber", {"tip_share"}, "'know a' read as a seek"),
+    ("regression", "can you recommend a pizza place", {"tip_seek"}, "seek, same nouns as the share above"),
+    ("regression", "show me quiet spots", {"tip_seek", "clarify"}, "place-seek misrouted to the events browse"),
+    ("regression", "I am a teacher", {"identity", "chat"}, "self-description, not a request for a teacher"),
+    ("regression", "I like badminton", {"identity", "chat", "clarify"}, "interest, not an events browse"),
+    ("regression", "wanna find a fun event this weekend", {"find_activities", "clarify"}, "hosting regex (want + event noun) hijacked a browse"),
+    ("regression", "looking for stroller walk buddies", {"seek_meet", "find_peers"}, "swap regex (verb + item noun) read a meet as a swap"),
+    ("regression", "looking for a used crib", {"swap_seek"}, "real swap seek"),
+    ("regression", "Is there any good doctor in our block", {"tip_seek"}, "doctor ask shown a peer preview"),
+    ("regression", "I need a doctor for my kid", {"tip_seek"}, "doctor ask"),
+    ("regression", "show me communities around me", {"communities"}, "browse, carries no create verb"),
+    ("regression", "I cry every night and I don't know what to do anymore", {"crisis"}, "distress got a ZIP ask (old regex crisis rail)"),
+    ("regression", "my chest hurts, what should I take?", {"medical"}, "medical rail"),
 ]
 
 
@@ -212,14 +269,19 @@ def main() -> int:
     by_cat: dict[str, list[int]] = {}
     failures: list[tuple] = []
     passed = 0
+    ai_passed = 0
+    overridden = 0  # cases where code changed the model's lane
 
     for cat, msg, expect, note in cases:
         want = _normalize(expect)
         slots = ai_parse_discovery_turn(
             msg, routing_phase="listening", history=None, has_block=False, has_identity=False
         )
-        got = resolve_lane(slots)
+        got = final_lane(slots, msg)
+        raw = ai_lane(slots)
         ok = got in want
+        ai_passed += raw in want
+        overridden += raw != got
         by_cat.setdefault(cat, [0, 0])
         by_cat[cat][1] += 1
         if ok:
@@ -229,7 +291,8 @@ def main() -> int:
             failures.append((cat, msg, want, got, note, slots))
         if not only_fails:
             mark = "PASS" if ok else "FAIL"
-            print(f"  [{mark}] ({cat}) {msg[:60]:<60} -> {got}   want {sorted(want)}")
+            via = "" if raw == got else f"  (model said {raw})"
+            print(f"  [{mark}] ({cat}) {msg[:60]:<60} -> {got}{via}   want {sorted(want)}")
 
     total = len(cases)
     print("\n── by category ──")
@@ -241,7 +304,7 @@ def main() -> int:
         print("\n── failures ──")
         for cat, msg, want, got, note, slots in failures:
             print(f"  ({cat}) {msg}")
-            print(f"      got={got}  want={sorted(want)}  | {note}")
+            print(f"      got={got}  model={ai_lane(slots)}  want={sorted(want)}  | {note}")
             print(
                 f"      slots: goal={slots.get('goal')} linear={slots.get('linear_intent')} "
                 f"signal={slots.get('signal_intent')} clarify={slots.get('clarify')} "
@@ -249,7 +312,9 @@ def main() -> int:
             )
 
     pct = (passed / total * 100) if total else 0.0
-    print(f"\n=== {passed}/{total} passed ({pct:.0f}%) ===")
+    ai_pct = (ai_passed / total * 100) if total else 0.0
+    print(f"\n=== {passed}/{total} passed ({pct:.0f}%) — what Lana does ===")
+    print(f"=== {ai_passed}/{total} model alone ({ai_pct:.0f}%), code changed the lane on {overridden} ===")
     return 0
 
 

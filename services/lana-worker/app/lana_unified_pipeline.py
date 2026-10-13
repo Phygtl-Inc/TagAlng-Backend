@@ -604,6 +604,7 @@ def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
     `looks_like_community_create`.
     """
     from app.community_capture import looks_like_community_create
+    from app.layer1_intents import keyword_may_decide
 
     text = str(msg or "").strip()
     if not text:
@@ -619,7 +620,13 @@ def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
         linear = slots_linear_intent(enriched)
         if linear == "sharing.community" and intent_confidence_met(enriched, linear):
             return True
-    return looks_like_community_create(text)
+    # The words alone only count when the model did not pick a lane — "any
+    # recommendations for a startup community?" matches the create pattern too.
+    if not (keyword_may_decide(slots) and looks_like_community_create(text)):
+        return False
+    if isinstance(slots, dict):
+        slots["decided_by"] = "keyword"  # the cached read — the routing log picks it up
+    return True
 
 
 def _tip_share_slots(
@@ -655,14 +662,15 @@ def _tip_share_slots(
 def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     """Is this turn SHARING a recommendation (the typed capture, C-4-RECO)?
 
-    The same condition discovery_route uses — signal-or-utterance, no confidence bar. Two
-    callers need it and they must agree: the policy gate (to let the turn through) and the
-    capture's own entry (to pick it up). They disagreed once and the turn reached neither.
+    The same condition discovery_route uses. Two callers need it and they must agree: the
+    policy gate (to let the turn through) and the capture's own entry (to pick it up). They
+    disagreed once and the turn reached neither. enrich_slots folds in the tip-share keyword
+    rule only when the model was unsure; with no classifier read at all, the words decide.
     """
     from app.layer1_intents import enrich_slots, slots_indicate_tip_share_signal, utterance_indicates_tip_share
 
-    if isinstance(slots, dict) and slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg)):
-        return True
+    if isinstance(slots, dict):
+        return slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg))
     return utterance_indicates_tip_share(msg)
 
 

@@ -278,21 +278,28 @@ class TestFirstPersonOfferIsAShare(unittest.TestCase):
 
     def test_the_seek_engine_declines_the_turn(self) -> None:
         """The routing consequence: `_try_signal_seek_early_turn` bails on a share, so the
-        capture picks it up even when the classifier says looking.tip."""
+        capture picks it up — from the model's sharing.tip (0.98 on gpt-4.1, 2026-10-13),
+        or from the keyword when the model was unsure. A CONFIDENT looking.tip now stands:
+        a keyword never outranks the model."""
         from app.discovery_route import _try_signal_seek_early_turn
         from app.lana_unified_pipeline import _turn_is_tip_share
 
         msg = "I know a really reliable plumber"
-        misread = {"linear_intent": "looking.tip", "signal_intent": "tip_seek",
-                   "goal": "save_signal", "confidence": 0.9}
-        self.assertTrue(_turn_is_tip_share(misread, msg), "the capture has to claim it")
-        self.assertIsNone(
-            _try_signal_seek_early_turn(
-                msg=msg, slots=misread, session_ctx={}, user_jwt="", phone_verified=True,
-                home_block_id="b1", phase="listening",
-            ),
-            "the seek engine must not answer the user's own recommendation",
-        )
+        for read in (
+            {"linear_intent": "sharing.tip", "signal_intent": "tip_share",
+             "goal": "save_signal", "confidence": 0.98},
+            {"linear_intent": "looking.tip", "signal_intent": "tip_seek",
+             "goal": "save_signal", "confidence": 0.4},
+        ):
+            with self.subTest(read=read):
+                self.assertTrue(_turn_is_tip_share(read, msg), "the capture has to claim it")
+                self.assertIsNone(
+                    _try_signal_seek_early_turn(
+                        msg=msg, slots=read, session_ctx={}, user_jwt="", phone_verified=True,
+                        home_block_id="b1", phase="listening",
+                    ),
+                    "the seek engine must not answer the user's own recommendation",
+                )
 
 
 class TestBareServiceNounIsNotASeek(unittest.TestCase):

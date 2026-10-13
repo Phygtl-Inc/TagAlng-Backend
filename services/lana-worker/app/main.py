@@ -74,6 +74,7 @@ from app.lang_pref import (
     seed_session_language,
 )
 from app.lana_unified_pipeline import run_lana_unified_pipeline
+from app.routing_log import log_routing_turn
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
 from app.tip_share import looks_like_tip_share_entry
@@ -2221,6 +2222,7 @@ def _run_lana_message(
         orch_used = False
         user_jwt = _bearer_token(authorization)
         if purpose == "lana":
+            _prev_routing = session_ctx_in.get("last_routing")
             reply, status, session_ctx, ui_raw, draft_raw = run_lana_unified_pipeline(
                 user_id=auth.user_id,
                 session_id=session_id,
@@ -2253,6 +2255,16 @@ def _run_lana_message(
                 session_ctx=session_ctx,
                 reply=reply,
                 is_anonymous=auth.is_anonymous,
+            )
+            # What the AI said vs what Lana did, one row per turn — see app/routing_log.py.
+            log_routing_turn(
+                session_id=session_id,
+                user_id=auth.user_id,
+                ctx=session_ctx,
+                user_message=body.message,
+                reply=reply,
+                intent_hint=body.intent_hint,
+                prev_routing=_prev_routing,
             )
         elif use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(
