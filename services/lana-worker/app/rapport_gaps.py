@@ -512,7 +512,7 @@ def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
             .table("rapport_gaps")
             .select(
                 "gap_row_id, gap_id, question, covers_concept, parent_bucket, why_frame, "
-                "place_ref, affiliation_ref, grounding_options"
+                "place_ref, affiliation_ref, grounding_options, deepens_concept"
             )
             .eq("gap_row_id", gap_row_id)
             .limit(1)
@@ -522,6 +522,62 @@ def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
     except Exception:
         logger.exception("rapport: get_gap_row failed for %s", gap_row_id)
         return None
+
+
+def thread_claim(user_id: str, concept: str | None) -> dict[str, Any] | None:
+    """The live claim a question deepens: {id, concept, label, details}, or None.
+
+    A tile answer is ABOUT this thread whether or not the extractor finds a new fact in
+    it. "Pausa in San Mateo, CA" answering "which pizzeria do you get your fig pizza
+    from?" states nothing about the user on its own, so the extractor saved nothing, the
+    gap closed with no link, and the place he named was lost (todiba, 2026-10-12).
+    """
+    concept = str(concept or "").strip()
+    if not user_id or not concept:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("id, concept, label, details")
+            .eq("user_id", user_id)
+            .eq("concept", concept)
+            .is_("dismissed_at", "null")
+            .limit(1)
+            .execute()
+        )
+        return (res.data or [None])[0]
+    except Exception:
+        logger.exception("rapport: thread_claim lookup failed for %s", user_id)
+        return None
+
+
+def thread_already_asked(user_id: str, concept: str | None) -> bool:
+    """True when this thread already has a live or answered question.
+
+    One question per thread is the coverage rule (rapport_uncovered_claims). The
+    extractor's per-message follow-up bypassed it, so a thread answered in August could
+    be asked again whenever the user mentioned it in passing. On a read error, answer
+    False — the follow-up opens exactly as it did before this check existed.
+    """
+    concept = str(concept or "").strip()
+    if not user_id or not concept:
+        return False
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id")
+            .eq("user_id", user_id)
+            .eq("deepens_concept", concept)
+            .in_("status", ["open", "asked", "answered"])
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        logger.exception("rapport: thread_already_asked failed for %s", user_id)
+        return False
 
 
 def mark_answered(gap_row_id: str, answer_claim_id: str | None = None) -> None:

@@ -762,7 +762,9 @@ class TestFollowupYieldsToGrounding(unittest.TestCase):
 
         import app.claims_persist as cp
 
-        claim = SimpleNamespace(bucket="activity", confidence=0.9, label="Book club member")
+        claim = SimpleNamespace(
+            bucket="activity", confidence=0.9, label="Book club member", concept="book_club_member"
+        )
         with patch.object(cp, "persist_nickname_if_stated", return_value=None), \
              patch.object(cp, "should_extract_claims_from_message", return_value=True), \
              patch.object(cp, "fetch_active_claim_threads", return_value=[]), \
