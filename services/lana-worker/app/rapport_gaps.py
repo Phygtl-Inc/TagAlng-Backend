@@ -404,6 +404,7 @@ question does not apply to them.
 reply together are what they told her.
 - A guess is not an answer. When they never said it, or picking one side of an earlier \
 either-or question is the only hint, Lana cannot answer it.
+- A request or a search (asking Lana to find, show or do something) states nothing about them.
 - Lana's own lines are context, never something they said.
 
 Output ONLY JSON: {"lana_would_answer": "the answer in a few words, or empty when she would be \
