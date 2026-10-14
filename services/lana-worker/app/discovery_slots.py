@@ -65,6 +65,17 @@ _SYSTEM = (
     "answer/refinement and must NOT be used as a filter). A short or vague reply ('any', 'whatever', "
     "'idk', 'sure', 'something else', a bare topic word) DURING an active capture is an ANSWER to what "
     "was just asked, not a fresh intent — do not force it onto a noun-matched lane. "
+    "REPLY TO PENDING — pending_ask names the one question or offer Lana is waiting on, with her "
+    "last message and any options she offered. When it is not 'none', ALWAYS set reply_to_pending: "
+    "'answer' when the message responds to it — accepting, choosing one of the options (in their own "
+    "words or by position), or giving the information she asked for, however short or fragmentary; "
+    "'decline' when it turns down or backs out of that question or offer and asks for nothing else; "
+    "'new_ask' when it asks for something else, changes the subject, or does both (declining and "
+    "then asking for something different is new_ask). Judge by what the message does with HER "
+    "question, not by which words it shares with it. A message about distress, danger, health or "
+    "abuse is ALWAYS new_ask and gets its own safety goal. reply_to_pending says only how the "
+    "message relates to the pending ask — set linear_intent, goal and the rest exactly as the other "
+    "rules say. When pending_ask is 'none', omit reply_to_pending. "
     "Discovery funnel = ZIP, giving self-description for matching, preview matches, verify phone, RSVP. "
     "When routing_phase=listening and user wants to meet/find/show/connect with neighbors or people "
     "(any phrasing: 'meet new people', 'make me meet people', 'find me people', 'stop asking questions') "
@@ -1003,6 +1014,9 @@ def ai_parse_discovery_turn(
             "clarify_options": clarify_options,
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
+            "reply_to_pending": (
+                str(raw.get("reply_to_pending") or "").strip().lower() or None
+            ),
             "declined_slot": declined_slot_s,
             # Did they ASK, or did they just say something an action would serve? The
             # intent alone cannot tell you: "find me neighbors nearby" and "we don't know
@@ -1252,6 +1266,9 @@ def _discovery_slot_payload(
     sc = session_ctx or {}
     active_intent = str(sc.get("active_intent") or "").strip() or "none"
     active_capture = _active_capture_context(sc)
+    from app.pending_ask import pending_ask, prompt_line
+
+    pending_line = prompt_line(pending_ask(sc, history))
     # A pending offer to change the default language: the divergence nudge (single code)
     # or a rapport-concierge offer (possibly several codes the user named, TTL'd).
     lang_pref_offer = str(sc.get("lang_nudge_pending") or "").strip()
@@ -1277,6 +1294,7 @@ def _discovery_slot_payload(
         f"has_profile_photo: {has_profile_photo}\n"
         f"session_active_intent: {active_intent}\n"
         f"active_capture: {active_capture}\n"
+        f"pending_ask: {pending_line}\n"
         f"lang_pref_offer: {lang_pref_offer}\n"
         f"conversation_lang: {conversation_lang}\n"
         f"active_community: {active_community_line}\n\n"
@@ -1357,6 +1375,7 @@ def _discovery_slot_payload(
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "abandon": true|false,\n'
+        '  "reply_to_pending": "answer"|"decline"|"new_ask" — only when pending_ask is not none,\n'
         '  "declined_slot": "zip"|"identity"|"display_name"|null,\n'
         '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous. '
         "Judge by words not script (a language typed in Latin letters is still that language). Report a language DIFFERENT "

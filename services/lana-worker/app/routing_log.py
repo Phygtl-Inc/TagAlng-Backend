@@ -29,6 +29,7 @@ def build_routing_record(
     user_message: str,
     intent_hint: str | None,
     prev_routing: Any,
+    pending_kind: str | None = None,
 ) -> dict[str, Any]:
     text = str(user_message or "").strip()
     slots = ctx.get("_discovery_slots")
@@ -70,6 +71,10 @@ def build_routing_record(
         "flow": routing.get("outcome"),
         "intent_class": routing.get("intent_class"),
         "tool": routing.get("tool_to_call") or routing.get("tool_called"),
+        # What Lana was waiting on when the message arrived (app/pending_ask.py) and the
+        # classifier's read of how the message relates to it.
+        "pending_kind": pending_kind,
+        "reply_to_pending": (slots.get("reply_to_pending") or None) if classified else None,
         "routing_phase": ctx.get("routing_phase"),
         "active_intent": ctx.get("active_intent"),
     }
@@ -84,11 +89,13 @@ def log_routing_turn(
     reply: str | None,
     intent_hint: str | None,
     prev_routing: Any,
+    pending_kind: str | None = None,
 ) -> None:
     """Build now (the ctx keeps changing after the turn), write on a daemon thread."""
     try:
         record = build_routing_record(
-            ctx, user_message=user_message, intent_hint=intent_hint, prev_routing=prev_routing
+            ctx, user_message=user_message, intent_hint=intent_hint,
+            prev_routing=prev_routing, pending_kind=pending_kind,
         )
     except Exception:  # noqa: BLE001 — logging must never break a turn
         logger.exception("routing_log_build_failed")

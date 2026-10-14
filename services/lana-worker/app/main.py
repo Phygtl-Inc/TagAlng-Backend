@@ -74,6 +74,7 @@ from app.lang_pref import (
     seed_session_language,
 )
 from app.lana_unified_pipeline import run_lana_unified_pipeline
+from app.pending_ask import pending_ask
 from app.routing_log import log_routing_turn
 from app.discovery_route import looks_like_host_event_entry
 from app.pass_along import looks_like_pass_along_entry
@@ -2223,6 +2224,8 @@ def _run_lana_message(
         user_jwt = _bearer_token(authorization)
         if purpose == "lana":
             _prev_routing = session_ctx_in.get("last_routing")
+            # Read before the turn — the engine that answers it clears the key.
+            _pending = pending_ask(session_ctx_in, history)
             reply, status, session_ctx, ui_raw, draft_raw = run_lana_unified_pipeline(
                 user_id=auth.user_id,
                 session_id=session_id,
@@ -2265,6 +2268,7 @@ def _run_lana_message(
                 reply=reply,
                 intent_hint=body.intent_hint,
                 prev_routing=_prev_routing,
+                pending_kind=_pending.kind if _pending else None,
             )
         elif use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(

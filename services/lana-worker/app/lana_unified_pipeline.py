@@ -674,6 +674,31 @@ def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     return utterance_indicates_tip_share(msg)
 
 
+def _reply_owned_downstream(
+    ctx: dict[str, Any],
+    msg: str,
+    *,
+    history: list[dict[str, Any]] | None,
+    home_block_id: str | None,
+    phone_verified: bool,
+    timer: TurnTimer | None = None,
+) -> bool:
+    """Does this message answer a question whose engine runs after the policy gate?
+
+    Only an ANSWER is held back. A decline or a new ask stays eligible for the policy, as
+    before — the classifier's reply_to_pending decides, never the words."""
+    from app.pending_ask import pending_ask, reply_verdict
+
+    ask = pending_ask(ctx, history)
+    if ask is None or not ask.after_policy:
+        return False
+    slots = _tip_share_slots(
+        ctx, msg, history=history, home_block_id=home_block_id,
+        phone_verified=phone_verified, timer=timer,
+    )
+    return reply_verdict(slots) == "answer"
+
+
 def _turn_is_engine_action(
     ctx: dict[str, Any],
     msg: str,
@@ -2674,6 +2699,15 @@ def run_lana_unified_pipeline(
         # Skip deterministically on the classifier's own verdict rather than trusting the
         # prompt.
         and not _turn_is_engine_action(
+            session_ctx, user_message,
+            history=history, home_block_id=home_block_id,
+            phone_verified=phone_verified, timer=timer,
+        )
+        # Lana is waiting on an answer that an engine AFTER this gate reads (a people-
+        # search offer, a community-join offer, a clarifier, an intro...) and the
+        # classifier says this message answers it. The policy replying here answered in
+        # prose while the offer stayed armed and its engine never ran.
+        and not _reply_owned_downstream(
             session_ctx, user_message,
             history=history, home_block_id=home_block_id,
             phone_verified=phone_verified, timer=timer,
