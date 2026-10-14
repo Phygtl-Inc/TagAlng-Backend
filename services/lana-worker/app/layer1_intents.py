@@ -618,8 +618,20 @@ def _reconcile_defer_to_llm(
     ):
         return True
 
+    # A model that is asking a clarifying question is never overruled by a keyword.
+    if str(out.get("clarify") or "").strip():
+        return True
+
+    # AI-FIRST, ENFORCED: a confident pick of any OTHER lane wins over every regex, an
+    # utterance match included. That match used to win here ("high precision"), which let
+    # "Dr X is a great dentist" rewrite a confident discovery pick — the keyword-over-model
+    # path the June AI-first switch meant to close. Live 2026-10-14 the model read 25/26
+    # tip/swap/host phrasings into their own lane at >=0.85 with no keyword rewrite needed.
+    if linear and conf >= 0.6 and linear != target_linear:
+        return True
+
     # A high-precision structural utterance match ("Dr X is a great dentist",
-    # "coffee this weekend") may correct the model only among signal lanes.
+    # "coffee this weekend") fills in when the model was unsure or gave no lane.
     if utterance_match:
         return False
     if not linear or linear == target_linear:
@@ -635,6 +647,19 @@ def _reconcile_defer_to_llm(
     return linear in LOOKING_SHARING_INTENTS
 
 
+def _note_override(rule: str, out: dict[str, Any], before: tuple[Any, Any]) -> None:
+    """Report a rewrite of the model's pick to the per-turn intent audit (observation only)."""
+    from app.intent_audit import record_override
+
+    record_override(
+        rule,
+        from_label=before[0],
+        from_conf=before[1],
+        to_label=out.get("linear_intent"),
+        to_conf=out.get("confidence"),
+    )
+
+
 def reconcile_tip_share_signal(out: dict[str, Any], *, msg: str) -> None:
     """Recommendation share — wins over misclassified hosting or peer discovery."""
     tip_utterance = utterance_indicates_tip_share(msg)
@@ -645,12 +670,14 @@ def reconcile_tip_share_signal(out: dict[str, Any], *, msg: str) -> None:
         return
     if utterance_indicates_hosting_plan(msg) and not utterance_indicates_tip_share(msg):
         return
+    before = (out.get("linear_intent"), out.get("confidence"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "tip_share"
     out["linear_intent"] = "sharing.tip"
     out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _note_override("reconcile_tip_share", out, before)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -666,12 +693,14 @@ def reconcile_tip_seek_signal(out: dict[str, Any], *, msg: str) -> None:
         return
     if _reconcile_defer_to_llm(out, "looking.tip", utterance_match=tip_utterance):
         return
+    before = (out.get("linear_intent"), out.get("confidence"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "tip_seek"
     out["linear_intent"] = "looking.tip"
     out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _note_override("reconcile_tip_seek", out, before)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -706,12 +735,14 @@ def reconcile_swap_seek_signal(out: dict[str, Any], *, msg: str) -> None:
     swap = utterance_indicates_swap_seek(msg) or slots_indicate_swap_seek_signal(out)
     if not swap:
         return
+    before = (out.get("linear_intent"), out.get("confidence"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "swap_seek"
     out["linear_intent"] = "looking.swap"
     out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _note_override("reconcile_swap_seek", out, before)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -729,12 +760,14 @@ def reconcile_hosting_peer_slot_conflict(out: dict[str, Any], *, msg: str) -> No
         out, "sharing.host", utterance_match=hosting_utterance, protect_discovery=True
     ):
         return
+    before = (out.get("linear_intent"), out.get("confidence"))
     out.pop("attr_filter", None)
     out["goal"] = "save_signal"
     out["in_discovery"] = False
     out["signal_intent"] = "host_meet"
     out["linear_intent"] = "sharing.host"
     out["confidence"] = max(float(out.get("confidence", 0.0)), 0.85)
+    _note_override("reconcile_hosting", out, before)
     detail = str(out.get("signal_detail") or msg or "").strip()[:500]
     if detail:
         out["signal_detail"] = detail
@@ -747,12 +780,31 @@ def reconcile_hosting_peer_slot_conflict(out: dict[str, Any], *, msg: str) -> No
             out["signal_when"] = m.group(0).strip()
 
 
+_SAFETY_GOAL_BY_LINEAR = {"system.unsafe": "unsafe", "system.medical": "medical", "system.crisis": "crisis"}
+
+
 def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
     """Derive linear_intent, goal, and signal_intent for handlers."""
     out = dict(slots)
     phrase = phrase_linear_intent(msg) if msg else None
     ai_linear = normalize_linear_intent(out.get("linear_intent"))
     ai_conf = float(out.get("confidence", 0.0))
+
+    # SAFETY READS ARE NEVER OVERRIDDEN, at any confidence. Their handlers
+    # (_is_crisis_turn / _is_medical_turn / _unsafe_kind_for_turn) are deliberately not
+    # confidence-gated, but below the 0.6 "confident" bar the phrase fallback and the
+    # reconcilers used to rewrite them first: "I just want to delete myself" at 0.55 became
+    # identity.edit_claim, a distressed "...planning a party but I can't go on" sharing.host.
+    safety = ai_linear if ai_linear in _SAFETY_GOAL_BY_LINEAR else _GOAL_TO_LINEAR.get(
+        str(out.get("goal") or "")
+    )
+    if safety in _SAFETY_GOAL_BY_LINEAR:
+        out["linear_intent"] = safety
+        out["goal"] = _SAFETY_GOAL_BY_LINEAR[safety]
+        out["in_discovery"] = False
+        for key in ("signal_intent", "signal_detail", "signal_category", "attr_filter"):
+            out.pop(key, None)
+        return out
 
     # AI-AUTHORITATIVE routing. A regex phrase intent NEVER overrides the AI anymore — it is
     # only a FALLBACK for when the AI did not confidently classify the turn (and did not ask
@@ -771,6 +823,7 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
     elif phrase:
         out["linear_intent"] = phrase
         out["confidence"] = max(ai_conf, 0.85)
+        _note_override("phrase_fallback", out, (ai_linear, ai_conf))
         _apply_discovery_linear_slots(out, phrase, msg=msg)
     elif ai_linear:
         out["linear_intent"] = ai_linear
@@ -798,8 +851,6 @@ def enrich_slots(slots: dict[str, Any], *, msg: str = "") -> dict[str, Any]:
     reconcile_tip_seek_signal(out, msg=msg)
     reconcile_swap_seek_signal(out, msg=msg)
     reconcile_hosting_peer_slot_conflict(out, msg=msg)
-    if utterance_indicates_tip_share(msg):
-        reconcile_tip_share_signal(out, msg=msg)
     if str(out.get("goal") or "") == "show_block_log":
         out.pop("signal_intent", None)
         out.pop("signal_detail", None)

@@ -105,7 +105,7 @@ def test_pipeline_hooks_run_before_any_lane_or_the_policy() -> None:
 
     from app import lana_unified_pipeline as pipe
 
-    src = inspect.getsource(pipe.run_lana_unified_pipeline)
+    src = inspect.getsource(pipe._run_lana_unified_pipeline)
     arm = src.index("take_offered_verify_email(session_ctx, user_message")
     note = src.index("note_chat_area(")
     browse = src.index('if session_ctx.get("activity_browse_active"):')

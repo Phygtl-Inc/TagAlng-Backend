@@ -59,7 +59,10 @@ _PUBLISH_RE = re.compile(
 # flow's own front door. Browse phrasings carry no create verb, so they never match:
 # "show me communities around me", "communities I can join", "what communities am I in".
 _CREATE_COMMUNITY_RE = re.compile(
-    r"\b(?:creat\w*|start\w*|set(?:ting)?\s*up|add|make|open|launch\w*)\b[^.?!]{0,40}?"
+    # Verb FORMS, not prefixes: `start\w*` matched "startup community" and `creat\w*`
+    # "creative communities" — both browse/reco asks that armed the capture.
+    r"\b(?:creat(?:e|es|ed|ing)|start(?:s|ed|ing)?|set(?:ting)?\s*up|add|make|open|"
+    r"launch(?:es|ed|ing)?)\b[^.?!]{0,40}?"
     # NOT "a community event" — that is one gathering the community hosts, i.e. a meet.
     r"\bcommunit(?:y|ies)\b(?!\s+(?:event|meet|meetup|gathering|party))",
     re.I,

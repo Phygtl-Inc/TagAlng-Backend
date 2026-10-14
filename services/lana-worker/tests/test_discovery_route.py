@@ -1642,6 +1642,10 @@ class TestHeritageIntroRouting(unittest.TestCase):
 
 
 class TestSignalPivotRouting(unittest.TestCase):
+    """A sticky peer preview must not swallow a service/item ask. The keyword reconcilers
+    fill in when the model is UNSURE (0.5 here); a confident pick of another lane wins
+    since 2026-10-14 — live, the model reads the doctor ask as looking.tip itself."""
+
     @patch("app.discovery_route.save_local_signal")
     @patch("app.discovery_route.discovery_ai_enabled", return_value=True)
     @patch("app.discovery_route.discovery_slots_for_turn")
@@ -1653,7 +1657,7 @@ class TestSignalPivotRouting(unittest.TestCase):
         mock_slots.return_value = {
             "goal": "peers",
             "in_discovery": True,
-            "confidence": 0.92,
+            "confidence": 0.5,
             "identity_snippet": "brazilian mom",
         }
         mock_peers.return_value = [
@@ -1698,7 +1702,7 @@ class TestSignalPivotRouting(unittest.TestCase):
         mock_slots.return_value = {
             "goal": "peers",
             "in_discovery": True,
-            "confidence": 0.92,
+            "confidence": 0.5,
             "identity_snippet": "brazilian mom",
         }
         mock_peers.return_value = [

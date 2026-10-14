@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any
@@ -21,6 +22,8 @@ from app.signal_capture import is_signal_lane_intent
 from app.orchestrator.llm import llm_configured, llm_json, router_model
 from app.orchestrator.progress import normalize_progress
 from app.turn_timing import TurnTimer
+
+logger = logging.getLogger(__name__)
 
 _ZIP_IN_TEXT = re.compile(r"\b(\d{5})\b")
 
@@ -1015,8 +1018,18 @@ def ai_parse_discovery_turn(
             # AI-authored thinking-status stage, streamed live to the client.
             "progress": normalize_progress(raw.get("progress"), max_stages=1),
         }, msg=text)
-    except Exception:
-        return _empty_slots()
+    except Exception as exc:
+        # The turn still degrades to empty slots (keyword fallback) — but never silently
+        # again: a revoked API key once routed every turn by keyword with no trace
+        # (2026-10-14). Type + HTTP status only; a provider's message can echo the key.
+        status = getattr(exc, "status_code", None)
+        if status is not None:
+            logger.error("discovery_classifier_failed error=%s status=%s", type(exc).__name__, status)
+        else:
+            logger.exception("discovery_classifier_failed error=%s", type(exc).__name__)
+        slots = _empty_slots()
+        slots["_classifier_error"] = type(exc).__name__
+        return slots
 
 
 def _active_capture_context(session_ctx: dict[str, Any]) -> str:
