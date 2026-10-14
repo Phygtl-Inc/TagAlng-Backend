@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from app.auth import (
     AuthSession,
     require_home_block_for_purpose,
+    require_verified_member,
     service_client,
     verify_auth,
     verify_jwt,
@@ -4739,6 +4740,10 @@ def post_circles_join(
     the user had already MENTIONED confirms that candidate instead, keeping
     source='chat_extraction' and recording confirmed_via='community_join'."""
     auth = verify_auth(authorization)
+    # Membership needs a verified account. A guest member has no name and no email, so
+    # members were mailed "Someone new joined" about nobody. The PWA sends a guest to
+    # verify first (/chat?intent=signup&next=…) and retries the join on return.
+    require_verified_member(auth)
     from app.community_discovery import join_community, joined_via_label
 
     try:
@@ -4816,6 +4821,7 @@ def post_circles_membership(
     from member counts, rosters and matching, so a stranger never becomes a match
     candidate for people she has never met. Idempotent; either answer can be changed."""
     auth = verify_auth(authorization)
+    require_verified_member(auth)
     from app.community_discovery import set_membership
 
     try:

@@ -38,6 +38,9 @@ LOGIN_CARRY_KEYS: tuple[str, ...] = (
     "ask_draft_pending",
     # They chose a community to join and then had to verify.
     "community_join_pending",
+    # A guest's accepted join, held until verified (community_discovery.JOIN_VERIFY_PENDING);
+    # the first verified, named turn on the account writes it.
+    "community_join_verify_pending",
     # A community they were CREATING when the login interrupted. Real work — the place is
     # pinned and Lana's questions are half-answered — and the draft itself
     # (community_draft) rides in the session context, so dropping only the pending ask
