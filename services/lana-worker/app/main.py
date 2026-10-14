@@ -5804,7 +5804,7 @@ def post_rapport_record_answer(
             )
         elif text:
             note_ungrounded_detail(auth.user_id, affiliation_id, text)
-        rapport_mark_answered(body.gap_row_id)
+        rapport_mark_answered(body.gap_row_id, answer_text=text)
         # Close the queued questions this answer already settles, then refill.
         background_tasks.add_task(
             rapport_after_answer, auth.user_id, body.gap_row_id,
@@ -5880,7 +5880,7 @@ def post_rapport_record_answer(
             or None
         )
     # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
-    rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
+    rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id, answer_text=text)
     # Close the OTHER queued questions this answer already settles ("Fitness CF" answers "which
     # gym?" and "which Fitness CF spot?" alike), then refill the reserve so the tile always has
     # a fresh, non-repeat question ahead. Background so it never delays the reply.

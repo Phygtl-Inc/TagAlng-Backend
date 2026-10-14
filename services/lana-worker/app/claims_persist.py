@@ -1868,14 +1868,26 @@ def extract_and_upsert_claims_from_message(
     ONE contextual rapport follow-up gap from the extractor's own warm question (semantic,
     not a static template). `allow_rapport_gap` lets the caller defer to the turn's safety
     verdict (crisis / out-of-scope / medical) and suppress the gap while still capturing claims."""
-    return try_upsert_claims_from_message(
+    res = try_upsert_claims_from_message(
         user_id,
         message,
         skip_heritage=skip_heritage,
         message_id=message_id,
         allow_rapport_gap=allow_rapport_gap,
         here_place=here_place,
-    ).saved
+    )
+    # Something about themselves, said in ordinary chat, can answer a question still queued
+    # for the tile. Only a tile answer used to close queued questions, so a fact told in
+    # conversation was asked about again later. Gated on a saved claim: a message with
+    # nothing about them answers nothing, and the judge costs one call.
+    if res.saved > 0 and allow_rapport_gap:
+        try:
+            from app.rapport_gaps import close_gaps_told_in_chat
+
+            close_gaps_told_in_chat(user_id, message, res.primary_claim_id)
+        except Exception:
+            logger.exception("rapport: chat-answer close failed for %s", user_id)
+    return res.saved
 
 
 def claim_ids_created_since(user_id: str, since_iso: str, limit: int = 6) -> list[str]:

@@ -2108,7 +2108,7 @@ def run_lana_unified_pipeline(
             claim_id = str((thread_claim(user_id, asked_concept) or {}).get("id") or "") or None
         if gap_row_id:
             try:
-                mark_answered(gap_row_id, answer_claim_id=claim_id)
+                mark_answered(gap_row_id, answer_claim_id=claim_id, answer_text=user_message)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("rapport_answer_close_gap_failed")
             # Close the other queued questions this answer already settles, behind the turn.

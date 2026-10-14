@@ -84,7 +84,7 @@ class TestAnswerLinksTheClaimItWrote(unittest.TestCase):
              patch.object(main, "rapport_reconcile_gaps"), \
              patch("app.claims_persist.claim_ids_created_since", return_value=[]), \
              patch("app.circles_flow.tag_claim_place_from_gap"), \
-             patch.object(main, "rapport_mark_answered", side_effect=lambda g, answer_claim_id=None: marked.update(id=answer_claim_id)), \
+             patch.object(main, "rapport_mark_answered", side_effect=lambda g, answer_claim_id=None, answer_text=None: marked.update(id=answer_claim_id, text=answer_text)), \
              patch.object(main, "amplitude_track"), \
              patch("app.claims_persist.latest_claim_id", return_value="speaks-portuguese"):
             bg = MagicMock()

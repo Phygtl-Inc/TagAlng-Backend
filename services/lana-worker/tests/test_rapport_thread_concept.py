@@ -110,7 +110,7 @@ class TestRecordAnswerLinksTheThread(unittest.TestCase):
              patch("app.claims_persist.claim_ids_created_since", return_value=[]), \
              patch("app.circles_flow.tag_claim_place_from_gap"), \
              patch.object(main, "rapport_mark_answered",
-                          side_effect=lambda g, answer_claim_id=None: marked.update(id=answer_claim_id)), \
+                          side_effect=lambda g, answer_claim_id=None, answer_text=None: marked.update(id=answer_claim_id, text=answer_text)), \
              patch.object(main, "amplitude_track"):
             main.post_rapport_record_answer(
                 main.RapportAnswerBody(gap_row_id="g1", text="Pausa in San Mateo, CA"), MagicMock(), "Bearer x"
@@ -124,6 +124,7 @@ class TestRecordAnswerLinksTheThread(unittest.TestCase):
         """The todiba case: nothing extracted, the gap still links the fig-pizza thread."""
         marked, seen = self._answer(ClaimExtractResult(saved=0), self.GAP, FIG)
         self.assertEqual(marked["id"], "fig-claim")
+        self.assertEqual(marked["text"], "Pausa in San Mateo, CA")
         self.assertEqual(seen["asked_concept"], "fig_gorgonzola_pizza_fan")
 
     def test_written_claim_still_wins(self):
