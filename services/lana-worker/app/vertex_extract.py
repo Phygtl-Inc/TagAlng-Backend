@@ -510,7 +510,11 @@ def _existing_claims_block(existing_labels: list[Any] | None) -> str:
     )
 
 
-def _name_context_block(current_nickname: str | None, asked_question: str | None) -> str:
+def _name_context_block(
+    current_nickname: str | None,
+    asked_question: str | None,
+    asked_thread: dict[str, Any] | None = None,
+) -> str:
     """The two facts the extractor needs before it is allowed to touch a name.
 
     Without the SAVED NAME it cannot tell a first fill from a rename, so every
@@ -532,6 +536,20 @@ def _name_context_block(current_nickname: str | None, asked_question: str | None
             f'LANA JUST ASKED: "{q}" — this message is most likely an ANSWER to that question. '
             "An answer is not a nickname unless the question asked what to call them."
         )
+        concept = str((asked_thread or {}).get("concept") or "").strip()
+        label = str((asked_thread or {}).get("label") or "").strip()
+        if concept:
+            # The question was written to deepen ONE thread. A bare answer (a place, a time,
+            # a group) says nothing about the user on its own; read against the thread it
+            # answers, it is a detail of that thread. Without this the answer was dropped.
+            lines.append(
+                f"THAT QUESTION IS ABOUT THEIR THREAD: {concept} — {label or concept}. When the "
+                "message answers it, RE-EMIT that thread with its EXACT concept slug and the "
+                "answer folded into one short detail that reads on its own (it must say what "
+                "the answer is about, not only repeat the bare words). A reply that gives no "
+                "answer (unsure, declines, skips) is not a restatement: do not re-emit the "
+                "thread for it. Anything else the message says about them is extracted as usual."
+            )
     return "\n".join(lines) + "\n\n"
 
 
@@ -594,6 +612,7 @@ def vertex_extract_claims_from_utterance(
     *,
     current_nickname: str | None = None,
     asked_question: str | None = None,
+    asked_thread: dict[str, Any] | None = None,
 ) -> Any:
     from app.orchestrator.llm import vertex_generate_json
 
@@ -601,7 +620,7 @@ def vertex_extract_claims_from_utterance(
         INCREMENTAL_EXTRACT_PROMPT
         + _existing_claims_block(existing_labels)
         + _recent_questions_block(recent_questions)
-        + _name_context_block(current_nickname, asked_question)
+        + _name_context_block(current_nickname, asked_question, asked_thread)
         + message.strip()
     )
     return vertex_generate_json(
@@ -621,6 +640,7 @@ def incremental_claims_from_utterance(
     current_nickname: str | None = None,
     asked_question: str | None = None,
     here_place: dict[str, Any] | None = None,
+    asked_thread: dict[str, Any] | None = None,
 ) -> Any:
     """Extract claims via orchestrator LLM when configured; else Vertex."""
     import logging
@@ -631,7 +651,7 @@ def incremental_claims_from_utterance(
         INCREMENTAL_EXTRACT_PROMPT
         + _existing_claims_block(existing_labels)
         + _recent_questions_block(recent_questions)
-        + _name_context_block(current_nickname, asked_question)
+        + _name_context_block(current_nickname, asked_question, asked_thread)
         + _here_block(here_place)
     )
     try:
@@ -656,6 +676,7 @@ def incremental_claims_from_utterance(
         recent_questions,
         current_nickname=current_nickname,
         asked_question=asked_question,
+        asked_thread=asked_thread,
     )
 
 

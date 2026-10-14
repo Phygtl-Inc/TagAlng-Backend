@@ -2064,6 +2064,11 @@ def run_lana_unified_pipeline(
         from datetime import datetime as _dt_now, timezone as _tz
 
         answer_started = _dt_now.now(_tz.utc).isoformat()
+        from app.rapport_gaps import get_gap_row, thread_claim
+
+        # The thread this question deepens. The answer belongs to it even when the
+        # extractor finds no new fact of its own in the words.
+        asked_concept = str((get_gap_row(gap_row_id) or {}).get("deepens_concept") or "") or None
         try:
             # The tile question is what this message is answering — hand it over so a
             # bare answer ("Orlando", "Fitness CF") can't be mistaken for a new name.
@@ -2072,6 +2077,7 @@ def run_lana_unified_pipeline(
                 user_message,
                 allow_rapport_gap=False,
                 asked_question=question or None,
+                asked_concept=asked_concept,
             )
             if res.nickname_changed_from and res.nickname:
                 session_ctx["nickname_changed"] = {
@@ -2096,9 +2102,13 @@ def run_lana_unified_pipeline(
                         tag_claim_place_from_gap(gap_row_id, _cid)
         except Exception:  # noqa: BLE001 — never fail the turn on a persist hiccup
             logging.getLogger(__name__).exception("rapport_answer_persist_failed")
+        if not claim_id and asked_concept:
+            # Nothing written, but the question was about one thread and they answered it.
+            # Link that thread so it reads as covered; no claim is invented.
+            claim_id = str((thread_claim(user_id, asked_concept) or {}).get("id") or "") or None
         if gap_row_id:
             try:
-                mark_answered(gap_row_id, answer_claim_id=claim_id)
+                mark_answered(gap_row_id, answer_claim_id=claim_id, answer_text=user_message)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("rapport_answer_close_gap_failed")
             # Close the other queued questions this answer already settles, behind the turn.

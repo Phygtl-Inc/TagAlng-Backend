@@ -263,6 +263,17 @@ def open_semantic_gap(
     if not skip_dedup and _is_semantic_duplicate(user_id, embedding):
         logger.info("rapport: skipped near-duplicate question for %s: %s", user_id, q_text)
         return False
+    # Questions are deduped against questions above; this checks it against what the person
+    # actually SAID, in chat or in earlier answers. A grounding question is left alone: it
+    # resolves an affiliation to a map place, and skipping it would leave that undone.
+    if not skip_dedup and not affiliation_ref:
+        evidence = already_told(user_id, q_text, embedding)
+        if evidence:
+            logger.info(
+                "rapport: skipped already-told question for %s: %r (they said %r)",
+                user_id, q_text, evidence[:120],
+            )
+            return False
     row: dict[str, Any] = {
         "user_id": user_id,
         "gap_id": gap_id,
@@ -381,6 +392,188 @@ def reconcile_gaps(user_id: str, message_id: str | None = None) -> None:
                 logger.exception("rapport: failed to close gap %s", gap_id)
 
 
+_ALREADY_TOLD_PROMPT = """Lana, a neighborhood concierge, is about to ask someone the QUESTION below. \
+Under it is what this person has already told Lana: lines from their own chat messages, places \
+they recommended, and earlier questions Lana asked them with their answers.
+
+Could Lana answer this question herself, from what they told her, without guessing? If she \
+could, asking makes them repeat themselves. That includes when what they said shows the \
+question does not apply to them.
+
+- A reply to an earlier question takes its subject from that question: the question and the \
+reply together are what they told her.
+- A guess is not an answer. When they never said it, or picking one side of an earlier \
+either-or question is the only hint, Lana cannot answer it.
+- A request or a search (asking Lana to find, show or do something) states nothing about them.
+- Lana's own lines are context, never something they said.
+
+Output ONLY JSON: {"lana_would_answer": "the answer in a few words, or empty when she would be \
+guessing", "from": "the line(s) above it comes from, quoted", "can_answer": true|false}"""
+
+
+def _told_lines(user_id: str, question: str, embedding: list[float] | None) -> list[str]:
+    """What the person has told Lana that bears on ``question``: their own chat lines nearest
+    to it (the MemGPT recall index over lana_messages), what they recommended, and the
+    questions they already answered, with their answers. Empty on any failure."""
+    lines: list[str] = []
+    try:
+        from app.orchestrator.recall import recall_memories
+
+        for m in recall_memories(
+            user_id=user_id, block_id=None, query=question, scope="self", k=10,
+            query_embedding=embedding,
+        ):
+            content = " ".join(str(m.get("content") or "").split())
+            # Their own words only. Lana's lines would let her own earlier question count
+            # as something the person said; searches ("inquiry") are asks, not facts.
+            if m.get("source_type") == "message" and content.lower().startswith("user:"):
+                lines.append("they said: " + content[5:].strip())
+            elif m.get("source_type") == "claim":
+                lines.append("on their profile: " + content)
+    except Exception:
+        logger.exception("rapport: already-told recall failed for %s", user_id)
+
+    def _answered(columns: str) -> list[dict[str, Any]]:
+        return (
+            service_client()
+            .table("rapport_gaps")
+            .select(columns)
+            .eq("user_id", user_id)
+            .eq("status", "answered")
+            .not_.is_("question", "null")
+            .order("answered_at", desc=True)
+            .limit(80)
+            .execute()
+        ).data or []
+
+    try:
+        # What they recommended is something they told Lana too: capturing a reco asks
+        # "what should people order at The Backhaus?", and then the tile asked which bakery
+        # they go to for pastries (todiba, 2026-09-21).
+        recos = (
+            service_client()
+            .table("local_signals")
+            .select("reco_name, category, reco_place, reco_fields, embedding")
+            .eq("user_id", user_id)
+            .not_.is_("reco_name", "null")
+            .order("created_at", desc=True)
+            .limit(40)
+            .execute()
+        ).data or []
+        for r in _nearest(recos, "embedding", embedding, _TOLD_RECOS):
+            name = " ".join(str(r.get("reco_name") or "").split())
+            if not name:
+                continue
+            kind = " ".join(str(r.get("category") or "").split())
+            place = " ".join(str(r.get("reco_place") or "").split())
+            facts = [
+                f"{f.get('label')}: {f.get('answer')}"
+                for f in (r.get("reco_fields") or [])
+                if isinstance(f, dict) and f.get("label") and f.get("answer")
+                and f.get("field") != "ask_ok"
+            ]
+            head = name + (f" ({kind}" + (f", {place}" if place else "") + ")" if kind else "")
+            lines.append("they recommended " + head + (": " + "; ".join(facts) if facts else ""))
+    except Exception:
+        logger.exception("rapport: already-told reco read failed for %s", user_id)
+    try:
+        try:
+            rows = _answered("question, answer_text, question_embedding")
+        except Exception:
+            rows = _answered("question, question_embedding")  # before 20270207120000
+        for r in _nearest(rows, "question_embedding", embedding, _TOLD_ANSWERS):
+            q = " ".join(str(r.get("question") or "").split())
+            a = " ".join(str(r.get("answer_text") or "").split())
+            if q:
+                lines.append(f'Lana asked "{q}" and they answered' + (f": {a}" if a else ""))
+    except Exception:
+        logger.exception("rapport: already-told answered read failed for %s", user_id)
+    return lines
+
+
+# How much of their history the judge reads. Everything they ever answered drowned the one
+# pair that mattered: with 47 lines the fig-pizza-at-Pausa answer sat beside 40 unrelated
+# ones and the judge missed it; ranked nearest-first it is near the top.
+_TOLD_ANSWERS = 8
+_TOLD_RECOS = 4
+
+
+def _nearest(
+    rows: list[dict[str, Any]], column: str, embedding: list[float] | None, k: int
+) -> list[dict[str, Any]]:
+    """The ``k`` rows whose ``column`` vector is closest to ``embedding``; rows without a
+    vector rank last. Without a query vector, the first ``k`` (newest, as read)."""
+    if not embedding:
+        return rows[:k]
+    import json
+    import math
+
+    qn = math.sqrt(sum(x * x for x in embedding)) or 1.0
+
+    def score(row: dict[str, Any]) -> float:
+        raw = row.get(column)
+        try:
+            vec = json.loads(raw) if isinstance(raw, str) else raw
+            if not vec or len(vec) != len(embedding):
+                return -2.0
+            vn = math.sqrt(sum(x * x for x in vec)) or 1.0
+            return sum(x * y for x, y in zip(vec, embedding)) / (qn * vn)
+        except (TypeError, ValueError):
+            return -2.0
+
+    return sorted(rows, key=score, reverse=True)[:k]
+
+
+def _already_told_model() -> str:
+    """The extraction tier, not the router tier. On todiba's real history (2026-10-14, 5 runs
+    each) the router model skipped questions he had never answered ("how long have you trained
+    at Fitness CF?" from "I work out 4 times a week") and missed "I run alone"; the extraction
+    model got all eight cases right but one run in five."""
+    from app.orchestrator.llm import extractor_model
+
+    return extractor_model()
+
+
+def already_told(user_id: str, question: str, embedding: list[float] | None = None) -> str:
+    """Their own words that already answer ``question``, or "" when they have not said it.
+
+    Every question used to be checked only against Lana's earlier QUESTIONS. What the person
+    said in conversation never counted, so Tommaso, who told Lana in chat and in two tile
+    answers that he gets his fig and gorgonzola pizza at Pausa, was asked which pizzeria he
+    gets it from (prod, 2026-10-12). The judgment is the model's; any failure fails open
+    (the question is asked, as before this check existed).
+    """
+    question = " ".join(str(question or "").split())
+    if not user_id or not question:
+        return ""
+    lines = _told_lines(user_id, question, embedding)
+    if not lines:
+        return ""
+    payload = f"QUESTION: {question}\n\nWHAT THEY HAVE TOLD LANA:\n" + "\n".join(
+        f"- {line}" for line in lines
+    )
+    data: Any = None
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json
+
+        if llm_configured():
+            data = llm_json(
+                model=_already_told_model(), system=_ALREADY_TOLD_PROMPT, user_payload=payload,
+                max_tokens=240, temperature=0.0,
+            )
+    except Exception:
+        logger.exception("rapport: already-told verdict failed")
+        return ""
+    if not isinstance(data, dict) or data.get("can_answer") is not True:
+        return ""
+    answer = " ".join(str(data.get("lana_would_answer") or "").split())
+    source = " ".join(str(data.get("from") or "").split())
+    # The verdict must rest on an answer drawn from quoted lines; a bare true is not evidence.
+    if not answer or not source:
+        return ""
+    return f"{answer} (from: {source})"
+
+
 _SIBLINGS_PROMPT = """Someone in a neighborhood app was just asked one question and answered it. \
 Below are OTHER questions still queued to ask them later. Which of those does their answer ALREADY \
 answer — so that asking it later would make them repeat themselves?
@@ -431,6 +624,95 @@ def _siblings_verdict(question: str, answer: str, queued: list[str]) -> list[int
         if 1 <= n <= len(queued) and n not in out:
             out.append(n)
     return out
+
+
+_CHAT_TOLD_PROMPT = """Someone just said the MESSAGE below to Lana, a neighborhood concierge, in \
+conversation. Lana has QUEUED QUESTIONS she planned to ask them later. For each one: could Lana \
+now answer it herself from this message, without guessing? If so, asking it later would make \
+them repeat themselves.
+
+- Only what the message states counts. A guess is not an answer, and a fact about one thing \
+never answers a question about a different thing, however alike the two questions look.
+- A request or a search (asking Lana to find or do something) states nothing about them.
+
+Output ONLY JSON: {"answerable": [{"n": <question number>, "answer": "the answer in a few \
+words"}]}, an empty list when none."""
+
+
+def close_gaps_told_in_chat(
+    user_id: str, message: str, answer_claim_id: str | None = None
+) -> int:
+    """Close queued questions that something the person said in ordinary chat already answers.
+
+    Only a tile answer used to close queued questions, so a fact told in conversation was
+    asked about again later. Same "could Lana answer it herself?" judgment as already_told,
+    on the extraction model: the sibling judge (router model) closed "how long have you lived
+    in Lake On The Park?" on "I've been going to Lagoinha for three years", and "which running
+    club?" on a request to find a running buddy (todiba, real run 2026-10-14).
+    Best-effort; never raises. Returns how many closed.
+    """
+    message = " ".join(str(message or "").split())
+    if not user_id or not message:
+        return 0
+    try:
+        rows = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id, question")
+            .eq("user_id", user_id)
+            .in_("status", ["open", "asked"])
+            .not_.is_("question", "null")
+            .order("opened_at", desc=True)
+            .limit(30)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("rapport: chat-told read failed for %s", user_id)
+        return 0
+    rows = [r for r in rows if (r.get("question") or "").strip()]
+    if not rows:
+        return 0
+    numbered = "\n".join(f"{i}. {r['question'].strip()}" for i, r in enumerate(rows, 1))
+    data: Any = None
+    try:
+        from app.orchestrator.llm import llm_configured, llm_json
+
+        if llm_configured():
+            data = llm_json(
+                model=_already_told_model(), system=_CHAT_TOLD_PROMPT,
+                user_payload=f"MESSAGE: {message}\n\nQUEUED QUESTIONS:\n{numbered}",
+                max_tokens=300, temperature=0.0,
+            )
+    except Exception:
+        logger.exception("rapport: chat-told verdict failed")
+        return 0
+    picked: list[int] = []
+    for item in (data.get("answerable") if isinstance(data, dict) else None) or []:
+        try:
+            n = int(item.get("n")) if isinstance(item, dict) else int(item)
+        except (TypeError, ValueError):
+            continue
+        answer = str(item.get("answer") or "").strip() if isinstance(item, dict) else ""
+        if 1 <= n <= len(rows) and n not in picked and answer:
+            picked.append(n)
+    closed = 0
+    for n in picked:
+        patch: dict[str, Any] = {"status": "answered", "answered_at": _now(), "updated_at": _now()}
+        if answer_claim_id:
+            patch["answer_claim_id"] = answer_claim_id
+        try:
+            service_client().table("rapport_gaps").update(patch).eq(
+                "gap_row_id", rows[n - 1]["gap_row_id"]
+            ).in_("status", ["open", "asked"]).execute()
+            closed += 1
+        except Exception:
+            logger.exception("rapport: chat-told close failed for %s", rows[n - 1].get("gap_row_id"))
+    if closed:
+        logger.info(
+            "rapport: chat message closed %d queued question(s) for %s: %s",
+            closed, user_id, [rows[n - 1]["question"] for n in picked],
+        )
+    return closed
 
 
 def close_gaps_answered_by(
@@ -512,7 +794,7 @@ def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
             .table("rapport_gaps")
             .select(
                 "gap_row_id, gap_id, question, covers_concept, parent_bucket, why_frame, "
-                "place_ref, affiliation_ref, grounding_options"
+                "place_ref, affiliation_ref, grounding_options, deepens_concept"
             )
             .eq("gap_row_id", gap_row_id)
             .limit(1)
@@ -524,12 +806,74 @@ def get_gap_row(gap_row_id: str) -> dict[str, Any] | None:
         return None
 
 
-def mark_answered(gap_row_id: str, answer_claim_id: str | None = None) -> None:
+def thread_claim(user_id: str, concept: str | None) -> dict[str, Any] | None:
+    """The live claim a question deepens: {id, concept, label, details}, or None.
+
+    A tile answer is ABOUT this thread whether or not the extractor finds a new fact in
+    it. "Pausa in San Mateo, CA" answering "which pizzeria do you get your fig pizza
+    from?" states nothing about the user on its own, so the extractor saved nothing, the
+    gap closed with no link, and the place he named was lost (todiba, 2026-10-12).
+    """
+    concept = str(concept or "").strip()
+    if not user_id or not concept:
+        return None
+    try:
+        res = (
+            service_client()
+            .table("user_identity_claims")
+            .select("id, concept, label, details")
+            .eq("user_id", user_id)
+            .eq("concept", concept)
+            .is_("dismissed_at", "null")
+            .limit(1)
+            .execute()
+        )
+        return (res.data or [None])[0]
+    except Exception:
+        logger.exception("rapport: thread_claim lookup failed for %s", user_id)
+        return None
+
+
+def thread_already_asked(user_id: str, concept: str | None) -> bool:
+    """True when this thread already has a live or answered question.
+
+    One question per thread is the coverage rule (rapport_uncovered_claims). The
+    extractor's per-message follow-up bypassed it, so a thread answered in August could
+    be asked again whenever the user mentioned it in passing. On a read error, answer
+    False — the follow-up opens exactly as it did before this check existed.
+    """
+    concept = str(concept or "").strip()
+    if not user_id or not concept:
+        return False
+    try:
+        res = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id")
+            .eq("user_id", user_id)
+            .eq("deepens_concept", concept)
+            .in_("status", ["open", "asked", "answered"])
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        logger.exception("rapport: thread_already_asked failed for %s", user_id)
+        return False
+
+
+def mark_answered(
+    gap_row_id: str, answer_claim_id: str | None = None, answer_text: str | None = None
+) -> None:
     """Close a gap because the user engaged with the ask this turn, linking the claim it made.
 
     reconcile_gaps closes gaps whose covered concept now exists as a claim, but a free-text
     answer may map to a differently-named concept (or none). We still don't want to re-ask a
     topic she just responded to, so close it directly by row id and record the answer claim.
+
+    `answer_text` keeps their words beside the question. A bare answer ("Pausa in San Mateo,
+    CA") means nothing without the question it answered, and that pair is what the
+    already-told check reads before any new question is asked.
     """
     if not gap_row_id:
         return
@@ -540,12 +884,25 @@ def mark_answered(gap_row_id: str, answer_claim_id: str | None = None) -> None:
     }
     if answer_claim_id:
         patch["answer_claim_id"] = answer_claim_id
+    text = " ".join(str(answer_text or "").split())[:500]
+    if text:
+        patch["answer_text"] = text
     try:
         service_client().table("rapport_gaps").update(patch).eq(
             "gap_row_id", gap_row_id
         ).execute()
     except Exception:
-        logger.exception("rapport: mark_answered failed for %s", gap_row_id)
+        if "answer_text" not in patch:
+            logger.exception("rapport: mark_answered failed for %s", gap_row_id)
+            return
+        # A database without answer_text (before 20270207120000): the gap must still close.
+        patch.pop("answer_text")
+        try:
+            service_client().table("rapport_gaps").update(patch).eq(
+                "gap_row_id", gap_row_id
+            ).execute()
+        except Exception:
+            logger.exception("rapport: mark_answered failed for %s", gap_row_id)
 
 
 def mark_chat_asked(gap_row_id: str) -> None:

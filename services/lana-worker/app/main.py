@@ -5804,7 +5804,7 @@ def post_rapport_record_answer(
             )
         elif text:
             note_ungrounded_detail(auth.user_id, affiliation_id, text)
-        rapport_mark_answered(body.gap_row_id)
+        rapport_mark_answered(body.gap_row_id, answer_text=text)
         # Close the queued questions this answer already settles, then refill.
         background_tasks.add_task(
             rapport_after_answer, auth.user_id, body.gap_row_id,
@@ -5848,6 +5848,7 @@ def post_rapport_record_answer(
             message_id=body.message_id,
             allow_rapport_gap=False,
             asked_question=_asked,
+            asked_concept=str((gap_row or {}).get("deepens_concept") or "") or None,
         )
         saved = res.saved
         rapport_reconcile_gaps(auth.user_id, body.message_id)
@@ -5869,8 +5870,17 @@ def post_rapport_record_answer(
                 # answer: only the newest was tagged to the community (2026-10-01).
                 for _cid in claim_ids_created_since(auth.user_id, _answer_started) or res.claim_ids:
                     tag_claim_place_from_gap(body.gap_row_id, _cid)
+    if not claim_id and text and (gap_row or {}).get("deepens_concept"):
+        # No new fact, but the answer is about the thread the question deepens: link it so
+        # the thread reads as covered. Nothing is fabricated — the link names an existing row.
+        from app.rapport_gaps import thread_claim
+
+        claim_id = (
+            str((thread_claim(auth.user_id, gap_row["deepens_concept"]) or {}).get("id") or "")
+            or None
+        )
     # Close the gap regardless of whether a claim was made (don't re-ask a topic she engaged).
-    rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id)
+    rapport_mark_answered(body.gap_row_id, answer_claim_id=claim_id, answer_text=text)
     # Close the OTHER queued questions this answer already settles ("Fitness CF" answers "which
     # gym?" and "which Fitness CF spot?" alike), then refill the reserve so the tile always has
     # a fresh, non-repeat question ahead. Background so it never delays the reply.

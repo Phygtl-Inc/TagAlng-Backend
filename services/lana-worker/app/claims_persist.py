@@ -1613,19 +1613,35 @@ def _open_rapport_gap(
     label: str | None,
     bucket: str | None,
     teaser: str | None = None,
+    concept: str | None = None,
 ) -> None:
     """Open one contextual rapport gap from the extractor's follow-up question (best-effort).
 
     Sensitivity is gated upstream by AI signals, not keywords here: the extractor returns
     followup=null on sensitive/help-seeking topics, so there's nothing to open.
+
+    `concept` is the claim the question deepens, recorded as deepens_concept. Without it
+    the row carried only gap_id 'deepen:<slug of the LABEL>', which is not the claim's
+    concept ("Likes fig and gorgonzola pizza" → likes_fig_and_gorgonzola_pizza, claim
+    fig_gorgonzola_pizza_fan). Coverage matches on the concept, so an answered thread read
+    as never asked and the question came back (todiba, 2026-10-12).
     """
     if not followup:
         return
     try:
-        from app.rapport_gaps import open_semantic_gap
+        from app.rapport_gaps import open_semantic_gap, thread_already_asked
 
+        if concept and thread_already_asked(user_id, concept):
+            logger.info("rapport: follow-up skipped, thread %s already asked for %s", concept, user_id)
+            return
         open_semantic_gap(
-            user_id, message_id, followup, label=label, bucket=bucket, teaser=teaser
+            user_id,
+            message_id,
+            followup,
+            label=label,
+            bucket=bucket,
+            teaser=teaser,
+            deepens_concept=concept,
         )
     except Exception:
         logger.exception("rapport: semantic gap open failed")
@@ -1641,6 +1657,7 @@ def try_upsert_claims_from_message(
     allow_rapport_gap: bool = True,
     asked_question: str | None = None,
     here_place: dict[str, Any] | None = None,
+    asked_concept: str | None = None,
 ) -> ClaimExtractResult:
     """Flash extract from one user line → upsert claims; confirm heritage conflicts.
 
@@ -1651,6 +1668,10 @@ def try_upsert_claims_from_message(
     asked_question is what Lana said just before this message. Pass it when the
     caller has it: without it the extractor cannot tell a name from an ANSWER,
     and a bare "Orlando" replying to "which Lagoinha location?" reads as a name.
+
+    asked_concept is the thread that question deepens (the gap's deepens_concept). With
+    it the extractor files a bare answer ("Pausa in San Mateo, CA") as a detail of that
+    thread instead of finding nothing in it.
     """
     saved_nick = current_nickname(user_id)
     stated_nick = persist_nickname_if_stated(user_id, message)
@@ -1660,6 +1681,18 @@ def try_upsert_claims_from_message(
         # Threads (concept — label — details) so the extractor can ENRICH in place
         # by re-emitting a known concept slug, instead of staying silent on repeats.
         existing_labels = fetch_active_claim_threads(user_id)
+        asked_thread: dict[str, Any] | None = None
+        if asked_concept:
+            from app.rapport_gaps import thread_claim
+
+            asked_thread = thread_claim(user_id, asked_concept)
+            # The thread list is capped at 40 rows; the one being answered must be in it
+            # or the model has no slug to re-emit.
+            if asked_thread and not any(
+                isinstance(t, dict) and t.get("concept") == asked_thread.get("concept")
+                for t in existing_labels
+            ):
+                existing_labels = [*existing_labels, asked_thread]
         # Recent rapport questions so the extractor's follow-up isn't a near-duplicate.
         recent_questions: list[str] = []
         if allow_rapport_gap:
@@ -1676,6 +1709,7 @@ def try_upsert_claims_from_message(
             current_nickname=saved_nick,
             asked_question=asked_question,
             here_place=here_place,
+            asked_thread=asked_thread,
         )
         nickname, claims, kids_count, followup = parse_incremental_claims_data(data)
         # AI-written teaser for the tile ("about your reading…") — read straight off the raw
@@ -1803,6 +1837,11 @@ def try_upsert_claims_from_message(
             primary.label if primary else None,
             primary.bucket if primary else None,
             teaser=followup_topic,
+            concept=(
+                primary.concept
+                if primary and primary.confidence >= MIN_CLAIM_CONFIDENCE
+                else None
+            ),
         )
     return ClaimExtractResult(
         saved=saved,
@@ -1829,14 +1868,26 @@ def extract_and_upsert_claims_from_message(
     ONE contextual rapport follow-up gap from the extractor's own warm question (semantic,
     not a static template). `allow_rapport_gap` lets the caller defer to the turn's safety
     verdict (crisis / out-of-scope / medical) and suppress the gap while still capturing claims."""
-    return try_upsert_claims_from_message(
+    res = try_upsert_claims_from_message(
         user_id,
         message,
         skip_heritage=skip_heritage,
         message_id=message_id,
         allow_rapport_gap=allow_rapport_gap,
         here_place=here_place,
-    ).saved
+    )
+    # Something about themselves, said in ordinary chat, can answer a question still queued
+    # for the tile. Only a tile answer used to close queued questions, so a fact told in
+    # conversation was asked about again later. Gated on a saved claim: a message with
+    # nothing about them answers nothing, and the judge costs one call.
+    if res.saved > 0 and allow_rapport_gap:
+        try:
+            from app.rapport_gaps import close_gaps_told_in_chat
+
+            close_gaps_told_in_chat(user_id, message, res.primary_claim_id)
+        except Exception:
+            logger.exception("rapport: chat-answer close failed for %s", user_id)
+    return res.saved
 
 
 def claim_ids_created_since(user_id: str, since_iso: str, limit: int = 6) -> list[str]:
