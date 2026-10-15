@@ -30,10 +30,6 @@ _MAX_ENRICH = 2
 # that happened to agree until one call site started overriding its own.
 LOOK_MEET_WINDOW = "14 days"
 
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
 # The "Start listening for me" CTA / any go-ahead to post the seek.
 _LISTEN_RE = re.compile(
     r"\b(start listening|listen for me|listening for me|post it|that'?s it|"
@@ -574,7 +570,7 @@ def run_look_meet_turn(
     # ── Loop safety ──
     turns = int(session_ctx.get("look_turns") or 0) + 1
     session_ctx["look_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _LOOK_MEET_TURN_CAP:
+    if turns > _LOOK_MEET_TURN_CAP:
         for k in ("look_meet_active", "look_draft", "look_ready", "look_pending_ask",
                   "look_enrich_count", "look_affinity_asked"):
             session_ctx[k] = None

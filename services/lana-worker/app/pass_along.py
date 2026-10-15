@@ -38,11 +38,6 @@ def _question_for_field(field: str) -> tuple[str, list[str]]:
         return "What detail should I update?", []
     return "What should I change?", []
 
-# Loop safety: an explicit bail or a hard turn cap releases the flow (never trapped).
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
 _LIST_NOW_RE = re.compile(
     r"\b(list it|list now|post it|that'?s it|all done|done|go ahead|publish|"
     r"no photo|skip photo|without photo|just list)\b",
@@ -323,7 +318,7 @@ def run_pass_along_turn(
     # ── Loop safety: explicit bail / turn cap releases the flow ──
     turns = int(session_ctx.get("pass_along_turns") or 0) + 1
     session_ctx["pass_along_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _PASS_ALONG_TURN_CAP:
+    if turns > _PASS_ALONG_TURN_CAP:
         session_ctx["pass_along_active"] = False
         session_ctx["pass_along_turns"] = 0
         session_ctx["pass_along_pending_ask"] = None

@@ -294,3 +294,65 @@ def test_typed_hosting_escapes_the_policy_to_its_flow():
     from app.lana_unified_pipeline import POLICY_ENGINE_ONLY_INTENTS
 
     assert "sharing.host" in POLICY_ENGINE_ONLY_INTENTS
+
+
+# ── 2026-10-15 live audit: five paths where a word list beat the model ──────────────
+
+
+def test_crisis_is_answered_before_the_unsafe_word_list():
+    """"my husband calls me a bitch and I'm scared to go home" read system.crisis and got
+    the flat unsafe refusal because the slur matched first. Crisis must be checked first."""
+    src = (APP / "discovery_route.py").read_text()
+    assert src.index("if _is_crisis_turn(slots, msg):") < src.index(
+        "_unsafe_kind = _unsafe_kind_for_turn(slots, msg)"
+    )
+
+
+def test_no_lane_ends_on_a_cancel_word():
+    for name in ("lane_decision.py", "tip_share.py", "pass_along.py", "look_meet.py",
+                 "activity_browse.py", "community_capture.py"):
+        assert "_CANCEL_RE" not in (APP / name).read_text(), name
+
+
+def test_tip_toggle_step_still_lets_a_crisis_out():
+    from app.tip_share import tip_share_should_release
+
+    ctx = {
+        "tip_draft": {"step_set": [{"kind": "toggle", "field": "q", "question": "Can neighbours ask you more?"}]},
+        "tip_pending_ask": "q",
+    }
+    # The toggle step's own carve-out: a plain "no" is its answer, never a release.
+    assert tip_share_should_release("naah", ctx, {"abandon": True, "confidence": 0.9}) is False
+    crisis = {"goal": "crisis", "linear_intent": "system.crisis", "confidence": 0.5}
+    assert tip_share_should_release("I can't do this anymore", ctx, crisis) is True
+
+
+def test_logout_follows_the_model():
+    from app.discovery_route import logout_requested
+
+    netflix = "haha my husband never remembers to log out of my Netflix"
+    # Chat reads usually carry no linear label — the confident goal alone must hold.
+    assert logout_requested(netflix, _ai(None, 0.9, goal="chat")) is False
+    assert logout_requested(netflix, _ai("discovery.find_peers", 0.9, goal="peers")) is False
+    assert logout_requested("log me out", _ai("auth.logout", 0.9, goal="logout")) is True
+    # Model unsure or absent: the phrase still gets someone signed out.
+    assert logout_requested("log me out", _ai(None, 0.2)) is True
+    assert logout_requested("log me out", None) is True
+
+
+def test_intros_phrase_does_not_beat_a_confident_search():
+    from app.discovery_route import _phrase_may_decide
+
+    assert _phrase_may_decide(_ai("discovery.find_by_attrs", 0.9, goal="peers")) is False
+    assert _phrase_may_decide(_ai(None, 0.2)) is True
+    src = (APP / "discovery_route.py").read_text()
+    assert "phrase_wants_list = _phrase_may_decide(slots) and wants_list_intros_phrase(msg)" in src
+
+
+def test_leaving_a_capture_never_opens_one():
+    """A bare "cancel" keeps the label of the flow it leaves; that label must not re-arm
+    the flow or count as an engine command (dev 2026-10-15: host reopened, tip fell into
+    the signal cascade)."""
+    leaving = {**_ai("sharing.tip", 0.9), "abandon": True}
+    assert _turn_is_tip_share(leaving, "cancel") is False
+    assert _turn_is_pass_along({**_ai("sharing.swap", 0.9), "abandon": True}, "nvm") is False

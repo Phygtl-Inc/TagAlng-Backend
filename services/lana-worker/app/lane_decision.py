@@ -18,13 +18,6 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-# Cancel is a graceful IN-FLOW exit (the lane's run-turn emits "No problem…"), never a
-# reroute — identical across lanes, so it lives here.
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
-
 # A confident classification is one we trust enough to act on as a pivot.
 _CONFIDENT = 0.6
 _VAGUE_GOALS = ("", "continue", "none")
@@ -66,6 +59,20 @@ def is_meta_or_chat(slots: dict[str, Any] | None) -> bool:
 # refuse / empathy handlers downstream must get the turn.
 _ALWAYS_OFF_LANE_GOALS = ("out_of_scope", "unsafe", "crisis")
 _ALWAYS_OFF_LANE_LINEARS = ("system.out_of_scope", "system.unsafe", "system.crisis")
+
+
+def is_universal_exit(slots: dict[str, Any] | None) -> bool:
+    """The model read this turn as distress, abuse or an errand Lana can't run. Not
+    confidence-gated, the same way the crisis and unsafe rails in discovery_route aren't:
+    sending a crisis read to the crisis handler is always the safer mistake, and a lane
+    that kept it would answer distress as a field value."""
+    if not slots:
+        return False
+    from app.layer1_intents import normalize_linear_intent
+
+    goal = str(slots.get("goal") or "")
+    linear = normalize_linear_intent(slots.get("linear_intent")) or ""
+    return goal in _ALWAYS_OFF_LANE_GOALS or linear in _ALWAYS_OFF_LANE_LINEARS
 
 
 def is_confident_off_lane(
@@ -130,12 +137,17 @@ def lane_should_continue(
 
     Decision order (first match wins):
       1. empty message      -> stay  (no-op turn)
-      2. cancel words       -> stay  (run-turn emits the graceful exit copy)
+      2. crisis / unsafe / out-of-scope read -> release (the rails downstream answer it)
       3. offered option     -> stay  (they tapped a chip Lana just put in front of them)
       4. slots.abandon      -> release
       5. cross-lane regex   -> release
       6. is_valid_answer    -> stay  (answer / refine / confirm / chip edit)
       7. default            -> RELEASE  (the inversion — nothing keeps a user trapped)
+
+    Leaving is the model's call (abandon), never a word in the sentence. A cancel-word list
+    used to sit at step 2 and win over everything: "it's called The Bus Stop Diner" threw
+    away a half-written recommendation, and "honestly I just want everything to stop" —
+    read system.crisis — got "No problem — we can do that another time" (dev 2026-10-15).
 
     Step 3 sits ABOVE abandon deliberately. Lanes offer chips like "Skip that one", and a
     stateless read of those words is an abandon — so tapping Lana's own button released the
@@ -147,8 +159,8 @@ def lane_should_continue(
     msg = str(message or "").strip()
     if not msg:
         return True
-    if _CANCEL_RE.search(msg):
-        return True
+    if is_universal_exit(slots):
+        return False
     if is_offered_option is not None and is_offered_option(msg, session_ctx, slots):
         return True
     if slots and slots.get("abandon"):

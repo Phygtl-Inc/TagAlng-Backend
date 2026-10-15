@@ -36,10 +36,6 @@ _OPEN_RE = re.compile(
     r"you (?:pick|choose|decide)|no preference|open)\s*[.!]*\s*$",
     re.IGNORECASE,
 )
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
 # Explicit pivot to another intent — needs a find/show verb + people noun so an interest
 # answer ("family", "all moms welcome") is never mistaken for a pivot.
 _PIVOT_OUT_RE = re.compile(
@@ -2098,7 +2094,7 @@ def _run_browse_turn(
 
     turns = int(session_ctx.get("browse_turns") or 0) + 1
     session_ctx["browse_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _BROWSE_TURN_CAP:
+    if turns > _BROWSE_TURN_CAP:
         from app.reply_compose import compose_reply
 
         reset_activity_browse_state(session_ctx)

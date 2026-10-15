@@ -26,10 +26,6 @@ _TRAIT_PROMPT = "What makes them great?"
 _CATEGORY_SUGGESTIONS = ["Doctor / clinic", "Restaurant", "Park / playground", "Home service"]
 _MAX_ENRICH = 2
 
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
 # The ready card's post button. Its LABEL is "Drop the recommendation" (design ruling
 # 2026-09-08, shipped in the PWA 2026-09-09); what it SENDS is still the protocol utterance
 # "pass the tip along", which _PASS_RE below matches. Copy that tells someone which button
@@ -1296,8 +1292,12 @@ def tip_share_should_release(
 ) -> bool:
     """Release the sticky tip-share flow on a semantic abandon or a confident pivot to
     another intent (AI's read, not keywords), so the user is never trapped."""
-    from app.lane_decision import lane_should_continue
+    from app.lane_decision import is_universal_exit, lane_should_continue
 
+    # Distress, abuse and out-of-scope errands leave from every step, the toggle included —
+    # the carve-out below exists for a "no", not for a crisis.
+    if is_universal_exit(slots):
+        return True
     # A no to Lana's OWN closing yes/no ("Can neighbours ask you more?" → "naah, I don't
     # want them to") is the ANSWER to that step, but it reads as an abandon to the
     # classifier — which released the lane on the very last question and dropped a finished
@@ -1438,7 +1438,7 @@ def run_tip_share_turn(
     # ── Loop safety ──
     turns = int(session_ctx.get("tip_turns") or 0) + 1
     session_ctx["tip_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _TIP_TURN_CAP:
+    if turns > _TIP_TURN_CAP:
         for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_enrich_count", "tip_asked_fields", "tip_need_zip", "tip_fork_pending"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0

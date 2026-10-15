@@ -341,14 +341,16 @@ def test_changing_the_type_rewrites_the_questions(monkeypatch: Any) -> None:
     assert draft["suggestions"] == cc.TYPE_SUGGESTIONS
 
 
-def test_cancel_drops_the_draft(monkeypatch: Any) -> None:
+def test_leaving_is_the_models_abandon(monkeypatch: Any) -> None:
     ctx: dict[str, Any] = {
         "community_draft": {"circle_type": "friends", "name": "X"},
         "community_create_active": True,
+        "community_turns": 2,
     }
-    _run(monkeypatch, "never mind", ctx, {})
-    assert not ctx.get("community_draft")
-    assert not ctx.get("community_create_active")
+    assert cc.community_capture_should_release("never mind", ctx, {"abandon": True}) is True
+    # A cancel word inside an answer is not a way out: the blurb keeps the draft.
+    _run(monkeypatch, "we stop by the farmers market every Sunday", ctx, {})
+    assert ctx.get("community_draft")
 
 
 def test_create_is_not_swallowed_by_the_hosting_lane() -> None:
@@ -556,7 +558,7 @@ def _walk_to_subject(monkeypatch: Any, ctx: dict[str, Any]) -> None:
 
 
 def test_a_name_containing_a_control_word_is_a_name(monkeypatch: Any) -> None:
-    """_CANCEL_RE matches stop / never mind / not now; _PASS_RE matches pass / skip / done /
+    """A cancel word list used to match stop / never mind / not now; _PASS_RE matches pass / skip / done /
     all good. At a step whose answer is a NAME those eat real ones — "Stop the Stigma"
     destroyed the whole draft and "Pass the Mic" was silently dropped. Both are plausible
     community names, and neither is a command."""
@@ -567,13 +569,12 @@ def test_a_name_containing_a_control_word_is_a_name(monkeypatch: Any) -> None:
         assert (draft.get("answers") or {}).get(COMMUNITY_SUBJECT_FIELD) == name, name
 
 
-def test_a_bare_control_word_still_gets_the_user_out(monkeypatch: Any) -> None:
-    """The exception is scoped to the phrase being essentially the WHOLE message. Someone
-    who genuinely wants out while being asked the name must not be trapped."""
+def test_a_user_who_wants_out_at_the_name_step_gets_out(monkeypatch: Any) -> None:
+    """Someone who genuinely wants out while being asked the name must not be trapped —
+    the model's abandon read releases at this step like any other."""
     ctx: dict[str, Any] = {}
     _walk_to_subject(monkeypatch, ctx)
-    _run(monkeypatch, "cancel", ctx, {})
-    assert not ctx.get("community_draft"), "a bare cancel must still drop the draft"
+    assert cc.community_capture_should_release("cancel", ctx, {"abandon": True}) is True
 
 
 def test_the_published_name_is_what_the_caller_sees(monkeypatch: Any) -> None:

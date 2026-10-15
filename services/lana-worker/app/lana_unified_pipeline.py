@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from app.discovery_route import handle_discovery_turn, looks_like_logout
+from app.discovery_route import handle_discovery_turn, logout_requested, looks_like_logout
 from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import decide_turn_mode, unified_rules_first_enabled
@@ -676,6 +676,8 @@ def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     from app.layer1_intents import enrich_slots, slots_indicate_tip_share_signal, utterance_indicates_tip_share
 
     if isinstance(slots, dict):
+        if slots.get("abandon"):
+            return False  # leaving a capture never opens one
         return slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg))
     return utterance_indicates_tip_share(msg)
 
@@ -689,7 +691,7 @@ def _turn_is_pass_along(slots: dict[str, Any] | None, msg: str) -> bool:
     is the model's call. No classifier read → not this flow (fail closed): the turn goes
     on to discovery, which handles an offer as a signal.
     """
-    if not isinstance(slots, dict):
+    if not isinstance(slots, dict) or slots.get("abandon"):
         return False
     from app.layer1_intents import enrich_slots, normalize_linear_intent
 
@@ -767,6 +769,11 @@ def _turn_is_engine_action(
             timer=timer,
         )
         if not isinstance(slots, dict):
+            return False
+        # Leaving is not an engine command. A bare "cancel" mid-capture keeps the label of the
+        # flow it is leaving (sharing.tip), and sending that to the engine opened the old
+        # signal cascade ("What kind of tip is this?") instead of letting the policy close it.
+        if slots.get("abandon"):
             return False
         linear = str(slots.get("linear_intent") or "")
         sig = str(slots.get("signal_intent") or "") or SIGNAL_INTENT_BY_LINEAR.get(linear, "")
@@ -1762,8 +1769,16 @@ def run_lana_unified_pipeline(
 
     # A logout request must escape any sticky capture mode — otherwise "log me out" gets
     # swallowed as an item/tip/meet answer and does nothing. Clear the flags so the turn
-    # falls through to discovery's logout handler.
-    if looks_like_logout(user_message):
+    # falls through to discovery's logout handler. The phrase only says whether to ask: the
+    # model's read decides (logout_requested), so "never remembers to log out of my
+    # Netflix" no longer wipes a half-built draft on its way to being signed out.
+    if looks_like_logout(user_message) and logout_requested(
+        user_message,
+        _tip_share_slots(
+            session_ctx, user_message, history=history,
+            home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+        ),
+    ):
         for _k in (
             "pass_along_active", "tip_share_active", "look_meet_active",
             "activity_browse_active", "event_host_active"
@@ -2713,7 +2728,16 @@ def run_lana_unified_pipeline(
         # to the auth engine, trading this bug for a worse one. Login has the
         # same structural exposure and needs a tighter matcher before it can be
         # escaped here; see test_auth_turns_kept_off_policy.
-        and not looks_like_logout(user_message)
+        and not (
+            looks_like_logout(user_message)
+            and logout_requested(
+                user_message,
+                _tip_share_slots(
+                    session_ctx, user_message, history=history,
+                    home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+                ),
+            )
+        )
         # A tapped LEGACY chip is an engine command ("Widen the search") — never
         # the policy's turn. Taps on the policy's own chips stay with the policy.
         and not (

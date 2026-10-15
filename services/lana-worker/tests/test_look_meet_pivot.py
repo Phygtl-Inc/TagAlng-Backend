@@ -24,10 +24,11 @@ class TestLookMeetPivot(unittest.TestCase):
         self.assertFalse(look_meet_user_moved_on("Start listening for me", ctx))
         self.assertFalse(look_meet_user_moved_on("fix:kind", ctx))
 
-    def test_cancel_handled_in_flow_not_a_pivot(self) -> None:
+    def test_a_cancel_word_is_not_an_answer(self) -> None:
+        # No word list keeps or ends the flow; with no classifier read, "never mind" is not
+        # an answer to the card, so the lane lets go (the inversion — never trapped).
         ctx = {"look_meet_active": True, "look_ready": True}
-        # Cancel is a graceful in-flow exit, not a reroute.
-        self.assertFalse(look_meet_user_moved_on("never mind", ctx))
+        self.assertTrue(look_meet_user_moved_on("never mind", ctx))
 
     def test_mid_capture_answers_stay_in_flow(self) -> None:
         ctx = {"look_meet_active": True}  # not ready yet — collecting fields
