@@ -1653,9 +1653,11 @@ def try_upsert_claims_from_message(
     and a bare "Orlando" replying to "which Lagoinha location?" reads as a name.
     """
     saved_nick = current_nickname(user_id)
-    stated_nick = persist_nickname_if_stated(user_id, message)
+    # The model reads the name. The intro pattern ("I'm X", "call me X") only fills an EMPTY
+    # name when the model gave nothing back — run first, it saved "I'm Tired." as "Tired".
+    stated_nick: str | None = None
     if not should_extract_claims_from_message(message):
-        return ClaimExtractResult(nickname=stated_nick)
+        return ClaimExtractResult(nickname=None)
     try:
         # Threads (concept — label — details) so the extractor can ENRICH in place
         # by re-emitting a known concept slug, instead of staying silent on repeats.
@@ -1687,7 +1689,10 @@ def try_upsert_claims_from_message(
         )
     except Exception:
         logger.exception("incremental_claim_extract_failed")
-        return ClaimExtractResult(nickname=stated_nick)
+        return ClaimExtractResult(nickname=persist_nickname_if_stated(user_id, message))
+    if not isinstance(data, dict):
+        # No model read (unconfigured / empty reply): the pattern may fill an empty name.
+        stated_nick = persist_nickname_if_stated(user_id, message)
     # Circles Stage 1 (extract-and-park, §H.1): persist circle / place-feature candidates
     # from the same extractor pass. Best-effort and additive — must never affect claims.
     # "Sara is 9" — a name/age with no activity. Applies to every row already held

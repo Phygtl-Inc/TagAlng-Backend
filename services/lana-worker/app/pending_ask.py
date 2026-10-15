@@ -60,6 +60,8 @@ _REGISTRY: tuple[tuple[str, Callable[[dict[str, Any]], bool], str, bool, _Option
      "a yes-or-no confirmation before Lana carries out an action for them", False, None),
     ("lane_switch", lambda c: bool(c.get("pending_lane_switch")),
      "whether to stop what they were doing and sign in instead", True, None),
+    ("display_name", lambda c: bool(c.get("awaiting_upfront_name") or c.get("awaiting_name_change")),
+     "what first name they want people to call them", True, None),
     ("heritage_change", lambda c: bool(c.get("pending_heritage_change")),
      "whether to update a heritage already on their profile to the one they just mentioned",
      True, None),

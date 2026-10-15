@@ -1411,6 +1411,7 @@ def _try_upfront_display_name_turn(
     user_id: str | None,
     phase: str,
     is_anonymous: bool,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Ask a nameless *authenticated* user their display name UP FRONT, as its own clean
     turn — so the name-ask is never glued onto an unrelated reply ("Rooting for Colombia…
@@ -1421,8 +1422,35 @@ def _try_upfront_display_name_turn(
     can't trap the user here.
     """
     if session_ctx.get("awaiting_upfront_name"):
-        # Our own follow-up turn: the reply should be their name.
-        nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+        # Our own follow-up turn: the reply SHOULD be their name — whether it is, is the
+        # model's read (the ask is registered in app/pending_ask.py). The intro pattern
+        # alone saved "I'm Tired." as the name "Tired" (dev 2026-10-15). A new ask is let
+        # through to normal routing; a decline is respected; only an answer is parsed.
+        from app.pending_ask import reply_verdict
+
+        verdict = reply_verdict(slots)
+        if verdict == "new_ask" or (verdict is None and slots and str(slots.get("declined_slot") or "") == "display_name"):
+            session_ctx["awaiting_upfront_name"] = None
+            session_ctx["upfront_name_attempts"] = None
+            if verdict == "new_ask":
+                return None
+        nick = (
+            None
+            if verdict in ("decline", "new_ask")
+            else extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+        )
+        if verdict == "decline":
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+            ctx["display_name_saved"] = True  # asked once; never re-nag this session
+            ctx["awaiting_upfront_name"] = None
+            ctx["upfront_name_attempts"] = None
+            ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+            return (
+                "No worries — I'll skip that for now. So, how can I help you today?",
+                ctx,
+                ctx["last_routing"],
+                [],
+            )
         if nick and user_id:
             persist_profile_patch(user_id, {"nickname": nick})
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
@@ -3225,6 +3253,7 @@ def _try_community_join_reply_turn(
     session_ctx: dict[str, Any],
     user_id: str | None,
     phase: str | None = None,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Join a community the previous turn listed. One-turn offer: whatever comes next
     consumes it, and anything that isn't a join falls through to normal routing.
@@ -3235,7 +3264,7 @@ def _try_community_join_reply_turn(
         return None
     from app.community_discovery import join_confirm_reply, read_join_reply
 
-    result = read_join_reply(user_id, msg, session_ctx)
+    result = read_join_reply(user_id, msg, session_ctx, slots)
     if not result:
         return None
     member_count: int | None = None
@@ -9541,6 +9570,7 @@ def handle_discovery_turn(
         user_id=user_id,
         phase=phase,
         is_anonymous=is_anonymous,
+        slots=slots,
     )
     if upfront_name_turn is not None:
         reply, ctx, routing, peers = upfront_name_turn
@@ -9688,7 +9718,7 @@ def handle_discovery_turn(
         # Tap (or typed answer) on "want to join one of these?" — read before the signal
         # lane for the same reason: "Join Lp Fit" must not be captured as a fresh signal.
         join_turn = _try_community_join_reply_turn(
-            msg=msg, session_ctx=session_ctx, user_id=user_id, phase=phase
+            msg=msg, session_ctx=session_ctx, user_id=user_id, phase=phase, slots=slots
         )
         if join_turn is not None:
             reply, ctx, routing, peers = join_turn

@@ -45,6 +45,20 @@ def is_setup_handoff(message: str) -> bool:
     return bool(text) and text.casefold() == SETUP_HANDOFF.casefold()
 
 
+def is_bare_control(message: str, pattern: "re.Pattern[str]") -> bool:
+    """The message IS a control phrase ("done", "post it", "list it"), not merely contains it.
+
+    A whole message that is the command is a typed button press. The same words inside a
+    sentence are content: "she's done wonders with my twins" posted a tip, "I'm done with
+    this bike" listed an item, "yes please change the name first" published a community.
+    """
+    text = re.sub(r"[\s.!?,]+", " ", str(message or "").strip().lower()).strip()
+    if not text:
+        return False
+    m = pattern.search(text)
+    return bool(m) and len(m.group(0)) >= len(text) - 1
+
+
 def is_meta_or_chat(slots: dict[str, Any] | None) -> bool:
     """A question / companionship / meta turn (goal=chat) — e.g. "what's my zip?",
     "who's coming?", "why these?". It is never an ANSWER to a capture step, so a lane that

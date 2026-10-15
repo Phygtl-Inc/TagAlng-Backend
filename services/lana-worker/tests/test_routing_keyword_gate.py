@@ -356,3 +356,49 @@ def test_leaving_a_capture_never_opens_one():
     leaving = {**_ai("sharing.tip", 0.9), "abandon": True}
     assert _turn_is_tip_share(leaving, "cancel") is False
     assert _turn_is_pass_along({**_ai("sharing.swap", 0.9), "abandon": True}, "nvm") is False
+
+
+# ── 2026-10-15 group 1: words that WRITE something ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "msg,pattern_owner,pattern",
+    [
+        ("she's done wonders with my twins, add that", "app.tip_share", "_PASS_RE"),
+        ("I'm done with this bike, my kid outgrew it", "app.pass_along", "_LIST_NOW_RE"),
+        ("yes please change the name first", "app.community_capture", "_PUBLISH_RE"),
+    ],
+)
+def test_a_control_word_inside_a_sentence_is_content(msg, pattern_owner, pattern):
+    import importlib
+
+    from app.lane_decision import is_bare_control
+
+    assert is_bare_control(msg, getattr(importlib.import_module(pattern_owner), pattern)) is False
+
+
+@pytest.mark.parametrize(
+    "msg,pattern_owner,pattern",
+    [
+        ("pass the tip along", "app.tip_share", "_PASS_RE"),  # the post button's payload
+        ("Done.", "app.tip_share", "_PASS_RE"),
+        ("list it", "app.pass_along", "_LIST_NOW_RE"),  # the item card's button
+        ("go ahead", "app.community_capture", "_PUBLISH_RE"),
+    ],
+)
+def test_a_whole_message_command_is_a_typed_button(msg, pattern_owner, pattern):
+    import importlib
+
+    from app.lane_decision import is_bare_control
+
+    assert is_bare_control(msg, getattr(importlib.import_module(pattern_owner), pattern)) is True
+
+
+def test_no_name_is_read_off_the_message_before_the_model():
+    main_src = (APP / "main.py").read_text()
+    i = main_src.index("persist_nickname_if_stated(auth.user_id")
+    assert 'if purpose == "profile_intake":' in main_src[i - 600:i]
+    claims_src = (APP / "claims_persist.py").read_text()
+    body = claims_src[claims_src.index("def try_upsert_claims_from_message"):]
+    body = body[: body.index("incremental_claims_from_utterance(")]
+    assert "persist_nickname_if_stated(" not in body  # never ahead of the extractor

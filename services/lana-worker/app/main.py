@@ -2044,8 +2044,12 @@ def _run_lana_message(
     # popped — a popped key gets resurrected by the stored-context merge and Lana
     # would re-announce the same name change on every later turn.
     session_ctx_in["nickname_changed"] = None
-    if purpose in ("lana", "profile_intake"):
-        # Fill-only fallback: this cannot rename anyone (see persist_nickname_if_stated).
+    # No name is read off the message here, before the model has seen it: "I'm Tired." and
+    # "can you call me back" were saved as names "Tired" and "Back" by the intro pattern.
+    # The claims extractor reads names in context; the pattern is its fallback only when
+    # the model can't run (claims_persist.try_upsert_claims_from_message).
+    if purpose == "profile_intake":
+        # The legacy guest intake has no extractor pass of its own.
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
     # Button entries. A tapped CTA names its flow outright (intent_hint), so it enters here

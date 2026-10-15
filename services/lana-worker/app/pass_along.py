@@ -18,6 +18,8 @@ import json
 import re
 from typing import Any
 
+from app.lane_decision import is_bare_control
+
 # ── tappable option sets (same idea as the event flow's quick replies) ──────────
 _CONDITION_SUGGESTIONS = ["Brand new", "Like new", "Lightly used", "Well-loved"]
 _INTENT_SUGGESTIONS = ["Free", "Looking to swap"]
@@ -352,7 +354,7 @@ def run_pass_along_turn(
     # ── Capture the answer to an AI-tailored enrichment question into `details`
     # (the only answers the field-extractor can't map to a known column). ──
     pending = session_ctx.get("pass_along_pending_ask")
-    if pending and msg and not _LIST_NOW_RE.search(msg):
+    if pending and msg and not is_bare_control(msg, _LIST_NOW_RE):
         details = list(draft.get("details") or [])
         if msg not in details:
             details.append(msg)
@@ -415,7 +417,7 @@ def run_pass_along_turn(
 
     # ── P3: details complete → offer a photo once, then list ──
     has_photo = _has(draft, "photo_url")
-    wants_list = bool(_LIST_NOW_RE.search(msg))
+    wants_list = is_bare_control(msg, _LIST_NOW_RE)
     if not has_photo and not wants_list and not session_ctx.get("pass_along_photo_prompted"):
         draft["chips"] = chips
         draft["suggestions"] = []

@@ -404,21 +404,7 @@ def _awaiting_text_subject(session_ctx: dict[str, Any], draft: dict[str, Any]) -
     return (step or {}).get("kind") == "text"
 
 
-def _is_bare_control(message: str, pattern: "re.Pattern[str]") -> bool:
-    """The message IS the control phrase, rather than merely containing it.
-
-    Both control regexes match ordinary words — stop, pass, skip, done, all good — so at a
-    step whose answer is a NAME they eat real ones: "Stop the Stigma" destroyed the whole
-    draft, "Pass the Mic" was silently dropped. Neither is a command; both are plausible
-    community names. But exempting the step outright would trap someone who genuinely wants
-    out while being asked the name, so the test is whether the control phrase is essentially
-    the entire message.
-    """
-    text = re.sub(r"[\s.!?,]+", " ", str(message or "").strip().lower()).strip()
-    if not text:
-        return False
-    m = pattern.search(text)
-    return bool(m) and len(m.group(0)) >= len(text) - 1
+from app.lane_decision import is_bare_control as _is_bare_control  # noqa: E402
 
 
 def _resolve_parent(draft: dict[str, Any], user_id: Any) -> None:
@@ -1495,7 +1481,7 @@ def run_community_capture_turn(
         return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id)
 
     # ── Publish: the ready card's CTA ──
-    if session_ctx.get("community_ready") and _PUBLISH_RE.search(msg):
+    if session_ctx.get("community_ready") and _is_bare_control(msg, _PUBLISH_RE):
         # Which community "inside X" means is settled before the ready card
         # (_after_questions); this is a no-op then, and a safety net for older drafts.
         _resolve_parent(draft, user_id)
@@ -1673,11 +1659,7 @@ def run_community_capture_turn(
 
     # ── Capture a pending answer into the right place ──
     pending = str(session_ctx.get("community_pending_ask") or "")
-    passed = (
-        _is_bare_control(msg, _PASS_RE)
-        if _awaiting_text_subject(session_ctx, draft)
-        else bool(_PASS_RE.search(msg))
-    )
+    passed = _is_bare_control(msg, _PASS_RE)
     if pending and msg and not passed and not tapped_type:
         if pending == COMMUNITY_SUBJECT_FIELD:
             # A place is only ever set by the picker (/community-setup), never by text:
@@ -1796,7 +1778,7 @@ def run_community_capture_turn(
         draft["missing"] = missing_required(step_set, draft.get("answers"))
         asked = set(session_ctx.get("community_asked_fields") or [])
         # "that's it" goes STRAIGHT to the ready card once the required steps are in.
-        done_early = bool(_PASS_RE.search(msg)) and not draft["missing"]
+        done_early = _is_bare_control(msg, _PASS_RE) and not draft["missing"]
         step = None if done_early else next_question(
             step_set, draft.get("answers"), asked=asked
         )

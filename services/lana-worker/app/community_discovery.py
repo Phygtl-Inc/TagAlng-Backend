@@ -2798,7 +2798,12 @@ _JOIN_VERB_RE = re.compile(
 _JOIN_REPLY_MAX_LEN = 120
 
 
-def read_join_reply(user_id: str, message: str, session_ctx: dict[str, Any]) -> dict[str, Any] | None:
+def read_join_reply(
+    user_id: str,
+    message: str,
+    session_ctx: dict[str, Any],
+    slots: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Read a reply to the "want to join one of these?" offer.
 
     Returns the join result plus the matched place, or None to fall through to normal
@@ -2822,14 +2827,31 @@ def read_join_reply(user_id: str, message: str, session_ctx: dict[str, Any]) -> 
         return None
 
     named = _match_offered_place(text, places)
-    wants_join = bool(_JOIN_VERB_RE.search(text)) or _is_bare_yes(text)
+    # Whether this reply ACCEPTS the offer is the model's read (reply_to_pending — the
+    # offer is registered in app/pending_ask.py, so the classifier sees it). The words used
+    # to decide: with one community offered, "I'm in San Jose actually, anything there?"
+    # matched "i'm in" and wrote a membership. A tap on the chip itself ("Join <place>",
+    # posted verbatim) is a rendered control and needs no reading. The verb list survives
+    # only for a turn with no classifier read at all.
+    from app.pending_ask import reply_verdict
+
+    tapped = named is not None and _norm(text) == _norm(f"Join {named.get('place_name') or ''}")
+    verdict = reply_verdict(slots)
+    if tapped:
+        wants_join = True
+    elif verdict is not None:
+        wants_join = verdict == "answer"
+    elif slots is None:
+        wants_join = bool(_JOIN_VERB_RE.search(text)) or _is_bare_yes(text)
+    else:
+        wants_join = False
     if named is None:
         # "yes" / "join" with nothing named: only unambiguous with a single offer.
         if wants_join and len(places) == 1:
             named = places[0]
         else:
             return None
-    if not wants_join and not _looks_like_only_a_name(text, named):
+    if not wants_join and not (verdict in (None, "answer") and _looks_like_only_a_name(text, named)):
         return None
 
     try:

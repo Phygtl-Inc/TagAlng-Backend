@@ -20,6 +20,8 @@ import re
 import uuid
 from typing import Any
 
+from app.lane_decision import is_bare_control
+
 from app.reply_compose import compose_reply, readback
 
 _TRAIT_PROMPT = "What makes them great?"
@@ -36,7 +38,7 @@ _POST_CTA = "Drop the recommendation"
 _POST_UTTERANCE = "pass the tip along"
 # The post button's utterance / any go-ahead to post it.
 _PASS_RE = re.compile(
-    r"\b(pass (?:the )?tip|pass it along|post it|share it|list it|that'?s it|"
+    r"\b(pass (?:the )?tip(?: along)?|pass it along|post it|share it|list it|that'?s it|"
     r"go ahead|done|send it|share with (?:the |my )?communit(?:y|ies))\b",
     re.IGNORECASE,
 )
@@ -1336,7 +1338,7 @@ def reset_tip_share_state(session_ctx: dict[str, Any]) -> None:
 def posting_cta(msg: str) -> bool:
     """A control line (post it / looks good / fix:<field>), never a statement."""
     low = msg.strip().lower()
-    return bool(_PASS_RE.search(low)) or low.startswith("fix:") or low in {"looks good", "yes", "no"}
+    return is_bare_control(low, _PASS_RE) or low.startswith("fix:") or low in {"looks good", "yes", "no"}
 
 
 def _tip_ready_reply(summary: str, circle: str) -> str:
@@ -1450,7 +1452,7 @@ def run_tip_share_turn(
     # as a card answer by the extractor, so every retry failed the same way (dev QA
     # 2026-09-03, "block_required" twice in a row). Answering the ask posts the tip on the
     # spot — they already tapped the CTA once.
-    posting = bool(_PASS_RE.search(msg))
+    posting = is_bare_control(msg, _PASS_RE)
     if session_ctx.get("tip_need_zip") and msg:
         from app.discovery_route import (
             ensure_home_block_for_verified_user,
@@ -1658,7 +1660,7 @@ def run_tip_share_turn(
 
     # ── Capture a pending enrichment / name answer into the right place ──
     pending = session_ctx.get("tip_pending_ask")
-    if pending and msg and not handoff and not _PASS_RE.search(msg):
+    if pending and msg and not handoff and not is_bare_control(msg, _PASS_RE):
         step_fields = {s["field"] for s in step_set_of(draft)}
         if pending in step_fields:
             draft["answers"] = {**(draft.get("answers") or {}), str(pending): msg}
@@ -1757,7 +1759,7 @@ def run_tip_share_turn(
         # reliable mid-capture — it read "why should i answer this" as an answer and the
         # question went onto the card as the user's opinion (dev QA 2026-09-08).
         and (role == "asks_why" or (not role and is_meta_or_chat(slots)))
-        and not _PASS_RE.search(msg)
+        and not is_bare_control(msg, _PASS_RE)
     ):
         skippable = not pending_step.get("required")
         # Their question was stamped in as the answer a few lines up. Take it back out.
@@ -1845,7 +1847,7 @@ def run_tip_share_turn(
         and not (set(new_answers) - {weak_field})
         and weak_field not in reasked
         and weak_field not in (SUBJECT_FIELD, COMMUNITY_FIELD, *TAIL_FIELDS)
-        and not _PASS_RE.search(msg)
+        and not is_bare_control(msg, _PASS_RE)
     ):
         step = next(
             (s for s in step_set_of(draft) if s["field"] == weak_field), None
@@ -2078,7 +2080,7 @@ def run_tip_share_turn(
         # required steps are in. A typed set is 7-8 steps deep, so without this the only
         # way out of a set the user considers finished is to answer every optional or
         # abandon the tip.
-        done_early = bool(_PASS_RE.search(msg)) and not draft["missing"]
+        done_early = is_bare_control(msg, _PASS_RE) and not draft["missing"]
         # `asked` goes IN so the walk advances past optionals already offered.
         step = None if done_early else next_question(
             step_set, draft.get("answers"), asked=asked
