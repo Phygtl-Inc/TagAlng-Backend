@@ -46,20 +46,6 @@ _PASS_RE = re.compile(
 )
 _TIP_TURN_CAP = 24  # 8 carousel steps + name/type + corrections
 
-# Deterministic entry backstop (the "A tip to share" CTA), so it engages even without
-# the FE intent_hint. Matches SHARING a recommendation — not seeking one.
-_ENTRY_RE = re.compile(
-    r"\b(tip to share|recommend(?:ation)?|i'?d? recommend|you should try|"
-    r"a (?:great|good) (?:place|spot|doctor|dentist)|share a tip)\b",
-    re.IGNORECASE,
-)
-
-
-def looks_like_tip_share_entry(message: str) -> bool:
-    """True when the message looks like the user wants to share a recommendation."""
-    return bool(_ENTRY_RE.search(str(message or "").strip()))
-
-
 _TIP_VALUE_FIELDS = ("name", "category", "trait", "locality", "reco_type")
 
 _EXTRACT_SYSTEM = """You extract structured fields about a local recommendation (a "tip") \

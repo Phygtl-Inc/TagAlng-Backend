@@ -6614,22 +6614,34 @@ def _release_host_mode(session_ctx: dict[str, Any]) -> None:
         session_ctx[key] = None
 
 
-# Explicit "host/throw/plan a <event>" — a deterministic entry into the event flow that
-# does NOT depend on the CTA hint or the classifier. Requires a host verb + an event
-# noun so "I want to meet people" (discovery) is never caught.
-_HOST_ENTRY_RE = re.compile(
-    r"\bhost(?:ing)?\b.{0,30}\b(?:meet|meet-?up|event|gathering|playgroup|play\s?group|"
-    r"playdate|play\s?date|brunch|coffee|breakfast|picnic|hang(?:out)?|get[- ]?together|"
-    r"party|potluck|walk|stroll|playground|class|circle|club)\b|"
-    r"\b(?:throw|organi[sz]e|plan|set up)\b.{0,30}\b(?:meetup|meet-?up|gathering|playgroup|"
-    r"play\s?group|playdate|brunch|picnic|party|potluck|get[- ]?together|event)\b",
-    re.I,
-)
-
-
-def looks_like_host_event_entry(msg: str) -> bool:
-    """Deterministic 'host an event' entry — host/plan verb + an event noun."""
-    return bool(_HOST_ENTRY_RE.search(str(msg or "").strip()))
+def start_host_mode(session_ctx: dict[str, Any]) -> None:
+    """Enter the event-host flow on a FRESH draft — never inherit a prior session's event
+    (the stale "dads meetup" card), and clear event_id so a past publish doesn't skip the
+    flow. Shared by both ways in: the host CTA (app/main.py, which re-applies a venue the
+    community card stamped) and the classifier's sharing.host verdict below. Keys are set,
+    never popped, for the same session-merge reason as _release_host_mode."""
+    session_ctx["event_host_active"] = True
+    session_ctx["event_host_turns"] = 0
+    for key in (
+        "event_draft",
+        "event_id",
+        "event_when_date",
+        "event_when_time",
+        "event_venue",
+        "event_venue_tried",
+        "event_settings",
+        # Batched-setup stage (review → setup → confirm → published); start unset.
+        "host_stage",
+    ):
+        session_ctx[key] = None
+    for key in (
+        "event_affinity_asked",
+        "event_place_asked",
+        "event_cap_asked",
+        "event_approval_asked",
+        "event_share_asked",
+    ):
+        session_ctx[key] = False
 
 
 def _show_activities_preview(
@@ -9104,7 +9116,14 @@ def handle_discovery_turn(
             # publish). When the orchestrator is on it owns this in-chat (OpenAI), so
             # defer to it and pin host mode so the follow-up turns stay with it.
             if _host_via_orchestrator():
-                session_ctx["event_host_active"] = True
+                if not session_ctx.get("event_host_active"):
+                    # The classifier is the way in for typed asks ("I want to host a
+                    # potluck"), so it opens the flow exactly as the CTA does: on a fresh
+                    # draft, with any browse that was mid-question closed.
+                    from app.activity_browse import reset_activity_browse_state
+
+                    reset_activity_browse_state(session_ctx)
+                    start_host_mode(session_ctx)
                 session_ctx["event_host_turns"] = int(session_ctx.get("event_host_turns") or 0) + 1
                 return None
             hosting_turn = _try_signal_lane_turn(

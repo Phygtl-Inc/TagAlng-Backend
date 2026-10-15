@@ -50,19 +50,18 @@ _LIST_NOW_RE = re.compile(
 )
 _PASS_ALONG_TURN_CAP = 12
 
-# Deterministic entry detection (a backstop for the "Something to pass along" CTA,
-# so the flow engages even if the FE doesn't send intent_hint). Matches OFFERING an
-# item — not a "looking for" seek.
-_ENTRY_RE = re.compile(
-    r"\b(pass(?:ing)?\s+along|give\s+away|giving\s+away|hand(?:ing)?\s+(?:down|over)|"
-    r"free to a good home|something to share|to pass (?:along|on))\b",
-    re.IGNORECASE,
-)
+def start_pass_along(session_ctx: dict[str, Any]) -> None:
+    """Open the capture on a fresh item draft. Entering pass-along closes any in-flight tip
+    flow and its card. Shared by the CTA (app/main.py) and the classifier's sharing.swap
+    verdict (lana_unified_pipeline), so both ways in start from the same state."""
+    session_ctx["pass_along_active"] = True
+    session_ctx["pass_along_turns"] = 0
+    session_ctx["pass_along_photo_prompted"] = False
+    session_ctx["item_draft"] = None
+    session_ctx["tip_share_active"] = False
+    session_ctx["tip_ready"] = None
+    session_ctx["tip_draft"] = None
 
-
-def looks_like_pass_along_entry(message: str) -> bool:
-    """True when the message looks like the user wants to offer/pass along an item."""
-    return bool(_ENTRY_RE.search(str(message or "").strip()))
 
 _ITEM_VALUE_FIELDS = ("title", "category", "condition", "intent_type")
 

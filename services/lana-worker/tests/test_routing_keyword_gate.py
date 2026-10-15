@@ -11,7 +11,11 @@ import pathlib
 import pytest
 
 from app.layer1_intents import enrich_slots, keyword_may_decide
-from app.lana_unified_pipeline import _turn_is_community_create, _turn_is_tip_share
+from app.lana_unified_pipeline import (
+    _turn_is_community_create,
+    _turn_is_pass_along,
+    _turn_is_tip_share,
+)
 from app.routing_log import build_routing_record
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "app"
@@ -114,6 +118,75 @@ def test_tip_share_turn_follows_confident_model():
     assert _turn_is_tip_share(None, msg) is True
 
 
+# ── typed words never open a flow before the model reads them ───────────────────────
+
+
+def test_main_opens_flows_from_buttons_only():
+    """The host / give-away / tip entries in main.py run BEFORE the classifier, so only a
+    tapped CTA (intent_hint) may open them. A typed ask is the model's to read."""
+    src = (APP / "main.py").read_text()
+    for gone in (
+        "looks_like_host_event_entry",
+        "looks_like_pass_along_entry",
+        "looks_like_tip_share_entry",
+    ):
+        assert gone not in src
+
+
+@pytest.mark.parametrize(
+    "msg,label",
+    [
+        # Pouya's 2026-10-14 cases: each matched an OFFERING entry phrase while asking.
+        ("is anyone giving away a crib?", "looking.swap"),
+        ("is anyone hosting a party this weekend?", "discovery.find_activities"),
+        ("can you recommend a pizza place near me?", "looking.tip"),
+    ],
+)
+def test_seeks_that_share_words_with_offers_open_no_offer_flow(msg, label):
+    slots = _ai(label, 0.9)
+    assert _turn_is_pass_along(slots, msg) is False
+    assert _turn_is_tip_share(slots, msg) is False
+
+
+def test_pass_along_follows_the_model():
+    assert _turn_is_pass_along(_ai("sharing.swap", 0.9), "I'm giving away a stroller") is True
+    # The model's own signal field counts, as it does for the other lanes.
+    slots = _ai("discovery.find_peers", 0.7, goal="peers", signal_intent="swap_offer")
+    assert _turn_is_pass_along(slots, "my kid outgrew this bike, anyone want it?") is True
+    # No classifier read: fail closed — the words alone never open it.
+    assert _turn_is_pass_along(None, "I'm giving away a stroller") is False
+
+
+def test_start_host_mode_never_inherits_a_previous_event():
+    from app.discovery_route import start_host_mode
+
+    ctx = {
+        "event_draft": {"title": "dads meetup"},
+        "event_id": "old-event",
+        "event_when_date": "2026-10-01",
+        "event_venue": {"name": "Old Park"},
+        "event_place_asked": True,
+        "host_stage": "confirm",
+    }
+    start_host_mode(ctx)
+    assert ctx["event_host_active"] is True
+    assert ctx["event_host_turns"] == 0
+    for key in ("event_draft", "event_id", "event_when_date", "event_venue", "host_stage"):
+        assert ctx[key] is None, key  # set, not popped: the session merge must clear them
+    assert ctx["event_place_asked"] is False
+
+
+def test_start_pass_along_closes_an_open_tip():
+    from app.pass_along import start_pass_along
+
+    ctx = {"tip_share_active": True, "tip_draft": {"name": "Casa Lupe"}, "item_draft": {"title": "x"}}
+    start_pass_along(ctx)
+    assert ctx["pass_along_active"] is True
+    assert ctx["item_draft"] is None
+    assert ctx["tip_share_active"] is False
+    assert ctx["tip_draft"] is None
+
+
 # ── no new direct callers ───────────────────────────────────────────────────────────
 
 _MATCHERS = {
@@ -213,3 +286,11 @@ def test_record_drops_last_turns_routing():
     rec = build_routing_record(ctx, user_message="hi", intent_hint=None, prev_routing=stale)
     assert rec["flow"] is None
     assert rec["decided_by"] == "ai"
+
+
+def test_typed_hosting_escapes_the_policy_to_its_flow():
+    """Without the pre-classifier entry phrase, sharing.host must still reach the host
+    flow: the policy gate hands it to the engine instead of answering in prose."""
+    from app.lana_unified_pipeline import POLICY_ENGINE_ONLY_INTENTS
+
+    assert "sharing.host" in POLICY_ENGINE_ONLY_INTENTS

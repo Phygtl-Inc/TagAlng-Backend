@@ -545,6 +545,12 @@ POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     # SAME bug and the more common phrasing; it is also the text of the chip the policy
     # itself offers, so the typed sentence and the tapped chip now run the same engine.
     "discovery.find_by_attrs",
+    # Hosting is a flow, not a conversation. Typed "I want to host a potluck this
+    # saturday" used to reach it only because main.py's entry phrases armed
+    # event_host_active before the classifier ran, which also skipped this gate. With that
+    # gone the classifier's sharing.host is the way in, and without this escape the
+    # policy answered it in prose and the host flow never opened (dev 2026-10-15).
+    "sharing.host",
 })
 
 # Intents that double as an expressed need, so the intent alone cannot say whether this
@@ -672,6 +678,25 @@ def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     if isinstance(slots, dict):
         return slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg))
     return utterance_indicates_tip_share(msg)
+
+
+def _turn_is_pass_along(slots: dict[str, Any] | None, msg: str) -> bool:
+    """Is this turn OFFERING an item (the pass-along capture)?
+
+    The classifier's verdict only. The flow's old way in was an entry phrase list checked
+    before the model ran, and "is anyone giving away a crib?" — a SEEK — matched it as
+    readily as "I'm giving away a stroller". The words sit on both sides; the direction
+    is the model's call. No classifier read → not this flow (fail closed): the turn goes
+    on to discovery, which handles an offer as a signal.
+    """
+    if not isinstance(slots, dict):
+        return False
+    from app.layer1_intents import enrich_slots, normalize_linear_intent
+
+    out = enrich_slots(dict(slots), msg=msg)
+    if str(out.get("signal_intent") or "").strip().lower() == "swap_offer":
+        return True
+    return normalize_linear_intent(out.get("linear_intent")) == "sharing.swap"
 
 
 def _reply_owned_downstream(
@@ -2284,14 +2309,31 @@ def run_lana_unified_pipeline(
 
     # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
     # structured extraction), the same way event_host_active does. It releases on
-    # save, cancel, or a turn cap, so other flows are never affected.
-    if session_ctx.get("pass_along_active"):
+    # save, cancel, or a turn cap, so other flows are never affected. Entered from the
+    # CTA (app/main.py) or, for a typed offer, from the classifier's sharing.swap verdict.
+    if session_ctx.get("pass_along_active") or (
+        str(session_ctx.get("routing_phase") or "") in ("", "listening")
+        and not session_ctx.get("requires_phone_verification")
+        and not session_ctx.get("pending_signup_gate")
+        and not session_ctx.get("tip_share_active")
+        and _turn_is_pass_along(_tip_share_slots(
+            session_ctx, user_message, history=history,
+            home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+        ), user_message)
+    ):
         from app.discovery_slots import discovery_slots_for_turn
         from app.pass_along import (
             pass_along_should_release,
             reset_pass_along_state,
             run_pass_along_turn,
+            start_pass_along,
         )
+
+        if not session_ctx.get("pass_along_active"):
+            from app.activity_browse import reset_activity_browse_state
+
+            reset_activity_browse_state(session_ctx)
+            start_pass_along(session_ctx)
 
         # Classify so the capture releases on a semantic abandon ("no i dont wanna
         # giveaway") or a pivot to another lane ("find me a jogging partner") — the AI's
