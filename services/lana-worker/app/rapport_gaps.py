@@ -266,8 +266,10 @@ def open_semantic_gap(
     # Questions are deduped against questions above; this checks it against what the person
     # actually SAID, in chat or in earlier answers. A grounding question is left alone: it
     # resolves an affiliation to a map place, and skipping it would leave that undone.
+    checked = False
     if not skip_dedup and not affiliation_ref:
-        evidence = already_told(user_id, q_text, embedding)
+        evidence = told_verdict(user_id, q_text, embedding)
+        checked = evidence is not None
         if evidence:
             logger.info(
                 "rapport: skipped already-told question for %s: %r (they said %r)",
@@ -305,16 +307,22 @@ def open_semantic_gap(
     literal = to_pgvector(embedding)
     if literal:
         row["question_embedding"] = literal
+    if checked:
+        # Checked against what they told Lana just now, so the queue revalidation skips it.
+        row["told_checked_at"] = _now()
     try:
         res = service_client().table("rapport_gaps").insert(row).execute()
     except Exception:
         # unique(user_id, gap_id) violation = already open for this topic — fine.
-        # An environment without answer_options (pre-20261029) also lands here, so
-        # retry once without the chips rather than lose the whole question.
-        if "answer_options" not in row:
+        # An environment without answer_options (pre-20261029) or told_checked_at
+        # (pre-20270209) also lands here, so retry once without those optional columns
+        # rather than lose the whole question.
+        optional = [k for k in ("answer_options", "told_checked_at") if k in row]
+        if not optional:
             logger.debug("rapport: semantic gap %s exists/race", gap_id)
             return False
-        row.pop("answer_options")
+        for k in optional:
+            row.pop(k)
         try:
             res = service_client().table("rapport_gaps").insert(row).execute()
         except Exception:
@@ -535,7 +543,15 @@ def _already_told_model() -> str:
 
 
 def already_told(user_id: str, question: str, embedding: list[float] | None = None) -> str:
-    """Their own words that already answer ``question``, or "" when they have not said it.
+    """Their own words that already answer ``question``, or "" when they have not said it
+    (or when it could not be judged — see told_verdict for the difference)."""
+    return told_verdict(user_id, question, embedding) or ""
+
+
+def told_verdict(user_id: str, question: str, embedding: list[float] | None = None) -> str | None:
+    """Their own words that already answer ``question``; "" when they have not said it; None
+    when it could not be judged (no model, or the call failed). The queue revalidation needs
+    the difference: a question it could not judge must be tried again, not marked checked.
 
     Every question used to be checked only against Lana's earlier QUESTIONS. What the person
     said in conversation never counted, so Tommaso, who told Lana in chat and in two tile
@@ -552,19 +568,21 @@ def already_told(user_id: str, question: str, embedding: list[float] | None = No
     payload = f"QUESTION: {question}\n\nWHAT THEY HAVE TOLD LANA:\n" + "\n".join(
         f"- {line}" for line in lines
     )
-    data: Any = None
     try:
         from app.orchestrator.llm import llm_configured, llm_json
 
-        if llm_configured():
-            data = llm_json(
-                model=_already_told_model(), system=_ALREADY_TOLD_PROMPT, user_payload=payload,
-                max_tokens=240, temperature=0.0,
-            )
+        if not llm_configured():
+            return None
+        data = llm_json(
+            model=_already_told_model(), system=_ALREADY_TOLD_PROMPT, user_payload=payload,
+            max_tokens=240, temperature=0.0,
+        )
     except Exception:
         logger.exception("rapport: already-told verdict failed")
-        return ""
-    if not isinstance(data, dict) or data.get("can_answer") is not True:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("can_answer") is not True:
         return ""
     answer = " ".join(str(data.get("lana_would_answer") or "").split())
     source = " ".join(str(data.get("from") or "").split())
@@ -572,6 +590,123 @@ def already_told(user_id: str, question: str, embedding: list[float] | None = No
     if not answer or not source:
         return ""
     return f"{answer} (from: {source})"
+
+
+# How many never-checked queued questions one pass judges. Each is one model call; the
+# buffer holds ~5 per user, and new questions are stamped when they open, so after the
+# first pass a user's queue is clean and later passes cost nothing.
+_REVALIDATE_MAX = 5
+
+
+def revalidate_queue(user_id: str, max_checks: int = _REVALIDATE_MAX) -> int:
+    """Run the already-told check on queued questions that never had it, and close the ones
+    the person already answered. Returns how many it closed. Never raises.
+
+    The check guards questions as they OPEN (open_semantic_gap). Everything queued before it
+    shipped was never checked: on prod, 2026-10-15, 53 queued questions asked what people had
+    already said ("how often do you play tennis?" to someone who plays every other day). A
+    question it cannot judge (model down) is left unstamped and tried on the next pass.
+    Questions that go stale AFTER they are checked are closed per chat message by
+    close_gaps_told_in_chat.
+    """
+    if not user_id:
+        return 0
+    try:
+        rows = (
+            service_client()
+            .table("rapport_gaps")
+            .select("gap_row_id, gap_id, question, question_embedding, affiliation_ref")
+            .eq("user_id", user_id)
+            .in_("status", ["open", "asked"])
+            .is_("told_checked_at", "null")
+            .not_.is_("question", "null")
+            .order("opened_at")
+            .limit(max(1, int(max_checks)))
+            .execute()
+        ).data or []
+    except Exception:
+        # Before 20270209 the column does not exist: nothing to do.
+        logger.debug("rapport: revalidate read failed for %s", user_id)
+        return 0
+    closed = 0
+    for r in rows:
+        patch: dict[str, Any] = {"told_checked_at": _now()}
+        # Confirming (reco:) and place-grounding questions are exempt here exactly as at
+        # opening: they are meant to name what the person already did.
+        if not r.get("affiliation_ref") and not str(r.get("gap_id") or "").startswith("reco:"):
+            raw = r.get("question_embedding")
+            try:
+                import json
+
+                embedding = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, ValueError):
+                embedding = None
+            evidence = told_verdict(user_id, str(r.get("question") or ""), embedding or None)
+            if evidence is None:
+                continue  # could not judge: try again next pass
+            if evidence:
+                patch.update({"status": "answered", "answered_at": _now(), "updated_at": _now()})
+                logger.info(
+                    "rapport: closed queued already-told question for %s: %r (they said %r)",
+                    user_id, r.get("question"), evidence[:120],
+                )
+                closed += 1
+        try:
+            service_client().table("rapport_gaps").update(patch).eq(
+                "gap_row_id", r["gap_row_id"]
+            ).in_("status", ["open", "asked"]).execute()
+        except Exception:
+            logger.exception("rapport: revalidate write failed for %s", r.get("gap_row_id"))
+    return closed
+
+
+def revalidate_backlog(max_users: int | None = None) -> dict[str, int]:
+    """One pass over every user with never-checked queued questions (the pre-check backlog).
+    For a one-off run after deploy; the per-turn and per-tile triggers cover it otherwise."""
+    users: list[str] = []
+    try:
+        rows = (
+            service_client()
+            .table("rapport_gaps")
+            .select("user_id")
+            .in_("status", ["open", "asked"])
+            .is_("told_checked_at", "null")
+            .limit(5000)
+            .execute()
+        ).data or []
+        users = list(dict.fromkeys(str(r["user_id"]) for r in rows if r.get("user_id")))
+    except Exception:
+        logger.exception("rapport: backlog read failed")
+    if max_users is not None:
+        users = users[:max_users]
+    closed = 0
+    for u in users:
+        # Loop until this user's backlog is empty or a pass makes no progress.
+        while True:
+            before = _unchecked_count(u)
+            closed += revalidate_queue(u)
+            if not before or _unchecked_count(u) >= before:
+                break
+    return {"users": len(users), "closed": closed}
+
+
+def _unchecked_count(user_id: str) -> int:
+    try:
+        return len(
+            (
+                service_client()
+                .table("rapport_gaps")
+                .select("gap_row_id")
+                .eq("user_id", user_id)
+                .in_("status", ["open", "asked"])
+                .is_("told_checked_at", "null")
+                .limit(200)
+                .execute()
+            ).data
+            or []
+        )
+    except Exception:
+        return 0
 
 
 _SIBLINGS_PROMPT = """Someone in a neighborhood app was just asked one question and answered it. \
