@@ -52,11 +52,14 @@ def is_bare_control(message: str, pattern: "re.Pattern[str]") -> bool:
     sentence are content: "she's done wonders with my twins" posted a tip, "I'm done with
     this bike" listed an item, "yes please change the name first" published a community.
     """
-    text = re.sub(r"[\s.!?,]+", " ", str(message or "").strip().lower()).strip()
+    text = re.sub(r"[\s.!?,·•\-]+", " ", str(message or "").strip().lower()).strip()
     if not text:
         return False
-    m = pattern.search(text)
-    return bool(m) and len(m.group(0)) >= len(text) - 1
+    # Nothing may be left once every control phrase is taken out: "yes please" and "ok, go
+    # ahead" are commands; "she's done wonders with my twins" leaves content behind.
+    if not pattern.search(text):
+        return False
+    return not pattern.sub(" ", text).strip()
 
 
 def is_meta_or_chat(slots: dict[str, Any] | None) -> bool:
@@ -144,7 +147,6 @@ def lane_should_continue(
     slots: dict[str, Any] | None,
     *,
     is_valid_answer: IsValidAnswer,
-    pivot_re: "re.Pattern[str] | None" = None,
     is_offered_option: "IsValidAnswer | None" = None,
 ) -> bool:
     """Return True to STAY in the lane this turn, False to RELEASE to normal routing.
@@ -154,9 +156,11 @@ def lane_should_continue(
       2. crisis / unsafe / out-of-scope read -> release (the rails downstream answer it)
       3. offered option     -> stay  (they tapped a chip Lana just put in front of them)
       4. slots.abandon      -> release
-      5. cross-lane regex   -> release
-      6. is_valid_answer    -> stay  (answer / refine / confirm / chip edit)
-      7. default            -> RELEASE  (the inversion — nothing keeps a user trapped)
+      5. is_valid_answer    -> stay  (answer / refine / confirm / chip edit)
+      6. default            -> RELEASE  (the inversion — nothing keeps a user trapped)
+
+    There is no word-list step: a "pivot" phrase list used to release the lane before the
+    model was read ("show me playdates for families" ended a browse it refined).
 
     Leaving is the model's call (abandon), never a word in the sentence. A cancel-word list
     used to sit at step 2 and win over everything: "it's called The Bus Stop Diner" threw
@@ -178,7 +182,5 @@ def lane_should_continue(
     if is_offered_option is not None and is_offered_option(msg, session_ctx, slots):
         return True
     if slots and slots.get("abandon"):
-        return False
-    if pivot_re is not None and pivot_re.search(msg):
         return False
     return bool(is_valid_answer(msg, session_ctx, slots))

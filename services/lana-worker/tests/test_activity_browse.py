@@ -124,7 +124,7 @@ class TestBrowseRelease(unittest.TestCase):
                 "Yes, listen for me",
                 {
                     "activity_browse_active": True,
-                    "browse_draft": {"interest": "badminton", "_seek_offer": True},
+                    "browse_draft": {"interest": "badminton", "_seek_offer": True, "suggestions": ["Yes, listen for me", "Show me anything"]},
                 },
                 {"goal": "save_signal", "signal_intent": "meet_seek", "confidence": 0.8},
             )
@@ -137,7 +137,7 @@ class TestBrowseRelease(unittest.TestCase):
                 "what about cricket",
                 {
                     "activity_browse_active": True,
-                    "browse_draft": {"interest": "badminton", "_seek_offer": True},
+                    "browse_draft": {"interest": "badminton", "_seek_offer": True, "suggestions": ["Yes, listen for me", "Show me anything"]},
                 },
                 {"goal": "activities", "confidence": 0.9},
             )
@@ -520,7 +520,7 @@ class TestBrowseOutOfCoverage(unittest.TestCase):
     def test_expansion_accept_gates_guest_into_verify(self) -> None:
         ctx: dict = {
             "activity_browse_active": True,
-            "browse_draft": {"_expansion_offer": "10025", "_asked": True},
+            "browse_draft": {"_expansion_offer": "10025", "_asked": True, "suggestions": ["Yes, text me at launch", "No thanks"]},
         }
         reply = run_activity_browse_turn(
             user_message="Yes, text me at launch",
@@ -541,7 +541,7 @@ class TestBrowseOutOfCoverage(unittest.TestCase):
         ctx: dict = {
             "activity_browse_active": True,
             "phone_verified": True,
-            "browse_draft": {"_expansion_offer": "10025", "_asked": True},
+            "browse_draft": {"_expansion_offer": "10025", "_asked": True, "suggestions": ["Yes, text me at launch", "No thanks"]},
         }
         reply = run_activity_browse_turn(
             user_message="yes please",
@@ -559,7 +559,7 @@ class TestBrowseOutOfCoverage(unittest.TestCase):
     def test_expansion_decline_closes_warmly(self) -> None:
         ctx: dict = {
             "activity_browse_active": True,
-            "browse_draft": {"_expansion_offer": "10025", "_asked": True},
+            "browse_draft": {"_expansion_offer": "10025", "_asked": True, "suggestions": ["Yes, text me at launch", "No thanks"]},
         }
         reply = run_activity_browse_turn(
             user_message="No thanks",

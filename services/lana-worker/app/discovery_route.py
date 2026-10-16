@@ -6516,19 +6516,8 @@ def _host_via_orchestrator() -> bool:
         return False
 
 
-# While hosting, ONLY an explicit pivot leaves the flow — narrow patterns so an event
-# description ("weekday playground meet with kids") is never mistaken for a pivot.
-_HOST_PIVOT_RE = re.compile(
-    r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow my (?:block log|neighborhood log|intros)\b|\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b",
-    re.I,
-)
 # Backstop so a verified user can never be trapped in host mode.
 _EVENT_HOST_TURN_CAP = 12
-
-
-def _pivots_out_of_host(msg: str) -> bool:
-    return bool(_HOST_PIVOT_RE.search(str(msg or "").strip()))
 
 
 # Lanes the host capture does NOT own — a confident classification into any is a pivot
@@ -6584,7 +6573,7 @@ def _is_host_answer(
     capacity chip ("Open · no limit") as off-lane noise. Taking those as confident pivots
     used to release host mode mid-build, wiping the draft + the resolved date, so the flow
     re-asked "when?" with the date still showing in the card. Step-awareness suppresses
-    that false positive; an explicit pivot (``_HOST_PIVOT_RE``), an abandon, or a meta /
+    that false positive; a confident foreign read, an abandon, or a meta /
     question turn still releases."""
     from app.lane_decision import is_meta_or_chat
 
@@ -6642,7 +6631,6 @@ def _is_host_cta_turn(msg: str, session_ctx: dict[str, Any]) -> bool:
     return (
         str(session_ctx.get("host_stage") or "") in ("review", "setup", "confirm")
         and (_is_host_confirm(msg) or _is_host_drop(msg) or _is_host_tweak(msg))
-        and not is_signal_cancel(msg)
     )
 
 
@@ -8804,12 +8792,19 @@ def handle_discovery_turn(
         # "no worries" acknowledgement. A bare abandon ("nah forget it") has no follow-on
         # and still gets the acknowledgement. The classifier decides "is there a new
         # intent?" — any clarify signal or a non-vague goal in the same turn.
-        _ab_slots = enrich_slots(dict(slots), msg=msg) if slots.get("abandon") else {}
+        #
+        # "In the same breath" means a concrete OTHER action. A bare "cancel" keeps the
+        # sharing.host label it is leaving and a non-vague goal; reading that as a new
+        # request fell through to the signal lane ("When works for you?") instead of the
+        # acknowledgement (dev 2026-10-15).
         abandon_with_followon = bool(slots.get("abandon")) and (
-            bool(str(_ab_slots.get("clarify") or "").strip())
-            or str(_ab_slots.get("goal") or "none") not in ("none", "chat")
+            bool(str(slots.get("clarify") or "").strip())
+            or _host_confident_foreign_action(slots)
         )
-        pivoted_away = _pivots_out_of_host(msg) or confident_foreign or abandon_with_followon
+        # The model's read only: the pivot phrase list ("find … moms", "log out") is gone —
+        # a confident foreign read already covers both, and the list could not tell
+        # "find me some parents to invite" (an event detail) from a search.
+        pivoted_away = confident_foreign or abandon_with_followon
         # Seed turn: the "A meet to host" button (or the host-entry regex) JUST entered this
         # flow deterministically, with payload "I want to host a meet" — that 'meet' noun can
         # read as find_activities, so re-classifying the button's own payload would release the
@@ -8828,7 +8823,7 @@ def handle_discovery_turn(
         # classifier and would spuriously release host mode — wiping the draft + host_publish_pending
         # before the signup handler can stash/publish it (the "logged in but no event" bug).
         wants_out = not seed_turn and not host_verifying and not cta_turn and (
-            bool(slots.get("abandon")) or is_signal_cancel(msg) or pivoted_away
+            bool(slots.get("abandon")) or pivoted_away
         )
         if wants_out:
             _release_host_mode(session_ctx)

@@ -402,3 +402,48 @@ def test_no_name_is_read_off_the_message_before_the_model():
     body = claims_src[claims_src.index("def try_upsert_claims_from_message"):]
     body = body[: body.index("incremental_claims_from_utterance(")]
     assert "persist_nickname_if_stated(" not in body  # never ahead of the extractor
+
+
+# ── 2026-10-16 group 2: leaving a flow ───────────────────────────────────────────────
+
+
+def test_editing_the_card_is_not_the_publish_button():
+    from app.lana_unified_pipeline import _is_host_confirm, _is_host_drop, _is_host_tweak
+
+    assert _is_host_drop("drop that last line from the description") is False
+    assert _is_host_drop("Drop the meet up") is True
+    assert _is_host_drop("drop it") is False  # English for cancel, never publish
+    assert _is_host_confirm("Looks good · next") is True
+    assert _is_host_confirm("yes but change the time to 6") is False
+    assert _is_host_tweak("Let me tweak") is True
+
+
+def test_no_lane_has_a_pivot_phrase_list():
+    import inspect
+
+    from app.lane_decision import lane_should_continue
+
+    assert "pivot_re" not in inspect.signature(lane_should_continue).parameters
+    for name in ("activity_browse.py", "look_meet.py", "discovery_route.py"):
+        src = (APP / name).read_text()
+        assert "_PIVOT_OUT_RE" not in src and "_HOST_PIVOT_RE" not in src, name
+
+
+def test_a_confident_browse_read_keeps_the_browse():
+    """"is there a good pizza-making class for kids this weekend?" left the browse for
+    pizza restaurants: the tip-seek words were checked before the model's read."""
+    from app.activity_browse import activity_browse_should_release
+
+    ctx = {"activity_browse_active": True, "browse_draft": {"interest": "cooking"}}
+    browse = _ai("discovery.find_activities", 0.9, goal="activities")
+    assert activity_browse_should_release(
+        "is there a good pizza-making class for kids this weekend?", ctx, browse
+    ) is False
+
+
+def test_offer_replies_count_only_when_they_are_the_reply():
+    from app.lane_decision import is_bare_control
+    from app.activity_browse import _ACCEPT_SEEK_RE
+
+    assert is_bare_control("yes please", _ACCEPT_SEEK_RE) is True
+    assert is_bare_control("no thanks, let me know later", _ACCEPT_SEEK_RE) is False

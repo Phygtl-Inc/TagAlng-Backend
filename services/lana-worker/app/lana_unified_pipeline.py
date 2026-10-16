@@ -1039,7 +1039,7 @@ def _rapport_should_release(
         return not is_confident_off_lane(s, native_goals=frozenset({"chat"}))
 
     return not lane_should_continue(
-        message, session_ctx, slots, is_valid_answer=_is_rapport_answer, pivot_re=None
+        message, session_ctx, slots, is_valid_answer=_is_rapport_answer
     )
 
 
@@ -1325,19 +1325,31 @@ def _norm_cta(msg: str) -> str:
     return str(msg or "").strip().lower()
 
 
+# The host card's own buttons, and their typed equivalents. A message has to BE one of
+# these — "drop that last line from the description" contains "drop", and substring
+# matching read it as "Drop the meet up" and published the event. ("drop it" is the
+# English for cancel, so it is deliberately not here.)
+_HOST_CONFIRM_RE = re.compile(r"\b(looks? good(?: next)?|yes|perfect|next|all set|sounds good)\b", re.I)
+_HOST_DROP_RE = re.compile(r"\b(drop the meet ?up|drop it on the block|post it|publish(?: it)?|go live)\b", re.I)
+_HOST_TWEAK_RE = re.compile(r"\b(let me tweak(?: that| it)?|tweak(?: it| that)?|let me change(?: it| that)?)\b", re.I)
+
+
 def _is_host_confirm(msg: str) -> bool:
-    n = _norm_cta(msg)
-    return "looks good" in n or n in {"yes", "perfect", "next", "all set", "sounds good"}
+    from app.lane_decision import is_bare_control
+
+    return is_bare_control(msg, _HOST_CONFIRM_RE)
 
 
 def _is_host_drop(msg: str) -> bool:
-    n = _norm_cta(msg)
-    return "drop" in n or "post it" in n or "publish" in n or "go live" in n
+    from app.lane_decision import is_bare_control
+
+    return is_bare_control(msg, _HOST_DROP_RE)
 
 
 def _is_host_tweak(msg: str) -> bool:
-    n = _norm_cta(msg)
-    return "tweak" in n or "let me change" in n
+    from app.lane_decision import is_bare_control
+
+    return is_bare_control(msg, _HOST_TWEAK_RE)
 
 
 def _host_blockers_needed(title: str, wd: Any, wt: Any, venue_ok: bool) -> list[str]:
