@@ -223,7 +223,10 @@ def test_is_there_x_answers_yes_first_never_with_membership(monkeypatch: Any) ->
     """Prod 2026-10-06: "is there San Jose State University?" got "I don't see you in the
     San Jose State University community yet"."""
     _, seen = _about(monkeypatch, far=False)
-    assert "FIRST words are yes" in seen["goal"]
+    assert "Confirm that it exists on Lana only when existence is what they asked" in seen["goal"]
+    # No scripted wording for the model to parrot: "what is sjsu?" was answered
+    # "Yes — it is here" because the old goal quoted those words (2026-10-08).
+    assert "yes — it is here" not in seen["goal"].lower()
     assert "never open with whether they are in it" in seen["goal"]
     assert any("never the opening" in f for f in seen["facts"])
     assert any("exists on Lana" in f for f in seen["facts"])

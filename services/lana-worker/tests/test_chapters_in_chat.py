@@ -166,7 +166,8 @@ def test_about_a_chapter_says_whose_chapter_it_is(monkeypatch: Any) -> None:
 
 def test_about_a_parent_mentions_its_clubs(monkeypatch: Any) -> None:
     facts = _about(monkeypatch, dict(_SJSU), [_ch("pRcc", "RCC"), _ch("pData", "Data")])
-    assert any("It has 2 clubs (chapters) inside it" in f for f in facts)
+    # By name — with only a count the model named a meet as "the club inside it".
+    assert any("Clubs (chapters) inside it on Lana: RCC; Data" in f for f in facts)
     facts = _about(monkeypatch, dict(_SJSU), [])
     assert not any("chapters) inside" in f for f in facts)
 
