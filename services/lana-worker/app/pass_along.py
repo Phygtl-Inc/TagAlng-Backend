@@ -18,6 +18,8 @@ import json
 import re
 from typing import Any
 
+from app.lane_decision import is_bare_control
+
 # ── tappable option sets (same idea as the event flow's quick replies) ──────────
 _CONDITION_SUGGESTIONS = ["Brand new", "Like new", "Lightly used", "Well-loved"]
 _INTENT_SUGGESTIONS = ["Free", "Looking to swap"]
@@ -38,11 +40,6 @@ def _question_for_field(field: str) -> tuple[str, list[str]]:
         return "What detail should I update?", []
     return "What should I change?", []
 
-# Loop safety: an explicit bail or a hard turn cap releases the flow (never trapped).
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
 _LIST_NOW_RE = re.compile(
     r"\b(list it|list now|post it|that'?s it|all done|done|go ahead|publish|"
     r"no photo|skip photo|without photo|just list)\b",
@@ -50,19 +47,18 @@ _LIST_NOW_RE = re.compile(
 )
 _PASS_ALONG_TURN_CAP = 12
 
-# Deterministic entry detection (a backstop for the "Something to pass along" CTA,
-# so the flow engages even if the FE doesn't send intent_hint). Matches OFFERING an
-# item — not a "looking for" seek.
-_ENTRY_RE = re.compile(
-    r"\b(pass(?:ing)?\s+along|give\s+away|giving\s+away|hand(?:ing)?\s+(?:down|over)|"
-    r"free to a good home|something to share|to pass (?:along|on))\b",
-    re.IGNORECASE,
-)
+def start_pass_along(session_ctx: dict[str, Any]) -> None:
+    """Open the capture on a fresh item draft. Entering pass-along closes any in-flight tip
+    flow and its card. Shared by the CTA (app/main.py) and the classifier's sharing.swap
+    verdict (lana_unified_pipeline), so both ways in start from the same state."""
+    session_ctx["pass_along_active"] = True
+    session_ctx["pass_along_turns"] = 0
+    session_ctx["pass_along_photo_prompted"] = False
+    session_ctx["item_draft"] = None
+    session_ctx["tip_share_active"] = False
+    session_ctx["tip_ready"] = None
+    session_ctx["tip_draft"] = None
 
-
-def looks_like_pass_along_entry(message: str) -> bool:
-    """True when the message looks like the user wants to offer/pass along an item."""
-    return bool(_ENTRY_RE.search(str(message or "").strip()))
 
 _ITEM_VALUE_FIELDS = ("title", "category", "condition", "intent_type")
 
@@ -324,7 +320,7 @@ def run_pass_along_turn(
     # ── Loop safety: explicit bail / turn cap releases the flow ──
     turns = int(session_ctx.get("pass_along_turns") or 0) + 1
     session_ctx["pass_along_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _PASS_ALONG_TURN_CAP:
+    if turns > _PASS_ALONG_TURN_CAP:
         session_ctx["pass_along_active"] = False
         session_ctx["pass_along_turns"] = 0
         session_ctx["pass_along_pending_ask"] = None
@@ -358,7 +354,7 @@ def run_pass_along_turn(
     # ── Capture the answer to an AI-tailored enrichment question into `details`
     # (the only answers the field-extractor can't map to a known column). ──
     pending = session_ctx.get("pass_along_pending_ask")
-    if pending and msg and not _LIST_NOW_RE.search(msg):
+    if pending and msg and not is_bare_control(msg, _LIST_NOW_RE):
         details = list(draft.get("details") or [])
         if msg not in details:
             details.append(msg)
@@ -421,7 +417,7 @@ def run_pass_along_turn(
 
     # ── P3: details complete → offer a photo once, then list ──
     has_photo = _has(draft, "photo_url")
-    wants_list = bool(_LIST_NOW_RE.search(msg))
+    wants_list = is_bare_control(msg, _LIST_NOW_RE)
     if not has_photo and not wants_list and not session_ctx.get("pass_along_photo_prompted"):
         draft["chips"] = chips
         draft["suggestions"] = []

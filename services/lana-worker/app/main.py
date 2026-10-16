@@ -74,9 +74,10 @@ from app.lang_pref import (
     seed_session_language,
 )
 from app.lana_unified_pipeline import run_lana_unified_pipeline
-from app.discovery_route import looks_like_host_event_entry
-from app.pass_along import looks_like_pass_along_entry
-from app.tip_share import looks_like_tip_share_entry
+from app.pending_ask import pending_ask
+from app.routing_log import log_routing_turn
+from app.discovery_route import start_host_mode
+from app.pass_along import start_pass_along
 from app.models import (
     ActivityPreviewRow,
     AskDraftChip,
@@ -2043,16 +2044,24 @@ def _run_lana_message(
     # popped — a popped key gets resurrected by the stored-context merge and Lana
     # would re-announce the same name change on every later turn.
     session_ctx_in["nickname_changed"] = None
-    if purpose in ("lana", "profile_intake"):
-        # Fill-only fallback: this cannot rename anyone (see persist_nickname_if_stated).
+    # No name is read off the message here, before the model has seen it: "I'm Tired." and
+    # "can you call me back" were saved as names "Tired" and "Back" by the intro pattern.
+    # The claims extractor reads names in context; the pattern is its fallback only when
+    # the model can't run (claims_persist.try_upsert_claims_from_message).
+    if purpose == "profile_intake":
+        # The legacy guest intake has no extractor pass of its own.
         if persist_nickname_if_stated(auth.user_id, body.message.strip()):
             session_ctx_in["display_name_saved"] = True
-    # Deterministic entry into the in-chat event-host flow — from the "A meet to host"
-    # CTA hint OR an explicit "host/plan a <event>" message (no classifier dependency).
-    if purpose == "lana" and (
-        body.intent_hint == "host_event"
-        or looks_like_host_event_entry(body.message)
-    ):
+    # Button entries. A tapped CTA names its flow outright (intent_hint), so it enters here
+    # before the classifier. TYPED words never do: "is anyone hosting a party?", "can you
+    # recommend a pizza place?" and "is anyone giving away a crib?" all matched the old
+    # entry phrases and armed the OFFERING flow — wiping whatever browse or draft was in
+    # flight — before the model read them as the asks they are. A typed host / give-away /
+    # tip now enters from the classifier's own verdict (discovery_route's sharing.host
+    # arm, lana_unified_pipeline's sharing.swap and sharing.tip arms).
+    #
+    # Event-host flow — the "A meet to host" CTA and a community's "Create an event".
+    if purpose == "lana" and body.intent_hint == "host_event":
         # A deterministic entry outranks whatever lane was mid-question. The browse asks
         # "what kind of thing are you up for?" and then treats the NEXT message as its
         # answer, whatever it is — so tapping "Create an event" on a community got
@@ -2069,24 +2078,7 @@ def _run_lana_message(
         seeded = bool(session_ctx_in.get("event_venue_seeded"))
         seeded_venue = session_ctx_in.get("event_venue") if seeded else None
         seeded_draft = (session_ctx_in.get("event_draft") or {}) if seeded else {}
-        session_ctx_in["event_host_active"] = True
-        session_ctx_in["event_host_turns"] = 0
-        session_ctx_in["event_affinity_asked"] = False
-        # Start a fresh draft — don't inherit a prior session's event (the stale
-        # "dads meetup" card). event_id too, so a past publish doesn't skip the flow.
-        session_ctx_in["event_draft"] = None
-        session_ctx_in["event_id"] = None
-        session_ctx_in["event_when_date"] = None
-        session_ctx_in["event_when_time"] = None
-        session_ctx_in["event_place_asked"] = False
-        session_ctx_in["event_venue"] = None
-        session_ctx_in["event_venue_tried"] = None
-        session_ctx_in["event_settings"] = None
-        session_ctx_in["event_cap_asked"] = False
-        session_ctx_in["event_approval_asked"] = False
-        session_ctx_in["event_share_asked"] = False
-        # Batched-setup stage (review → setup → confirm → published); start unset.
-        session_ctx_in["host_stage"] = None
+        start_host_mode(session_ctx_in)
         if seeded_venue:
             session_ctx_in["event_venue"] = seeded_venue
             session_ctx_in["event_place_asked"] = True
@@ -2108,29 +2100,15 @@ def _run_lana_message(
             # Seeded with the community only (it has no location): keep the tag, ask where.
             session_ctx_in["event_draft"] = {"circle_place_id": seeded_draft["circle_place_id"]}
         session_ctx_in["event_venue_seeded"] = None
-    # Deterministic entry into the in-chat "pass along an item" flow — from the
-    # "Something to pass along" CTA hint OR an explicit offer phrase (no classifier
-    # dependency, so it engages before discovery classifies it as sharing.swap).
-    if purpose == "lana" and (
-        body.intent_hint == "pass_along"
-        or looks_like_pass_along_entry(body.message)
-    ):
+    # "Pass along an item" flow — the "Something to pass along" CTA hint.
+    if purpose == "lana" and body.intent_hint == "pass_along":
         from app.activity_browse import reset_activity_browse_state
 
         reset_activity_browse_state(session_ctx_in)  # same swallow as the host entry above
-        session_ctx_in["pass_along_active"] = True
-        session_ctx_in["pass_along_turns"] = 0
-        session_ctx_in["pass_along_photo_prompted"] = False
-        session_ctx_in["item_draft"] = None
-        # Entering pass-along closes any in-flight tip flow + its card.
-        session_ctx_in["tip_share_active"] = False
-        session_ctx_in["tip_ready"] = None
-        session_ctx_in["tip_draft"] = None
-    # Deterministic entry into the in-chat "share a tip" flow — from the "A tip to
-    # share" CTA hint OR an explicit recommendation phrase.
+        start_pass_along(session_ctx_in)
+    # "Share a tip" flow — the "A tip to share" CTA hint.
     if purpose == "lana" and not session_ctx_in.get("pass_along_active") and (
         body.intent_hint == "tip_share"
-        or looks_like_tip_share_entry(body.message)
     ):
         from app.activity_browse import reset_activity_browse_state
 
@@ -2140,10 +2118,7 @@ def _run_lana_message(
         session_ctx_in["tip_ready"] = None
         session_ctx_in["tip_enrich_count"] = 0
         session_ctx_in["tip_draft"] = None
-        _LOG.info(
-            "tip_share_armed hint=%s phrase=%s", body.intent_hint,
-            looks_like_tip_share_entry(body.message),
-        )
+        _LOG.info("tip_share_armed hint=%s", body.intent_hint)
         # Entering tip-share closes any in-flight pass-along flow + its card.
         session_ctx_in["pass_along_active"] = False
         session_ctx_in["item_draft"] = None
@@ -2221,6 +2196,9 @@ def _run_lana_message(
         orch_used = False
         user_jwt = _bearer_token(authorization)
         if purpose == "lana":
+            _prev_routing = session_ctx_in.get("last_routing")
+            # Read before the turn — the engine that answers it clears the key.
+            _pending = pending_ask(session_ctx_in, history)
             reply, status, session_ctx, ui_raw, draft_raw = run_lana_unified_pipeline(
                 user_id=auth.user_id,
                 session_id=session_id,
@@ -2253,6 +2231,17 @@ def _run_lana_message(
                 session_ctx=session_ctx,
                 reply=reply,
                 is_anonymous=auth.is_anonymous,
+            )
+            # What the AI said vs what Lana did, one row per turn — see app/routing_log.py.
+            log_routing_turn(
+                session_id=session_id,
+                user_id=auth.user_id,
+                ctx=session_ctx,
+                user_message=body.message,
+                reply=reply,
+                intent_hint=body.intent_hint,
+                prev_routing=_prev_routing,
+                pending_kind=_pending.kind if _pending else None,
             )
         elif use_orch:
             reply, status, session_ctx, ui_raw, draft_raw = run_turn(

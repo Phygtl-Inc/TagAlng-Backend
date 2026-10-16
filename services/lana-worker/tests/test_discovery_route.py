@@ -1650,10 +1650,12 @@ class TestSignalPivotRouting(unittest.TestCase):
         self, mock_peers, mock_slots, _mock_ai, mock_save
     ) -> None:
         mock_save.return_value = {"signal_id": "sig-1", "matches_created": 0}
+        # An UNSURE peers read: the keyword rescue may only fill in for the model, never
+        # outrank a confident one (the live classifier files this sentence itself).
         mock_slots.return_value = {
             "goal": "peers",
             "in_discovery": True,
-            "confidence": 0.92,
+            "confidence": 0.5,
             "identity_snippet": "brazilian mom",
         }
         mock_peers.return_value = [
@@ -1695,10 +1697,12 @@ class TestSignalPivotRouting(unittest.TestCase):
         self, mock_peers, mock_slots, _mock_ai, mock_save
     ) -> None:
         mock_save.return_value = {"signal_id": "sig-2", "matches_created": 0}
+        # An UNSURE peers read: the keyword rescue may only fill in for the model, never
+        # outrank a confident one (the live classifier files this sentence itself).
         mock_slots.return_value = {
             "goal": "peers",
             "in_discovery": True,
-            "confidence": 0.92,
+            "confidence": 0.5,
             "identity_snippet": "brazilian mom",
         }
         mock_peers.return_value = [

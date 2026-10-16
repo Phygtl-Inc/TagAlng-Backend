@@ -126,31 +126,6 @@ class SubjectIsTheCommunity(unittest.TestCase):
         self.assertIsNone(draft.get("circle_place_id"))
 
 
-class SeedTurnNeverReleases(unittest.TestCase):
-    """The turn that OPENS the capture cannot be a pivot away from it.
-
-    Dev 2026-09-15: "I want to recommend Bella Vita in San Mateo — it's authentic
-    Italian..." armed the share, and the classifier — reading the sentence on its words
-    alone — called it `looking.tip`. The lane released on that same turn and the
-    recommendation came back answered as a SEARCH: "No neighbor has recommended one yet,
-    here's what's nearby (from Google)".
-
-    The guard itself (app/lana_unified_pipeline.py) is inline in run_lana_turn, which has
-    no test harness — it is covered by the live retest, not from here. What IS worth
-    pinning is the arming it depends on: lose this and the seed turn never even reaches
-    the gate.
-    """
-
-    def test_the_entry_phrase_arms_the_share_not_the_seek(self) -> None:
-        from app.tip_share import looks_like_tip_share_entry
-
-        self.assertTrue(looks_like_tip_share_entry("I want to recommend Bella Vita"))
-        self.assertTrue(looks_like_tip_share_entry("a tip to share"))
-        # The seek side must NOT arm it — that lane answers, it does not capture.
-        self.assertFalse(looks_like_tip_share_entry("anyone know a good plumber?"))
-        self.assertFalse(looks_like_tip_share_entry("find me an italian place"))
-
-
 if __name__ == "__main__":
     unittest.main()
 

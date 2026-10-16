@@ -20,6 +20,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+from app.lane_decision import is_bare_control
+
 from app.i18n import session_lang, t
 
 if TYPE_CHECKING:
@@ -36,18 +38,7 @@ _OPEN_RE = re.compile(
     r"you (?:pick|choose|decide)|no preference|open)\s*[.!]*\s*$",
     re.IGNORECASE,
 )
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
-# Explicit pivot to another intent — needs a find/show verb + people noun so an interest
-# answer ("family", "all moms welcome") is never mistaken for a pivot.
-_PIVOT_OUT_RE = re.compile(
-    r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow (?:my )?(?:(?:block|neighborhood) log|intros)\b|"
-    r"\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b",
-    re.IGNORECASE,
-)
+
 
 
 def reset_activity_browse_state(session_ctx: dict[str, Any]) -> None:
@@ -97,8 +88,8 @@ def _is_browse_answer(
     """Is this turn an answer/refine for the browse? A re-filter ("show me cricket instead",
     "anything outdoors") or a vague reply is — only a confident pivot to another lane, a
     meta/question turn ("what's my zip?"), or an out_of_scope/unsafe turn releases."""
-    from app.lane_decision import is_confident_off_lane, is_meta_or_chat
-    from app.layer1_intents import utterance_indicates_tip_seek
+    from app.lane_decision import is_bare_control, is_confident_off_lane, is_meta_or_chat
+    from app.layer1_intents import keyword_may_decide, utterance_indicates_tip_seek
 
     # Deterministic backstop to the AI classifier: an explicit request for a standing
     # PLACE/venue/service recommendation ("find me restaurants", "know a good pizza place")
@@ -107,7 +98,11 @@ def _is_browse_answer(
     # Places path. Bare activity/topic refinements never trip this (the regex needs a
     # service/place noun), so a genuine "cricket"/"outdoors" refine still stays. Checked FIRST
     # so an explicit place request still escapes even while we're awaiting the interest.
-    if utterance_indicates_tip_seek(message):
+    #
+    # Only when the model gave no confident read of its own: checked first and unconditionally
+    # it beat a confident find_activities — "is there a good pizza-making class for kids this
+    # weekend?" left the browse for pizza restaurants.
+    if keyword_may_decide(slots) and utterance_indicates_tip_seek(message):
         return False
     # A reply we EXPLICITLY asked for belongs to THIS flow — never release on it (that was the
     # "Social" loop: the P1 answer read as a foreign meet_seek and released, so the browse-vs-meet
@@ -127,7 +122,12 @@ def _is_browse_answer(
         if draft.get("_asked") and not str(draft.get("interest") or "").strip():
             return True
         if draft.get("_seek_offer") and (
-            _ACCEPT_SEEK_RE.search(message) or _WIDEN_RE.search(message)
+            # Lana's own accept / widen pill (judged by ITS label, never the user's words;
+            # "Host a meet" is a pill too, and a way out), or a typed message that IS one.
+            bool(_ACCEPT_SEEK_RE.search(_tapped_pill(message, draft) or ""))
+            or bool(_WIDEN_RE.search(_tapped_pill(message, draft) or ""))
+            or is_bare_control(message, _ACCEPT_SEEK_RE)
+            or is_bare_control(message, _WIDEN_RE)
         ):
             return True
     if is_meta_or_chat(slots):
@@ -138,6 +138,18 @@ def _is_browse_answer(
         native_linears=_NATIVE_LINEARS,
         native_signals=_NATIVE_SIGNALS,
     )
+
+
+def _tapped_pill(message: str, draft: Any) -> str | None:
+    """The pill Lana offered last turn (draft["suggestions"]) that this message IS, or
+    None. An exact match — a tap posts the label verbatim — so no words are read."""
+    if not isinstance(draft, dict):
+        return None
+    msg = str(message or "").strip().casefold()
+    for pill in draft.get("suggestions") or []:
+        if msg and msg == str(pill or "").strip().casefold():
+            return str(pill)
+    return None
 
 
 def _echo_topic(interest: str, label: str | None) -> str:
@@ -196,7 +208,6 @@ def activity_browse_should_release(
         session_ctx,
         slots,
         is_valid_answer=_is_browse_answer,
-        pivot_re=_PIVOT_OUT_RE,
         is_offered_option=_is_offered_browse_chip,
     )
 
@@ -2098,7 +2109,7 @@ def _run_browse_turn(
 
     turns = int(session_ctx.get("browse_turns") or 0) + 1
     session_ctx["browse_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _BROWSE_TURN_CAP:
+    if turns > _BROWSE_TURN_CAP:
         from app.reply_compose import compose_reply
 
         reset_activity_browse_state(session_ctx)
@@ -2379,7 +2390,12 @@ def _run_browse_turn(
         if zip_new and zip_new != offered_zip:
             draft["_expansion_offer"] = None
             draft["_need_zip"] = True  # consume the fresh ZIP below as a ZIP answer
-        elif _ACCEPT_SEEK_RE.search(msg):
+        elif (
+            # The "Yes, text me at launch" pill, or a typed message that IS a yes. A "yes"
+            # inside a longer reply ("no thanks, let me know later") is not an accept.
+            bool(_ACCEPT_SEEK_RE.search(_tapped_pill(msg, draft) or ""))
+            or (not _tapped_pill(msg, draft) and is_bare_control(msg, _ACCEPT_SEEK_RE))
+        ):
             reset_activity_browse_state(session_ctx)
             if not phone_verified:
                 session_ctx["requires_phone_verification"] = True

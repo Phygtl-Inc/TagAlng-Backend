@@ -17,6 +17,8 @@ import json
 import re
 from typing import Any
 
+from app.lane_decision import is_bare_control
+
 from app.i18n import session_lang, t
 
 _KIND_SUGGESTIONS = ["Playground meet", "Stroller walk", "Coffee & kids", "Library storytime"]
@@ -30,13 +32,9 @@ _MAX_ENRICH = 2
 # that happened to agree until one call site started overriding its own.
 LOOK_MEET_WINDOW = "14 days"
 
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
 # The "Start listening for me" CTA / any go-ahead to post the seek.
 _LISTEN_RE = re.compile(
-    r"\b(start listening|listen for me|listening for me|post it|that'?s it|"
+    r"\b(start listening(?: for me)?|listen for me|listening for me|post it|that'?s it|"
     r"go ahead|done|sounds good|do it)\b",
     re.IGNORECASE,
 )
@@ -47,15 +45,6 @@ _LOOK_MEET_TURN_CAP = 12
 # CTA (intent_hint) enters deterministically. See main.py / handle_discovery_turn.
 
 
-# Explicit pivot to another intent — release the capture so normal routing handles it.
-# Needs a find/show verb + a people noun so a meet answer ("all moms") is never a pivot.
-_PIVOT_OUT_RE = re.compile(
-    r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow (?:my )?(?:(?:block|neighborhood) log|intros)\b|"
-    r"\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b|"
-    r"\b(?:host|create|throw|plan|organi[sz]e)\s+(?:an?\s+|my\s+)?(?:event|party|meetup|gathering)\b",
-    re.IGNORECASE,
-)
 
 
 # What THIS meet capture owns: looking for a meet (meet_seek) and browsing activities to
@@ -107,7 +96,7 @@ def _is_look_meet_answer(
     # On the ready card, only a confirm CTA or a chip edit counts; anything else is a new
     # request and should release.
     if session_ctx.get("look_ready"):
-        return bool(_LISTEN_RE.search(message) or re.match(r"\s*fix:\w+\s*$", message))
+        return bool(is_bare_control(message, _LISTEN_RE) or re.match(r"\s*fix:\w+\s*$", message))
     # Mid follow-up (affinity / detail) — any reply answers it.
     if session_ctx.get("look_pending_ask"):
         return True
@@ -148,7 +137,6 @@ def look_meet_should_release(
         session_ctx,
         slots,
         is_valid_answer=_is_look_meet_answer,
-        pivot_re=_PIVOT_OUT_RE,
     )
 
 
@@ -574,7 +562,7 @@ def run_look_meet_turn(
     # ── Loop safety ──
     turns = int(session_ctx.get("look_turns") or 0) + 1
     session_ctx["look_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _LOOK_MEET_TURN_CAP:
+    if turns > _LOOK_MEET_TURN_CAP:
         for k in ("look_meet_active", "look_draft", "look_ready", "look_pending_ask",
                   "look_enrich_count", "look_affinity_asked"):
             session_ctx[k] = None
@@ -583,7 +571,7 @@ def run_look_meet_turn(
         return "No problem — we can do that another time. What else can I help with?"
 
     # ── The "Start listening for me" CTA on the ready card → save the seek ──
-    if session_ctx.get("look_ready") and _LISTEN_RE.search(msg):
+    if session_ctx.get("look_ready") and is_bare_control(msg, _LISTEN_RE):
         # Guests must verify before we can save under a real account (same email prompt
         # logs in an existing account or signs up a new one). Stash the ready seek and
         # gate into verify; it auto-saves the moment they're verified.
@@ -641,7 +629,7 @@ def run_look_meet_turn(
 
     # ── Capture a pending answer (enrichment detail, or the affinity choice) ──
     pending = session_ctx.get("look_pending_ask")
-    if pending and msg and not _LISTEN_RE.search(msg):
+    if pending and msg and not is_bare_control(msg, _LISTEN_RE):
         if pending == "affinity":
             draft["affinity"] = msg
         else:

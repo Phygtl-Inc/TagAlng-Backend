@@ -1725,6 +1725,30 @@ class TestJoinReply(unittest.TestCase):
         join.assert_not_called()
         self.assertIsNone(ctx["community_join_pending"])
 
+    @patch("app.community_discovery.join_community")
+    def test_the_model_decides_whether_a_reply_accepts(self, join) -> None:
+        """dev audit 2026-10-15: with one community offered, "I'm in San Jose actually,
+        anything there?" matched "i'm in" and wrote a membership. The classifier reads it
+        as a new ask; that read decides."""
+        from app.community_discovery import read_join_reply
+
+        pending = {"places": [{"place_id": "p1", "place_name": "Lp Fit"}]}
+        msg = "I'm in San Jose actually, anything there?"
+        out = read_join_reply("u1", msg, {"community_join_pending": dict(pending)},
+                              {"reply_to_pending": "new_ask"})
+        self.assertIsNone(out)
+        join.assert_not_called()
+        # A decline that names the place is still a decline.
+        self.assertIsNone(read_join_reply("u1", "no, not Lp Fit", {"community_join_pending": dict(pending)},
+                                          {"reply_to_pending": "decline"}))
+        join.assert_not_called()
+        # An accept joins; the chip tap needs no read at all.
+        join.return_value = {"place_id": "p1", "place_name": "Lp Fit"}
+        self.assertIsNotNone(read_join_reply("u1", "yes add me", {"community_join_pending": dict(pending)},
+                                             {"reply_to_pending": "answer"}))
+        self.assertIsNotNone(read_join_reply("u1", "Join Lp Fit", {"community_join_pending": dict(pending)},
+                                             {"reply_to_pending": "new_ask"}))
+
     def test_no_offer_armed_is_a_no_op(self) -> None:
         from app.community_discovery import read_join_reply
 

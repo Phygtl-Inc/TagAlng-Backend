@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from app.discovery_route import handle_discovery_turn, looks_like_logout
+from app.discovery_route import handle_discovery_turn, logout_requested, looks_like_logout
 from app.lana_dispatch import lana_unified_turn
 from app.lana_ui import sanitize_assistant_message
 from app.lana_paths import decide_turn_mode, unified_rules_first_enabled
@@ -545,6 +545,12 @@ POLICY_ENGINE_ONLY_INTENTS: frozenset[str] = frozenset({
     # SAME bug and the more common phrasing; it is also the text of the chip the policy
     # itself offers, so the typed sentence and the tapped chip now run the same engine.
     "discovery.find_by_attrs",
+    # Hosting is a flow, not a conversation. Typed "I want to host a potluck this
+    # saturday" used to reach it only because main.py's entry phrases armed
+    # event_host_active before the classifier ran, which also skipped this gate. With that
+    # gone the classifier's sharing.host is the way in, and without this escape the
+    # policy answered it in prose and the host flow never opened (dev 2026-10-15).
+    "sharing.host",
 })
 
 # Intents that double as an expressed need, so the intent alone cannot say whether this
@@ -604,6 +610,7 @@ def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
     `looks_like_community_create`.
     """
     from app.community_capture import looks_like_community_create
+    from app.layer1_intents import keyword_may_decide
 
     text = str(msg or "").strip()
     if not text:
@@ -619,7 +626,13 @@ def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
         linear = slots_linear_intent(enriched)
         if linear == "sharing.community" and intent_confidence_met(enriched, linear):
             return True
-    return looks_like_community_create(text)
+    # The words alone only count when the model did not pick a lane — "any
+    # recommendations for a startup community?" matches the create pattern too.
+    if not (keyword_may_decide(slots) and looks_like_community_create(text)):
+        return False
+    if isinstance(slots, dict):
+        slots["decided_by"] = "keyword"  # the cached read — the routing log picks it up
+    return True
 
 
 def _tip_share_slots(
@@ -655,15 +668,62 @@ def _tip_share_slots(
 def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     """Is this turn SHARING a recommendation (the typed capture, C-4-RECO)?
 
-    The same condition discovery_route uses — signal-or-utterance, no confidence bar. Two
-    callers need it and they must agree: the policy gate (to let the turn through) and the
-    capture's own entry (to pick it up). They disagreed once and the turn reached neither.
+    The same condition discovery_route uses. Two callers need it and they must agree: the
+    policy gate (to let the turn through) and the capture's own entry (to pick it up). They
+    disagreed once and the turn reached neither. enrich_slots folds in the tip-share keyword
+    rule only when the model was unsure; with no classifier read at all, the words decide.
     """
     from app.layer1_intents import enrich_slots, slots_indicate_tip_share_signal, utterance_indicates_tip_share
 
-    if isinstance(slots, dict) and slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg)):
-        return True
+    if isinstance(slots, dict):
+        if slots.get("abandon"):
+            return False  # leaving a capture never opens one
+        return slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg))
     return utterance_indicates_tip_share(msg)
+
+
+def _turn_is_pass_along(slots: dict[str, Any] | None, msg: str) -> bool:
+    """Is this turn OFFERING an item (the pass-along capture)?
+
+    The classifier's verdict only. The flow's old way in was an entry phrase list checked
+    before the model ran, and "is anyone giving away a crib?" — a SEEK — matched it as
+    readily as "I'm giving away a stroller". The words sit on both sides; the direction
+    is the model's call. No classifier read → not this flow (fail closed): the turn goes
+    on to discovery, which handles an offer as a signal.
+    """
+    if not isinstance(slots, dict) or slots.get("abandon"):
+        return False
+    from app.layer1_intents import enrich_slots, normalize_linear_intent
+
+    out = enrich_slots(dict(slots), msg=msg)
+    if str(out.get("signal_intent") or "").strip().lower() == "swap_offer":
+        return True
+    return normalize_linear_intent(out.get("linear_intent")) == "sharing.swap"
+
+
+def _reply_owned_downstream(
+    ctx: dict[str, Any],
+    msg: str,
+    *,
+    history: list[dict[str, Any]] | None,
+    home_block_id: str | None,
+    phone_verified: bool,
+    timer: TurnTimer | None = None,
+) -> bool:
+    """Does this message answer a question whose engine runs after the policy gate?
+
+    Only an ANSWER is held back. A decline or a new ask stays eligible for the policy, as
+    before — the classifier's reply_to_pending decides, never the words."""
+    from app.pending_ask import pending_ask, reply_verdict
+
+    ask = pending_ask(ctx, history)
+    if ask is None or not ask.after_policy:
+        return False
+    slots = _tip_share_slots(
+        ctx, msg, history=history, home_block_id=home_block_id,
+        phone_verified=phone_verified, timer=timer,
+    )
+    return reply_verdict(slots) == "answer"
 
 
 def _turn_is_engine_action(
@@ -709,6 +769,11 @@ def _turn_is_engine_action(
             timer=timer,
         )
         if not isinstance(slots, dict):
+            return False
+        # Leaving is not an engine command. A bare "cancel" mid-capture keeps the label of the
+        # flow it is leaving (sharing.tip), and sending that to the engine opened the old
+        # signal cascade ("What kind of tip is this?") instead of letting the policy close it.
+        if slots.get("abandon"):
             return False
         linear = str(slots.get("linear_intent") or "")
         sig = str(slots.get("signal_intent") or "") or SIGNAL_INTENT_BY_LINEAR.get(linear, "")
@@ -974,7 +1039,7 @@ def _rapport_should_release(
         return not is_confident_off_lane(s, native_goals=frozenset({"chat"}))
 
     return not lane_should_continue(
-        message, session_ctx, slots, is_valid_answer=_is_rapport_answer, pivot_re=None
+        message, session_ctx, slots, is_valid_answer=_is_rapport_answer
     )
 
 
@@ -1260,19 +1325,31 @@ def _norm_cta(msg: str) -> str:
     return str(msg or "").strip().lower()
 
 
+# The host card's own buttons, and their typed equivalents. A message has to BE one of
+# these — "drop that last line from the description" contains "drop", and substring
+# matching read it as "Drop the meet up" and published the event. ("drop it" is the
+# English for cancel, so it is deliberately not here.)
+_HOST_CONFIRM_RE = re.compile(r"\b(looks? good(?: next)?|yes|perfect|next|all set|sounds good)\b", re.I)
+_HOST_DROP_RE = re.compile(r"\b(drop the meet ?up|drop it on the block|post it|publish(?: it)?|go live)\b", re.I)
+_HOST_TWEAK_RE = re.compile(r"\b(let me tweak(?: that| it)?|tweak(?: it| that)?|let me change(?: it| that)?)\b", re.I)
+
+
 def _is_host_confirm(msg: str) -> bool:
-    n = _norm_cta(msg)
-    return "looks good" in n or n in {"yes", "perfect", "next", "all set", "sounds good"}
+    from app.lane_decision import is_bare_control
+
+    return is_bare_control(msg, _HOST_CONFIRM_RE)
 
 
 def _is_host_drop(msg: str) -> bool:
-    n = _norm_cta(msg)
-    return "drop" in n or "post it" in n or "publish" in n or "go live" in n
+    from app.lane_decision import is_bare_control
+
+    return is_bare_control(msg, _HOST_DROP_RE)
 
 
 def _is_host_tweak(msg: str) -> bool:
-    n = _norm_cta(msg)
-    return "tweak" in n or "let me change" in n
+    from app.lane_decision import is_bare_control
+
+    return is_bare_control(msg, _HOST_TWEAK_RE)
 
 
 def _host_blockers_needed(title: str, wd: Any, wt: Any, venue_ok: bool) -> list[str]:
@@ -1704,8 +1781,16 @@ def run_lana_unified_pipeline(
 
     # A logout request must escape any sticky capture mode — otherwise "log me out" gets
     # swallowed as an item/tip/meet answer and does nothing. Clear the flags so the turn
-    # falls through to discovery's logout handler.
-    if looks_like_logout(user_message):
+    # falls through to discovery's logout handler. The phrase only says whether to ask: the
+    # model's read decides (logout_requested), so "never remembers to log out of my
+    # Netflix" no longer wipes a half-built draft on its way to being signed out.
+    if looks_like_logout(user_message) and logout_requested(
+        user_message,
+        _tip_share_slots(
+            session_ctx, user_message, history=history,
+            home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+        ),
+    ):
         for _k in (
             "pass_along_active", "tip_share_active", "look_meet_active",
             "activity_browse_active", "event_host_active"
@@ -2261,14 +2346,31 @@ def run_lana_unified_pipeline(
 
     # Sticky "pass along an item" capture owns the whole turn (deterministic flow +
     # structured extraction), the same way event_host_active does. It releases on
-    # save, cancel, or a turn cap, so other flows are never affected.
-    if session_ctx.get("pass_along_active"):
+    # save, cancel, or a turn cap, so other flows are never affected. Entered from the
+    # CTA (app/main.py) or, for a typed offer, from the classifier's sharing.swap verdict.
+    if session_ctx.get("pass_along_active") or (
+        str(session_ctx.get("routing_phase") or "") in ("", "listening")
+        and not session_ctx.get("requires_phone_verification")
+        and not session_ctx.get("pending_signup_gate")
+        and not session_ctx.get("tip_share_active")
+        and _turn_is_pass_along(_tip_share_slots(
+            session_ctx, user_message, history=history,
+            home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+        ), user_message)
+    ):
         from app.discovery_slots import discovery_slots_for_turn
         from app.pass_along import (
             pass_along_should_release,
             reset_pass_along_state,
             run_pass_along_turn,
+            start_pass_along,
         )
+
+        if not session_ctx.get("pass_along_active"):
+            from app.activity_browse import reset_activity_browse_state
+
+            reset_activity_browse_state(session_ctx)
+            start_pass_along(session_ctx)
 
         # Classify so the capture releases on a semantic abandon ("no i dont wanna
         # giveaway") or a pivot to another lane ("find me a jogging partner") — the AI's
@@ -2648,7 +2750,16 @@ def run_lana_unified_pipeline(
         # to the auth engine, trading this bug for a worse one. Login has the
         # same structural exposure and needs a tighter matcher before it can be
         # escaped here; see test_auth_turns_kept_off_policy.
-        and not looks_like_logout(user_message)
+        and not (
+            looks_like_logout(user_message)
+            and logout_requested(
+                user_message,
+                _tip_share_slots(
+                    session_ctx, user_message, history=history,
+                    home_block_id=home_block_id, phone_verified=phone_verified, timer=timer,
+                ),
+            )
+        )
         # A tapped LEGACY chip is an engine command ("Widen the search") — never
         # the policy's turn. Taps on the policy's own chips stay with the policy.
         and not (
@@ -2676,6 +2787,15 @@ def run_lana_unified_pipeline(
         # Skip deterministically on the classifier's own verdict rather than trusting the
         # prompt.
         and not _turn_is_engine_action(
+            session_ctx, user_message,
+            history=history, home_block_id=home_block_id,
+            phone_verified=phone_verified, timer=timer,
+        )
+        # Lana is waiting on an answer that an engine AFTER this gate reads (a people-
+        # search offer, a community-join offer, a clarifier, an intro...) and the
+        # classifier says this message answers it. The policy replying here answered in
+        # prose while the offer stayed armed and its engine never ran.
+        and not _reply_owned_downstream(
             session_ctx, user_message,
             history=history, home_block_id=home_block_id,
             phone_verified=phone_verified, timer=timer,

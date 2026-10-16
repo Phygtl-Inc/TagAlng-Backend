@@ -65,6 +65,17 @@ _SYSTEM = (
     "answer/refinement and must NOT be used as a filter). A short or vague reply ('any', 'whatever', "
     "'idk', 'sure', 'something else', a bare topic word) DURING an active capture is an ANSWER to what "
     "was just asked, not a fresh intent — do not force it onto a noun-matched lane. "
+    "REPLY TO PENDING — pending_ask names the one question or offer Lana is waiting on, with her "
+    "last message and any options she offered. When it is not 'none', ALWAYS set reply_to_pending: "
+    "'answer' when the message responds to it — accepting, choosing one of the options (in their own "
+    "words or by position), or giving the information she asked for, however short or fragmentary; "
+    "'decline' when it turns down or backs out of that question or offer and asks for nothing else; "
+    "'new_ask' when it asks for something else, changes the subject, or does both (declining and "
+    "then asking for something different is new_ask). Judge by what the message does with HER "
+    "question, not by which words it shares with it. A message about distress, danger, health or "
+    "abuse is ALWAYS new_ask and gets its own safety goal. reply_to_pending says only how the "
+    "message relates to the pending ask — set linear_intent, goal and the rest exactly as the other "
+    "rules say. When pending_ask is 'none', omit reply_to_pending. "
     "Discovery funnel = ZIP, giving self-description for matching, preview matches, verify phone, RSVP. "
     "When routing_phase=listening and user wants to meet/find/show/connect with neighbors or people "
     "(any phrasing: 'meet new people', 'make me meet people', 'find me people', 'stop asking questions') "
@@ -275,6 +286,11 @@ _SYSTEM = (
     "Also abandon=false for: answering a question (a title, a time, a chip tap) or mild uncertainty "
     "about ONE detail (not sure what to call it, what time is good?). abandon means quitting the whole "
     "task, never editing or swapping a part of it. "
+    "When active_capture is not 'none' and the WHOLE message is just a command to stop (a single "
+    "word or a couple of words whose only content is cancelling, quitting or leaving), that is "
+    "abandon=true, and it is not a new request of any kind. The same "
+    "word INSIDE an answer (a place or business whose name contains it, a description that uses "
+    "it) is the answer, abandon=false. "
     "abandon=true ALSO when the user ACCEPTS a 'no' Lana just gave (e.g. after Lana explained she "
     "can't do something and offered an alternative) and disengages with NO Lana alternative — they "
     "are closing the thread: 'I understand, I'll look elsewhere', 'no worries, I'll handle it myself', "
@@ -1003,6 +1019,9 @@ def ai_parse_discovery_turn(
             "clarify_options": clarify_options,
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
             "abandon": bool(raw.get("abandon")),
+            "reply_to_pending": (
+                str(raw.get("reply_to_pending") or "").strip().lower() or None
+            ),
             "declined_slot": declined_slot_s,
             # Did they ASK, or did they just say something an action would serve? The
             # intent alone cannot tell you: "find me neighbors nearby" and "we don't know
@@ -1012,6 +1031,10 @@ def ai_parse_discovery_turn(
             # that omits it leaves the turn exactly where it is today.
             "explicit_request": bool(raw.get("explicit_request")),
             "confidence": float(raw.get("confidence", 0.0)),
+            # The model's own verdict, frozen before enrich_slots can rewrite linear_intent
+            # or confidence — the per-turn routing log reads these to show who decided.
+            "ai_linear_intent": linear_intent,
+            "ai_confidence": float(raw.get("confidence", 0.0)),
             # AI-authored thinking-status stage, streamed live to the client.
             "progress": normalize_progress(raw.get("progress"), max_stages=1),
         }, msg=text)
@@ -1248,6 +1271,9 @@ def _discovery_slot_payload(
     sc = session_ctx or {}
     active_intent = str(sc.get("active_intent") or "").strip() or "none"
     active_capture = _active_capture_context(sc)
+    from app.pending_ask import pending_ask, prompt_line
+
+    pending_line = prompt_line(pending_ask(sc, history))
     # A pending offer to change the default language: the divergence nudge (single code)
     # or a rapport-concierge offer (possibly several codes the user named, TTL'd).
     lang_pref_offer = str(sc.get("lang_nudge_pending") or "").strip()
@@ -1273,6 +1299,7 @@ def _discovery_slot_payload(
         f"has_profile_photo: {has_profile_photo}\n"
         f"session_active_intent: {active_intent}\n"
         f"active_capture: {active_capture}\n"
+        f"pending_ask: {pending_line}\n"
         f"lang_pref_offer: {lang_pref_offer}\n"
         f"conversation_lang: {conversation_lang}\n"
         f"active_community: {active_community_line}\n\n"
@@ -1353,6 +1380,7 @@ def _discovery_slot_payload(
         '  "identity_snippet": "string or null",\n'
         '  "profile_photo_action": "start"|"accept"|"skip"|"done"|"none",\n'
         '  "abandon": true|false,\n'
+        '  "reply_to_pending": "answer"|"decline"|"new_ask" — only when pending_ask is not none,\n'
         '  "declined_slot": "zip"|"identity"|"display_name"|null,\n'
         '  "lang": "ISO 639-1 code of the language the latest user message is written in, or null when too short/ambiguous. '
         "Judge by words not script (a language typed in Latin letters is still that language). Report a language DIFFERENT "

@@ -178,13 +178,13 @@ from app.layer1_intents import (
     intent_confidence_met,
     is_block_activity_browse,
     is_profile_acknowledgment,
+    keyword_may_decide,
     normalize_attr_filter_text,
     phrase_linear_intent,
     PHRASE_POLICY_OVERRIDES,
     slots_indicate_hosting_signal,
     slots_indicate_tip_share_signal,
     slots_linear_intent,
-    utterance_indicates_tip_share,
     utterance_indicates_tip_seek,
     utterance_indicates_swap_seek,
 )
@@ -1411,6 +1411,7 @@ def _try_upfront_display_name_turn(
     user_id: str | None,
     phase: str,
     is_anonymous: bool,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Ask a nameless *authenticated* user their display name UP FRONT, as its own clean
     turn — so the name-ask is never glued onto an unrelated reply ("Rooting for Colombia…
@@ -1421,8 +1422,35 @@ def _try_upfront_display_name_turn(
     can't trap the user here.
     """
     if session_ctx.get("awaiting_upfront_name"):
-        # Our own follow-up turn: the reply should be their name.
-        nick = extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+        # Our own follow-up turn: the reply SHOULD be their name — whether it is, is the
+        # model's read (the ask is registered in app/pending_ask.py). The intro pattern
+        # alone saved "I'm Tired." as the name "Tired" (dev 2026-10-15). A new ask is let
+        # through to normal routing; a decline is respected; only an answer is parsed.
+        from app.pending_ask import reply_verdict
+
+        verdict = reply_verdict(slots)
+        if verdict == "new_ask" or (verdict is None and slots and str(slots.get("declined_slot") or "") == "display_name"):
+            session_ctx["awaiting_upfront_name"] = None
+            session_ctx["upfront_name_attempts"] = None
+            if verdict == "new_ask":
+                return None
+        nick = (
+            None
+            if verdict in ("decline", "new_ask")
+            else extract_display_name_reply(msg) or extract_nickname_from_message(msg)
+        )
+        if verdict == "decline":
+            ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
+            ctx["display_name_saved"] = True  # asked once; never re-nag this session
+            ctx["awaiting_upfront_name"] = None
+            ctx["upfront_name_attempts"] = None
+            ctx["last_routing"] = _discovery_routing_stub("listening", "update_user_name")
+            return (
+                "No worries — I'll skip that for now. So, how can I help you today?",
+                ctx,
+                ctx["last_routing"],
+                [],
+            )
         if nick and user_id:
             persist_profile_patch(user_id, {"nickname": nick})
             ctx = _routing_ctx(session_ctx, phase="listening", active_intent=None)
@@ -3225,6 +3253,7 @@ def _try_community_join_reply_turn(
     session_ctx: dict[str, Any],
     user_id: str | None,
     phase: str | None = None,
+    slots: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     """Join a community the previous turn listed. One-turn offer: whatever comes next
     consumes it, and anything that isn't a join falls through to normal routing.
@@ -3235,7 +3264,7 @@ def _try_community_join_reply_turn(
         return None
     from app.community_discovery import join_confirm_reply, read_join_reply
 
-    result = read_join_reply(user_id, msg, session_ctx)
+    result = read_join_reply(user_id, msg, session_ctx, slots)
     if not result:
         return None
     member_count: int | None = None
@@ -3535,7 +3564,10 @@ def _try_list_intros_turn(
     if looks_like_peer_drilldown(msg):
         return None
     goal = str(slots.get("goal") or "none")
-    phrase_wants_list = wants_list_intros_phrase(msg)
+    # The phrase list counts only when the model gave no confident label: "find moms like
+    # me, I already checked my intros" (find_by_attrs) was answered with the intros list
+    # because "my intros" matched (dev 2026-10-15).
+    phrase_wants_list = _phrase_may_decide(slots) and wants_list_intros_phrase(msg)
     slot_wants_list = goal == "list_intros" and float(slots.get("confidence", 0.0)) >= 0.5
     if wants_neighbor_intro(msg) and phrase_wants_list and not slot_wants_list:
         return None
@@ -5999,7 +6031,7 @@ def _try_signal_seek_early_turn(
     seek_slots = enrich_slots(dict(slots), msg=msg)
     if _wants_block_log(msg, seek_slots):
         return None
-    if slots_indicate_tip_share_signal(seek_slots) or utterance_indicates_tip_share(msg):
+    if slots_indicate_tip_share_signal(seek_slots):
         return None
     if slots_indicate_hosting_signal(seek_slots):
         return None
@@ -6240,9 +6272,10 @@ def _turn_wants_login(
     if _login_flow_active(session_ctx):
         return True
     if discovery_ai_enabled():
-        # Flash classification OR the deterministic phrase backstop — so "sign me in"
-        # never silently fails when Flash labels it as chat/discovery (mirrors logout).
-        return slots_want_login(slots) or wants_login_intent(msg)
+        # The model decides. The phrase list fills in only when it gave no confident label:
+        # OR-ing it in turned "my login for the gym app broke, any gyms near me?" into a
+        # sign-in prompt over a confident tip-seek read.
+        return slots_want_login(slots) or (_phrase_may_decide(slots) and wants_login_intent(msg))
     return wants_login_intent(msg)
 
 
@@ -6269,15 +6302,37 @@ def looks_like_logout(message: str) -> bool:
     return bool(_LOGOUT_RE.search(str(message or "").strip()))
 
 
+def _phrase_may_decide(slots: dict[str, Any] | None) -> bool:
+    """keyword_may_decide, plus: a confident GOAL is a verdict too. Chat turns often come
+    back goal=chat with no linear label, and keyword_may_decide reads only the label — so
+    on its own it would still hand "never remembers to log out of my Netflix" to the
+    phrase list."""
+    if not keyword_may_decide(slots):
+        return False
+    if not isinstance(slots, dict):
+        return True
+    goal = str(slots.get("goal") or "").strip().lower()
+    confident = float(slots.get("ai_confidence", slots.get("confidence")) or 0.0) >= 0.6
+    return not (confident and goal not in ("", "none", "continue"))
+
+
+def logout_requested(msg: str, slots: dict[str, Any] | None) -> bool:
+    """Does this turn ask to sign out? The model's verdict decides; the phrase list fills
+    in only when the model gave no confident label (keyword_may_decide). OR-ing the phrase
+    in signed out "haha my husband never remembers to log out of my Netflix" (dev
+    2026-10-15) — the words name logging out, the sentence is about someone else's app."""
+    if slots_want_logout(slots):
+        return True
+    return _phrase_may_decide(slots) and looks_like_logout(msg)
+
+
 def _turn_wants_logout(
     msg: str,
     slots: dict[str, Any] | None,
     session_ctx: dict[str, Any],
 ) -> bool:
-    # AI classification OR the deterministic phrase backstop — so logout never silently
-    # fails when Flash classifies "log me out" as chat.
     if discovery_ai_enabled():
-        return slots_want_logout(slots) or looks_like_logout(msg)
+        return logout_requested(msg, slots)
     return wants_logout_intent(msg) or looks_like_logout(msg)
 
 
@@ -6461,19 +6516,8 @@ def _host_via_orchestrator() -> bool:
         return False
 
 
-# While hosting, ONLY an explicit pivot leaves the flow — narrow patterns so an event
-# description ("weekday playground meet with kids") is never mistaken for a pivot.
-_HOST_PIVOT_RE = re.compile(
-    r"\b(?:find|show)\s+(?:me\s+)?(?:\w+\s+){0,3}(?:moms?|dads?|parents?|neighbou?rs?|people|families)\b|"
-    r"\bshow my (?:block log|neighborhood log|intros)\b|\bmy (?:block|neighborhood) log\b|\blog\s?out\b|\bsign out\b",
-    re.I,
-)
 # Backstop so a verified user can never be trapped in host mode.
 _EVENT_HOST_TURN_CAP = 12
-
-
-def _pivots_out_of_host(msg: str) -> bool:
-    return bool(_HOST_PIVOT_RE.search(str(msg or "").strip()))
 
 
 # Lanes the host capture does NOT own — a confident classification into any is a pivot
@@ -6529,7 +6573,7 @@ def _is_host_answer(
     capacity chip ("Open · no limit") as off-lane noise. Taking those as confident pivots
     used to release host mode mid-build, wiping the draft + the resolved date, so the flow
     re-asked "when?" with the date still showing in the card. Step-awareness suppresses
-    that false positive; an explicit pivot (``_HOST_PIVOT_RE``), an abandon, or a meta /
+    that false positive; a confident foreign read, an abandon, or a meta /
     question turn still releases."""
     from app.lane_decision import is_meta_or_chat
 
@@ -6587,7 +6631,6 @@ def _is_host_cta_turn(msg: str, session_ctx: dict[str, Any]) -> bool:
     return (
         str(session_ctx.get("host_stage") or "") in ("review", "setup", "confirm")
         and (_is_host_confirm(msg) or _is_host_drop(msg) or _is_host_tweak(msg))
-        and not is_signal_cancel(msg)
     )
 
 
@@ -6615,22 +6658,34 @@ def _release_host_mode(session_ctx: dict[str, Any]) -> None:
         session_ctx[key] = None
 
 
-# Explicit "host/throw/plan a <event>" — a deterministic entry into the event flow that
-# does NOT depend on the CTA hint or the classifier. Requires a host verb + an event
-# noun so "I want to meet people" (discovery) is never caught.
-_HOST_ENTRY_RE = re.compile(
-    r"\bhost(?:ing)?\b.{0,30}\b(?:meet|meet-?up|event|gathering|playgroup|play\s?group|"
-    r"playdate|play\s?date|brunch|coffee|breakfast|picnic|hang(?:out)?|get[- ]?together|"
-    r"party|potluck|walk|stroll|playground|class|circle|club)\b|"
-    r"\b(?:throw|organi[sz]e|plan|set up)\b.{0,30}\b(?:meetup|meet-?up|gathering|playgroup|"
-    r"play\s?group|playdate|brunch|picnic|party|potluck|get[- ]?together|event)\b",
-    re.I,
-)
-
-
-def looks_like_host_event_entry(msg: str) -> bool:
-    """Deterministic 'host an event' entry — host/plan verb + an event noun."""
-    return bool(_HOST_ENTRY_RE.search(str(msg or "").strip()))
+def start_host_mode(session_ctx: dict[str, Any]) -> None:
+    """Enter the event-host flow on a FRESH draft — never inherit a prior session's event
+    (the stale "dads meetup" card), and clear event_id so a past publish doesn't skip the
+    flow. Shared by both ways in: the host CTA (app/main.py, which re-applies a venue the
+    community card stamped) and the classifier's sharing.host verdict below. Keys are set,
+    never popped, for the same session-merge reason as _release_host_mode."""
+    session_ctx["event_host_active"] = True
+    session_ctx["event_host_turns"] = 0
+    for key in (
+        "event_draft",
+        "event_id",
+        "event_when_date",
+        "event_when_time",
+        "event_venue",
+        "event_venue_tried",
+        "event_settings",
+        # Batched-setup stage (review → setup → confirm → published); start unset.
+        "host_stage",
+    ):
+        session_ctx[key] = None
+    for key in (
+        "event_affinity_asked",
+        "event_place_asked",
+        "event_cap_asked",
+        "event_approval_asked",
+        "event_share_asked",
+    ):
+        session_ctx[key] = False
 
 
 def _show_activities_preview(
@@ -8633,26 +8688,31 @@ def handle_discovery_turn(
             if (phase or "") != PHASE_NEED_IDENTITY:
                 session_ctx["skip_claims_background_extract"] = True
 
-    # Safety FIRST — inappropriate/abusive content (NSFW, harassment, hate, illegal) is
+    # Crisis FIRST (AI-driven, no regex): emotional distress or danger gets the empathetic
+    # AI-authored response — acknowledge, right resource when acute (988 / PSI / DV hotline /
+    # 911), stay with them. Checked before every lane and funnel so a distress message can
+    # never be swallowed as a field answer or answered with a ZIP ask (the bug this fixes:
+    # "I cry every night… haven't talked to another adult in days" → browse funnel → ZIP ask).
+    #
+    # Ahead of the unsafe word list on purpose. Someone telling us about abuse QUOTES it:
+    # "my husband calls me a bitch and I'm scared to go home" was read system.crisis by the
+    # classifier and still got the flat unsafe refusal, because the slur matched first (dev
+    # 2026-10-15). The two verdicts are one field (goal), so the model never says both; the
+    # word list exists for what the model misses, not to overrule what it read.
+    if _is_crisis_turn(slots, msg):
+        return _respond_crisis(msg=msg, slots=slots, session_ctx=session_ctx)
+
+    # Safety SECOND — inappropriate/abusive content (NSFW, harassment, hate, illegal) is
     # refused before any intent routing, so it can never be captured as a swap/tip, logged
     # as a feature request, or funnelled into find_peers. Detected by the AI router
     # (goal=unsafe) with a regex backstop; refused + logged to moderation_flags, no
-    # escalation. Crisis content (self-harm/DV/emotional distress) is intentionally excluded
-    # — goal=crisis answers those with empathy + resources below, not this flat boundary.
+    # escalation.
     _unsafe_kind = _unsafe_kind_for_turn(slots, msg)
     if _unsafe_kind is not None:
         return _refuse_unsafe(
             msg=msg, kind=_unsafe_kind, session_ctx=session_ctx,
             user_id=user_id, home_block_id=home_block_id, phase=phase,
         )
-
-    # Crisis SECOND (AI-driven, no regex): emotional distress or danger gets the empathetic
-    # AI-authored response — acknowledge, right resource when acute (988 / PSI / DV hotline /
-    # 911), stay with them. Checked before every lane and funnel so a distress message can
-    # never be swallowed as a field answer or answered with a ZIP ask (the bug this fixes:
-    # "I cry every night… haven't talked to another adult in days" → browse funnel → ZIP ask).
-    if _is_crisis_turn(slots, msg):
-        return _respond_crisis(msg=msg, slots=slots, session_ctx=session_ctx)
 
     # A guest who finished an event, hit the verify gate, and is now verified: publish the
     # event RIGHT AWAY (mirrors the meet-seek publish-after-verify below) and show the
@@ -8732,12 +8792,19 @@ def handle_discovery_turn(
         # "no worries" acknowledgement. A bare abandon ("nah forget it") has no follow-on
         # and still gets the acknowledgement. The classifier decides "is there a new
         # intent?" — any clarify signal or a non-vague goal in the same turn.
-        _ab_slots = enrich_slots(dict(slots), msg=msg) if slots.get("abandon") else {}
+        #
+        # "In the same breath" means a concrete OTHER action. A bare "cancel" keeps the
+        # sharing.host label it is leaving and a non-vague goal; reading that as a new
+        # request fell through to the signal lane ("When works for you?") instead of the
+        # acknowledgement (dev 2026-10-15).
         abandon_with_followon = bool(slots.get("abandon")) and (
-            bool(str(_ab_slots.get("clarify") or "").strip())
-            or str(_ab_slots.get("goal") or "none") not in ("none", "chat")
+            bool(str(slots.get("clarify") or "").strip())
+            or _host_confident_foreign_action(slots)
         )
-        pivoted_away = _pivots_out_of_host(msg) or confident_foreign or abandon_with_followon
+        # The model's read only: the pivot phrase list ("find … moms", "log out") is gone —
+        # a confident foreign read already covers both, and the list could not tell
+        # "find me some parents to invite" (an event detail) from a search.
+        pivoted_away = confident_foreign or abandon_with_followon
         # Seed turn: the "A meet to host" button (or the host-entry regex) JUST entered this
         # flow deterministically, with payload "I want to host a meet" — that 'meet' noun can
         # read as find_activities, so re-classifying the button's own payload would release the
@@ -8756,7 +8823,7 @@ def handle_discovery_turn(
         # classifier and would spuriously release host mode — wiping the draft + host_publish_pending
         # before the signup handler can stash/publish it (the "logged in but no event" bug).
         wants_out = not seed_turn and not host_verifying and not cta_turn and (
-            bool(slots.get("abandon")) or is_signal_cancel(msg) or pivoted_away
+            bool(slots.get("abandon")) or pivoted_away
         )
         if wants_out:
             _release_host_mode(session_ctx)
@@ -9076,7 +9143,9 @@ def handle_discovery_turn(
 
     if discovery_ai_enabled() and slots and not is_hosting_ui_cta(msg):
         tip_slots = enrich_slots(dict(slots), msg=msg)
-        if slots_indicate_tip_share_signal(tip_slots) or utterance_indicates_tip_share(msg):
+        # enrich_slots already folded in the tip-share keyword rule, gated on the model
+        # being unsure — OR-ing the raw match here would let it outrank a confident model.
+        if slots_indicate_tip_share_signal(tip_slots):
             tip_turn = _try_signal_lane_turn(
                 msg=msg,
                 slots=tip_slots,
@@ -9098,12 +9167,21 @@ def handle_discovery_turn(
         # low-confidence fallback (reconcile_hosting_peer_slot_conflict). Do NOT OR a
         # raw utterance regex here — that lets "wanna find ... event" hijack a confident
         # discovery classification into the create-event flow.
-        if slots_indicate_hosting_signal(hosting_slots):
+        # An abandon is never a way IN: "cancel" mid-setup keeps the sharing.host label it
+        # is leaving, and re-arming here reopened the flow the user had just closed.
+        if slots_indicate_hosting_signal(hosting_slots) and not slots.get("abandon"):
             # Hosting an event is a full create_event flow (what/where/when/affinity →
             # publish). When the orchestrator is on it owns this in-chat (OpenAI), so
             # defer to it and pin host mode so the follow-up turns stay with it.
             if _host_via_orchestrator():
-                session_ctx["event_host_active"] = True
+                if not session_ctx.get("event_host_active"):
+                    # The classifier is the way in for typed asks ("I want to host a
+                    # potluck"), so it opens the flow exactly as the CTA does: on a fresh
+                    # draft, with any browse that was mid-question closed.
+                    from app.activity_browse import reset_activity_browse_state
+
+                    reset_activity_browse_state(session_ctx)
+                    start_host_mode(session_ctx)
                 session_ctx["event_host_turns"] = int(session_ctx.get("event_host_turns") or 0) + 1
                 return None
             hosting_turn = _try_signal_lane_turn(
@@ -9487,6 +9565,7 @@ def handle_discovery_turn(
         user_id=user_id,
         phase=phase,
         is_anonymous=is_anonymous,
+        slots=slots,
     )
     if upfront_name_turn is not None:
         reply, ctx, routing, peers = upfront_name_turn
@@ -9634,7 +9713,7 @@ def handle_discovery_turn(
         # Tap (or typed answer) on "want to join one of these?" — read before the signal
         # lane for the same reason: "Join Lp Fit" must not be captured as a fresh signal.
         join_turn = _try_community_join_reply_turn(
-            msg=msg, session_ctx=session_ctx, user_id=user_id, phase=phase
+            msg=msg, session_ctx=session_ctx, user_id=user_id, phase=phase, slots=slots
         )
         if join_turn is not None:
             reply, ctx, routing, peers = join_turn

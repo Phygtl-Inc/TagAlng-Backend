@@ -21,9 +21,34 @@ def _slots(goal="", linear=None, signal=None, conf=0.0, abandon=False):
 
 
 class LaneShouldContinueTests(unittest.TestCase):
-    def test_empty_and_cancel_stay(self):
+    def test_empty_stays(self):
         self.assertTrue(lane_should_continue("", {}, None, is_valid_answer=lambda *a: False))
-        self.assertTrue(lane_should_continue("nvm", {}, None, is_valid_answer=lambda *a: False))
+
+    def test_leaving_is_the_models_abandon_not_a_word(self):
+        # A cancel word in an ANSWER keeps the lane: "The Bus Stop Diner" is a name.
+        self.assertTrue(
+            lane_should_continue(
+                "it's called The Bus Stop Diner", {}, _slots(goal="save_signal", conf=0.9),
+                is_valid_answer=lambda *a: True,
+            )
+        )
+        # The model's abandon read is what lets someone out.
+        self.assertFalse(
+            lane_should_continue("nvm", {}, _slots(abandon=True), is_valid_answer=lambda *a: True)
+        )
+
+    def test_crisis_leaves_every_lane_even_over_an_offered_chip(self):
+        crisis = _slots(goal="crisis", linear="system.crisis", conf=0.4)
+        self.assertFalse(
+            lane_should_continue(
+                "honestly I just want everything to stop", {}, crisis,
+                is_valid_answer=lambda *a: True, is_offered_option=lambda *a: True,
+            )
+        )
+        unsafe = _slots(goal="unsafe", conf=0.9)
+        self.assertFalse(
+            lane_should_continue("x", {}, unsafe, is_valid_answer=lambda *a: True)
+        )
 
     def test_abandon_releases_even_if_answer_shaped(self):
         self.assertFalse(

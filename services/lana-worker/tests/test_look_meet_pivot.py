@@ -24,25 +24,33 @@ class TestLookMeetPivot(unittest.TestCase):
         self.assertFalse(look_meet_user_moved_on("Start listening for me", ctx))
         self.assertFalse(look_meet_user_moved_on("fix:kind", ctx))
 
-    def test_cancel_handled_in_flow_not_a_pivot(self) -> None:
+    def test_a_cancel_word_is_not_an_answer(self) -> None:
+        # No word list keeps or ends the flow; with no classifier read, "never mind" is not
+        # an answer to the card, so the lane lets go (the inversion — never trapped).
         ctx = {"look_meet_active": True, "look_ready": True}
-        # Cancel is a graceful in-flow exit, not a reroute.
-        self.assertFalse(look_meet_user_moved_on("never mind", ctx))
+        self.assertTrue(look_meet_user_moved_on("never mind", ctx))
 
     def test_mid_capture_answers_stay_in_flow(self) -> None:
         ctx = {"look_meet_active": True}  # not ready yet — collecting fields
         for answer in ("anywhere", "Lively", "Open · all moms", "anything like fifa screening?"):
             self.assertFalse(look_meet_user_moved_on(answer, ctx), answer)
 
-    def test_explicit_pivot_releases_any_time(self) -> None:
+    def test_a_pivot_is_the_models_read_not_a_phrase(self) -> None:
+        """No phrase list releases the capture. With no classifier read a pivot is not an
+        answer, so it releases by default; with a read, the read decides — "show me
+        playdates for families" is still THIS lane's search and stays."""
         ctx = {"look_meet_active": True}  # mid-capture
-        for pivot in (
-            "find me italian moms",
-            "show me people on my block",
-            "log out",
-            "host an event",
-        ):
-            self.assertTrue(look_meet_user_moved_on(pivot, ctx), pivot)
+        for pivot in ("find me italian moms", "log out", "host an event"):
+            self.assertTrue(
+                look_meet_should_release(pivot, ctx, {"goal": "peers", "linear_intent": "discovery.find_peers", "confidence": 0.9}),
+                pivot,
+            )
+        self.assertFalse(
+            look_meet_should_release(
+                "show me playdates for families", {"look_meet_active": True},
+                {"goal": "activities", "linear_intent": "discovery.find_activities", "confidence": 0.9},
+            )
+        )
 
     def test_reset_clears_state(self) -> None:
         ctx = {

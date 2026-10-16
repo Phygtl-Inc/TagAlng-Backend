@@ -823,18 +823,6 @@ class TestBlurbTruthfulness(unittest.TestCase):
             )
 
 
-class TestCreateEventCta(unittest.TestCase):
-    def test_its_message_enters_hosting_without_the_classifier(self) -> None:
-        """The CTA posts a normal chat message, so its WORDS decide the lane. Phrased as
-        "host something at X" it read as a search and answered "there aren't any
-        activities by them in your area" — a discovery result for a hosting button."""
-        from app.discovery_route import looks_like_host_event_entry
-        from app.ui_actions import community_profile_actions
-
-        actions = community_profile_actions(place_name="St. Luke's", relation="church")
-        self.assertTrue(looks_like_host_event_entry(actions[0]["message"]))
-
-
 class TestEventsAtPlace(unittest.TestCase):
     """A community's upcoming list holds meets held HERE plus meets created FOR it (the
     setup card's community tag), and the two-column filter only ever sees a real uuid."""

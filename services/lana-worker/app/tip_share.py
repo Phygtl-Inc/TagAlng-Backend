@@ -20,16 +20,14 @@ import re
 import uuid
 from typing import Any
 
+from app.lane_decision import is_bare_control
+
 from app.reply_compose import compose_reply, readback
 
 _TRAIT_PROMPT = "What makes them great?"
 _CATEGORY_SUGGESTIONS = ["Doctor / clinic", "Restaurant", "Park / playground", "Home service"]
 _MAX_ENRICH = 2
 
-_CANCEL_RE = re.compile(
-    r"\b(cancel|never\s*mind|nvm|stop|forget it|not now|skip this|exit|quit)\b",
-    re.IGNORECASE,
-)
 # The ready card's post button. Its LABEL is "Drop the recommendation" (design ruling
 # 2026-09-08, shipped in the PWA 2026-09-09); what it SENDS is still the protocol utterance
 # "pass the tip along", which _PASS_RE below matches. Copy that tells someone which button
@@ -40,25 +38,11 @@ _POST_CTA = "Drop the recommendation"
 _POST_UTTERANCE = "pass the tip along"
 # The post button's utterance / any go-ahead to post it.
 _PASS_RE = re.compile(
-    r"\b(pass (?:the )?tip|pass it along|post it|share it|list it|that'?s it|"
+    r"\b(pass (?:the )?tip(?: along)?|pass it along|post it|share it|list it|that'?s it|"
     r"go ahead|done|send it|share with (?:the |my )?communit(?:y|ies))\b",
     re.IGNORECASE,
 )
 _TIP_TURN_CAP = 24  # 8 carousel steps + name/type + corrections
-
-# Deterministic entry backstop (the "A tip to share" CTA), so it engages even without
-# the FE intent_hint. Matches SHARING a recommendation — not seeking one.
-_ENTRY_RE = re.compile(
-    r"\b(tip to share|recommend(?:ation)?|i'?d? recommend|you should try|"
-    r"a (?:great|good) (?:place|spot|doctor|dentist)|share a tip)\b",
-    re.IGNORECASE,
-)
-
-
-def looks_like_tip_share_entry(message: str) -> bool:
-    """True when the message looks like the user wants to share a recommendation."""
-    return bool(_ENTRY_RE.search(str(message or "").strip()))
-
 
 _TIP_VALUE_FIELDS = ("name", "category", "trait", "locality", "reco_type")
 
@@ -1310,8 +1294,12 @@ def tip_share_should_release(
 ) -> bool:
     """Release the sticky tip-share flow on a semantic abandon or a confident pivot to
     another intent (AI's read, not keywords), so the user is never trapped."""
-    from app.lane_decision import lane_should_continue
+    from app.lane_decision import is_universal_exit, lane_should_continue
 
+    # Distress, abuse and out-of-scope errands leave from every step, the toggle included —
+    # the carve-out below exists for a "no", not for a crisis.
+    if is_universal_exit(slots):
+        return True
     # A no to Lana's OWN closing yes/no ("Can neighbours ask you more?" → "naah, I don't
     # want them to") is the ANSWER to that step, but it reads as an abandon to the
     # classifier — which released the lane on the very last question and dropped a finished
@@ -1350,7 +1338,7 @@ def reset_tip_share_state(session_ctx: dict[str, Any]) -> None:
 def posting_cta(msg: str) -> bool:
     """A control line (post it / looks good / fix:<field>), never a statement."""
     low = msg.strip().lower()
-    return bool(_PASS_RE.search(low)) or low.startswith("fix:") or low in {"looks good", "yes", "no"}
+    return is_bare_control(low, _PASS_RE) or low.startswith("fix:") or low in {"looks good", "yes", "no"}
 
 
 def _tip_ready_reply(summary: str, circle: str) -> str:
@@ -1452,7 +1440,7 @@ def run_tip_share_turn(
     # ── Loop safety ──
     turns = int(session_ctx.get("tip_turns") or 0) + 1
     session_ctx["tip_turns"] = turns
-    if _CANCEL_RE.search(msg) or turns > _TIP_TURN_CAP:
+    if turns > _TIP_TURN_CAP:
         for k in ("tip_share_active", "tip_draft", "tip_ready", "tip_pending_ask", "tip_pending_question", "tip_enrich_count", "tip_asked_fields", "tip_need_zip", "tip_fork_pending"):
             session_ctx[k] = None
         session_ctx["tip_turns"] = 0
@@ -1464,7 +1452,7 @@ def run_tip_share_turn(
     # as a card answer by the extractor, so every retry failed the same way (dev QA
     # 2026-09-03, "block_required" twice in a row). Answering the ask posts the tip on the
     # spot — they already tapped the CTA once.
-    posting = bool(_PASS_RE.search(msg))
+    posting = is_bare_control(msg, _PASS_RE)
     if session_ctx.get("tip_need_zip") and msg:
         from app.discovery_route import (
             ensure_home_block_for_verified_user,
@@ -1672,7 +1660,7 @@ def run_tip_share_turn(
 
     # ── Capture a pending enrichment / name answer into the right place ──
     pending = session_ctx.get("tip_pending_ask")
-    if pending and msg and not handoff and not _PASS_RE.search(msg):
+    if pending and msg and not handoff and not is_bare_control(msg, _PASS_RE):
         step_fields = {s["field"] for s in step_set_of(draft)}
         if pending in step_fields:
             draft["answers"] = {**(draft.get("answers") or {}), str(pending): msg}
@@ -1771,7 +1759,7 @@ def run_tip_share_turn(
         # reliable mid-capture — it read "why should i answer this" as an answer and the
         # question went onto the card as the user's opinion (dev QA 2026-09-08).
         and (role == "asks_why" or (not role and is_meta_or_chat(slots)))
-        and not _PASS_RE.search(msg)
+        and not is_bare_control(msg, _PASS_RE)
     ):
         skippable = not pending_step.get("required")
         # Their question was stamped in as the answer a few lines up. Take it back out.
@@ -1859,7 +1847,7 @@ def run_tip_share_turn(
         and not (set(new_answers) - {weak_field})
         and weak_field not in reasked
         and weak_field not in (SUBJECT_FIELD, COMMUNITY_FIELD, *TAIL_FIELDS)
-        and not _PASS_RE.search(msg)
+        and not is_bare_control(msg, _PASS_RE)
     ):
         step = next(
             (s for s in step_set_of(draft) if s["field"] == weak_field), None
@@ -2092,7 +2080,7 @@ def run_tip_share_turn(
         # required steps are in. A typed set is 7-8 steps deep, so without this the only
         # way out of a set the user considers finished is to answer every optional or
         # abandon the tip.
-        done_early = bool(_PASS_RE.search(msg)) and not draft["missing"]
+        done_early = is_bare_control(msg, _PASS_RE) and not draft["missing"]
         # `asked` goes IN so the walk advances past optionals already offered.
         step = None if done_early else next_question(
             step_set, draft.get("answers"), asked=asked
