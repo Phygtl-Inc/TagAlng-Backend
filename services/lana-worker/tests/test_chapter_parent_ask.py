@@ -140,8 +140,6 @@ def test_caps_the_chips_at_three_candidates(env: dict) -> None:
     [
         [],  # no memberships at all
         [_row(SJSU, "SJSU", status="suggested")],  # not a confirmed member
-        [_row(SJSU, "Iron Man Training", place_type="creator", circle_type="creator")],
-        [_row(SJSU, "Iron Man", google_place_id="creator:iron-man")],
         [_row(SJSU, "Data Club", parent_place_id=ACME)],  # itself a chapter: depth
     ],
 )
@@ -214,7 +212,7 @@ def test_tapping_a_candidate_sets_the_parent_and_shows_the_chip(env: dict) -> No
     draft = ctx["community_draft"]
     assert draft["parent"] == "San Jose State University"
     assert draft["parent_place"] == {"place_id": SJSU, "place_name": "San Jose State University",
-                                     "located": True, "handle": None}
+                                     "located": True, "handle": None, "join_first": False}
     assert {"label": "Part of San Jose State University", "tone": "sky", "field": "parent"} in draft["chips"]
     # A located parent makes the city question unnecessary: straight to the ready card.
     assert ctx.get("community_pending_ask") is None
@@ -399,3 +397,134 @@ def test_a_tapped_parent_whose_name_holds_a_cancel_word_is_not_a_cancel(env: dic
     _turn(ctx, "Part of Stop the Stigma")
     assert ctx["community_draft"]["parent_place"]["place_id"] == SJSU
     assert ctx["community_create_active"] is True
+
+
+# ── creator communities, the community picked at the top, and joining the parent ──────
+
+
+class _Places:
+    """service_client() whose places reads return `rows` (blurb/handle/scoped reads)."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def __getattr__(self, n: str) -> Any:
+        return lambda *a, **k: self
+
+    def execute(self) -> Any:
+        return mock.Mock(data=[dict(r) for r in self.rows])
+
+
+PODCASTERS = "44444444-4444-4444-4444-444444444444"
+
+
+def test_a_creator_community_can_be_offered_as_a_parent(env: dict) -> None:
+    # attach_chapter refuses a creator community only as the CHAPTER; as a parent it is a
+    # topic that holds local branches (Podcasters → Podcasters Orlando).
+    env["rows"] = [_row(PODCASTERS, "Podcasters", place_type="creator", circle_type="creator",
+                        google_place_id="creator:podcasters", lat=None, lng=None)]
+    ctx = _ctx(_ready_draft(name="Podcasters Orlando", blurb="podcasters meeting in Orlando"))
+    _turn(ctx, "looks good")
+    assert ctx["community_draft"]["suggestions"][0] == "Part of Podcasters"
+
+
+def test_the_judge_is_told_which_candidates_are_spread_out(env: dict, monkeypatch: Any) -> None:
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("app.orchestrator.llm.llm_configured", lambda: True)
+    monkeypatch.setattr("app.orchestrator.llm.llm_json",
+                        lambda **k: seen.update(k) or {"umbrellas": [1]})
+    env["real_judge"]({"name": "Podcasters Orlando"},
+                      [{"place_id": PODCASTERS, "place_name": "Podcasters", "located": False},
+                       {"place_id": SJSU, "place_name": "SJSU", "located": True}])
+    assert '"spread_out": true' in seen["user_payload"]
+    assert '"spread_out": false' in seen["user_payload"]
+
+
+def test_the_scoped_community_is_offered_first_without_the_judge(env: dict) -> None:
+    env["rows"] = [_row(SJSU, "San Jose State University"), _row(ACME, "Acme Corp")]
+    judged: list = []
+    env["judge"] = lambda draft, cands: judged.append([c["place_id"] for c in cands]) or cands
+    ctx = _ctx(_ready_draft(), active_community={"place_id": ACME, "name": "Acme Corp"})
+    _turn(ctx, "looks good")
+    assert ctx["community_draft"]["suggestions"][:2] == ["Part of Acme Corp",
+                                                         "Part of San Jose State University"]
+    assert judged == [[SJSU]]  # the scoped one never went to the judge
+
+
+def test_a_scoped_community_they_are_not_in_is_offered_and_joined_at_publish(
+    env: dict, monkeypatch: Any
+) -> None:
+    env["rows"] = []  # no memberships at all
+    monkeypatch.setattr("app.auth.service_client", lambda: _Places(
+        [{"id": PODCASTERS, "name": "Podcasters", "lat": None, "lng": None,
+          "handle": "podcaster", "parent_place_ref": None, "governance_state": None,
+          "google_place_id": "creator:podcasters"}]))
+    ctx = _ctx(_ready_draft(name="Podcasters Orlando", google_place_id="gLib"),
+               active_community={"place_id": PODCASTERS, "name": "Podcasters"})
+    _turn(ctx, "looks good")
+    draft = ctx["community_draft"]
+    assert draft["suggestions"] == ["Part of Podcasters", "On its own"]
+    assert draft["parent_offer"][0]["join_first"] is True
+    assert any("not a member of Podcasters" in f for f in env["composed"][-1]["facts"])
+    assert env["judged"] == 0
+
+    _turn(ctx, "Part of Podcasters")
+    assert ctx["community_draft"]["parent_place"]["join_first"] is True
+    # Publish: the first attach is refused for membership, they join, the attach reruns.
+    monkeypatch.setattr(cc, "publish_community", lambda **k: ({"place_id": RCC}, ""))
+    attaches = iter([{"ok": False, "reason": "not_a_member_of_parent"}, {"ok": True}])
+    monkeypatch.setattr(ops, "attach_chapter", lambda u, c, p: next(attaches))
+    joins: list = []
+    monkeypatch.setattr("app.community_discovery.join_community",
+                        lambda u, p, **k: joins.append(p) or {"place_id": p})
+    _turn(ctx, "Share with the community")
+    assert joins == [PODCASTERS]
+    assert ctx["community_draft"]["parent_attached"] is True
+    assert any("now a member of it too" in f for c in env["composed"] for f in c["facts"])
+
+
+def test_a_scoped_community_that_is_itself_a_chapter_is_not_offered(
+    env: dict, monkeypatch: Any
+) -> None:
+    env["rows"] = []
+    monkeypatch.setattr("app.auth.service_client", lambda: _Places(
+        [{"id": RCC, "name": "RCC", "lat": 1.0, "lng": 2.0, "handle": None,
+          "parent_place_ref": SJSU, "governance_state": None, "google_place_id": "gRcc"}]))
+    ctx = _ctx(_ready_draft(), active_community={"place_id": RCC, "name": "RCC"})
+    _turn(ctx, "looks good")
+    assert ctx.get("community_pending_ask") != "parent"
+
+
+def test_a_named_parent_they_are_not_in_is_joined_then_attached(
+    env: dict, monkeypatch: Any
+) -> None:
+    ctx = _ctx(_ready_draft(google_place_id="gLib", parent="Podcasters",
+                            parent_place={"place_id": PODCASTERS, "place_name": "Podcasters",
+                                          "located": False}),
+               community_ready=True)
+    monkeypatch.setattr(cc, "publish_community", lambda **k: ({"place_id": RCC}, ""))
+    attaches = iter([{"ok": False, "reason": "not_a_member_of_parent"}, {"ok": True}])
+    monkeypatch.setattr(ops, "attach_chapter", lambda u, c, p: next(attaches))
+    joins: list = []
+    monkeypatch.setattr("app.community_discovery.join_community",
+                        lambda u, p, **k: joins.append(p) or {"place_id": p})
+    _turn(ctx, "Share with the community")
+    assert joins == [PODCASTERS] and ctx["community_draft"]["parent_attached"] is True
+
+
+def test_a_failed_join_leaves_it_standalone_and_says_why(env: dict, monkeypatch: Any) -> None:
+    ctx = _ctx(_ready_draft(google_place_id="gLib", parent="Podcasters",
+                            parent_place={"place_id": PODCASTERS, "place_name": "Podcasters",
+                                          "located": False}),
+               community_ready=True)
+    monkeypatch.setattr(cc, "publish_community", lambda **k: ({"place_id": RCC}, ""))
+    monkeypatch.setattr(ops, "attach_chapter",
+                        lambda u, c, p: {"ok": False, "reason": "not_a_member_of_parent"})
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise ValueError("join_failed")
+
+    monkeypatch.setattr("app.community_discovery.join_community", boom)
+    _turn(ctx, "Share with the community")
+    assert ctx["community_draft"]["parent_attached"] is False
+    assert any("not a member of Podcasters" in f for c in env["composed"] for f in c["facts"])
