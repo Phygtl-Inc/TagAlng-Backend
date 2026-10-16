@@ -465,7 +465,7 @@ class TestAskReason(unittest.TestCase):
             "gap_row_id": "g1", "gap_id": "deepen:fit_407", "parent_bucket": "interest",
             "why_frame": "about FIT 407 Lake Nona…",
             "why_reason": "Knowing what you go there for lets me introduce you to "
-                          "neighbors who show up for the same thing.",
+                          "others who show up for the same thing.",
             "question": "What do you enjoy most about your time at FIT 407 Lake Nona?",
         }
         with patch.object(rapport_ranker, "_heal_reason") as heal:
@@ -495,14 +495,14 @@ class TestAskReason(unittest.TestCase):
                 "es": {
                     "question": "¿Qué mañanas corres?",
                     "why_frame": "sobre tus carreras…",
-                    "why_reason": "Así puedo presentarte a vecinos que corren a esa hora.",
+                    "why_reason": "Así puedo presentarte a gente que corre a esa hora.",
                 }
             },
         }
         with patch.object(rapport_ranker, "_heal_reason"):
             built = rapport_ranker._build(row, None, "es")
         self.assertEqual(
-            built["why_reason"], "Así puedo presentarte a vecinos que corren a esa hora."
+            built["why_reason"], "Así puedo presentarte a gente que corre a esa hora."
         )
 
     def test_reason_newer_than_translation_kicks_a_rerender(self):
@@ -518,6 +518,47 @@ class TestAskReason(unittest.TestCase):
             built = rapport_ranker._build(row, None, "es")
         self.assertEqual(built["why_reason"], "English reason")
         kick.assert_called_once()
+
+    def test_stored_reason_with_banned_word_serves_none_and_recomposes(self):
+        # Written before rule 11 (2026-10-04): the guard only ran at write time, so the
+        # stored line still promised "neighbors". Never serve it; heal overwrites it.
+        row = {
+            "gap_row_id": "g5", "gap_id": "deepen:pizza", "parent_bucket": "interest",
+            "why_frame": "about your pizza…",
+            "why_reason": "so I can introduce you to neighbors nearby who also love "
+                          "fig and gorgonzola pizza",
+            "question": "Which local pizzeria do you get your fig and gorgonzola pizza from?",
+        }
+        with patch.object(rapport_ranker, "_heal_reason") as heal:
+            built = rapport_ranker._build(row, None)
+        self.assertIsNone(built["why_reason"])
+        heal.assert_called_once()
+
+    def test_translated_reason_with_banned_word_serves_none_and_recomposes(self):
+        row = {
+            "gap_row_id": "g6", "gap_id": "deepen:running", "parent_bucket": "activity",
+            "why_frame": "about your running…", "why_reason": "English reason",
+            "question": "Which mornings do you run?",
+            "question_i18n": {
+                "es": {
+                    "question": "¿Qué mañanas corres?",
+                    "why_reason": "Así puedo presentarte a vecinos que corren a esa hora.",
+                }
+            },
+        }
+        with patch.object(rapport_ranker, "_heal_reason") as heal:
+            built = rapport_ranker._build(row, None, "es")
+        self.assertIsNone(built["why_reason"])
+        heal.assert_called_once()
+
+    def test_reason_prompt_never_licenses_neighbors(self):
+        # The prompt used to list "introduce them to neighbors" as an allowed promise,
+        # so the model wrote the banned word on purpose (prompt vs. rule 11).
+        from app import rapport_reasons
+        from app.lingo_guard import find_violations
+
+        allowed = rapport_reasons._REASON_PROMPT.split("Rules:")[0]
+        self.assertEqual(find_violations(allowed), [])
 
     def test_compose_cleans_banned_lexicon_and_length(self):
         from app import rapport_reasons
@@ -550,14 +591,14 @@ class TestAskReason(unittest.TestCase):
         with patch.object(rapport_reasons, "service_client", return_value=_Supabase(store)), \
              patch.object(
                  rapport_reasons, "compose_ask_reason",
-                 return_value="So I can point you to neighbors out at the same hour.",
+                 return_value="So I can point you to others out at the same hour.",
              ):
             written = rapport_reasons.attach_ask_reason("g9", "Which mornings do you run?")
         self.assertIsNotNone(written)
         patched = [p for (t, p) in store["updates"] if t == "rapport_gaps"]
         self.assertEqual(
             patched,
-            [{"why_reason": "So I can point you to neighbors out at the same hour."}],
+            [{"why_reason": "So I can point you to others out at the same hour."}],
         )
 
     def test_attach_writes_nothing_when_compose_fails(self):
