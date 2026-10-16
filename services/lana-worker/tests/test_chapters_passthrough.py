@@ -354,7 +354,7 @@ class _Query:
 
 class _DB:
     # SJSU: created by ME. RCC: ME is a live operator. CLUB: ME was an operator, removed.
-    # OTHER_CLUB: ME is only a member.
+    # Modded (666…): ME is a live co-owner (role=manager).
     TABLES = {
         "places": [
             {"id": SJSU, "created_by": ME},
@@ -414,17 +414,18 @@ class TestCirclesListCanManage(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         return {r["place_name"]: r["can_manage"] for r in res.json()["circles"]}
 
-    def test_own_list_creator_and_operator_only(self) -> None:
+    def test_own_list_creator_operator_and_coowner(self) -> None:
+        # Modded: ME is a live co-owner (role=manager) — co-owners edit, so they manage.
         self.assertEqual(
             self._post({}),
-            {"SJSU": True, "RCC": True, "Old club": False, "Modded": False},
+            {"SJSU": True, "RCC": True, "Old club": False, "Modded": True},
         )
 
     def test_someone_elses_list_answers_for_the_viewer(self) -> None:
         # OTHER's list, viewed by ME: whether *I* run each place.
         self.assertEqual(
             self._post({"user_id": OTHER}),
-            {"SJSU": True, "RCC": True, "Old club": False, "Modded": False},
+            {"SJSU": True, "RCC": True, "Old club": False, "Modded": True},
         )
 
     def test_stranger_runs_nothing(self) -> None:

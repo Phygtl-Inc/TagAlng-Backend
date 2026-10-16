@@ -2094,10 +2094,11 @@ def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
 
 
 def _managed_place_ids(user_id: str, place_ids: list[str]) -> set[str] | None:
-    """Which of these places the user RUNS: she created it (places.created_by) or is its
-    live operator (place_managers role='operator', not removed). The same standing
-    attach_chapter / detach_chapter demand (20270125120000) via is_community_operator, so
-    the PWA never offers "Make this a chapter" to someone the SQL will refuse.
+    """Which of these places the user RUNS: she created it (places.created_by), or is its
+    live operator or co-owner (place_managers role 'operator' / 'manager', not removed).
+    The same standing attach_chapter / detach_chapter demand (20270125120000) via
+    is_community_operator, so the PWA never offers "Make this a chapter" to someone the SQL
+    will refuse.
 
     None when either read fails — unknown, which a client must not render as "no"."""
     ids = [p for p in dict.fromkeys(place_ids) if p]
@@ -2113,7 +2114,7 @@ def _managed_place_ids(user_id: str, place_ids: list[str]) -> set[str] | None:
             .select("place_id")
             .eq("user_id", user_id)
             .in_("place_id", ids)
-            .eq("role", "operator")
+            .in_("role", ["operator", "manager"])
             .is_("removed_at", "null")
             .execute()
         )
