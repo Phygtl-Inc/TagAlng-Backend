@@ -1,0 +1,151 @@
+{
+  "id": "find_fl_0",
+  "tags": [
+    "find",
+    "fl",
+    "Family & kids"
+  ],
+  "zip": "32827",
+  "turns": [
+    {
+      "sent": "I'm looking for a meet or playgroup",
+      "hint": "look_meet",
+      "status": 200,
+      "ms": 4548,
+      "assistant_message": "Love it — what kind of thing are you up for?",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "Family & kids",
+      "hint": null,
+      "status": 200,
+      "ms": 5307,
+      "assistant_message": "What's your ZIP code? Once I know your block I can show what's happening nearby.",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "32827",
+      "hint": null,
+      "status": 200,
+      "ms": 6521,
+      "assistant_message": "Here's what's coming up for family:\n• Pre-K Playground Meetup at Laureate Park Zipline Playground (Fri Jul 10)\n• Playdate at the park at New York (Tue Jul 14)\n• 6th Birthday Moms & Kids Party at At My Place Cafe (Wed Aug 12)\nVerify your email to RSVP, or tell me to narrow it (e.g. 'just cricket').",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [
+        {
+          "title": "Pre-K Playground Meetup",
+          "when": "2026-07-10T13:30:00+00:00"
+        },
+        {
+          "title": "Playdate at the park",
+          "when": "2026-07-14T00:30:00+00:00"
+        },
+        {
+          "title": "6th Birthday Moms & Kids Party",
+          "when": "2026-08-12T04:00:00+00:00"
+        }
+      ],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "Something for my 4 year old, we're free weekday mornings",
+      "hint": null,
+      "status": 200,
+      "ms": 9771,
+      "assistant_message": "Verify your email first — then I can post that to your block.",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "save_signal_need_verify",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "no_result_event": false,
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T00:51:47.316Z",
+  "session": "2ca5a47d-7b47-48f8-bb25-8aaf037de989",
+  "finishedAt": "2026-07-09T00:52:15.815Z"
+}

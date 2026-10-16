@@ -1,0 +1,109 @@
+{
+  "id": "host_4",
+  "tags": [
+    "host"
+  ],
+  "zip": "32801",
+  "turns": [
+    {
+      "sent": "I want to host a meet. a moms night out next friday 8pm, somewhere with wine",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 15775,
+      "assistant_message": "Let's set it up! Add a name, a date & time, and a place below — or just tell me here and I'll fill them in.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Moms Night Out",
+        "starts_at": "2026-07-17T20:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32801",
+      "hint": null,
+      "status": 200,
+      "ms": 20373,
+      "assistant_message": "Thanks for sharing your zip code! To finish setting up your Moms Night Out, could you pick a specific spot—like a favorite wine bar or café—in 32801? Once we have the location, we’ll be ready to post your event.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Moms Night Out",
+        "starts_at": "2026-07-17T20:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 15256,
+      "assistant_message": "Great, thanks for confirming! We just need the name of the spot where you’d like to host Moms Night Out in 32827. Once you pick a venue, I’ll get everything ready to post your event.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Moms Night Out",
+        "starts_at": "2026-07-17T20:00:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Setting up your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:06:12.333Z",
+  "session": "502e7110-eb33-4ae3-b3d2-2c95180485e7",
+  "finishedAt": "2026-07-09T01:07:07.577Z"
+}
