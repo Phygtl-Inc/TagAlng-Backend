@@ -1,4 +1,4 @@
--- 20270209120000_community_coowners · behaviour checks (local validation container only)
+-- 20270210120000_community_coowners · behaviour checks (local validation container only)
 --   psql -h 127.0.0.1 -p 55432 -U supabase_admin -d postgres -f supabase/tests/community_coowners.sql
 -- Runs as `authenticated` with request.jwt.claim.sub switched per actor, so grants are
 -- exercised. Needs public._require_verified_neighbor_comms (20260616120000 lines 1-62;
