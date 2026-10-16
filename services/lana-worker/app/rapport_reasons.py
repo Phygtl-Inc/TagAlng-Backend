@@ -5,7 +5,7 @@ which names the topic but never says what answering *does* for the user. This mo
 authors the honest reason in Lana's voice, grounded in the actual question:
 
     Q: "What do you enjoy most about your time at FIT 407 Lake Nona?"
-    → "Knowing what you go for there lets me introduce you to neighbors who show up
+    → "Knowing what you go for there lets me introduce you to others who show up
        for the same thing."
 
 Written per gap, never templated (AI-authored copy rule), and composed OFF the turn:
@@ -52,32 +52,31 @@ def _cooling_down(gap_row_id: str) -> bool:
     _last_attempt[gap_row_id] = now
     return False
 
-_REASON_PROMPT = """You write ONE line for a neighborhood app where a warm local concierge \
-(Lana) helps neighbors meet the people and plans near them. She has just asked the user a \
-question; your line goes right under it and answers the user's fair question: "why are you \
-asking me this?"
+_REASON_PROMPT = """You write ONE line for a local app where a warm concierge (Lana) helps \
+people meet others and find plans near them. She has just asked the user a question; your \
+line goes right under it and answers the user's fair question: "why are you asking me this?"
 
 Output ONLY JSON: {"reason": "..."}
 
 What the answer actually lets her do — say one of these, whichever fits the question, and \
 never promise anything else:
-- introduce them to neighbors nearby who share that same thing
+- introduce them to other people nearby who share that same thing
 - suggest (or help them start) a small local get-together that fits it
 - know which things happening near them are actually worth mentioning
 - for a named place: find the other people who go there too
 
 Rules:
 - ONE sentence, under 120 characters. No question mark. No "By the way", no greeting.
-- Speak TO the user, first person ("so I can…", "that way I can…", "it helps me…").
-- Be SPECIFIC to THIS question — name the thing it's about. \
-Weak: "It helps me get to know you better." \
-Strong: "Knowing which nights you play lets me point you to neighbors who hit the courts then."
+- Speak TO the user, in the first person.
+- Be SPECIFIC to THIS question: name the thing it is about. A line that would fit any \
+question (getting to know them better) is a failure.
 - Truthful and modest: it is about connecting them with people and plans nearby. NEVER claim \
 it unlocks features, feeds ads, is shared with anyone, or is required.
 - When `community` is given, the question is asked INSIDE that community: the honest reason \
-is about its MEMBERS ("so I can connect you with other members of <community> who…") — \
-never "neighbors", "nearby" or "local".
-- Never the words "circle", "block", "match", "mom", or "profile".
+is about connecting them with other MEMBERS of that community, named — never people \
+"nearby" or "local".
+- Other people are "people", "others" or "members" — never "neighbors". Never the words \
+"circle", "block", "match", "mom", or "profile".
 - English only — it is rendered into the user's language downstream."""
 
 

@@ -27,6 +27,7 @@ from typing import Any
 
 from app.analytics import track
 from app.auth import service_client
+from app.lingo_guard import find_violations
 from app.rapport_gap_tree import get_gap
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,11 @@ def _build(
                 why_reason = ""
         elif question:
             _kick_i18n(row, question, why_frame, lang, i18n, why_reason)
+    if why_reason and find_violations(why_reason):
+        # Stored before a lexicon rule landed (rule 11: "neighbors", 2026-10-04) — the
+        # guard only ran at write time. Serve the teaser instead and let _heal_reason
+        # recompose, which overwrites the column and re-renders the translation.
+        why_reason = ""
     chips = row.get("answer_options")
     chips = [str(c) for c in chips if str(c or "").strip()] if isinstance(chips, list) else []
     if chips and lang and lang != "en":
