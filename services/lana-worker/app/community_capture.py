@@ -745,16 +745,22 @@ def _ask_parent(
 
     offer = [o for o in (draft.get("parent_offer") or []) if isinstance(o, dict)]
     names = [o["place_name"] for o in offer]
+    # The community picked at the top of the app, when it is among the options.
+    here = next((o["place_name"] for o in offer if o.get("scoped")), None)
     lang = session_lang(session_ctx)
-    raw = [f"Part of {n}"[:40] for n in names] + ["On its own"]
+    raw = [
+        (f"Chapter of {o['place_name']}" if o.get("scoped") else f"Part of {o['place_name']}")[:40]
+        for o in offer
+    ] + ["On its own"]
     labels = localize_labels(raw, lang) if lang else raw
     for o, label in zip(offer, labels):
         o["label"] = label
     draft["parent_offer"] = offer
     draft["parent_standalone_label"] = labels[-1]
-    # The first of the closing questions (_after_questions): asked with the card not yet
-    # ready, the same state the city and link steps are asked in; the PWA renders
-    # `suggestions` as quick replies under the message.
+    # Asked before the questions when a community is picked at the top of the app
+    # (parent_asked_early), otherwise the first of the closing questions (_after_questions).
+    # Either way the card is not ready, and the PWA renders `suggestions` as quick replies
+    # under the message.
     draft["chips"] = _build_chips(draft)
     draft["pending_field"] = _PARENT_ASK
     draft["suggestions"] = labels
@@ -770,10 +776,29 @@ def _ask_parent(
     session_ctx["routing_phase"] = "listening"
     name = str(draft.get("name") or "their community")
     joined = " or ".join(f"**{n}**" for n in names)
+    if here:
+        others = [n for n in names if n != here]
+        fallback = (
+            f"Just so you know, you're inside **{here}** right now. Should **{name}** be a "
+            f"chapter of {here}"
+            + (f", part of {' or '.join(others)}" if others else "")
+            + ", or a community of its own?"
+        )
+    else:
+        fallback = f"Is **{name}** part of {joined}, or does it stand on its own?"
     return compose_reply(
         goal=(
-            "Ask in one short line whether their new community is part of one of the bigger "
-            "communities listed in the facts, or stands on its own. Name them. "
+            (
+                "They are inside a community right now (named in the facts). Let them know, "
+                "briefly and politely, that creating this one there would make it a chapter "
+                "of that community, and ask whether they want a chapter of it or a "
+                "community of its own. If the facts list other bigger communities, offer "
+                "those too. Keep it to one or two short lines. "
+                if here
+                else "Ask in one short line whether their new community is part of one of "
+                "the bigger communities listed in the facts, or stands on its own. Name "
+                "them. "
+            )
             + (
                 "You already asked once and they did not say which one, so ask them to pick "
                 "one. "
@@ -782,10 +807,16 @@ def _ask_parent(
             )
             + "They answer with the buttons below or in their own words."
         ),
-        facts=[
-            f"The new community: {name}",
-            "Bigger communities it could sit inside: " + ", ".join(names),
-        ]
+        facts=[f"The new community: {name}"]
+        + (
+            [
+                f"They are inside {here} right now: it is the community selected at the top "
+                f"of their app. Made here, the new community would be a chapter of {here}",
+            ]
+            if here
+            else []
+        )
+        + ["Bigger communities it could sit inside: " + ", ".join(names)]
         + [
             f"They are not a member of {o['place_name']} yet; choosing it also makes them one"
             for o in offer
@@ -795,25 +826,30 @@ def _ask_parent(
             "Inside one, people looking at that community see it as one of its clubs; it "
             "can still be found and joined on its own",
         ],
-        fallback=f"Is **{name}** part of {joined}, or does it stand on its own?",
+        fallback=fallback,
     )
 
 
 def _maybe_ask_parent(
-    session_ctx: dict[str, Any], draft: dict[str, Any], user_id: Any
+    session_ctx: dict[str, Any], draft: dict[str, Any], user_id: Any, *, early: bool = False
 ) -> str | None:
     """Ask the parent question if it is due and someone could hold this community; the
     reply, or None to carry on. Marks the draft asked either way, so the membership read
-    and the judgement run once per draft."""
+    and the judgement run once per draft.
+
+    early: asked before the questions, and only when the community picked at the top of
+    the app could hold this one. Otherwise nothing is marked, and it is asked at the end."""
     if not _parent_ask_due(draft):
         return None
-    draft["parent_asked"] = True
     candidates = _parent_candidates(draft, user_id)
     # The community picked at the top of the app is where they are standing: it is offered
     # first, without the umbrella judgement — choosing it is their own signal. Still a
     # question, never an assumption: browsing inside Podcasters does not make every new
     # community a branch of it.
     scoped = _scoped_parent(session_ctx, draft, candidates)
+    if early and not scoped:
+        return None
+    draft["parent_asked"] = True
     others = [c for c in candidates if not scoped or c["place_id"] != scoped["place_id"]]
     plausible = ([scoped] if scoped else []) + _judge_umbrellas(draft, others)
     if not plausible:
@@ -826,9 +862,14 @@ def _maybe_ask_parent(
             "handle": c.get("handle"),
             # Not a member yet: picking it joins them first (attach_chapter needs that).
             "join_first": bool(c.get("join_first")),
+            # The one picked at the top: the question says they are inside it right now.
+            "scoped": c is scoped,
         }
         for c in plausible[:_PARENT_MAX]
     ]
+    if early:
+        # The answer goes on to the questions, not to the closing steps.
+        draft["parent_asked_early"] = True
     return _ask_parent(session_ctx, draft)
 
 
@@ -1481,6 +1522,9 @@ def run_community_capture_turn(
     # ── The answer to "is it part of something bigger?" ──
     # Read before anything else: a tapped "Part of SJSU" is not a name, a blurb or a
     # publish. A correction chip is a rendered control of its own and goes to its branch.
+    # Answered before the questions (parent_asked_early), the turn goes on to them, with
+    # the answer not read again as a name or a blurb.
+    parent_answered = False
     if session_ctx.get("community_pending_ask") == _PARENT_ASK and not re.match(
         r"\s*fix:\w+\s*$", msg
     ):
@@ -1492,7 +1536,9 @@ def run_community_capture_turn(
             return _ask_parent(session_ctx, draft, again=True)
         if outcome == "unclear":
             draft["parent_declined"] = True
-        if outcome != "none":
+        if outcome != "none" and draft.get("parent_asked_early") and not draft.get("steps"):
+            parent_answered = True
+        elif outcome != "none":
             # On to whatever closing question is left (a chapter of a located parent
             # skips the city; one of a linked parent skips the link), then the ready card.
             return _after_questions(draft=draft, session_ctx=session_ctx, user_id=user_id)
@@ -1735,7 +1781,7 @@ def run_community_capture_turn(
         return f"Sure — {question}"
 
     # ── A tapped circle-type chip, before the extractor sees it ──
-    tapped_type = match_type_label(msg)
+    tapped_type = None if parent_answered else match_type_label(msg)
     if tapped_type and not _has(draft, "circle_type"):
         draft["circle_type"] = tapped_type
         session_ctx["community_pending_ask"] = None
@@ -1743,7 +1789,7 @@ def run_community_capture_turn(
     # ── Capture a pending answer into the right place ──
     pending = str(session_ctx.get("community_pending_ask") or "")
     passed = _is_bare_control(msg, _PASS_RE)
-    if pending and msg and not passed and not tapped_type:
+    if pending and msg and not passed and not tapped_type and not parent_answered:
         if pending == COMMUNITY_SUBJECT_FIELD:
             # A place is only ever set by the picker (/community-setup), never by text:
             # a typed name cannot be grounded. Left pending so the step is re-asked.
@@ -1789,7 +1835,12 @@ def run_community_capture_turn(
     # ── Extract fields (+ the set, once) ──
     # Not on the carousel's hand-off: its answers are already stamped, and "Looks good"
     # is a control, not content to read for a name or a blurb.
-    if msg and not tapped_type and not _is_carousel_handoff(msg, session_ctx):
+    if (
+        msg
+        and not tapped_type
+        and not parent_answered
+        and not _is_carousel_handoff(msg, session_ctx)
+    ):
         from app.i18n import lang_display_name, session_lang
 
         code = session_lang(session_ctx)
@@ -1853,6 +1904,19 @@ def run_community_capture_turn(
             draft.pop("steps_raw", None), draft["circle_type"]
         )
     step_set = step_set_of(draft)
+
+    # ── Inside a community picked at the top of the app: "a chapter of it, or its own?"
+    # comes before the questions, so they know from the start what they are making — and
+    # a chapter of a located, linked parent is not asked for a city or a link at the end.
+    # Only before the first question (no `steps` yet): a pick made mid-draft is asked at
+    # the end instead, where the PWA's cards would otherwise hide the quick replies. ──
+    if not draft.get("steps") and not draft.get("parent_asked"):
+        from app.community_scope import active_community
+
+        if active_community(session_ctx):
+            asked = _maybe_ask_parent(session_ctx, draft, user_id, early=True)
+            if asked:
+                return asked
 
     # ── P3: walk the set ──
     if step_set:

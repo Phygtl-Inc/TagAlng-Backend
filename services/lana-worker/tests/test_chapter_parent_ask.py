@@ -446,7 +446,7 @@ def test_the_scoped_community_is_offered_first_without_the_judge(env: dict) -> N
     env["judge"] = lambda draft, cands: judged.append([c["place_id"] for c in cands]) or cands
     ctx = _ctx(_ready_draft(), active_community={"place_id": ACME, "name": "Acme Corp"})
     _turn(ctx, "looks good")
-    assert ctx["community_draft"]["suggestions"][:2] == ["Part of Acme Corp",
+    assert ctx["community_draft"]["suggestions"][:2] == ["Chapter of Acme Corp",
                                                          "Part of San Jose State University"]
     assert judged == [[SJSU]]  # the scoped one never went to the judge
 
@@ -463,12 +463,12 @@ def test_a_scoped_community_they_are_not_in_is_offered_and_joined_at_publish(
                active_community={"place_id": PODCASTERS, "name": "Podcasters"})
     _turn(ctx, "looks good")
     draft = ctx["community_draft"]
-    assert draft["suggestions"] == ["Part of Podcasters", "On its own"]
+    assert draft["suggestions"] == ["Chapter of Podcasters", "On its own"]
     assert draft["parent_offer"][0]["join_first"] is True
     assert any("not a member of Podcasters" in f for f in env["composed"][-1]["facts"])
     assert env["judged"] == 0
 
-    _turn(ctx, "Part of Podcasters")
+    _turn(ctx, "Chapter of Podcasters")
     assert ctx["community_draft"]["parent_place"]["join_first"] is True
     # Publish: the first attach is refused for membership, they join, the attach reruns.
     monkeypatch.setattr(cc, "publish_community", lambda **k: ({"place_id": RCC}, ""))
@@ -528,3 +528,185 @@ def test_a_failed_join_leaves_it_standalone_and_says_why(env: dict, monkeypatch:
     _turn(ctx, "Share with the community")
     assert ctx["community_draft"]["parent_attached"] is False
     assert any("not a member of Podcasters" in f for c in env["composed"] for f in c["facts"])
+
+
+# ── inside a community picked at the top: asked first, before the questions ────────────
+
+
+def _fresh_draft(**kw: Any) -> dict[str, Any]:
+    """A club draft whose type is known and whose questions have not started."""
+    draft = {
+        "draft_id": "d2", "name": "Podcasters Orlando", "circle_type": "hobby",
+        "blurb": "podcasters meeting in Orlando",
+        "step_set": [
+            {"field": "subject", "label": "Where", "question": "Where do you meet?",
+             "kind": "place", "required": False},
+            {"field": "vibe", "label": "Vibe", "question": "What's the vibe?",
+             "kind": "text", "required": False},
+        ],
+        "answers": {},
+    }
+    draft.update(kw)
+    return draft
+
+
+def _fresh_ctx(draft: dict[str, Any], **kw: Any) -> dict[str, Any]:
+    ctx: dict[str, Any] = {"community_draft": draft, "community_create_active": True,
+                           "community_turns": 1}
+    ctx.update(kw)
+    return ctx
+
+
+@pytest.fixture
+def acme_scope(env: dict) -> dict[str, Any]:
+    env["rows"] = [_row(ACME, "Acme Corp", circle_type="hobby", relation="member")]
+    return {"active_community": {"place_id": ACME, "name": "Acme Corp"}}
+
+
+def test_inside_a_picked_community_it_is_asked_before_the_questions(
+    env: dict, acme_scope: dict
+) -> None:
+    ctx = _fresh_ctx(_fresh_draft(), **acme_scope)
+    reply = _turn(ctx, "a podcasters group in Orlando")
+    draft = ctx["community_draft"]
+    assert ctx["community_pending_ask"] == "parent"
+    assert draft["pending_field"] == "parent"
+    assert draft["suggestions"] == ["Chapter of Acme Corp", "On its own"]
+    assert draft["parent_asked_early"] is True
+    # Before the first question: no carousel steps yet, so the PWA shows the quick replies.
+    assert not draft.get("steps") and not ctx.get("community_asked_fields")
+    assert "Acme Corp" in reply
+    composed = env["composed"][-1]
+    # Lana is told WHY it is offered; the name stays in the facts, never in the goal.
+    assert any("inside Acme Corp right now" in f and "chapter of Acme Corp" in f
+               for f in composed["facts"])
+    assert "Acme Corp" not in composed["goal"]
+    assert "chapter" in composed["goal"]
+
+
+def test_choosing_the_chapter_goes_on_to_the_first_question(
+    env: dict, acme_scope: dict, monkeypatch: Any
+) -> None:
+    ctx = _fresh_ctx(_fresh_draft(), **acme_scope)
+    _turn(ctx, "a podcasters group in Orlando")
+    extracted: list = []
+    monkeypatch.setattr(cc, "_extract_fields", lambda **k: extracted.append(k) or {})
+    reply = _turn(ctx, "Chapter of Acme Corp")
+    draft = ctx["community_draft"]
+    assert draft["parent_place"]["place_id"] == ACME
+    # Not the closing steps or the ready card: the questions start now.
+    assert ctx["community_pending_ask"] == "subject"
+    assert draft["steps"] and ctx["community_ready"] is None
+    assert "Where do you meet?" in reply
+    # The tap is an answer to the parent question, not a name or a blurb to extract.
+    assert extracted == []
+    assert draft["name"] == "Podcasters Orlando"
+
+
+def test_choosing_the_chapter_then_finishing_attaches_without_asking_again(
+    env: dict, acme_scope: dict, monkeypatch: Any
+) -> None:
+    ctx = _fresh_ctx(_fresh_draft(), **acme_scope)
+    _turn(ctx, "a podcasters group in Orlando")
+    _turn(ctx, "Chapter of Acme Corp")
+    _turn(ctx, "that's it")
+    # A located parent: no city, no second parent question, straight to the ready card.
+    assert ctx["community_ready"] is True and ctx.get("community_pending_ask") is None
+    monkeypatch.setattr(cc, "publish_community", lambda **k: ({"place_id": RCC}, ""))
+    attached: list = []
+    monkeypatch.setattr(ops, "attach_chapter",
+                        lambda u, c, p: attached.append(p) or {"ok": True})
+    _turn(ctx, "Share with the community")
+    assert attached == [ACME]
+
+
+def test_on_its_own_goes_on_to_the_questions_and_is_not_asked_again(
+    env: dict, acme_scope: dict
+) -> None:
+    ctx = _fresh_ctx(_fresh_draft(), **acme_scope)
+    _turn(ctx, "a podcasters group in Orlando")
+    _turn(ctx, "On its own")
+    draft = ctx["community_draft"]
+    assert draft["parent_declined"] is True and not draft.get("parent_place")
+    assert ctx["community_pending_ask"] == "subject"
+    _turn(ctx, "that's it")
+    assert ctx.get("community_pending_ask") != "parent"
+
+
+def test_without_a_pick_at_the_top_it_waits_for_the_end(env: dict) -> None:
+    env["rows"] = [_row(SJSU, "San Jose State University")]
+    ctx = _fresh_ctx(_fresh_draft())
+    _turn(ctx, "a podcasters group in Orlando")
+    assert ctx["community_pending_ask"] == "subject"
+    assert env["judged"] == 0
+    assert not ctx["community_draft"].get("parent_asked")
+
+
+def test_a_pick_that_cannot_hold_it_waits_for_the_end(env: dict, monkeypatch: Any) -> None:
+    """The picked community is itself a chapter: nothing is asked first, and the draft is
+    not marked asked — the end still judges their other communities."""
+    env["rows"] = [_row(SJSU, "San Jose State University")]
+    monkeypatch.setattr("app.auth.service_client", lambda: _Places(
+        [{"id": RCC, "name": "RCC", "lat": 1.0, "lng": 2.0, "handle": None,
+          "parent_place_ref": SJSU, "governance_state": None, "google_place_id": "gRcc"}]))
+    ctx = _fresh_ctx(_fresh_draft(), active_community={"place_id": RCC, "name": "RCC"})
+    _turn(ctx, "a podcasters group in Orlando")
+    assert ctx["community_pending_ask"] == "subject"
+    assert not ctx["community_draft"].get("parent_asked") and env["judged"] == 0
+    _turn(ctx, "that's it")
+    assert ctx["community_pending_ask"] == "parent"
+    assert ctx["community_draft"]["suggestions"][0] == "Part of San Jose State University"
+
+
+def test_a_pick_made_mid_draft_is_asked_at_the_end_as_a_chapter(env: dict, acme_scope: dict) -> None:
+    ctx = _fresh_ctx(_fresh_draft())
+    _turn(ctx, "a podcasters group in Orlando")  # no pick yet: the questions start
+    assert ctx["community_pending_ask"] == "subject"
+    ctx.update(acme_scope)  # picked at the top while answering
+    _turn(ctx, "that's it")
+    assert ctx["community_pending_ask"] == "parent"
+    assert ctx["community_draft"]["suggestions"][0] == "Chapter of Acme Corp"
+    assert not ctx["community_draft"].get("parent_asked_early")
+    # Answered at the end, it goes to the closing steps / ready card as before.
+    _turn(ctx, "Chapter of Acme Corp")
+    assert ctx["community_ready"] is True
+
+
+def test_named_parent_is_not_asked_first(env: dict, acme_scope: dict) -> None:
+    ctx = _fresh_ctx(_fresh_draft(parent="SJSU"), **acme_scope)
+    _turn(ctx, "a podcasters group inside SJSU")
+    assert ctx["community_pending_ask"] != "parent"
+
+
+def test_an_unclear_early_answer_is_asked_once_more_then_the_questions(
+    env: dict, acme_scope: dict
+) -> None:
+    env["rows"].append(_row(SJSU, "San Jose State University"))
+    ctx = _fresh_ctx(_fresh_draft(), **acme_scope)
+    _turn(ctx, "a podcasters group in Orlando")
+    env["read"] = {"choice": "unclear"}
+    _turn(ctx, "yes")
+    assert ctx["community_pending_ask"] == "parent"
+    _turn(ctx, "yes")
+    assert ctx["community_pending_ask"] == "subject"
+    assert ctx["community_draft"]["parent_declined"] is True
+
+
+def test_a_non_answer_to_the_early_ask_is_read_as_the_turn_it_is(
+    env: dict, acme_scope: dict, monkeypatch: Any
+) -> None:
+    ctx = _fresh_ctx(_fresh_draft(), **acme_scope)
+    _turn(ctx, "a podcasters group in Orlando")
+    monkeypatch.setattr(cc, "_extract_fields", lambda **k: {"name": "Orlando Podcast Club"})
+    env["read"] = {"choice": "none"}
+    _turn(ctx, "actually call it Orlando Podcast Club")
+    draft = ctx["community_draft"]
+    assert draft["name"] == "Orlando Podcast Club"
+    assert draft["parent_declined"] is True
+    assert ctx["community_pending_ask"] == "subject"
+
+
+def test_the_fallback_names_where_they_are(env: dict, acme_scope: dict) -> None:
+    ctx = _fresh_ctx(_fresh_draft(), **acme_scope)
+    reply = _turn(ctx, "a podcasters group in Orlando")
+    assert "inside **Acme Corp**" in reply and "chapter of Acme Corp" in reply
