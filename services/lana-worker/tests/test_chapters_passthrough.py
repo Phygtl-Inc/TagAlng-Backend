@@ -354,13 +354,16 @@ class _Query:
 
 class _DB:
     # SJSU: created by ME. RCC: ME is a live operator. CLUB: ME was an operator, removed.
-    # Modded (666…): ME is a live co-owner (role=manager).
+    # Modded (666…): ME is a live co-owner (role=manager). Taken over (888…): ME started it,
+    # then a reviewer verified someone else as its owner.
     TABLES = {
         "places": [
             {"id": SJSU, "created_by": ME},
             {"id": RCC, "created_by": OTHER},
             {"id": CLUB, "created_by": OTHER},
             {"id": "66666666-6666-6666-6666-666666666666", "created_by": None},
+            # ME started it, but a reviewer handed it to its real owner (a takeover).
+            {"id": "88888888-8888-8888-8888-888888888888", "created_by": ME, "governance_state": "operator_verified"},
         ],
         "place_managers": [
             {"place_id": RCC, "user_id": ME, "role": "operator", "removed_at": None},
@@ -396,6 +399,7 @@ _LIST = [
     _circle(RCC, "RCC"),
     _circle(CLUB, "Old club"),
     _circle("66666666-6666-6666-6666-666666666666", "Modded"),
+    _circle("88888888-8888-8888-8888-888888888888", "Taken over"),
 ]
 
 
@@ -418,14 +422,14 @@ class TestCirclesListCanManage(unittest.TestCase):
         # Modded: ME is a live co-owner (role=manager) — co-owners edit, so they manage.
         self.assertEqual(
             self._post({}),
-            {"SJSU": True, "RCC": True, "Old club": False, "Modded": True},
+            {"SJSU": True, "RCC": True, "Old club": False, "Modded": True, "Taken over": False},
         )
 
     def test_someone_elses_list_answers_for_the_viewer(self) -> None:
         # OTHER's list, viewed by ME: whether *I* run each place.
         self.assertEqual(
             self._post({"user_id": OTHER}),
-            {"SJSU": True, "RCC": True, "Old club": False, "Modded": True},
+            {"SJSU": True, "RCC": True, "Old club": False, "Modded": True, "Taken over": False},
         )
 
     def test_stranger_runs_nothing(self) -> None:
