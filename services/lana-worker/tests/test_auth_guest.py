@@ -43,7 +43,7 @@ class RequireHomeBlockForPurposeTests(unittest.TestCase):
 
 
 class VerifyAuthTests(unittest.TestCase):
-    @patch("app.auth.create_client")
+    @patch("app.auth.service_client")
     @patch("app.auth.httpx.Client")
     def test_reads_anonymous_and_phone_flags(self, mock_client_cls, mock_create_client) -> None:
         mock_http = MagicMock()
@@ -75,7 +75,7 @@ class VerifyAuthTests(unittest.TestCase):
         self.assertFalse(auth.phone_verified)
         self.assertIsNone(auth.home_block_id)
 
-    @patch("app.auth.create_client")
+    @patch("app.auth.service_client")
     @patch("app.auth.httpx.Client")
     def test_phone_verified_from_auth_confirmed_at(self, mock_client_cls, mock_create_client) -> None:
         mock_http = MagicMock()

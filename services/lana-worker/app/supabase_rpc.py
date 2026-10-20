@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -8,22 +9,29 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 
 
+@lru_cache(maxsize=1)
+def _http() -> httpx.Client:
+    # One client for the process so calls reuse a kept-alive connection; a client per call
+    # paid a fresh TCP + TLS handshake to Supabase every time. HTTP/1.1 for the reason
+    # app/auth.py::_supabase gives.
+    return httpx.Client(timeout=30.0, http2=False)
+
+
 def call_rpc(user_jwt: str, rpc_name: str, payload: dict[str, Any]) -> Any:
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
     if not user_jwt:
         raise HTTPException(status_code=401, detail="missing_bearer_token")
 
-    with httpx.Client(timeout=30.0) as client:
-        res = client.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/{rpc_name}",
-            headers={
-                "apikey": SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {user_jwt}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
+    res = _http().post(
+        f"{SUPABASE_URL}/rest/v1/rpc/{rpc_name}",
+        headers={
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": f"Bearer {user_jwt}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+    )
 
     # >= 300, not >= 400. PostgREST answers an ambiguous overload with 300 (PGRST203), and
     # a 3xx body is an ERROR body — so it sailed through this guard, res.json() handed the

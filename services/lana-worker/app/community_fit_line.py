@@ -133,8 +133,14 @@ def _store(user_id: str, lang: str, pending: list[tuple[str, str, str, list[str]
         logger.warning("community-fit-line: store failed", exc_info=True)
 
 
-def attach_fit_lines(user_id: str, rows: list[dict[str, Any]]) -> None:
+def attach_fit_lines(
+    user_id: str, rows: list[dict[str, Any]], *, compose: bool = True
+) -> bool:
     """Set `fit_line` and `fit_chips` on each discovery row, in place.
+
+    `compose=False` serves cached lines only and returns True when a row with evidence is
+    still missing one, so discovery answers without waiting on the model and the client
+    asks again (without the flag) to have those authored.
 
     Reads the `_fit_basis` app/community_affinity.py::attach_affinity stashed and POPS it,
     so the evidence never reaches the wire. Best-effort throughout: a row we cannot author
@@ -150,7 +156,7 @@ def attach_fit_lines(user_id: str, rows: list[dict[str, Any]]) -> None:
         if isinstance(basis, dict) and basis and place_id:
             todo.append((idx, place_id, basis, _basis_sig(basis)))
     if not user_id or not todo:
-        return
+        return False
 
     try:
         from app.lang_pref import get_user_preferred_language
@@ -171,7 +177,9 @@ def attach_fit_lines(user_id: str, rows: list[dict[str, Any]]) -> None:
         else:
             missing.append((idx, place_id, basis, sig))
     if not missing:
-        return
+        return False
+    if not compose:
+        return True
     if len(missing) > _MAX_COMPOSE:
         logger.info(
             "community-fit-line: authoring %d of %d missing lines this fetch",
@@ -182,7 +190,7 @@ def attach_fit_lines(user_id: str, rows: list[dict[str, Any]]) -> None:
 
     composed = _compose([basis for _, _, basis, _ in missing], lang, _SYSTEM)
     if not composed:
-        return
+        return False
     pending: list[tuple[str, str, str, list[str]]] = []
     for (idx, place_id, _unused, sig), (line, chips) in zip(missing, composed):
         if not line:
@@ -191,3 +199,4 @@ def attach_fit_lines(user_id: str, rows: list[dict[str, Any]]) -> None:
         rows[idx]["fit_chips"] = chips
         pending.append((place_id, sig, line, chips))
     _store(user_id, lang, pending)
+    return False
