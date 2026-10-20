@@ -1881,11 +1881,12 @@ def extract_and_upsert_claims_from_message(
         allow_rapport_gap=allow_rapport_gap,
         here_place=here_place,
     )
-    # Something about themselves, said in ordinary chat, can answer a question still queued
-    # for the tile. Only a tile answer used to close queued questions, so a fact told in
-    # conversation was asked about again later. Gated on a saved claim: a message with
-    # nothing about them answers nothing, and the judge costs one call.
-    if res.saved > 0 and allow_rapport_gap:
+    # Something said in ordinary chat can answer a question still queued for the tile. Only
+    # a tile answer used to close queued questions, so a fact told in conversation was asked
+    # about again later. Not gated on a saved claim: an answer to a queued question can be
+    # a fact the extractor files nowhere ("around my neighborhood", "every day at 6pm").
+    # One batched call; it returns before the model when nothing is queued.
+    if allow_rapport_gap:
         try:
             from app.rapport_gaps import close_gaps_told_in_chat
 

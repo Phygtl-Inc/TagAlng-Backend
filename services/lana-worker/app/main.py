@@ -193,6 +193,7 @@ from app.claims_persist import (
     user_needs_display_name,
 )
 from app.rapport_synth import after_answer as rapport_after_answer
+from app.rapport_gaps import revalidate_queue as rapport_revalidate_queue
 from app.rapport_synth import ensure_gap_buffer as rapport_ensure_gap_buffer
 from app.reply_compose import compose_reply
 from app.profile_photo import upload_profile_photo_bytes
@@ -2427,6 +2428,9 @@ def _run_lana_message(
     # next_ask is a fast read. ensure_gap_buffer returns immediately when the pool is full
     # and carries its own 120s per-user burst guard, so a per-turn call is cheap.
     if purpose in ("lana", "profile_intake"):
+        # First drop queued questions they already answered (never-checked ones from before
+        # the already-told check), so the refill right after tops up what is really left.
+        background_tasks.add_task(rapport_revalidate_queue, auth.user_id)
         background_tasks.add_task(rapport_ensure_gap_buffer, auth.user_id)
     if purpose in ("lana", "profile_intake") and should_extract_claims_from_message(
         body.message
@@ -5878,12 +5882,17 @@ class RapportNextAskBody(_BaseModel):
 
 @app.post("/lana/rapport/next-ask")
 def post_rapport_next_ask(
+    background_tasks: BackgroundTasks,
     body: RapportNextAskBody | None = None,
     authorization: str | None = Header(default=None),
 ):
     # POST (not GET): the PWA service worker breaks cross-origin GETs to the worker but
     # lets POSTs through — same reason the chat/places calls are POST.
     auth = verify_auth(authorization)
+    if not auth.is_anonymous:
+        # Someone who opens the app but does not chat still gets their queue cleaned of
+        # questions they already answered: after this response, never on the render path.
+        background_tasks.add_task(rapport_revalidate_queue, auth.user_id)
     surface = (body.surface if body else "homescreen") or "homescreen"
     cycle = bool(body.cycle) if body else False
     community_id = (body.community_id or "").strip() if body else ""

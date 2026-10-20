@@ -151,7 +151,7 @@ class TestOpenGapChecksWhatTheySaid(unittest.TestCase):
         with patch.object(rapport_gaps, "service_client", return_value=db), \
              patch.object(rapport_gaps, "_question_embedding", return_value=[0.1]), \
              patch.object(rapport_gaps, "_is_semantic_duplicate", return_value=False), \
-             patch.object(rapport_gaps, "already_told", return_value=told) as check, \
+             patch.object(rapport_gaps, "told_verdict", return_value=told) as check, \
              patch("app.rapport_priority.score_for", return_value=0.5), \
              patch("app.rapport_reasons.attach_ask_reason_async"), \
              patch("app.lang_pref.get_user_preferred_language", return_value="en"):
@@ -216,15 +216,17 @@ class TestChatClosesWhatItAnswers(unittest.TestCase):
         n, db = self._run({"answerable": [{"n": 2, "answer": ""}, {"n": 9, "answer": "x"}, {"n": "x"}]})
         self.assertEqual((n, db.updates), (0, []))
 
-    def test_chat_extraction_runs_the_closer_only_when_it_saved_something(self):
-        for saved, allowed, expect in ((1, True, True), (0, True, False), (1, False, False)):
+    def test_chat_extraction_runs_the_closer_whenever_rapport_is_allowed(self):
+        # Not gated on a saved claim: "every day at 6pm" can answer a queued question while
+        # the extractor files no claim for it. Safety turns (allow_rapport_gap=False) still skip.
+        for saved, allowed, expect in ((1, True, True), (0, True, True), (1, False, False)):
             with patch.object(claims_persist, "try_upsert_claims_from_message",
                               return_value=ClaimExtractResult(saved=saved, claim_ids=["c1"] if saved else [])), \
                  patch.object(rapport_gaps, "close_gaps_told_in_chat") as closer:
                 claims_persist.extract_and_upsert_claims_from_message("u1", "I read history books", allow_rapport_gap=allowed)
             self.assertEqual(closer.called, expect, (saved, allowed))
             if expect:
-                self.assertEqual(closer.call_args[0], ("u1", "I read history books", "c1"))
+                self.assertEqual(closer.call_args[0], ("u1", "I read history books", "c1" if saved else None))
 
 
 if __name__ == "__main__":
