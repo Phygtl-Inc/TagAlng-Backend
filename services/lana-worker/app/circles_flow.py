@@ -2094,8 +2094,10 @@ def list_circles(user_id: str, viewer_id: str) -> list[dict[str, Any]]:
 
 
 def _managed_place_ids(user_id: str, place_ids: list[str]) -> set[str] | None:
-    """Which of these places the user RUNS: she created it (places.created_by), or is its
-    live operator or co-owner (place_managers role 'operator' / 'manager', not removed).
+    """Which of these places the user RUNS: she created it (places.created_by) and nobody
+    has since been verified as its owner, or she is its live operator or co-owner
+    (place_managers role 'operator' / 'manager', not removed). A starter whose community a
+    reviewer handed to its real owner runs nothing (_community_starter, 20270211120000).
     The same standing attach_chapter / detach_chapter demand (20270125120000) via
     is_community_operator, so the PWA never offers "Make this a chapter" to someone the SQL
     will refuse.
@@ -2107,7 +2109,11 @@ def _managed_place_ids(user_id: str, place_ids: list[str]) -> set[str] | None:
     try:
         sb = service_client()
         created = (
-            sb.table("places").select("id").in_("id", ids).eq("created_by", user_id).execute()
+            sb.table("places")
+            .select("id, governance_state")
+            .in_("id", ids)
+            .eq("created_by", user_id)
+            .execute()
         )
         operated = (
             sb.table("place_managers")
@@ -2121,7 +2127,13 @@ def _managed_place_ids(user_id: str, place_ids: list[str]) -> set[str] | None:
     except Exception:
         logger.exception("managed_place_ids_failed user=%s places=%s", user_id, len(ids))
         return None
-    out = {str(r["id"]) for r in (created.data or []) if isinstance(r, dict) and r.get("id")}
+    out = {
+        str(r["id"])
+        for r in (created.data or [])
+        if isinstance(r, dict)
+        and r.get("id")
+        and r.get("governance_state") not in ("operator_verified", "suspended")
+    }
     out |= {
         str(r["place_id"])
         for r in (operated.data or [])
