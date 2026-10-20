@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from typing import Any, Callable, Literal
 from uuid import UUID
 
-from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -4886,6 +4886,167 @@ async def post_circles_claim_proof(
         return {"proof_path": upload_proof(user_id, raw, content_type)}
     except ClaimError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.code) from exc
+
+
+# ── community knowledge documents (LANA_COMMUNITY_DOCS) ───────────────────────────
+# Owners and co-owners upload MD / DOCX / PDF; Lana answers members' questions from them
+# (app/community_docs_answer.py). Errors are {detail: code}: not_manager, place_not_found,
+# doc_not_found, type_not_allowed, file_too_large, empty_file, too_many_docs,
+# invalid_visibility.
+
+
+def _docs_on() -> None:
+    from app.community_docs import docs_enabled
+
+    if not docs_enabled():
+        raise HTTPException(status_code=404, detail="not_enabled")
+
+
+def _docs_http(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=getattr(exc, "status", 400), detail=getattr(exc, "code", "error"))
+
+
+class CommunityDocPlaceBody(_BaseModel):
+    place_id: str
+
+
+class CommunityDocBody(_BaseModel):
+    doc_id: str
+
+
+class CommunityDocVisibilityBody(_BaseModel):
+    doc_id: str
+    visibility: Literal["members", "public"]
+
+
+@app.post("/lana/communities/docs/list")
+def post_community_docs_list(
+    body: CommunityDocPlaceBody, authorization: str | None = Header(default=None)
+):
+    """The community's documents. Managers get every row with its processing status;
+    members get ready members + public docs; visitors get ready public docs."""
+    _docs_on()
+    from app.community_docs import DocsError, list_documents
+
+    auth = verify_auth(authorization)
+    try:
+        return list_documents(user_id=auth.user_id, place_id=body.place_id)
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+
+
+@app.post("/lana/communities/docs/upload")
+async def post_community_doc_upload(
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    place_id: str = Form(...),
+    title: str | None = Form(default=None),
+    visibility: str | None = Form(default=None),
+    replace_doc_id: str | None = Form(default=None),
+):
+    """Upload one document (10 MB; md, docx, pdf). Returns the row with status
+    'uploaded'; ingest runs in the background — poll the list until 'ready' or 'failed'.
+    replace_doc_id uploads a new version of an existing document."""
+    _docs_on()
+    from app.community_docs import DocsError, ingest_document, upload_document
+
+    user_id = _claim_user(authorization)
+    raw = await file.read()
+    try:
+        row = upload_document(
+            user_id=user_id,
+            place_id=place_id,
+            filename=file.filename,
+            content_type=file.content_type,
+            raw=raw,
+            title=title,
+            visibility=visibility,
+            replace_doc_id=replace_doc_id or None,
+        )
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+    background_tasks.add_task(ingest_document, str(row["doc_id"]))
+    return row
+
+
+@app.post("/lana/communities/docs/preview")
+def post_community_doc_preview(
+    body: CommunityDocBody, authorization: str | None = Header(default=None)
+):
+    """Managers only: the Markdown Lana reads and its sections, to check a conversion."""
+    _docs_on()
+    from app.community_docs import DocsError, preview_document
+
+    user_id = _claim_user(authorization)
+    try:
+        return preview_document(user_id=user_id, doc_id=body.doc_id)
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+
+
+@app.post("/lana/communities/docs/visibility")
+def post_community_doc_visibility(
+    body: CommunityDocVisibilityBody, authorization: str | None = Header(default=None)
+):
+    _docs_on()
+    from app.community_docs import DocsError, set_visibility
+
+    user_id = _claim_user(authorization)
+    try:
+        return set_visibility(user_id=user_id, doc_id=body.doc_id, visibility=body.visibility)
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+
+
+@app.post("/lana/communities/docs/reingest")
+def post_community_doc_reingest(
+    body: CommunityDocBody,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Run ingest again on the stored file — the retry for a 'failed' document."""
+    _docs_on()
+    from app.community_docs import DocsError, ingest_document, preview_document
+
+    user_id = _claim_user(authorization)
+    try:
+        row = preview_document(user_id=user_id, doc_id=body.doc_id)
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+    background_tasks.add_task(ingest_document, body.doc_id)
+    return {"doc_id": row["doc_id"], "status": "uploaded"}
+
+
+@app.post("/lana/communities/docs/delete")
+def post_community_doc_delete(
+    body: CommunityDocBody, authorization: str | None = Header(default=None)
+):
+    _docs_on()
+    from app.community_docs import DocsError, delete_document
+
+    user_id = _claim_user(authorization)
+    try:
+        delete_document(user_id=user_id, doc_id=body.doc_id)
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+    return {"deleted": True}
+
+
+@app.post("/lana/communities/docs/gaps")
+def post_community_doc_gaps(
+    body: CommunityDocPlaceBody, authorization: str | None = Header(default=None)
+):
+    """Managers only: recent questions the documents answered partly or not at all."""
+    _docs_on()
+    from app.community_docs import DocsError
+    from app.community_docs_answer import knowledge_gaps
+
+    user_id = _claim_user(authorization)
+    try:
+        return {"gaps": knowledge_gaps(user_id=user_id, place_id=body.place_id)}
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
 
 
 @app.post("/lana/circles/claims")

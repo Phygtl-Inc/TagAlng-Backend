@@ -380,6 +380,26 @@ def _gemini_generate(*, model: str, system: str, user_payload: str, max_tokens: 
     return response.text or ""
 
 
+def gemini_transcribe_pdf(pdf_bytes: bytes, instruction: str, *, model: str | None = None) -> str:
+    """Plain-text Gemini read of a PDF (community knowledge docs). Not JSON: the output is
+    the document itself. Bounded like every other Vertex call — same timeout/retry
+    options; its own output ceiling because a page of text outgrows the JSON budget."""
+    from google.genai import types
+
+    response = _gemini_client().models.generate_content(
+        model=model or os.environ.get("LANA_DOCS_PDF_MODEL", "").strip() or "gemini-2.5-flash",
+        contents=[types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"), instruction],
+        config=types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=32768,
+            response_mime_type="text/plain",
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            http_options=gemini_http_options(),
+        ),
+    )
+    return response.text or ""
+
+
 def _gemini_json(
     *,
     model: str,

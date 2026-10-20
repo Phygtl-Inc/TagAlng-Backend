@@ -8,4 +8,6 @@ google-genai>=1.0.0,<2
 anthropic[vertex]>=0.49.0,<1
 openai>=1.55.0,<2
 pywebpush>=2.0.0,<3
+pypdf>=5.0.0,<7  # community knowledge docs: PDF page split + text fallback (BSD)
+mammoth>=1.8.0,<2  # community knowledge docs: DOCX -> Markdown (BSD)
 tzdata>=2024.1  # IANA tz database for zoneinfo (slim containers lack system zoneinfo)

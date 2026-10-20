@@ -153,6 +153,17 @@ _FACTS_KEY = "_active_community_facts"
 _FACTS_TTL = timedelta(minutes=10)
 
 
+def _docs_cover(place_id: str) -> str | None:
+    """What the owner's uploaded documents cover — a routing hint, never their content."""
+    try:
+        from app.community_docs import docs_cover_line
+
+        return docs_cover_line(place_id)
+    except Exception:  # noqa: BLE001 — no hint is the same as no documents
+        logger.warning("active_community_docs_cover_failed place=%s", place_id, exc_info=True)
+        return None
+
+
 def active_community_facts(session_ctx: dict[str, Any] | None) -> dict[str, Any] | None:
     """What the chat's community IS, for every model that reads this turn.
 
@@ -196,6 +207,7 @@ def active_community_facts(session_ctx: dict[str, Any] | None) -> dict[str, Any]
         # lana.help stores "What might someone ask first?" here.
         "creator_wants": _clean(row.get("first_action")) or None,
         "creator": (_creator_name(place_id) or None) if is_creator else None,
+        "docs_cover": _docs_cover(place_id),
         "at": datetime.now(timezone.utc).isoformat(),
     }
     if not facts["name"]:
@@ -218,6 +230,9 @@ def active_community_prompt_line(session_ctx: dict[str, Any] | None) -> str:
         parts.append(f'members help each other with: {facts["members_help"][:160]}')
     if facts.get("creator_wants"):
         parts.append(f'a first question its creator expects: {facts["creator_wants"][:160]}')
+    if facts.get("docs_cover"):
+        # Already budgeted per document by docs_cover_line — no second cut here.
+        parts.append(f'its documents cover: {facts["docs_cover"]}')
     return " — ".join(parts)
 
 

@@ -1881,6 +1881,43 @@ def _try_layer1_intent_turn(
             "communities_turn here=%s named=%r ask=%s about_here=%s verified=%s",
             (_here or {}).get("name"), _named, _ask, _about_here, phone_verified,
         )
+        # A question about the community the chat is inside goes to the owner's uploaded
+        # documents first. The classifier's own verdict picks this path — 'docs', or
+        # 'about' naming THIS community — but the line between those two labels is not one
+        # a router draws reliably (on dev, gpt-4.1-mini filed "is there parking?" as
+        # 'about' though the venue guide covers it, and the about-turn then said
+        # "membership is free"), so both go to the documents, and only an answer the
+        # documents do not cover falls back to the about-turn below. The raw label is read
+        # here: slots_community_ask turns an empty one into 'about', and an empty label is
+        # a browse of other communities. No verify gate: what a visitor may read is
+        # decided per document (public vs members) inside the answer.
+        _raw_ask = str((slots or {}).get("community_ask") or "")
+        if (
+            _here
+            and _here.get("place_id")
+            and (_raw_ask == "docs" or (_raw_ask == "about" and _about_here))
+        ):
+            from app.community_docs_answer import answer_from_community_docs
+
+            _docs = answer_from_community_docs(
+                user_id=user_id,
+                place_id=str(_here["place_id"]),
+                question=msg,
+                history=history,
+                community_name=str(_here.get("name") or "") or None,
+            )
+            if _docs is not None and _docs.coverage != "none":
+                ctx = _routing_ctx(
+                    ctx_base, phase=phase or "listening", active_intent="discovery.communities"
+                )
+                routing = {
+                    **_discovery_routing_stub(phase or "listening", "community_docs_answer"),
+                    "docs_coverage": _docs.coverage,
+                    "docs_mode": _docs.mode,
+                    "docs_sources": _docs.sources,
+                }
+                ctx["last_routing"] = routing
+                return _docs.reply, ctx, routing, []
         if (not phone_verified or not user_id) and _about_here and _ask == "people":
             return (
                 compose_reply(
@@ -1963,7 +2000,8 @@ def _try_layer1_intent_turn(
             # "who is in <place>" arrives here now, so the turn needs the place they named
             # and which side of it they asked about (its people, or the place itself).
             community_name=slots_community_name(slots),
-            community_ask=slots_community_ask(slots),
+            # "docs" that found nothing to answer from is an ordinary about-question.
+            community_ask=_ask if _ask != "docs" else "about",
             community_topic=slots_community_topic(slots),
             chapter_change=slots_chapter_change(slots),
         )
