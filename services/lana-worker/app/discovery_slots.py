@@ -595,7 +595,17 @@ _SYSTEM = (
     "what people do or talk about here, what happens here, or what the creator is like → "
     "discovery.communities with community_name = the active community's name exactly as the "
     "context line gives it, community_ask='about'. Asking who is in it / its members / who "
-    "else is here → the same with community_ask='people'. This is an answer about THIS "
+    "else is here → the same with community_ask='people'. When the active_community line "
+    "says its documents cover something, a question about how THIS community works that "
+    "those documents could answer — its rules, fees, schedule, policies, procedures, "
+    "requirements, contacts, or any topic the line lists — is the same with "
+    "community_ask='docs'. Judge by meaning against the listed topics, not by shared words; "
+    "with no documents line, 'docs' is never used. A follow-up to what Lana just said about "
+    "THIS community — a short question that leans on her last answer, referring to it "
+    "rather than naming anything — is about THIS community too: the same intent, "
+    "community_name = the active community's name, and the same community_ask as the "
+    "question it follows. "
+    "This is an answer about THIS "
     "community, never a browse of communities nearby, and never out_of_scope. Asking for "
     "RECOMMENDATIONS or tips inside it ('does it have any recommendations?', 'any good "
     "dentist here?', 'what do people here recommend?') is a recommendation ask — tip_seek "
@@ -926,7 +936,7 @@ def ai_parse_discovery_turn(
         community_ask = str(raw.get("community_ask") or "").strip().lower()
         community_ask_s = (
             community_ask
-            if community_ask in ("people", "about", "manage", "mine", "chapters")
+            if community_ask in ("people", "about", "manage", "mine", "chapters", "docs")
             else None
         )
         intro_direction = raw.get("intro_direction")
@@ -1344,7 +1354,7 @@ def _discovery_slot_payload(
         'as they called it (short forms included) — and with looking.tip, the community, school, '
         'club or venue whose recommendations they want or where the thing should be, as they '
         'called it (short forms included); else null",\n'
-        '  "community_ask": "people"|"about"|"manage"|null — with community_name: "people" when they want '
+        '  "community_ask": "people"|"about"|"manage"|"mine"|"chapters"|"docs"|null — with community_name: "people" when they want '
         'WHO is there (who is in it, the members, who else goes), "manage" when they want to CHANGE '
         'a community they are in (its location/spot, details, name, or leave it), "about" when they want anything '
         'else about the place itself (what kind of place it is, what it has, how big it is, what '
@@ -1352,7 +1362,7 @@ def _discovery_slot_payload(
         'they ask WHICH communities they themselves are in. "chapters" when they want the clubs, groups, '
         'chapters or sub-communities INSIDE the community they named or the active community (what clubs '
         'does UMD have?, any chess clubs at St. Brigid\'s?, groups inside this community?) — set community_name to '
-        'that community, and community_topic too when they narrow it to a subject. Otherwise null when no community is named,\n'
+        'that community, and community_topic too when they narrow it to a subject. "docs" only inside the active community, when its context line lists what its documents cover and the question is one those documents could answer (see ACTIVE COMMUNITY). Otherwise null when no community is named,\n'
         '  "search_place": "the town or city they want searched when it is NOT where they are '
         '(language events in Tulsa, anything this weekend in Austin, I am visiting Denver — '
         'what is on?) — the place name only (Tulsa, Austin, Denver); null when they mean near '
@@ -1459,12 +1469,13 @@ def slots_want_propose_intro(slots: dict[str, Any]) -> bool:
 
 def slots_community_ask(slots: dict[str, Any] | None) -> str:
     """"people" (the roster), "manage" (change one they are in), "chapters" (the clubs or
-    groups INSIDE it) or "about" (the place itself). Defaults to "about": a question we could not classify is answered from the
+    groups INSIDE it), "docs" (answered from the active community's uploaded documents)
+    or "about" (the place itself). Defaults to "about": a question we could not classify is answered from the
     place's own facts, which is the read that works for a non-member too."""
     if not slots:
         return "about"
     ask = str(slots.get("community_ask") or "")
-    return ask if ask in ("people", "manage", "mine", "chapters") else "about"
+    return ask if ask in ("people", "manage", "mine", "chapters", "docs") else "about"
 
 
 def slots_chapter_change(slots: dict[str, Any] | None) -> tuple[str | None, str | None]:
