@@ -183,6 +183,11 @@ LANA_GOOGLE_RECO_CARDS: "${LANA_GOOGLE_RECO_CARDS:-1}"
 # Sunday stretch session". On by default (2026-10-07); 0 turns it off. Zero extra model
 # calls: it reads the scores the topic filter already returned.
 LANA_STRETCH_OFFER: "${LANA_STRETCH_OFFER:-1}"
+# Community knowledge documents (app/community_docs*.py): owners upload a handbook / FAQ /
+# rules and Lana answers inside the community from them. On by default (2026-10-20); 0
+# turns it off. Needs migration 20270212120000 on THAT database — without its tables the
+# Knowledge section hides itself and chat falls back to the about-turn, but uploads fail.
+LANA_COMMUNITY_DOCS: "${LANA_COMMUNITY_DOCS:-1}"
 EOF
 
 # Warm-instance policy, chosen by the caller — this script's own defaults are exactly
