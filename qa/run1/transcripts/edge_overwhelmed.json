@@ -1,0 +1,127 @@
+{
+  "id": "edge_overwhelmed",
+  "tags": [
+    "edge",
+    "emotional"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "honestly being a mom is so hard, I haven't talked to another adult in days",
+      "hint": null,
+      "status": 200,
+      "ms": 5340,
+      "assistant_message": "I hear that being a mom is hard and you haven't talked to another adult in days — would you like me to help you find existing meetups nearby or match you with a neighbor to talk with?",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "clarify_browse_or_meet",
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Show me meetups",
+        "Match me with a neighbor",
+        "Not sure"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "yes please",
+      "hint": null,
+      "status": 200,
+      "ms": 3126,
+      "assistant_message": "Love it — what kind of thing are you up for?",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "activity_browse",
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "32827",
+      "hint": null,
+      "status": 200,
+      "ms": 5436,
+      "assistant_message": "Here's what's coming up:\n• Pre-K Playground Meetup at Laureate Park Zipline Playground (Fri Jul 10)\n• Morning meetup at My place (Sat Jul 11)\n• Brazilian Coffee Morning at Foxtail Coffee Co. (Sat Jul 11)\n• Brazilian Coffee Morning at Foxtail at Foxtail Coffee Co (Sat Jul 11)\n• Brazilian Coffee Morning at Foxtail Coffee Co (Sat Jul 11)\nVerify your email to RSVP, or tell me to narrow it (e.g. 'just cricket').",
+      "routing": {
+        "outcome": "activity_browse",
+        "intent_class": "discovery",
+        "confidence": null,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Sports",
+        "Family & kids",
+        "Outdoors",
+        "Social"
+      ],
+      "activity_previews": [
+        {
+          "title": "Pre-K Playground Meetup",
+          "when": "2026-07-10T13:30:00+00:00"
+        },
+        {
+          "title": "Morning meetup",
+          "when": "2026-07-11T14:00:00+00:00"
+        },
+        {
+          "title": "Brazilian Coffee Morning",
+          "when": "2026-07-11T14:00:00+00:00"
+        },
+        {
+          "title": "Brazilian Coffee Morning at Foxtail",
+          "when": "2026-07-11T14:00:00+00:00"
+        },
+        {
+          "title": "Brazilian Coffee Morning",
+          "when": "2026-07-11T14:00:00+00:00"
+        }
+      ],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:13:44.956Z",
+  "session": "300c1e28-4bdd-4e93-80a6-6802e678ca2d",
+  "finishedAt": "2026-07-09T01:14:18.762Z"
+}

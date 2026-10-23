@@ -1,0 +1,109 @@
+{
+  "id": "host_0",
+  "tags": [
+    "host"
+  ],
+  "zip": "32827",
+  "turns": [
+    {
+      "sent": "I want to host a meet. A playground meetup Friday morning around 9:30 at Laureate Park playground, for pre-K kids",
+      "hint": "share_host",
+      "status": 200,
+      "ms": 14453,
+      "assistant_message": "Here's your meet — **Pre-K Playground Meetup**. Take a look: tap **Looks good** to set it up, or **Let me tweak** to change anything.",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Pre-K Playground Meetup",
+        "starts_at": "2026-07-10T09:30:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Publishing your meet…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "32827",
+      "hint": null,
+      "status": 200,
+      "ms": 11153,
+      "assistant_message": "Updated **Pre-K Playground Meetup** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Pre-K Playground Meetup",
+        "starts_at": "2026-07-10T09:30:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Getting to know you…",
+        "Composing…"
+      ]
+    },
+    {
+      "sent": "yes that works",
+      "hint": null,
+      "status": 200,
+      "ms": 11838,
+      "assistant_message": "Updated **Pre-K Playground Meetup** — does this look right?",
+      "routing": {
+        "outcome": "R",
+        "intent_class": "hosting",
+        "confidence": 1,
+        "tool_called": null,
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": {
+        "title": "Pre-K Playground Meetup",
+        "starts_at": "2026-07-10T09:30:00"
+      },
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…",
+        "Reading your message…",
+        "Publishing your meet…",
+        "Composing…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T00:58:55.000Z",
+  "session": "614bf0f2-5213-4b25-86fb-1bf1cee1b4bc",
+  "finishedAt": "2026-07-09T01:01:10.266Z"
+}

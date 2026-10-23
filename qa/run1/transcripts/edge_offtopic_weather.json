@@ -1,0 +1,70 @@
+{
+  "id": "edge_offtopic_weather",
+  "tags": [
+    "edge",
+    "offtopic"
+  ],
+  "zip": null,
+  "turns": [
+    {
+      "sent": "what's the weather tomorrow?",
+      "hint": null,
+      "status": 200,
+      "ms": 5601,
+      "assistant_message": "You asked about the weather tomorrow. I can't provide weather forecasts, but I can help find local activities or neighbors. Would you like to see events nearby or meet some neighbors?",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "clarify_out_of_scope",
+        "capture_fired": false
+      },
+      "ui_actions": [
+        "Show local events",
+        "Meet neighbors",
+        "No thanks"
+      ],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    },
+    {
+      "sent": "ok can you find me mom friends then",
+      "hint": null,
+      "status": 200,
+      "ms": 3497,
+      "assistant_message": "Verify your email first — then I can post that to your block.",
+      "routing": {
+        "outcome": "T",
+        "intent_class": "discovery",
+        "confidence": 1,
+        "tool_called": "save_signal_need_verify",
+        "capture_fired": false
+      },
+      "ui_actions": [],
+      "activity_previews": [],
+      "event_draft": null,
+      "peer_matches": 0,
+      "joint_moment": false,
+      "signal_saved": null,
+      "identity_profile": null,
+      "requires_phone_verification": false,
+      "leaks": [],
+      "statusEvents": [
+        "Reading your message…"
+      ]
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-07-09T01:11:59.035Z",
+  "session": "b5656ebf-37e9-494b-ab72-75db7b3b7dcc",
+  "finishedAt": "2026-07-09T01:12:33.986Z"
+}
