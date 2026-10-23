@@ -27,9 +27,10 @@ from typing import Any
 from app.auth import service_client
 from app.community_docs import (
     DocsError,
+    docs_access,
     docs_enabled,
     docs_role,
-    visible_visibilities,
+    readable_doc_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,8 +74,13 @@ class DocsAnswer:
 # ── loading what the asker may read ─────────────────────────────────────────────
 
 
-def _load_sections(place_id: str, role: str) -> list[DocSection]:
+def _load_sections(place_id: str, user_id: str | None) -> list[DocSection]:
     client = service_client()
+    # Which documents this person may be answered from is decided in SQL (their level vs
+    # each document's; approved only) — nothing else reaches the model.
+    ids = readable_doc_ids(place_id, user_id)
+    if not ids:
+        return []
     docs = (
         client.table("community_documents")
         .select("id, title")
@@ -82,7 +88,7 @@ def _load_sections(place_id: str, role: str) -> list[DocSection]:
         # No status filter: sections exist only after a successful ingest, so a document
         # being re-processed (or whose new version failed) keeps answering from its last
         # good version.
-        .in_("visibility", list(visible_visibilities(role)))
+        .in_("id", ids)
         .execute()
         .data
         or []
@@ -311,7 +317,7 @@ def answer_from_community_docs(
     t0 = time.monotonic()
     try:
         role = docs_role(place_id, user_id)
-        sections = _load_sections(place_id, role)
+        sections = _load_sections(place_id, user_id)
     except DocsError:
         return None
     except Exception:
@@ -451,18 +457,23 @@ def _audit(place_id: str, user_id: str | None, question: str, a: DocsAnswer, lat
                 "claims_dropped": a.claims_dropped,
                 "retried": a.retried,
                 "latency_ms": latency_ms,
+                # What she actually said, and from where — the officers' "What Lana said" log.
+                "reply": a.reply[:4000],
+                "sources": a.sources,
             }
         ).execute()
     except Exception:
         logger.warning("community_docs_answer.audit_failed place=%s", place_id, exc_info=True)
 
 
+def _require_log_reader(place_id: str, user_id: str) -> None:
+    if not docs_access(place_id, user_id).can_read_log:
+        raise DocsError("not_manager", 403)
+
+
 def knowledge_gaps(*, user_id: str, place_id: str, limit: int = 50) -> list[dict[str, Any]]:
     """Questions the documents could not fully answer — the owner's to-do list."""
-    from app.community_docs import ROLE_MANAGER
-
-    if docs_role(place_id, user_id) != ROLE_MANAGER:
-        raise DocsError("not_manager", 403)
+    _require_log_reader(place_id, user_id)
     rows = (
         service_client()
         .table("community_doc_answers")
@@ -476,3 +487,22 @@ def knowledge_gaps(*, user_id: str, place_id: str, limit: int = 50) -> list[dict
         or []
     )
     return rows
+
+
+def answer_log(
+    *, user_id: str, place_id: str, gaps_only: bool = False, limit: int = 50
+) -> list[dict[str, Any]]:
+    """What Lana answered about this community: the question, her reply, and the sections
+    it came from. Never who asked — the log is about what Lana said, not about members."""
+    _require_log_reader(place_id, user_id)
+    q = (
+        service_client()
+        .table("community_doc_answers")
+        .select("id, question, reply, coverage, sources, created_at")
+        .eq("place_id", place_id)
+    )
+    if gaps_only:
+        q = q.neq("coverage", "full")
+    return (
+        q.order("created_at", desc=True).limit(max(1, min(limit, 200))).execute().data or []
+    )

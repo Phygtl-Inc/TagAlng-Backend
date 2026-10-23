@@ -23,6 +23,7 @@ from app.community_docs_convert import (
 
 PLACE = "44444444-4444-4444-4444-444444444444"
 ME = "11111111-1111-1111-1111-111111111111"
+DOC = "55555555-5555-5555-5555-555555555555"
 
 
 # ── conversion ──────────────────────────────────────────────────────────────────
@@ -405,13 +406,227 @@ class AnswerLoopTest(unittest.TestCase):
             )
 
 
-class VisibilityTest(unittest.TestCase):
-    def test_visitor_reads_public_only(self):
-        self.assertEqual(cd.visible_visibilities("visitor"), ("public",))
+LEVELS = {
+    "amb": {"id": "amb", "name": "Ambassador", "rank": 1},
+    "lead": {"id": "lead", "name": "Lead", "rank": 2},
+    "eb": {"id": "eb", "name": "E-board", "rank": 3},
+}
 
-    def test_member_and_manager_read_both(self):
-        self.assertEqual(cd.visible_visibilities("member"), ("members", "public"))
-        self.assertEqual(cd.visible_visibilities("manager"), ("members", "public"))
+
+def _acc(role="member", rank=0, approve=False, log=False) -> cd.DocsAccess:
+    return cd.DocsAccess(
+        role=role, rank=rank, can_upload=rank >= 0, can_approve=approve, can_read_log=log
+    )
+
+
+class _Writes:
+    """A client that records inserts, updates, storage uploads and deletes."""
+
+    def __init__(self, doc: dict[str, Any] | None = None):
+        self.inserted: list[dict[str, Any]] = []
+        self.updated: list[dict[str, Any]] = []
+        self.uploaded: list[str] = []
+        self.deleted = False
+        self.doc = doc
+        outer = self
+
+        class _T:
+            def __init__(self, name):
+                self.name = name
+                self.rows = [outer.doc] if (name == "community_documents" and outer.doc) else []
+
+            def insert(self, row):
+                outer.inserted.append(row)
+                self.rows = [{"id": row.get("id"), **row}]
+                return self
+
+            def update(self, patch_):
+                outer.updated.append(patch_)
+                self.rows = [{**(outer.doc or {}), **patch_}]
+                return self
+
+            def delete(self):
+                outer.deleted = True
+                return self
+
+            def __getattr__(self, _n):
+                return lambda *a, **k: self
+
+            def execute(self):
+                return type("R", (), {"data": self.rows, "count": 0})()
+
+        class _Bucket:
+            def upload(self, path, *_a, **_k):
+                outer.uploaded.append(path)
+
+            def list(self, *_a, **_k):
+                return []
+
+            def remove(self, *_a, **_k):
+                return None
+
+        self._T = _T
+        self.storage = type("S", (), {"from_": staticmethod(lambda _b: _Bucket())})()
+
+    def table(self, name):
+        return self._T(name)
+
+
+class LevelRankTest(unittest.TestCase):
+    def test_audiences_map_onto_the_ladder(self):
+        self.assertEqual(cd.doc_rank({"visibility": "public"}, LEVELS), -1)
+        self.assertEqual(cd.doc_rank({"visibility": "members"}, LEVELS), 0)
+        self.assertEqual(cd.doc_rank({"visibility": "members", "min_level_id": "lead"}, LEVELS), 2)
+        self.assertEqual(cd.doc_rank({"visibility": "owners"}, LEVELS), 1000)
+
+    def test_a_missing_level_reads_as_owners_only(self):
+        self.assertEqual(cd.doc_rank({"visibility": "members", "min_level_id": "gone"}, LEVELS), 1000)
+
+    def test_a_level_means_members_and_must_belong_here(self):
+        self.assertEqual(cd._target("public", "lead", LEVELS), ("members", "lead"))
+        self.assertEqual(cd._target(None, None, LEVELS), ("members", None))
+        self.assertEqual(cd._target("owners", None, LEVELS), ("owners", None))
+        with self.assertRaises(cd.DocsError) as e:
+            cd._target("members", "elsewhere", LEVELS)
+        self.assertEqual(e.exception.code, "level_not_found")
+        with self.assertRaises(cd.DocsError) as e:
+            cd._target("everyone", None, LEVELS)
+        self.assertEqual(e.exception.code, "invalid_visibility")
+
+
+class UploadByLevelTest(unittest.TestCase):
+    def _upload(self, acc, **kw):
+        client = _Writes()
+        with patch.object(cd, "docs_access", return_value=acc), patch.object(
+            cd, "_levels", return_value=LEVELS
+        ), patch.object(cd, "service_client", return_value=client):
+            row = cd.upload_document(
+                user_id=ME, place_id=PLACE, filename="tips.md", content_type="text/markdown",
+                raw=b"# Tips", **kw,
+            )
+        return row, client
+
+    def test_a_member_upload_waits_for_an_approver(self):
+        row, client = self._upload(_acc(rank=1), level_id="amb")
+        self.assertEqual(client.inserted[0]["review_status"], "pending")
+        self.assertEqual(client.inserted[0]["min_level_id"], "amb")
+        self.assertEqual(client.inserted[0]["visibility"], "members")
+        self.assertEqual(row["review_status"], "pending")
+        self.assertTrue(row["mine"])
+
+    def test_an_approver_upload_is_live(self):
+        _, client = self._upload(_acc(rank=2, approve=True), level_id="lead")
+        self.assertEqual(client.inserted[0]["review_status"], "approved")
+
+    def test_nobody_uploads_above_their_own_level(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._upload(_acc(rank=1), level_id="lead")
+        self.assertEqual(e.exception.code, "level_too_high")
+
+    def test_a_member_cannot_upload_owners_only(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._upload(_acc(rank=3, approve=True), visibility="owners")
+        self.assertEqual(e.exception.code, "level_too_high")
+
+    def test_nothing_is_stored_when_refused(self):
+        client = _Writes()
+        with patch.object(cd, "docs_access", return_value=_acc(rank=1)), patch.object(
+            cd, "_levels", return_value=LEVELS
+        ), patch.object(cd, "service_client", return_value=client):
+            with self.assertRaises(cd.DocsError):
+                cd.upload_document(user_id=ME, place_id=PLACE, filename="a.md", content_type="text/markdown",
+                                   raw=b"# A", level_id="eb")
+        self.assertEqual(client.uploaded, [])
+        self.assertEqual(client.inserted, [])
+
+    def test_a_visitor_cannot_upload(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._upload(_acc(role="visitor", rank=-1), visibility="public")
+        self.assertEqual(e.exception.code, "not_member")
+
+    def test_only_owners_replace_a_document(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._upload(_acc(rank=3, approve=True), replace_doc_id="d1")
+        self.assertEqual(e.exception.code, "not_manager")
+
+
+class ReviewTest(unittest.TestCase):
+    def _review(self, acc, doc, approve=True):
+        client = _Writes(doc)
+        with patch.object(cd, "docs_access", return_value=acc), patch.object(
+            cd, "_levels", return_value=LEVELS
+        ), patch.object(cd, "service_client", return_value=client):
+            row = cd.review_document(user_id=ME, doc_id=DOC, approve=approve)
+        return row, client
+
+    def _doc(self, **kw):
+        return {"id": DOC, "place_id": PLACE, "title": "Tips", "visibility": "members",
+                "min_level_id": "amb", "review_status": "pending", "uploaded_by": "someone", **kw}
+
+    def test_an_approver_publishes(self):
+        row, client = self._review(_acc(rank=2, approve=True), self._doc())
+        self.assertEqual(client.updated[0]["review_status"], "approved")
+        self.assertEqual(client.updated[0]["reviewed_by"], ME)
+
+    def test_reject(self):
+        _, client = self._review(_acc(rank=2, approve=True), self._doc(), approve=False)
+        self.assertEqual(client.updated[0]["review_status"], "rejected")
+
+    def test_a_member_who_cannot_approve_is_refused(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._review(_acc(rank=3), self._doc())
+        self.assertEqual(e.exception.code, "not_approver")
+
+    def test_an_approver_cannot_publish_above_their_level(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._review(_acc(rank=2, approve=True), self._doc(min_level_id="eb"))
+        self.assertEqual(e.exception.code, "not_approver")
+
+    def test_only_pending_documents_are_reviewed(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._review(_acc(role="manager", rank=1000, approve=True), self._doc(review_status="approved"))
+        self.assertEqual(e.exception.code, "not_pending")
+
+
+class WithdrawTest(unittest.TestCase):
+    def _delete(self, acc, doc):
+        client = _Writes(doc)
+        with patch.object(cd, "docs_access", return_value=acc), patch.object(cd, "service_client", return_value=client):
+            cd.delete_document(user_id=ME, doc_id=DOC)
+        return client
+
+    def test_uploader_withdraws_their_pending_upload(self):
+        client = self._delete(_acc(rank=1), {"id": DOC, "place_id": PLACE, "uploaded_by": ME, "review_status": "pending"})
+        self.assertTrue(client.deleted)
+
+    def test_a_live_document_is_the_owners_to_remove(self):
+        with self.assertRaises(cd.DocsError) as e:
+            self._delete(_acc(rank=1), {"id": DOC, "place_id": PLACE, "uploaded_by": ME, "review_status": "approved"})
+        self.assertEqual(e.exception.code, "not_manager")
+
+    def test_nobody_withdraws_someone_elses(self):
+        with self.assertRaises(cd.DocsError):
+            self._delete(_acc(rank=3, approve=True), {"id": DOC, "place_id": PLACE, "uploaded_by": "other", "review_status": "pending"})
+
+
+class HintLevelTest(unittest.TestCase):
+    def test_level_restricted_and_pending_documents_are_never_advertised(self):
+        client = _Client({
+            "community_documents": [
+                {"id": "h", "title": "Handbook", "visibility": "members"},
+                {"id": "a", "title": "Applications", "visibility": "members", "min_level_id": "eb"},
+                {"id": "o", "title": "Owner notes", "visibility": "owners"},
+                {"id": "p", "title": "Pending tips", "visibility": "public", "review_status": "pending"},
+            ],
+            "community_doc_sections": [
+                {"doc_id": d, "ord": 0, "heading_path": [d, "Part"], "covers": f"{d} topic"} for d in "haop"
+            ],
+        })
+        with patch.object(cd, "docs_enabled", return_value=True), patch.object(cd, "service_client", return_value=client):
+            line = cd.docs_cover_line(PLACE)
+        self.assertIn("Handbook", line)
+        for hidden in ("Applications", "Owner notes", "Pending tips"):
+            self.assertNotIn(hidden, line)
 
 
 class RoutingHintTest(unittest.TestCase):
