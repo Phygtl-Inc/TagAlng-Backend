@@ -4986,6 +4986,82 @@ async def post_community_doc_upload(
     return row
 
 
+class CommunityDocLinkBody(_BaseModel):
+    place_id: str
+    url: str
+    title: str | None = None
+    visibility: Literal["members", "public"] | None = None
+    level_id: str | None = None
+
+
+@app.post("/lana/communities/docs/link")
+def post_community_doc_link(
+    body: CommunityDocLinkBody,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Add a document from a Google Drive link shared "anyone with the link can view"
+    (Doc, Sheet, Slides, or a PDF / DOCX in Drive). Same rules as an upload (who may add,
+    audience, approval). Downloaded now, re-checked when more than a day old. Errors:
+    invalid_link, link_not_public, link_not_found, link_empty, link_unreachable,
+    file_too_large, plus the upload errors."""
+    _docs_on()
+    from app.community_docs import DocsError, ingest_document, link_document
+
+    user_id = _claim_user(authorization)
+    try:
+        row = link_document(
+            user_id=user_id,
+            place_id=body.place_id,
+            url=body.url,
+            title=body.title,
+            visibility=body.visibility,
+            level_id=body.level_id or None,
+        )
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+    background_tasks.add_task(ingest_document, str(row["doc_id"]))
+    return row
+
+
+@app.post("/lana/communities/docs/refresh")
+def post_community_doc_refresh(
+    body: CommunityDocBody,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Fetch a Drive document's link again now (owners, or whoever added it).
+    {outcome: updated | unchanged | failed}; 'updated' re-processes in the background,
+    'failed' keeps the last good version."""
+    _docs_on()
+    from app.community_docs import DocsError, ingest_document, refresh_document
+
+    user_id = _claim_user(authorization)
+    try:
+        outcome = refresh_document(body.doc_id, user_id=user_id)
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+    if outcome == "updated":
+        background_tasks.add_task(ingest_document, body.doc_id)
+    return {"doc_id": body.doc_id, "outcome": outcome}
+
+
+@app.post("/hooks/community-docs-refresh")
+def hook_community_docs_refresh(
+    limit: int = 50,
+    x_sweep_token: str | None = Header(default=None),
+):
+    """Re-check every Drive-linked document older than a day, across communities. Chat and
+    the Knowledge list already refresh lazily; this is for a scheduler, if one is wanted.
+    Shared-secret auth (SIGNAL_SWEEP_TOKEN), fails closed."""
+    expected = os.environ.get("SIGNAL_SWEEP_TOKEN", "").strip()
+    if not expected or str(x_sweep_token or "").strip() != expected:
+        raise HTTPException(status_code=403, detail="forbidden")
+    from app.community_docs import refresh_stale_links
+
+    return {"ok": True, **refresh_stale_links(None, limit=max(1, min(int(limit), 200)))}
+
+
 @app.post("/lana/communities/docs/preview")
 def post_community_doc_preview(
     body: CommunityDocBody, authorization: str | None = Header(default=None)

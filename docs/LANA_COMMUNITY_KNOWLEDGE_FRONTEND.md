@@ -55,6 +55,33 @@ Returns the document row with `status: "uploaded"`. Processing runs in the backg
 - Accepted files: `.md`, `.txt`, `.docx`, `.pdf`, up to 10 MB. PDFs can be up to 200 pages.
 - Errors: `not_manager` (403), `type_not_allowed` (415), `file_too_large` (413), `empty_file`, `too_many_docs` (409), `invalid_visibility`, `place_not_found` (404), `sign_in_required` (403).
 
+### `POST /lana/communities/docs/link`
+Body `{ "place_id": "…", "url": "…", "title"?: "…", "visibility"?: "members" | "public", "level_id"?: "…" }`. Follows the same rules as an upload (who may add, which audience, approval). Adds a document from a Google Drive link shared **"Anyone with the link can view"**:
+- **Google Doc:** downloaded as DOCX, so its headings are kept.
+- **Google Sheet:** its first tab becomes a Markdown table.
+- **Google Slides:** downloaded as PDF.
+- **PDF / DOCX / MD stored in Drive:** downloaded as is.
+
+The title defaults to the file's name in Drive. Returns the row (`source_kind: "drive"`); processing then runs exactly as after an upload, so poll the list.
+
+Errors:
+- `invalid_link`: not a Google Docs/Drive file link. Folders and Forms are refused too.
+- `link_not_public` (403): not shared publicly.
+- `link_not_found` (404).
+- `link_empty`.
+- `link_unreachable` (502).
+- `file_too_large` (413).
+- Plus the upload errors.
+
+Linked rows are **re-checked from Drive when more than a day old**. This happens in the background whenever the community's list loads or a question is answered. An unchanged file isn't re-processed. If the link stops working (un-shared or deleted), the last good version keeps answering, and `sync_error` says why.
+
+### `POST /lana/communities/docs/refresh`
+Body `{ "doc_id": "…" }`. Owners, or whoever added the link. Re-checks a linked document now. Returns `{ "outcome": "updated" | "unchanged" | "failed" }`. `updated` re-processes in the background, so poll the list.
+
+Extra fields on each row:
+- **Everyone:** `source_kind` (`upload` | `drive`).
+- **Rows shown with processing details** (owners, the uploader, approvers): `source_url`, `last_synced_at`, `sync_error` (`link_not_public` | `link_not_found` | … | null).
+
 ### `POST /lana/communities/docs/preview`
 Body `{ "doc_id": "…" }`. Managers only. Returns the row plus `markdown` (the converted text Lana reads) and `sections: [{id, ord, heading_path[], covers, token_count}]`. Use it for the preview.
 
