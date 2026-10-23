@@ -732,6 +732,18 @@ def _extract_model() -> str:
     return os.environ.get("VERTEX_EXTRACT_MODEL", "gemini-2.5-flash")
 
 
+def _alternative_intent(raw: dict[str, Any]) -> str | None:
+    """The runner-up label, only when it is a real id and differs from the pick."""
+    from app.layer1_intents import LINEAR_INTENTS, normalize_linear_intent
+
+    alt = normalize_linear_intent(raw.get("alternative_intent"))
+    if not alt or alt not in LINEAR_INTENTS:
+        return None
+    if alt == normalize_linear_intent(raw.get("linear_intent")):
+        return None
+    return alt
+
+
 def _format_history(history: list[dict[str, Any]] | None, *, limit: int = 8) -> str:
     if not history:
         return "(none)"
@@ -1031,6 +1043,9 @@ def ai_parse_discovery_turn(
             "activity_topic": activity_topic_s,
             "current_place": current_place_s,
             "clarify": clarify,
+            # The model's runner-up label — what a two-button question would offer next to
+            # linear_intent. Recorded on the routing log; nothing routes on it yet.
+            "alternative_intent": _alternative_intent(raw),
             "clarify_question": clarify_question,
             "clarify_options": clarify_options,
             "unsafe_kind": (str(raw.get("unsafe_kind") or "").strip().lower() or None),
@@ -1387,6 +1402,9 @@ def _discovery_slot_payload(
         '  "chapter_action": "attach"|"detach"|null — with community_ask=manage: attach when '
         'they want the named community put inside another, detach when they want it out of '
         'the one it is in; else null,\n'
+        '  "alternative_intent": "the Layer 1 intent id you would pick SECOND for this message — '
+        'the runner-up you weighed against linear_intent, never the same id; null when no other '
+        'reading is plausible",\n'
         '  "clarify": "browse_or_meet"|"scope"|"intent"|null,\n'
         '  "clarify_question": "when clarify is set, YOUR warm one-line question (Lana\'s voice) that '
         'references what the user actually said and asks exactly what you need to disambiguate; else null",\n'

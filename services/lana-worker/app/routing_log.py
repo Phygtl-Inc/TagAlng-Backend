@@ -64,6 +64,7 @@ def build_routing_record(
         "intent_hint": hint,
         "ai_label": slots.get("ai_linear_intent", slots.get("linear_intent")) if classified else None,
         "ai_confidence": _conf(slots.get("ai_confidence", slots.get("confidence"))) if classified else None,
+        "ai_alternative": slots.get("alternative_intent") if classified else None,
         "ai_clarify": (slots.get("clarify") or None) if classified else None,
         "final_label": slots.get("linear_intent") if classified else None,
         "final_goal": slots.get("goal") if classified else None,

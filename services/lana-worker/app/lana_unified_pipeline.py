@@ -616,6 +616,8 @@ def _turn_is_community_create(slots: dict[str, Any] | None, msg: str) -> bool:
     if not text:
         return False
     if isinstance(slots, dict):
+        if _model_is_asking(slots):
+            return False
         from app.layer1_intents import (
             enrich_slots,
             intent_confidence_met,
@@ -665,6 +667,14 @@ def _tip_share_slots(
         return None
 
 
+def _model_is_asking(slots: dict[str, Any] | None) -> bool:
+    """The classifier chose to ASK which request this is (clarify set). No capture flow
+    may open on such a turn: "I just moved here, kids are bored and I have baby stuff to
+    get rid of" was read clarify=intent with a sharing.swap label, and the give-away flow
+    opened ahead of the question listing all three (dev 2026-10-19)."""
+    return isinstance(slots, dict) and bool(str(slots.get("clarify") or "").strip())
+
+
 def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     """Is this turn SHARING a recommendation (the typed capture, C-4-RECO)?
 
@@ -676,8 +686,8 @@ def _turn_is_tip_share(slots: dict[str, Any] | None, msg: str) -> bool:
     from app.layer1_intents import enrich_slots, slots_indicate_tip_share_signal, utterance_indicates_tip_share
 
     if isinstance(slots, dict):
-        if slots.get("abandon"):
-            return False  # leaving a capture never opens one
+        if slots.get("abandon") or _model_is_asking(slots):
+            return False  # leaving a capture never opens one, nor does a turn being asked about
         return slots_indicate_tip_share_signal(enrich_slots(dict(slots), msg=msg))
     return utterance_indicates_tip_share(msg)
 
@@ -691,7 +701,7 @@ def _turn_is_pass_along(slots: dict[str, Any] | None, msg: str) -> bool:
     is the model's call. No classifier read → not this flow (fail closed): the turn goes
     on to discovery, which handles an offer as a signal.
     """
-    if not isinstance(slots, dict) or slots.get("abandon"):
+    if not isinstance(slots, dict) or slots.get("abandon") or _model_is_asking(slots):
         return False
     from app.layer1_intents import enrich_slots, normalize_linear_intent
 
@@ -775,6 +785,12 @@ def _turn_is_engine_action(
         # signal cascade ("What kind of tip is this?") instead of letting the policy close it.
         if slots.get("abandon"):
             return False
+        # The model chose to ASK. Its question (with tap-able options) is shown by the
+        # clarify step in discovery_route; the policy reaching it first answered "not sure,
+        # what do you think?" and "help" in prose with no options (dev 2026-10-16). Not on
+        # the reply to a question Lana just asked — that re-classifies normally, no loops.
+        if str(slots.get("clarify") or "").strip() and not ctx.get("clarify_pending"):
+            return True
         linear = str(slots.get("linear_intent") or "")
         sig = str(slots.get("signal_intent") or "") or SIGNAL_INTENT_BY_LINEAR.get(linear, "")
         if sig == "tip_seek":
