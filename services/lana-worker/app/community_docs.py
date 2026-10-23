@@ -17,7 +17,6 @@ from community_docs_readable() — both in SQL.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -30,6 +29,7 @@ from typing import Any
 
 from app.auth import service_client
 from app.community_docs_convert import (
+    content_fingerprint,
     KIND_MIME,
     ConvertError,
     Section,
@@ -551,7 +551,7 @@ def link_document(
     drive_fields = {
         "source_kind": "drive",
         "source_url": url.strip()[:2048],
-        "content_hash": hashlib.sha256(got.raw).hexdigest(),
+        "content_hash": content_fingerprint(got.raw, detect_kind(got.filename, got.content_type)),
         "last_synced_at": _now_iso(),
         "sync_error": None,
     }
@@ -617,7 +617,7 @@ def refresh_document(doc_id: str, *, user_id: str | None = None) -> str:
         client.table("community_documents").update({"sync_error": exc.code}).eq("id", doc_id).execute()
         logger.info("community_docs.link_refresh_failed doc=%s code=%s", doc_id, exc.code)
         return "failed"
-    digest = hashlib.sha256(got.raw).hexdigest()
+    digest = content_fingerprint(got.raw, detect_kind(got.filename, got.content_type))
     if digest == row.get("content_hash") and row.get("status") != "failed":
         client.table("community_documents").update(
             {"last_synced_at": _now_iso(), "sync_error": None}

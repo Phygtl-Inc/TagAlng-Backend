@@ -353,3 +353,58 @@ class LinkEndpointTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _docx_at(text: str, when: tuple) -> bytes:
+    """A real .docx whose zip entries carry the given timestamp — what Google changes on
+    every export of an unchanged Doc."""
+    import io
+    import zipfile
+
+    from tests.test_community_docs import _docx
+
+    src = zipfile.ZipFile(io.BytesIO(_docx([("Heading1", "FAQ"), (None, text)])))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for info in src.infolist():
+            z.writestr(zipfile.ZipInfo(info.filename, date_time=when), src.read(info.filename))
+    return out.getvalue()
+
+
+class FingerprintTest(unittest.TestCase):
+    def test_a_re_exported_doc_with_the_same_words_is_unchanged(self):
+        from app.community_docs_convert import content_fingerprint
+
+        a = _docx_at("Dues are $60 a year.", (2026, 10, 1, 9, 0, 0))
+        b = _docx_at("Dues are $60 a year.", (2026, 10, 23, 18, 30, 0))
+        self.assertNotEqual(a, b)  # the bytes differ, exactly like two Google exports
+        self.assertEqual(content_fingerprint(a, "docx"), content_fingerprint(b, "docx"))
+
+    def test_an_edit_is_a_change(self):
+        from app.community_docs_convert import content_fingerprint
+
+        a = _docx_at("Dues are $60 a year.", (2026, 10, 1, 9, 0, 0))
+        b = _docx_at("Dues are $65 a year.", (2026, 10, 1, 9, 0, 0))
+        self.assertNotEqual(content_fingerprint(a, "docx"), content_fingerprint(b, "docx"))
+
+    def test_markdown_ignores_line_endings_only(self):
+        from app.community_docs_convert import content_fingerprint
+
+        self.assertEqual(content_fingerprint(b"# A\r\n\r\nText", "md"), content_fingerprint(b"# A\n\nText", "md"))
+        self.assertNotEqual(content_fingerprint(b"# A\n\nText", "md"), content_fingerprint(b"# A\n\nTexts", "md"))
+
+
+class HeadingQuoteTest(unittest.TestCase):
+    def test_a_fact_in_the_heading_is_verified(self):
+        import app.community_docs_answer as cda
+
+        sec = cda.DocSection("S1", "s1", "d", "FAQ", ["FAQ", "FAQ for authors The Web Conference 2022"], "",
+                             "Last updated: 18.10.2021", 10)
+        good, bad = cda.verify_claims([{"section": "S1", "quote": "The Web Conference 2022"}], {"S1": sec})
+        self.assertEqual((len(good), len(bad)), (1, 0))
+
+    def test_a_quote_stitched_across_heading_and_body_is_not(self):
+        import app.community_docs_answer as cda
+
+        self.assertFalse(cda.quote_in_section("Conference 2022 Last updated", "Last updated: 18.10.2021",
+                                              ["FAQ for authors The Web Conference 2022"]))

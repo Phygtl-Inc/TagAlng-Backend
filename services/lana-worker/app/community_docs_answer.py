@@ -170,11 +170,15 @@ def normalize_for_quote(text: str) -> str:
     return t.strip().casefold()
 
 
-def quote_in_section(quote: str, body: str) -> bool:
+def quote_in_section(quote: str, body: str, headings: list[str] | None = None) -> bool:
+    """The quote is in the section's text — its body or one of its headings. A heading can
+    carry the fact itself (a title naming the event a FAQ is for), and the model sees the
+    headings beside the body. Each is checked on its own, so a quote can never be stitched
+    together across a heading and the text under it."""
     q = normalize_for_quote(quote).strip(" .,;:\"'")
     if len(q) < _MIN_QUOTE_CHARS:
         return False
-    return q in normalize_for_quote(body)
+    return any(q in normalize_for_quote(t) for t in [body, *(headings or [])])
 
 
 def verify_claims(
@@ -185,7 +189,7 @@ def verify_claims(
     for c in claims:
         sec = by_sid.get(str(c.get("section") or "").strip().upper())
         quote = str(c.get("quote") or "")
-        if sec is not None and quote_in_section(quote, sec.body):
+        if sec is not None and quote_in_section(quote, sec.body, sec.heading_path):
             good.append(c)
         else:
             bad.append(c)

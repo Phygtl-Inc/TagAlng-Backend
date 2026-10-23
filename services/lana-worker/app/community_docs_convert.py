@@ -176,6 +176,28 @@ def _markdown_from_pdf(raw: bytes) -> str:
     return _clean("\n\n".join(p for p in parts if p))
 
 
+def content_fingerprint(raw: bytes, kind: str | None) -> str:
+    """A hash of what a file SAYS, not its bytes. Google re-exports a Doc as a fresh DOCX
+    (new zip timestamps) and Slides as a fresh PDF (new creation date) on every download,
+    so a byte hash called every daily re-check a change and re-processed an unchanged
+    document. Cheap local reads only — never the Gemini PDF pass."""
+    import hashlib
+
+    text: str | None = None
+    try:
+        if kind == KIND_DOCX:
+            text = _markdown_from_docx(raw)
+        elif kind == KIND_PDF:
+            reader = _pdf_reader(raw)
+            text = _pdf_text(reader, 0, min(len(reader.pages), PDF_MAX_PAGES))
+        elif kind == KIND_MD:
+            text = _markdown_from_md(raw)
+    except Exception:  # noqa: BLE001 — an unreadable file falls back to its bytes
+        text = None
+    payload = re.sub(r"\s+", " ", text).strip().encode() if text else raw
+    return hashlib.sha256(payload).hexdigest()
+
+
 def to_markdown(raw: bytes, kind: str) -> str:
     if not raw:
         raise ConvertError("empty_file")
