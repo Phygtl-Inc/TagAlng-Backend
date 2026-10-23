@@ -17,12 +17,15 @@ from community_docs_readable() — both in SQL.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import threading
+import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.auth import service_client
@@ -202,7 +205,8 @@ def _doc(doc_id: str) -> dict[str, Any]:
 
 _LIST_FIELDS = (
     "id, place_id, title, source_mime, status, error, visibility, min_level_id, review_status, "
-    "uploaded_by, summary, token_count, version, created_at, updated_at"
+    "uploaded_by, summary, token_count, version, created_at, updated_at, "
+    "source_kind, source_url, last_synced_at, sync_error"
 )
 
 
@@ -227,6 +231,7 @@ def _public_row(
         "review_status": row.get("review_status") or "approved",
         "mine": bool(viewer) and str(row.get("uploaded_by") or "") == str(viewer),
         "updated_at": row.get("updated_at"),
+        "source_kind": row.get("source_kind") or "upload",
     }
     if uploader_name is not None:
         out["uploaded_by_name"] = uploader_name
@@ -239,6 +244,9 @@ def _public_row(
                 "token_count": row.get("token_count"),
                 "version": row.get("version"),
                 "created_at": row.get("created_at"),
+                "source_url": row.get("source_url"),
+                "last_synced_at": row.get("last_synced_at"),
+                "sync_error": row.get("sync_error"),
             }
         )
     return out
@@ -494,6 +502,196 @@ def summarize_sections(title: str, sections: list[Section]) -> str:
     return " ".join(summaries)[:1200]
 
 
+# ── Google Drive links ──────────────────────────────────────────────────────────
+
+LINK_REFRESH_AFTER = timedelta(hours=24)
+# One refresh attempt per document per hour per process, so a busy community's
+# list / answer calls never stampede Google with the same download.
+_LINK_RETRY_GAP_S = 3600
+_link_attempts: dict[str, float] = {}
+_link_lock = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def link_document(
+    *,
+    user_id: str,
+    place_id: str,
+    url: str,
+    title: str | None = None,
+    visibility: str | None = None,
+    level_id: str | None = None,
+) -> dict[str, Any]:
+    """A document from a shared Google Drive link. The file goes through upload_document,
+    so linking follows every upload rule (who may add, which audience, approval); then the
+    row is marked as linked so it is re-checked when stale. The caller schedules
+    ingest_document(doc_id)."""
+    from app.community_docs_drive import DriveError, fetch_drive_file
+
+    acc = docs_access(place_id, user_id)
+    if not acc.can_upload:
+        raise DocsError("not_member", 403)
+    try:
+        got = fetch_drive_file(url, max_bytes=MAX_BYTES)
+    except DriveError as exc:
+        raise DocsError(exc.code, exc.status) from exc
+    row = upload_document(
+        user_id=user_id,
+        place_id=place_id,
+        filename=got.filename,
+        content_type=got.content_type,
+        raw=got.raw,
+        title=title,
+        visibility=visibility,
+        level_id=level_id,
+    )
+    drive_fields = {
+        "source_kind": "drive",
+        "source_url": url.strip()[:2048],
+        "content_hash": hashlib.sha256(got.raw).hexdigest(),
+        "last_synced_at": _now_iso(),
+        "sync_error": None,
+    }
+    service_client().table("community_documents").update(drive_fields).eq(
+        "id", str(row["doc_id"])
+    ).execute()
+    return {
+        **row,
+        "source_kind": "drive",
+        "source_url": drive_fields["source_url"],
+        "last_synced_at": drive_fields["last_synced_at"],
+        "sync_error": None,
+    }
+
+
+def _replace_file(row: dict[str, Any], *, filename: str, content_type: str, raw: bytes, digest: str) -> None:
+    """A refreshed Drive file as the document's next version. Only the file changes: the
+    audience, the approval state and who added it stay exactly as they were."""
+    kind = detect_kind(filename, content_type)
+    if not kind:
+        raise DocsError("type_not_allowed", 415)
+    doc_id = str(row["id"])
+    version = int(row.get("version") or 1) + 1
+    path = f"{row['place_id']}/{doc_id}/v{version}.{kind}"
+    client = service_client()
+    client.storage.from_(BUCKET).upload(
+        path, raw, file_options={"content-type": KIND_MIME[kind], "upsert": "true"}
+    )
+    client.table("community_documents").update(
+        {
+            "storage_path": path,
+            "source_mime": KIND_MIME[kind],
+            "version": version,
+            "status": "uploaded",
+            "error": None,
+            "content_hash": digest,
+            "last_synced_at": _now_iso(),
+            "sync_error": None,
+            "updated_at": _now_iso(),
+        }
+    ).eq("id", doc_id).execute()
+
+
+def refresh_document(doc_id: str, *, user_id: str | None = None) -> str:
+    """Fetch a Drive document's link again. Returns 'updated' (new version stored, caller
+    ingests), 'unchanged', or 'failed' (sync_error written; the last good version keeps
+    answering). With user_id the caller must be an owner or the one who added the link;
+    without, it is the worker's own scheduled refresh."""
+    from app.community_docs_drive import DriveError, fetch_drive_file
+
+    row = _doc(doc_id)
+    place_id = str(row["place_id"])
+    if user_id is not None:
+        acc = docs_access(place_id, user_id)
+        if not (acc.manager or str(row.get("uploaded_by") or "") == str(user_id)):
+            raise DocsError("not_manager", 403)
+    if row.get("source_kind") != "drive" or not row.get("source_url"):
+        raise DocsError("not_a_link")
+    client = service_client()
+    try:
+        got = fetch_drive_file(str(row["source_url"]), max_bytes=MAX_BYTES)
+    except DriveError as exc:
+        client.table("community_documents").update({"sync_error": exc.code}).eq("id", doc_id).execute()
+        logger.info("community_docs.link_refresh_failed doc=%s code=%s", doc_id, exc.code)
+        return "failed"
+    digest = hashlib.sha256(got.raw).hexdigest()
+    if digest == row.get("content_hash") and row.get("status") != "failed":
+        client.table("community_documents").update(
+            {"last_synced_at": _now_iso(), "sync_error": None}
+        ).eq("id", doc_id).execute()
+        return "unchanged"
+    try:
+        _replace_file(row, filename=got.filename, content_type=got.content_type, raw=got.raw, digest=digest)
+    except DocsError as exc:
+        client.table("community_documents").update({"sync_error": exc.code}).eq("id", doc_id).execute()
+        return "failed"
+    logger.info("community_docs.link_refreshed doc=%s", doc_id)
+    return "updated"
+
+
+def _claim_attempt(doc_id: str) -> bool:
+    now = time.monotonic()
+    with _link_lock:
+        last = _link_attempts.get(doc_id)
+        if last is not None and now - last < _LINK_RETRY_GAP_S:
+            return False
+        _link_attempts[doc_id] = now
+        return True
+
+
+def _stale_links(place_id: str | None, limit: int) -> list[dict[str, Any]]:
+    # 'Z', never '+00:00': a '+' in the PostgREST query string reads as a space.
+    cutoff = (datetime.now(timezone.utc) - LINK_REFRESH_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ")
+    q = (
+        service_client()
+        .table("community_documents")
+        .select("id, last_synced_at")
+        .eq("source_kind", "drive")
+        .or_(f"last_synced_at.is.null,last_synced_at.lt.{cutoff}")
+        .order("last_synced_at", desc=False, nullsfirst=True)
+        .limit(limit)
+    )
+    if place_id:
+        q = q.eq("place_id", place_id)
+    return q.execute().data or []
+
+
+def refresh_stale_links(place_id: str | None = None, *, limit: int = 3) -> dict[str, int]:
+    """Re-check Drive links older than LINK_REFRESH_AFTER and ingest any that changed."""
+    counts = {"updated": 0, "unchanged": 0, "failed": 0, "skipped": 0}
+    try:
+        rows = _stale_links(place_id, limit)
+    except Exception:
+        logger.exception("community_docs.stale_links_read_failed place=%s", place_id)
+        return counts
+    for r in rows:
+        doc_id = str(r["id"])
+        if not _claim_attempt(doc_id):
+            counts["skipped"] += 1
+            continue
+        try:
+            outcome = refresh_document(doc_id)
+        except Exception:
+            logger.exception("community_docs.link_refresh_crashed doc=%s", doc_id)
+            outcome = "failed"
+        counts[outcome] += 1
+        if outcome == "updated":
+            ingest_document(doc_id)
+    return counts
+
+
+def refresh_stale_links_later(place_id: str) -> None:
+    """Fire-and-forget: the list or answer that triggered it never waits on Google."""
+    if not docs_enabled() or not _is_uuid(place_id):
+        return
+    threading.Thread(
+        target=refresh_stale_links, args=(place_id,), daemon=True, name="docs-link-refresh"
+    ).start()
+
+
 # ── reads for the edit sheet ────────────────────────────────────────────────────
 
 
@@ -521,6 +719,7 @@ def list_documents(*, user_id: str | None, place_id: str) -> dict[str, Any]:
         .data
         or []
     )
+    refresh_stale_links_later(place_id)
     readable = set(readable_doc_ids(place_id, user_id)) if not acc.manager else set()
     out: list[dict[str, Any]] = []
     pending_uploaders: list[str] = []

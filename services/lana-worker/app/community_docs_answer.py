@@ -325,6 +325,11 @@ def answer_from_community_docs(
         return None
     if not sections:
         return None
+    # A linked Drive document older than a day is re-checked in the background; this
+    # answer uses what is stored now and never waits on Google.
+    from app.community_docs import refresh_stale_links_later
+
+    refresh_stale_links_later(place_id)
 
     by_sid = {s.sid: s for s in sections}
     total = sum(s.token_count for s in sections)
