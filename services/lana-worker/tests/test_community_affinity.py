@@ -307,7 +307,7 @@ class TestTheWire(unittest.TestCase):
                 row["affinity"] = 0.65
                 row["_fit_basis"] = {"shared": ["Trail running"]}
 
-        def _author(user_id, rows):
+        def _author(user_id, rows, compose=True):
             for row in rows:
                 row.pop("_fit_basis", None)
                 row["fit_line"] = "A few of them run your trails."

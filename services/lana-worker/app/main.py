@@ -3792,6 +3792,10 @@ class TipFeedBody(_BaseModel):
     # ["professional", "service"], "Others" is ["location"]). Empty = every type.
     # Unknown keys are dropped, never guessed at.
     reco_types: list[str] = _Field(default_factory=list, max_length=8)
+    # Answer with the "why Lana sees a fit" lines already written and leave the rest for a
+    # second call without this flag, so the list never waits on the model. Off by default
+    # so a client that does not know to ask again still gets every line in one call.
+    defer_fit: bool = False
 
 
 class TipFeedbackBody(_BaseModel):
@@ -3843,7 +3847,9 @@ def post_tips_recent(
     # justify simply ships without the block.
     from app.tip_rec_line import attach_fit
 
-    attach_fit(auth.user_id, tips, tab=tab, limit=limit)
+    fit_pending = attach_fit(
+        auth.user_id, tips, tab=tab, limit=limit, compose=not (body and body.defer_fit)
+    )
     # Whether a nudge to each recommender is still sendable. One batched relationship
     # lookup for the page: without it every row offered a Nudge button, including to people
     # the reader already knows or already has an intro out to — a tap that can only fail
@@ -3851,7 +3857,7 @@ def post_tips_recent(
     from app.peer_discovery_surface import stamp_connection_state
 
     stamp_connection_state(tips, user_id=auth.user_id)
-    return {"tab": tab, "tips": tips}
+    return {"tab": tab, "tips": tips, "fit_pending": bool(fit_pending)}
 
 
 class TipTypesBody(_BaseModel):
@@ -4268,6 +4274,10 @@ class CommunityDiscoverBody(_BaseModel):
     # nothing new. A half-given pair falls back too, rather than centring on the equator.
     lat: float | None = _Field(default=None, ge=-90, le=90)
     lng: float | None = _Field(default=None, ge=-180, le=180)
+    # Answer with the "why Lana sees a fit" lines already written and leave the rest for a
+    # second call without this flag, so the list never waits on the model. Off by default
+    # so a client that does not know to ask again still gets every line in one call.
+    defer_fit: bool = False
 
 
 class CommunityDiscoverTopicBody(_BaseModel):
@@ -4499,11 +4509,14 @@ def post_circles_discover(
     # built from different facts. Both are best-effort: a failure leaves `affinity` null
     # and `fit_line` absent, and the panel still lists real communities.
     attach_affinity(auth.user_id, rows)
-    attach_fit_lines(auth.user_id, rows)
+    fit_pending = attach_fit_lines(
+        auth.user_id, rows, compose=not (body and body.defer_fit)
+    )
     attach_description_and_area(rows)
     return CommunityDiscoveryResponse(
         communities=_discovery_rows(rows),
         radius_meters=int(radius_meters()),
+        fit_pending=bool(fit_pending),
     )
 
 
@@ -4538,6 +4551,8 @@ def _discovery_rows(rows: list[dict]) -> list[CommunityDiscoveryRow]:
 
 class CommunityChaptersBody(_BaseModel):
     place_id: str
+    # Same as CommunityDiscoverBody.defer_fit.
+    defer_fit: bool = False
 
 
 @app.post("/lana/circles/chapters/attach", response_model=ChapterChangeResponse)
@@ -4606,12 +4621,13 @@ def post_circles_chapters(
         raise _community_error(exc) from exc
     rows = data["chapters"]
     attach_affinity(auth.user_id, rows)
-    attach_fit_lines(auth.user_id, rows)
+    fit_pending = attach_fit_lines(auth.user_id, rows, compose=not body.defer_fit)
     attach_description_and_area(rows)
     return CommunityChaptersResponse(
         place_id=str(data["place_id"]),
         place_name=data.get("place_name"),
         chapters=_discovery_rows(rows),
+        fit_pending=bool(fit_pending),
     )
 
 

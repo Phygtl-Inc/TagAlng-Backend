@@ -49,19 +49,30 @@ def verify_auth(authorization: str | None) -> AuthSession:
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         raise HTTPException(status_code=500, detail="server_misconfigured")
 
-    with httpx.Client(timeout=15.0) as client:
-        res = client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {token}"},
-        )
-    if res.status_code != 200:
-        raise HTTPException(status_code=401, detail="invalid_session")
-    user = res.json()
+    # Checked here against the project's published signing key, not by asking Supabase
+    # Auth: that round trip ran before every endpoint did any work. Auth is still asked
+    # whenever the local check cannot settle it — a token we cannot verify, no users row
+    # (a deleted account, or one the sync trigger has not reached), or a real account not
+    # yet stamped verified, whose confirmation time only Auth holds.
+    profile: dict | None = None
+    user: dict | None = None
+    claims = _verified_claims(token)
+    if claims:
+        profile = _load_user_profile(str(claims["sub"]))
+        anonymous = bool(claims.get("is_anonymous"))
+        if profile and (
+            anonymous or profile.get("email_verified_at") or profile.get("phone_verified_at")
+        ):
+            user = {"id": str(claims["sub"]), "is_anonymous": anonymous}
+
+    if user is None:
+        user = _fetch_auth_user(token)
     user_id = user.get("id")
     if not user_id:
         raise HTTPException(status_code=401, detail="invalid_session")
 
-    profile = _load_user_profile(str(user_id))
+    if profile is None:
+        profile = _load_user_profile(str(user_id))
     return AuthSession(
         user_id=str(user_id),
         is_anonymous=bool(user.get("is_anonymous")),
@@ -70,6 +81,53 @@ def verify_auth(authorization: str | None) -> AuthSession:
         role=profile.get("role") or None,
         grammatical_gender=profile.get("grammatical_gender") or None,
     )
+
+
+def _fetch_auth_user(token: str) -> dict:
+    with httpx.Client(timeout=15.0) as client:
+        res = client.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {token}"},
+        )
+    if res.status_code != 200:
+        raise HTTPException(status_code=401, detail="invalid_session")
+    return res.json()
+
+
+@lru_cache(maxsize=1)
+def _jwks_client():
+    import jwt
+
+    # Keys are cached and re-fetched when a token names a kid we have not seen, so a key
+    # rotation costs one fetch rather than a deploy.
+    return jwt.PyJWKClient(
+        f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json", cache_keys=True, lifespan=600, timeout=5
+    )
+
+
+def _verified_claims(token: str) -> dict | None:
+    """The token's claims when its signature, expiry, audience and issuer check out
+    against the project's asymmetric signing key; None when it cannot be checked here
+    (a legacy HS256 token, keys unreachable, a bad or expired token) — the caller then
+    asks Auth, which stays the judge of anything we could not settle."""
+    try:
+        import jwt
+
+        alg = jwt.get_unverified_header(token).get("alg")
+        if alg not in ("ES256", "RS256"):
+            return None
+        key = _jwks_client().get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            key.key,
+            algorithms=[alg],
+            audience="authenticated",
+            issuer=f"{SUPABASE_URL}/auth/v1",
+            options={"require": ["exp", "sub"]},
+        )
+    except Exception:  # noqa: BLE001 — anything unsettled goes to Auth
+        return None
+    return claims if claims.get("sub") else None
 
 
 def verify_jwt(authorization: str | None) -> str:
@@ -246,9 +304,7 @@ def _resolve_verified(user_id: str, user: dict, profile: dict) -> bool:
 
 
 def _load_user_profile(user_id: str) -> dict:
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        raise HTTPException(status_code=500, detail="server_misconfigured")
-    sb = _supabase(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    sb = service_client()
     try:
         profile = (
             sb.table("users")

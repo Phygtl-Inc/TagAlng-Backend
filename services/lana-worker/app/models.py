@@ -763,6 +763,9 @@ class CommunityChaptersResponse(BaseModel):
     place_id: str
     place_name: str | None = None
     chapters: list[CommunityDiscoveryRow] = Field(default_factory=list)
+    # True when rows with evidence came back without their fit line because the request
+    # asked to defer them; asking again without `defer_fit` authors them.
+    fit_pending: bool = False
 
 
 class FellowsResponse(BaseModel):
@@ -806,6 +809,9 @@ class CommunityDiscoveryResponse(BaseModel):
     # The parent whose chapters these rows are ("Clubs in SJSU"). Null on every other
     # list, including chapters-from-outside when nothing inside answered.
     within: CommunityWithinRow | None = None
+    # True when rows with evidence came back without their fit line because the request
+    # asked to defer them; asking again without `defer_fit` authors them.
+    fit_pending: bool = False
 
 
 class TopicCommunityRow(BaseModel):

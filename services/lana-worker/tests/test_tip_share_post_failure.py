@@ -186,8 +186,8 @@ def test_a_300_from_postgrest_raises_instead_of_returning_the_error_body():
         json={"code": "PGRST203", "message": "Could not choose the best candidate function"},
         request=httpx.Request("POST", "http://local/rest/v1/rpc/save_local_signal"),
     )
-    with mock.patch.object(supabase_rpc.httpx, "Client") as client_cls:
-        client_cls.return_value.__enter__.return_value.post.return_value = resp
+    with mock.patch.object(supabase_rpc, "_http") as http:
+        http.return_value.post.return_value = resp
         try:
             supabase_rpc.call_rpc("jwt", "save_local_signal", {})
         except HTTPException:

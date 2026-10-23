@@ -171,8 +171,13 @@ def attach_fit(
     *,
     tab: str = "recent",
     limit: int = 20,
-) -> None:
+    compose: bool = True,
+) -> bool:
     """Score every row, order the For-you tab, and author a line where there is evidence.
+
+    `compose=False` serves cached lines only and returns True when some row still has
+    evidence but no line — the feed answers at once and the client asks again (without
+    the flag) to have those authored, instead of the list waiting on the model.
 
     In place, best-effort: a row we cannot author for keeps `rec_line: None` and renders
     without the block, which is the frontend's stated position — author it wherever there
@@ -187,7 +192,7 @@ def attach_fit(
         row.setdefault("rec_id", None)
         row.setdefault("match_strength", 0.0)
     if not user_id or not rows:
-        return
+        return False
 
     try:
         from app.claims_persist import fetch_active_claim_labels
@@ -220,7 +225,7 @@ def attach_fit(
         if basis and author:
             todo.append((idx, author, basis, _basis_sig(basis)))
     if not todo:
-        return
+        return False
 
     try:
         from app.lang_pref import get_user_preferred_language
@@ -240,7 +245,9 @@ def attach_fit(
         else:
             missing.append((idx, author, basis, sig))
     if not missing:
-        return
+        return False
+    if not compose:
+        return True
     if len(missing) > _MAX_COMPOSE:
         logger.info(
             "tip-rec-line: authoring %d of %d missing lines this fetch",
@@ -251,7 +258,7 @@ def attach_fit(
 
     composed = _compose([basis for _, _, basis, _ in missing], lang, _SYSTEM)
     if not composed:
-        return
+        return False
     pending: list[tuple[str, str, str, list[str]]] = []
     for (idx, author, _unused, sig), (line, chips) in zip(missing, composed):
         if not line:
@@ -264,3 +271,4 @@ def attach_fit(
         rec_id = ids.get(author)
         if rec_id and rows[idx].get("rec_line"):
             rows[idx]["rec_id"] = rec_id
+    return False
