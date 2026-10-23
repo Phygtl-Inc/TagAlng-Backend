@@ -1,13 +1,18 @@
-"""Community knowledge documents: upload, ingest, list, preview, visibility, delete.
+"""Community knowledge documents: upload, ingest, list, preview, visibility, review, delete.
 
-An owner or co-owner uploads MD / DOCX / PDF. The file goes to the private
-community-docs bucket, a community_documents row is written, and ingest runs in the
-background: convert to Markdown → split at headings → one model call writes a "covers:"
-line per section and a document summary → community_doc_replace_sections swaps the
-sections in one transaction. Answering lives in app/community_docs_answer.py.
+Any member uploads MD / DOCX / PDF. The file goes to the private community-docs bucket, a
+community_documents row is written, and ingest runs in the background: convert to
+Markdown → split at headings → one model call writes a "covers:" line per section and a
+document summary → community_doc_replace_sections swaps the sections in one transaction.
+Answering lives in app/community_docs_answer.py.
 
-Everything here runs as the service role; the caller's role comes from
-community_docs_role() before any read or write.
+Who reads what is the community's own ladder (20270213120000): visitor < member < the
+levels the owner named < owner. A document names the lowest level that may read it; an
+upload from someone who cannot approve waits as 'pending' until an approver publishes it.
+
+Everything here runs as the service role; the caller's rights come from
+community_docs_access() before any read or write, and what Lana may answer from comes
+from community_docs_readable() — both in SQL.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,27 +69,118 @@ def _is_uuid(value: Any) -> bool:
     return True
 
 
-def docs_role(place_id: str, user_id: str | None) -> str:
-    """manager | member | visitor. Raises place_not_found."""
+VISIBILITIES = ("public", "members", "owners")
+RANK_VISITOR = -1
+RANK_MEMBER = 0
+RANK_OWNER = 1000
+
+
+@dataclass(frozen=True)
+class DocsAccess:
+    role: str
+    rank: int
+    level_id: str | None = None
+    level_name: str | None = None
+    can_upload: bool = False
+    can_approve: bool = False
+    can_read_log: bool = False
+
+    @property
+    def manager(self) -> bool:
+        return self.role == ROLE_MANAGER
+
+
+def docs_access(place_id: str, user_id: str | None) -> DocsAccess:
+    """The caller's rank on the community's ladder and what it lets them do. Raises
+    place_not_found."""
     if not _is_uuid(place_id):
         raise DocsError("place_not_found", 404)
     res = service_client().rpc(
-        "community_docs_role",
+        "community_docs_access",
         {"p_place_id": place_id, "p_user_id": user_id if _is_uuid(user_id) else None},
     ).execute()
-    role = str(res.data or "")
-    if role == "place_not_found" or role not in (ROLE_MANAGER, ROLE_MEMBER, ROLE_VISITOR):
+    data = res.data if isinstance(res.data, dict) else {}
+    role = str(data.get("role") or "")
+    if role not in (ROLE_MANAGER, ROLE_MEMBER, ROLE_VISITOR):
         raise DocsError("place_not_found", 404)
-    return role
+    return DocsAccess(
+        role=role,
+        rank=int(data.get("rank") if data.get("rank") is not None else RANK_VISITOR),
+        level_id=data.get("level_id"),
+        level_name=data.get("level_name"),
+        can_upload=bool(data.get("can_upload")),
+        can_approve=bool(data.get("can_approve")),
+        can_read_log=bool(data.get("can_read_log")),
+    )
 
 
-def visible_visibilities(role: str) -> tuple[str, ...]:
-    return ("members", "public") if role in (ROLE_MANAGER, ROLE_MEMBER) else ("public",)
+def docs_role(place_id: str, user_id: str | None) -> str:
+    """manager | member | visitor. Raises place_not_found."""
+    return docs_access(place_id, user_id).role
 
 
-def _require_manager(place_id: str, user_id: str) -> None:
-    if docs_role(place_id, user_id) != ROLE_MANAGER:
+def readable_doc_ids(place_id: str, user_id: str | None) -> list[str]:
+    """The documents Lana may answer this person from — decided in SQL, never here."""
+    res = service_client().rpc(
+        "community_docs_readable",
+        {"p_place_id": place_id, "p_user_id": user_id if _is_uuid(user_id) else None},
+    ).execute()
+    out: list[str] = []
+    for r in res.data or []:
+        v = r.get("community_docs_readable") if isinstance(r, dict) else r
+        if v:
+            out.append(str(v))
+    return out
+
+
+def _levels(place_id: str) -> dict[str, dict[str, Any]]:
+    rows = (
+        service_client()
+        .table("community_levels")
+        .select("id, name, rank")
+        .eq("place_id", place_id)
+        .order("rank")
+        .execute()
+        .data
+        or []
+    )
+    return {str(r["id"]): {"id": str(r["id"]), "name": r.get("name"), "rank": int(r.get("rank") or 0)} for r in rows}
+
+
+def doc_rank(row: dict[str, Any], levels: dict[str, dict[str, Any]]) -> int:
+    """Mirrors community_doc_rank(): a level that has gone missing reads as owners-only."""
+    vis = row.get("visibility")
+    if vis == "public":
+        return RANK_VISITOR
+    if vis == "owners":
+        return RANK_OWNER
+    level_id = row.get("min_level_id")
+    if not level_id:
+        return RANK_MEMBER
+    level = levels.get(str(level_id))
+    return int(level["rank"]) if level else RANK_OWNER
+
+
+def _target(
+    visibility: str | None, level_id: str | None, levels: dict[str, dict[str, Any]]
+) -> tuple[str, str | None]:
+    """(visibility, min_level_id) for a requested audience. A level means 'members'."""
+    vis = (visibility or "").strip().lower() or "members"
+    lvl = (level_id or "").strip() or None
+    if lvl:
+        if lvl not in levels:
+            raise DocsError("level_not_found", 404)
+        return "members", lvl
+    if vis not in VISIBILITIES:
+        raise DocsError("invalid_visibility")
+    return vis, None
+
+
+def _require_manager(place_id: str, user_id: str) -> DocsAccess:
+    acc = docs_access(place_id, user_id)
+    if not acc.manager:
         raise DocsError("not_manager", 403)
+    return acc
 
 
 def _doc(doc_id: str) -> dict[str, Any]:
@@ -104,19 +201,35 @@ def _doc(doc_id: str) -> dict[str, Any]:
 
 
 _LIST_FIELDS = (
-    "id, place_id, title, source_mime, status, error, visibility, summary, token_count, "
-    "version, created_at, updated_at"
+    "id, place_id, title, source_mime, status, error, visibility, min_level_id, review_status, "
+    "uploaded_by, summary, token_count, version, created_at, updated_at"
 )
 
 
-def _public_row(row: dict[str, Any], *, manager: bool) -> dict[str, Any]:
+def _public_row(
+    row: dict[str, Any],
+    *,
+    manager: bool,
+    levels: dict[str, dict[str, Any]] | None = None,
+    viewer: str | None = None,
+    uploader_name: str | None = None,
+) -> dict[str, Any]:
+    """manager=True adds the processing details — for owners, the uploader of their own
+    document, and an approver looking at the review queue."""
+    level = (levels or {}).get(str(row.get("min_level_id") or ""))
     out = {
         "doc_id": row.get("id"),
         "title": row.get("title"),
         "summary": row.get("summary"),
         "visibility": row.get("visibility"),
+        "level_id": level["id"] if level else None,
+        "level_name": level["name"] if level else None,
+        "review_status": row.get("review_status") or "approved",
+        "mine": bool(viewer) and str(row.get("uploaded_by") or "") == str(viewer),
         "updated_at": row.get("updated_at"),
     }
+    if uploader_name is not None:
+        out["uploaded_by_name"] = uploader_name
     if manager:
         out.update(
             {
@@ -143,12 +256,20 @@ def upload_document(
     raw: bytes,
     title: str | None = None,
     visibility: str | None = None,
+    level_id: str | None = None,
     replace_doc_id: str | None = None,
 ) -> dict[str, Any]:
     """Store the file and its row (status 'uploaded'). The caller schedules
-    ingest_document(doc_id). With replace_doc_id the same row gets the new file and
-    version + 1, so the document keeps its id and visibility."""
-    _require_manager(place_id, user_id)
+    ingest_document(doc_id). With replace_doc_id (owners only) the same row gets the new
+    file and version + 1, so the document keeps its id and audience.
+
+    Any member may upload, for their own level or below. Owners' and approvers' uploads
+    are live at once; anyone else's wait as 'pending' for an approver."""
+    acc = docs_access(place_id, user_id)
+    if replace_doc_id and not acc.manager:
+        raise DocsError("not_manager", 403)
+    if not acc.can_upload:
+        raise DocsError("not_member", 403)
     if not raw:
         raise DocsError("empty_file")
     if len(raw) > MAX_BYTES:
@@ -156,9 +277,12 @@ def upload_document(
     kind = detect_kind(filename, content_type)
     if not kind:
         raise DocsError("type_not_allowed", 415)
-    vis = (visibility or "").strip().lower() or None
-    if vis is not None and vis not in ("members", "public"):
-        raise DocsError("invalid_visibility")
+    levels = _levels(place_id)
+    asked = bool((visibility or "").strip() or (level_id or "").strip())
+    vis, min_level = _target(visibility, level_id, levels)
+    if doc_rank({"visibility": vis, "min_level_id": min_level}, levels) > acc.rank:
+        raise DocsError("level_too_high", 403)
+    review = "approved" if acc.can_approve else "pending"
     name = (title or "").strip() or _title_from_filename(filename)
 
     client = service_client()
@@ -196,8 +320,9 @@ def upload_document(
         }
         if title and title.strip():
             patch["title"] = name
-        if vis:
+        if asked:
             patch["visibility"] = vis
+            patch["min_level_id"] = min_level
         res = client.table("community_documents").update(patch).eq("id", doc_id).execute()
     else:
         res = (
@@ -210,7 +335,9 @@ def upload_document(
                     "source_mime": KIND_MIME[kind],
                     "storage_path": path,
                     "uploaded_by": user_id,
-                    "visibility": vis or "members",
+                    "visibility": vis,
+                    "min_level_id": min_level,
+                    "review_status": review,
                     "version": version,
                 }
             )
@@ -218,10 +345,10 @@ def upload_document(
         )
     row = (res.data or [{}])[0] or _doc(doc_id)
     logger.info(
-        "community_docs.uploaded place=%s doc=%s kind=%s bytes=%d v=%d",
-        place_id, doc_id, kind, len(raw), version,
+        "community_docs.uploaded place=%s doc=%s kind=%s bytes=%d v=%d review=%s",
+        place_id, doc_id, kind, len(raw), version, row.get("review_status"),
     )
-    return _public_row(row, manager=True)
+    return _public_row(row, manager=True, levels=levels, viewer=user_id)
 
 
 def _title_from_filename(filename: str | None) -> str:
@@ -370,31 +497,87 @@ def summarize_sections(title: str, sections: list[Section]) -> str:
 # ── reads for the edit sheet ────────────────────────────────────────────────────
 
 
+def _names(user_ids: list[str]) -> dict[str, str]:
+    ids = sorted({u for u in user_ids if _is_uuid(u)})
+    if not ids:
+        return {}
+    rows = service_client().table("users").select("id, nickname").in_("id", ids).execute().data or []
+    return {str(r["id"]): (str(r.get("nickname") or "").strip() or "A member") for r in rows}
+
+
 def list_documents(*, user_id: str | None, place_id: str) -> dict[str, Any]:
-    role = docs_role(place_id, user_id)
-    q = (
+    """Owners see every row with its processing status. Everyone else sees what they may
+    be answered from (ready), their own uploads in any state, and — for approvers — the
+    pending queue up to their own level."""
+    acc = docs_access(place_id, user_id)
+    levels = _levels(place_id)
+    rows = (
         service_client()
         .table("community_documents")
         .select(_LIST_FIELDS)
         .eq("place_id", place_id)
         .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
     )
-    if role != ROLE_MANAGER:
-        q = q.eq("status", "ready").in_("visibility", list(visible_visibilities(role)))
-    rows = q.execute().data or []
+    readable = set(readable_doc_ids(place_id, user_id)) if not acc.manager else set()
+    out: list[dict[str, Any]] = []
+    pending_uploaders: list[str] = []
+    for r in rows:
+        mine = bool(user_id) and str(r.get("uploaded_by") or "") == str(user_id)
+        review = r.get("review_status") or "approved"
+        queue = acc.can_approve and review == "pending" and doc_rank(r, levels) <= acc.rank
+        live = str(r["id"]) in readable and r.get("status") == "ready"
+        if not (acc.manager or mine or queue or live):
+            continue
+        out.append(r)
+        if review == "pending" and r.get("uploaded_by"):
+            pending_uploaders.append(str(r["uploaded_by"]))
+    names = _names(pending_uploaders)
+    # The audiences this person may give a document: their own level and below.
+    offer = [lv for lv in levels.values() if acc.manager or lv["rank"] <= acc.rank]
     return {
-        "you": role,
-        "can_manage": role == ROLE_MANAGER,
+        "you": acc.role,
+        "your_rank": acc.rank,
+        "your_level_name": acc.level_name,
+        "can_manage": acc.manager,
+        "can_upload": acc.can_upload,
+        "can_approve": acc.can_approve,
+        "can_read_log": acc.can_read_log,
         "max_docs": MAX_DOCS_PER_COMMUNITY,
-        "documents": [_public_row(r, manager=role == ROLE_MANAGER) for r in rows],
+        "levels": sorted(offer, key=lambda lv: lv["rank"]),
+        "documents": [
+            _public_row(
+                r,
+                manager=acc.manager
+                or str(r.get("uploaded_by") or "") == str(user_id or "")
+                or (r.get("review_status") == "pending" and acc.can_approve),
+                levels=levels,
+                viewer=user_id,
+                uploader_name=names.get(str(r.get("uploaded_by") or ""))
+                if r.get("review_status") == "pending"
+                else None,
+            )
+            for r in out
+        ],
     }
 
 
+def _may_review(acc: DocsAccess, row: dict[str, Any], levels: dict[str, dict[str, Any]]) -> bool:
+    return acc.manager or (acc.can_approve and doc_rank(row, levels) <= acc.rank)
+
+
 def preview_document(*, user_id: str, doc_id: str) -> dict[str, Any]:
-    """What Lana reads: the converted Markdown and its sections. Managers only — the
-    owner checks a garbled PDF here before members ask anything."""
+    """What Lana reads: the converted Markdown and its sections. Owners, the uploader, and
+    an approver reviewing it — the check for a garbled PDF before anyone is answered."""
     row = _doc(doc_id)
-    _require_manager(str(row["place_id"]), user_id)
+    place_id = str(row["place_id"])
+    acc = docs_access(place_id, user_id)
+    levels = _levels(place_id)
+    mine = str(row.get("uploaded_by") or "") == str(user_id)
+    if not (mine or _may_review(acc, row, levels)):
+        raise DocsError("not_manager", 403)
     sections = (
         service_client()
         .table("community_doc_sections")
@@ -406,32 +589,77 @@ def preview_document(*, user_id: str, doc_id: str) -> dict[str, Any]:
         or []
     )
     return {
-        **_public_row(row, manager=True),
+        **_public_row(row, manager=True, levels=levels, viewer=user_id),
         "markdown": row.get("markdown"),
         "sections": sections,
     }
 
 
-def set_visibility(*, user_id: str, doc_id: str, visibility: str) -> dict[str, Any]:
-    vis = (visibility or "").strip().lower()
-    if vis not in ("members", "public"):
-        raise DocsError("invalid_visibility")
-    row = _doc(doc_id)
-    _require_manager(str(row["place_id"]), user_id)
-    res = (
-        service_client()
-        .table("community_documents")
-        .update({"visibility": vis, "updated_at": datetime.now(timezone.utc).isoformat()})
-        .eq("id", doc_id)
-        .execute()
-    )
-    return _public_row((res.data or [row])[0], manager=True)
-
-
-def delete_document(*, user_id: str, doc_id: str) -> None:
+def set_visibility(
+    *, user_id: str, doc_id: str, visibility: str | None, level_id: str | None = None
+) -> dict[str, Any]:
     row = _doc(doc_id)
     place_id = str(row["place_id"])
     _require_manager(place_id, user_id)
+    levels = _levels(place_id)
+    vis, min_level = _target(visibility, level_id, levels)
+    res = (
+        service_client()
+        .table("community_documents")
+        .update(
+            {
+                "visibility": vis,
+                "min_level_id": min_level,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        .eq("id", doc_id)
+        .execute()
+    )
+    return _public_row((res.data or [row])[0], manager=True, levels=levels, viewer=user_id)
+
+
+def review_document(*, user_id: str, doc_id: str, approve: bool) -> dict[str, Any]:
+    """Publish (or turn down) a member's upload. Only a pending document, and only by
+    someone whose level may approve and may read it."""
+    row = _doc(doc_id)
+    place_id = str(row["place_id"])
+    acc = docs_access(place_id, user_id)
+    levels = _levels(place_id)
+    if not _may_review(acc, row, levels):
+        raise DocsError("not_approver", 403)
+    if (row.get("review_status") or "approved") != "pending":
+        raise DocsError("not_pending", 409)
+    now = datetime.now(timezone.utc).isoformat()
+    res = (
+        service_client()
+        .table("community_documents")
+        .update(
+            {
+                "review_status": "approved" if approve else "rejected",
+                "reviewed_by": user_id,
+                "reviewed_at": now,
+                "updated_at": now,
+            }
+        )
+        .eq("id", doc_id)
+        .eq("review_status", "pending")
+        .execute()
+    )
+    logger.info(
+        "community_docs.reviewed place=%s doc=%s approve=%s by=%s", place_id, doc_id, approve, user_id
+    )
+    return _public_row((res.data or [row])[0], manager=True, levels=levels, viewer=user_id)
+
+
+def delete_document(*, user_id: str, doc_id: str) -> None:
+    """Owners delete anything; an uploader may withdraw their own upload until it is live."""
+    row = _doc(doc_id)
+    place_id = str(row["place_id"])
+    acc = docs_access(place_id, user_id)
+    mine = str(row.get("uploaded_by") or "") == str(user_id)
+    if not (acc.manager or (mine and (row.get("review_status") or "approved") != "approved")):
+        raise DocsError("not_manager", 403)
     client = service_client()
     # Every version of the file, not just the current one.
     try:
@@ -509,25 +737,35 @@ def docs_cover_line(place_id: str, *, max_chars: int = DOCS_HINT_CHARS) -> str |
     """What the community's documents cover, for the routing model's context: each
     document's title with its section headings and covers lines, every document given
     an equal share of max_chars. A hint about WHAT they cover — never their content,
-    and the answer path re-checks visibility for the asker."""
+    and the answer path re-checks visibility for the asker.
+
+    Only live documents every member may read: a heading from a level-restricted or
+    still-pending document ("Applications — E-board") never reaches a model's context."""
     if not docs_enabled() or not _is_uuid(place_id):
         return None
     client = service_client()
-    docs = (
-        client.table("community_documents")
-        .select("id, title")
-        .eq("place_id", place_id)
-        .order("created_at")
-        .execute()
-        .data
-        or []
-    )
+    docs = [
+        d
+        for d in (
+            client.table("community_documents")
+            .select("id, title, visibility, min_level_id, review_status")
+            .eq("place_id", place_id)
+            .order("created_at")
+            .execute()
+            .data
+            or []
+        )
+        if (d.get("review_status") or "approved") == "approved"
+        and (d.get("visibility") or "members") in ("public", "members")
+        and not d.get("min_level_id")
+    ]
     if not docs:
         return None
     rows = (
         client.table("community_doc_sections")
         .select("doc_id, ord, heading_path, covers")
         .eq("place_id", place_id)
+        .in_("doc_id", [str(d["id"]) for d in docs])
         .order("ord")
         .limit(600)
         .execute()

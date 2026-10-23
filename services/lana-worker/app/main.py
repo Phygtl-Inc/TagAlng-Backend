@@ -4893,10 +4893,12 @@ async def post_circles_claim_proof(
 
 
 # ── community knowledge documents (LANA_COMMUNITY_DOCS) ───────────────────────────
-# Owners and co-owners upload MD / DOCX / PDF; Lana answers members' questions from them
-# (app/community_docs_answer.py). Errors are {detail: code}: not_manager, place_not_found,
-# doc_not_found, type_not_allowed, file_too_large, empty_file, too_many_docs,
-# invalid_visibility.
+# Any member uploads MD / DOCX / PDF for their own level or below; owners' and approvers'
+# uploads are live at once, everyone else's wait for an approver. Lana answers from what
+# the asker's level may read (app/community_docs_answer.py). Errors are {detail: code}:
+# not_manager, not_member, not_approver, not_pending, level_too_high, level_not_found,
+# place_not_found, doc_not_found, type_not_allowed, file_too_large, empty_file,
+# too_many_docs, invalid_visibility.
 
 
 def _docs_on() -> None:
@@ -4920,15 +4922,23 @@ class CommunityDocBody(_BaseModel):
 
 class CommunityDocVisibilityBody(_BaseModel):
     doc_id: str
-    visibility: Literal["members", "public"]
+    visibility: Literal["members", "public", "owners"] = "members"
+    # A community level: readable from that level up (visibility is then 'members').
+    level_id: str | None = None
+
+
+class CommunityDocLogBody(_BaseModel):
+    place_id: str
+    gaps_only: bool = False
 
 
 @app.post("/lana/communities/docs/list")
 def post_community_docs_list(
     body: CommunityDocPlaceBody, authorization: str | None = Header(default=None)
 ):
-    """The community's documents. Managers get every row with its processing status;
-    members get ready members + public docs; visitors get ready public docs."""
+    """The community's documents and what the caller may do with them. Owners get every
+    row with its processing status; others get what their level reads (ready), their own
+    uploads, and — approvers — the pending queue. `levels` = the audiences they may pick."""
     _docs_on()
     from app.community_docs import DocsError, list_documents
 
@@ -4947,6 +4957,7 @@ async def post_community_doc_upload(
     place_id: str = Form(...),
     title: str | None = Form(default=None),
     visibility: str | None = Form(default=None),
+    level_id: str | None = Form(default=None),
     replace_doc_id: str | None = Form(default=None),
 ):
     """Upload one document (10 MB; md, docx, pdf). Returns the row with status
@@ -4966,6 +4977,7 @@ async def post_community_doc_upload(
             raw=raw,
             title=title,
             visibility=visibility,
+            level_id=level_id or None,
             replace_doc_id=replace_doc_id or None,
         )
     except DocsError as exc:
@@ -4998,7 +5010,38 @@ def post_community_doc_visibility(
 
     user_id = _claim_user(authorization)
     try:
-        return set_visibility(user_id=user_id, doc_id=body.doc_id, visibility=body.visibility)
+        return set_visibility(
+            user_id=user_id, doc_id=body.doc_id, visibility=body.visibility, level_id=body.level_id
+        )
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+
+
+@app.post("/lana/communities/docs/approve")
+def post_community_doc_approve(
+    body: CommunityDocBody, authorization: str | None = Header(default=None)
+):
+    """An approver publishes a member's pending upload — Lana starts answering from it."""
+    _docs_on()
+    from app.community_docs import DocsError, review_document
+
+    user_id = _claim_user(authorization)
+    try:
+        return review_document(user_id=user_id, doc_id=body.doc_id, approve=True)
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+
+
+@app.post("/lana/communities/docs/reject")
+def post_community_doc_reject(
+    body: CommunityDocBody, authorization: str | None = Header(default=None)
+):
+    _docs_on()
+    from app.community_docs import DocsError, review_document
+
+    user_id = _claim_user(authorization)
+    try:
+        return review_document(user_id=user_id, doc_id=body.doc_id, approve=False)
     except DocsError as exc:
         raise _docs_http(exc) from exc
 
@@ -5049,6 +5092,25 @@ def post_community_doc_gaps(
     user_id = _claim_user(authorization)
     try:
         return {"gaps": knowledge_gaps(user_id=user_id, place_id=body.place_id)}
+    except DocsError as exc:
+        raise _docs_http(exc) from exc
+
+
+@app.post("/lana/communities/docs/log")
+def post_community_doc_log(
+    body: CommunityDocLogBody, authorization: str | None = Header(default=None)
+):
+    """What Lana said: recent questions about this community, her replies and their
+    sources. Owners, or the level the owner chose. Never who asked."""
+    _docs_on()
+    from app.community_docs import DocsError
+    from app.community_docs_answer import answer_log
+
+    user_id = _claim_user(authorization)
+    try:
+        return {
+            "answers": answer_log(user_id=user_id, place_id=body.place_id, gaps_only=body.gaps_only)
+        }
     except DocsError as exc:
         raise _docs_http(exc) from exc
 
